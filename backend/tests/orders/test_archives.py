@@ -1302,3 +1302,76 @@ async def test_the_sweep_goes_on_after_a_failed_start(shop: Shop) -> None:
     again = Starts()
     await sweep_media(shop.lifecycle, Archives(), again, limit=LIMIT)
     assert sorted(again.started) == sorted([(first.id, False), (second.id, False)])
+
+
+async def test_the_read_answers_the_ids_of_what_is_attached(shop: Shop, step: Step) -> None:
+    """Spec 2026-11-05 §4.4: the answer says what each archive has attached now, so the
+    page shows it after a reload and offers only what is missing."""
+    order, item, attempt = by_hand(shop)
+    seam = Archives(facts(81))
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    [offer] = read.archives
+    assert (offer.finished_attachment_id, offer.timelapse_attachment_id) == (None, None)
+
+    await step(seam, attempt.id)
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    ids = {a.archive_media: a.id for a in shop.rows.attachments(order.id)}
+    [offer] = read.archives
+    assert offer.finished_attachment_id == ids["finished_photo"]
+    assert offer.timelapse_attachment_id == ids["timelapse"]
+
+
+async def test_a_copy_on_the_item_from_before_5268_is_answered_as_attached(shop: Shop) -> None:
+    order, item, attempt = by_hand(shop)
+    sha = "e" * 64
+    kept = shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id=str(uuid.uuid4()),
+        kind="image",
+        role="finished",
+        filename="finish_old.jpg",
+        media_type="image/jpeg",
+        size_bytes=10,
+        sha256=sha,
+        blob_key="attachment-" + sha,
+        caption="Attempt 1, Bambuddy archive 81",
+        archive_id=81,
+        archive_media="finished_photo",
+    )
+
+    read = await attempt_archives(
+        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+
+    [offer] = read.archives
+    assert offer.finished_attachment_id == kept.id
+    assert offer.timelapse_attachment_id is None
+
+
+async def test_the_read_answers_a_medium_refused_as_too_large(shop: Shop, step: Step) -> None:
+    """#7281 review: a medium the import refused at this limit, or a higher one, is
+    answered as too large, so the page stops waiting for it; a higher limit clears it."""
+    order, item, attempt = by_hand(shop)
+    seam = Archives(facts(81))
+    small = len(JPEG) + 1
+    await step(seam, attempt.id, limit=small)
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=small
+    )
+    [offer] = read.archives
+    assert offer.finished_attachment_id is not None and not offer.finished_too_large
+    assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, True)
+
+    read = await attempt_archives(
+        shop.lifecycle, seam, order.id, item.id, attempt.id, Starts(), limit=LIMIT
+    )
+    [offer] = read.archives
+    assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, False)
