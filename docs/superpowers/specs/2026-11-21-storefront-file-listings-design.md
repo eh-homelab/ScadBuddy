@@ -1034,9 +1034,10 @@ a failed project ensure is. The find skips a run's per-print copy (`per_print`),
 sweep trashes. A retry of the same claim finds the item moved and keeps that file while it
 stands (`Shelf.stands`: live, with the pinned sha256, or a Bambuddy row that states no hash,
 whose bytes the next print's check reads); when it is gone since, the held copy is
-put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The Bambuddy side of the restore
-(`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
-reaches the Bambuddy client. The check reads a Bambuddy file that states no hash only when its
+put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The shelf of the library that
+serves (`served_shelf`, `NativeShelf`) is in `orders/served_library.py`, which needs no Bambuddy
+(#7467); Bambuddy's (`BambuddyShelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
+reaches the Bambuddy client, loaded only when Bambuddy's library serves. The check reads a Bambuddy file that states no hash only when its
 stated size is the held copy's; another size is other bytes. The restore runs before the
 print claims the item, so a claim refused after it (on hold, claimed by another print) leaves
 the item on the restored file; that is intended, and the next print restores nothing.
