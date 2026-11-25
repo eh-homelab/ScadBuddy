@@ -258,7 +258,10 @@ tools/go/core/internal/inventory/
 ```
 
 A route handler holds no SQL and no rule beyond parsing and problem mapping (plan #7666
-R-P3-54, kept). The layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
+R-P3-54, kept). The package registers its areas as the Go core's domain packages do since
+#7709: `inventory.Areas(pool, keys) map[string][]crud.Route`, returning `inventory` and
+`inventory:read`, as `internal/ordercosts/areas.go` returns `session-order-costs`. The
+layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
 
 ### 6.3 Data
 
