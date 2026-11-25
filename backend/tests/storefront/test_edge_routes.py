@@ -22,8 +22,10 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
+from scadbuddy.auth.service_auth import ServiceAuth
 from scadbuddy.core.proxies import parse_cidr_list
-from scadbuddy.crud.client import CrudUnavailableError
+from scadbuddy.crud.client import CrudClient, CrudUnavailableError
+from scadbuddy.crud.storefront import PREVIEW_BUDGET, StorefrontCrud
 from scadbuddy.storefront import ratelimit, routes, uploads
 from scadbuddy.storefront.app import create_app
 from scadbuddy.storefront.ratelimit import (
@@ -700,6 +702,70 @@ def test_a_preview_not_ready_is_asked_for_again_then_is_a_503(
     assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}preview_not_ready"
     assert r.headers["retry-after"] == "1"
     assert "unavailable" not in caplog.text
+
+
+class _Token:
+    def token(self) -> str | None:
+        return "sbsvc_storefront"
+
+    def invalidate(self, token: str) -> None: ...
+
+
+class _Clock:
+    """The CRUD client's clock, moved only by its own sleeps (#6252)."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _preview_crud(answers: list[httpx.Response], clock: _Clock) -> tuple[StorefrontCrud, list[int]]:
+    asked: list[int] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        asked.append(1)
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    crud = CrudClient(
+        "http://api.test",
+        "storefront",
+        ServiceAuth(_Token()),
+        transport=httpx.MockTransport(answer),
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    return StorefrontCrud(crud), asked
+
+
+async def test_a_preview_not_ready_is_asked_for_again_within_its_budget() -> None:
+    """#6968, on a fake clock that only the backoffs move: a 503 ``preview_not_ready`` is
+    asked for again, a later 200 is the stream, and asking stops once `PREVIEW_BUDGET` is
+    spent."""
+    waiting = httpx.Response(
+        503,
+        json={"type": f"{STOREFRONT_PROBLEMS}preview_not_ready", "status": 503},
+        headers=CRUD,
+    )
+    mesh = httpx.Response(200, headers={**CRUD, "Content-Type": "model/gltf-binary"}, content=b"g")
+    clock = _Clock()
+    crud, asked = _preview_crud([waiting, waiting, mesh], clock)
+    stream = await crud.render_preview(JOB, plate=None, visitor_id="v", client="1.2.3.4")
+    await stream.aclose()
+    assert stream.response.status_code == 200 and len(asked) == 3
+    assert 0 < clock.now < PREVIEW_BUDGET
+
+    clock = _Clock()
+    crud, asked = _preview_crud([waiting], clock)
+    with pytest.raises(CrudUnavailableError) as raised:
+        await crud.render_preview(JOB, plate=None, visitor_id="v", client="1.2.3.4")
+    assert raised.value.problem["type"] == f"{STOREFRONT_PROBLEMS}preview_not_ready"
+    assert len(asked) > 2
+    assert PREVIEW_BUDGET <= clock.now < PREVIEW_BUDGET + 5
 
 
 def test_a_dropped_preview_closes_its_stream_at_once(

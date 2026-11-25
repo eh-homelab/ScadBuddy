@@ -12,27 +12,35 @@ function passes(error: unknown): boolean {
   return typeof response?.status === 'number' && PASSING.has(response.status)
 }
 
-/** Each URL's retry that waits on its timer, with the failure it ends with if stopped. */
-const waiting = new Map<string, { timer: ReturnType<typeof setTimeout>; fail: () => void }>()
+/** Each URL's load that may still ask again: the timer of its wait, when one waits, and
+ * whether it was stopped, which the try in flight reads when it fails. */
+interface Load {
+  timer?: ReturnType<typeof setTimeout>
+  stopped: boolean
+  fail: () => void
+}
+const loads = new Map<string, Load>()
 
 /**
- * Stops ``url``'s waiting retry, if one waits: its load fails at once, so a viewer that
+ * Stops ``url``'s load that may still ask again, whether it waits on its timer or its try is
+ * in flight: it fails at once, and a try in flight that fails asks no more. So a viewer that
  * unmounts or moves to another URL never keeps asking for the old one. True when one was
  * stopped: the loader's cache then holds that failure, which the caller clears.
  */
 export function stopRetries(url: string): boolean {
-  const entry = waiting.get(url)
-  if (entry === undefined) return false
-  waiting.delete(url)
-  clearTimeout(entry.timer)
-  entry.fail()
+  const load = loads.get(url)
+  if (load === undefined) return false
+  loads.delete(url)
+  load.stopped = true
+  clearTimeout(load.timer)
+  load.fail()
   return true
 }
 
 /**
  * The viewers' mesh loader: a 502, 503 or 504 is tried again with a backoff, since the first
  * read of a done render can find its files still on their way from the store (#6968). Any
- * other failure, and the last try's, is the caller's error; `stopRetries` ends a wait.
+ * other failure, and the last try's, is the caller's error; `stopRetries` ends a load.
  */
 export class PreviewLoader extends GLTFLoader {
   override load(
@@ -42,20 +50,35 @@ export class PreviewLoader extends GLTFLoader {
     onError?: Parameters<GLTFLoader['load']>[3],
   ): void {
     let tries = 0
+    const load: Load = {
+      stopped: false,
+      fail: () => onError?.(new Error(`The preview's load was stopped: ${url}`)),
+    }
+    const done = () => {
+      if (loads.get(url) === load) loads.delete(url)
+    }
     const attempt = () =>
-      super.load(url, onLoad, onProgress, (error) => {
-        const delay = RETRY_DELAYS_MS[tries]
-        if (delay === undefined || !passes(error)) {
-          onError?.(error)
-          return
-        }
-        tries += 1
-        const timer = setTimeout(() => {
-          waiting.delete(url)
-          attempt()
-        }, delay)
-        waiting.set(url, { timer, fail: () => onError?.(error) })
-      })
+      super.load(
+        url,
+        (gltf) => {
+          if (load.stopped) return
+          done()
+          onLoad(gltf)
+        },
+        onProgress,
+        (error) => {
+          if (load.stopped) return
+          const delay = RETRY_DELAYS_MS[tries]
+          if (delay === undefined || !passes(error)) {
+            done()
+            onError?.(error)
+            return
+          }
+          tries += 1
+          load.timer = setTimeout(attempt, delay)
+        },
+      )
+    loads.set(url, load)
     attempt()
   }
 }

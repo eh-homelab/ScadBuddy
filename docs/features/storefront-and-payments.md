@@ -89,7 +89,9 @@ sequenceDiagram
   (`backend/scadbuddy/orders/storefront/renders.py` `preview_ready`); the edge asks again for
   10 s, and the viewer (`frontend/src/lib/previewLoader.ts`) asks again on a 502, 503 or 504
   with a backoff, so a slow store shows as loading, not as an error
-  ([#6968](https://github.com/eh-homelab/ScadBuddy/issues/6968)).
+  ([#6968](https://github.com/eh-homelab/ScadBuddy/issues/6968)). The app's own viewers use
+  the same loader, so there any 502, 503 or 504 (a `database_unavailable` too) shows as
+  loading for about 30 s before the failure shows.
 - A published listing with no price (published before #6922, or whose price run ended with
   none) gets its run from the housekeeping sweep `housekeeping_warm_listings`
   (`backend/scadbuddy/orders/storefront/prepare.py` `warm_unpriced`, #7665): once per

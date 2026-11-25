@@ -70,4 +70,27 @@ describe('PreviewLoader (#6968)', () => {
     expect(loaded).not.toHaveBeenCalled()
     expect(stopRetries(URL_)).toBe(false)
   })
+
+  it('stops a load whose try is in flight, and it asks no more', async () => {
+    let answer: (response: Response) => void = () => {}
+    const fetched = vi.fn(() => new Promise<Response>((resolve) => (answer = resolve)))
+    vi.stubGlobal('fetch', fetched)
+    const { loaded, failed } = load()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(fetched).toHaveBeenCalledTimes(1))
+    expect(stopRetries(URL_)).toBe(true)
+    expect(failed).toHaveBeenCalledTimes(1)
+    answer(new Response('', { status: 503 }))
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetched).toHaveBeenCalledTimes(1)
+    expect(failed).toHaveBeenCalledTimes(1)
+    expect(loaded).not.toHaveBeenCalled()
+  })
+
+  it('forgets a load once it ends', async () => {
+    answers(mesh)
+    const { loaded } = load()
+    await vi.waitFor(() => expect(loaded).toHaveBeenCalledTimes(1))
+    expect(stopRetries(URL_)).toBe(false)
+  })
 })

@@ -979,6 +979,8 @@ def test_a_preview_read_answers_at_once_while_its_files_are_fetched(
     cache has no files yet. It answers 503 after `READY_WAIT`, never holds the request for
     the whole fetch, and a later read streams the mesh. One fetch serves them all."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 72})
+    # Another replica: it has fetched nothing.
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
     monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
     real = materialize_result
     fetches = 0
@@ -1005,12 +1007,30 @@ def test_a_preview_read_answers_at_once_while_its_files_are_fetched(
     assert fetches == 1
 
 
+def test_a_preview_read_of_fetched_files_starts_no_fetch(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6968 review: a job this replica fetched, whose files are still in its cache, is
+    read at once; no new fetch starts for it."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 74})
+    assert job["id"] in renders_module._ready
+
+    async def refused(_blobs: Any, _result: Any) -> None:
+        raise AssertionError("a fetch started for files already cached")
+
+    monkeypatch.setattr(renders_module, "materialize_result", refused)
+    r = crud.get(f"/renders/{job['id']}/preview.glb")
+    assert r.status_code == 200, r.text
+    assert r.content[:4] == b"glTF"
+
+
 def test_a_preview_whose_files_are_lost_is_not_asked_for_for_good(
     crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#6968: a fetch that fails `FETCH_TRIES` times is taken as lost, so the read goes on
     to the preview's own read, which says what is there, not "ask again" for ever."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 73})
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
     monkeypatch.setattr(renders_module, "_failed", OrderedDict())
 
     async def lost(_blobs: Any, _result: Any) -> None:

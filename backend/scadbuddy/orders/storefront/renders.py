@@ -264,12 +264,24 @@ async def shown_render(state: AppState, job: Job) -> StoreRender:
     return store_render(job, ready=ready)
 
 
+def _cached(state: AppState, job: Job) -> bool:
+    """Whether every output's 3MF of ``job`` is in this process's cache now: one stat each,
+    no fetch."""
+    return all(
+        result_file(state.store.blobs, state.paths.root, result.model_3mf).is_file()
+        for result in job_results(job)
+    )
+
+
 async def preview_ready(state: AppState, job: Job) -> bool:
     """Whether the done ``job``'s preview can be read here now (#6968): its files are in
-    this process's cache after a wait of at most `READY_WAIT`, or they are taken as lost
-    (`files_lost`), so the read says so. False: the read answers 503, and the next one
-    finds the fetch further on. It fetches even for a job in `_ready`, on purpose: the
-    cache may have evicted the files since, and the read needs them on this replica."""
+    this process's cache (a job fetched before whose files are still there answers at once,
+    `_cached`), or after a wait of at most `READY_WAIT` on its fetch, or they are taken as
+    lost (`files_lost`), so the read says so. False: the read answers 503, and the next one
+    finds the fetch further on. A job in `_ready` whose files the cache has evicted since
+    is fetched again, as the read needs them on this replica."""
+    if job.id in _ready and await asyncio.to_thread(_cached, state, job):
+        return True
     return await _fetch(state, job) or files_lost(job.id)
 
 
