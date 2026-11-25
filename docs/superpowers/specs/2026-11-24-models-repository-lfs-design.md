@@ -86,13 +86,16 @@ and reads the old repository only. It commits each pinned (slug, commit) and the
 version of every template and built-in, in the order of the old history, with the original
 author and date. (As built: one order for all of them, not the pins first. An upstream is
 older than the `model.json` that names it, so its new id is known when that file is
-written.) Each commit has an `Imported-From: <old id>` trailer, so git itself holds the id
+written. It also keeps the upstream revisions, `base` and `dismissed`, that a kept
+`model.json` names, and theirs: a duplicate without its base merges with conflicts.) Each
+commit has an `Imported-From: <old id>` trailer, so git itself holds the id
 map. It also copies ignored files that are data (videos in `media/`), and not `.renders/`
 or wrappers. It points each `model.json` upstream at the new id. An id that the new history
 does not have stays as it was.
 
 **Check.** Every file's sha256, current and pinned, old against new. Every mesh model
-renders. Push to a branch of the remote, clone, pull, compare again.
+renders. Push to a branch of the remote, clone, pull, compare again. (As built: the
+command's `push` sends it to a `models-trial` branch, with the app's own push.)
 
 **Switch.** All API replicas at 0. Run the builder again for the last changes. The
 transaction: set `models_repo_head`, delete the `models` row of `git_remote_pushes`, and
