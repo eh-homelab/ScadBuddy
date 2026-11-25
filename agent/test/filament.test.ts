@@ -888,6 +888,51 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
   })
 
+  const BELOW = {
+    offer: null,
+    reason: 'below_label',
+    insert_type_id: ROW,
+    empty_weight_g: 200,
+    filament_g: 700,
+    shortfall_g: 100,
+    resolutions: [
+      { kind: 'tared', filament_g: 900, new_label_weight_g: null },
+      { kind: 'short', filament_g: 700, new_label_weight_g: null },
+      { kind: 'label_wrong', filament_g: 700, new_label_weight_g: 700 },
+    ],
+    default: 'tared',
+  }
+
+  it('with a reading under the label and no resolution, names the choices and books nothing (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 900 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 900'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.below_label).toMatchObject({ shortfall_g: 100, default: 'tared' })
+    expect(String(out.next)).toContain('resolution')
+  })
+
+  it('with a resolution, posts it with the reading alone (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' }])
+    expect((firstText(res) as Record<string, unknown>).event).toEqual({ kind: 'weighed' })
+    expect(tool('filament_spool_add_event').description).toContain('below_label')
+  })
+
   it('sends the reading beside the grams, so the event keeps its breakdown (#7682)', async () => {
     const order: string[] = []
     const bodies: unknown[] = []

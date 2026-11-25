@@ -331,16 +331,32 @@ class InsertType(_Checked):
     derived_count: int = 0
 
 
-#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2).
+#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2). ``below_label``
+#: (#7683): a new spool read under its label weight, and `InsertWeightCheck` names the
+#: shortfall and the resolutions.
 NoOfferReason = Literal[
     "archived",
     "no_insert",
     "no_label_weight",
     "used",
     "not_full",
+    "below_label",
     "not_above_label",
     "derived_too_heavy",
 ]
+
+#: How a new spool's reading under its label weight is read (#7683, spec §5.3): the
+#: scale was tared on the empty spool, the spool is short, or the label weight is wrong.
+BelowLabelResolutionKind = Literal["tared", "short", "label_wrong"]
+
+
+class BelowLabelResolution(BaseModel):
+    """One reading of a new spool's shortfall, with the filament it means."""
+
+    kind: BelowLabelResolutionKind
+    filament_g: float
+    #: For ``label_wrong``: ``filament_g`` rounded half up, at least 1.
+    new_label_weight_g: int | None = None
 
 
 class InsertWeightOffer(BaseModel):
@@ -375,6 +391,12 @@ class InsertWeightCheck(BaseModel):
     empty_weight_g: int | None
     #: ``reading_g - empty_weight_g``; ``None`` without an insert.
     filament_g: float | None
+    #: For ``below_label`` (#7683): ``label_weight_g - reading_g``, the resolutions in the
+    #: order ``tared``, ``short``, ``label_wrong`` (the last two only when the reading is
+    #: at least the empty weight) and the one chosen by default.
+    shortfall_g: float | None = None
+    resolutions: list[BelowLabelResolution] = []
+    default: BelowLabelResolutionKind | None = None
 
 
 class InsertWeightAccept(_In):
@@ -1722,7 +1744,9 @@ class SpoolEventAdd(_In):
     the breakdown and the drift in the event's ``data``, #7682), a drying (its temperature
     and hours) or a reset of its consumed counter (``consumed_reset``, #7149 R-7149-4: no
     grams, the grams left stay). A drying that leaves out ``temp_c`` or ``hours`` takes
-    the spool's `DryingDefaults` for it; ``null`` records none (#6720)."""
+    the spool's `DryingDefaults` for it; ``null`` records none (#6720). A new spool's
+    weighing under its label weight sends ``resolution`` with ``reading_g`` alone (#7683):
+    what the check `GET …/insert-weight-offer` offered for it."""
 
     kind: Literal["weighed", "dried", "consumed_reset"]
     source: Literal["person", "scale"] = "person"
@@ -1731,6 +1755,8 @@ class SpoolEventAdd(_In):
     grams: Grams | None = None
     #: The scale reading with the spool, a weighing only.
     reading_g: Grams | None = None
+    #: How a reading under a new spool's label weight is read (#7683).
+    resolution: BelowLabelResolutionKind | None = None
     temp_c: Temp | None = None
     hours: Hours | None = None
     note: Note | None = None
@@ -1742,6 +1768,10 @@ class SpoolEventAdd(_In):
             raise ValueError("at is in the future")
         if self.reading_g is not None and self.kind != "weighed":
             raise ValueError("only a weighing has reading_g")
+        if self.resolution is not None and self.reading_g is None:
+            raise ValueError("a resolution needs reading_g")
+        if self.resolution is not None and self.grams is not None:
+            raise ValueError("a resolution takes reading_g alone")
         if self.reading_g is not None and self.grams is not None and self.reading_g < self.grams:
             raise ValueError("reading_g is below grams")
         if self.kind == "weighed" and self.grams is None and self.reading_g is None:
