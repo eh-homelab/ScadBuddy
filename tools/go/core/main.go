@@ -19,10 +19,15 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/access"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
 )
 
@@ -110,7 +115,9 @@ func serve(ctx context.Context, server *http.Server, listener net.Listener) erro
 type areaRoutes func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Route
 
 // areaPackages are the packages whose areas the switch below does not name.
-var areaPackages = []areaRoutes{}
+var areaPackages = []areaRoutes{
+	access.Areas, mcprelay.Areas, notify.Areas, secrets.Areas, transcripts.Areas,
+}
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
@@ -142,12 +149,12 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "session-turns:read":
 			router.Add("agent", turn.Polled()...)
 		default:
+			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
 			routes, ok := more[name]
 			if !ok {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
-			}
-			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
-				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			router.Add("agent", routes...)
 		}
