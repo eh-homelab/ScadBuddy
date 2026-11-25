@@ -162,6 +162,14 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   for its downloads. A stored value read after a pick does not undo the pick (R-7216-16). — Task 6's
   review found that a pick before the read saved the default fields over the stored ones. — If
   wrong: one branch in the page's save.
+- **R-7216-18 A field tick is a change to one box, not a whole list.** The page keeps each tick as
+  "this field on" or "this field off". It shows and downloads the fields it has (the default before
+  the read, the stored ones after it) with those changes applied. Once the read answers, it saves
+  the stored fields with the changes applied, so a tick before the read never writes the default
+  list over the stored one. A failed read saves nothing; downloads still use the default fields
+  with the changes. The last checked box stays disabled on the list the page shows. — Task 7's
+  review found that a tick before the read saved the default list over the stored one. — If wrong:
+  the page's field state is one reducer.
 
 - **P1 (pre-flight) Task 1 makes `filament_label_output` whole.** Task 1 stores `{format, dpi,
   fields}`, with `fields` at the R-7216-9 default; Task 3 makes `fields` act. — One shape of the
