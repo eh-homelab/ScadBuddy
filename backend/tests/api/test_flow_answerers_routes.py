@@ -166,6 +166,9 @@ def test_sessions_admits_a_browser_users_session(
     assert decision(app, run_id) == {"responder": f"session:{MINE}", "admitted_by": "setting"}
     done = until(client, run_id, lambda v: v["status"] == "succeeded")
     assert done["run"]["result"] == "result: 'done'"
+    assert done["answers"] == [
+        {"call_id": entry["call_id"], "answered_by": f"session:{MINE}", "admitted_by": "setting"}
+    ]
     if entry["task"] is not None:
         task = client.get(f"/api/v1/tasks/{entry['call_id']}").json()
         assert task["answered_by"] == f"session:{MINE}"

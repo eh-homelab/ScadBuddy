@@ -344,6 +344,15 @@ def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantV
     )
 
 
+class AnswerBy(BaseModel):
+    """Who answered a run's question: `browser` for a person, `session:<id>` or
+    `token:<id>` for an agent, and what admitted the agent (`setting`)."""
+
+    call_id: str
+    answered_by: str
+    admitted_by: str | None = None
+
+
 class RunView(BaseModel):
     """A run, with what it waits on now."""
 
@@ -366,6 +375,8 @@ class RunView(BaseModel):
     grant: GrantView | None = None
     #: The trigger that started it (#2484); None for a run a request started.
     trigger: RunTrigger | None = None
+    #: Who answered each answered question (#7471), by call id.
+    answers: list[AnswerBy] = []
 
 
 def may_inherit(
@@ -1030,6 +1041,10 @@ async def _run_view(
         view.grant = run_grant_view(
             grant, await flows.store.grant_uses(run.id), await flows.store.grant_in_force(grant)
         )
+    view.answers = [
+        AnswerBy(call_id=d.call_id, answered_by=d.responder, admitted_by=d.admitted_by)
+        for d in await flows.store.answers_of(run.id)
+    ]
     if run.status in TERMINAL:
         return view
     if flows.client is None:

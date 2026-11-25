@@ -377,6 +377,13 @@ export function setFlowPendingSummary(id: string, callId: string, summary: strin
 
 /** #2477: each run's images, as the view lists them. */
 const images = new Map<string, FlowRunView['images']>()
+/** #7471 — who answered each run's questions. */
+const answered = new Map<string, FlowRunView['answers']>()
+
+/** Tests: who answered run `id`'s questions (#7471). */
+export function setFlowAnswers(id: string, answers: FlowRunView['answers']): void {
+  answered.set(id, answers)
+}
 /** One grey pixel, what every image route answers. */
 const PIXEL = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGO4AAAA0gDR29kOtwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0))
 
@@ -390,6 +397,7 @@ export function reset(): void {
   starting.clear()
   summaries.clear()
   images.clear()
+  answered.clear()
   children.clear()
   defaultChildren()
   states.clear()
@@ -499,7 +507,7 @@ export function flowRequests(): readonly { path: string; key: string | null; bod
 
 function view(id: string): FlowRunView | undefined {
   if (starting.has(id)) {
-    return { id, status: 'starting', definition_id: 'def-swap', version: 1, name: 'swap', run: null, pending: [], live: false, images: [] }
+    return { id, status: 'starting', definition_id: 'def-swap', version: 1, name: 'swap', run: null, pending: [], live: false, images: [], answers: [] }
   }
   const found = runs.find((r) => r.id === id)
   if (!found) return undefined
@@ -532,6 +540,7 @@ function view(id: string): FlowRunView | undefined {
     live: !offline.has(id),
     images: images.get(id) ?? [],
     grant: grants.get(id) ?? null,
+    answers: answered.get(id) ?? [],
   }
 }
 

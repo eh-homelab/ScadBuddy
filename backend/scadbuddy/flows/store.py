@@ -382,6 +382,10 @@ class FlowStore:
     async def get_decision(self, request_id: str) -> Decision | None:
         return await asyncio.to_thread(self._get_decision, request_id)
 
+    async def answers_of(self, run_id: str) -> list[Decision]:
+        """The run's answers on record, every execution's, oldest first (#7471)."""
+        return await asyncio.to_thread(self._answers_of, run_id)
+
     async def record_grant_decision(self, decision: Decision) -> bool:
         """Record a run grant's approval of a call (#2481), only if the grant is in force
         now and its recorded use of this request id is for this very input: one statement
@@ -971,6 +975,15 @@ class FlowStore:
                 (*_decided(decision), decision.input_hash, decision.request_id),
             ).fetchone()
         return held is not None and bool(held["same"])
+
+    def _answers_of(self, run_id: str) -> list[Decision]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_DECISION} FROM workflow_run_decisions"
+                " WHERE run_id = %s AND kind = 'answer' ORDER BY created_at",
+                (run_id,),
+            ).fetchall()
+        return [Decision.model_validate(row) for row in rows]
 
     def _get_decision(self, request_id: str) -> Decision | None:
         with self._pool.connection() as conn:

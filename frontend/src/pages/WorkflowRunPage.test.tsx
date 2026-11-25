@@ -8,6 +8,7 @@ import {
   flowRequests,
   moveFlowRunOn,
   moveFlowRunPastPreview,
+  setFlowAnswers,
   setFlowRunImages,
   setFlowRunOffline,
   setFlowRunStarting,
@@ -83,6 +84,19 @@ describe('WorkflowRunPage', () => {
     render('run-done')
     expect(await screen.findByRole('region', { name: 'Result' })).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'Inputs' })).toBeNull()
+  })
+
+  it('says a question is for people only (#7471)', async () => {
+    render('run-ask')
+    expect(await screen.findByText('The flow asks this of people only.')).toBeInTheDocument()
+  })
+
+  it('names the assistant that answered a question, and links its session (#7471)', async () => {
+    setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'setting' }])
+    render('run-ask')
+    const steps = await screen.findByRole('table', { name: 'Steps' })
+    const link = await within(steps).findByRole('link', { name: 'Answered by the assistant' })
+    expect(link.getAttribute('href')).toMatch(/\?assistant-session=s-9$/)
   })
 
   it('answers a question with a key, and the run moves on', async () => {

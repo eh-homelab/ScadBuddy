@@ -62,6 +62,8 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
     'print_auto_import_skip_printers',
     'print_auto_import_skip_lan_printers',
   ],
+  // #7471 — who besides a person answers a flow's question; only a person saves it.
+  'flow-answerers': ['flow_answerers'],
   // #426 — the blob store beside the inbox folder it needs.
   projects: [
     'library_folder_id',
@@ -209,6 +211,13 @@ export function printerIdsValue(ids: readonly number[]): string {
 }
 
 /** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */
+/** #7471 — `flow_answerers` as the form holds it: `starter`, `sessions`, then the tokens, once each. */
+export function answerersValue(rules: readonly string[]): string {
+  const unique = [...new Set(rules)]
+  const fixed = ['starter', 'sessions'].filter((rule) => unique.includes(rule))
+  return [...fixed, ...unique.filter((rule) => !fixed.includes(rule)).sort()].join(',')
+}
+
 export function registryIdsValue(ids: readonly string[]): string {
   return [...new Set(ids)].sort().join(',')
 }
@@ -221,6 +230,7 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'filament_preset_mirror') return settings.filament_preset_mirror === false ? 'false' : 'true'
   // #7156 — on until the settings say otherwise, as the backend's default.
   if (name === 'filament_auto_add_unknown_rfid') return settings.filament_auto_add_unknown_rfid === false ? 'false' : 'true'
+  if (name === 'flow_answerers') return answerersValue(settings.flow_answerers ?? [])
   if (name === 'print_auto_import_sources') return sourcesValue(settings.print_auto_import_sources ?? [])
   if (name === 'print_auto_import_skip_printers') return printerIdsValue(settings.print_auto_import_skip_printers ?? [])
   if (name === 'print_auto_import_skip_lan_printers')
@@ -284,6 +294,7 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
   // #6265 — one direction per data type: the form's six-part string, split.
   if (name === 'filament_sync') return syncParts(raw)
   // #4699 — an empty list allows no source (each print goes to Unsorted imports) or skips no printer.
+  if (name === 'flow_answerers') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_sources') return raw === '' ? [] : raw.split(',')
   if (name === 'print_auto_import_skip_printers') return raw === '' ? [] : raw.split(',').map(Number)
   if (name === 'print_auto_import_skip_lan_printers') return raw === '' ? [] : raw.split(',')
