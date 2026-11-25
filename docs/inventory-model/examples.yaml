@@ -88,10 +88,11 @@ items:
 
 # What you have. A unit may override its item's parameters (`steps`).
 instances:
-  - {id: h2c_1, item: h2c, type: unit, serial: 31B-598, name: "3DP-31B-598"}
-  - {id: nozzle_3, item: nozzle_hs_04, type: unit}
-  - {id: nozzle_4, item: nozzle_hs_04, type: unit}
-  - {id: plate_1, item: pei_textured, type: unit}
+  - {id: h2c_1, item: h2c, type: unit, serial: 31B-598, name: "3DP-31B-598", cost_minor: 349900}
+  - {id: h2c_2, item: h2c, type: unit, name: "Printer B", cost_minor: 349900}
+  - {id: nozzle_3, item: nozzle_hs_04, type: unit, cost_minor: 2500}
+  - {id: nozzle_4, item: nozzle_hs_04, type: unit, cost_minor: 2500}
+  - {id: plate_1, item: pei_textured, type: unit, cost_minor: 4000}
   - {id: spool_112, item: pla_matte_charcoal, type: unit}
   - {id: spool_113, item: pla_plus_gold, type: unit}
   - {id: insert_7, item: reusable_spool, type: unit}
@@ -129,3 +130,29 @@ relations:
   - {type: covers, from: "unit:warranty_1", to: "unit:h2c_1"}
   - {type: covers, from: "unit:drill_1", to: "unit:h2c_1", expect: refused,
      why: "only a service with a term covers"}
+
+# What happens over time (design §4.5, README §5.7). `check.py` replays it in order:
+# `add` and `remove` change a relationship, `run` is print runs that end on a printer
+# (`hours` of running, `prints` of them). A run books its hours and prints on the printer
+# (own_run_hours) and, through it, on every unit it contains at that moment
+# (container_run_hours for hours, the prints for uses). Then `expect_life` must hold.
+history:
+  - {at: 2026-12-01, do: add, rel: {type: contains, from: "unit:h2c_1", to: "unit:nozzle_4"}}
+  - {at: 2026-12-02, do: run, printer: "unit:h2c_1", hours: 600, prints: 400}
+  - {at: 2027-01-10, do: remove, rel: {type: contains, from: "unit:h2c_1", to: "unit:nozzle_4"}}
+  - {at: 2027-01-10, do: remove, rel: {type: contains, from: "unit:h2c_1", to: "unit:plate_1"}}
+  - {at: 2027-01-11, do: add, rel: {type: contains, from: "unit:h2c_2", to: "unit:nozzle_4"}}
+  - {at: 2027-01-11, do: add, rel: {type: contains, from: "unit:h2c_2", to: "unit:plate_1"}}
+  - {at: 2027-01-12, do: run, printer: "unit:h2c_2", hours: 750, prints: 500}
+  - {at: 2027-01-13, do: run, printer: "unit:h2c_1", hours: 100, prints: 80}
+
+# The nozzle and the plate moved from printer A (h2c_1) to printer B (h2c_2). Each keeps
+# what it did in both: nozzle_4 600 + 750 = 1350 of 1500 h; plate_1 400 + 500 = 900 of
+# 1000 prints. Printer A's last run came after they left, so it does not count on them;
+# it counts on nozzle_3, which stayed. Both moved units reach their 90% warning.
+expect_life:
+  - {unit: nozzle_4, at: 2027-01-14, used: 1350, share: 0.9, warn: true, book_value_minor: 250}
+  - {unit: plate_1, at: 2027-01-14, used: 900, share: 0.9, warn: true, book_value_minor: 400}
+  - {unit: nozzle_3, at: 2027-01-14, used: 700, share: 0.4667, warn: false, book_value_minor: 1333.33}
+  - {unit: h2c_1, at: 2027-01-14, used: 700, share: 0.07, warn: false, book_value_minor: 325407}
+  - {unit: h2c_2, at: 2027-01-14, used: 750, share: 0.075, warn: false, book_value_minor: 323657.5}

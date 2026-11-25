@@ -24,7 +24,9 @@ uvx --with pyyaml python -I docs/inventory-model/check.py
 It resolves each item's class and handlers, checks each handler's step, class and
 parameters, checks each instance and relationship, and checks that §3's table is what it
 resolved. It also checks that the five relationships marked `expect: refused` are refused,
-each for its stated reason. Output on 2026-11-25:
+each for its stated reason. It replays `examples.yaml`'s history (a nozzle and a plate
+move from one printer to another) and checks each unit's life against `expect_life`.
+Output on 2026-11-25:
 
 ```text
 refused as expected: contains unit:label_printer_1 -> unit:roll_5: unit:label_printer_1 holds 1 of kind:label_roll at most, and has ['unit:roll_4']
@@ -32,7 +34,12 @@ refused as expected: contains unit:label_printer_1 -> unit:roll_9: unit:label_pr
 refused as expected: contains unit:drill_1 -> unit:nozzle_4: unit:drill_1 does not accept unit:nozzle_4
 refused as expected: contains unit:h2c_1 -> unit:insert_7: unit:insert_7 is already in unit:spool_112
 refused as expected: covers unit:drill_1 -> unit:h2c_1: unit:drill_1: class {'nature': 'physical', 'role': 'durable', 'counting': 'unit'} is not {'nature': 'service', 'billing': 'term'}
-ok: 33 kinds, 38 handlers, 16 items, 16 instances, 16 relationships
+life as expected: nozzle_4 used 1350, 90.0%, warn True, book value 250.00
+life as expected: plate_1 used 900, 90.0%, warn True, book value 400.00
+life as expected: nozzle_3 used 700, 46.7%, warn False, book value 1333.33
+life as expected: h2c_1 used 700, 7.0%, warn False, book value 325407.00
+life as expected: h2c_2 used 750, 7.5%, warn False, book value 323657.50
+ok: 33 kinds, 38 handlers, 16 items, 17 instances, 16 relationships, 8 history events, 5 lives
 ```
 
 ## 1. What a thing is: the class
@@ -320,6 +327,45 @@ sequenceDiagram
     B->>BF: bill(1)
     BF-->>JC: 15.00
 ```
+
+### 5.7 A nozzle and a plate move from printer A to printer B
+
+A unit's life is never read from the printer it is in now. Every print run books a row in
+`unit_uses` on the printer and, through it, on each unit it contains at that moment. A
+life handler sums the unit's own rows. So a unit that moves keeps what it did in each
+printer, and a printer's later runs do not count on a unit that has left it. The same
+holds for any unit that is fitted in another: a nozzle (`life.hours`), a plate
+(`life.uses`), a hotend, a belt.
+
+```mermaid
+sequenceDiagram
+    actor P as Person
+    participant A as Printer A (h2c_1)
+    participant B as Printer B (h2c_2)
+    participant U as unit_uses
+    participant L as life handlers
+    P->>A: contains nozzle #4 (plate #1 is already in A)
+    A->>U: run 600 h, 400 prints: rows for A, and via A for nozzle #3, nozzle #4, plate #1
+    P->>A: remove nozzle #4 and plate #1
+    P->>B: contains nozzle #4 and plate #1
+    B->>U: run 750 h, 500 prints: rows for B, and via B for nozzle #4, plate #1
+    A->>U: run 100 h, 80 prints: rows for A, and via A for nozzle #3 only
+    L->>U: nozzle #4: sum of its rows via any container
+    U-->>L: 600 + 750 = 1350 h of 1500: 90%, warning, book value 2.50
+    L->>U: plate #1: sum of its prints
+    U-->>L: 400 + 500 = 900 of 1000: 90%, warning, book value 4.00
+```
+
+| Unit | Rows in `unit_uses` | Life handler | Used | Book value |
+|---|---|---|---|---|
+| Nozzle #4 | 600 h via A, 750 h via B | `life.hours`, 1500 h, through a container | 1350 h (90%, warning) | 25.00 → 2.50 |
+| Plate #1 | 400 prints via A, 500 via B | `life.uses`, 1000 | 900 prints (90%, warning) | 40.00 → 4.00 |
+| Nozzle #3 (stayed in A) | 600 h, 100 h via A | `life.hours`, 1500 h | 700 h (46.7%) | 25.00 → 13.33 |
+| Printer A | 600 h, 100 h own | `life.hours`, 10000 h, own | 700 h (7%) | 3499.00 → 3254.07 |
+| Printer B | 750 h own | `life.hours`, 10000 h, own | 750 h (7.5%) | 3499.00 → 3236.58 |
+
+The `contains` relationship keeps its end date when a unit is removed, so the unit's page
+can also list where it has been and for how long.
 
 ## 6. The life of a unit
 

@@ -170,7 +170,13 @@ Life is a step like the others. Handlers: `life.none`, `life.months` (`months`,
 the unit it is installed in, or manual), `life.uses` (`uses`), `life.term` (from the
 instance's `starts_at` to `ends_at`, `warn_days`). A life handler answers a unit's state at
 a time: used share, book value, and signals (a warning, the end). Nothing stores a life
-except the handler's parameters. This replaces `item_kinds.life_basis`,
+except the handler's parameters.
+
+A life handler reads only the unit's own `unit_uses` rows (§6.3), never the state of the
+unit it is in now. A print run books a row on the printer and, through it, on each unit
+it contains at that moment. So a nozzle or a plate moved from printer A to printer B keeps
+every hour and print from both, and A's later runs do not count on it. The proof replays
+such a move and checks each life (`docs/inventory-model/README.md` §5.7). This replaces `item_kinds.life_basis`,
 `items.life_hours`, `items.life_months`, `stock_units.life_hours` and
 `stock_units.life_months`.
 
@@ -306,7 +312,8 @@ parameters, every instance and every relationship (each container field's `max`
 included), checks that five relationships the design must refuse are refused for their
 stated reason, and checks that the README's table is the resolved one. On 2026-11-25 it
 passed (`uvx --with pyyaml python -I docs/inventory-model/check.py`): 33 kinds, 38
-handlers, 16 items, 16 instances, 16 relationships. Its 12 Mermaid diagrams rendered with
+handlers, 16 items, 17 instances, 16 relationships, and a history of 8 events whose 5
+unit lives it checks. Its 13 Mermaid diagrams rendered with
 `@mermaid-js/mermaid-cli` 11.4.2.
 
 The first Go task ports `check.py` to a Go test over the same YAML, so the proof becomes

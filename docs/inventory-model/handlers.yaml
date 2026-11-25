@@ -132,8 +132,11 @@ handlers:
     steps: [life]
     applies: {nature: physical, role: durable}
     does: >-
-      Book value falls with hours in service. The hours come from `source`: the run hours
-      of the printer the unit is installed in, or hours a person enters.
+      Book value falls with hours in service. It sums the unit's own `unit_uses` rows up to
+      the time asked. `source` says which rows count: `container_run_hours`, the hours
+      booked on this unit through whatever container held it at the time (so a nozzle
+      moved from one printer to another keeps every hour it ran in each); `own_run_hours`,
+      the unit's own running (a printer); `manual`, hours a person enters.
     params:
       hours: {type: number, required: true}
       source: {type: string, required: true, enum: [container_run_hours, own_run_hours, manual]}

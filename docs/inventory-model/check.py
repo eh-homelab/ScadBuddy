@@ -244,6 +244,65 @@ for rel in X["relations"]:
     if rel["type"] == "contains":
         held[rel["to"]] = rel["from"]
 
+# Replay the history (design §4.5): uses are booked per unit, through its container.
+uses: list[dict] = []  # unit_uses rows: unit, at, hours, prints, via
+for ev in X.get("history", []):
+    if ev["do"] == "add":
+        why = check_relation(ev["rel"], accepts, held)
+        if why:
+            raise Broken(f"history {ev['at']}: refused {ev['rel']}: {why}")
+        held[ev["rel"]["to"]] = ev["rel"]["from"]
+    elif ev["do"] == "remove":
+        if held.get(ev["rel"]["to"]) != ev["rel"]["from"]:
+            raise Broken(f"history {ev['at']}: {ev['rel']['to']} is not in {ev['rel']['from']}")
+        del held[ev["rel"]["to"]]
+    elif ev["do"] == "run":
+        printer = ev["printer"]
+        _, _, res = RESOLVED[INST[printer.split(":", 1)[1]]["item"]]
+        if res["consume"][0] != "printer.consume_run":
+            raise Broken(f"history {ev['at']}: {printer} has no printer consume handler")
+        rows_ = [{"unit": printer, "at": ev["at"], "hours": ev["hours"], "prints": ev["prints"], "via": None}]
+        rows_ += [{"unit": u, "at": ev["at"], "hours": ev["hours"], "prints": ev["prints"], "via": printer}
+                  for u, c in held.items() if c == printer]
+        uses.extend(rows_)
+    else:
+        raise Broken(f"history: unknown event {ev['do']}")
+
+
+def life_state(unit: str, at) -> dict:
+    """The unit's life handler, answered from its own unit_uses rows up to `at`."""
+    inst = INST[unit.split(":", 1)[1]]
+    _, _, res = RESOLVED[inst["item"]]
+    hid, params = res["life"]
+    rows_ = [u for u in uses if u["unit"] == unit and u["at"] <= at]
+    if hid == "life.hours":
+        if params["source"] == "container_run_hours":
+            used = sum(u["hours"] for u in rows_ if u["via"])
+        elif params["source"] == "own_run_hours":
+            used = sum(u["hours"] for u in rows_ if not u["via"])
+        else:
+            raise Broken(f"{unit}: manual hours are not in the examples")
+        life = params["hours"]
+    elif hid == "life.uses":
+        used, life = sum(u["prints"] for u in rows_), params["uses"]
+    else:
+        raise Broken(f"{unit}: {hid} is not replayed by the examples")
+    share = min(used / life, 1)
+    cost = inst["cost_minor"]
+    salvage = cost * (params.get("salvage_pct") or 0) / 100
+    warn = "warn_pct" in params and share * 100 >= params["warn_pct"]
+    return {"used": used, "share": share, "warn": warn, "book": cost - (cost - salvage) * share}
+
+
+for exp in X.get("expect_life", []):
+    got = life_state(f"unit:{exp['unit']}", exp["at"])
+    ok = (got["used"] == exp["used"] and abs(got["share"] - exp["share"]) < 1e-4
+          and got["warn"] == exp["warn"] and abs(got["book"] - exp["book_value_minor"]) < 0.01)
+    if not ok:
+        raise Broken(f"life of {exp['unit']} at {exp['at']}: expected {exp}, got {got}")
+    print(f"life as expected: {exp['unit']} used {got['used']}, {got['share']:.1%}, "
+          f"warn {got['warn']}, book value {got['book']:.2f}")
+
 rows = ["| Item | Class | " + " | ".join(STEPS) + " |", "|---|---|" + "---|" * len(STEPS)]
 for iid, (cls, special, res) in RESOLVED.items():
     c = "/".join(cls[k] for k in FULL[cls["nature"]]) + (f" + {special}" if special else "")
@@ -259,4 +318,5 @@ m = re.search(r"<!-- matrix:start -->\n(.*?)\n<!-- matrix:end -->", readme, re.S
 if not m or m.group(1).strip() != table.strip():
     raise Broken("README.md's table is not the resolved one: run with --print and paste it")
 print(f"ok: {len(K)} kinds, {len(HANDLERS)} handlers, {len(ITEMS)} items, "
-      f"{len(INST)} instances, {len(X['relations'])} relationships")
+      f"{len(INST)} instances, {len(X['relations'])} relationships, "
+      f"{len(X.get('history', []))} history events, {len(X.get('expect_life', []))} lives")
