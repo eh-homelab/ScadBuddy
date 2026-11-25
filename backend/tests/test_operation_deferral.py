@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass
 from datetime import timedelta
 
 import pytest
@@ -120,6 +121,40 @@ async def client() -> AsyncIterator[Client]:
         yield connected
 
 
+@dataclass(frozen=True)
+class _OldBuild:
+    """The print deployment while only its old build serves: that build lacks the kind
+    ``test`` (`_old_build`)."""
+
+    name: str
+    queue: str
+    arg: OperationInput
+    workflow_id: str
+    fake: Fake
+
+
+@contextlib.asynccontextmanager
+async def _old_build(client: Client, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_OldBuild]:
+    """A print deployment of its own whose current build, ``old``, has no ``check`` or
+    ``run`` for the kind ``test``, served and current before the body runs. Its
+    operations' workflows are ended after it (#7532: the deferral tests share it)."""
+    name = f"scadbuddy-print-test-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(temporal, "PRINT_DEPLOYMENT_NAME", name)
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    fake = Fake()
+    old = temporal.bambuddy_worker(client, queue, [fake.insert, fake.finish], build_id="old")
+    arg = op_input()
+    try:
+        async with old:
+            await _make(client, name, "old")
+            assert await wait_until_build_serves(
+                client, queue, "old", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
+            )
+            yield _OldBuild(name, queue, arg, f"op-{arg.kind}-{arg.key}", fake)
+    finally:
+        await terminate_open_workflows(client, queue)
+
+
 @pytest.mark.requires_temporal
 async def test_a_new_kind_waits_for_the_build_that_has_it(
     client: Client, monkeypatch: pytest.MonkeyPatch
@@ -128,51 +163,36 @@ async def test_a_new_kind_waits_for_the_build_that_has_it(
     The operation's workflow task fails on the old build (no activity is scheduled, so
     no attempt is spent and nothing is recorded ``failed``), and is retried until the
     new build is current, which runs the whole operation."""
-    name = f"scadbuddy-print-test-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setattr(temporal, "PRINT_DEPLOYMENT_NAME", name)
-    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
-    old_fake, new_fake = Fake(), Fake()
-    old = temporal.bambuddy_worker(
-        client, queue, [old_fake.insert, old_fake.finish], build_id="old"
-    )
-    new = temporal.bambuddy_worker(client, queue, new_fake.all(), build_id="new")
-    arg = op_input()
-    workflow_id = f"op-{arg.kind}-{arg.key}"
-    try:
-        async with old:
-            await _make(client, name, "old")
-            assert await wait_until_build_serves(
-                client, queue, "old", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
-            )
-            still: list[float] = []
-            answering = asyncio.create_task(_send_until_answered(client, queue, arg, still))
-            loop = asyncio.get_running_loop()
-            began = loop.time()
-            await asyncio.sleep(OLD_BUILD_HOLD)
-            handle = client.get_workflow_handle(workflow_id)
-            described = await handle.describe()
-            attempt = described.raw_description.pending_workflow_task.attempt
-            held = loop.time() - began
-            print(f"deferred workflow task: attempt {attempt} after {held:.1f}s")
-            # Retried, and backed off: not a tight loop.
-            assert 2 <= attempt <= held / 5 + 2
-            history = await handle.fetch_history()
-            assert not [
-                event
-                for event in history.events
-                if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
-            ]
-            # The route answers still accepting (202, or 503 to send again), never the
-            # refusal Temporal's "Workflow Task in failed state" used to be.
-            assert not answering.done()
-            assert still
-            async with new:
-                await _make(client, name, "new")
-                done = await asyncio.wait_for(answering, 60)
-    finally:
-        await terminate_open_workflows(client, queue)
+    new_fake = Fake()
+    async with _old_build(client, monkeypatch) as build:
+        still: list[float] = []
+        answering = asyncio.create_task(_send_until_answered(client, build.queue, build.arg, still))
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await asyncio.sleep(OLD_BUILD_HOLD)
+        handle = client.get_workflow_handle(build.workflow_id)
+        described = await handle.describe()
+        attempt = described.raw_description.pending_workflow_task.attempt
+        held = loop.time() - began
+        print(f"deferred workflow task: attempt {attempt} after {held:.1f}s")
+        # Retried, and backed off: not a tight loop.
+        assert 2 <= attempt <= held / 5 + 2
+        history = await handle.fetch_history()
+        assert not [
+            event
+            for event in history.events
+            if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        ]
+        # The route answers still accepting (202, or 503 to send again), never the
+        # refusal Temporal's "Workflow Task in failed state" used to be.
+        assert not answering.done()
+        assert still
+        new = temporal.bambuddy_worker(client, build.queue, new_fake.all(), build_id="new")
+        async with new:
+            await _make(client, build.name, "new")
+            done = await asyncio.wait_for(answering, 60)
     assert done.status == "succeeded"
-    assert old_fake.calls == []
+    assert build.fake.calls == []
     assert new_fake.calls == ["check", "insert", "run", "finish:ok"]
 
 
@@ -187,46 +207,32 @@ async def test_a_deployed_operation_retries_its_deferred_task_at_the_short_timeo
     6.1, 14.0, 26.0 and 46.6 s: from the fifth the server adds a growing backoff to the
     timeout. At the 10 s default they began at 0, 0.25, 10.2, 20.1, 34.7 and 53.6 s. The
     bound is loose: a slow runner only spaces the tries further apart."""
-    name = f"scadbuddy-print-test-{uuid.uuid4().hex[:8]}"
-    monkeypatch.setattr(temporal, "PRINT_DEPLOYMENT_NAME", name)
-    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
-    old_fake = Fake()
-    old = temporal.bambuddy_worker(
-        client, queue, [old_fake.insert, old_fake.finish], build_id="old"
-    )
-    arg = op_input()
-    workflow_id = f"op-{arg.kind}-{arg.key}"
-    try:
-        async with old:
-            await _make(client, name, "old")
-            assert await wait_until_build_serves(
-                client, queue, "old", timeout=30, poll=0.05, max_poll=0.5, deployment_name=name
+    async with _old_build(client, monkeypatch) as build:
+        answering = asyncio.create_task(
+            _send_until_answered(
+                client, build.queue, build.arg, [], task_timeout=SHORT_TASK_TIMEOUT
             )
-            answering = asyncio.create_task(
-                _send_until_answered(client, queue, arg, [], task_timeout=SHORT_TASK_TIMEOUT)
-            )
-            loop = asyncio.get_running_loop()
-            began = loop.time()
-            await asyncio.sleep(OLD_BUILD_HOLD)
-            described = await client.get_workflow_handle(workflow_id).describe()
-            held = loop.time() - began
-            raw = described.raw_description
-            assert raw.execution_config.default_workflow_task_timeout.ToTimedelta() == (
-                SHORT_TASK_TIMEOUT
-            )
-            attempt = raw.pending_workflow_task.attempt
-            print(f"deferred workflow task at 3 s: attempt {attempt} after {held:.1f}s")
-            # The 10 s default cannot reach attempt 5 in under 30 s (three timeouts after
-            # the first retry); at 3 s it reached it after 14 s. Still backed off: not a
-            # tight loop.
-            assert 5 <= attempt <= held / 1.5 + 2
-            assert not answering.done()
-            answering.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await answering
-    finally:
-        await terminate_open_workflows(client, queue)
-    assert old_fake.calls == []
+        )
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        await asyncio.sleep(OLD_BUILD_HOLD)
+        described = await client.get_workflow_handle(build.workflow_id).describe()
+        held = loop.time() - began
+        raw = described.raw_description
+        assert raw.execution_config.default_workflow_task_timeout.ToTimedelta() == (
+            SHORT_TASK_TIMEOUT
+        )
+        attempt = raw.pending_workflow_task.attempt
+        print(f"deferred workflow task at 3 s: attempt {attempt} after {held:.1f}s")
+        # The 10 s default cannot reach attempt 5 in under 30 s (three timeouts after
+        # the first retry); at 3 s it reached it after 14 s. Still backed off: not a
+        # tight loop.
+        assert 5 <= attempt <= held / 1.5 + 2
+        assert not answering.done()
+        answering.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await answering
+    assert build.fake.calls == []
 
 
 @activity.defn(name="op.probe.check")
