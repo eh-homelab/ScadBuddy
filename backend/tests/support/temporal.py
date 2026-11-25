@@ -193,10 +193,28 @@ def _dev_server(db_file: Path) -> Iterator[str]:
 CANCEL_RECORDED_WITHIN = 10.0
 
 
-async def cancel_recorded(handle: WorkflowHandle[Any, Any]) -> None:
+async def cancel_recorded(
+    handle: WorkflowHandle[Any, Any],
+    *,
+    gate: asyncio.Event | None = None,
+    pending: asyncio.Task[Any] | None = None,
+) -> None:
     """Cancel ``handle``'s workflow and return once its history holds the cancel request,
     so a recorder (#7433) opens its gate only after the server recorded the cancel. A
-    cancel not recorded within `CANCEL_RECORDED_WITHIN` raises `TimeoutError` (#7500)."""
+    cancel not recorded within `CANCEL_RECORDED_WITHIN` raises `TimeoutError` (#7500).
+    On any failure, the recorder's ``gate`` is opened and its ``pending`` start is
+    cancelled first, so no pending task's warning buries the error (#7554)."""
+    try:
+        await _cancel_recorded(handle)
+    except BaseException:
+        if gate is not None:
+            gate.set()
+        if pending is not None:
+            pending.cancel()
+        raise
+
+
+async def _cancel_recorded(handle: WorkflowHandle[Any, Any]) -> None:
     await handle.cancel()
     try:
         async with asyncio.timeout(CANCEL_RECORDED_WITHIN):
