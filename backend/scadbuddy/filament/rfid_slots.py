@@ -28,7 +28,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.presets import effective_k_values, effective_presets, preset_for
-from scadbuddy.filament.rfid_push import acquire_lock, error_label
+from scadbuddy.filament.rfid_push import acquire_lock, error_label, failure_label
 from scadbuddy.printers import ams_slots as sc
 from scadbuddy.printers.lan_command_models import LanCommandPending, LanCommandRun
 from scadbuddy.printers.lan_commands import SlotParams, UnsupportedUnitError
@@ -49,8 +49,10 @@ SLOTS_LOCK = "scadbuddy:filament:rfid_slots"
 #: change, a warning is logged: the AMS may not report back what was sent (see
 #: `reconcile_slots`).
 RECONFIGURE_WARNING = 3
-#: At most this many slots' runs are open at once in one pass (P46). Each run waits up to
-#: `LAN_ROUTE_WAIT_S`, so a pass of up to this many slots waits about one of those.
+#: At most this many slots' runs are open at once in one pass (P46), and at most one per
+#: printer (P58): each run opens an MQTT connection of its own, and a printer has few LAN
+#: client slots. Each run waits up to `LAN_ROUTE_WAIT_S`, so a pass waits about one of those
+#: per slot of its busiest printer, until its deadline.
 MAX_CONCURRENT_RUNS = 8
 #: The reconcile route's budget, in seconds from the request's start, under Envoy's 15 s
 #: route timeout (P46): a slot's run starts only while the run's whole wait still ends
@@ -135,13 +137,15 @@ def _configured(
     spool_id: UUID,
     digest: str,
     *,
+    repeat: bool,
     confirmed: bool,
     run_key: str | None,
 ) -> int:
     """Write the row after a configure and return its ``attempts``: the consecutive
     acknowledged configures of an unchanged hash for the same spool (0 for a new hash or
-    spool). An unacknowledged one (``confirmed`` false) does not count, writes
-    ``last_error`` `UNCONFIRMED`, and keeps ``run_key`` while its run is still open."""
+    spool: ``repeat`` false, read before `_started` wrote the hash). An unacknowledged one
+    (``confirmed`` false) does not count, writes ``last_error`` `UNCONFIRMED`, and keeps
+    ``run_key`` while its run is still open."""
     with store.spools.transaction() as conn:
         row = conn.execute(
             "INSERT INTO filament_override_slots"
@@ -152,9 +156,7 @@ def _configured(
             " spool_id = EXCLUDED.spool_id, params_hash = EXCLUDED.params_hash,"
             " configured_at = EXCLUDED.configured_at, last_error = EXCLUDED.last_error,"
             " run_key = EXCLUDED.run_key,"
-            " attempts = CASE WHEN filament_override_slots.params_hash = EXCLUDED.params_hash"
-            " AND filament_override_slots.spool_id = EXCLUDED.spool_id"
-            " THEN filament_override_slots.attempts + %s ELSE 0 END"
+            " attempts = CASE WHEN %s THEN filament_override_slots.attempts + %s ELSE 0 END"
             " RETURNING attempts",
             (
                 printer_id,
@@ -164,6 +166,7 @@ def _configured(
                 digest,
                 None if confirmed else UNCONFIRMED,
                 run_key,
+                repeat,
                 1 if confirmed else 0,
             ),
         ).fetchone()
@@ -179,20 +182,52 @@ def _failed(
     spool_id: UUID,
     label: str,
     digest: str | None = None,
+    run_key: str | None = None,
 ) -> None:
-    """Record a configure that did not happen: ``attempts`` and ``last_error``. The hash is
-    stored only with ``digest`` (an `UNSUPPORTED_UNIT` slot, so the next pass knows it was
-    recorded); else none."""
+    """Record a configure that did not happen, or whose outcome is not known:
+    ``attempts`` and ``last_error``. The hash is stored only with ``digest`` (an
+    `UNSUPPORTED_UNIT` slot, so the next pass knows it was recorded, or a run that may still
+    be open); else none. ``run_key`` is kept for the next pass to join (`_run_key`)."""
     with store.spools.transaction() as conn:
         conn.execute(
             "INSERT INTO filament_override_slots"
-            " (printer_id, ams_id, tray_id, spool_id, params_hash, attempts, last_error)"
-            " VALUES (%s, %s, %s, %s, %s, 1, %s)"
+            " (printer_id, ams_id, tray_id, spool_id, params_hash, attempts, last_error,"
+            " run_key)"
+            " VALUES (%s, %s, %s, %s, %s, 1, %s, %s)"
             " ON CONFLICT (printer_id, ams_id, tray_id) DO UPDATE SET"
             " spool_id = EXCLUDED.spool_id, params_hash = EXCLUDED.params_hash,"
-            " attempts = filament_override_slots.attempts + 1, run_key = NULL,"
+            " attempts = filament_override_slots.attempts + 1, run_key = EXCLUDED.run_key,"
             " last_error = EXCLUDED.last_error",
-            (printer_id, ams_id, tray_id, spool_id, digest, label),
+            (printer_id, ams_id, tray_id, spool_id, digest, label, run_key),
+        )
+
+
+def _started(
+    store: Filament,
+    printer_id: UUID,
+    ams_id: int,
+    tray_id: int,
+    spool_id: UUID,
+    digest: str,
+    run_key: str,
+) -> None:
+    """Write the run's key and the params' hash before the run is sent (I1), so a pass
+    that is cancelled, or whose task raises, while it waits for the answer leaves a key
+    the next pass joins (`_run_key`) rather than sending the commands again. ``attempts``
+    restarts at 0 for a new hash or spool; ``last_error`` is left for the outcome."""
+    with store.spools.transaction() as conn:
+        conn.execute(
+            "INSERT INTO filament_override_slots"
+            " (printer_id, ams_id, tray_id, spool_id, params_hash, run_key)"
+            " VALUES (%s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (printer_id, ams_id, tray_id) DO UPDATE SET"
+            " attempts = CASE WHEN filament_override_slots.params_hash"
+            " IS NOT DISTINCT FROM EXCLUDED.params_hash"
+            " AND filament_override_slots.spool_id = EXCLUDED.spool_id"
+            " THEN filament_override_slots.attempts ELSE 0 END,"
+            " spool_id = EXCLUDED.spool_id, params_hash = EXCLUDED.params_hash,"
+            " run_key = EXCLUDED.run_key",
+            (printer_id, ams_id, tray_id, spool_id, digest, run_key),
         )
 
 
@@ -230,6 +265,8 @@ class _Send:
     digest: str
     run: LanCommandRun
     key: str
+    #: Whether the row holds this hash for this spool already (`_configured`).
+    repeat: bool
 
 
 async def reconcile_slots(
@@ -261,19 +298,23 @@ async def reconcile_slots(
     configures it. A printer with no fresh report is skipped before that and counted nowhere.
 
     The runs (`configure_commands`) are sent concurrently, at most `MAX_CONCURRENT_RUNS` at
-    once (P46), each under its slot's key (`_run_key`, P47), so a pass waits about one
-    `LAN_ROUTE_WAIT_S`. ``deadline`` (`time.monotonic`, see `start_deadline`) is when the
-    pass starts no more runs: a slot not started by then counts ``waiting``. A run the
-    printer acknowledged is ``configured``; one still open (`LanCommandPending`) or with a
-    write it did not acknowledge is ``unconfirmed`` (P36, P48: it may be on its way, so it
-    is neither done nor failed). Both write the row with the hash and ``configured_at``,
-    since the next pass checks the tray anyway; an unconfirmed one writes ``last_error``
-    `UNCONFIRMED`, keeps the open run's key for the next pass to join, logs a warning of
-    its own, and is not a repeat (`RECONFIGURE_WARNING`). A refused or unanswered run (an
-    `ApiError`: ``printer_refused``, ``printer_no_answer``, ``printer_unreachable``)
-    records ``attempts`` and ``last_error`` (`_label`), stores no hash, and counts
-    ``failed``. A unit the LAN commands cannot address (`UnsupportedUnitError`, P22) counts
-    ``unsupported_unit``, is never sent, and its row is written once per hash.
+    once (P46) and one per printer (P58), each under its slot's key (`_run_key`, P47),
+    which the row takes before the run is sent (`_started`), so a pass waits about one
+    `LAN_ROUTE_WAIT_S` per slot of its busiest printer. ``deadline`` (`time.monotonic`,
+    see `start_deadline`) is when the pass starts no more runs: a slot not started by then
+    counts ``waiting``. A run the printer acknowledged is ``configured``; one still open
+    (`LanCommandPending`) or with a write it did not acknowledge is ``unconfirmed`` (P36,
+    P48: it may be on its way, so it is neither done nor failed). Both write the row with
+    the hash and ``configured_at``, since the next pass checks the tray anyway; an
+    unconfirmed one writes ``last_error`` `UNCONFIRMED`, keeps the open run's key for the
+    next pass to join, logs a warning of its own, and is not a repeat
+    (`RECONFIGURE_WARNING`). A refused or unanswered run (an `ApiError`:
+    ``printer_refused``, ``printer_no_answer``, ``printer_unreachable``) records
+    ``attempts`` and ``last_error`` (`_label`), stores no hash, and counts ``failed``. Any
+    other error of a run counts ``failed`` too, with ``last_error`` ``internal``, and keeps
+    the hash and the key for the next pass to join; the other slots go on. A unit the LAN
+    commands cannot address (`UnsupportedUnitError`, P22) counts ``unsupported_unit``, is
+    never sent, and its row is written once per hash.
 
     A type with no preset for the nozzle, or one whose preset has no filament id in the
     catalogue, is ``no_preset``; a spool with no temperatures of its own and none on the
@@ -431,21 +472,28 @@ async def reconcile_slots(
                     digest=digest,
                     run=run,
                     key=_run_key(ams_id, tray_id, digest, slot if same else None),
+                    repeat=same and slot is not None and slot["params_hash"] == digest,
                 )
             )
         await asyncio.to_thread(_drop_stale, store, printer, keep)
 
     gate = asyncio.Semaphore(MAX_CONCURRENT_RUNS)
+    # One run open per printer at once (P58); a slot waits for its printer before it takes
+    # a place under the global cap, so one printer's slots never hold the others' places.
+    per_printer = {job.printer_id: asyncio.Semaphore(1) for job in sends}
 
     async def send(job: _Send) -> None:
-        async with gate:
+        async with per_printer[job.printer_id], gate:
             if time.monotonic() >= deadline:
                 report.waiting += 1
                 return
             await _send(store, commands, job, report)
 
-    # A TaskGroup, not gather: a run that raises cancels the others and waits for them,
-    # so none is left open, or its row unwritten, once the caller releases SLOTS_LOCK.
+    # A TaskGroup, not gather: when the pass ends, or is cancelled, no slot's task is still
+    # running, so none writes its row after the caller releases SLOTS_LOCK. `_send` records
+    # every error but a cancel, so one slot's failure never cancels the others. A cancelled
+    # task's run may stay open on Temporal: its row already holds the run's key (`_started`),
+    # and the next pass joins that run.
     async with asyncio.TaskGroup() as group:
         for job in sends:
             group.create_task(send(job))
@@ -455,15 +503,42 @@ async def reconcile_slots(
 async def _send(
     store: Filament, commands: LanCommandSender, job: _Send, report: m.SlotReport
 ) -> None:
-    """Run one slot's configure and record what came of it (`reconcile_slots`)."""
+    """Run one slot's configure and record what came of it (`reconcile_slots`). The row
+    takes the run's key first (`_started`). A problem (`ApiError`) is the run's closed
+    outcome: the row drops the key and the hash. Any other error (a Temporal RPC error, a
+    database error) may leave the run open: the row keeps the key and the hash, so the next
+    pass joins the run. Both count ``failed``. A cancel is not caught."""
     where = {"printer_id": job.printer_id, "ams_id": job.ams_id, "tray_id": job.tray_id}
     try:
+        await asyncio.to_thread(
+            _started, store, job.printer, job.ams_id, job.tray_id, job.spool, job.digest, job.key
+        )
         answer = await commands.run(job.printer_id, job.run, key=job.key)
     except ApiError as exc:
         label = _label(exc)
         logger.warning("could not configure an override slot", extra={**where, "error": label})
         await asyncio.to_thread(
             _failed, store, job.printer, job.ams_id, job.tray_id, job.spool, label
+        )
+        report.failed += 1
+        return
+    except Exception as exc:
+        label = failure_label(exc)
+        logger.warning(
+            "could not configure an override slot",
+            extra={**where, "error": label},
+            exc_info=True,
+        )
+        await asyncio.to_thread(
+            _failed,
+            store,
+            job.printer,
+            job.ams_id,
+            job.tray_id,
+            job.spool,
+            label,
+            job.digest,
+            job.key,
         )
         report.failed += 1
         return
@@ -479,6 +554,7 @@ async def _send(
         job.tray_id,
         job.spool,
         job.digest,
+        repeat=job.repeat,
         confirmed=confirmed,
         run_key=job.key if pending else None,
     )
