@@ -12,6 +12,25 @@ const BY = 'browser:browser'
 const BROWSER = ALL_TOOLS.filter((t) => t.name.startsWith('browser_')).map((t) => t.name)
 
 describe('AccessResolver', () => {
+  it("answers every registry tool's override in one read as `of` answers each (#7733)", async () => {
+    const migrated = { source: S, item: 'get_model', access: 'outward', updated_by: MIGRATED_BY }
+    for (const browserOff of [false, true]) {
+      const { access, reads } = memoryAccess([
+        ...rowsFromOverrides(S, { send_to_bambuddy: 'write', list_models: 'outward', ['__proto__']: 'read' }, ['delete_model']),
+        migrated,
+        ...rowsFromOverrides(B, { browser_click: 'outward' }, ['browser_navigate']),
+        ...(browserOff ? [{ source: B, item: '*', access: 'off', updated_by: BY }] : []),
+      ])
+      const overrides = new AccessResolver(access).registryOverrides()
+      reads.n = 0
+      const all = await overrides.all!()
+      expect(reads.n).toBe(1)
+      for (const name of [...ALL_TOOLS.map((t) => t.name), 'no_such_tool', '__proto__']) {
+        expect(all(name), name).toEqual(await overrides.of(name))
+      }
+    }
+  })
+
   it('answers defaults without a reader', async () => {
     const resolver = new AccessResolver(undefined)
     expect(await resolver.registry()).toEqual({ tool_tiers: {}, disabled_tools: [] })

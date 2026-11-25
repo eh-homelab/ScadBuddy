@@ -50,6 +50,16 @@ export class AccessResolver {
         return { ...(access === own ? {} : { tier: access }), disabled: false }
       },
       disabled: async () => new Set((await this.registry()).disabled_tools),
+      // `registry` folds in the same rules as `item` and `switchedItem`, so each answer is `of`'s.
+      all: async () => {
+        const { tool_tiers, disabled_tools } = await this.registry()
+        const off = new Set(disabled_tools)
+        return (tool) => {
+          if (!this.risk.has(tool)) return { disabled: false }
+          if (off.has(tool)) return { disabled: true }
+          return Object.hasOwn(tool_tiers, tool) ? { tier: tool_tiers[tool]!, disabled: false } : { disabled: false }
+        }
+      },
     }
   }
 

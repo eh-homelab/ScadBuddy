@@ -174,6 +174,11 @@ export type ToolOverrides = {
   of(tool: string): Promise<ToolOverride>
   /** Every disabled tool's name, for a tool list (/mcp). */
   disabled(): Promise<ReadonlySet<string>>
+  /**
+   * Every tool's override in one read, as `of` answers each: for a list of tools
+   * (`effectiveTools`). Without it a list asks `of` once per tool (#7733).
+   */
+  all?(): Promise<(tool: string) => ToolOverride>
 }
 
 /** What a tool runs at now: its override's tier or its own, whether that gates it, and whether it is disabled. */
@@ -191,7 +196,20 @@ export async function effectiveTool(
   /** The call's arguments, when there is a call: one outward by its input (#959, pinnedOutward.ts) stays gated whatever the override. */
   input?: unknown,
 ): Promise<EffectiveTool> {
-  const override = await services.toolOverrides?.of(tool.name)
+  return effectiveOf(tool, await services.toolOverrides?.of(tool.name), input)
+}
+
+/**
+ * Each tool's `effectiveTool`, with one read of the overrides where the reader has one
+ * (`ToolOverrides.all`): a list of hundreds of tools must not ask once per tool (#7733).
+ */
+export async function effectiveTools(tools: readonly Tool[], services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool[]> {
+  const all = await services.toolOverrides?.all?.()
+  if (!all) return Promise.all(tools.map((tool) => effectiveTool(tool, services)))
+  return tools.map((tool) => effectiveOf(tool, all(tool.name)))
+}
+
+function effectiveOf(tool: Tool, override: ToolOverride | undefined, input?: unknown): EffectiveTool {
   const disabled = override?.disabled === true
   if (input !== undefined && pinnedOutward(tool.name, input)) return { risk: 'outward', gated: true, disabled }
   const risk = override?.tier ?? tool.risk

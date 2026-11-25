@@ -72,6 +72,15 @@ describe("a flow's tool tiers (#2704)", () => {
     ])
   })
 
+  it('lists them from one read of the overrides, not one per tool (#7733)', async () => {
+    const { access, reads } = memoryAccess()
+    const flowTools = ALL_TOOLS.filter((t) => !t.name.startsWith('browser_'))
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: ALL_TOOLS.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+    expect(await flowToolTiers(ALL_TOOLS, svc)).toHaveLength(flowTools.length)
+    expect(reads.n).toBe(1)
+  })
+
   it('flow_tool_tier answers the camera off as disabled', async () => {
     const { access } = memoryAccess([{ source: BUILTIN_SOURCES.scadbuddy, item: 'get_printer_camera', access: 'off', updated_by: 'browser:browser' }])
     const camera = [tool('get_printer_camera', 'read')]

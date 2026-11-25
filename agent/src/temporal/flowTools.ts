@@ -1,6 +1,6 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure } from '@temporalio/common'
-import { effectiveTool, type Risk, type Tool, type ToolServices } from '../tools/registry.js'
+import { effectiveTool, effectiveTools, type Risk, type Tool, type ToolServices } from '../tools/registry.js'
 import { flowOf } from './flowRuns.js'
 
 // A flow's tools and their tiers (#2704), as the agent's own turns resolve them: each
@@ -25,14 +25,11 @@ export function forFlows(tool: Tool): boolean {
 
 export type FlowToolTier = { name: string; tier: Risk; disabled: boolean }
 
-async function tierOf(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<FlowToolTier> {
-  const effective = await effectiveTool(tool, services)
-  return { name: tool.name, tier: effective.risk, disabled: effective.disabled }
-}
-
-/** Every tool a flow may call, at its effective tier now. */
+/** Every tool a flow may call, at its effective tier now, from one read of the overrides (#7733). */
 export async function flowToolTiers(tools: readonly Tool[], services: Pick<ToolServices, 'toolOverrides'>): Promise<FlowToolTier[]> {
-  return Promise.all(tools.filter(forFlows).map((tool) => tierOf(tool, services)))
+  const flows = tools.filter(forFlows)
+  const effective = await effectiveTools(flows, services)
+  return flows.map((tool, i) => ({ name: tool.name, tier: effective[i]!.risk, disabled: effective[i]!.disabled }))
 }
 
 /**
@@ -62,7 +59,7 @@ export function flowToolTierActivity(
     if (!forFlows(tool)) {
       throw ApplicationFailure.nonRetryable(`${name} is not for flows: a flow has no session and no browser tab`, 'NotForFlows')
     }
-    const { tier, disabled } = await tierOf(tool, services)
+    const { risk: tier, disabled } = await effectiveTool(tool, services)
     return { tier, disabled, declared: tool.risk, keyed: tool.keyed }
   }
 }
