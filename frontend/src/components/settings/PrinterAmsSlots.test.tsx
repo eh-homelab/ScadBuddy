@@ -174,6 +174,35 @@ describe('PrinterAmsSlots (#7153)', () => {
     )
   })
 
+  it('clears the saved preset when the material has no generic id and none was typed', async () => {
+    const deletes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE' && new URL(request.url).pathname.endsWith('/preset')) deletes.push(request.url)
+    })
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 2')
+    await user.clear(within(form).getByLabelText('Material'))
+    await user.type(within(form).getByLabelText('Material'), 'Mystery')
+    await user.clear(within(form).getByLabelText('Preset id'))
+    await confirm(user, form, 'AMS-A slot 2')
+    await said('Configured AMS-A slot 2')
+    // The configure answered `preset_id: ""`, as the backend does for a material it has no generic for.
+    await waitFor(() => expect(deletes).toHaveLength(1))
+    expect(amsPresetsSaved()).toEqual([])
+    const slot = screen.getByRole('button', { name: 'AMS-A slot 2' })
+    await waitFor(() => expect(slot).not.toHaveTextContent('Saved:'))
+  })
+
+  it('saves the generic id the backend maps a material to', async () => {
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 4')
+    await user.type(within(form).getByLabelText('Material'), 'ASA')
+    await user.type(within(form).getByLabelText('Nozzle min (°C)'), '240')
+    await user.type(within(form).getByLabelText('Nozzle max (°C)'), '270')
+    await confirm(user, form, 'AMS-A slot 4')
+    await waitFor(() => expect(amsPresetsSaved()).toEqual([expect.objectContaining({ preset_id: 'GFB98' })]))
+  })
+
   it('warns when the slot was configured but its preset was not saved', async () => {
     server.use(
       http.put('/api/v1/printers/:id/trays/:ams/:tray/preset', () =>

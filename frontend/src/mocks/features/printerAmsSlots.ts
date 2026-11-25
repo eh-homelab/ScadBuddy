@@ -156,6 +156,35 @@ function view(): AmsView {
   }
 }
 
+/** The backend's `ams_slots.py` `GENERIC_FILAMENT_IDS`, as Bambuddy's configure route maps them. */
+const GENERIC_FILAMENT_IDS: Record<string, string> = {
+  PLA: 'GFL99',
+  PETG: 'GFG99',
+  ABS: 'GFB99',
+  ASA: 'GFB98',
+  PC: 'GFC99',
+  PA: 'GFN99',
+  NYLON: 'GFN99',
+  TPU: 'GFU99',
+  PVA: 'GFS99',
+  HIPS: 'GFS98',
+  'PLA-CF': 'GFL98',
+  'PETG-CF': 'GFG98',
+  'PA-CF': 'GFN98',
+  'PETG HF': 'GFG96',
+  'PLA SILK': 'GFL96',
+  'PLA HIGH SPEED': 'GFL95',
+  PCTG: 'GFG97',
+  PE: 'GFP99',
+  PP: 'GFP97',
+}
+
+/** `ams_slots.py` `generic_filament_id`: the whole name, then its first word; "" when none is known. */
+function genericFilamentId(material: string): string {
+  const name = material.toUpperCase().trim()
+  return GENERIC_FILAMENT_IDS[name] ?? GENERIC_FILAMENT_IDS[name.split('-')[0]!.split(' ')[0]!] ?? ''
+}
+
 const problem = (status: number, detail: string, code?: string) =>
   HttpResponse.json({ title: detail, status, detail, ...(code ? { code } : {}) }, { status })
 
@@ -191,8 +220,9 @@ export const handlers = [
         filled: true,
         material: body.material ?? 'PLA',
         colour: colour.length === 7 ? `${colour}FF` : colour,
-        // With no preset, the material's generic filament id (`ams_slots.py` `configure_values`).
-        preset_id: body.preset_id ?? ((body.material ?? 'PLA').toUpperCase() === 'PETG' ? 'GFG99' : 'GFL99'),
+        // With no preset, the material's generic filament id, "" for one it has none for
+        // (`ams_slots.py` `configure_values`).
+        preset_id: body.preset_id || genericFilamentId(body.material ?? 'PLA'),
         preset_name: body.preset_name ?? (fromSpool ? 'Shop PLA' : (body.material ?? 'PLA')),
         nozzle_temp_min: body.nozzle_temp_min ?? 190,
         nozzle_temp_max: body.nozzle_temp_max ?? 230,
