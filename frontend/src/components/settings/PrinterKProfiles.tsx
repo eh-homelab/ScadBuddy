@@ -20,8 +20,8 @@ import { Said, stopped, usePrinterCommand } from './usePrinterCommand'
  * slow command's 202), says it was sent while the printer has not answered, and says when the
  * printer did not confirm it (R-7154-7). A press that repeats a command the page stopped
  * following sends its key again (P55, `usePrinterCommand`); closing the panel or changing the
- * nozzle stops every follow. Notes are ScadBuddy's own, under the keys Bambuddy's K-Profiles
- * page used, so the notes carried over from it still match (R-7154-8).
+ * nozzle stops every follow. Notes are ScadBuddy's own and start empty: nothing is copied from
+ * Bambuddy (R-7276-16). They only keep the keys Bambuddy's K-Profiles page used (R-7154-8).
  */
 
 export const NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
