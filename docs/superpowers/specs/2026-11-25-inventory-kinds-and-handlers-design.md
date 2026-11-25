@@ -342,11 +342,58 @@ Go owns stock; Python calls it.
   (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
   The Python caller writes its own row first, then calls Go with a key derived from that
-  row (`order_item:<id>:parts:<version>`), and a retry settles a failed call (plan K1,
-  R-K1-14). A caller that must undo its own row on a refusal does so in its own
-  transaction.
+  row (`order_item:<id>:parts:<version>`), and Temporal retries a failed call (§6.1a). A
+  caller that must undo its own row on a refusal does so in its own transaction.
 - In Go, a handler runs in the base flow's transaction: every table a handler writes is
   in the same database, written by `scadbuddy-core`.
+
+### 6.1a Crossing a boundary is a Temporal activity (owner, 2026-11-25)
+
+The owner: "We should be using Temporal, not transactions on SQL, when we cross
+boundaries", with Standalone Activities "used inline for maximum sharing", which "also
+gives us the visibility into the Activities tab in SB".
+
+- **Writes go through Standalone Activities.** A Standalone Activity is an activity
+  started by a client with no workflow, retried by Temporal, listed by its id
+  ([docs.temporal.io/standalone-activity](https://docs.temporal.io/standalone-activity),
+  GA, read 2026-11-25). Every stock write that crosses from Python to Go is one: the
+  Python caller starts the Go activity by its type name (`inventory.Receive`,
+  `inventory.Take`, `inventory.GiveBack`, `inventory.Recost`, `inventory.Repoint`, …) on
+  the task queue `inventory`. A public route waits for the result inline
+  (`client.execute_activity`); a background settle starts it and returns
+  (`client.start_activity`). Reads stay plain HTTP on the internal routes.
+- **Go runs the activities.** `scadbuddy-core` gets a Temporal client and a worker for
+  the `inventory` queue. Each activity runs the base flow in its own database
+  transaction, so the activity is the Go code itself, with no second HTTP hop. The same
+  activity function serves a standalone start, a workflow's step (a flow, the
+  invoice-import flow), and the Go tests: that is the sharing.
+- **Idempotency.** The activity id is the idempotency key
+  (`order_item:<id>:parts:<n>:<item>`, `entity_merge:<from>:<to>`, a route's
+  `Idempotency-Key`). The start uses the conflict policy Use Existing (a repeat attaches
+  to the running one) and the reuse policy Reject Duplicate (a repeat after it finished
+  gets the stored result, within the namespace's retention). An activity runs at least
+  once, so the Go side also records the key with its result in `crud_requests` (§6.1) and
+  answers a repeat from it.
+- **Orders.** Fulfilling an order item commits the order change, then starts
+  `inventory.Take` with the item's key. Temporal retries it until Go answers; there is no
+  outbox table and no sweep. If the start itself fails, the fulfil call answers an error
+  and the person retries; the fulfil is idempotent.
+- **Merges.** An entity or printer merge first executes `inventory.Repoint` (move the
+  stock rows from the old id to the kept one), then runs its own transaction and deletes
+  the old row. Calling Go from inside the merge's locked transaction would make the two
+  transactions wait on each other; this order avoids it. A stock row that lands on the
+  old id between the two steps makes the delete fail on its foreign key, and the merge
+  repeats the first step.
+- **Visibility.** An activity interceptor in Go writes each activity's start and end to
+  SB's activity record (`backend/scadbuddy/activity/index.py`, through its CRUD route), so
+  it shows on the Activities tab with its kind, subject and status. Temporal's
+  `ListActivities` lists them too.
+- **Versions.** Prod runs Temporal server 1.32.1 (eh-homelab/clusters
+  `applications/scadbuddy/temporal-cluster-v2.yaml` l.65); Standalone Activities need
+  1.32.0. The backend's Python SDK is 1.36.0 (`backend/uv.lock`); they need 1.33.0. The Go
+  SDK needs 1.49.0; `scadbuddy-core` adds it (vendored, `tools/go/CLAUDE.md`). Go
+  Temporal code to follow: eh-homelab/clusters `tier0/bootstrap/internal/` (`wf`,
+  `activities`, `codec`, `progress`), on SDK v1.47.0.
 
 ### 6.2 Layout
 
@@ -358,7 +405,8 @@ tools/go/core/internal/inventory/
   special/filament/   the filament_spool handlers
   special/printer/    the printer handlers (phase K6)
   store/       every SQL statement
-  routes/      /api/v1/internal/crud/inventory/*
+  routes/      /api/v1/internal/crud/inventory/* (reads)
+  activities/  the Temporal activities for every write, and the worker (§6.1a)
   modeldata/   loads docs/inventory-model/*.yaml for the tests
 ```
 
@@ -519,6 +567,8 @@ of #7667's phase 6 into this work).
 14. A manual reading replaces the counted measure from its time on; it does not change
     the life's length (`hours`), which is a parameter.
 15. Property history is written by a database trigger, for every entity kind (§4.8).
+16. Every Python-to-Go write is a Standalone Activity run by a Go worker; reads stay HTTP
+    (§6.1a).
 
 ## 12. Left to the builder
 
