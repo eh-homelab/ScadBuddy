@@ -1257,6 +1257,10 @@ class SpoolDraft(_In):
     presets: list[SpoolPresetCreate] = Field(default_factory=list)
     k_values: list[SpoolKValueCreate] = Field(default_factory=list)
     copy_of: UUID | None = None
+    #: The archived spool whose filament this one continues (respooled, #7684): the new
+    #: spool's ``created`` event keeps it as ``continued_from``, and the source's newest
+    #: ``archived`` event gets ``continued_as``. The source must be archived.
+    continued_from: UUID | None = None
 
 
 #: The most spools one bulk create makes (R-7150-1).
@@ -1264,9 +1268,16 @@ BULK_MAX: Final = 100
 
 
 class SpoolBulkCreate(SpoolDraft):
-    """``quantity`` identical spools, each with its own number (#7150, R-7150-1)."""
+    """``quantity`` identical spools, each with its own number (#7150, R-7150-1). A
+    continued spool (``continued_from``) is one spool."""
 
     quantity: Annotated[int, Field(ge=1, le=BULK_MAX)] = 1
+
+    @model_validator(mode="after")
+    def _one_continues(self) -> SpoolBulkCreate:
+        if self.continued_from is not None and self.quantity != 1:
+            raise ValueError("only one spool continues a respooled one")
+        return self
 
 
 class SpoolPatch(_Patch):

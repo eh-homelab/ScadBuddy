@@ -19,6 +19,7 @@ from uuid import UUID
 
 from psycopg import Connection, errors
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import JsonValue
 
@@ -208,6 +209,13 @@ class SpoolCopySourceError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("copy_of names no spool")
+
+
+class ContinuedFromNotArchivedError(ValueError):
+    """``continued_from`` names a spool that is not archived (#7684)."""
+
+    def __init__(self) -> None:
+        super().__init__("continued_from names a spool that is not archived")
 
 
 class SpoolBulkRefusedError(ValueError):
@@ -846,12 +854,15 @@ class FilamentSpoolStore:
         actor: str,
         ref_kind: str | None = None,
         ref_id: UUID | None = None,
+        continued_from: UUID | None = None,
     ) -> UUID:
         """`create` on ``conn``, in the caller's transaction (`filament/csv_import.py`):
         the new spool's id. A row it names that does not exist is the driver's
         `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``created`` event
         (an invoice line's, #6266); a retry of one pair books nothing twice. It writes no
-        ``properties``: `create` and `bulk_on` do."""
+        ``properties``: `create` and `bulk_on` do. ``continued_from`` (#7684) goes on the
+        ``created`` event's ``data``; `bulk_on` has checked the source and links its
+        ``archived`` event back."""
         if body.properties is not None:
             raise ValueError("create_on writes no properties")
         data = body.model_dump(exclude={"grams_left", "properties"})
@@ -873,6 +884,7 @@ class FilamentSpoolStore:
             ref_kind=ref_kind,
             ref_id=None if ref_id is None else str(ref_id),
             actor=actor,
+            data=None if continued_from is None else {"continued_from": str(continued_from)},
         )
         return spool_id
 
@@ -900,6 +912,18 @@ class FilamentSpoolStore:
         intended. Each spool gets the draft's ``properties``, by ``by``; with ``checked``
         (#7703) an incomplete spool is `MissingRequiredProperties`."""
         carried: set[_PresetValues] = set()
+        continued: UUID | None = None
+        if body.continued_from is not None:
+            # #7684: the source is locked, so its archive state holds while the link is made.
+            source = conn.execute(
+                "SELECT archived_at FROM filament_spools WHERE id = %s FOR UPDATE",
+                (body.continued_from,),
+            ).fetchone()
+            if source is None:
+                raise SpoolCopySourceError()
+            if source["archived_at"] is None:
+                raise ContinuedFromNotArchivedError()
+            continued = body.continued_from
         if body.copy_of is not None:
             # One read: the source, and its migrated rows (none: one row of NULLs).
             rows = conn.execute(
@@ -921,8 +945,15 @@ class FilamentSpoolStore:
         made: _Ids = []
         bare = body.spool.model_copy(update={"properties": None})
         for _ in range(body.quantity):
-            spool_id = self.create_on(conn, bare, actor=actor)
+            spool_id = self.create_on(conn, bare, actor=actor, continued_from=continued)
             _properties(conn, spool_id, body.spool.properties, by, checked)
+            if continued is not None:
+                conn.execute(
+                    "UPDATE filament_spool_events SET data = data || %s WHERE id = ("
+                    "SELECT id FROM filament_spool_events WHERE spool_id = %s AND kind = 'archived'"
+                    " ORDER BY at DESC, seq DESC LIMIT 1)",
+                    (Jsonb({"continued_as": str(spool_id)}), continued),
+                )
             if body.location_id is not None:
                 LocationStore.move_on(conn, spool_id, body.location_id, actor=actor)
             if body.presets:

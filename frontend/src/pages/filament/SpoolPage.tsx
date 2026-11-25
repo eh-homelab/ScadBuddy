@@ -424,7 +424,13 @@ export function SpoolPage() {
   const asked = id === 'new' ? search.get('copy') : null
   /** The source was deleted after the form loaded its copy: the next save sends no `copy_of`. */
   const [sourceGone, setSourceGone] = useState(false)
+  /** #7684 — the continued spool's number, for the banner. */
+  const [sourceNumber, setSourceNumber] = useState<number | null>(null)
   const copyOf = sourceGone ? null : asked
+  /** #7684 — the copy continues a respooled spool (`&continue=1&grams=<g>`): its filament, not added full. */
+  const continues = asked !== null && search.get('continue') === '1'
+  const continuedGrams = continues ? search.get('grams') : null
+  const continuedFrom = continues ? copyOf : null
   /** How many identical spools a save makes (#7150). */
   const [quantity, setQuantity] = useState('1')
   /** One `Idempotency-Key` per opened form: a retry or a second click makes no more spools. */
@@ -469,9 +475,11 @@ export function SpoolPage() {
     setQuantity('1')
     setCreateKey(crypto.randomUUID())
     setSourceGone(false)
+    setSourceNumber(null)
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
       asked ? copySpool(asked) : Promise.resolve(null),
+      continues && asked ? getSpool(asked).then((source) => source.number) : Promise.resolve(null),
       listCatalog('materials'),
       listCatalog('subtypes'),
       listCatalog('brands'),
@@ -482,14 +490,15 @@ export function SpoolPage() {
       listLocations(),
       api.listPrinters(),
     ])
-      .then(([spool, copy, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
+      .then(([spool, copy, source, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
         if (!live) return
+        setSourceNumber(source)
         setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), placeNames: named(places), placeHrefs: placeLinks(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
         if (spool) {
           setSaved(spool)
           setDraft(draftOf(spool))
         }
-        if (copy) setDraft(draftOfCopy(copy))
+        if (copy) setDraft(continues ? { ...draftOfCopy(copy), grams_left: continuedGrams ?? '', added_full: 'no' } : draftOfCopy(copy))
       })
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That spool is gone. Pick another from the Spools tab.' : `The spool could not be loaded: ${message(cause)}`)
@@ -610,7 +619,7 @@ export function SpoolPage() {
     try {
       if (creating) {
         // One request makes every spool with its place, presets and K values (#7150).
-        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf }, createKey)
+        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf, continued_from: continuedFrom }, createKey)
         const first = made[0]!
         setMadeId(first.id)
         setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
@@ -806,7 +815,12 @@ export function SpoolPage() {
       <p role="status" className="mb-2 min-h-5 text-[13px] text-muted-foreground">
         {notice}
       </p>
-      {creating && copyOf && (
+      {creating && copyOf && continues && (
+        <p className="mb-4 text-[13px] text-muted-foreground">
+          Continues <Link to={filamentLinks.spool(copyOf)} className="underline">spool #{sourceNumber ?? '…'}</Link>: its filament, respooled.
+        </p>
+      )}
+      {creating && copyOf && !continues && (
         <p className="mb-4 text-[13px] text-muted-foreground">
           A copy of <Link to={filamentLinks.spool(copyOf)} className="underline">the first spool</Link>. Its number, tag, tray, weight history, weight lock and whether it was added full stay with it.
         </p>

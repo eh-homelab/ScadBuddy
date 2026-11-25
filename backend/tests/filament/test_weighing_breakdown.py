@@ -13,11 +13,13 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.spools import (
+    ContinuedFromNotArchivedError,
     FilamentDefaults,
     FilamentSpoolStore,
     NoBelowLabelError,
     NoEmptyWeightError,
     ReadingBelowEmptyError,
+    SpoolCopySourceError,
 )
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
@@ -554,3 +556,57 @@ def test_a_patch_archive_closes_with_no_reason(pg_pool: PgPool) -> None:
     data = store.events(spool)[-1].data
     assert data["reason"] is None and data["final_filament_g"] == 992
     assert data["started_g"] == 1000 and data["scale_consumed_g"] is None
+
+
+# -- a respooled spool continues as a new one (#7684) --------------------------------
+
+
+def _continue(pool: PgPool, source: UUID, grams: float = 480, quantity: int = 1) -> list[UUID]:
+    store = FilamentSpoolStore(pool)
+    body = m.SpoolBulkCreate(
+        spool=m.SpoolCreate(material_id=_material(pool), grams_left=grams, added_full=False),
+        copy_of=source,
+        continued_from=source,
+        quantity=quantity,
+    )
+    with store.transaction() as conn:
+        return store.bulk_on(conn, body, actor="t")
+
+
+@pg
+def test_a_continued_spool_links_both_ledgers(pg_pool: PgPool) -> None:
+    source = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, source)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(source, True, actor="t", reason="respooled", final_reading_g=680)
+    (made,) = _continue(pg_pool, source)
+    created = store.events(made)[0]
+    assert created.kind == "created" and created.data["continued_from"] == str(source)
+    assert created.grams_after == 480
+    archived = store.events(source)[-1]
+    assert archived.kind == "archived" and archived.data["continued_as"] == str(made)
+    assert archived.data["reason"] == "respooled"
+
+
+@pg
+def test_an_unarchived_source_cannot_be_continued(pg_pool: PgPool) -> None:
+    source = _spool(pg_pool, _insert(pg_pool))
+    with pytest.raises(ContinuedFromNotArchivedError):
+        _continue(pg_pool, source)
+    assert FilamentSpoolStore(pg_pool).list(include_archived=True) == [
+        FilamentSpoolStore(pg_pool).get(source)
+    ]
+
+
+@pg
+def test_a_missing_source_cannot_be_continued(pg_pool: PgPool) -> None:
+    with pytest.raises(SpoolCopySourceError):
+        _continue(pg_pool, uuid4())
+
+
+@pg
+def test_only_one_spool_continues_a_source(pg_pool: PgPool) -> None:
+    source = _spool(pg_pool, _insert(pg_pool))
+    FilamentSpoolStore(pg_pool).archive(source, True, actor="t", reason="respooled")
+    with pytest.raises(ValueError, match="one spool"):
+        _continue(pg_pool, source, quantity=2)

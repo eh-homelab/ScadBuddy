@@ -183,6 +183,7 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
+    ContinuedFromNotArchivedError,
     NoBelowLabelError,
     NoEmptyWeightError,
     OverrideKindError,
@@ -1288,8 +1289,12 @@ BULK_ROUTE = "POST /filament/spools/bulk"
         "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
         "effective minimum temperature above its maximum, two preset or K rows of one key, "
         "a place that does not exist, is archived, is an AMS unit's or is a printer's tray "
-        "(a tray takes one spool, through its own link), or a `copy_of` that names no "
-        "spool. Nothing is written on a refusal."
+        "(a tray takes one spool, through its own link), or a `copy_of` or `continued_from` "
+        "that names no spool. `continued_from` (#7684) is the archived spool whose filament "
+        "the new one continues (respooled): the new spool's `created` event keeps it, the "
+        "source's newest `archived` event gets `continued_as`, `quantity` must be 1, and a "
+        "source not archived is a 422 with `code` `continued_from_not_archived`. Nothing is "
+        "written on a refusal."
     ),
 )
 async def bulk_create_spools(
@@ -1329,6 +1334,10 @@ async def bulk_create_spools(
 
     try:
         done = await asyncio.to_thread(write)
+    except ContinuedFromNotArchivedError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="continued_from_not_archived"
+        ) from None
     except (
         *_SPOOL_REFUSED,
         SpoolTrayPlaceError,

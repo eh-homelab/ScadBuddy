@@ -891,7 +891,9 @@ const tools: Tool[] = [
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
       'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
-      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
+      'then change the copy. `continued_from` (#7684, with `copy_of` the same archived, respooled spool and `grams_left` its final filament) links the two: the new ' +
+      "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise. " +
+      'Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. `properties` (#7026) are set on the spool, or on each spool made, after it is saved, and the answer carries them; if they ' +
@@ -903,6 +905,7 @@ const tools: Tool[] = [
       fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
       quantity: z.number().int().min(1).max(100).optional().describe('When adding: how many identical spools to make'),
       copy_of: z.string().uuid().optional().describe("When adding: the `id` of a spool to copy"),
+      continued_from: z.string().uuid().optional().describe('When adding one spool: the `id` of the archived (respooled) spool whose filament it continues'),
       properties: propertySet.optional().describe("The spool's properties to set after the spool is saved; `null` removes a key"),
     }),
     risk: 'write',
@@ -920,10 +923,10 @@ const tools: Tool[] = [
         ? `Edit spool ${spool_id}`
         : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`) +
       propertyChanges(properties),
-    handler: async ({ spool_id, fields, quantity, copy_of, properties }, ctx) => {
+    handler: async ({ spool_id, fields, quantity, copy_of, continued_from, properties }, ctx) => {
       const { backend } = ctx
-      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
-        throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
+      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined || continued_from !== undefined)) {
+        throw new ToolError('`quantity`, `copy_of` and `continued_from` are for adding a spool; leave out `spool_id`')
       }
       if (spool_id !== undefined && properties !== undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, as for a type (an empty one could still move the row's sync time).
@@ -935,7 +938,7 @@ const tools: Tool[] = [
         properties === undefined
           ? row
           : { ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties, `spool ${row.id}`) }
-      if (spool_id === undefined && quantity === undefined && copy_of === undefined) {
+      if (spool_id === undefined && quantity === undefined && copy_of === undefined && continued_from === undefined) {
         return json(await withProperties(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool')))
       }
       if (spool_id === undefined) {
@@ -949,7 +952,7 @@ const tools: Tool[] = [
         // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
         // source is a new request, never a 422 for a key sent with another body.
         // The draft carries `copy_of` (the copy route answers it), so a copied migrated preset row stays so (R-7150-13).
-        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1, ...(continued_from ? { continued_from } : {}) } as SpoolBulkCreate
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
           : idempotencyKey(ctx)

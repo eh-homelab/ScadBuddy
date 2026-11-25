@@ -1997,6 +1997,26 @@ describe('filament_spool_upsert quantity and copy_of', () => {
     ])
   })
 
+  it('passes continued_from through for a respooled spool (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
+        HttpResponse.json({ spool: { type_id: ROW, weight_locked: false }, location_id: null, presets: [], k_values: [], copy_of: SOURCE_ID }),
+      ),
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    const call = { copy_of: SOURCE_ID, continued_from: SOURCE_ID, fields: { grams_left: 480, added_full: false } }
+    expect((await runTool(tool('filament_spool_upsert'), call, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { spool: { type_id: ROW, weight_locked: false, grams_left: 480, added_full: false }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID, continued_from: SOURCE_ID },
+    ])
+    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, continued_from: SOURCE_ID }, ctx())
+    expect(refused.isError).toBe(true)
+  })
+
   // R-7150-8: a resend reads the copy again, so its key names the draft it read too.
   const TEAL = { spool: { type_id: ROW, colour_name: 'Teal' }, location_id: null, presets: [], k_values: [] }
   function copyResends(drafts: (typeof TEAL)[]) {

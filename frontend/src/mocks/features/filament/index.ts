@@ -2325,19 +2325,24 @@ export const handlers = [
     const raw = (await request.json()) as Record<string, unknown>
     const presetKeys = ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name']
     const extra =
-      extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of']) ??
+      extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of', 'continued_from']) ??
       extraKeys(raw.spool, FIELDS.spoolCreate) ??
       extraKeys(raw.presets, presetKeys)
     if (extra) return extra
     const body = raw as S['SpoolBulkCreate']
     const quantity = body.quantity ?? 1
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) return problem(422, 'quantity: Input should be between 1 and 100')
+    if (body.continued_from && quantity !== 1) return problem(422, 'body: Value error, only one spool continues a respooled one')
     return keyed(request, JSON.stringify(raw), () => {
       const place = body.location_id ? state.locations.find((one) => one.id === body.location_id && !one.archived_at) : null
       if (body.location_id && !place) return problem(422, REFUSED.moveTarget)
       if (place && place.tray_id != null) return problem(422, REFUSED.trayPlace)
       // R-7150-13: a client never marks a row migrated; a row that matches the copy source's migrated row stays so.
       if (body.copy_of && !findSpool(body.copy_of)) return problem(422, 'copy_of names no spool')
+      // #7684: the source must be archived; the two ledgers link each other.
+      const source = body.continued_from ? findSpool(body.continued_from) : null
+      if (body.continued_from && !source) return problem(422, 'copy_of names no spool')
+      if (source && !source.archived_at) return problem(422, 'continued_from names a spool that is not archived', { code: 'continued_from_not_archived' })
       const carried = state.spoolPresets.filter((one) => body.copy_of && one.spool_id === body.copy_of && one.migrated)
       const presets = (body.presets ?? []).map((row) => ({
         ...row,
@@ -2354,7 +2359,11 @@ export const handlers = [
       }
       for (const row of made) {
         state.spools.push(row)
-        addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left })
+        addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left, data: source ? { continued_from: source.id } : {} })
+        if (source) {
+          const closing = state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1)
+          if (closing) closing.data = { ...closing.data, continued_as: row.id }
+        }
         if (place) addEvent(row.id, 'moved', { data: { from: null, to: place.id } })
         state.spoolPresets.push(...presets.map((one) => ({ slicer_filament_name: null, ...one, spool_id: row.id })))
         state.spoolKValues.push(...(body.k_values ?? []).map((one) => ({ nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value), spool_id: row.id })))
