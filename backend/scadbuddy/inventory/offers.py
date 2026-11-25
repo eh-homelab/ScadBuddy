@@ -21,8 +21,8 @@ from scadbuddy.inventory.models import (
     Offer,
     OfferInput,
     OfferPatch,
+    OfferPricePoint,
     PriceInput,
-    PricePoint,
 )
 from scadbuddy.orders.models import Actor
 
@@ -87,6 +87,14 @@ class OfferStore:
     def get(self, offer_id: UUID) -> Offer | None:
         with self.pool.connection() as conn:
             return _get(conn, offer_id)
+
+    def supplier_exists(self, supplier_id: UUID) -> bool:
+        """A supplier of that id, archived or not."""
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM filament_suppliers WHERE id = %s", (supplier_id,)
+            ).fetchone()
+        return row is not None
 
     def create(self, body: OfferInput, by: Actor) -> Offer:
         """`SupplierNotFound` for an unknown or archived supplier, `ItemNotFound` for an
@@ -180,7 +188,7 @@ class OfferStore:
         assert found is not None
         return found
 
-    def add_price(self, offer_id: UUID, body: PriceInput) -> PricePoint:
+    def add_price(self, offer_id: UUID, body: PriceInput) -> OfferPricePoint:
         """A `manual` pack price; `OfferNotFound`."""
         # The shop's currency is a settings read on a connection of its own: take it first.
         currency = body.currency or self._shop_currency()
@@ -200,15 +208,15 @@ class OfferStore:
                 (offer_id, body.price, currency, on_date),
             ).fetchone()
         assert row is not None
-        return PricePoint.model_validate(dict(row))
+        return OfferPricePoint.model_validate(dict(row))
 
-    def prices(self, offer_id: UUID) -> builtins.list[PricePoint]:
+    def prices(self, offer_id: UUID) -> builtins.list[OfferPricePoint]:
         """The offer's price points, newest first."""
         with self.pool.connection() as conn:
             rows = conn.execute(
                 f"{_PRICE} WHERE offer_id = %s{_PRICE_ORDER}", (offer_id,)
             ).fetchall()
-        return [PricePoint.model_validate(dict(r)) for r in rows]
+        return [OfferPricePoint.model_validate(dict(r)) for r in rows]
 
     def _list(self, where: str, value: UUID, include_archived: bool) -> builtins.list[Offer]:
         live = "" if include_archived else " AND o.archived_at IS NULL"
