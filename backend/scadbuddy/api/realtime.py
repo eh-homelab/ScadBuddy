@@ -215,50 +215,37 @@ def _strip_anchors(pattern: str) -> str:
     return pattern.removeprefix("^").removesuffix("$")
 
 
+_TOPIC_SHAPES = [
+    f"job:{_strip_anchors(HEX_ID_PATTERN)}",
+    f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
+    f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
+    # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
+    r"print:library:[1-9][0-9]{0,17}",
+    # The print dialog's background slice (#265): its slicer and its job id.
+    r"preview-slice:(?:bambuddy|native):[1-9][0-9]{0,17}",
+    f"workflow-run:{FLOW_RUN_ID_PATTERN}",
+    # A registry printer (#3823): its id is a UUID, as `printers/store.py` makes.
+    f"printer:{FLOW_RUN_ID_PATTERN}",
+    # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
+    f"order:{FLOW_RUN_ID_PATTERN}",
+    # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
+    # the tasks shown in one place.
+    f"task:{FLOW_RUN_ID_PATTERN}",
+    f"tasks:{TASK_PLACE_CHAR}{{1,{TASK_PLACE_MAX}}}",
+    # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
+    r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
+    *sorted(COLLECTION_TOPICS),
+]
 _TOPIC = re.compile(
     "^(?:"
-    + "|".join(
-        [
-            f"job:{_strip_anchors(HEX_ID_PATTERN)}",
-            f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
-            f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
-            # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
-            r"print:library:[1-9][0-9]{0,17}",
-            # The print dialog's background slice (#265): its slicer and its job id.
-            r"preview-slice:(?:bambuddy|native):[1-9][0-9]{0,17}",
-            f"workflow-run:{FLOW_RUN_ID_PATTERN}",
-            # A registry printer (#3823): its id is a UUID, as `printers/store.py` makes.
-            f"printer:{FLOW_RUN_ID_PATTERN}",
-            # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
-            f"order:{FLOW_RUN_ID_PATTERN}",
-            # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
-            # the tasks shown in one place.
-            f"task:{FLOW_RUN_ID_PATTERN}",
-            f"tasks:{TASK_PLACE_CHAR}{{1,{TASK_PLACE_MAX}}}",
-            # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
-            r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
-            *sorted(COLLECTION_TOPICS),
-        ]
-    )
+    + "|".join(_TOPIC_SHAPES)
     + r")\Z"  # not `$`, which also matches before a trailing newline
 )
 
 
-#: The namespaces `_TOPIC` gives a shape of its own. An opaque event never routes in one.
-_KNOWN_NAMESPACES = frozenset(
-    {
-        "job",
-        "model",
-        "print",
-        "preview-slice",
-        "workflow-run",
-        "printer",
-        "order",
-        "task",
-        "tasks",
-        "activity",
-    }
-)
+#: The namespaces `_TOPIC` gives a shape of its own, read from it. An opaque event never routes
+#: in one.
+_KNOWN_NAMESPACES = frozenset(shape.split(":", 1)[0] for shape in _TOPIC_SHAPES if ":" in shape)
 #: A topic of an unknown kind's namespace (a kind `fleet.message` owns `fleet:...`).
 _OPAQUE_TOPIC = re.compile(r"^[a-z][a-z0-9_]*:[A-Za-z0-9:._-]{1,200}\Z")
 
@@ -347,6 +334,17 @@ def topics_of(event: AnyEvent) -> list[str]:
 def event_frame(event: AnyEvent, topics: list[str]) -> dict[str, Any]:
     # An order event's `cart` (#5282) is for the flow triggers only: the frame keeps
     # spec 2026-10-18 §7.1's fields, plus `deleted: true` for a cart the draft sweep took.
+    if isinstance(event, OpaqueEvent):
+        # A signal only: an opaque kind has no authorisation hook, so its payload never
+        # reaches a browser. A consumer that may read it fetches it through its own route.
+        return {
+            "type": "event",
+            "id": event.id,
+            "at": event.at.isoformat(),
+            "kind": event.kind,
+            "topics": topics,
+            "data": {},
+        }
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})
     if isinstance(event, OrderChanged) and not event.deleted:
         del data["deleted"]

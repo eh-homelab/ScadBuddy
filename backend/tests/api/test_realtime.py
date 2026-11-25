@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -477,6 +478,34 @@ def test_topics_of_opaque_namespaced() -> None:
 def test_an_opaque_event_cannot_pose_as_a_known_namespace() -> None:
     job = f"job:{'a' * 32}"
     assert realtime.topics_of(_opaque("job.sneaky", [job])) == []
+
+
+def test_an_opaque_event_frame_is_a_signal_only() -> None:
+    raw = {
+        "id": "x",
+        "at": "2026-11-25T00:00:00Z",
+        "kind": "fleet.message",
+        "topics": ["fleet:agent:a", "fleet:agent:b"],
+        "recipients": ["secret"],
+        "retention_seconds": 5,
+    }
+    event = OpaqueEvent.model_validate({**raw, "payload": raw})
+    frame = realtime.event_frame(event, ["fleet:agent:a"])
+    assert frame["data"] == {}
+    assert frame["topics"] == ["fleet:agent:a"]
+    assert (frame["id"], frame["kind"]) == ("x", "fleet.message")
+    assert "at" in frame
+    text = json.dumps(frame)
+    assert "recipients" not in text
+    assert "secret" not in text
+    assert "agent:b" not in text
+
+
+def test_every_known_topic_namespace_is_reserved() -> None:
+    for topic in ["job:" + "a" * 32, "model:m", "printer:" + FLOW_RUN_ID, "order:" + FLOW_RUN_ID]:
+        if realtime.valid_topic(topic):
+            assert topic.split(":", 1)[0] in realtime._KNOWN_NAMESPACES
+    assert {"job", "model", "print", "tasks", "workflow-run"} <= realtime._KNOWN_NAMESPACES
 
 
 def test_valid_topic_namespaced() -> None:

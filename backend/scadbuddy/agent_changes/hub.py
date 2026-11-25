@@ -329,8 +329,9 @@ async def _replay(
         try:
             page = await log.replay(after, limit=MAX_REPLAY_LIMIT)
         except ValueError:
-            # A kind this build does not know (a newer pod's, during a roll): replaying past it
-            # would fail the same way at every reconnect, so the agent re-reads instead.
+            # Only a row whose envelope is broken raises (a routable unknown kind replays as an
+            # `OpaqueEvent`): replaying past it would fail the same way at every reconnect, so
+            # the agent re-reads instead.
             logger.warning("the event log holds an event this build cannot decode; resyncing")
             return [], _Place(await log.newest() or START, set()), True
         if page.gap or len(place.replayed) + len(page.events) > REPLAY_MAX:

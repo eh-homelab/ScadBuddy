@@ -508,6 +508,26 @@ def test_decode_broken_envelope_refused(payload: str) -> None:
         decode_event(payload)
 
 
+@pytest.mark.parametrize(
+    "topics",
+    [[f"fleet:{n}" for n in range(65)], ["fleet:" + "x" * 195]],
+)
+def test_opaque_topics_are_bounded(topics: list[str]) -> None:
+    payload = json.dumps(
+        {"id": "x", "at": "2026-11-25T00:00:00Z", "kind": "fleet.message", "topics": topics}
+    )
+    with pytest.raises(ValueError):
+        decode_event(payload)
+
+
+def test_opaque_topics_at_the_bound_are_kept() -> None:
+    topics = [f"fleet:{n}" for n in range(64)]
+    payload = json.dumps(
+        {"id": "x", "at": "2026-11-25T00:00:00Z", "kind": "fleet.message", "topics": topics}
+    )
+    assert isinstance(decode_event(payload), OpaqueEvent)
+
+
 def test_a_known_kind_with_a_bad_body_is_still_refused() -> None:
     with pytest.raises(ValueError):
         decode_event('{"id":"x","at":"2026-11-25T00:00:00Z","kind":"model.created"}')

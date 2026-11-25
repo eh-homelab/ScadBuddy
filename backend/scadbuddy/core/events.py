@@ -420,8 +420,8 @@ class SessionBusEvent(BaseEvent):
     """An AI agent session changed (#300, AI spec §7: ``session.*`` "from the agent
     side"). The agent service publishes these itself
     (``agent/src/sessions/busEvents.ts``): NOTIFY only, never into ``events``, so
-    they are not replayed. Declared here so this process decodes them instead of
-    logging each as undecodable; they go to no WebSocket topic (``realtime.py``),
+    they are not replayed. Declared here so this process decodes them to this typed
+    model instead of an :class:`OpaqueEvent`; they go to no WebSocket topic (``realtime.py``),
     since the UI follows a session over the agent's own socket, which checks who
     may see it. ``seq`` is the session's event-log position, ``replica`` the
     publishing agent process."""
@@ -511,6 +511,12 @@ def encode_event(event: AnyEvent) -> str:
 OPAQUE_KIND_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$"
 
 
+#: At most this many topics, each this long: the realtime socket follows 64 topics (`MAX_TOPICS`
+#: there) and refuses a topic over 200 characters.
+MAX_OPAQUE_TOPICS = 64
+MAX_OPAQUE_TOPIC_LENGTH = 200
+
+
 class OpaqueEvent(BaseModel):
     """An event of a kind this process has no model for, with a valid envelope.
 
@@ -523,7 +529,9 @@ class OpaqueEvent(BaseModel):
     id: str
     at: datetime
     kind: str = Field(pattern=OPAQUE_KIND_PATTERN)
-    topics: list[str] = []
+    topics: list[Annotated[str, Field(max_length=MAX_OPAQUE_TOPIC_LENGTH)]] = Field(
+        default=[], max_length=MAX_OPAQUE_TOPICS
+    )
     #: How long the log keeps the event; ``None`` is the log's own default.
     retention_seconds: float | None = None
     payload: dict[str, Any]
