@@ -105,6 +105,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
     'write_file',
     'set_readme',
     'order_attach',
+    'entity_attachment_add',
   ]
 
   it('every upload tool offers workspace_path with its sha256, says so, and keeps its tier', () => {
@@ -127,6 +128,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
       write_file: 'write',
       set_readme: 'write',
       order_attach: 'write',
+      entity_attachment_add: 'outward',
     })
   })
 

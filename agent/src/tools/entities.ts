@@ -1,14 +1,17 @@
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
+import { binary } from './binary.js'
 import { ok } from './call.js'
+import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
-import { defineTool, json, ToolError } from './registry.js'
+import { blob, defineTool, image, json, ToolError } from './registry.js'
+import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
-// (backend/scadbuddy/api/entity_attachments.py, entity_links.py). Lists are `read`; every
-// file or link change is `outward`, so a session parks it for a person. An agent upload is out of scope:
-// a file reaches an entity through the UI (an order's through order_attach).
+// (backend/scadbuddy/api/entity_attachments.py, entity_links.py). Lists and a file's bytes are `read`;
+// every file or link change is `outward`, so a session parks it for a person. An agent adds a file
+// from its workspace (entity_attachment_add); an order's files go through order_attach.
 
 const entity = z
   .string()
@@ -173,6 +176,76 @@ export const entityTools = [
     routes: ['GET /api/v1/entities/{ref}/attachments'],
     handler: async ({ entity: ref }, { backend }) =>
       withPage(ref, await onEntity(ref, backend.GET('/api/v1/entities/{ref}/attachments', { params: { path: { ref } } }), `list the files of ${ref}`)),
+  }),
+  defineTool({
+    name: 'entity_attachment_get',
+    label: "See an entity's file",
+    description:
+      "One file kept on an entity, as entity_attachment_list lists it: a photo as an image you can see, any other " +
+      'file as its bytes. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything ' +
+      'else): use it when the full photo is over the inline limit, or when a glance is enough.',
+    input: z.object({
+      entity,
+      attachment_id: attachmentId,
+      thumbnail: z.boolean().optional().describe('A small WebP copy of a photo instead of the file itself'),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/entities/{ref}/attachments/{attachment_id}/content', 'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail'],
+    handler: async ({ entity: ref, attachment_id, thumbnail }, ctx) => {
+      const params = { params: { path: { ref, attachment_id } }, parseAs: 'stream' as const }
+      const part = thumbnail ? 'thumbnail' : 'content'
+      const path = `/api/v1/entities/${encodeURIComponent(ref)}/attachments/${encodeURIComponent(attachment_id)}/${part}`
+      const render = (bytes: ArrayBuffer, mimeType: string) =>
+        mimeType.startsWith('image/') && mimeType !== 'image/svg+xml'
+          ? image(bytes, mimeType)
+          : blob(`scadbuddy://entities/${ref}/attachments/${attachment_id}`, bytes, mimeType)
+      return binary(
+        thumbnail
+          ? ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail', params)
+          : ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/content', params),
+        `get file ${attachment_id} of ${ref}`,
+        ctx,
+        { path, name: attachment_id, fallbackType: thumbnail ? 'image/webp' : 'application/octet-stream' },
+        render,
+      )
+    },
+  }),
+  defineTool({
+    name: 'entity_attachment_add',
+    label: 'Attach a file to an entity',
+    description:
+      "Attach a file from your workspace to an entity: a spool's label photo, a printer's manual, a receipt. Any " +
+      "file; what it is (`kind`, `media_type`) comes from its bytes. `role` says why it is kept (`other` when left " +
+      "out). An order's files go through order_attach (409 `use_order_route`). Outward: a person approves it." +
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        entity: fileOwner,
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+        filename: z.string().min(1).max(255).optional().describe("e.g. \"label.jpg\"; the workspace file's own name by default"),
+        role: role.optional(),
+        caption: caption.optional(),
+      })
+      .strict(),
+    risk: 'outward',
+    routes: ['POST /api/v1/entities/{ref}/attachments'],
+    summarize: ({ entity: ref, filename, workspace_path }) => `Attach ${filename ?? workspace_path} to ${ref}`,
+    handler: async ({ entity: ref, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'entity_attachment_add')
+      const name = filename ?? uploadName(info.path)
+      const fields = changes({ role, caption }) as Record<string, string>
+      const part = { name: 'file', filename: name, type: info.mediaType }
+      const what = `attach ${name} to ${ref}`
+      const answer = await command(ctx, what, (headers) =>
+        ctx.backend.POST('/api/v1/entities/{ref}/attachments', {
+          params: { path: { ref } },
+          body: { file: name, role: role ?? null, caption: caption ?? null },
+          ...uploadInit(ctx, info, part, headers, fields),
+        }),
+      )
+      return json(withSent(answer, info))
+    },
   }),
   defineTool({
     name: 'entity_attachment_update',

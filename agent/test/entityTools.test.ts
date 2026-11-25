@@ -5,6 +5,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
+import { memoryWorkspace } from './helpers/workspace.js'
 
 // Entity attachments and links (#6950, phase 1 Task 7): the generic `/entities/{ref}` routes.
 
@@ -38,6 +39,7 @@ describe('entity attachment and link tools', () => {
   it('tiers lists as read and every change as outward, and maps each to its route', () => {
     const expected: Record<string, [string, string]> = {
       entity_attachment_list: ['read', 'GET /api/v1/entities/{ref}/attachments'],
+      entity_attachment_add: ['outward', 'POST /api/v1/entities/{ref}/attachments'],
       entity_attachment_update: ['outward', 'PATCH /api/v1/entities/{ref}/attachments/{attachment_id}'],
       entity_attachment_delete: ['outward', 'DELETE /api/v1/entities/{ref}/attachments/{attachment_id}'],
       entity_link_list: ['read', 'GET /api/v1/entities/{ref}/links'],
@@ -49,6 +51,57 @@ describe('entity attachment and link tools', () => {
       expect(tool(name).risk, name).toBe(risk)
       expect(tool(name).routes, name).toEqual([route])
     }
+  })
+
+  it("answers a photo as an image, its thumbnail on request, and any other file as its bytes", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])
+    server.use(
+      http.get(`${base(SPOOL)}/attachments/${ID}/content`, () => new HttpResponse(jpeg, { headers: { 'Content-Type': 'image/jpeg' } })),
+      http.get(`${base(SPOOL)}/attachments/${ID}/thumbnail`, () => new HttpResponse(Buffer.from('RIFF'), { headers: { 'Content-Type': 'image/webp' } })),
+      http.get(`${base(PRINTER)}/attachments/${ID}/content`, () => new HttpResponse(Buffer.from('%PDF-1.7'), { headers: { 'Content-Type': 'application/pdf' } })),
+    )
+    const get = tool('entity_attachment_get')
+    expect(get.risk).toBe('read')
+    expect(get.routes).toEqual([
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
+    ])
+    const photo = await get.execute({ entity: SPOOL, attachment_id: ID }, ctx())
+    expect(photo.content).toEqual([{ type: 'image', mimeType: 'image/jpeg', data: jpeg.toString('base64') }])
+    const thumb = await get.execute({ entity: SPOOL, attachment_id: ID, thumbnail: true }, ctx())
+    expect(thumb.content).toEqual([{ type: 'image', mimeType: 'image/webp', data: Buffer.from('RIFF').toString('base64') }])
+    const pdf = await get.execute({ entity: PRINTER, attachment_id: ID }, ctx())
+    expect(pdf.content).toEqual([
+      {
+        type: 'resource',
+        resource: { uri: `scadbuddy://entities/${PRINTER}/attachments/${ID}`, mimeType: 'application/pdf', blob: Buffer.from('%PDF-1.7').toString('base64') },
+      },
+    ])
+  })
+
+  it('attaches a workspace file to an entity as a command, with its role and caption', async () => {
+    const seen: { key: string | null; fields: Record<string, string>; file: { name: string; size: number } }[] = []
+    server.use(
+      http.post(`${base(SPOOL)}/attachments`, async ({ request }) => {
+        const form = await request.formData()
+        const file = form.get('file') as File
+        const fields = Object.fromEntries([...form.entries()].filter((e): e is [string, string] => typeof e[1] === 'string'))
+        seen.push({ key: request.headers.get('Idempotency-Key'), fields, file: { name: file.name, size: file.size } })
+        return HttpResponse.json({ id: ID, entity: SPOOL, filename: file.name })
+      }),
+    )
+    const ws = memoryWorkspace({ 'photos/label.jpg': Buffer.from('jpg bytes') }, 'image/jpeg')
+    const c = { ...ctx(), workspace: ws.workspace } as ToolContext
+    const add = tool('entity_attachment_add')
+    const result = await add.execute({ entity: SPOOL, ...ws.ref('photos/label.jpg'), role: 'label', caption: 'Lot 7' }, c)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.key).toBeTruthy()
+    expect(seen[0]!.fields).toEqual({ role: 'label', caption: 'Lot 7' })
+    expect(seen[0]!.file).toEqual({ name: 'label.jpg', size: 9 })
+    expect(firstText(result)).toMatchObject({
+      id: ID,
+      workspace_file: { path: 'photos/label.jpg', size_bytes: 9, media_type: 'image/jpeg' },
+    })
   })
 
   it('lists attachments and links with the entity page where the kind has one', async () => {
