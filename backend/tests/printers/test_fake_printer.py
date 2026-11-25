@@ -956,23 +956,42 @@ async def test_a_late_executor_connect_is_shut(
     linked: _Linked, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """aiomqtt connects in an executor thread, and a cut does not stop that thread (#7616).
-    The connect is held past `MQTT_TIMEOUT`, then let go: it opens a socket after the cut,
-    and that socket is closed when the thread ends, not left open."""
-    shut = _spy_force_close(monkeypatch)
+    The connect is held past `MQTT_TIMEOUT`, then let go: it opens a socket after the cut.
+    The loop thread closes that socket after aiomqtt's queued ``add_reader`` and
+    ``add_writer`` ran, so the loop registers no closed fd and logs no error."""
+    loop = asyncio.get_running_loop()
+    shut: list[tuple[aiomqtt.Client, int]] = []
+    closed = asyncio.Event()
+    force_close = lan_module._force_close
+
+    def spy(client: aiomqtt.Client) -> None:
+        shut.append((client, threading.get_ident()))
+        force_close(client)
+        if len(shut) == 2:
+            closed.set()
+
+    monkeypatch.setattr(lan_module, "_force_close", spy)
     go = threading.Event()
     done = threading.Event()
     held: list[Any] = []
+    made: list[aiomqtt.Client] = []
 
     class HeldInExecutor(aiomqtt.Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
         def _client_connect(self) -> None:
             go.wait()
             super()._client_connect()
             held.append(self._client.socket())
 
-    loop = asyncio.get_running_loop()
     run_in_executor = loop.run_in_executor
 
     def tracked(executor: Any, func: Callable[..., Any], *args: Any) -> Any:
+        if not (made and func == made[0]._client_connect):
+            return run_in_executor(executor, func, *args)
+
         def run() -> Any:
             try:
                 return func(*args)
@@ -981,19 +1000,29 @@ async def test_a_late_executor_connect_is_shut(
 
         return run_in_executor(executor, run)
 
+    seen: list[dict[str, Any]] = []
+    handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: seen.append(context))
     monkeypatch.setattr(loop, "run_in_executor", tracked)
     monkeypatch.setattr(aiomqtt, "Client", HeldInExecutor)
     monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 0.5)
     try:
-        with pytest.raises(TimeoutError):
-            await _ask(linked, ams_get_rfid(0, 0, "91"))
-        assert len(shut) == 1
+        try:
+            with pytest.raises(TimeoutError):
+                await _ask(linked, ams_get_rfid(0, 0, "91"))
+            assert len(shut) == 1
+        finally:
+            go.set()
+        assert await asyncio.to_thread(done.wait, 30.0)
+        async with asyncio.timeout(30.0):
+            await closed.wait()
     finally:
-        go.set()
-    assert await asyncio.to_thread(done.wait, 30.0)
+        loop.set_exception_handler(handler)
     assert len(held) == 1 and held[0] is not None
     try:
+        assert shut[1] == (made[0], threading.get_ident())
         assert held[0].fileno() == -1
+        assert seen == []
     finally:
         held[0].close()
 

@@ -478,8 +478,8 @@ class LanPrinter:
         `MQTT_TIMEOUT`); a close that fails or overruns keeps the reply. A connect that
         never got in (cut by `MQTT_TIMEOUT` or failed inside ``__aenter__``) is shut by
         force, as a cut close is (`_force_close`, P31). A cut does not stop aiomqtt's
-        connect in its executor thread, so that connect closes the socket it made once it
-        ends (`_close_late_connect`, #7616)."""
+        connect in its executor thread, so when that connect ends, it queues a
+        `_force_close` of the socket it made on the loop (`_close_late_connect`, #7616)."""
         loop = asyncio.get_running_loop()
         may_be_sent = False
         reply: dict[str, Any] | None = None
@@ -494,8 +494,8 @@ class LanPrinter:
                 except BaseException:
                     # aiomqtt leaves the socket open when its wait for the CONNACK is
                     # cancelled or times out: nothing was entered, so no close would run.
-                    # A connect still in its executor thread closes its own socket when
-                    # it ends (`_close_late_connect`).
+                    # A connect still in its executor thread queues a close of its own
+                    # socket on the loop when it ends (`_close_late_connect`).
                     cut.set()
                     _force_close(made)
                     raise
@@ -641,9 +641,18 @@ def _close_late_connect(client: aiomqtt.Client) -> threading.Event:
     (``loop.run_in_executor(None, self._client_connect)``, aiomqtt 2.5.1 ``client.py:779``;
     ``_client_connect`` at ``client.py:752``). A cut does not stop that thread, so a connect
     that ends after `_force_close` ran would leave a connected socket that nothing closes.
-    The wrapper closes paho's socket when the connect ends while the returned event is set;
-    the caller sets it before `_force_close`. This sets an attribute on this one instance
-    only, and reaches into aiomqtt's private names, as `_force_close` does (#7616)."""
+    When the connect ends while the returned event is set, the wrapper queues `_force_close`
+    on the loop; the caller sets the event before its own `_force_close`.
+
+    The thread must not close the socket itself. aiomqtt does not register the socket from
+    that thread: it queues ``add_reader`` and ``add_writer`` with ``call_soon_threadsafe``
+    (aiomqtt 2.5.1 ``client.py:704`` and ``:738``). A close on the thread would free the fd
+    before those run, so the loop would register a closed fd number (EBADF) or another
+    socket's. ``call_soon_threadsafe`` keeps FIFO order, so the queued close runs after
+    them, and paho's ``remove_reader`` and ``remove_writer`` then run on the loop thread.
+    This sets an attribute on this one instance only, and reaches into aiomqtt's private
+    names, as `_force_close` does (#7616)."""
+    loop = asyncio.get_running_loop()
     cut = threading.Event()
     connect = client._client_connect
 
@@ -652,8 +661,8 @@ def _close_late_connect(client: aiomqtt.Client) -> threading.Event:
             connect()
         finally:
             if cut.is_set():
-                with suppress(Exception):
-                    client._client._sock_close()
+                with suppress(RuntimeError):  # the loop is closed
+                    loop.call_soon_threadsafe(_force_close, client)
 
     client._client_connect = connect_then_close_if_cut  # type: ignore[method-assign]
     return cut
@@ -663,14 +672,19 @@ def _force_close(client: aiomqtt.Client) -> None:
     """Shut ``client``'s socket at once. A cancelled disconnect, or a connect cut while it
     waits for the CONNACK, leaves the socket open for seconds, holding one of the printer's
     few LAN client slots. A connect cut while paho still connects in aiomqtt's executor
-    thread has no socket yet: the thread closes the one it makes when it ends
-    (`_close_late_connect`). This reaches into aiomqtt's private paho client (aiomqtt 2.x);
-    `tests/printers/test_fake_printer.py` cuts all three against a real broker, so a release
-    that renames these fails there rather than doing nothing."""
+    thread has no socket yet: when that thread ends, it queues this close on the loop for
+    the socket it made (`_close_late_connect`). This reaches into aiomqtt's private paho
+    client (aiomqtt 2.x); `tests/printers/test_fake_printer.py` cuts all three against a
+    real broker, so a release that renames these fails there rather than doing nothing.
+
+    The socket closes first. A ``disconnect`` on an open socket queues its DISCONNECT, and
+    aiomqtt queues an ``add_writer`` for it with ``call_soon_threadsafe`` (aiomqtt 2.5.1
+    ``client.py:738``). That ran after the close, on a closed fd (EBADF), and the DISCONNECT
+    never went out. With no socket, ``disconnect`` only marks paho disconnected (#7616)."""
     with suppress(Exception):
         paho = client._client
-        paho.disconnect()
         paho._sock_close()
+        paho.disconnect()
 
 
 def _close_data(conn: socket.socket) -> None:
