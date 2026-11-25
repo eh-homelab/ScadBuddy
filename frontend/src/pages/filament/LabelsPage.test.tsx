@@ -9,6 +9,7 @@ import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
+import { printTiming } from '../../components/filament/labelSheet'
 import { LabelsPage } from './LabelsPage'
 
 // Loads the file the way the real one does; saving it is lib/embed's own test.
@@ -1045,6 +1046,60 @@ describe('saved sheets (#7216)', () => {
     fail = true
     await user.click(screen.getByRole('button', { name: 'Print' }))
     await waitFor(() => expect(grids).toEqual(['grid-template-columns: repeat(2, 60mm)']))
+  })
+
+  it('prints with the grid it has when the read before Print never answers (R-7216-21)', async () => {
+    serve()
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let hold = false
+    server.use(
+      http.get('*/api/v1/filament/label-templates', async () => {
+        if (hold) await new Promise(() => {})
+        return HttpResponse.json({ ...LABEL_TEMPLATES, saved: [sheet(SHEET_ID, 'Shelf strip')] })
+      }),
+    )
+    const grids: (string | undefined)[] = []
+    vi.spyOn(window, 'print').mockImplementation(() => void grids.push(printGrid()))
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(printGrid()).toBe('grid-template-columns: repeat(2, 60mm)'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
+    printTiming.readWaitMs = 50
+    hold = true
+    try {
+      await user.click(screen.getByRole('button', { name: 'Print' }))
+      await waitFor(() => expect(grids).toEqual(['grid-template-columns: repeat(2, 60mm)']))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
+    } finally {
+      printTiming.readWaitMs = 5_000
+    }
+  })
+
+  it('prints on the grid of a read that started while Print waited (R-7216-21)', async () => {
+    serve()
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let cols = 2
+    let releaseFirst: () => void = () => {}
+    let reads = 0
+    server.use(
+      http.get('*/api/v1/filament/label-templates', async () => {
+        reads += 1
+        const body = { ...LABEL_TEMPLATES, saved: [sheet(SHEET_ID, 'Shelf strip', { cols })] }
+        // The read Print starts is held; a newer read answers at once with the newer grid.
+        if (reads === 2) await new Promise<void>((resolve) => (releaseFirst = resolve))
+        return HttpResponse.json(body)
+      }),
+    )
+    const grids: (string | undefined)[] = []
+    vi.spyOn(window, 'print').mockImplementation(() => void grids.push(printGrid()))
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(printGrid()).toBe('grid-template-columns: repeat(2, 60mm)'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Print' }))
+    await waitFor(() => expect(reads).toBe(2))
+    cols = 3
+    document.dispatchEvent(new Event('visibilitychange'))
+    await waitFor(() => expect(grids).toEqual(['grid-template-columns: repeat(3, 60mm)']))
+    releaseFirst()
   })
 
   it('shows a note when the saved sheet is gone', async () => {

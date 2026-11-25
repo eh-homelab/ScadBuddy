@@ -21,7 +21,7 @@ import { Label, LocationLabel } from '../../components/filament/Label'
 import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
 import { LabelFieldsPicker } from '../../components/filament/LabelFieldsPicker'
 import { LabelSheetEditor } from '../../components/filament/LabelSheetEditor'
-import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, type LabelField, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg, tickField } from '../../components/filament/labelSheet'
+import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, type LabelField, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, printTiming, qrSvg, tickField } from '../../components/filament/labelSheet'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -218,6 +218,8 @@ export function LabelsPage() {
   const choiceNow = useRef<LabelTemplateChoice>(DEFAULT_CHOICE)
   // #7216 — each template list read takes the next number, and only the newest read's answer lands.
   const templatesRead = useRef(0)
+  // Settles when the newest template read answers (or fails); a newer read takes over the same signal.
+  const templatesAnswered = useRef<{ done: Promise<void>; settle: () => void; open: boolean }>({ done: Promise.resolve(), settle: () => {}, open: false })
   // R-7216-21 — Print reads the list first; each print after that read is one more here, and an effect prints
   // once the newest list is drawn.
   const [printing, setPrinting] = useState(false)
@@ -358,18 +360,36 @@ export function LabelsPage() {
    */
   function readTemplates(live: () => boolean = () => true): Promise<void> {
     const read = ++templatesRead.current
+    if (!templatesAnswered.current.open) {
+      let settle = () => {}
+      const done = new Promise<void>((resolve) => (settle = resolve))
+      templatesAnswered.current = { done, settle, open: true }
+    }
+    const signal = templatesAnswered.current
+    const newest = () => read === templatesRead.current
     return listLabelTemplates().then(
       (list) => {
-        if (live() && read === templatesRead.current) setTemplates(list)
+        if (live() && newest()) setTemplates(list)
       },
       () => {},
-    )
+    ).finally(() => {
+      if (newest()) {
+        signal.open = false
+        signal.settle()
+      }
+    })
   }
 
   /** R-7216-21 — Print draws on the newest grid: a sheet edited elsewhere (the agent) since the page read it prints as edited. */
   const print = async () => {
     setPrinting(true)
-    await readTemplates()
+    void readTemplates()
+    // Wait for the newest read, also one a save, a delete or the shown tab starts meanwhile, but at most
+    // `printTiming.readWaitMs`: a read that never answers must not keep Print off.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeUp = new Promise<void>((resolve) => (timer = setTimeout(resolve, printTiming.readWaitMs)))
+    await Promise.race([templatesAnswered.current.done, timeUp])
+    clearTimeout(timer)
     setPrinting(false)
     setPrints((n) => n + 1)
   }

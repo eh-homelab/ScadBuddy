@@ -267,3 +267,6 @@ export function httpsOrigin(candidate: string | null | undefined): string | null
 export const labelBase = (baseUrl: string | null): string => httpsOrigin(baseUrl) ?? window.location.origin
 
 export const qrSvg = (payload: string): Promise<string> => QRCode.toString(payload, { type: 'svg', errorCorrectionLevel: 'M', margin: 0 })
+
+/** How long Print waits for the template list before it prints with the list it has (R-7216-21); a field for tests. */
+export const printTiming = { readWaitMs: 5_000 }
