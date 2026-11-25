@@ -165,7 +165,8 @@ always read the files (spec §7.4).
   (spec §10).
 - A row whose `model.json` Postgres cannot store (`meta` null, `meta_error` `not storable
   (…)`: NaN, a lone surrogate) is read from its file by every reader, the list and
-  `list_summaries` included, as before the copy.
+  `list_summaries` included, as before the copy. When its folder is gone, the list and
+  `list_summaries` both leave it out (#7661).
 - A media file that the row's `files` lacks is stat'ed only while the template's media
   changed after the row's `refreshed_at` (`TemplateRow.media_newer`, read with the row from
   `templates.media_changed_at`): every media write (an add, a removal, a reorder, a
