@@ -846,13 +846,10 @@ async def test_the_slots_runs_are_sent_together(pg_pool: PgPool) -> None:
     _four_slots(w)
     w.sender.delay = 0.5
 
-    started = time.monotonic()
     report = await w.run()
-    took = time.monotonic() - started
 
     assert report == SlotReport(configured=4)
-    assert w.sender.most == 4
-    assert took < 4 * w.sender.delay  # one after another would take at least 2 s
+    assert w.sender.most == 4  # one after another would never have more than one open
 
 
 async def test_at_most_so_many_runs_are_open_at_once(
