@@ -39,6 +39,12 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
 | `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
 
+Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
+`/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
+`DELETE /channels/{name}/members/{session_id}`, `GET /agents/{session_id}/channels`, `POST
+/messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
+`fleet.message` after its commit. `GET /changes` stays Python's.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.
