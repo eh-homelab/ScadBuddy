@@ -178,18 +178,18 @@ func (t *Tasks) create(r *http.Request, _ crud.Params) (any, error) {
 	description := body.Text("description", 1, 500)
 	spec := body.Dict("spec")
 	var createdBy []byte
-	if _, given := body.Raw("created_by"); !given {
-		body.Fail([]string{"created_by"}, "Field required")
-	} else if o := body.Object("created_by", "kind", "id", "label"); o == nil {
-		body.Fail([]string{"created_by"}, "Input should be a valid dictionary or object to extract fields from")
-	} else {
-		owner := struct {
-			Kind  string `json:"kind"`
-			ID    string `json:"id"`
-			Label string `json:"label"`
-		}{o.Enum("kind", ownerKinds...), o.Text("id", 0, nameMax), o.Text("label", 0, nameMax)}
-		o.Done()
-		createdBy, _ = json.Marshal(owner)
+	if _, given := body.Required("created_by"); given {
+		if o := body.Object("created_by", "kind", "id", "label"); o == nil {
+			body.Fail([]string{"created_by"}, "Input should be a valid dictionary or object to extract fields from")
+		} else {
+			owner := struct {
+				Kind  string `json:"kind"`
+				ID    string `json:"id"`
+				Label string `json:"label"`
+			}{o.Enum("kind", ownerKinds...), o.Text("id", 0, nameMax), o.Text("label", 0, nameMax)}
+			o.Done()
+			createdBy, _ = json.Marshal(owner)
+		}
 	}
 	nextAt, expiresAt := body.OptTime("next_at"), body.OptTime("expires_at")
 	if err := body.Err(); err != nil {

@@ -586,3 +586,31 @@ func TestTheWorkspaceSweepAndReconcile(t *testing.T) {
 	}
 	expect(t, a.ok("POST", "/workspace/reconciles", "{}").raw, `{"released":0,"held":0,"skipped":"held"}`)
 }
+
+// A body that is no object has one issue, at body, as FastAPI answers.
+func TestABodyThatIsNoObjectHasOneIssue(t *testing.T) {
+	a := newAPI(t, blobAreas)
+	for _, path := range []string{
+		"/session-blobs/deletes", "/attachments/resolve", "/attachments/deletes", "/background-tasks",
+		"/background-tasks/0000abcd/calls", "/workspace/session-files",
+	} {
+		for _, body := range []string{`[]`, `"x"`, `1`} {
+			got := a.do("POST", base+path, body)
+			expect(t, got.status, 422)
+			expect(t, got.body["errors"], []any{map[string]any{
+				"loc": []any{"body"}, "msg": "Input should be a valid dictionary or object to extract fields from",
+			}})
+		}
+	}
+}
+
+// Starlette reads a query's invalid UTF-8 as U+FFFD; the value never reaches Postgres as is.
+func TestAQueryWithInvalidUTF8IsReadAsReplaced(t *testing.T) {
+	a := newAPI(t, blobAreas)
+	expect(t, a.ok("GET", "/workspace/files?workspace=principal:browser:%ff", "").raw, `{"files":[]}`)
+	expect(t, a.do("GET", base+"/workspace/file?workspace=principal:browser:x&path=a%ff", "").body["detail"],
+		"\"a\\ufffd\""+` is not a workspace path: use up to 4 "/"-separated parts, each starting with a letter,`+
+			` digit or "_" and holding only letters, digits, "_", "." and "-" (e.g. "downloads/part.3mf")`)
+	got := a.do("GET", base+"/attachments/"+uuid()+"/image?owner_kind=browser&owner_id=%ff%fe", "")
+	expect(t, got.status, 404)
+}

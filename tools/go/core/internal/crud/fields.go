@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
@@ -58,12 +59,15 @@ func ParseTime(s string) (time.Time, bool) {
 // PyUUID is s as pydantic reads a UUID (any case, hyphens or none, braces, urn:uuid:),
 // in the lower-case hyphenated spelling; ok is false when it is none.
 func PyUUID(s string) (string, bool) {
-	s = strings.ToLower(s)
-	s = strings.TrimPrefix(s, "urn:uuid:")
-	if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
-		s = s[1 : len(s)-1]
+	// As the uuid crate's parse_str: braces or the urn: prefix only around the hyphenated form.
+	hyphenated := len(s) == 36
+	if len(s) == 38 && s[0] == '{' && s[37] == '}' {
+		s, hyphenated = s[1:37], true
+	} else if rest, ok := strings.CutPrefix(s, "urn:uuid:"); ok && len(rest) == 36 {
+		s, hyphenated = rest, true
 	}
-	if len(s) == 32 && !strings.Contains(s, "-") {
+	s = strings.ToLower(s)
+	if len(s) == 32 && !hyphenated && !strings.Contains(s, "-") {
 		s = s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:]
 	}
 	return s, IsUUID(s)
@@ -106,7 +110,58 @@ func query(r *http.Request, name string) (string, bool) {
 	if len(values) == 0 {
 		return "", false
 	}
-	return values[len(values)-1], true
+	return replaceInvalidUTF8(values[len(values)-1]), true
+}
+
+// replaceInvalidUTF8 is s with each maximal invalid UTF-8 subpart as U+FFFD, as Python's
+// decode with errors="replace" (and so Starlette's query) reads it.
+func replaceInvalidUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		if r != utf8.RuneError || n > 1 {
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
+		b.WriteRune(utf8.RuneError)
+		i += invalidSubpart(s[i:])
+	}
+	return b.String()
+}
+
+// invalidSubpart is the length of the invalid sequence at the start of s: a lead byte and
+// the continuation bytes that still fit it, at least 1.
+func invalidSubpart(s string) int {
+	lead := s[0]
+	need, low, high := 0, byte(0x80), byte(0xbf)
+	switch {
+	case lead >= 0xc2 && lead <= 0xdf:
+		need = 1
+	case lead >= 0xe0 && lead <= 0xef:
+		need = 2
+		if lead == 0xe0 {
+			low = 0xa0
+		} else if lead == 0xed {
+			high = 0x9f
+		}
+	case lead >= 0xf0 && lead <= 0xf4:
+		need = 3
+		if lead == 0xf0 {
+			low = 0x90
+		} else if lead == 0xf4 {
+			high = 0x8f
+		}
+	}
+	n := 1
+	for n <= need && n < len(s) && s[n] >= low && s[n] <= high {
+		n++
+		low, high = 0x80, 0xbf
+	}
+	return n
 }
 
 func queryIssue(name, msg string) error {
@@ -186,6 +241,10 @@ func QueryBool(r *http.Request, name string) (bool, error) {
 	}
 	return false, queryIssue(name, "Input should be a valid boolean, unable to interpret input")
 }
+
+// Required is the member name as it was sent, with "Field required" when an object lacks
+// it; ok is false when it is absent.
+func (b *Body) Required(name string) (json.RawMessage, bool) { return b.required(name) }
 
 // Raw is the member name as it was sent; ok is false when it is absent.
 func (b *Body) Raw(name string) (json.RawMessage, bool) {
@@ -302,9 +361,12 @@ func (b *Body) pyUUID(path []string, raw json.RawMessage) string {
 }
 
 func (b *Body) list(name string, least, most int, required bool) []json.RawMessage {
-	raw, ok := b.fields[name]
-	if !ok && required {
-		b.fail([]string{name}, "Field required")
+	var raw json.RawMessage
+	var ok bool
+	if required {
+		raw, ok = b.required(name)
+	} else {
+		raw, ok = b.fields[name]
 	}
 	if !ok {
 		return []json.RawMessage{}
@@ -390,7 +452,7 @@ func (b *Body) IntIn(name string, least, most int64, fallback *int64) int64 {
 		if fallback != nil {
 			return *fallback
 		}
-		b.fail([]string{name}, "Field required")
+		b.required(name)
 		return 0
 	}
 	var n *int64

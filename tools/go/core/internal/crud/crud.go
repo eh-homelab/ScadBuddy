@@ -270,10 +270,9 @@ func QueryInt(r *http.Request, name string, least, most int64) (value int64, giv
 
 // QueryText is the required query parameter name, 1 to most characters.
 func QueryText(r *http.Request, name string, most int) (string, error) {
-	values := r.URL.Query()[name]
+	value, given := query(r, name)
 	issue := httpx.Issue{Loc: []string{"query", name}, Msg: "Field required"}
-	if len(values) > 0 {
-		value := values[len(values)-1]
+	if given {
 		issue.Msg = lengthIssue(value, 1, most)
 		if issue.Msg == "" {
 			return value, nil

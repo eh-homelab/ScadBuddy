@@ -105,8 +105,11 @@ func (b *Blobs) sessionBlob(r *http.Request, _ crud.Params) (any, error) {
 type owner struct{ kind, id string }
 
 func readOwner(b *crud.Body) owner {
-	raw, ok := b.Raw("owner")
-	if !ok || string(raw) == "null" {
+	raw, ok := b.Required("owner")
+	if !ok {
+		return owner{}
+	}
+	if string(raw) == "null" {
 		b.Fail([]string{"owner"}, "Field required")
 		return owner{}
 	}
