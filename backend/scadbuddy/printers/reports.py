@@ -130,22 +130,33 @@ READ_FIELDS = (
     "vir_slot",
     "nozzle_type",
     "nozzle_diameter",
+    # The AMS slot guard's busy state (`printers/ams_slots.py` `ams_busy`, #7276).
+    "ams_status",
 )
 
 
 def read_view(report: dict[str, Any]) -> tuple[Any, ...]:
     """What the readers of a stored report read of it: `READ_FIELDS`, and of ``device``
-    the nozzles (``nozzle``), the active extruder (``extruder.state``) and whether a
+    the nozzles (``nozzle``), the active extruder (``extruder.state``), each extruder's
+    loaded slot (``extruder.info[].snow``, which load and unload read, #7276) and whether a
     filament switch is fitted (`status.py`). Two reports with one view read alike, so the
     second need not be written; the temperatures, fans and ``sequence_id`` are left out.
     A new reader of a stored field adds it here."""
     device = report.get("device")
     device = device if isinstance(device, dict) else {}
     extruder = device.get("extruder")
+    extruder = extruder if isinstance(extruder, dict) else {}
+    info = extruder.get("info")
+    loaded = tuple(
+        (entry.get("id"), entry.get("snow"))
+        for entry in (info if isinstance(info, list) else [])
+        if isinstance(entry, dict)
+    )
     return (
         tuple(report.get(name) for name in READ_FIELDS),
         device.get("nozzle"),
-        extruder.get("state") if isinstance(extruder, dict) else None,
+        extruder.get("state"),
+        loaded,
         isinstance(device.get("fila_switch"), dict),
     )
 
