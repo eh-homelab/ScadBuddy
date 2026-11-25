@@ -1,8 +1,9 @@
-"""Tasks (#7364): the typed questions flows ask a person, and their answers.
+"""Tasks (#7364): the typed questions flows ask, and their answers.
 
-An answer is checked here against the task's schema, then given to the run by the
-`task_answer` operation (`flows/operations.py`). It reaches the operation sealed under
-the run's key, so it is in no history, record or log in the clear.
+An answer is checked here against the task's schema, then given to the run by an
+operation (`flows/operations.py`): `task_answer` for a person's, `flow_agent_answer` for
+an assistant session's or MCP token's that `flow_answerers` admits (#7471). It reaches the
+operation sealed under the run's key, so it is in no history, record or log in the clear.
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ class TaskList(BaseModel):
 
 
 class TaskAnswerBody(BaseModel):
-    """A person's answer to a task."""
+    """An answer to a task: a person's, or an admitted assistant's (#7471)."""
 
     #: The answer, by the schema's property names. At most 16 KiB of JSON.
     answer: dict[str, Any]
@@ -120,7 +121,8 @@ def list_tasks(
 )
 async def get_task(task_id: TaskIdPath, tasks: TasksDep) -> Task:
     # The answer and who gave it too, for every caller of an `api` route
-    # (`auth/routes.py`): only `answer_task` is a person's alone.
+    # (`auth/routes.py`). No task route is a person's alone: an agent answers only when
+    # `flow_answerers` admits it (`api/flows.py` `answerer` and `admit`, #7471).
     return await _found(tasks, task_id)
 
 
@@ -198,6 +200,8 @@ async def answer_task(
     async def refuse() -> None:
         # Not for a repeat, which is its first answer however the task stands now.
         if not person:
+            # A task's id is its prompt's call id (`workflows/flow_tools.py` `_prompt_task`):
+            # the parked entry's key.
             await admit(found, settings, flows, task.run_id, task.id)
         if task.state != "open":
             raise task_not_open(task.state)

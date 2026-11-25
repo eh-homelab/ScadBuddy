@@ -1,4 +1,5 @@
-"""A person's answer and approval for a flow run's parked calls, as operations on the
+"""Answers and approvals for a flow run's parked calls (a person's, or an agent's answer
+that `flow_answerers` admits, #7471), as operations on the
 `projects` queue (#1057, plan 2026-10-09-durable-phase-6-flows.md decisions A and B).
 
 Each records the decision in `workflow_run_decisions` first, then tells the harness with

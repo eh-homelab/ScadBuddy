@@ -210,7 +210,6 @@ export function printerIdsValue(ids: readonly number[]): string {
   return [...new Set(ids)].sort((a, b) => a - b).join(',')
 }
 
-/** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */
 /** #7471 — `flow_answerers` as the form holds it: `starter`, `sessions`, then the tokens, once each. */
 export function answerersValue(rules: readonly string[]): string {
   const unique = [...new Set(rules)]
@@ -218,6 +217,7 @@ export function answerersValue(rules: readonly string[]): string {
   return [...fixed, ...unique.filter((rule) => !fixed.includes(rule)).sort()].join(',')
 }
 
+/** #6041 — the form's value for a list of registry printer ids (uuids): sorted, comma-joined. */
 export function registryIdsValue(ids: readonly string[]): string {
   return [...new Set(ids)].sort().join(',')
 }

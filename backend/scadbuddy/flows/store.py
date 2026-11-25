@@ -373,7 +373,7 @@ class FlowStore:
     # -- decisions ---------------------------------------------------------------
 
     async def record_decision(self, decision: Decision, *, at_hop: Hop | None = None) -> bool:
-        """Record a person's answer before the harness is told. True when recorded, or
+        """Record an answer or approval before the harness is told. True when recorded, or
         when this same decision is there already (a retried run resends it); False when
         another decision holds the request id. With `at_hop`, only while the call waits
         at that hop, checked under the run's row lock: `HopMovedError` otherwise."""
@@ -441,8 +441,10 @@ class FlowStore:
     async def answer_session(self, session: str, principal: str) -> SessionOwner | None:
         """Who owns session `session`, when it may answer a flow's question now (#7471, spec
         §4.1.1): it is not archived, its owner is `principal`, it is not a flow's
-        (`background_tools` and not `turn_flow`), and its owner holds `write`. None
-        otherwise, and when no agent service has migrated this database."""
+        (`background_tools` and not `turn_flow`), and its owner holds `write`: a token
+        owner's tier is checked (`answer_token`); a browser user holds every tier, so a
+        browser-owned session needs no check. None otherwise, and when no agent service
+        has migrated this database."""
         return await asyncio.to_thread(self._answer_session, session, principal)
 
     async def answer_token(self, token_id: str) -> bool:

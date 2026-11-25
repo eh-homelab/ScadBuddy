@@ -1310,6 +1310,7 @@ async def admit(
     if not admitted(found, rules, run.started_by):
         raise not_allowed()
     entry = next((w for w in run.waiting_on if w.call_id == call_id and w.kind == "answer"), None)
+    # No parked entry: the operation's check refuses it (it is not waiting, or answered).
     if entry is not None and entry.people_only is not False:
         raise people_only()
 

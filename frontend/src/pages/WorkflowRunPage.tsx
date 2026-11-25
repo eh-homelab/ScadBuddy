@@ -289,7 +289,8 @@ function LoadedScript({ definitionId }: { definitionId: string }) {
 }
 
 function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] }) {
-  // #7471: the latest answer of each question (a Reset may answer it again).
+  // #7471: the latest answer of each question (a Reset may answer it again). A step still
+  // running has no answer in effect: a Reset to before its answer parked it again.
   const by = new Map(answers.map((a) => [a.call_id, a.answered_by] as const))
   return (
     <Card size="sm" className="px-3">
@@ -310,7 +311,7 @@ function Steps({ steps, answers }: { steps: FlowStep[]; answers: FlowAnswerBy[] 
               <td className="py-1 pr-3 font-mono">{step.fn}</td>
               <td className="py-1 pr-3">
                 {step.error ? `${step.status} (${step.error})` : step.status}
-                {by.has(step.call_id) && (
+                {step.status !== 'running' && by.has(step.call_id) && (
                   <span className="block text-muted-foreground">
                     <AnsweredBy by={by.get(step.call_id)} />
                   </span>

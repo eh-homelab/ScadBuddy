@@ -92,11 +92,24 @@ describe('WorkflowRunPage', () => {
   })
 
   it('names the assistant that answered a question, and links its session (#7471)', async () => {
+    const [run] = (await api.listFlowRuns()).filter((r) => r.id === 'run-ask')
+    setFlowRuns([
+      { ...run!, status: 'running', waiting_on: [], steps: run!.steps.map((s) => ({ ...s, status: 'succeeded' as const })) },
+    ])
     setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'setting' }])
     render('run-ask')
     const steps = await screen.findByRole('table', { name: 'Steps' })
     const link = await within(steps).findByRole('link', { name: 'Answered by the assistant' })
     expect(link.getAttribute('href')).toMatch(/\?assistant-session=s-9$/)
+  })
+
+  it('names no one for a question a Reset parked again, though its old answer is on record (#7471)', async () => {
+    // run-ask's call-2 is running and waiting again: the answer is of an undone execution.
+    setFlowAnswers('run-ask', [{ call_id: 'call-2', answered_by: 'session:s-9', admitted_by: 'setting' }])
+    render('run-ask')
+    const steps = await screen.findByRole('table', { name: 'Steps' })
+    expect(await within(steps).findByText('wait_for_human')).toBeInTheDocument()
+    expect(within(steps).queryByText('Answered by the assistant')).toBeNull()
   })
 
   it('answers a question with a key, and the run moves on', async () => {

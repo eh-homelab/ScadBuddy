@@ -93,13 +93,15 @@ class HumanAnswer(BaseModel):
 
 @agent.callback_tool_defn(inherently_safe=True, timeout=timedelta(seconds=MAX_WAIT_S))
 async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body]
-    """Wait for a person to answer `question` on the Workflows page."""
+    """Wait for an answer to `question`: a person's on the Workflows page, or an admitted
+    assistant's (#7471)."""
     ...
 
 
 @agent.callback_tool_defn(inherently_safe=True, timeout=OPEN_WAIT)
 async def human_answer_open(question: str) -> HumanAnswer:  # type: ignore[empty-body]
-    """Wait for a person to answer `question` on the Workflows page, with no limit."""
+    """Wait for an answer to `question`, with no limit: a person's on the Workflows page,
+    or an admitted assistant's (#7471)."""
     ...
 
 
@@ -158,7 +160,7 @@ async def wait_for_human(
 
 
 class TaskAnswer(BaseModel):
-    """A person's answer to a prompt, as they sent it."""
+    """An answer to a prompt, as its answerer sent it."""
 
     answer: dict[str, Any]
 

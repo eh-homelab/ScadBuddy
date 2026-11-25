@@ -183,6 +183,7 @@ def test_each_rule_admits_its_answerer_and_no_other(
         (as_token(credential)),
     )
     cases = {
+        # `sessions` is a browser user's sessions only: a token's session is refused.
         ("sessions",): (mine,),
         (f"token:{TOKEN}",): (tokens, token),
     }
@@ -272,6 +273,8 @@ def test_starter_admits_only_the_session_that_started_the_run(
     app: FastAPI, client: TestClient, credential: str
 ) -> None:
     answerers(client, "starter")
+    # Each run is started through the route, so `started_by` has the shape the start
+    # route writes (`kind`, `session`, `principal`), which `admitted` reads.
     # Started from the browser: nobody is its starter session.
     run_id, entry = text_question(client)
     refused(answer(client, run_id, entry, as_agent(credential)))
