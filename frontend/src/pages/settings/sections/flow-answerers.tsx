@@ -53,8 +53,8 @@ export function Component() {
 
   return (
     <SavedSection form={form} id={id} title={title}>
-      <FieldRow id="flow-answerers" {...docOf(form.settings, 'flow_answerers')} error={errors.flow_answerers}>
-        <fieldset id="flow-answerers" aria-label="Who else may answer" className="flex flex-col gap-1.5">
+      <FieldRow id="flow-answerers-who" {...docOf(form.settings, 'flow_answerers')} error={errors.flow_answerers}>
+        <fieldset id="flow-answerers-who" aria-label="Who else may answer" className="flex flex-col gap-1.5">
           <span className="text-xs text-muted-foreground">
             {rules.length === 0
               ? 'People only: nothing is chosen.'
