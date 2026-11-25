@@ -1190,7 +1190,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   both sides against it (R-7216-19).
   With no `qr` the text column starts at `QUIET_MM`. Place labels ignore the fields.
   `label_png.py` rasterises the PDF with pypdfium2, every
-  PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), each page a
+  PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), a request's
+  on the one-thread executor `_PDFIUM` (`rasterise`, R-7216-20), so a request that waits for
+  PDFium holds no worker of the shared `to_thread` pool; each page a
   greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
   pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
   entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`

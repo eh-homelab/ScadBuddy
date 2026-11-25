@@ -2807,7 +2807,7 @@ async def render_labels(
         ) from None
     content, media_type, name = pdf, "application/pdf", "labels.pdf"
     if form == "png":
-        pngs = await asyncio.to_thread(label_png.render_pngs, pdf, dpi)
+        pngs = await label_png.rasterise(pdf, dpi)
         if len(pngs) == 1:
             content, media_type, name = pngs[0], "image/png", "labels.png"
         else:

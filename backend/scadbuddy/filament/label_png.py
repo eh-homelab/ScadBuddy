@@ -5,14 +5,19 @@ the date.
 
 "PDFium is inherently not thread-safe" (pypdfium2's README, "Known limitations",
 https://github.com/pypdfium2-team/pypdfium2#incompatibility-with-threading), so every PDFium
-call holds one lock for the process."""
+call holds one lock for the process. A request rasterises on `_PDFIUM`, one thread of its own
+(R-7216-20), so a request that waits for PDFium waits in that executor's queue and holds no
+worker of the shared `asyncio.to_thread` pool. The lock stays for the PDFium calls made off that
+thread: the tests read the PDFs back with PDFium in their own threads."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import threading
 import zipfile
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from typing import Final
 
 import pypdfium2
@@ -30,6 +35,8 @@ _MM_PER_INCH: Final = 25.4
 _ZIP_DATE: Final = (1980, 1, 1, 0, 0, 0)
 
 _PDFIUM_LOCK: Final = threading.Lock()
+#: The one thread every request's rasterise runs on (R-7216-20).
+_PDFIUM: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdfium")
 
 
 class PngTooLargeError(ValueError):
@@ -83,6 +90,11 @@ def render_pngs(pdf: bytes, dpi: int) -> list[bytes]:
         finally:
             document.close()
     return pngs
+
+
+async def rasterise(pdf: bytes, dpi: int) -> list[bytes]:
+    """`render_pngs` on `_PDFIUM`, the one PDFium thread (R-7216-20)."""
+    return await asyncio.get_running_loop().run_in_executor(_PDFIUM, render_pngs, pdf, dpi)
 
 
 def png_names(labels: Sequence[Label], sheet: bool, pages: int) -> list[str]:

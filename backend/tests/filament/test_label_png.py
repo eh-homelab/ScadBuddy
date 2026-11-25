@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
+import threading
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any
 
 import pytest
 from PIL import Image
 
+from scadbuddy.filament import label_png
 from scadbuddy.filament.label_pdf import PlaceLabel, SpoolLabel, render_pdf
 from scadbuddy.filament.label_png import png_names, png_pixels, render_pngs, zip_pngs
 from scadbuddy.filament.label_templates import BY_ID
@@ -69,3 +73,53 @@ def test_two_rasterisations_at_once_both_give_pngs() -> None:
     with ThreadPoolExecutor(2) as pool:
         results = list(pool.map(lambda _: render_pngs(pdf, 300), range(2)))
     assert all(r[0].startswith(b"\x89PNG") for r in results)
+
+
+class _RefusingExecutor(ThreadPoolExecutor):
+    """A default executor that refuses work: a rasterise must not use the shared pool."""
+
+    def submit(self, *args: object, **kwargs: object) -> Future[Any]:
+        raise AssertionError("a rasterise used the loop's default executor")
+
+
+async def test_rasterises_wait_on_the_one_pdfium_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    # R-7216-20: two PNG renders at once run one after the other on `_PDFIUM`, and the one
+    # that waits holds no worker of the loop's default executor.
+    release = threading.Event()
+    first_in = threading.Event()
+    running: list[str] = []
+    seen: list[tuple[str, int]] = []
+    guard = threading.Lock()
+
+    def blocking(pdf: bytes, dpi: int) -> list[bytes]:
+        with guard:
+            running.append(threading.current_thread().name)
+            seen.append((threading.current_thread().name, len(running)))
+        first_in.set()
+        release.wait()
+        with guard:
+            running.pop()
+        return [pdf]
+
+    monkeypatch.setattr(label_png, "render_pngs", blocking)
+    loop = asyncio.get_running_loop()
+    refusing = _RefusingExecutor(max_workers=1)
+    loop.set_default_executor(refusing)
+    try:
+        first = asyncio.create_task(label_png.rasterise(b"a", 300))
+        second = asyncio.create_task(label_png.rasterise(b"b", 300))
+        while not first_in.is_set():
+            if first.done():
+                first.result()  # raises what stopped it, such as the refusing executor's error
+            await asyncio.sleep(0.001)
+        # The second is queued on the one PDFium thread, not running beside the first.
+        assert label_png._PDFIUM._work_queue.qsize() == 1
+        assert len(seen) == 1
+        release.set()
+        assert list(await asyncio.gather(first, second)) == [[b"a"], [b"b"]]
+    finally:
+        release.set()
+        loop.set_default_executor(ThreadPoolExecutor())
+        refusing.shutdown()
+    assert [name.startswith("pdfium") for name, _ in seen] == [True, True]
+    assert [count for _, count in seen] == [1, 1]
