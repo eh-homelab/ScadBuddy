@@ -126,6 +126,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " itself, and keeps the printer's file in ScadBuddy's own library. It records no"
             " print from a printer checked here.",
         ),
+        "flow_answerers": SettingDoc(
+            "Who else may answer a flow's question",
+            "A person always may. By default, nobody else may. Add `starter` for the session"
+            " that started the run, `sessions` for any session that a person owns, or"
+            " `token:<id>` for one MCP token and its sessions. Only a person can change this.",
+        ),
         # -- Projects & files ----------------------------------------------------------
         "library_folder_id": SettingDoc(
             "Inbox folder, for sends without a project",
