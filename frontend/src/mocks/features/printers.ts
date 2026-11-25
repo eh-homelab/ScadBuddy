@@ -25,8 +25,16 @@ export const LAN_WITHHELD =
   'Bambuddy withholds the access code from API keys while its auth is on: link the LAN in Settings > Printers'
 const STAMP = '2026-10-18T12:00:00Z'
 
-function row(fields: Partial<PrinterRow> & Pick<PrinterRow, 'id' | 'serial' | 'name'>): PrinterRow {
+/** The backend's rule (`PrinterRow.lan_linked`): a physical printer with host, pinned cert and access code. */
+export function withLanLinked(printer: Omit<PrinterRow, 'lan_linked'>): PrinterRow {
   return {
+    ...printer,
+    lan_linked: printer.kind === 'physical' && !!printer.lan_host && !!printer.lan_cert_sha256 && printer.has_access_code,
+  }
+}
+
+function row(fields: Partial<PrinterRow> & Pick<PrinterRow, 'id' | 'serial' | 'name'>): PrinterRow {
+  return withLanLinked({
     kind: 'physical',
     model: 'H2C',
     bambuddy_printer_id: null,
@@ -41,7 +49,7 @@ function row(fields: Partial<PrinterRow> & Pick<PrinterRow, 'id' | 'serial' | 'n
     created_at: STAMP,
     updated_at: STAMP,
     ...fields,
-  }
+  })
 }
 
 /** The H2C in Bambuddy as printer 1 (`printersNow.ts`'s first card), and one by serial only. */
@@ -192,7 +200,7 @@ function found(id: string): PrinterRow | undefined {
 }
 
 function update(id: string, fields: Partial<PrinterRow>): PrinterRow {
-  const next = { ...found(id)!, ...fields, updated_at: STAMP }
+  const next = withLanLinked({ ...found(id)!, ...fields, updated_at: STAMP })
   state.printers = state.printers.map((printer) => (printer.id === id ? next : printer))
   changed(id)
   return next
