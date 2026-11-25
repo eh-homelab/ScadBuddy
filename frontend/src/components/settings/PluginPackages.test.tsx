@@ -1,6 +1,6 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http, type JsonBodyType } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
@@ -429,17 +429,23 @@ describe('PluginPackagesPanel', () => {
   })
 
   it('reads the package again while its load is being checked', async () => {
-    seedStoredPackage('greeter')
-    // Held at checking: the subscription's confirmation reads the tree again too (#7672).
-    setPackageChecking('greeter', true)
-    const { user } = renderPage(<PluginPackagesPanel />)
-    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
-    const source = await within(card).findByRole('region', { name: 'Source greeter' })
-    await user.click(within(source).getByRole('button', { name: 'greeter' }))
-    expect(within(source).getAllByText(CHECKING).length).toBeGreaterThan(0)
-    setPackageChecking('greeter', false)
-    // No reload: the page asks again shortly (1 s, then 2 s), and the second read has settled.
-    await waitFor(() => expect(within(source).queryAllByText(CHECKING)).toEqual([]), { timeout: 6000 })
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      seedStoredPackage('greeter')
+      // Held at checking: the subscription's confirmation reads the tree again too (#7672).
+      setPackageChecking('greeter', true)
+      const { user } = renderPage(<PluginPackagesPanel />, { userEventOptions: { advanceTimers: vi.advanceTimersByTime } })
+      const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+      const source = await within(card).findByRole('region', { name: 'Source greeter' })
+      await user.click(within(source).getByRole('button', { name: 'greeter' }))
+      expect(within(source).getAllByText(CHECKING).length).toBeGreaterThan(0)
+      setPackageChecking('greeter', false)
+      // No reload: the page asks again shortly (1 s, then 2 s), and the second read has settled.
+      await act(() => vi.advanceTimersByTimeAsync(3000))
+      await waitFor(() => expect(within(source).queryAllByText(CHECKING)).toEqual([]))
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("says an older review's items appear once the package is next loaded", async () => {
