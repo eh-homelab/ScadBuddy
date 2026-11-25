@@ -14,8 +14,8 @@
 
 ## Global Constraints
 
-- Table `filament_unknown_trays`: `id`, `printer_id` (FK `printers`, `ON DELETE CASCADE`), `ams_id`, `tray_id`, `tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct` (nullable), `first_seen_at`, `seen_at`; unique `(printer_id, ams_id, tray_id)`. A row exists only while the tray is loaded and unmatched.
-- Routes: `GET /api/v1/filament/unknown-trays`, `POST /api/v1/filament/unknown-trays/{id}/resolve`, and the worker's `GET /api/v1/internal/crud/print/filament/printers/{printer_id}/unknown-trays` (as the spec's D7; every print-worker CRUD route lives under `crud_router("print")`, `crud/print.py` `BASE`).
+- Table `filament_unknown_trays`: `id`, `printer_id` (FK `printers`, `ON DELETE CASCADE`), `ams_id`, `tray_id`, `tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct` (nullable), `first_seen_at`, `seen_at`; unique `(printer_id, ams_id, tray_id)`. A row exists while the tray is loaded and unmatched; resolving, dismissing (D10) or emptying deletes it. Three cases keep a row as it is: a tray that is loading, an AMS unit the report no longer shows, and a tray whose lock is busy (D11).
+- Routes: `GET /api/v1/filament/unknown-trays`, `POST /api/v1/filament/unknown-trays/{id}/resolve`, `POST /api/v1/filament/unknown-trays/{id}/dismiss` (D10), and the worker's `GET /api/v1/internal/crud/print/filament/printers/{printer_id}/unknown-trays` (as the spec's D7; every print-worker CRUD route lives under `crud_router("print")`, `crud/print.py` `BASE`).
 - Problem codes: `tray_changed` (409), `code_unknown` (404, reused from `api/codes.py`), `spool_archived` (409), `no_ams_kind` (409), and the block's `unknown_spool_loaded` (422). Use these strings everywhere: backend, mocks, frontend, agent.
 - Block text, word for word: `"<printer name> has an unknown spool in <slot>: link it on the Filament page first."`; several slots join with `", "` and a final `" and "`. `<slot>` is `bambuddy/trays.py` `tray_label` ("AMS-A slot 2").
 - Needs-you title: `"Unknown spool in <printer name> <slot>"` ("Unknown spool in H2C AMS-A slot 2").
@@ -55,7 +55,7 @@ D1 to D5 are the spec's D1 to D5 ("Decisions made while planning"), with the rea
 These bind the tasks named, on top of their text below.
 
 - **D9, Task 3:** `FilamentInventory.reconcile_trays` (`filament/inventory.py:448`) also handles an untagged tray of a fresh report that holds no placed spool. When Bambuddy's assignment names a linked, unarchived SB spool that agrees with the tray (`_verdict`), place it there (`place_on`, a `moved` event by `RECONCILE_ACTOR`, `data.reason` `"assigned_to_empty_tray"`) and `clear_on` the tray's row in the same transaction. An assigned spool that another reported tray holds stays where it is, as today. Tests: `test_reconcile_places_an_assigned_spool_into_an_unknown_tray` (row gone, spool placed, one `moved` event) and `test_reconcile_leaves_a_disagreeing_assigned_spool` (row kept).
-- **D9, Task 4:** on the Bambuddy path, `prepare_run` leaves out a row whose tray the run's own `read_inventory` result gives an SB spool. Test: `test_bambuddy_path_does_not_block_an_assigned_tray`. The native path keeps the block (no Bambuddy read there).
+- **D9, Task 4:** on the Bambuddy path, `prepare_run` leaves out a row whose tray its own lazy `read_inventory` read (Task 4's `inventory`, not shared with `_plan_sliced`'s later read) gives an SB spool. Test: `test_bambuddy_path_does_not_block_an_assigned_tray`. The native path keeps the block (no Bambuddy read there).
 - **D10, Task 3:** `POST /filament/unknown-trays/{id}/dismiss` deletes the row (204; 404 when it is gone). **Task 5:** the resolve dialog has "Dismiss" with the text "Only for a slot that is no longer there; if a spool is still loaded, it comes back on the next report." **Task 7:** no agent tool. Tests: the route (204 then 404) and the dialog button.
 - **D11, Task 2:** in `note_unknown`, take `try_tray_lock` before every `clear_on` too (the "empty" and "holder found" branches); when it is busy, leave the row. Test: `test_a_busy_tray_lock_leaves_the_row_on_clear` (a row at (0,2), the lock held by another connection, an empty-tray report: the row is still there).
 - **Task 8:** the spec's "Data" section now states the three cases that keep a row; the as-built notes keep them.
@@ -265,7 +265,7 @@ Expected: no errors.
   - `class UnknownTrayStore` in `filament/unknown_trays.py`: `__init__(self, pool: ConnectionPool[Conn], inventory: FilamentInventory, locations: LocationStore, defaults: Callable[[], FilamentDefaults])`; `list(self) -> m.UnknownSpoolTrays`; `resolve(self, tray_id: UUID, body: m.UnknownSpoolResolve, *, actor: str) -> m.Spool`.
   - `rank(row: UnknownTrayRow, spools: Sequence[m.Spool], keys: Mapping[UUID, frozenset[str]], *, limit: int = 10) -> list[m.UnknownSpoolCandidate]`.
   - Errors: `TrayChangedError(ValueError)`, `SpoolArchivedError(ValueError)`, `CodeUnknownError(LookupError)`.
-  - Routes: `GET /filament/unknown-trays` (name `list_unknown_trays`, `response_model=m.UnknownSpoolTrays`) and `POST /filament/unknown-trays/{tray_id}/resolve` (name `resolve_unknown_tray`, `response_model=m.Spool`).
+  - Routes: `GET /filament/unknown-trays` (name `list_unknown_trays`, `response_model=m.UnknownSpoolTrays`) and `POST /filament/unknown-trays/{tray_id}/resolve` (name `resolve_unknown_tray`, `response_model=m.Spool`), and `POST /filament/unknown-trays/{tray_id}/dismiss` (name `dismiss_unknown_tray`, 204; D10).
 
 `rank` sorts every unarchived spool by this key and takes the first `limit`:
 
@@ -359,7 +359,7 @@ Expected: PASS, no lint errors.
 - Modify: `backend/scadbuddy/bambuddy/print_run.py` (`RunRefusalError` :887; `PrintCheck` :988; `check_print` :1465 and its `RunRefusalError` catches at :1543 and :1625; `_native_check` :1865 and its catch at :1905; `prepare_run` :3000, the check before `if source.is_sliced:` at :3149; the callers at :2507 and :2575)
 - Modify: `backend/scadbuddy/workflows/print_activities.py` (`PrintDeps` :146, the `prepare_run` call :385)
 - Modify: `backend/scadbuddy/printers/print_activities.py` (`LanDeps` :208; `lan_print` :362, before `self._command`)
-- Modify: `backend/scadbuddy/api/crud_print.py` (route), `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["print"]` and its comment), `backend/scadbuddy/worker.py` (`PRINT_CRUD_AREAS` :1497, `PrintDeps` :1405, `LanDeps` :1425), `backend/scadbuddy/crud/print.py` (`RemoteUnknownTrays`)
+- Modify: `backend/scadbuddy/api/crud_print.py` (route), `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["print"]` and its comment), `backend/scadbuddy/worker.py` (`PRINT_CRUD_AREAS` :1498, `PrintDeps` :1405, `LanDeps` :1425), `backend/scadbuddy/crud/print.py` (`RemoteUnknownTrays`)
 - Modify: `backend/scadbuddy/main.py` (`PrintDeps` :1772, `LanDeps` :1806), `backend/scadbuddy/api/printing.py` :1600 and `backend/scadbuddy/api/library_print.py` :1717 (pass `unknown_trays=PoolUnknownTrays(pool)` to the check)
 - Test: `backend/tests/printers/test_unknown_spool_block.py`, `backend/tests/crud/test_crud_unknown_trays.py`
 
@@ -367,14 +367,14 @@ Expected: PASS, no lint errors.
 - Consumes: `UnknownSpoolReads`, `UnknownSpoolRef`, `UnknownSpoolBlock`, `PoolUnknownTrays`, `blocked_detail`, `UNKNOWN_SPOOL_LOADED` (Task 1).
 - Produces:
   - `class UnknownSpoolLoadedError(RunRefusalError)`: `__init__(self, printer_name: str, refs: Sequence[UnknownSpoolRef])`, detail `blocked_detail(...)`, extension `code=UNKNOWN_SPOOL_LOADED`, attribute `refs`.
-  - `async def refuse_unknown_spools(reads: UnknownSpoolReads | None, row: PrinterRow | None) -> None`: does nothing when `reads` or `row` is `None`; raises `UnknownSpoolLoadedError(row.name, refs)` when `reads.blocking(row.id)` is non-empty.
+  - `async def refuse_unknown_spools(reads: UnknownSpoolReads | None, row: PrinterRow | None, *, inventory: Callable[[], Awaitable[Inventory]] | None = None) -> None`: does nothing when `reads` or `row` is `None`; raises `UnknownSpoolLoadedError(row.name, refs)` when `reads.blocking(row.id)` is non-empty. D9: when the refs are non-empty and `inventory` is given, it awaits `inventory()` once (`bambuddy/filaments.py` `read_inventory`) and drops each ref whose tray that result gives an SB spool before it decides. The read is lazy, so a printer with no unknown tray costs no Bambuddy read. The native path passes `None`.
   - `PrintCheck.unknown_trays: list[UnknownSpoolRef] = Field(default_factory=list)`.
   - `_refused_check(error: RunRefusalError) -> PrintCheck`: `PrintCheck(errors=[error.detail], unknown_trays=error.refs if isinstance(error, UnknownSpoolLoadedError) else [])`, used at the three catches.
   - A new keyword `unknown_trays: UnknownSpoolReads | None = None` on `prepare_run`, `check_print`, `_native_check` and the two check callers; `PrintDeps.unknown_trays` and `LanDeps.unknown_trays` (same type, default `None`).
-  - CRUD route `GET /filament/printers/{printer_id}/unknown-trays` on `crud_router("print")` (name `crud_print_unknown_trays`, answers `UnknownSpoolBlock`), in a new area `"unknown-trays"`, last in `CRUD_AREAS["print"]` and in `PRINT_CRUD_AREAS`. It is an area of its own, so a new worker waits for an API that serves it.
+  - CRUD route `GET /filament/printers/{printer_id}/unknown-trays` on `crud_router("print")` (name `crud_print_unknown_trays`, answers `UnknownSpoolBlock`), in a new area `"unknown-trays"`, last in `CRUD_AREAS["print"]` (the only ordered list) and added to `PRINT_CRUD_AREAS` (a frozenset, `worker.py:1498`). It is an area of its own, so a new worker waits for an API that serves it.
   - `class RemoteUnknownTrays` in `crud/print.py`: `__init__(self, client: CrudClient)`; `async def blocking(self, printer_id: str) -> list[UnknownSpoolRef]` (GET `{BASE}/filament/printers/{printer_id}/unknown-trays`).
 
-`prepare_run` calls `await refuse_unknown_spools(unknown_trays, row)` once the row is known (after the `if route is not None and route.native: … else: …` block), before `if source.is_sliced:`. So the check and the run both refuse, a sliced file too, and nothing is uploaded. `PrintActivities` passes `self.d.unknown_trays`. In `lan_print`, after the "an earlier attempt's start was taken" branch, call `self._refuse_unknown(row)`: a non-empty answer raises `_failed(blocked_detail(row.name, refs), status_code=422)`. Any exception from the read is logged at warning ("the unknown trays could not be read before a LAN start", `error` = type name) and the start goes on (Review Focus 9).
+`prepare_run` takes a new keyword `sb_reads: SbSpoolReads | None = None` (`filament/inventory.py`, the type of `print_run.py`'s other `reads` and `sb_reads` keywords and of both callers' reads). Both callers on the Bambuddy path pass theirs: `PrintActivities` (the run) and `check_print` (`print_run.py`, its `prepare_run` call; it already holds `sb_reads` for `reading`), so the check and the run drop the same refs. `_native_check` passes none (native path). It calls `await refuse_unknown_spools(unknown_trays, row, inventory=…)` once the row is known (after the `if route is not None and route.native: … else: …` block), before `if source.is_sliced:`. On the Bambuddy path `inventory` is `lambda: read_inventory(bambuddy_client(client), sb_reads)`; on the native path it is `None`. `prepare_run` reads no inventory today (the run's plan reads it later, `_plan_sliced` too, `print_run.py` `inventory = await read_inventory(client, reads)`, after `prepare_run`), so this read is the one D9 uses, a sliced file included. It is a read of its own: `check_print`'s `reading` task exists only for an unsliced source with `filament_plan.slots`, so it cannot stand in for it. So the check and the run both refuse, a sliced file too, and nothing is uploaded. `PrintActivities` passes `self.d.unknown_trays`. In `lan_print`, after the "an earlier attempt's start was taken" branch, call `self._refuse_unknown(row)`: a non-empty answer raises `_failed(blocked_detail(row.name, refs), status_code=422)`. Any exception from the read is logged at warning ("the unknown trays could not be read before a LAN start", `error` = type name) and the start goes on (Review Focus 9).
 
 - [ ] **Step 1: Write the failing tests** (`tests/printers/test_unknown_spool_block.py`: `prepare`, `lan_linked`, `bambuddy_routes` and `run_request` as in `tests/printers/test_run_printer.py`; `Scripted` and `_input` as in `tests/printers/test_lan_start.py`; `class FakeReads` with `refs: list[UnknownSpoolRef]` and `fail: bool`)
 
@@ -393,6 +393,10 @@ async def test_lan_print_starts_when_the_read_fails(pg_pool, caplog): ...
     # FakeReads(fail=True) → LanStarted; one warning record
 async def test_a_start_already_taken_is_not_refused(pg_pool): ...
     # baseline report already shows subtask_name RUNNING: LanStarted, FakeReads not called
+async def test_bambuddy_path_does_not_block_an_assigned_tray(...): ...   # D9
+    # FakeReads([ref]) and an inventory whose tray for that ref holds an SB spool → PreparedRun;
+    # check_print with the same request → no unknown_spool_loaded error (the check agrees with the run);
+    # the same on the native path → UnknownSpoolLoadedError (inventory is None there)
 ```
 
 `tests/crud/test_crud_unknown_trays.py` (fixtures `store`, `crud` as in `tests/crud/test_crud_filament.py`):

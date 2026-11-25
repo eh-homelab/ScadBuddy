@@ -368,6 +368,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
   // An entity's files and links (#6950) are records of their own, shown on the entity's page.
+  entity_attachment_add: () => [],
   entity_attachment_update: () => [],
   entity_attachment_delete: () => [],
   entity_link_add: () => [],

@@ -193,6 +193,31 @@ weight is known (the phone page sends it alone, so a decimal reading keeps the i
 name). Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md`
 §5.1, §5.2, §5.5.
 
+### A new spool's first weighing under the label weight (#7683)
+
+When a spool that is new by #7280's rule (nothing consumed, grams left at the
+label) reads under its label weight, the insert weight check
+(`GET /filament/spools/{id}/insert-weight-offer`) answers `reason` `below_label` with
+`shortfall_g` (the label less the reading), `resolutions` and `default`. Each resolution
+names its filament: `tared` (the scale was tared on the empty spool, so the reading is the
+filament), `short` (the spool holds less than its label: the reading less the empty weight,
+and the spool stops being added full) and `label_wrong` (the same filament, and the spool's
+own label weight becomes it, rounded; the type keeps its own). `short` and `label_wrong`
+are offered only when the reading is at least the empty weight. The default is `tared`
+within 10 % of the label, else `short`; a reading under the empty weight offers `tared`
+alone, so its default is `tared`. The weigh form and the phone page show the three
+with their numbers ("The reading is 100 g under the label weight. What is up?") with the
+default preselected, and the weighing posts `resolution` with `reading_g` alone; the
+agent's `filament_spool_add_event` answers the choices (`below_label`, nothing booked)
+until it is called again with one. The store checks the choice again under the row locks
+(a resolution the check no longer offers is 422 `no_below_label` with the check's
+`reason`), books the side effect as an `edited` event before the weighing, and keeps
+`resolution` and `shortfall_g` in the event's `data`; a `tared` weighing's `empty_source`
+is `tared`, `empty_g` 0. A resolved weighing keeps `expected_g` and records no `drift_g`,
+so it raises no Drift mark: the person just explained the gap. The timeline says "scale tared on the spool", "spool short by
+100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
+scale was tared on the spool)". Design: the same spec, §5.3.
+
 ### The phone page (#7273)
 
 `/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
@@ -225,8 +250,25 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Each kind has a schema that documents and types the keys it knows. It never refuses a
   key. The schema is an allowlisted subset of JSON Schema Draft 2020-12 (`TOP_KEYWORDS`,
   `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
-  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
-  already stored are not checked again after a schema change.
+  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. A
+  schema change rewrites and refuses no stored value; on the required kinds below, reads mark a
+  value that no longer fits and the row's next checked save refuses it.
+- Required keys (#7703, [spec §6.3b](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md)).
+  The schema of a spool, a spool type or a catalog kind may list keys under `required`
+  (`REQUIRED_KINDS`); any other kind's schema with `required` is 422 `bad_property_schema`.
+  The row's own create and save routes (`POST`/`PATCH /filament/spools`,
+  `POST /filament/spools/bulk`, `POST`/`PATCH /filament/types` and
+  `POST`/`PATCH /filament/catalog/{kind}`) take `properties` beside the row, write both in
+  one transaction, and refuse a row whose required keys have no value or whose defined keys
+  hold a value that no longer fits: 422 `missing_required_properties`, with `missing` and
+  `invalid`. An empty or blank string and an empty list are no value; `false` and `0` are.
+  Not checked: a save that sends only `archived` or `sort_order`, bulk-update, events,
+  syncs, imports, invoice confirm, a catalog row added on the way to another, and
+  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. Reads carry
+  `missing_properties` and `invalid_properties` (keys only); an archived row is never
+  marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
+  that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
+  once the base-kind design settles; the UI follows in its own change.
 - `item` is the exception (#7067). An item's properties follow its item kind's
   `attribute_schema`, merged down the kind tree (a child kind's key wins;
   `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the

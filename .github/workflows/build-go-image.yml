@@ -33,6 +33,10 @@ on:
       - "go.work.sum"
       - "vendor/**"
       - ".github/workflows/build-go-image.yml"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      # A vendored module's CLAUDE.md or AGENTS.md is code (select-lanes.sh).
+      - "**/vendor/**"
   workflow_dispatch:
     inputs:
       commit_sha:
