@@ -460,6 +460,9 @@ async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
     store, meta, job = saved
     catalogue = _catalogue(store)
     shutil.rmtree(store.paths.model_dir(job.slug))
+    # A live template besides: a models directory with none sweeps nothing (#7649).
+    store.paths.model_dir("kept").mkdir()
+    store.paths.model_source("kept").write_text("cube(1);\n", encoding="utf-8")
     monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
     catalogue.sweep_orphans()
     assert store.directory(meta.id).is_dir()

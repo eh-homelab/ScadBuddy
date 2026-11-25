@@ -3747,8 +3747,9 @@ class Catalogue:
         ids. Apart from `sweep_orphans`, which works by path: the previews are
         rows in the database.
 
-        A model counts as live while its directory exists, as for `sweep_orphans`,
-        and one whose liveness cannot be checked is kept.
+        A model counts as gone as for `sweep_orphans`: nothing is dropped while the
+        models directory holds no template, unless a commit deleted it (#7649). One
+        whose liveness cannot be checked is kept.
         """
         gone = None if self.previews is None else self._gone()
         if self.previews is None or gone is None:
@@ -3789,7 +3790,7 @@ class Catalogue:
         try:
             if history is not None and history.available:
                 known |= history.deleted_templates()
-        except GitError:
+        except (GitError, OSError):
             logger.exception("could not read the deleted templates")
         if not known:
             logger.warning(

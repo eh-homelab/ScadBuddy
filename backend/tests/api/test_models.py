@@ -422,6 +422,10 @@ def test_no_sweep_while_the_models_directory_has_no_template(
     output.mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True, exist_ok=True)
     paths.model_schema_cache(model).write_text("{}\n", encoding="utf-8")
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}}}
+    preset = client.post(f"/api/v1/models/{model}/presets", json=body, headers=press())
+    assert preset.status_code == 201
+    catalogue.previews.record_failure(model, "key", "no preview")
     kept = paths.models.with_name("models-kept")
     paths.models.rename(kept)
     if state != "missing":
@@ -432,7 +436,45 @@ def test_no_sweep_while_the_models_directory_has_no_template(
         assert catalogue.sweep_orphans() == []
         assert catalogue.sweep_orphan_previews() == []
     assert output.is_dir() and paths.model_schema_cache(model).is_file()
+    assert [saved.name for saved in catalogue.presets.saved_presets(model)] == ["Lid"]
+    assert model in catalogue.previews.slugs()
     assert "no template" in caplog.text
+
+
+def test_a_template_a_commit_deleted_is_swept_with_no_template_left(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#7649: with no template in the models directory, the history still says which
+    slugs were deleted; one it never held is kept."""
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    slug = _upload(client).json()["slug"]
+    assert client.delete(f"/api/v1/models/{slug}", headers=press()).status_code == 204
+    # What a render racing the delete writes after its sweep.
+    paths.output_dir(slug, "deadbeef").mkdir(parents=True)
+    paths.output_dir("never", "deadbeef").mkdir(parents=True)
+
+    assert catalogue.sweep_orphans() == [f"outputs/{slug}"]
+    assert (paths.outputs / "never").is_dir()
+
+
+def test_a_template_still_in_head_is_kept_though_a_commit_deleted_a_file_of_it(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#7649: a restore that brought back `.git` but not the folders. A template HEAD
+    still holds is not gone because one of its files once was."""
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    slug = _upload(client).json()["slug"]
+    extra = paths.model_dir(slug) / "extra.scad"
+    extra.write_text("cube(1);\n", encoding="utf-8")
+    assert catalogue.history.commit("Add a file", slug) is not None
+    extra.unlink()
+    assert catalogue.history.commit("Drop the file", slug) is not None
+    paths.model_dir(slug).rename(paths.root / "away")
+    output = paths.output_dir(slug, "deadbeef")
+    output.mkdir(parents=True)
+
+    assert catalogue.sweep_orphans() == []
+    assert output.is_dir()
 
 
 def test_a_failed_startup_sweep_does_not_stop_the_boot(
