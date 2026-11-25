@@ -120,10 +120,10 @@ from scadbuddy.core.events import (
     ActivityEvent,
     AgentOperationEvent,
     AnalyzerDecisionEvent,
+    AnyEvent,
     AuthSessionRevoked,
     BusResync,
     CameraFeedEvent,
-    Event,
     FlowChanged,
     FlowRunEvent,
     FontInstalled,
@@ -132,6 +132,7 @@ from scadbuddy.core.events import (
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
+    OpaqueEvent,
     OperationEvent,
     OrderBankDepositsChanged,
     OrderChanged,
@@ -151,6 +152,7 @@ from scadbuddy.core.events import (
     TaskChanged,
     UpstreamAvailable,
     VersionCommitted,
+    namespace_of,
 )
 from scadbuddy.core.origins import origin_allowed as origin_allowed
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
@@ -242,15 +244,48 @@ _TOPIC = re.compile(
 )
 
 
+#: The namespaces `_TOPIC` gives a shape of its own. An opaque event never routes in one.
+_KNOWN_NAMESPACES = frozenset(
+    {
+        "job",
+        "model",
+        "print",
+        "preview-slice",
+        "workflow-run",
+        "printer",
+        "order",
+        "task",
+        "tasks",
+        "activity",
+    }
+)
+#: A topic of an unknown kind's namespace (a kind `fleet.message` owns `fleet:...`).
+_OPAQUE_TOPIC = re.compile(r"^[a-z][a-z0-9_]*:[A-Za-z0-9:._-]{1,200}\Z")
+
+
+def _opaque_namespace_topic(topic: str) -> bool:
+    return _OPAQUE_TOPIC.match(topic) is not None and (
+        topic.split(":", 1)[0] not in _KNOWN_NAMESPACES
+    )
+
+
 def valid_topic(topic: object) -> bool:
-    if not isinstance(topic, str) or not _TOPIC.match(topic):
+    if not isinstance(topic, str):
+        return False
+    if _opaque_namespace_topic(topic):
+        return True
+    if not _TOPIC.match(topic):
         return False
     return not topic.startswith("model:") or len(topic) - 6 <= MAX_MODEL_ID_LENGTH
 
 
-def topics_of(event: Event) -> list[str]:
+def topics_of(event: AnyEvent) -> list[str]:
     """Every topic ``event`` is news for."""
     match event:
+        case OpaqueEvent():
+            # Only its own kind's namespace, so an unknown kind cannot pose as `job:` news.
+            prefix = f"{namespace_of(event.kind)}:"
+            return [t for t in event.topics if t.startswith(prefix) and _opaque_namespace_topic(t)]
         case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
@@ -309,7 +344,7 @@ def topics_of(event: Event) -> list[str]:
             assert_never(event)
 
 
-def event_frame(event: Event, topics: list[str]) -> dict[str, Any]:
+def event_frame(event: AnyEvent, topics: list[str]) -> dict[str, Any]:
     # An order event's `cart` (#5282) is for the flow triggers only: the frame keeps
     # spec 2026-10-18 §7.1's fields, plus `deleted: true` for a cart the draft sweep took.
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})

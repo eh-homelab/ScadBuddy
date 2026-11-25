@@ -19,10 +19,12 @@ from scadbuddy.api.deps import build_state
 from scadbuddy.core import pg_events
 from scadbuddy.core.events import (
     PG_CHANNEL,
+    AnyEvent,
     BusResync,
     Event,
     JobEvent,
     ModelEvent,
+    OpaqueEvent,
     Subscription,
     encode_event,
 )
@@ -62,14 +64,14 @@ async def _until(predicate: Callable[[], bool], timeout: float = PROMPTLY) -> No
     await until(predicate, timeout, what="timed out")
 
 
-async def _next(subscription: Subscription, timeout: float = PROMPTLY) -> Event:
+async def _next(subscription: Subscription, timeout: float = PROMPTLY) -> AnyEvent:
     return await asyncio.wait_for(subscription.get(), timeout)
 
 
-async def _quiet(subscription: Subscription) -> list[Event]:
+async def _quiet(subscription: Subscription) -> list[AnyEvent]:
     """What else arrives within `QUIET`."""
     await asyncio.sleep(QUIET)
-    seen: list[Event] = []
+    seen: list[AnyEvent] = []
     while (event := subscription.get_nowait()) is not None:
         seen.append(event)
     return seen
@@ -102,7 +104,7 @@ async def make_bus(pg_conninfo: str) -> AsyncIterator[BusFactory]:
         await bus.aclose()
 
 
-def _slugs(events: list[Event]) -> list[str]:
+def _slugs(events: list[AnyEvent]) -> list[str]:
     return [event.slug for event in events if isinstance(event, ModelEvent)]
 
 
@@ -422,6 +424,25 @@ async def test_the_log_replays_after_a_seq_in_pages(make_bus: BusFactory) -> Non
 
 
 @pytest.mark.requires_postgres
+async def test_replay_returns_opaque(make_bus: BusFactory, pg_conninfo: str) -> None:
+    bus = await make_bus()
+    payload = (
+        '{"id":"o1","at":"2026-11-25T00:00:00Z","kind":"fleet.message",'
+        '"topics":["fleet:agent:a"],"seq":1}'
+    )
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO events (event_id, kind, at, payload) VALUES (%s, %s, %s, %s::jsonb)",
+            ("o1", "fleet.message", "2026-11-25T00:00:00Z", payload),
+        )
+    bus.publish(_model("m0"))
+    page = await bus.replay(0)
+    opaque = [logged.event for logged in page.events if isinstance(logged.event, OpaqueEvent)]
+    assert [event.kind for event in opaque] == ["fleet.message"]
+    assert opaque[0].payload["seq"] == 1
+
+
+@pytest.mark.requires_postgres
 async def test_a_started_bus_has_already_pruned_once(
     make_bus: BusFactory, pg_conninfo: str
 ) -> None:
@@ -536,7 +557,7 @@ def _result() -> JobResult:
     )
 
 
-def _jobs(events: list[Event]) -> list[tuple[str, str]]:
+def _jobs(events: list[AnyEvent]) -> list[tuple[str, str]]:
     return [(e.kind, e.job_id) for e in events if isinstance(e, JobEvent)]
 
 

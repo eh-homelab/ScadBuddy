@@ -79,7 +79,8 @@ The replay log
 ``events`` (migrations/20260928T0630Z_events.sql) keeps each published event under a
 monotonically increasing ``seq``. :meth:`replay` reads the events after a ``seq``,
 oldest first, with a limit, and says whether rows the caller has not seen were
-already pruned. It is pruned by age and by row count
+already pruned. A row of a kind this process has no model for comes back as an
+:class:`~.events.OpaqueEvent`. It is pruned by age and by row count
 (``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``)
 every `PRUNE_INTERVAL`, by every replica; the deletes are idempotent.
 
@@ -134,6 +135,7 @@ from psycopg_pool import AsyncConnectionPool
 from scadbuddy.core.events import (
     DEFAULT_QUEUE_SIZE,
     PG_CHANNEL,
+    AnyEvent,
     BusResync,
     Event,
     InProcessEventBus,
@@ -258,7 +260,7 @@ class EventLogRetention:
 class LoggedEvent:
     #: The event's place in the log: what a client sends back as ``Last-Event-ID``.
     seq: int
-    event: Event
+    event: AnyEvent
 
 
 @dataclass(frozen=True)
@@ -385,7 +387,7 @@ class PgNotifyEventBus:
         #: Told of every payload heard on the channel, as it was heard, with its event when
         #: it decodes and None when not: the agent's change stream (`agent_changes/hub.py`,
         #: #5299 D4). Each runs on the event loop and must not block.
-        self.taps: list[Callable[[str, Event | None], None]] = []
+        self.taps: list[Callable[[str, AnyEvent | None], None]] = []
         listener.listen(PG_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
     # -- lifecycle ------------------------------------------------------------------
@@ -659,18 +661,19 @@ class PgNotifyEventBus:
             event = decode_event(payload)
         except ValueError:
             self._tap(payload, None)
-            # Another version's kind, or something else NOTIFYing on the channel.
+            # Not an event: a payload with a broken envelope, or something else NOTIFYing
+            # on the channel. A kind this process has no model for is an `OpaqueEvent`.
             logger.warning("ignored an undecodable event payload", extra={"bytes": len(payload)})
             return
         self._tap(payload, event)
         self.metrics.events_received.inc()
         # Listeners first: one that applies the event later takes `settle` here, before
         # any read can be stamped with it (#1039).
-        self.local.publish(event)
+        self.local.deliver(event)
         self.last_event_id = event.id
         self.live_event_id = event.id
 
-    def _tap(self, payload: str, event: Event | None) -> None:
+    def _tap(self, payload: str, event: AnyEvent | None) -> None:
         for tap in self.taps:
             try:
                 tap(payload, event)

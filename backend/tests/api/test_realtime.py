@@ -30,6 +30,7 @@ from scadbuddy.core.events import (
     JobProgress,
     LibraryRemoved,
     ModelEvent,
+    OpaqueEvent,
     OutputEvent,
     PluginPackagesChanged,
     PreviewSliceEvent,
@@ -461,6 +462,30 @@ def test_a_task_topic_place_may_be_100_characters() -> None:
     assert realtime.valid_topic("tasks:" + "x" * 100)
     assert realtime.valid_topic("tasks")
     assert realtime.valid_topic(f"task:{TASK_ID}")
+
+
+def _opaque(kind: str, topics: list[str]) -> OpaqueEvent:
+    raw = {"id": "x", "at": "2026-11-25T00:00:00Z", "kind": kind, "topics": topics}
+    return OpaqueEvent.model_validate({**raw, "payload": raw})
+
+
+def test_topics_of_opaque_namespaced() -> None:
+    event = _opaque("fleet.message", ["fleet:agent:a", "job:abc", "orders", "fleet:"])
+    assert realtime.topics_of(event) == ["fleet:agent:a"]
+
+
+def test_an_opaque_event_cannot_pose_as_a_known_namespace() -> None:
+    job = f"job:{'a' * 32}"
+    assert realtime.topics_of(_opaque("job.sneaky", [job])) == []
+
+
+def test_valid_topic_namespaced() -> None:
+    assert realtime.valid_topic("fleet:agent:54a63686")
+    assert not realtime.valid_topic("fleet:")
+    assert not realtime.valid_topic("fleet:a\n")
+    assert not realtime.valid_topic("Fleet:a")
+    assert not realtime.valid_topic("fleet:" + "x" * 201)
+    assert not realtime.valid_topic("job:abc")
 
 
 def test_topics_of_handles_every_event_in_the_union() -> None:

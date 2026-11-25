@@ -47,6 +47,7 @@ refused and logged. The details are in `scadbuddy.core.pg_events`.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import uuid
@@ -54,9 +55,9 @@ from collections import deque
 from collections.abc import Callable, Collection
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Annotated, Literal, Protocol, Self, get_args
+from typing import Annotated, Any, Literal, Protocol, Self, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from scadbuddy.core.metrics import RenderStage
 
@@ -498,13 +499,59 @@ EVENT_KINDS: frozenset[str] = frozenset(
 )
 
 
-def encode_event(event: Event) -> str:
-    """The wire form: what a NOTIFY payload or a WebSocket frame carries."""
+def encode_event(event: AnyEvent) -> str:
+    """The wire form: what a NOTIFY payload or a WebSocket frame carries. An opaque event's
+    is the JSON it arrived as."""
+    if isinstance(event, OpaqueEvent):
+        return json.dumps(event.payload)
     return event.model_dump_json()
 
 
-def decode_event(payload: str | bytes) -> Event:
+#: A kind a service outside this process may publish: a namespace, a dot, a name.
+OPAQUE_KIND_PATTERN = r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$"
+
+
+class OpaqueEvent(BaseModel):
+    """An event of a kind this process has no model for, with a valid envelope.
+
+    The bus carries it and the log keeps it; ``payload`` is the whole JSON object, for a
+    consumer that knows the kind. Only :func:`decode_event` makes one: publishing stays
+    strict, so each service's publish route keeps its own kind allowlist."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    at: datetime
+    kind: str = Field(pattern=OPAQUE_KIND_PATTERN)
+    topics: list[str] = []
+    #: How long the log keeps the event; ``None`` is the log's own default.
+    retention_seconds: float | None = None
+    payload: dict[str, Any]
+
+
+AnyEvent = Event | OpaqueEvent
+
+
+def namespace_of(kind: str) -> str:
+    """The part of a kind before its first dot."""
+    return kind.split(".", 1)[0]
+
+
+def decode_known_event(payload: str | bytes) -> Event:
+    """Only a kind this process models; anything else is ``ValueError``."""
     return _EVENT_ADAPTER.validate_json(payload)
+
+
+def decode_event(payload: str | bytes) -> AnyEvent:
+    """The typed model for a known kind; an :class:`OpaqueEvent` for an unknown kind whose
+    envelope is valid; ``ValueError`` for anything else."""
+    try:
+        return _EVENT_ADAPTER.validate_json(payload)
+    except ValidationError as error:
+        if not any(detail["type"] == "union_tag_invalid" for detail in error.errors()):
+            raise
+        raw = json.loads(payload)
+    return OpaqueEvent.model_validate({**raw, "payload": raw})
 
 
 class Subscription:
@@ -533,7 +580,7 @@ class Subscription:
         #: Events this subscriber lost by falling more than ``maxsize`` behind.
         self.dropped = 0
         self._loop = loop
-        self._queue: deque[Event] = deque()
+        self._queue: deque[AnyEvent] = deque()
         self._ready = asyncio.Event()
         self._closed = False
         self._on_close = on_close
@@ -542,11 +589,11 @@ class Subscription:
     def closed(self) -> bool:
         return self._closed
 
-    def wants(self, event: Event) -> bool:
+    def wants(self, event: AnyEvent) -> bool:
         # A resync concerns every kind: a filtered subscriber missed its own too.
         return self.kinds is None or event.kind in self.kinds or event.kind == RESYNC_KIND
 
-    def offer(self, event: Event) -> None:
+    def offer(self, event: AnyEvent) -> None:
         """Hand ``event`` over from any thread. Never blocks, never raises."""
         if self._closed or not self.wants(event):
             return
@@ -563,7 +610,7 @@ class Subscription:
             # The subscriber's loop has closed under it: nobody is left to read.
             self._closed = True
 
-    def _put(self, event: Event) -> None:
+    def _put(self, event: AnyEvent) -> None:
         if self._closed:
             return
         if len(self._queue) >= self.maxsize:
@@ -572,12 +619,12 @@ class Subscription:
         self._queue.append(event)
         self._ready.set()
 
-    def get_nowait(self) -> Event | None:
+    def get_nowait(self) -> AnyEvent | None:
         if not self._queue:
             return None
         return self._queue.popleft()
 
-    async def get(self) -> Event:
+    async def get(self) -> AnyEvent:
         """The next event; ``StopAsyncIteration`` once closed and drained."""
         while not self._queue:
             if self._closed:
@@ -589,7 +636,7 @@ class Subscription:
     def __aiter__(self) -> Self:
         return self
 
-    async def __anext__(self) -> Event:
+    async def __anext__(self) -> AnyEvent:
         return await self.get()
 
     def close(self) -> None:
@@ -647,11 +694,19 @@ class InProcessEventBus:
         self._listeners: list[Listener] = []
 
     def publish(self, event: Event) -> None:
+        self.deliver(event)
+
+    def deliver(self, event: AnyEvent) -> None:
+        """:meth:`publish`, but also for an :class:`OpaqueEvent`, which only the Postgres bus
+        hears (from NOTIFY or a replay): publishing stays strict."""
         with self._lock:
             subscriptions = tuple(self._subscriptions)
             listeners = tuple(self._listeners)
         for subscription in subscriptions:
             subscription.offer(event)
+        if isinstance(event, OpaqueEvent):
+            # The listeners are typed taps on kinds this process models.
+            return
         for listener in listeners:
             try:
                 listener(event)

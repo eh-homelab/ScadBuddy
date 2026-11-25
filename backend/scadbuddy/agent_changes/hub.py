@@ -69,7 +69,7 @@ from typing import Final, Protocol
 from scadbuddy.core.events import (
     PG_CHANNEL,
     AgentOperationEvent,
-    Event,
+    AnyEvent,
     SessionBusEvent,
     encode_event,
 )
@@ -259,7 +259,7 @@ class ChangeHub:
         for stream in list(self._streams):
             stream.offer(END)
 
-    def _heard_event(self, payload: str, event: Event | None) -> None:
+    def _heard_event(self, payload: str, event: AnyEvent | None) -> None:
         logged = None if event is None or isinstance(event, NOTIFY_ONLY) else event.id
         self.publish(Change(PG_CHANNEL, payload, logged))
 
@@ -282,7 +282,7 @@ class _Listener(Protocol):
 
 
 class _Bus(Protocol):
-    taps: list[Callable[[str, Event | None], None]]
+    taps: list[Callable[[str, AnyEvent | None], None]]
 
 
 class Log(Protocol):
