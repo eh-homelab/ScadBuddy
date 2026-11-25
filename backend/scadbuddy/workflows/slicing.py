@@ -61,7 +61,7 @@ SLICE_TIMEOUT = timedelta(minutes=30)
 #: "Retries three times" (spec §5.5, Ruling C4): a worker shutdown and a heartbeat
 #: timeout take attempts too, and a shutdown's retry starts about at once: Rust core
 #: reports a cancel for its worker's shutdown as a retryable `WorkerShutdown` failure
-#: (temporalio-sdk-core 0.10.0 `worker/activities.rs`), not as a cancel. Pinned by
+#: (temporalio-sdk-core 0.10.2 `worker/activities.rs`), not as a cancel. Pinned by
 #: `workers/rust/bins/scadbuddy-slicer/tests/worker.rs`'s `WorkerShutdown` assertion, so
 #: a core bump that changes it fails there.
 SLICE_RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_attempts=4)
