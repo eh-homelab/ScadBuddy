@@ -71,20 +71,14 @@ PATTERNS_BUDGET_S: Final = 0.5
 patterns_deadline: ContextVar[float | None] = ContextVar("patterns_deadline", default=None)
 
 
-class _BudgetSpentError(TimeoutError):
-    """A pattern cut short by the check's shared `PATTERNS_BUDGET_S`, not by its own
-    `PATTERN_TIMEOUT_S`. Most often a busy pod, which a later check passes; but patterns
-    that need more than the budget together time out on every pod, so a caller that tries
-    again bounds its tries (`flow_activities.PATTERN_TIMEOUT_ATTEMPTS`). A pattern that
-    uses its whole `PATTERN_TIMEOUT_S` (`^(a|aa)+$`) times out on every check: refused."""
-
-
 class PatternsTimedOutError(TimeoutError):
-    """A default fails only because the check's shared budget ran out, and nothing else in
-    the schema is wrong: `schema_problems` with ``retry_timeouts`` raises it, for a caller
-    that tries again later, a bounded number of times (a prompt's task, #7437). A pattern
-    that uses its whole `PATTERN_TIMEOUT_S` is refused all the same. The message never
-    quotes the value."""
+    """A default fails only because its patterns ran out of time, its own
+    `PATTERN_TIMEOUT_S` or the check's shared `PATTERNS_BUDGET_S`, and nothing else in the
+    schema is wrong: `schema_problems` with ``retry_timeouts`` raises it, for a caller that
+    tries again later. A busy pod passes then; a pattern that times out on every pod
+    (`^(a|aa)+$`) does not, so the caller bounds its tries
+    (`flow_activities.PATTERN_TIMEOUT_ATTEMPTS`, a prompt's task, #7437, #7688). The
+    message never quotes the value."""
 
     def __init__(self) -> None:
         super().__init__("a default's pattern took too long to check: try again")
@@ -405,15 +399,16 @@ def _property_problems(
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if defaults and "default" in prop and not problems:
         checker = FORMAT_CHECKER if formats else None
-        errors = Validator(prop, format_checker=checker).iter_errors(prop["default"])
-        if (first := next(errors, None)) is not None:
-            if (
-                retry_timeouts
-                and isinstance(first.cause, _BudgetSpentError)
-                and all(isinstance(e.cause, _BudgetSpentError) for e in errors)
-            ):
-                raise PatternsTimedOutError
-            problems.append(f"default does not fit: {first.message}")
+        # Every error, not only the first: `best_match` picks among them, and a timeout must
+        # not hide a real error. Each pattern is still bounded by the shared budget (#7688).
+        errors = list(Validator(prop, format_checker=checker).iter_errors(prop["default"]))
+        real = [e for e in errors if not isinstance(e.cause, TimeoutError)]
+        if errors and not real and retry_timeouts:
+            raise PatternsTimedOutError
+        # jsonschema's own pick, among the real errors first: a timeout names the problem
+        # only when nothing else is wrong (#7688).
+        if (picked := jsonschema.exceptions.best_match(real or errors)) is not None:
+            problems.append(f"default does not fit: {picked.message}")
     return problems
 
 
@@ -459,17 +454,17 @@ def _pattern(
     if timeout <= 0:
         yield jsonschema.ValidationError(
             f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
-            cause=_BudgetSpentError(),
+            cause=TimeoutError(),
         )
         return
     try:
         found = regex.search(pattern, instance, timeout=timeout)
     except TimeoutError as err:
         if timeout < PATTERN_TIMEOUT_S:
-            # The shared budget cut it short: it might have passed with its own deadline.
+            # The shared budget cut it short: the message names the budget.
             yield jsonschema.ValidationError(
                 f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
-                cause=_BudgetSpentError(),
+                cause=err,
             )
             return
         yield jsonschema.ValidationError(

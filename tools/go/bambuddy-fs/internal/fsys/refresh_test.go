@@ -218,6 +218,9 @@ func TestTheLastListingIsServedWhileScadBuddyIsDown(t *testing.T) {
 	if l, errno := tr.list(context.Background(), 0, anyAge); errno != 0 || !slices.Equal(fileNames(l), []string{"a.3mf"}) {
 		t.Fatalf("forgotten while down: %v %v", fileNames(l), errno)
 	}
+	// The refresh logs the outage after it releases the tree's lock, which the wait above
+	// takes: wait for the line, then count it (#7589).
+	eventually(t, "the outage logged", func() bool { return strings.Contains(log.String(), "ScadBuddy is not answering") })
 	if n := strings.Count(log.String(), "ScadBuddy is not answering"); n != 1 {
 		t.Fatalf("logged %d times:\n%s", n, log)
 	}
@@ -229,9 +232,7 @@ func TestTheLastListingIsServedWhileScadBuddyIsDown(t *testing.T) {
 	if _, errno := tr.list(context.Background(), 0, anyAge); errno != 0 {
 		t.Fatal(errno)
 	}
-	if !strings.Contains(log.String(), "ScadBuddy answers again") {
-		t.Fatalf("no recovery line:\n%s", log)
-	}
+	eventually(t, "the recovery logged", func() bool { return strings.Contains(log.String(), "ScadBuddy answers again") })
 }
 
 // With a TTL that keeps listings, each write through the mount shows at the writer's

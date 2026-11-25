@@ -4,7 +4,7 @@ import type { Logged } from '../gate/crudStore.js'
 import type { Owner } from '../sessions/protocol.js'
 import type { ApprovalRow } from './service.js'
 
-// The classic approvals through the API's CRUD routes (#5299 step 10; backend
+// The approvals (MCP prepares) through the API's CRUD routes (#5299 step 10; backend
 // api/crud_agent_approvals.py, agent_data/approvals.py), area `approvals`. ApprovalService
 // (approvals/service.ts) calls only these.
 // Who may see or decide an approval stays the service's check; a decision is written on the API
@@ -33,17 +33,6 @@ export function rowOf(w: WireRow): ApprovalRow {
     consumed_at: at(w.consumed_at),
     revoked_at: at(w.revoked_at),
   }
-}
-
-/** The session access an approval's checks take. */
-export type SessionAccessRow = {
-  owner_kind: Owner['kind']
-  owner_id: string
-  owner_label: string
-  creator_kind: Owner['kind']
-  creator_id: string
-  offer_kind: Owner['kind'] | null
-  offer_id: string | null
 }
 
 /** A new pending approval's row, its summary and hash made here. */
@@ -76,9 +65,8 @@ export type SettleCall = {
 /** The approvals' routes, as ApprovalService calls them. */
 export interface ApprovalRoutes {
   row(id: string): Promise<ApprovalRow | undefined>
-  session(id: string): Promise<SessionAccessRow | undefined>
-  visiblePending(who: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]>
-  list(sessionId: string | undefined, pending: boolean): Promise<ApprovalRow[]>
+  /** Every pending approval, oldest first. */
+  pending(): Promise<ApprovalRow[]>
   prepared(who: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]>
   due(tried: readonly string[], limit: number): Promise<string[]>
   create(row: NewApprovalRow): Promise<{ approval: ApprovalRow; logged: Logged[] }>
@@ -106,22 +94,13 @@ export class CrudApprovals implements ApprovalRoutes {
     return approval ? rowOf(approval) : undefined
   }
 
-  async session(id: string): Promise<SessionAccessRow | undefined> {
-    const { session } = await this.#call<{ session: SessionAccessRow | null }>("an approval's session", `/approvals/session${qs({ session_id: id })}`)
-    return session ?? undefined
-  }
-
   async #rows(step: string, path: string, body: unknown): Promise<ApprovalRow[]> {
     const { approvals } = await this.#call<{ approvals: WireRow[] }>(step, path, { body: wellFormed(body) })
     return approvals.map(rowOf)
   }
 
-  async visiblePending(by: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]> {
-    return await this.#rows('the visible approvals', '/approvals/visible-pending', who(by))
-  }
-
-  async list(sessionId: string | undefined, pending: boolean): Promise<ApprovalRow[]> {
-    return await this.#rows('the approvals', '/approvals/list', { session_id: sessionId ?? null, pending })
+  async pending(): Promise<ApprovalRow[]> {
+    return await this.#rows('the approvals', '/approvals/list', { session_id: null, pending: true })
   }
 
   async prepared(by: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]> {

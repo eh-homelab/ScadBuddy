@@ -196,3 +196,6 @@ class CallOperation(BaseModel):
     id: str
     #: Its request while it runs, an answer sealed in it; None once it has ended.
     request: dict[str, Any] | None = None
+    #: Its workflow's id, by which an operation knows its own record (#7588); None from an
+    #: API from before it.
+    workflow_id: str | None = None

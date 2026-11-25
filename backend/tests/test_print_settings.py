@@ -18,7 +18,9 @@ from scadbuddy.library.catalogue import (
     meta_from_raw,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
+from tests.support.template_rows import open_template_rows
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 
@@ -88,27 +90,31 @@ def test_print_settings_that_are_not_an_object_are_refused() -> None:
         meta_from_raw({"print_settings": ["enable_support"]}, "demo")
 
 
-def _catalogue(tmp_path: Path, meta: dict[str, object]) -> Catalogue:
+def _catalogue(tmp_path: Path, meta: dict[str, object], pool: PgPool) -> Catalogue:
     paths = DataPaths(tmp_path)
     paths.model_dir("demo").mkdir(parents=True)
     paths.model_source("demo").write_text("cube(1);\n", encoding="utf-8")
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
-    return Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pool)
+    return catalogue
 
 
-def test_the_catalogue_answers_a_templates_print_settings(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path, {"name": "Demo", "print_settings": {"brim_width": "5"}})
+def test_the_catalogue_answers_a_templates_print_settings(tmp_path: Path, pg_pool: PgPool) -> None:
+    catalogue = _catalogue(
+        tmp_path, {"name": "Demo", "print_settings": {"brim_width": "5"}}, pg_pool
+    )
 
     assert catalogue.print_settings("demo") == {"brim_width": "5"}
     assert catalogue.record("demo").print_settings == {"brim_width": "5"}
 
 
-def test_a_template_that_is_gone_has_none(tmp_path: Path) -> None:
-    assert _catalogue(tmp_path, {"name": "Demo"}).print_settings("gone") == {}
+def test_a_template_that_is_gone_has_none(tmp_path: Path, pg_pool: PgPool) -> None:
+    assert _catalogue(tmp_path, {"name": "Demo"}, pg_pool).print_settings("gone") == {}
 
 
-def test_loading_a_template_with_any_key_reads_it(tmp_path: Path) -> None:
-    catalogue = _catalogue(tmp_path, {"name": "Demo", "print_settings": {"infill": "15%"}})
+def test_loading_a_template_with_any_key_reads_it(tmp_path: Path, pg_pool: PgPool) -> None:
+    catalogue = _catalogue(tmp_path, {"name": "Demo", "print_settings": {"infill": "15%"}}, pg_pool)
 
     assert catalogue.print_settings("demo") == {"infill": "15%"}
 

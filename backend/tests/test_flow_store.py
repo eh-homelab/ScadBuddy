@@ -47,7 +47,7 @@ class Events:
 
 @pytest.fixture
 def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
-    store = JobProjection(pg_conninfo, pool_size=2)
+    store = JobProjection(pg_conninfo, pool_size=4)
     store.open()
     try:
         yield store
@@ -288,29 +288,29 @@ async def test_an_answer_is_taken_over_only_as_it_was_seen(
 ) -> None:
     await started(store)
     one, two = answer_row("one"), answer_row("two")
-    assert not await store.take_over_answer(two, held=one, seen=[])  # no row
+    assert not await store.take_over_decision(two, held=one, seen=[])  # no row
     assert await store.record_decision(one)
     await insert_operation(jobs, "a", {"run_id": "r1", "task_id": "c", "answer_sealed": "s"})
     # An operation nobody looked at may be the one that sends.
-    assert not await store.take_over_answer(two, held=one, seen=[])
+    assert not await store.take_over_decision(two, held=one, seen=[])
     # The row moved on since it was read.
-    assert not await store.take_over_answer(two, held=answer_row("three"), seen=["a"])
-    assert await store.take_over_answer(two, held=one, seen=["a"])
+    assert not await store.take_over_decision(two, held=answer_row("three"), seen=["a"])
+    assert await store.take_over_decision(two, held=one, seen=["a"])
     # Sent again after a lost reply.
-    assert await store.take_over_answer(two, held=one, seen=["a"])
+    assert await store.take_over_decision(two, held=one, seen=["a"])
     held = await store.get_decision(two.request_id)
     assert held is not None and held.response == {"answer": "two"}
-    assert not await store.take_over_answer(answer_row("three"), held=one, seen=["a"])
+    assert not await store.take_over_decision(answer_row("three"), held=one, seen=["a"])
     # Put back, whatever operation started since.
     await insert_operation(jobs, "b", {"run_id": "r1", "task_id": "c", "answer_sealed": "t"})
-    assert not await store.take_over_answer(one, held=two, seen=["a"])
-    assert await store.take_over_answer(one, held=two, seen=None)
-    assert await store.take_over_answer(two, held=one, seen=["a", "b"])
+    assert not await store.take_over_decision(one, held=two, seen=["a"])
+    assert await store.take_over_decision(one, held=two, seen=None)
+    assert await store.take_over_decision(two, held=one, seen=["a", "b"])
     # Only an answer's own row is withdrawn.
-    await store.withdraw_answer(one)
+    await store.withdraw_decision(one)
     assert await store.get_decision(two.request_id) is not None
-    await store.withdraw_answer(two)
-    await store.withdraw_answer(two)
+    await store.withdraw_decision(two)
+    await store.withdraw_decision(two)
     assert await store.get_decision(two.request_id) is None
 
 
@@ -326,7 +326,137 @@ async def test_only_a_persons_answer_is_taken_over(store: FlowStore, update: Any
     await started(store)
     held = answer_row("one", **update)
     assert await store.record_decision(held)
-    assert not await store.take_over_answer(answer_row("two"), held=held, seen=[])
+    assert not await store.take_over_decision(answer_row("two"), held=held, seen=[])
+
+
+def approval_row(**update: Any) -> Decision:
+    row = answer_row("x", kind="approval", outcome="approved", response={}, input_hash="h1")
+    return row.model_copy(update=update)
+
+
+async def parks(store: FlowStore, **update: Any) -> None:
+    waiting = FlowWaiting(call_id="c", kind="approval", fn="queue_print", since=NOW)
+    await store.project(
+        ProjectionWrite(
+            run_id="r1", workflow_run_id="wr1", waiting_add=waiting.model_copy(update=update)
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"outcome": "denied", "response": {"reason": "no"}, "input_hash": None},
+        {"input_hash": "h2"},
+        {"response": {"args": {"copies": 1}, "narrowed_by": "s"}, "input_hash": "h2"},
+    ],
+    ids=["outcome", "hash", "narrowed"],
+)
+async def test_a_decision_is_taken_over_only_as_it_was_seen(
+    store: FlowStore, jobs: JobProjection, update: Any
+) -> None:
+    """#7588: the whole decision, not only its response."""
+    await started(store)
+    await parks(store)
+    one, two = approval_row(), approval_row(**update)
+    hops = [HopRecord(hop="person", action="approve", actor="browser", at=NOW)]
+    two = two.model_copy(update={"hops": hops})
+    assert await store.record_decision(one)
+    assert not await store.record_decision(two)
+    assert await store.record_decision(one)
+    await insert_operation(jobs, "a", {"run_id": "r1", "call_id": "c", "approved": True})
+    assert not await store.take_over_decision(two, held=one, seen=[])
+    assert not await store.take_over_decision(two, held=two, seen=["a"])
+    assert await store.take_over_decision(two, held=one, seen=["a"])
+    held = await store.get_decision(two.request_id)
+    assert held is not None
+    assert held.model_copy(update={"created_at": None}) == two
+    # Only a decision's own row is withdrawn.
+    await store.withdraw_decision(one)
+    assert await store.get_decision(two.request_id) is not None
+    await store.withdraw_decision(two)
+    assert await store.get_decision(two.request_id) is None
+
+
+@pytest.mark.parametrize("gone", ["never parked", "resolved", "parked late", "superseded", "ended"])
+async def test_a_decision_is_taken_over_only_while_its_call_waits(
+    store: FlowStore, gone: str
+) -> None:
+    """#7588: a call that runs has read its row."""
+    await started(store)
+    one, two = approval_row(), approval_row(outcome="denied", input_hash=None)
+    if gone != "never parked":
+        await parks(store)
+    assert await store.record_decision(one)
+    if gone in ("resolved", "parked late"):
+        await store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="c"))
+    if gone == "parked late":
+        # A copy of the park that arrives after the call was let through.
+        await parks(store)
+    if gone == "superseded":
+        await store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr2"))
+    if gone == "ended":
+        await store.mark_terminated("r1")
+    assert not await store.take_over_decision(two, held=one, seen=[])
+    held = await store.get_decision(one.request_id)
+    assert held is not None and held.outcome == "approved"
+
+
+async def test_a_take_over_sent_again_finds_its_own_row(store: FlowStore) -> None:
+    await started(store)
+    await parks(store)
+    one, two = approval_row(), approval_row(input_hash="h2")
+    assert await store.record_decision(one)
+    assert await store.take_over_decision(two, held=one, seen=[])
+    await store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="c"))
+    assert await store.take_over_decision(two, held=one, seen=[])
+
+
+async def test_only_a_denial_is_put_back(store: FlowStore) -> None:
+    """#7588: a call that was denied reads no row; one that was approved has."""
+    await started(store)
+    approved, denied = approval_row(), approval_row(outcome="denied", input_hash=None)
+    assert await store.record_decision(denied)
+    assert not await store.take_over_decision(approved, held=denied, seen=None)
+    await store.delete_decision(denied.request_id)
+    assert await store.record_decision(approved)
+    assert await store.take_over_decision(denied, held=approved, seen=None)
+
+
+async def test_a_call_let_through_waits_for_a_take_over_under_way(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    """#7588: so it reads the new row."""
+    await started(store)
+    await parks(store)
+    one, two = approval_row(), approval_row(outcome="denied", input_hash=None)
+    assert await store.record_decision(one)
+    with jobs.pool.connection() as conn, conn.transaction():
+        # The take-over stops at the decision's row, the run's row locked.
+        conn.execute(
+            "SELECT 1 FROM workflow_run_decisions WHERE request_id = %s FOR UPDATE",
+            (two.request_id,),
+        )
+        taking = asyncio.ensure_future(store.take_over_decision(two, held=one, seen=[]))
+        await asyncio.sleep(0.5)
+        through = asyncio.ensure_future(
+            store.project(ProjectionWrite(run_id="r1", workflow_run_id="wr1", waiting_remove="c"))
+        )
+        await asyncio.sleep(0.5)
+        assert not taking.done() and not through.done()
+    assert await taking is True
+    await through
+    held = await store.get_decision(two.request_id)
+    assert held is not None and held.outcome == "denied"
+
+
+async def test_an_approval_sent_again_with_no_hash_is_the_one_on_record(store: FlowStore) -> None:
+    """A worker from before #7588 resends so."""
+    await started(store)
+    assert await store.record_decision(approval_row())
+    assert await store.record_decision(approval_row(input_hash=None))
+    held = await store.get_decision("flow:r1:wr1:c")
+    assert held is not None and held.input_hash == "h1"
 
 
 async def test_an_answer_recorded_again_waits_for_a_take_over_under_way(

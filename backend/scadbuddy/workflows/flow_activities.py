@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.core.input_schema import PATTERNS_BUDGET_S, PatternsTimedOutError
+from scadbuddy.core.input_schema import PATTERN_TIMEOUT_S, PATTERNS_BUDGET_S, PatternsTimedOutError
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.wire import PATTERN_TIMEOUT
 from scadbuddy.flows.store import FlowStore
@@ -30,10 +30,10 @@ FLOW_TASK_CLOSE = "flow_task_close"
 TASK_REFUSED = "TaskRefused"
 #: A prompt's run takes no task: it ended, or it is gone.
 TASK_RUN_OVER = "TaskRunOver"
-#: The attempt at which a default's pattern that ran out of the shared budget is refused,
-#: not tried again (#7437). With Temporal's default backoff the attempts before it span
-#: about five minutes, long enough for a busy pod; a schema whose patterns need more than
-#: `PATTERNS_BUDGET_S` on every pod times out on every attempt, and is the script's.
+#: The attempt at which a default's pattern that ran out of time is refused, not tried
+#: again (#7437, #7688). With Temporal's default backoff the attempts before it span about
+#: five minutes, long enough for a busy pod; a pattern that times out on every pod is the
+#: script's.
 PATTERN_TIMEOUT_ATTEMPTS = 10
 
 
@@ -100,7 +100,8 @@ def _refuse_past_attempts() -> None:
     if activity.info().attempt >= PATTERN_TIMEOUT_ATTEMPTS:
         raise _refused(
             TASK_REFUSED,
-            f"schema: the defaults' patterns took over {PATTERNS_BUDGET_S}s to check together"
+            "schema: a default's pattern took too long to check"
+            f" (over {PATTERN_TIMEOUT_S}s, or {PATTERNS_BUDGET_S}s together)"
             f" on {PATTERN_TIMEOUT_ATTEMPTS} attempts",
         ) from None
 
@@ -118,17 +119,17 @@ class FlowTaskActivities:
         """Open the task, a `TaskOpen`'s JSON. A retry finds it there.
 
         Final: a task the model or the route refuses (422), a run that has ended, and a run
-        that is not there. Every other refusal is tried again without limit: a credential
-        refused (401, 403), any other 4xx, a 5xx, a route that is missing during a roll, an
-        API that is away. Those are ScadBuddy's to mend and not the script's, so they must
-        not fail a run that may have worked for weeks. Nothing is lost while it waits: the
+        that is not there. Every other refusal is tried again without limit (but see the
+        pattern timeout below): a credential refused (401, 403), any other 4xx, a 5xx, a
+        route that is missing during a roll, an API that is away. Those are ScadBuddy's to
+        mend and not the script's, so they must not fail a run that may have worked for
+        weeks. Nothing is lost while it waits: the
         question is not asked yet, and a cancel still ends the run.
 
-        A default's pattern cut short by the check's shared budget, here
-        (`PatternsTimedOutError`) or in the API (its 503 ``pattern-timeout``), is tried
-        again up to `PATTERN_TIMEOUT_ATTEMPTS`, then refused: a busy pod passes, but
-        patterns that need more than the budget on every pod are the script's (#7437). A
-        pattern that uses its own whole deadline is refused at once."""
+        A default's pattern that ran out of time, here (`PatternsTimedOutError`) or in the
+        API (its 503 ``pattern-timeout``), is tried again up to `PATTERN_TIMEOUT_ATTEMPTS`,
+        then refused: a busy pod passes, but a pattern that times out on every pod is the
+        script's (#7437, #7688)."""
         try:
             # Off the loop: the check of a default runs its pattern.
             checked = await asyncio.to_thread(TaskOpen.model_validate, task)
