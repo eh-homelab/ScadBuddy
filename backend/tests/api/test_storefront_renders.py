@@ -972,6 +972,58 @@ def test_a_render_whose_files_are_lost_names_its_preview_after_a_few_tries(
     assert r.json()["source"] == "none" and r.json()["price_minor"] is None
 
 
+def test_a_preview_read_answers_at_once_while_its_files_are_fetched(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6968: the status named the preview on one replica; the read reaches another, whose
+    cache has no files yet. It answers 503 after `READY_WAIT`, never holds the request for
+    the whole fetch, and a later read streams the mesh. One fetch serves them all."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 72})
+    monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
+    real = materialize_result
+    fetches = 0
+
+    async def slow(blobs: Any, result: Any) -> None:
+        nonlocal fetches
+        fetches += 1
+        await asyncio.sleep(0.6)
+        await real(blobs, result)
+
+    monkeypatch.setattr(renders_module, "materialize_result", slow)
+    path = f"/renders/{job['id']}/preview.glb"
+    began = time.monotonic()
+    first = crud.get(path)
+    assert time.monotonic() - began < 0.5
+    assert first.status_code == 503, first.text
+    assert first.json()["type"] == STOREFRONT_PROBLEMS + "preview_not_ready"
+    assert fetches == 1
+    # The same fetch, at its end.
+    monkeypatch.setattr(renders_module, "READY_WAIT", 10.0)
+    r = crud.get(path)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == GLB and r.content[:4] == b"glTF"
+    assert fetches == 1
+
+
+def test_a_preview_whose_files_are_lost_is_not_asked_for_for_good(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6968: a fetch that fails `FETCH_TRIES` times is taken as lost, so the read goes on
+    to the preview's own read, which says what is there, not "ask again" for ever."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 73})
+    monkeypatch.setattr(renders_module, "_failed", OrderedDict())
+
+    async def lost(_blobs: Any, _result: Any) -> None:
+        raise FileNotFoundError("the blob is gone")
+
+    monkeypatch.setattr(renders_module, "materialize_result", lost)
+    path = f"/renders/{job['id']}/preview.glb"
+    seen = [crud.get(path).status_code for _ in range(renders_module.FETCH_TRIES)]
+    assert seen[:-1] == [503] * (renders_module.FETCH_TRIES - 1)
+    # Only this module's fetch fails here: the preview's own read finds the files.
+    assert seen[-1] == 200
+
+
 def test_the_estimate_fetches_files_the_cache_evicted_after_the_preview_was_named(
     crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
 ) -> None:

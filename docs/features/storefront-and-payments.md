@@ -84,6 +84,12 @@ sequenceDiagram
 - Customer model imports after the check are a later phase
   (`backend/scadbuddy/workflows/staged_file.py:17`;
   [#6133](https://github.com/eh-homelab/ScadBuddy/issues/6133)).
+- The first read of a done render's preview on an API replica fetches its files from the
+  blob store. While that runs, the read answers 503 `preview_not_ready` after a few seconds
+  (`backend/scadbuddy/orders/storefront/renders.py` `preview_ready`); the edge asks again for
+  10 s, and the viewer (`frontend/src/lib/previewLoader.ts`) asks again on a 502, 503 or 504
+  with a backoff, so a slow store shows as loading, not as an error
+  ([#6968](https://github.com/eh-homelab/ScadBuddy/issues/6968)).
 - Venmo's pay page is off (`backend/scadbuddy/payments/venmo.py:48`;
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
 - A pipeline template is listed only when it declares its inputs (`model.json`

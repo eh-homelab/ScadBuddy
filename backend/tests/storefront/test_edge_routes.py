@@ -674,6 +674,27 @@ def test_a_preview_refusal_passes_through(edge: TestClient, crud_mock: respx.Rou
     assert r.status_code == 404 and r.json()["type"] == missing["type"]
 
 
+def test_a_preview_not_ready_is_asked_for_again_then_is_a_503(
+    edge: TestClient,
+    crud_mock: respx.Router,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#6968: the edge asks again while a replica fetches the files, and a replica that has
+    them answers; past `PREVIEW_BUDGET` the page gets a 503, which its viewer tries again."""
+    waiting = httpx.Response(
+        503,
+        json={"type": f"{STOREFRONT_PROBLEMS}preview_not_ready", "status": 503},
+        headers=CRUD,
+    )
+    mesh = httpx.Response(200, headers={**CRUD, "Content-Type": "model/gltf-binary"}, content=b"g")
+    route = crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").mock(side_effect=[waiting, mesh])
+    assert edge.get(f"/api/store/v1/renders/{JOB}/preview.glb").content == b"g"
+    assert route.call_count == 2
+    monkeypatch.setattr("scadbuddy.crud.storefront.PREVIEW_BUDGET", 0.0)
+    crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").mock(return_value=waiting)
+    assert edge.get(f"/api/store/v1/renders/{JOB}/preview.glb").status_code == 503
+
+
 def test_a_dropped_preview_closes_its_stream_at_once(
     edge_env: None,  # noqa: F811
     crud_mock: respx.Router,  # noqa: F811

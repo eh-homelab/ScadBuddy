@@ -114,8 +114,9 @@ UNAVAILABLE_RETRY: Final = 5
 #: The longest a status or estimate request waits on work behind it (#6120): a done
 #: render's files being fetched. Past it the request answers "not ready yet" and the page
 #: asks again, so no request is held near Cloudflare's 100 s. The fetch state below
-#: (`_fetches`, `_ready`, `_failed`) is this process's: it assumes one API process, as
-#: today; with more, a preview read may still fetch on its own.
+#: (`_fetches`, `_ready`, `_failed`) is this process's, as the cache is: a status read on
+#: one replica says nothing of another's cache, so a preview read waits on its own
+#: replica's fetch the same way (`preview_ready`, #6968).
 READY_WAIT: Final = 3.0
 
 
@@ -260,6 +261,14 @@ async def shown_render(state: AppState, job: Job) -> StoreRender:
         or files_lost(job.id)
     )
     return store_render(job, ready=ready)
+
+
+async def preview_ready(state: AppState, job: Job) -> bool:
+    """Whether the done ``job``'s preview can be read here now (#6968): its files are in
+    this process's cache after a wait of at most `READY_WAIT`, or they are taken as lost
+    (`files_lost`), so the read says so. False: the read answers 503, and the next one
+    finds the fetch further on."""
+    return await _fetch(state, job) or files_lost(job.id)
 
 
 def limited(error: RenderLimited) -> ApiError:
