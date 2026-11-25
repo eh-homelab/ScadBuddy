@@ -31,7 +31,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256; see [Saved outputs](#saved-outputs)) | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256), `output_cutover`, `output_claims` (`20261125T0758Z_outputs_cut_over`, #7257; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
@@ -288,7 +288,15 @@ pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. C
 its run has a `finished_at`, is not `incomplete`, and started after the last pod on the
 older build went. Until then, writes of the older pods may have no row yet.
 
-`output_index` stays as it is in this phase; #7257 drops it.
+Once a row copy run has finished, `GET /api/v1/outputs` lists from the `outputs` rows
+(#7257, release A): `name` and `source` are columns generated from `meta`, and
+`params_text` is a plain column that a save writes. A row that a pod on the phase 2 build
+saves has no `params_text`, so a text search does not find it by its params until release
+B fills them. The print links read an output's slug from `outputs` too. `output_index` and
+`output_hold_slugs` are still written, and each write to them is skipped with a warning
+when the table is gone; release B is to drop both.
+
+The copies stop at the cut-over mark (#7257, [The cut-over](#the-cut-over)).
 
 #### The byte copy
 
@@ -362,6 +370,74 @@ and `damaged_sample`, not the run's `damaged`: a person checks each output they 
 When `damaged_rows` is more than the sample, list the rest with
 `SELECT output_id, damaged FROM outputs WHERE damaged <> '[]' ORDER BY output_id`. An output with a refused `files/` name keeps its
 folder as the only copy of its bytes until the name is fixed.
+
+#### The cut-over
+
+Phase 3 (#7257) stops reading and writing `data/outputs/`. It ships as two releases,
+because during a roll the pods of the old build run beside the new ones (plan
+`docs/superpowers/plans/2026-11-25-outputs-cutover-phase-3.md`, D1). A phase 2 pod writes
+into an output's folder on a rename, a thumbnail upload and an attributed analysis, and
+fails when the folder is missing. So release A (3a) still writes every folder. Release B
+(3b, not built yet) is to stop the folder writes and to remove the file fallback, the
+copies, the directory scans and `output_index`.
+
+The mark is the one row of `output_cutover` (its key column is `one`). The API writes it
+(`OutputRows.try_cut_over`) in one transaction when all of these hold:
+
+- it gets both copies' advisory locks at once (`pg_try_advisory_xact_lock`), so no copy
+  runs;
+- the last row copy run has a `finished_at`;
+- the last byte run has a `finished_at`, no `refused` and an empty `failed`;
+- no `outputs` row has `bytes_at` NULL.
+
+It tries at each start, before the copies, and after each byte run that ended. Once the
+mark exists, both copies do nothing, at the start and in the sweeps: each checks the
+mark before its lock and again under it. `GET /api/v1/outputs/copy-status` names the
+mark's time as `cut_over_at` (`null` before it). Each process keeps the mark once it has
+read it. On `bambuddy` the byte copy is refused, so the mark is never written there.
+
+After the mark, release A:
+
+- writes into an output's folder as before, but a missing folder skips the file step
+  (logged at debug) and the row and blob steps run as before. This holds for a rename,
+  the storefront mark, the backfill writes, a thumbnail (uploaded or drawn), the kept
+  geometry and an attributed analysis (`OutputStore._folder_write`). Before the mark, a
+  missing folder raises, as in phase 2.
+- reaps orphan holds from the rows only: it releases the `output` holds of each holder
+  whose oldest hold is past the grace and which has no `outputs` row and no claim younger
+  than the grace. It scans no folder and reads no `output_hold_slugs`.
+
+A save claims its output id (#5390, a quote's attempts) in `output_claims` first, then
+makes the folder (`OutputStore.claim`). A pod of release B is to claim in the table only,
+so both share one claim during release B's roll. A claim ends in one of three ways: the
+save's row deletes it in the row's transaction, a failed save releases it
+(`output_operations.py`), or the hold reaper prunes it once it is older than
+`ORPHAN_HOLD_GRACE` (1 hour). A release that fails is logged and left to the prune. So
+`ORPHAN_HOLD_GRACE` is also the claim's lease: a save that runs longer than it can lose its
+claim, and another pod can then claim the same id. Release B is to keep a live save's
+claim. A phase 2 pod that saves after the mark takes no table claim, and its holds are
+kept only while they are younger than the grace.
+
+Release B's migration is to refuse to run while the mark is missing (unless `outputs`
+and `output_index` are both empty), and while any row has `bytes_at` NULL. The migration
+runs at the API's start, so a refused release B pod does not start, and the release A
+pods go on serving.
+
+After release A's roll ends:
+
+1. Confirm that every API pod runs release A's image (`kubectl -n bambuddy get pods -o
+   jsonpath` on the images, as above).
+2. Read `GET /api/v1/outputs/copy-status`. `cut_over_at` must be set, and `bytes.pending`
+   must be 0.
+3. When `cut_over_at` is `null`, read `bytes` (`refused`, `failed`, `pending`) and fix
+   that first. The next start or byte sweep tries the mark again.
+4. When `cut_over_at` is set and `pending` is not 0, a phase 2 pod's row copy wrote a row
+   after the mark (an orphan folder's row, with `bytes_at` NULL). The copies of release A
+   no longer fill it, and release B's migration is to refuse it. To recover, delete the mark
+   (`DELETE FROM output_cutover`), then restart the API pods (`kubectl -n bambuddy
+   rollout restart deploy scadbuddy`), because each process keeps the mark once it has
+   read it. The starts then copy the rows and the bytes, and write the mark again when the
+   conditions hold. Read copy-status again.
 
 ## Generated API files
 
