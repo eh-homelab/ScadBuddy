@@ -38,33 +38,70 @@ var reasons = map[string]error{
 }
 
 type client struct {
-	base  string
-	token func() (string, error)
-	http  *http.Client
+	base       string
+	token      func() (string, error)
+	invalidate func(string)
+	http       *http.Client
 }
 
-func newClient(baseURL string, token func() (string, error), timeout time.Duration) *client {
-	return &client{base: strings.TrimRight(baseURL, "/") + path, token: token, http: &http.Client{Timeout: timeout}}
+// Option configures NewStore and NewBus.
+type Option func(*client)
+
+// OnUnauthorized names the function told of a credential core refused (401), such as
+// (*Exchange).Invalidate. With it, a request refused with 401 is sent once more with the
+// credential token returns next. Core's CRUD guard refuses before a route runs, so the
+// route has not run twice.
+func OnUnauthorized(invalidate func(token string)) Option {
+	return func(c *client) { c.invalidate = invalidate }
 }
 
-// request builds a request with the credential, read now: the file rotates.
-func (c *client) request(ctx context.Context, method, route string, body io.Reader) (*http.Request, error) {
-	token, err := c.token()
-	if err != nil {
-		return nil, fmt.Errorf("reading the fleet credential: %w", err)
+func newClient(baseURL string, token func() (string, error), timeout time.Duration, opts []Option) *client {
+	c := &client{base: strings.TrimRight(baseURL, "/") + path, token: token, http: &http.Client{Timeout: timeout}}
+	for _, o := range opts {
+		o(c)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+route, body)
-	if err != nil {
-		return nil, err
+	return c
+}
+
+// send sends a request built with the credential token returns now, and, when core
+// refuses it (401) and OnUnauthorized was given, tells that function and sends it once
+// more. body is sent as is each time; header sets the request's other headers.
+func (c *client) send(ctx context.Context, method, route string, body []byte, header http.Header) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		token, err := c.token()
+		if err != nil {
+			return nil, fmt.Errorf("reading the fleet credential: %w", err)
+		}
+		var reader io.Reader
+		if body != nil {
+			reader = bytes.NewReader(body)
+		}
+		req, err := http.NewRequestWithContext(ctx, method, c.base+route, reader)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range header {
+			req.Header[k] = v
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		res, err := c.http.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		if res.StatusCode != http.StatusUnauthorized || c.invalidate == nil || attempt > 0 {
+			return res, nil
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
+		res.Body.Close()
+		c.invalidate(token)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	return req, nil
 }
 
 // do sends body (JSON, or none when nil) and decodes a 2xx answer into out (when not nil).
 // A problem answer is an error wrapping the fleetchat error its reason names.
 func (c *client) do(ctx context.Context, method, route string, body, out any) error {
-	var reader io.Reader
+	var encoded []byte
+	header := http.Header{"Accept": {"application/json"}}
 	if body != nil {
 		// No HTML escapes: core caps a send's body at about twice the largest text.
 		var b bytes.Buffer
@@ -73,17 +110,10 @@ func (c *client) do(ctx context.Context, method, route string, body, out any) er
 		if err := enc.Encode(body); err != nil {
 			return err
 		}
-		reader = bytes.NewReader(bytes.TrimSuffix(b.Bytes(), []byte("\n")))
+		encoded = bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+		header.Set("Content-Type", "application/json")
 	}
-	req, err := c.request(ctx, method, route, reader)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	res, err := c.http.Do(req)
+	res, err := c.send(ctx, method, route, encoded, header)
 	if err != nil {
 		return err
 	}
@@ -120,9 +150,9 @@ type store struct{ c *client }
 
 // NewStore returns a fleetchat.Store over core's fleet routes at baseURL (core's URL,
 // without the route prefix). token returns the `fleet` credential and is called for
-// every request.
-func NewStore(baseURL string, token func() (string, error)) fleetchat.Store {
-	return &store{c: newClient(baseURL, token, requestTimeout)}
+// every request. OnUnauthorized renews a refused credential.
+func NewStore(baseURL string, token func() (string, error), opts ...Option) fleetchat.Store {
+	return &store{c: newClient(baseURL, token, requestTimeout, opts)}
 }
 
 func agentPath(sessionID string) string { return "/agents/" + url.PathEscape(sessionID) }

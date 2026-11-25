@@ -39,13 +39,13 @@ type bus struct {
 // URL: core forwards the route to the Python API). Publish does nothing, since core
 // publishes fleet.message itself on a send. Subscribe follows the stream until its
 // context ends.
-func NewBus(baseURL string, token func() (string, error)) fleetchat.Bus {
-	return newBus(baseURL, token)
+func NewBus(baseURL string, token func() (string, error), opts ...Option) fleetchat.Bus {
+	return newBus(baseURL, token, opts...)
 }
 
-func newBus(baseURL string, token func() (string, error)) *bus {
+func newBus(baseURL string, token func() (string, error), opts ...Option) *bus {
 	// No overall timeout: the stream is long. The answer's headers still come in time.
-	c := newClient(baseURL, token, 0)
+	c := newClient(baseURL, token, 0, opts)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.ResponseHeaderTimeout = requestTimeout
 	c.http.Transport = transport
@@ -66,7 +66,8 @@ func (b *bus) next(d time.Duration) time.Duration {
 // Subscribe follows the change stream until ctx ends, and returns ctx.Err() then. It
 // reconnects after every failure and after the server ends a stream, sending the last
 // id it saw as Last-Event-ID so the server replays what came between. A refused
-// credential (401, 403) is retried too: the credential file rotates.
+// credential (401, 403) is retried too: the credential is renewed (OnUnauthorized, or a
+// static file that rotates).
 func (b *bus) Subscribe(ctx context.Context, f func(fleetchat.Event)) error {
 	var last string
 	var delay time.Duration
@@ -106,15 +107,11 @@ func (b *bus) follow(ctx context.Context, last *string, f func(fleetchat.Event))
 	})
 	defer watchdog.Stop()
 
-	req, err := b.c.request(streamCtx, http.MethodGet, "/changes", nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("Accept", "text/event-stream")
+	header := http.Header{"Accept": {"text/event-stream"}}
 	if *last != "" {
-		req.Header.Set("Last-Event-ID", *last)
+		header.Set("Last-Event-ID", *last)
 	}
-	res, err := b.c.http.Do(req)
+	res, err := b.c.send(streamCtx, http.MethodGet, "/changes", nil, header)
 	if err != nil {
 		return false, err
 	}

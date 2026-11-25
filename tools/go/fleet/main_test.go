@@ -51,6 +51,18 @@ func TestConfig(t *testing.T) {
 			t.Errorf("got %+v, want %+v", c, want)
 		}
 	})
+	t.Run("a proof file", func(t *testing.T) {
+		c, err := parseConfig(nil, env(map[string]string{
+			"FLEETCHAT_CORE_URL": "http://core", "FLEETCHAT_SERVICE_TOKEN_FILE": "/var/run/secrets/scadbuddy/token",
+		}))
+		if err != nil || c.TokenFile != "/var/run/secrets/scadbuddy/token" || c.CredentialFile != "" {
+			t.Errorf("got %+v, %v", c, err)
+		}
+		c, err = parseConfig([]string{"-core-url", "http://core", "-service-bootstrap-file", "/run/fleet"}, env(nil))
+		if err != nil || c.BootstrapFile != "/run/fleet" {
+			t.Errorf("got %+v, %v", c, err)
+		}
+	})
 	t.Run("a flag wins over the env", func(t *testing.T) {
 		c, err := parseConfig([]string{"-page-size", "5", "-core-url", "http://flag"}, env(map[string]string{
 			"FLEETCHAT_CORE_URL": "http://env", "FLEETCHAT_CREDENTIAL_FILE": "/t", "FLEETCHAT_PAGE_SIZE": "10",
@@ -68,6 +80,8 @@ func TestConfig(t *testing.T) {
 	}{
 		"missing core URL":        {[]string{"-credential-file", "/t"}, nil},
 		"missing credential file": {[]string{"-core-url", "http://core"}, nil},
+		"two proofs":              {[]string{"-core-url", "http://core", "-service-token-file", "/a"}, map[string]string{"FLEETCHAT_SERVICE_BOOTSTRAP_FILE": "/b"}},
+		"a proof and a fixed one": {[]string{"-core-url", "http://core", "-service-token-file", "/a", "-credential-file", "/t"}, nil},
 		"core URL not http":       {[]string{"-core-url", "core:8080", "-credential-file", "/t"}, nil},
 		"bad env number":          {[]string{"-core-url", "http://core", "-credential-file", "/t"}, map[string]string{"FLEETCHAT_MAX_TEXT": "lots"}},
 		"bad env duration":        {[]string{"-core-url", "http://core", "-credential-file", "/t"}, map[string]string{"FLEETCHAT_SESSION_TIMEOUT": "5"}},
@@ -101,7 +115,15 @@ func TestHelpExitsZero(t *testing.T) {
 
 func TestCredential(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "token")
-	read := credential(path)
+	read, opts := credential(config{CredentialFile: path})
+	if opts != nil {
+		t.Error("a fixed credential is renewed")
+	}
+	for _, c := range []config{{CoreURL: "http://core", TokenFile: "/a"}, {CoreURL: "http://core", BootstrapFile: "/b"}} {
+		if _, opts := credential(c); len(opts) != 1 {
+			t.Errorf("%+v: an exchanged credential with no renewal on a 401", c)
+		}
+	}
 	if _, err := read(); err == nil {
 		t.Error("no error for a missing file")
 	}

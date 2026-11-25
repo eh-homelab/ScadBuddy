@@ -36,6 +36,8 @@ const (
 type config struct {
 	Listen         string
 	CoreURL        string
+	TokenFile      string
+	BootstrapFile  string
 	CredentialFile string
 	MaxText        int
 	PageSize       int
@@ -108,7 +110,9 @@ func parseConfigTo(args []string, getenv func(string) string, out io.Writer) (co
 	settings := []setting{
 		{"listen", "FLEETCHAT_LISTEN", "the address to serve /mcp and /healthz on", str(&c.Listen), ":8080"},
 		{"core-url", "FLEETCHAT_CORE_URL", "core's URL, such as http://scadbuddy-core:8080 (required)", str(&c.CoreURL), ""},
-		{"credential-file", "FLEETCHAT_CREDENTIAL_FILE", "the file holding the fleet service credential, read at every request (required)", str(&c.CredentialFile), ""},
+		{"service-token-file", "FLEETCHAT_SERVICE_TOKEN_FILE", "a projected ServiceAccount token (audience scadbuddy) to exchange for the fleet credential", str(&c.TokenFile), ""},
+		{"service-bootstrap-file", "FLEETCHAT_SERVICE_BOOTSTRAP_FILE", "a bootstrap secret to exchange for the fleet credential", str(&c.BootstrapFile), ""},
+		{"credential-file", "FLEETCHAT_CREDENTIAL_FILE", "a fixed fleet credential, read at every request and never renewed (tests, local runs)", str(&c.CredentialFile), ""},
 		{"max-text", "FLEETCHAT_MAX_TEXT", "the largest message text, in bytes", num(&c.MaxText), "16777216"},
 		{"page-size", "FLEETCHAT_PAGE_SIZE", "the inbox page when a call gives no limit", num(&c.PageSize), "50"},
 		{"max-page-size", "FLEETCHAT_MAX_PAGE_SIZE", "the largest inbox page", num(&c.MaxPageSize), "200"},
@@ -154,8 +158,14 @@ func (c config) check() error {
 	if u, err := url.Parse(c.CoreURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return errors.New("the core URL must be an http or https URL with a host")
 	}
-	if c.CredentialFile == "" {
-		return errors.New("the credential file is required (-credential-file or FLEETCHAT_CREDENTIAL_FILE)")
+	proofs := 0
+	for _, f := range []string{c.TokenFile, c.BootstrapFile, c.CredentialFile} {
+		if f != "" {
+			proofs++
+		}
+	}
+	if proofs != 1 {
+		return errors.New("give exactly one of -service-token-file, -service-bootstrap-file and -credential-file (or FLEETCHAT_SERVICE_TOKEN_FILE, FLEETCHAT_SERVICE_BOOTSTRAP_FILE, FLEETCHAT_CREDENTIAL_FILE)")
 	}
 	if c.MaxText <= 0 || c.PageSize <= 0 || c.MaxPageSize <= 0 {
 		return errors.New("max text, page size and max page size must be more than 0")
@@ -177,8 +187,24 @@ func buildVersion() string {
 	return "dev"
 }
 
-// credential reads the file at every call: the credential rotates.
-func credential(path string) func() (string, error) {
+// credential is the fleet credential and, for an exchanged one, the function told of a
+// credential core refused. A proof is exchanged at core (sbfleet.Exchange); a fixed
+// credential file is read at every call.
+func credential(c config) (func() (string, error), []sbfleet.Option) {
+	var e *sbfleet.Exchange
+	switch {
+	case c.TokenFile != "":
+		e = sbfleet.NewExchange(c.CoreURL, c.TokenFile, sbfleet.ProofKubernetes)
+	case c.BootstrapFile != "":
+		e = sbfleet.NewExchange(c.CoreURL, c.BootstrapFile, sbfleet.ProofBootstrap)
+	default:
+		return credentialFile(c.CredentialFile), nil
+	}
+	return e.Token, []sbfleet.Option{sbfleet.OnUnauthorized(e.Invalidate)}
+}
+
+// credentialFile reads the file at every call: the credential may be rotated.
+func credentialFile(path string) func() (string, error) {
 	return func() (string, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -202,8 +228,8 @@ func newMux(ctx context.Context, svc *fleetchat.Service) http.Handler {
 }
 
 func run(ctx context.Context, c config) error {
-	token := credential(c.CredentialFile)
-	svc := fleetchat.NewService(sbfleet.NewStore(c.CoreURL, token), sbfleet.NewBus(c.CoreURL, token), fleetchat.Config{
+	token, opts := credential(c)
+	svc := fleetchat.NewService(sbfleet.NewStore(c.CoreURL, token, opts...), sbfleet.NewBus(c.CoreURL, token, opts...), fleetchat.Config{
 		MaxText: c.MaxText, PageSize: c.PageSize, MaxPageSize: c.MaxPageSize, SessionTimeout: c.SessionTimeout,
 	})
 	listener, err := net.Listen("tcp", c.Listen)

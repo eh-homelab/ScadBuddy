@@ -107,8 +107,10 @@ change stream filtered to `fleet.*` kinds, with the same frames and `Last-Event-
 
 A public Go module. Its package `sbfleet` imports `fleetchat` (for the interfaces) and nothing from core.
 
-- `Store`: an HTTP client of §4.2's routes, with the `fleet` credential (a bearer token from a
-  file path the host passes; the exchange flow is the host's, as for other services).
+- `Store`: an HTTP client of §4.2's routes, with the `fleet` credential. `sbfleet.Exchange`
+  exchanges the pod's proof (a projected ServiceAccount token or a bootstrap secret) at
+  `POST /api/v1/auth/service-token` and renews the credential at half-life and after a 401,
+  as every other caller does; a fixed credential file stays for tests and local runs.
 - `Bus`: `Publish` is a no-op, since core publishes on send. `Subscribe` follows
   `GET …/crud/fleet/changes` with `Last-Event-ID`, reconnects with back-off (500 ms to 30 s,
   as `camera/follow.py`), and turns `resync` and `reconnected` frames into `Event{Resync: true}`.
@@ -161,7 +163,7 @@ it notifies every inbox URI that has a subscriber.
 
 Flags with `FLEETCHAT_*` environment fallbacks **(owner: all configurable)**: largest message
 text (default 16 MiB **(owner)**), page size (50, max 200), listen address (`:8080`), core's
-URL, the credential file.
+URL, the proof file (or a fixed credential file), the MCP session timeout (24 h).
 
 ### 6.6 Binary
 

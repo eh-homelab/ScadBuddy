@@ -57,7 +57,23 @@ over HTTP (`TestNoCoreImports` checks it).
   context ends.
 
 The token function is called for every request. A read error fails that request (and,
-for the stream, that attempt).
+for the stream, that attempt). Both take `OnUnauthorized(f)`: a request core refuses
+with 401 calls `f` with the refused credential and is sent once more with the next one
+(core's CRUD guard refuses before a route runs, so no route runs twice).
+
+- `NewExchange(coreURL, proofFile, proof)`: the `fleet` service credential from the
+  service-token exchange (root `README.md`, "The service-token exchange"). `Token`
+  reads the proof file again and posts it to `POST /api/v1/auth/service-token`
+  (`client_id` `fleet`) when it holds no credential, at half-life (7.5 of the 15
+  minutes), and after `Invalidate`, which drops a credential core refused; it exchanges
+  again at once, but never under 10 s after the last exchange. A failed exchange is
+  tried again after 5 s, doubling to 60 s, and a 429 after its `Retry-After`; meanwhile
+  the credential held serves until it expires. The proof is `ProofKubernetes` (a
+  projected ServiceAccount token, ServiceAccount `scadbuddy-fleet`, audience
+  `scadbuddy`) or `ProofBootstrap` (a secret whose hash the API holds as the file
+  `fleet` in `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`). It mirrors the agent's
+  `ExchangeCredential` (`agent/src/api/serviceCredential.ts`). It never logs the proof
+  or the credential.
 
 ## Binary
 
@@ -71,14 +87,18 @@ no auth of its own; a NetworkPolicy admits only ScadBuddy's pods.
 |---|---|---|
 | `-listen` | `FLEETCHAT_LISTEN` | `:8080` |
 | `-core-url` | `FLEETCHAT_CORE_URL` | required: core's URL, such as `http://scadbuddy-core:8080` |
-| `-credential-file` | `FLEETCHAT_CREDENTIAL_FILE` | required: the `fleet` service credential, a bearer token, read again at every request |
+| `-service-token-file` | `FLEETCHAT_SERVICE_TOKEN_FILE` | a projected ServiceAccount token, exchanged for the `fleet` credential |
+| `-service-bootstrap-file` | `FLEETCHAT_SERVICE_BOOTSTRAP_FILE` | a bootstrap secret, exchanged for the `fleet` credential |
+| `-credential-file` | `FLEETCHAT_CREDENTIAL_FILE` | a fixed `fleet` credential, read again at every request and never renewed (tests, local runs) |
 | `-max-text` | `FLEETCHAT_MAX_TEXT` | `16777216` (16 MiB) |
 | `-page-size` | `FLEETCHAT_PAGE_SIZE` | `50` |
 | `-max-page-size` | `FLEETCHAT_MAX_PAGE_SIZE` | `200` |
 | `-session-timeout` | `FLEETCHAT_SESSION_TIMEOUT` | `24h`: a Go duration; `0` never closes a session |
 
-A flag wins over its variable, which wins over the default. A bad value, from either,
-stops the start. `--help` and `-version` need no core URL.
+Exactly one of the three credential settings is required. An exchanged credential is
+renewed in the process (`NewExchange`); a fixed one lasts 15 minutes unless something
+rewrites the file. A flag wins over its variable, which wins over the default. A bad
+value, from either, stops the start. `--help` and `-version` need no core URL.
 
 `-session-timeout` closes an MCP session, with its inbox subscriptions, after that long
 without a request. Claude Code never sends `DELETE /mcp` when it exits (measured
