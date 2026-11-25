@@ -47,11 +47,13 @@ from psycopg_pool import ConnectionPool
 from pydantic import JsonValue, TypeAdapter
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.paths import model_path
 from scadbuddy.core.pg_pool import record_connection
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.wire import NOT_CONFIGURED
 from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError
 from scadbuddy.library.libraries import CheckoutFetcher
+from scadbuddy.library.slugs import is_model_id
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.storefront.closest_colour import Swatch, closest_colour
@@ -266,14 +268,17 @@ def _source_invalid(name: str, detail: str) -> ApiError:
 
 def check_source(body: ListingInput) -> None:
     """422 ``listing_source_invalid`` (with ``name``, the field) for a body whose fields
-    do not fit its ``source`` (#6710 §4.1): a template needs ``slug`` and ``commit`` and no
-    ``library_file``; a file listing needs ``library_file``, no ``slug``, ``commit``,
-    ``params``, ``fixed``, ``inputs`` or ``inputs_v``, and only `FILE_PICTURE_ID`s in
-    ``media_ids``."""
+    do not fit its ``source`` (#6710 §4.1): a template needs ``slug``, a template's id whole,
+    and ``commit``, and no ``library_file``; a file listing needs ``library_file``, no
+    ``slug``, ``commit``, ``params``, ``fixed``, ``inputs`` or ``inputs_v``, and only
+    `FILE_PICTURE_ID`s in ``media_ids``. The slug is checked here and not by the model,
+    which a stored row is read by too."""
     if body.source == "template":
         for name in ("slug", "commit"):
             if getattr(body, name) is None:
                 raise _source_invalid(name, f"a template listing needs its {name}")
+        if not is_model_id(body.slug or ""):
+            raise _source_invalid("slug", f"{body.slug!r} is not a template's id")
         if body.library_file is not None:
             raise _source_invalid("library_file", "a template listing names no library file")
         return
@@ -1063,15 +1068,25 @@ async def with_inputs_version(core: Core, body: ListingInput) -> ListingInput:
     """``body`` as a save keeps it: a pipeline template's inputs with no version are of its
     commit's ``INPUTS_VERSION`` (#5701), which the row keeps, so a publish at a later commit
     migrates them. Unchanged for a template or a revision that cannot be read: publish
-    refuses those."""
-    if not body.inputs or body.inputs_v is not None or body.slug is None or body.commit is None:
+    refuses those. `check_source`'s 422 comes first, so no path is made of a slug that is
+    not a template's id; and the commit is one of the template's in the history, as
+    `resolve_reference` asks, whatever export of it is on the volume."""
+    check_source(body)
+    slug, commit = body.slug, body.commit
+    if not body.inputs or body.inputs_v is not None or slug is None or commit is None:
         return body
-    if not await asyncio.to_thread(core.catalogue.exists, body.slug):
-        return body
-    try:
-        directory, _ = await source_directory(
-            body.slug, body.commit, paths=core.paths, history=core.history
+
+    def known() -> bool:
+        return (
+            core.catalogue.exists(slug)
+            and core.history.available
+            and core.history.touched(core.history.resolve(commit), model_path(slug))
         )
+
+    try:
+        if not await asyncio.to_thread(known):
+            return body
+        directory, _ = await source_directory(slug, commit, paths=core.paths, history=core.history)
     except (
         GitError,
         RevisionNotFoundError,
@@ -1080,13 +1095,10 @@ async def with_inputs_version(core: Core, body: ListingInput) -> ListingInput:
         OSError,
     ) as error:
         logger.warning(
-            "the inputs version of %s@%s was not read: %s",
-            body.slug,
-            body.commit,
-            type(error).__name__,
+            "the inputs version of %s@%s was not read: %s", slug, commit, type(error).__name__
         )
         return body
-    facts = await asyncio.to_thread(pipeline_facts, directory, body.slug)
+    facts = await asyncio.to_thread(pipeline_facts, directory, slug)
     if facts is None:
         return body
     return body.model_copy(update={"inputs_v": facts.inputs_version})
