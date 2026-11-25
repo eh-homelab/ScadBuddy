@@ -5,7 +5,7 @@ import { flowOf } from './flowRuns.js'
 
 // A flow's tools and their tiers (#2704), as the agent's own turns resolve them: each
 // tool's definition with Settings' raised tiers and disabled tools applied, read when
-// asked (`effectiveTool`), never from a file built beside another image. Two ways in:
+// asked, never from a file built beside another image. Two ways in:
 //
 //   - `flow_tool_tier`, an activity on `agent-tools`: before a flow's `tool(name, args)`
 //     may run or park, ProjectWorkflow (backend/scadbuddy/workflows/flow_tools.py) asks
@@ -13,7 +13,9 @@ import { flowOf } from './flowRuns.js'
 //   - `GET /internal/flows/tools` (routes/flowTools.ts), on the pod's loopback: the API
 //     beside this sidecar checks a grant's tools and lists the editor's with it.
 //
-// Both answer from the one function below. Neither decides a call: the call's own
+// Both resolve each tool as `effectiveTool` does (tools/registry.ts): the activity reads its
+// one tool's row, and the list reads every override at once through `effectiveTools`
+// (#7733: one read per tool was 458 CRUD calls). Neither decides a call: the call's own
 // activity resolves the tool again as it runs (toolActivities.ts `runAsActivity`).
 
 export const FLOW_TOOL_TIER_ACTIVITY = 'flow_tool_tier'

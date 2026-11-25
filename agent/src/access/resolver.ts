@@ -37,7 +37,8 @@ export class AccessResolver {
   /**
    * The registry's overrides as a tool sees them: each call reads its tool's one row (`item`,
    * the same rules as `registry`; a browser tool's with `builtin:browser`'s switch,
-   * `switchedItem`), and `disabled` the whole registry.
+   * `switchedItem`), and `disabled` the whole registry. `all` reads the whole registry once
+   * (`registry`) and answers every tool as `of` would, for a list of tools (#7733).
    */
   registryOverrides(): ToolOverrides {
     return {

@@ -10,7 +10,7 @@ import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTiers } from '../src/temporal/flowTools.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { defineTool, json, type Tool } from '../src/tools/registry.js'
+import { defineTool, effectiveTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
 import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -77,8 +77,17 @@ describe("a flow's tool tiers (#2704)", () => {
     const flowTools = ALL_TOOLS.filter((t) => !t.name.startsWith('browser_'))
     const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: ALL_TOOLS.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
     const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
-    expect(await flowToolTiers(ALL_TOOLS, svc)).toHaveLength(flowTools.length)
+    await access.setItem(BUILTIN_SOURCES.scadbuddy, 'get_model', 'outward')
+    await access.setItem(BUILTIN_SOURCES.scadbuddy, 'send_to_bambuddy', 'off')
+    reads.n = 0
+    const listed = await flowToolTiers(ALL_TOOLS, svc)
     expect(reads.n).toBe(1)
+    expect(listed).toHaveLength(flowTools.length)
+    // Each tool as the one-tool path answers it: the stored overrides come through.
+    expect(listed.find((t) => t.name === 'get_model')).toEqual({ name: 'get_model', tier: 'outward', disabled: false })
+    expect(listed.find((t) => t.name === 'send_to_bambuddy')).toMatchObject({ disabled: true })
+    const one = new Map(await Promise.all(flowTools.map(async (t) => [t.name, await effectiveTool(t, svc)] as const)))
+    for (const t of listed) expect({ tier: t.tier, disabled: t.disabled }, t.name).toEqual({ tier: one.get(t.name)!.risk, disabled: one.get(t.name)!.disabled })
   })
 
   it('flow_tool_tier answers the camera off as disabled', async () => {
