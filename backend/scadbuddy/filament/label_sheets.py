@@ -63,6 +63,14 @@ def name_key(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
+def sort_key(name: str) -> tuple[str, str]:
+    """The list order: the name with its marks removed, then its `name_key`."""
+    plain = "".join(
+        ch for ch in unicodedata.normalize("NFKD", name) if not unicodedata.combining(ch)
+    )
+    return plain.casefold(), name_key(name)
+
+
 class SheetLayout(BaseModel):
     """A sheet's page, its label size and its grid, in mm (R-7216-11)."""
 
@@ -159,12 +167,12 @@ class LabelSheetStore:
         self._pool = pool
 
     def list(self) -> list[SavedLabelSheet]:
-        """Every saved sheet, by `name_key`."""
+        """Every saved sheet, by `sort_key`, so an accented name lists beside its plain
+        letters ("Étiquettes" before "Zebra")."""
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                f'SELECT {_COLUMNS} FROM label_sheets ORDER BY name_key COLLATE "C", id'
-            ).fetchall()
-        return [_sheet(row) for row in rows]
+            rows = conn.execute(f"SELECT {_COLUMNS} FROM label_sheets").fetchall()
+        sheets = [_sheet(row) for row in rows]
+        return sorted(sheets, key=lambda sheet: (sort_key(sheet.name), str(sheet.id)))
 
     def get(self, sheet_id: UUID) -> SavedLabelSheet | None:
         with self._pool.connection() as conn:

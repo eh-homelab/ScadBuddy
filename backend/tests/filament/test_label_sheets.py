@@ -8,7 +8,7 @@ from uuid import uuid4
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.filament.label_sheets import LabelSheetIn, SheetLayout, name_key
+from scadbuddy.filament.label_sheets import LabelSheetIn, SheetLayout, name_key, sort_key
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 
 AVERY_5163 = dict(
@@ -76,3 +76,8 @@ def test_a_saved_choice_needs_its_sheet_id_and_only_it_has_one() -> None:
 def test_a_saved_choice_does_not_resolve_without_its_row() -> None:
     with pytest.raises(ValueError):
         LabelTemplateChoice(template="saved", sheet_id=uuid4()).resolved()
+
+
+def test_an_accented_name_sorts_beside_its_plain_letters() -> None:
+    names = ["Zebra", "Étiquettes", "avery"]
+    assert sorted(names, key=sort_key) == ["avery", "Étiquettes", "Zebra"]
