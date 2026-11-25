@@ -12,7 +12,12 @@ import pytest
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogStore
-from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, NoEmptyWeightError
+from scadbuddy.filament.spools import (
+    FilamentDefaults,
+    FilamentSpoolStore,
+    NoEmptyWeightError,
+    ReadingBelowEmptyError,
+)
 from tests.conftest import PgPool
 
 pg = pytest.mark.requires_postgres
@@ -120,6 +125,15 @@ def test_a_reading_alone_needs_an_empty_weight(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool, None)
     with pytest.raises(NoEmptyWeightError):
         _weigh(pg_pool, spool, reading_g=1180)
+    with pg_pool.connection() as conn:
+        assert ledger.events(conn, spool)[-1].kind == "created"
+
+
+@pg
+def test_a_reading_below_the_empty_weight_is_refused(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    with pytest.raises(ReadingBelowEmptyError):
+        _weigh(pg_pool, spool, reading_g=150)
     with pg_pool.connection() as conn:
         assert ledger.events(conn, spool)[-1].kind == "created"
 

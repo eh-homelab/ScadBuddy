@@ -22,6 +22,16 @@ describe('WeightField (#7273)', () => {
     expect(event).toMatchObject({ kind: 'weighed', source: 'person', grams_after: 1000, data: { reading_g: 1250, empty_g: 250 } })
   })
 
+  it('sends a decimal reading alone, so the server takes the insert off it (#7682)', async () => {
+    const spool = await getSpool(spoolId(3))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '1250.4')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    const event = await lastWeighing(spool.id)
+    expect(event).toMatchObject({ grams_after: expect.closeTo(1000.4, 5), data: { reading_g: 1250.4, empty_source: 'insert', empty_name: 'Bambu reusable spool' } })
+  })
+
   it('takes the filament weight when the empty spool is unknown', async () => {
     // #6 has no type and no spool insert.
     const spool = await getSpool(spoolId(6))

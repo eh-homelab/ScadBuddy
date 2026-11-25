@@ -58,8 +58,9 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
     setError(null)
     setSaving(true)
     try {
-      // #7682: with an empty weight the reading goes too, so the event keeps its breakdown.
-      await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', grams: Math.round(net), ...(empty !== null ? { reading_g: value } : {}) })
+      // #7682: with an empty weight the reading goes alone and the server takes the insert off
+      // it, so the event keeps its breakdown and a decimal reading stays the insert's.
+      await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', ...(empty !== null ? { reading_g: value } : { grams: Math.round(net) }) })
       setSaved(true)
       // The card shows the grams left: the spool read again carries the new ones.
       getSpool(spool.id).then(

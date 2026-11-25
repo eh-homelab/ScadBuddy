@@ -915,7 +915,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   weight, today the spool's insert type's, else its type's, with `placeholder` decided by
   `is_placeholder`; #7278's parts join there, callers do not change; `add_event` takes it off
   a `reading_g` sent without `grams`, `NoEmptyWeightError`, 422 `no_empty_weight`, when there
-  is none), `insert_weights.py` (#7280: an insert's empty weight from new spools'
+  is none, `ReadingBelowEmptyError`, 422 `reading_below_empty`, when the reading is under it), `insert_weights.py` (#7280: an insert's empty weight from new spools'
   weighings, one row per spool in `filament_insert_weight_readings`, the mean of them with
   `filament_insert_types.empty_weight_basis` `derived`; routes `…/insert-weight-offer` and
   `…/insert-weight`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by

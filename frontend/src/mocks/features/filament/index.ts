@@ -2390,6 +2390,7 @@ export const handlers = [
         if (grams == null) {
           if (!insert) return problem(422, 'the spool has no empty weight to take off the reading', { code: 'no_empty_weight' })
           grams = body.reading_g - insert.empty_weight_g
+          if (grams < 0) return problem(422, "the reading is below the spool's empty weight", { code: 'reading_below_empty' })
         }
         const emptyG = body.reading_g - grams
         const own = insert != null && Math.abs(emptyG - insert.empty_weight_g) < 0.05 ? insert : null

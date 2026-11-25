@@ -226,6 +226,15 @@ def test_a_weighing_with_a_reading_answers_its_breakdown(client: TestClient) -> 
     assert spool["last_drift_g"] == -20.0 and spool["drift_notice"] is True
 
 
+def test_a_reading_below_the_empty_weight_is_refused(client: TestClient) -> None:
+    made = _spool(client, label_weight_g=1000, insert_type_id=_insert(client))
+    one = f"{SPOOLS}/{made['id']}"
+    refused = client.post(f"{one}/events", json={"kind": "weighed", "reading_g": 150})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "reading_below_empty"
+    assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created"]
+
+
 def test_a_reading_alone_needs_an_empty_weight(client: TestClient) -> None:
     made = _spool(client, label_weight_g=1000)
     one = f"{SPOOLS}/{made['id']}"

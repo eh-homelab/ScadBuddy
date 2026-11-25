@@ -141,6 +141,14 @@ class NoEmptyWeightError(ValueError):
         super().__init__("the spool has no empty weight to take off the reading")
 
 
+class ReadingBelowEmptyError(ValueError):
+    """A weighing sent as a reading alone that is under the spool's empty weight (#7682):
+    the filament would be negative."""
+
+    def __init__(self) -> None:
+        super().__init__("the reading is below the spool's empty weight")
+
+
 class SpoolTypelessError(ValueError):
     """A spool would name neither a type nor a material."""
 
@@ -1402,7 +1410,7 @@ class FilamentSpoolStore:
         `ResetBeforeLinkError` (R-7149-12). A weighing with ``reading_g`` keeps its
         breakdown (`ledger.breakdown`, #7682); one with no ``grams`` takes the spool's
         effective empty weight off the reading, `NoEmptyWeightError` when there is
-        none."""
+        none and `ReadingBelowEmptyError` when the reading is under it."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
         grams = body.grams
         # Read before the store takes its connection (`FilamentDefaults`' rule).
@@ -1439,6 +1447,8 @@ class FilamentSpoolStore:
                     if empty is None:
                         raise NoEmptyWeightError()
                     grams = body.reading_g - empty.grams
+                    if grams < 0:
+                        raise ReadingBelowEmptyError()
                 spool = conn.execute(
                     "SELECT s.weight_locked,"
                     " coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"

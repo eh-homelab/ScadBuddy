@@ -171,6 +171,7 @@ from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     NoEmptyWeightError,
     OverrideKindError,
+    ReadingBelowEmptyError,
     ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
     SpoolBulkRefusedError,
@@ -1627,7 +1628,8 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
         "ledger gave just before it, null with no reading before) and `drift_g` "
         "(`grams - expected_g`). With `reading_g` and no `grams`, the filament is the reading "
         "less the spool's effective empty weight (its insert's, else its type's insert's); a "
-        "spool with none is a 422 with `code` `no_empty_weight`. "
+        "spool with none is a 422 with `code` `no_empty_weight`, and a reading under the "
+        "empty weight one with `code` `reading_below_empty`. "
         "`dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
         "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
@@ -1656,6 +1658,10 @@ async def add_spool_event(
     except NoEmptyWeightError as exc:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="no_empty_weight"
+        ) from None
+    except ReadingBelowEmptyError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="reading_below_empty"
         ) from None
     if made is None:
         raise _no_spool(spool_id)

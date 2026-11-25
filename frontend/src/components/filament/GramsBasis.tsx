@@ -15,12 +15,14 @@ function anchorText(event: SpoolEvent): string {
 }
 
 /**
- * #7682 — an added-full spool whose anchor is not a reading (a Bambuddy pull's grams)
- * started at its label weight; the gap to the anchor is unexplained. Nothing under 0.05 g.
+ * #7682 — an added-full spool whose starting amount (its `created` event) came from
+ * something else than a reading (a Bambuddy pull's grams) started at its label weight; the
+ * gap to that amount is unexplained. A later anchor (a sync, an AMS reading) follows prints,
+ * so it shows no gap. Nothing under 0.05 g.
  */
 function startGap(anchor: SpoolEvent | null, addedFull: boolean | null, labelWeight: number | null): string | null {
   if (addedFull !== true || labelWeight == null || !anchor || anchor.grams_after == null) return null
-  if (anchor.source === 'scale' || anchor.source === 'person') return null
+  if (anchor.kind !== 'created' || anchor.source === 'scale' || anchor.source === 'person') return null
   const gap = labelWeight - anchor.grams_after
   if (Math.abs(gap) < 0.05) return null
   const source = anchor.source ? (SOURCE[anchor.source] ?? anchor.source) : 'The spool'

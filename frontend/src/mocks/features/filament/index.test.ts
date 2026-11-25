@@ -174,6 +174,7 @@ describe('the filament mocks', () => {
     expect((await getSpool(spoolId(1))).last_drift_g).toBeNull()
     const bare = await createSpool({ ...NEW_SPOOL, material_id: M.PLA, label_weight_g: 1000 })
     expect(await refusal(addSpoolEvent(bare.id, { kind: 'weighed', reading_g: 900 }))).toMatchObject({ status: 422, code: 'no_empty_weight' })
+    expect(await refusal(addSpoolEvent(spoolId(1), { kind: 'weighed', reading_g: 100 }))).toMatchObject({ status: 422, code: 'reading_below_empty' })
   })
 
   it('answers 404 for a spool, type or tag that does not exist', async () => {

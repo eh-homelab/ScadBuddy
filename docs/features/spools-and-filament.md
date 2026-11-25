@@ -178,17 +178,19 @@ empty weight), `empty_basis` and `empty_name` (the insert's, null for `person`),
 and `drift_g` (`grams - expected_g`; negative means the scale found less filament than the
 ledger expected). The effective empty weight is the spool's insert type's, else its type's
 (`filament/empty_weight.py`); a reading sent alone on a spool with none is refused, 422
-`no_empty_weight`. The ledger's rules do not change: the weighing's filament anchors as
+`no_empty_weight`, and one under the empty weight 422 `reading_below_empty`. The ledger's rules do not change: the weighing's filament anchors as
 before. The spool carries the newest weighing's drift as `last_drift_g` and `drift_notice`
 when it is at or over Settings → Filament → "Drift notice at, grams" (10 by default). The
 spool page's Weight section says it in a sentence ("Weighed 1180 g on 25 Nov 2026: filament
 980 g + spool 200 g (Plastic, placeholder). The ledger expected 992 g. The scale found 12 g
 less than the prints accounted for."), the timeline says "reading 1180 g, spool 200 g, 12 g
 less than expected", the heading and the spools list carry a Drift mark while it is a notice,
-and an added-full spool whose anchor is not a reading says its start gap ("Started at the
-label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g unexplained."). The spool page, the
+and an added-full spool whose starting amount (its `created` event) is not a reading says
+its start gap ("Started at the label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g
+unexplained."); a later anchor (a sync, an AMS reading) follows prints and shows none. The spool page, the
 phone page and the agent's `filament_spool_add_event` send `reading_g` whenever an empty
-weight is known. Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md`
+weight is known (the phone page sends it alone, so a decimal reading keeps the insert's
+name). Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md`
 §5.1, §5.2, §5.5.
 
 ### The phone page (#7273)

@@ -35,6 +35,13 @@ describe('GramsBasis (#7682)', () => {
     expect(screen.queryByText(/unexplained/)).toBeNull()
   })
 
+  it('shows no gap for a Bambuddy sync or an AMS reading that re-anchored a used spool', () => {
+    render(<GramsBasis basis={{ anchor: anchor({ kind: 'synced_from_bb', grams_after: 300 }), deltas: [] }} gramsLeft={300} addedFull={true} labelWeight={1000} />)
+    expect(screen.queryByText(/unexplained/)).toBeNull()
+    render(<GramsBasis basis={{ anchor: anchor({ kind: 'ams_reading', source: 'ams_remain', grams_after: 300 }), deltas: [] }} gramsLeft={300} addedFull={true} labelWeight={1000} />)
+    expect(screen.queryByText(/unexplained/)).toBeNull()
+  })
+
   it('shows no gap when the spool was not added full', () => {
     render(<GramsBasis basis={{ anchor: anchor({}), deltas: [] }} gramsLeft={979.3} addedFull={null} labelWeight={1000} />)
     expect(screen.queryByText(/unexplained/)).toBeNull()
