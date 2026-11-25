@@ -921,12 +921,29 @@ class OutputStore:
         call made it. A caller that names an id another may also name (a quote's
         attempts, `orders/quote.py` `operation_output_id`) saves under it only once it
         holds the claim, so it never writes into, or removes on a failure, a directory
-        another save made."""
+        another save made.
+
+        With rows, the id's ``output_claims`` row comes first (#7257, plan D6), so a pod
+        that claims in the table only (release B) and this pod share one claim. A row
+        claim that fails makes no folder. A folder that is there after the row claim
+        succeeded (a phase 2 pod's claim) releases the row claim. The save's row deletes
+        the row claim (`OutputRows.insert`); a failed save releases it
+        (`output_operations.py`); the hold reaper prunes one past `ORPHAN_HOLD_GRACE`."""
+        if self.rows is not None and not self.rows.claim(output_id, slug):
+            return False
         try:
             self.paths.output_dir(slug, output_id).mkdir(parents=True, exist_ok=False)
         except FileExistsError:
+            self._release_row_claim(output_id)
             return False
+        except OSError:
+            self._release_row_claim(output_id)
+            raise
         return True
+
+    def _release_row_claim(self, output_id: str) -> None:
+        if self.rows is not None:
+            self.rows.release_claim(output_id)
 
     async def save(
         self,
@@ -2334,7 +2351,8 @@ def reap_orphan_holds(
 
     An output that has an ``outputs`` row is live, whatever its folder holds (#7256): the
     reaper never releases its holds or removes its folder (one query, when the store has
-    rows).
+    rows). With rows, it first deletes the ``output_claims`` rows older than ``grace``
+    (#7257, `OutputRows.prune_claims`): a save that died between its claim and its row.
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
@@ -2348,6 +2366,9 @@ def reap_orphan_holds(
     and with no live output to learn it from) is never released here. The cost of all
     this: holds orphaned by a model's whole deletion stay until a person drops them."""
     with span("outputs.reap_orphan_holds") as current:
+        if store.rows is not None:
+            # First, so a share that cannot be listed does not keep stale claims (#7257).
+            current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))
         released = _reap_orphan_holds(refs, store, grace)
         current.set_attribute("scadbuddy.released", released)
         return released
