@@ -167,6 +167,20 @@ spool (its values and its type's preset and K value for the slot's nozzle) or th
 hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
 names ScadBuddy's place of the unit. The page asks before every printer write.
 
+### The phone page (#7273)
+
+`/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
+(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`). It works only in Chrome on
+Android, in its own tab: Web NFC refuses a frame, so inside Bambuddy the page shows its address
+to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens the
+spool that holds the tag, or offers to bind it or make a spool from what the tag says
+(OpenSpool or OpenTag3D). "Write tag" on a spool backs the tag up first, writes the spool's
+records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
+and binds it only when the read-back equals what was sent. Every write keeps a backup, which
+the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
+`nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
+and holds a tag.
+
 ### Properties (#7026)
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
@@ -213,7 +227,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 ## Code
 
 - Routes:
-  - `backend/scadbuddy/api/filament.py:239` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
+  - `backend/scadbuddy/api/filament.py:265` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
   - `backend/scadbuddy/api/tray_spools.py:44` (a tray's spool link, and create from slot);
   - `backend/scadbuddy/api/filament_profiles.py:26`;
   - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`);
@@ -268,12 +282,14 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
   - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
-    `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
+    `rfid_linked`, `nfc_link`, `opentag3d`), or `openspool`, ScadBuddy's own value for a tag
+    the phone page wrote in OpenSpool (Bambuddy has none for that format). It is read only. The pull takes Bambuddy's
     value; a person's tag bind sets `rfid_linked` when the tag's stored kind is a Bambu
-    tag, else `nfc_link`; a confirmed NTAG write sets `opentag3d`.
+    tag, else `nfc_link`; a tag written from the phone page (#7273) sets `openspool` or
+    `opentag3d`, the format it wrote.
     The push sends it when SB has one, and the tag push sends it to `link-tag`.
   - `added_full` (a person edits it) and `tag_encoded_at` (Bambuddy's `encode_time`, set
-    by a confirmed NTAG write) come from Bambuddy on the pull. Bambuddy takes no write of
+    by a tag written from the phone page) come from Bambuddy on the pull. Bambuddy takes no write of
     either, so they are never pushed. With the baseline below they are kept in the link's
     `bb_seen` (`PULL_SEEN_FIELDS`), and after a push the pull judges them against it, never
     against the push's echo (R-7149-8).

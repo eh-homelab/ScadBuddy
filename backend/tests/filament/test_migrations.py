@@ -225,3 +225,10 @@ def test_migration_adds_sku_columns_and_plate_index(pg_pool: PgPool) -> None:
         ).fetchone()
     assert columns == {"lead_time_days", "safety_margin_days"}
     assert index is not None
+
+
+@pg
+def test_the_ntag_writes_table_is_dropped(pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT to_regclass('filament_ntag_writes') AS t").fetchone()
+        assert row is not None and row["t"] is None

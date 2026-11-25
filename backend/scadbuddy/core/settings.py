@@ -822,6 +822,9 @@ class Settings(BaseSettings):
     filament_burn_window_days: int = Field(default=30, ge=1, le=365)
     filament_lead_time_days: int = Field(default=7, ge=0, le=365)
     filament_safety_margin_days: int = Field(default=3, ge=0, le=365)
+    # SCADBUDDY_FILAMENT_TAG_FORMAT (#7273): the format a spool tag write uses when the tag
+    # holds neither OpenSpool nor OpenTag3D (`filament/tag_formats.py` `pick_format`).
+    filament_tag_format: Literal["openspool", "opentag3d"] = "openspool"
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -1197,6 +1200,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_burn_window_days": "live",
         "filament_lead_time_days": "live",
         "filament_safety_margin_days": "live",
+        "filament_tag_format": "live",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",

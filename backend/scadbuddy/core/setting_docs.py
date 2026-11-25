@@ -506,6 +506,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Safety margin, days",
             "Days of stock kept on top of the lead time, when the type sets none. 0 to 365.",
         ),
+        "filament_tag_format": SettingDoc(
+            "Tag format for new tags",
+            "The format ScadBuddy writes to a blank tag, or to a tag that holds neither"
+            " format: OpenSpool (JSON, for NTAG215 or NTAG216) or OpenTag3D. A tag that"
+            " already holds OpenSpool or OpenTag3D keeps its format.",
+        ),
         # -- Diagnostics ---------------------------------------------------------------
         "log_level": SettingDoc(
             "Log level",

@@ -14,7 +14,7 @@ gives `nothing_pushes`. The defaults pull `spools`,
 `weights`, `tags` and `presets` and leave `suppliers` and `locations` off
 (`backend/scadbuddy/core/settings.py` `FilamentSync`; plan
 `docs/superpowers/plans/2026-11-18-filament-bb-sync.md`, Decision 3). Override mode, AMS
-slot setup and NTAG writes write BB whatever `filament_sync` says.
+slot setup write BB whatever `filament_sync` says.
 
 ## Sync with Bambuddy
 

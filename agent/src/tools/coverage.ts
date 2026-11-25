@@ -27,6 +27,42 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
   },
   {
+    operation: 'POST /api/v1/filament/tags/reads',
+    reason:
+      "The phone page's own Web NFC reading (#7273): the browser reads the tag. An agent reads a tag through nfc_read, which queues a job that the phone page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/backups',
+    reason:
+      "The phone page backs a tag up right before it writes, in the same tap (#7273 G7). An agent's write is backed up by the page when it runs the nfc_write job.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-records',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-written',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/{tag_id}/backups/{backup_id}/restore',
+    reason:
+      "One step of the phone page's restore of a tag backup (#7273 G7): the records to write back, after a fresh backup. The browser holds the tag and the page checks the read-back itself (R6), so an agent writes through nfc_write, which the page runs.",
+  },
+  ...(
+    [
+      'GET /api/v1/filament/nfc-jobs',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/claim',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/result',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The phone page's side of an agent's NFC job (#7273 G4): it lists the pending jobs, arms one when the person taps Arm, and posts what the tag held. The agent creates and waits on jobs with nfc_read and nfc_write.",
+  })),
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },

@@ -328,8 +328,10 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   /** The backend operations this tool covers, for the openapi coverage check. */
   routes: readonly Operation[]
   /**
-   * `outward` tools stop at the approval gate by default. Only the gate's own
-   * tool (`confirm_action`) opts out, because it IS the approval path.
+   * `outward` tools stop at the approval gate by default. A tool opts out only when it
+   * IS the approval path (`confirm_action`, `sessions_approve` and `sessions_deny`), or
+   * when a person's own act on a page approves each call (`nfc_write`, #7273: nothing is
+   * written until the person arms the job on the phone page and taps a tag).
    */
   approval?: 'required' | 'none'
   /** A human-readable line for the pending action a gated call creates. */
