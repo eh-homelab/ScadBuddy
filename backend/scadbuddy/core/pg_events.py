@@ -85,7 +85,9 @@ event's own ``retention_seconds``, by kind prefix
 (``SCADBUDDY_EVENT_LOG_RETENTION_KINDS``) or by the global age and row count
 (``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``; see
 `EventLogRetention` for the precedence), every `PRUNE_INTERVAL`, by every replica; the
-deletes are idempotent.
+deletes are idempotent. The own-retention delete reads the partial index
+``events_own_retention``; the per-kind and global deletes run only when an operator
+configures them, and they range-scan ``events_logged_at``.
 
 Consuming it (a backend WebSocket gateway, #406)
 ------------------------------------------------
@@ -622,6 +624,9 @@ class PgNotifyEventBus:
         One ``DELETE`` per rule class (see `EventLogRetention` for the precedence): an
         event's own retention, each kind prefix (longest first, so a row goes to the
         longest prefix that matches), then the global seconds and rows over the rest.
+        The first reads the partial index ``events_own_retention``. The per-kind and
+        global deletes run only when an operator configures them, and they range-scan
+        ``events_logged_at``.
         """
         retention = self.retention
         prefixes = sorted(retention.kinds, key=len, reverse=True)
@@ -633,8 +638,11 @@ class PgNotifyEventBus:
         )
         removed = 0
         async with self._pool.connection() as conn:
+            # The predicate of the partial index events_own_retention, word for word, so
+            # this DELETE reads that index and not the whole log.
             cursor = await conn.execute(
-                f"DELETE FROM events WHERE ({own})::float8 > 0"
+                "DELETE FROM events WHERE jsonb_typeof(payload->'retention_seconds') = 'number'"
+                f" AND ({own})::float8 > 0"
                 f" AND logged_at < now() - make_interval(secs => ({own})::float8)"
             )
             removed += max(0, cursor.rowcount)
