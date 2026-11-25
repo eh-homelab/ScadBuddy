@@ -113,7 +113,7 @@ The change:
 - The spool page's Weight section shows, for the newest weighing with a breakdown:
 
   ```text
-  Weighed 1,180 g on 25 Nov: filament 980 g + spool 200 g (DEEPLEE - Plastic, placeholder).
+  Weighed 1180 g on 25 Nov: filament 980 g + spool 200 g (DEEPLEE - Plastic, placeholder).
   The ledger expected 992 g. The scale found 12 g less than the prints accounted for.
   ```
 
@@ -123,8 +123,7 @@ The change:
   between its label weight and the anchor:
 
   ```text
-  Started at the label weight 1,000 g. Bambuddy reported 979.3 g at the link; 20.7 g
-  unexplained.
+  Started at the label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g unexplained.
   ```
 
   This is the owner's "it shows we started with 979.3" (2026-11-25): the number stays,
@@ -196,10 +195,10 @@ The change:
 
 Two settings, in the filament area, rememberable as every setting is:
 
-- `filament.weighing.drift_notice_g` (default 10): a drift at or over it is shown as a
-  notice on the spool and in the list, not just in the Weight section.
-- `filament.weighing.finished_left_g` (default 5): what counts as empty for §5.4's
-  check.
+- `filament_weighing_drift_notice_g` (default 10; slice A): a drift at or over it is
+  shown as a notice on the spool and in the list, not just in the Weight section.
+- `filament_weighing_finished_left_g` (default 5; slice C): what counts as empty for
+  §5.4's check.
 
 ### 5.6 Length (slice D, #7685)
 
@@ -225,7 +224,8 @@ change:
 ### 5.7 Carriers (slice E, #7278)
 
 Once #7278 lands, the effective empty weight (§5.1) is the insert's weight plus every
-installed part's, and `empty_basis` becomes `parts`. The breakdown sentence lists them
+installed part's, `empty_source` becomes `parts`, and `empty_basis` keeps the insert's
+basis. The breakdown sentence lists them
 ("spool 200 g + AMS adaptor 18 g"). #7278's G4 ("parts don't add up") is the
 first-weighing check of §5.3 with parts in the sum; the two share the code.
 
@@ -244,7 +244,7 @@ first-weighing check of §5.3 with parts in the sum; the two share the code.
 ## 7. Constraints
 
 - The ledger's rules (§5.5 of the filament spec) stand; `expected_g` is computed by the
-  same walk (`ledger.basis` / `grams_left`) restricted to events before the weighing.
+  same walk (`ledger.basis` / `grams_left`) over the events §5.1 names.
 - Migrations: new event `data` keys need none; `archive_reason` lives in the event's
   `data` too. If the builder keeps `added_full` changes or the label edit on the spool
   row, they are `edited` events as today. One new timestamped migration file only if a
@@ -257,9 +257,9 @@ first-weighing check of §5.3 with parts in the sum; the two share the code.
 
 | Slice | Issue | Builds | After |
 |---|---|---|---|
-| A | [#7682](https://github.com/eh-homelab/ScadBuddy/issues/7682) | §5.1, §5.2, §5.5 | - |
+| A | [#7682](https://github.com/eh-homelab/ScadBuddy/issues/7682) | §5.1, §5.2, §5.5 (the drift notice) | - |
 | B | [#7683](https://github.com/eh-homelab/ScadBuddy/issues/7683) | §5.3 | A |
-| C | [#7684](https://github.com/eh-homelab/ScadBuddy/issues/7684) | §5.4 | A |
+| C | [#7684](https://github.com/eh-homelab/ScadBuddy/issues/7684) | §5.4, §5.5 (finished) | A |
 | D | [#7685](https://github.com/eh-homelab/ScadBuddy/issues/7685) | §5.6 | A |
 | E | [#7278](https://github.com/eh-homelab/ScadBuddy/issues/7278) | §5.7 | A, #7067 (merged) |
 

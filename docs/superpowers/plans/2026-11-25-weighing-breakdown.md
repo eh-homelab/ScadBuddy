@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- The grams-left rule (`ledger.py` module docstring) is unchanged: no anchor or delta moves. `expected_g` is `ledger.grams_left` over the spool's events strictly before the weighing's `at`.
+- The grams-left rule (`ledger.py` module docstring) is unchanged: no anchor or delta moves. `expected_g` is `ledger.grams_left` over the spool's events before the weighing's `at`, plus the delta events at exactly that `at` (the ledger's rule 1: at one instant deltas come before readings).
 - Event `data` keys, exactly: `reading_g`, `empty_g`, `empty_source`, `empty_basis`, `empty_name`, `expected_g`, `drift_g`. `drift_g = grams - expected_g`, rounded to 0.1 g. `expected_g` and `drift_g` are `null` when the ledger had no anchor before the weighing.
 - `empty_source` is `insert` (this slice; `parts` is #7278's) or `person` (the client subtracted something else than the effective empty weight, or there was none). `empty_basis` is the insert's `empty_weight_basis` for `insert`, `null` for `person`.
 - A `bb` weighing (the pull's) records no breakdown: `bambuddy_pull.py` is not touched.
@@ -212,7 +212,7 @@ Frontend: in `sections/filament.test.tsx`, the field "Drift notice at, grams" is
 Run: `cd backend && uv run --frozen pytest tests/filament/test_weighing_breakdown.py tests/test_setting_docs.py -v`
 Expected: FAIL, `last_drift_g` missing
 
-- [ ] **Step 3: Implement**: the migration file; `refresh_derived` sets `last_drift_g` from `weighed[-1].data.get("drift_g")` (the full walk) and `_book_on_top` sets it from the event's data when `_weighs(event)`; the settings field with its `live` mode and doc; `FilamentDefaults.drift_notice_g` read where `low_stock_pct` is; `_hydrate` computes `drift_notice`; the frontend field entry. The mocks' settings seed (`frontend/src/mocks`, where `filament_low_stock_pct` is seeded) gets the new key at 10.
+- [ ] **Step 3: Implement**: the migration file; `refresh_derived` sets `last_drift_g` from `weighed[-1].data.get("drift_g")` (the full walk) and `_book_on_top` sets it for every on-top event that `_weighs`, from its `data.drift_g` or to null when it has none, so a newer weighing without a breakdown (a `bb` one) clears an older drift; the settings field with its `live` mode and doc; `FilamentDefaults.drift_notice_g` read where `low_stock_pct` is; `_hydrate` computes `drift_notice`; the frontend field entry. The mocks' settings seed (`frontend/src/mocks`, where `filament_low_stock_pct` is seeded) gets the new key at 10.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
