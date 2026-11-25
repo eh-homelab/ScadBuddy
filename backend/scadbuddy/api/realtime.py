@@ -137,6 +137,7 @@ from scadbuddy.core.events import (
     OrderChanged,
     OrderItemChanged,
     OutputEvent,
+    PluginPackagesChanged,
     PresetsChanged,
     PreviewSliceEvent,
     PrinterEvent,
@@ -200,6 +201,8 @@ COLLECTION_TOPICS = frozenset(
         "orders",
         # Tasks (#7364): the list of every task a flow asks.
         "tasks",
+        # Plugin packages and hosted plugins (#7460): Settings → Tools & plugins.
+        "plugin-packages",
     }
 )
 #: A flow run's id (#1057): a UUID, as ``api/flows.py`` makes them.
@@ -277,6 +280,8 @@ def topics_of(event: Event) -> list[str]:
             return ["fonts"]
         case SettingsChanged():
             return ["settings"]
+        case PluginPackagesChanged():
+            return ["plugin-packages"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
         case ActivityEvent():
