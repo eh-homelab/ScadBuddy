@@ -151,6 +151,10 @@ async def listing(listing_id: str, crud: Crud, visitor_id: Visitor, client: Clie
     return await crud.listing(listing_id, visitor_id=visitor_id, client=client)
 
 
+#: The CRUD side's answer for a preview whose files this replica still fetches (#6968).
+PREVIEW_NOT_READY: Final = f"{STOREFRONT_PROBLEMS}preview_not_ready"
+
+
 def _job(job_id: str) -> str:
     """``job_id`` when it is a job id; else 404 ``render_not_found``, before any call."""
     if JOB_ID.fullmatch(job_id) is None:
@@ -644,9 +648,21 @@ async def render_preview(
     client: Client,
     plate: Annotated[int | None, Query(ge=1, le=1000)] = None,
 ) -> StreamingResponse:
-    stream = await crud.render_preview(
-        _job(job_id), plate=plate, visitor_id=visitor_id, client=client
-    )
+    try:
+        stream = await crud.render_preview(
+            _job(job_id), plate=plate, visitor_id=visitor_id, client=client
+        )
+    except CrudUnavailableError as error:
+        # A replica still fetching the files past `PREVIEW_BUDGET` (#6968) is not an
+        # outage: the page's viewer asks again, so it is answered with no warning logged.
+        if error.problem.get("type") != PREVIEW_NOT_READY:
+            raise
+        raise ApiError(
+            503,
+            "The preview is still loading. Try again in a moment.",
+            type_=PREVIEW_NOT_READY,
+            headers={"Retry-After": "1"},
+        ) from None
     headers = {}
     if "content-length" in stream.response.headers and (
         "content-encoding" not in stream.response.headers

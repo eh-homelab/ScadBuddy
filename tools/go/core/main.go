@@ -20,19 +20,36 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/access"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/approvals"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/packages"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/pending"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/plugins"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/stores"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/workspace"
 )
 
 const (
@@ -159,8 +176,11 @@ type areaRoutes func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Rout
 
 // areaPackages are the packages whose areas the switch below does not name.
 var areaPackages = []areaRoutes{
-	access.Areas, mcprelay.Areas, notify.Areas, packages.Areas, plugins.Areas, secrets.Areas,
-	stores.Areas, transcripts.Areas,
+	access.Areas, agentreads.Areas, agentstart.Areas, approvals.Areas, audit.Areas, blobs.Areas,
+	edits.Areas, escalations.Areas, forget.Areas, gate.Areas, mcprelay.Areas, notify.Areas,
+	ordercosts.Areas, packages.Areas, pending.Areas, plugins.Areas, publish.Areas,
+	questions.Areas, secrets.Areas, sessions.Areas, stores.Areas, sweeps.Areas, tasks.Areas,
+	transcripts.Areas, workspace.Areas,
 }
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
@@ -191,7 +211,10 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add("agent", log.Reads()...)
 			router.Add("agent", log.Writes()...)
 		case "session-turns:read":
-			router.Add("agent", turn.Polled()...)
+			router.Add("agent", turn.Reads()...)
+		case "session-turns":
+			router.Add("agent", turn.Reads()...)
+			router.Add("agent", turn.Writes()...)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
