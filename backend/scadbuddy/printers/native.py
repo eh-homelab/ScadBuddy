@@ -15,6 +15,7 @@ from temporalio.client import Client
 
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.core.problems import ApiError
+from scadbuddy.printers.ams_slots import slot_view
 from scadbuddy.printers.kprofiles import kprofile_table_view, kprofile_write_view
 from scadbuddy.printers.lan_command_models import (
     LanCommandOutcome,
@@ -79,24 +80,26 @@ async def external_count(reports: PrinterReportStore, row: PrinterRow) -> int:
 CommandView = Callable[[LanCommandRun, LanCommandOutcome], BaseModel]
 """A route's 200 body from the run it sent and the run's outcome."""
 
-#: Each command's view, by the command's name (P37): the route that sends it and the command
-#: read route answer the same body. A run whose commands do not all map to one view answers
-#: its `LanCommandOutcome`.
+#: Each command's view, by the name of the first command a route sends (P37): the route
+#: and the command read route answer the same body. The AMS slot commands (#7276 Task 8)
+#: answer from the run's own ``answer``, so a configure's three commands are one view. A
+#: run whose first command has no view answers its `LanCommandOutcome`.
 COMMAND_VIEWS: dict[str, CommandView] = {
     "extrusion_cali_get": kprofile_table_view,
     "extrusion_cali_set": kprofile_write_view,
     "extrusion_cali_del": kprofile_write_view,
+    "ams_filament_setting": slot_view,
+    "ams_get_rfid": slot_view,
+    "ams_change_filament": slot_view,
 }
 
 
 def command_view(run: LanCommandRun | None, outcome: LanCommandOutcome) -> BaseModel:
-    """``outcome`` as the route that sent ``run`` answers it (`COMMAND_VIEWS`)."""
+    """``outcome`` as the route that sent ``run`` answers it: the view of its first
+    command (`COMMAND_VIEWS`)."""
     if run is None:
         return outcome
-    views = {COMMAND_VIEWS.get(command.name) for command in run.commands}
-    if len(views) != 1:
-        return outcome
-    [view] = views
+    view = COMMAND_VIEWS.get(run.commands[0].name)
     return outcome if view is None else view(run, outcome)
 
 

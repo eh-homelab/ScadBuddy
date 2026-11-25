@@ -40,6 +40,7 @@ from scadbuddy.bambuddy.virtual_printers import (
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.printers.address import UnsafeAddressError
+from scadbuddy.printers.ams_slots import SlotCommandSent, SlotConfigured
 from scadbuddy.printers.bambuddy_sync import (
     PrinterSyncResult,
     fill_lan_after_link,
@@ -389,20 +390,26 @@ async def get_printer(printers: PrintersDep, printer_id: str) -> PrinterRow:
 
 @router.get(
     "/{printer_id}/commands/{command_id}",
-    response_model=KProfileTable | KProfileWriteResult | LanCommandOutcome,
+    response_model=KProfileTable
+    | KProfileWriteResult
+    | SlotConfigured
+    | SlotCommandSent
+    | LanCommandOutcome,
     responses={status.HTTP_202_ACCEPTED: {"model": LanCommandPending}},
     summary="Follow a LAN command a route answered 202 for",
     description=(
         "A K-profile, AMS slot or configure route that did not finish within its wait answers"
         " 202 with a `workflow_id`: this is that command's id. It answers 200 with the body"
         " that route would have answered (`KProfileTable` for the K-profile list,"
-        " `KProfileWriteResult` for a K-profile write; a write that may have been sent is"
-        " `confirmed: false`), or `LanCommandOutcome`, the finished replies, for a command"
-        " with no such view; 202 while the command runs. 404 `command_not_found` for an"
-        " unknown id or one that"
-        " belongs to another printer. 409 `printer_refused`, `printer_cert_changed` or"
-        " `not_lan_linked`, 502 `printer_no_answer` or `printer_unreachable`, and 503"
-        " `lan_unavailable` as the command's own route answers them."
+        " `KProfileWriteResult` for a K-profile write, `SlotConfigured` for an AMS slot"
+        " configure, `SlotCommandSent` for a slot reset, refresh, load or unload; a K-profile"
+        " write that may have been sent is `confirmed: false`, and a slot command's `message`"
+        " says it was not acknowledged), or `LanCommandOutcome`, the finished replies, for a"
+        " command with no such view; 202 while the command runs. 404 `command_not_found` for"
+        " an unknown id or one that belongs to another printer. 409 `printer_refused`,"
+        " `printer_cert_changed` or `not_lan_linked`, 502 `printer_no_answer` or"
+        " `printer_unreachable`, and 503 `lan_unavailable` as the command's own route answers"
+        " them."
     ),
 )
 async def get_printer_command(
