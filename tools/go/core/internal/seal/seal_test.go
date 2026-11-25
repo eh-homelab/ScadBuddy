@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The agent's vector key (secret-vectors.json): 32 bytes of 0x5a.
@@ -349,6 +351,52 @@ func TestKeyFiles(t *testing.T) {
 	}
 	if keys, err := LoadKeys(func(string) string { return "" }); keys != nil || err != nil {
 		t.Fatal(keys, err)
+	}
+}
+
+func TestAnInputIsOneJSONValueAndNothingAfterIt(t *testing.T) {
+	key := make([]byte, 32)
+	// Python's json.loads refuses each of these too (NaN and Infinity aside, which JSON.parse refuses).
+	for _, input := range []string{
+		`1,"tool":"x"`, `{"a":1} 2`, `{"a":1},"tool":"write"`, "01", "1.", ".5", "-", "1e", "+1",
+		"[1,]", `"\x"`, "NaN", "Infinity", "0x10", "1_0",
+	} {
+		if got, err := InputHash(key, "render", input); err == nil {
+			t.Errorf("%q hashed to %s", input, got)
+		}
+	}
+	a, _ := InputHash(key, "render", `{"n":1}`)
+	b, err := InputHash(key, "render", " {\"n\":1}\n")
+	if err != nil || a != b {
+		t.Fatal("space around the value changed the hash", err)
+	}
+}
+
+func TestDeepOrWideJSONIsBounded(t *testing.T) {
+	deep := strings.Repeat("[", depthMax) + strings.Repeat("]", depthMax)
+	if _, err := Canonical(deep, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Canonical("["+deep+"]", true); !errors.Is(err, errDepth) {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	b.WriteString("{")
+	for i := range 100000 {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`"k` + strconv.Itoa(i%50000) + `":` + strconv.Itoa(i))
+	}
+	b.WriteString("}")
+	start := time.Now()
+	got, err := Canonical(b.String(), true)
+	if err != nil || !strings.Contains(got, `"k0":50000`) || strings.Count(got, `"k`) != 50000 {
+		t.Fatal("a repeated key does not keep its last value", err)
+	}
+	// A scan per key took about 5e9 key compares here: minutes, not seconds.
+	if time.Since(start) > 60*time.Second {
+		t.Fatal("a wide object is slow")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"math"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,12 +34,18 @@ func InputHashKey(kek *KEK) []byte {
 
 // InputHash is the hex HMAC-SHA256 of the canonical {"tool", "input"}, input a JSON text.
 func InputHash(key []byte, tool, input string) (string, error) {
-	text, err := Canonical(`{"tool":`+quote(tool)+`,"input":`+input+`}`, true)
+	// input is parsed alone, so no text in it can change the outer object.
+	parsed, err := parse(input)
 	if err != nil {
 		return "", err
 	}
+	var b strings.Builder
+	whole := jsObject{{key: utf16Units("tool"), value: jsString(utf16Units(tool))}, {key: utf16Units("input"), value: parsed}}
+	if err := write(&b, whole, true); err != nil {
+		return "", err
+	}
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(text))
+	mac.Write([]byte(b.String()))
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
@@ -57,14 +64,9 @@ var ErrNumber = errors.New("a response holds no numbers, and canonical JSON has 
 
 // Canonical is the canonical form of the JSON text; numbers says whether it may hold any.
 func Canonical(text string, numbers bool) (string, error) {
-	p := &parser{s: text}
-	p.space()
-	v, err := p.value()
+	v, err := parse(text)
 	if err != nil {
 		return "", err
-	}
-	if p.space(); p.i != len(p.s) {
-		return "", errors.New("text after the JSON value")
 	}
 	var b strings.Builder
 	if err := write(&b, v, numbers); err != nil {
@@ -207,11 +209,42 @@ func Number(x float64) string {
 // parser is JSON.parse: strings as UTF-16 code units (a lone surrogate kept), numbers as
 // doubles, a repeated key's last value.
 type parser struct {
-	s string
-	i int
+	s     string
+	i     int
+	depth int
 }
 
-var errSyntax = errors.New("the text is not JSON")
+// depthMax is the most arrays and objects one value nests.
+const depthMax = 512
+
+var (
+	errSyntax = errors.New("the text is not JSON")
+	errDepth  = errors.New("the JSON nests too deep")
+	// numberPattern is JSON's number grammar, matched at the parser's place.
+	numberPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?`)
+)
+
+// parse is the one JSON value in text; text after it is refused.
+func parse(text string) (any, error) {
+	p := &parser{s: text}
+	p.space()
+	v, err := p.value()
+	if err != nil {
+		return nil, err
+	}
+	if p.space(); p.i != len(p.s) {
+		return nil, errors.New("text after the JSON value")
+	}
+	return v, nil
+}
+
+// nest is entered for an array or an object; done leaves it.
+func (p *parser) nest() error {
+	if p.depth++; p.depth > depthMax {
+		return errDepth
+	}
+	return nil
+}
 
 func (p *parser) space() {
 	for p.i < len(p.s) && strings.IndexByte(" \t\n\r", p.s[p.i]) >= 0 {
@@ -224,9 +257,14 @@ func (p *parser) value() (any, error) {
 		return nil, errSyntax
 	}
 	switch c := p.s[p.i]; {
-	case c == '{':
-		return p.object()
-	case c == '[':
+	case c == '{' || c == '[':
+		if err := p.nest(); err != nil {
+			return nil, err
+		}
+		defer func() { p.depth-- }()
+		if c == '{' {
+			return p.object()
+		}
 		return p.array()
 	case c == '"':
 		return p.str()
@@ -247,6 +285,7 @@ func (p *parser) value() (any, error) {
 func (p *parser) object() (any, error) {
 	p.i++
 	out := jsObject{}
+	seen := map[string]int{}
 	p.space()
 	if p.i < len(p.s) && p.s[p.i] == '}' {
 		p.i++
@@ -272,10 +311,10 @@ func (p *parser) object() (any, error) {
 			return nil, err
 		}
 		k := key.(jsString)
-		at := slices.IndexFunc(out, func(m member) bool { return slices.Equal(m.key, k) })
-		if at >= 0 {
+		if at, ok := seen[unitKey(k)]; ok {
 			out[at].value = v
 		} else {
+			seen[unitKey(k)] = len(out)
 			out = append(out, member{k, v})
 		}
 		p.space()
@@ -376,15 +415,26 @@ func (p *parser) str() (any, error) {
 }
 
 func (p *parser) number() (any, error) {
-	start := p.i
-	for p.i < len(p.s) && strings.IndexByte("+-0123456789.eE", p.s[p.i]) >= 0 {
-		p.i++
+	text := numberPattern.FindString(p.s[p.i:])
+	if text == "" {
+		return nil, errSyntax
 	}
-	x, err := strconv.ParseFloat(p.s[start:p.i], 64)
+	p.i += len(text)
+	// Past the double's range is an infinity, as JavaScript reads it.
+	x, err := strconv.ParseFloat(text, 64)
 	if err != nil && !errors.Is(err, strconv.ErrRange) {
 		return nil, errSyntax
 	}
 	return x, nil
+}
+
+// unitKey is a key's UTF-16 code units as a map key: a lone surrogate stays distinct.
+func unitKey(k jsString) string {
+	b := make([]byte, 0, 2*len(k))
+	for _, u := range k {
+		b = append(b, byte(u>>8), byte(u))
+	}
+	return string(b)
 }
 
 // JSONString is s as JSON.stringify writes it: only what JSON must escape is escaped.
