@@ -383,6 +383,7 @@ def _index(slug: str) -> int:
     return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(f"_{slug}"))
 
 
+@pytest.mark.pg_empty  # it migrates step by step from an empty database (#7517)
 def test_an_item_fulfilled_before_the_migration_unfulfils_to_zero(
     pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
