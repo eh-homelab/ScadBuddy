@@ -18,9 +18,11 @@ from scadbuddy.printers.lan_command_models import LanCommandPending, LanCommandR
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.store import PrinterStore, printer_uuid
-from scadbuddy.workflows.lan_command import LanCommandAnswer, execute_lan_commands
-
-NOT_LAN_LINKED = "not_lan_linked"
+from scadbuddy.workflows.lan_command import (
+    NOT_LAN_LINKED,
+    LanCommandAnswer,
+    execute_lan_commands,
+)
 
 
 def is_lan_linked(row: PrinterRow) -> bool:

@@ -57,8 +57,9 @@ from scadbuddy.printers.store import (
     SerialTakenError,
     SerialUnknownError,
     VirtualPrinterRowError,
+    printer_uuid,
 )
-from scadbuddy.workflows.lan_command import read_lan_commands
+from scadbuddy.workflows.lan_command import command_not_found, read_lan_commands
 
 logger = logging.getLogger(__name__)
 
@@ -398,8 +399,11 @@ async def get_printer(printers: PrintersDep, printer_id: str) -> PrinterRow:
 async def get_printer_command(
     commands: LanCommandsDep, printer_id: str, command_id: str
 ) -> Response:
+    owner = printer_uuid(printer_id)
+    if owner is None:
+        raise command_not_found()
     return command_response(
-        await read_lan_commands(commands.client_getter(), printer_id, command_id)
+        await read_lan_commands(commands.client_getter(), str(owner), command_id)
     )
 
 

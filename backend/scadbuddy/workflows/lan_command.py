@@ -67,6 +67,9 @@ with workflow.unsafe.imports_passed_through():
         LAN_UNSURE,
     )
 
+NOT_LAN_LINKED = "not_lan_linked"
+"""The 409 code of a printer with no LAN link (``native`` shares it)."""
+
 _ONCE = RetryPolicy(maximum_attempts=1)
 
 
@@ -135,13 +138,13 @@ async def read_lan_commands(client: Client, printer_id: str, command_id: str) ->
     of Task 6): `LanCommandPending` while it runs, else what `execute_lan_commands` would
     have answered. A run of another printer, or none, is 404 ``command_not_found``."""
     if not command_id.startswith(f"lan-command-{printer_id}-"):
-        raise _not_found()
+        raise command_not_found()
     handle = client.get_workflow_handle(command_id, result_type=LanCommandOutcome)
     try:
         described = await handle.describe()
     except RPCError as error:
         if error.status == RPCStatusCode.NOT_FOUND:
-            raise _not_found() from None
+            raise command_not_found() from None
         raise
     if described.status == WorkflowExecutionStatus.RUNNING:
         return LanCommandPending(workflow_id=command_id)
@@ -190,7 +193,7 @@ async def _started_run(
     raise RuntimeError("a LanCommand execution has no input")
 
 
-def _not_found() -> ApiError:
+def command_not_found() -> ApiError:
     return ApiError(
         status.HTTP_404_NOT_FOUND, "No such command for this printer.", code="command_not_found"
     )
@@ -228,7 +231,7 @@ def _problem(failure: WorkflowFailureError) -> ApiError:
             detail if isinstance(detail, PrintRunError) else PrintRunError.model_validate(detail)
         )
         if problem.status == status.HTTP_409_CONFLICT:
-            return ApiError(problem.status, problem.detail, code="not_lan_linked")
+            return ApiError(problem.status, problem.detail, code=NOT_LAN_LINKED)
         if problem.status == status.HTTP_503_SERVICE_UNAVAILABLE:
             return ApiError(problem.status, problem.detail, code="lan_unavailable")
     raise failure
