@@ -1,21 +1,30 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { printRunPoll } from '../../api/client'
 import type { PrinterRow } from '../../api/types'
-import {
-  mockKProfileNotes,
-  mockKProfiles,
-  setKProfileAdminOnly,
-  setKProfileUnconfirmed,
-} from '../../mocks/features/printerKProfiles'
-import { initialPrinters } from '../../mocks/features/printers'
+import { printerCommandKeys, setPrinterCommandSlow } from '../../mocks/features/printerCommands'
+import { mockKProfileNotes, mockKProfiles, setKProfileUnconfirmed } from '../../mocks/features/printerKProfiles'
+import { initialPrinters, setLanLinked } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { flowOf, noteKeys, PrinterKProfiles, shownK } from './PrinterKProfiles'
 
-const [h2c, garage] = initialPrinters() as [PrinterRow, PrinterRow]
-const single: PrinterRow = { ...h2c, bambuddy_view: { ...h2c.bambuddy_view!, nozzle_count: 1 } }
+const [initialH2c, garage] = initialPrinters() as [PrinterRow, PrinterRow]
+// #7276: the K-profiles are read over ScadBuddy's LAN link, so printer 1 is linked over the LAN.
+let h2c: PrinterRow
+let single: PrinterRow
+const poll = { ...printRunPoll }
+
+beforeEach(() => {
+  h2c = setLanLinked(initialH2c.id)
+  single = { ...h2c, bambuddy_view: { ...h2c.bambuddy_view!, nozzle_count: 1 } }
+})
+
+afterEach(() => {
+  Object.assign(printRunPoll, poll)
+})
 
 async function opened(row: PrinterRow = h2c) {
   const page = renderPage(<PrinterKProfiles row={row} />)
@@ -59,7 +68,7 @@ describe('PrinterKProfiles (#7154)', () => {
 
   it("shows the route's refusal for a printer it cannot reach", async () => {
     await opened(garage)
-    expect(await screen.findByRole('alert')).toHaveTextContent('not linked to a Bambuddy printer')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Garage is not linked over the LAN')
   })
 
   it('adds a profile to both extruders of a dual-nozzle printer in one batch, with its note', async () => {
@@ -212,25 +221,77 @@ describe('PrinterKProfiles (#7154)', () => {
     await waitFor(() => expect(screen.queryByRole('row', { name: 'K-profile Bambu PLA Basic' })).not.toBeInTheDocument())
   })
 
-  it('never says saved when the printer did not confirm the write', async () => {
+  it('says when the printer did not confirm a K-profile write', async () => {
     setKProfileUnconfirmed(true)
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
     const status = await screen.findByRole('status')
-    expect(status).toHaveTextContent('the printer did not confirm it')
+    expect(status).toHaveTextContent('Sent; the printer did not confirm it.')
     expect(status).not.toHaveTextContent('Deleted')
   })
 
-  it("names Bambuddy's admin-only scope when its auth refuses the write", async () => {
-    setKProfileAdminOnly(true)
+  it("shows the printer's refusal as ScadBuddy words it", async () => {
+    server.use(
+      http.post('/api/v1/printers/:id/kprofiles', () =>
+        HttpResponse.json(
+          { title: 'Conflict', status: 409, detail: 'The printer refused the K-profile write', code: 'printer_refused' },
+          { status: 409 },
+        ),
+      ),
+    )
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
     const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
     await user.clear(within(form).getByLabelText('K value'))
     await user.type(within(form).getByLabelText('K value'), '0.03')
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
-    expect(await within(form).findByRole('alert')).toHaveTextContent("No Bambuddy API key can change a printer's K-profiles")
+    expect(await within(form).findByRole('alert')).toHaveTextContent('The printer refused the K-profile write')
+  })
+
+  it('sends each write with an Idempotency-Key', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await screen.findByRole('status')
+    // The reads (GET) carry none; the one delete carries one.
+    expect(printerCommandKeys().filter(Boolean)).toEqual([expect.stringMatching(/^[0-9a-f]{32}$/)])
+  })
+
+  it('follows a slow read and a slow write to their answers, saying the write was sent meanwhile', async () => {
+    printRunPoll.intervalMs = 150
+    setPrinterCommandSlow(2)
+    const deletes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname.endsWith('/kprofiles/delete')) deletes.push(request.method)
+    })
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }, { timeout: 3000 }))
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('Sent to the printer. Waiting for it to answer.')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Deleted Bambu PLA Basic.'), { timeout: 3000 })
+    expect(deletes).toEqual(['POST'])
+  })
+
+  it('says not to send it again when the printer has not answered in time', async () => {
+    printRunPoll.intervalMs = 1
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    printRunPoll.printerCommandFollowMs = 20
+    setPrinterCommandSlow(1_000)
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Do not send it again'))
+    expect(screen.getByRole('status')).toHaveTextContent('has not answered yet')
+    expect(screen.getByRole('status')).not.toHaveTextContent('Deleted')
+  })
+
+  it('never says Bambuddy', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const region = screen.getByRole('region', { name: `K-profiles of ${h2c.name}` })
+    expect(region.textContent).not.toMatch(/Bambuddy/)
+    expect(within(region).getByRole('form')).toHaveTextContent('Kept in ScadBuddy, not on the printer.')
   })
 
   it('shows a read that fails as an alert', async () => {

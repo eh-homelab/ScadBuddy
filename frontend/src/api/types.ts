@@ -431,14 +431,16 @@ export type VirtualPrinters = Schemas['VirtualPrintersView']
 export type VirtualPrinterCreate = Schemas['VirtualPrinterCreate']
 export type VirtualPrinterUpdate = Schemas['VirtualPrinterUpdate']
 export type VirtualPrinterDiagnostic = Schemas['VirtualPrinterDiagnostic']
-/** #7154 — a printer's K-profiles (pressure advance), through Bambuddy. */
+/** #7276 P27 — a printer command still running when its route stopped waiting: follow `workflow_id`. */
+export type LanCommandPending = Schemas['LanCommandPending']
+/** #7154, #7276 — a printer's K-profiles (pressure advance), over ScadBuddy's LAN link. */
 export type KProfile = Schemas['KProfile']
 export type KProfileTable = Schemas['KProfileTable']
 export type KProfileNotes = Schemas['KProfileNotes']
 export type KProfileWriteResult = Schemas['KProfileWriteResult']
 export type KProfileSet = Schemas['KProfileSet']
 export type KProfileRemove = Schemas['KProfileRemove']
-/** #7153: a printer's AMS slots through Bambuddy. */
+/** #7153, #7276: a printer's AMS slots over ScadBuddy's LAN link. */
 export type AmsView = Schemas['AmsView']
 export type AmsUnitView = Schemas['AmsUnitView']
 export type SlotView = Schemas['SlotView']

@@ -1,15 +1,34 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { printRunPoll } from '../../api/client'
 import type { PrinterRow } from '../../api/types'
-import { amsPresetsSaved, amsSent, setAmsAdminOnly, setAmsPrinting, setAmsTrayNow } from '../../mocks/features/printerAmsSlots'
-import { initialPrinters } from '../../mocks/features/printers'
+import {
+  amsPresetsSaved,
+  amsSent,
+  setAmsPrinting,
+  setAmsTrayNow,
+  setAmsUnconfirmed,
+} from '../../mocks/features/printerAmsSlots'
+import { printerCommandKeys, setPrinterCommandSlow } from '../../mocks/features/printerCommands'
+import { initialPrinters, setLanLinked } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { PrinterAmsSlots } from './PrinterAmsSlots'
 
-const [h2c, garage] = initialPrinters() as [PrinterRow, PrinterRow]
+const [initialH2c, garage] = initialPrinters() as [PrinterRow, PrinterRow]
+// #7276: the slots are read and written over ScadBuddy's LAN link, so printer 1 is linked over the LAN.
+let h2c: PrinterRow
+const poll = { ...printRunPoll }
+
+beforeEach(() => {
+  h2c = setLanLinked(initialH2c.id)
+})
+
+afterEach(() => {
+  Object.assign(printRunPoll, poll)
+})
 
 async function opened(row: PrinterRow = h2c) {
   const page = renderPage(<PrinterAmsSlots row={row} />)
@@ -119,7 +138,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     )
   })
 
-  it('saves a spool’s ScadBuddy preset with the source the route names', async () => {
+  it('saves the preset a configure from a spool sent', async () => {
     const { user } = await opened()
     const form = await configureForm(user, 'AMS-A slot 4')
     await choose(user, within(form).getByRole('combobox', { name: 'Preset source' }), 'Orca cloud')
@@ -131,26 +150,32 @@ describe('PrinterAmsSlots (#7153)', () => {
     await confirm(user, form, 'AMS-A slot 4')
     await waitFor(() =>
       expect(amsPresetsSaved()).toEqual([
-        { preset_id: '141', preset_name: 'Shop PLA', preset_source: 'local', tray_info_idx: '141' },
+        { preset_id: 'GFL99', preset_name: 'Shop PLA', preset_source: 'cloud', tray_info_idx: 'GFL99' },
       ]),
     )
     const slot = await screen.findByRole('button', { name: 'AMS-A slot 4' })
     await waitFor(() => expect(slot).toHaveTextContent('Saved: Shop PLA'))
   })
 
-  it('clears the saved preset when the configure sent none', async () => {
+  it('saves the generic preset the slot was sent when none was typed', async () => {
     const { user } = await opened()
     const form = await configureForm(user, 'AMS-A slot 2')
     await user.clear(within(form).getByLabelText('Preset id'))
     await confirm(user, form, 'AMS-A slot 2')
     await waitFor(() => expect(amsSent()).toEqual(['configure 0/1']))
-    const slot = await screen.findByRole('button', { name: 'AMS-A slot 2' })
-    await waitFor(() => expect(slot).not.toHaveTextContent('Saved:'))
-    expect(amsPresetsSaved()).toEqual([])
+    await waitFor(() =>
+      expect(amsPresetsSaved()).toEqual([
+        { preset_id: 'GFG99', preset_name: 'Bambu PETG Basic', preset_source: 'cloud', tray_info_idx: 'GFG99' },
+      ]),
+    )
   })
 
   it('warns when the slot was configured but its preset was not saved', async () => {
-    setAmsAdminOnly(true)
+    server.use(
+      http.put('/api/v1/printers/:id/trays/:ams/:tray/preset', () =>
+        HttpResponse.json({ title: 'Error', status: 500, detail: 'The preset could not be saved' }, { status: 500 }),
+      ),
+    )
     const { user } = await opened()
     const form = await configureForm(user, 'AMS-A slot 2')
     await confirm(user, form, 'AMS-A slot 2')
@@ -210,17 +235,114 @@ describe('PrinterAmsSlots (#7153)', () => {
     expect(screen.getByLabelText('Label for AMS-A')).toHaveValue('')
   })
 
-  it("says why Bambuddy refused a label", async () => {
-    setAmsAdminOnly(true)
+  it('says why a label was not saved', async () => {
+    server.use(
+      http.put('/api/v1/printers/:id/ams/:ams/label', () =>
+        HttpResponse.json({ title: 'Unprocessable', status: 422, detail: 'The label must hold printable characters only' }, { status: 422 }),
+      ),
+    )
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
     await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')
     await user.click(screen.getByRole('button', { name: 'Save label' }))
-    expect(await screen.findByRole('status')).toHaveTextContent("while Bambuddy's auth is on")
+    expect(await screen.findByRole('status')).toHaveTextContent('The label must hold printable characters only')
+  })
+
+  it('says the label names the unit’s place in ScadBuddy', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
+    expect(screen.getByRole('form', { name: 'Label AMS-A' })).toHaveTextContent('The label also names this unit’s place in ScadBuddy.')
   })
 
   it("shows the route's refusal for a printer it cannot reach", async () => {
     await opened(garage)
-    expect(await screen.findByRole('alert')).toHaveTextContent('not linked to a Bambuddy printer')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Garage is not linked over the LAN')
+  })
+
+  it('follows a slow configure to its answer, and saves the preset it sent (P44)', async () => {
+    printRunPoll.intervalMs = 50
+    const { user } = await opened()
+    const form = await configureForm(user, 'AMS-A slot 2')
+    setPrinterCommandSlow(2)
+    await user.clear(within(form).getByLabelText('Preset id'))
+    await user.type(within(form).getByLabelText('Preset id'), 'GFG99')
+    await user.clear(within(form).getByLabelText('Preset name'))
+    await user.type(within(form).getByLabelText('Preset name'), 'Generic PETG')
+    await confirm(user, form, 'AMS-A slot 2')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Configured AMS-A slot 2'), { timeout: 3000 })
+    // The saved preset follows the configure's answer, never the 202's body.
+    expect(amsPresetsSaved()).toEqual([
+      { preset_id: 'GFG99', preset_name: 'Generic PETG', preset_source: 'cloud', tray_info_idx: 'GFG99' },
+    ])
+    expect(amsSent()).toEqual(['configure 0/1'])
+  })
+
+  it('says the command was sent while the printer has not answered, and not to send it again when it gives up', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.printerCommandFollowMs = 20
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    setPrinterCommandSlow(1_000)
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Do not send it again'))
+    expect(amsSent()).toEqual(['load 0/1'])
+  })
+
+  it('says when the printer did not confirm a slot command', async () => {
+    setAmsUnconfirmed(true)
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('Load: sent to AMS-A slot 2; the printer did not confirm it.')
+    expect(status).toHaveClass('text-warn')
+  })
+
+  it("shows a refusal's own detail", async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    await user.click(screen.getByRole('button', { name: 'Unload' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Unload' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('H2C is not loaded from AMS-A slot 2')
+  })
+
+  it('sends each slot command with an Idempotency-Key', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    await screen.findByRole('status')
+    expect(printerCommandKeys()).toEqual([expect.stringMatching(/^[0-9a-f]{32}$/)])
+  })
+
+  it('never says Bambuddy', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    await user.click(screen.getByRole('button', { name: 'Rename AMS-A' }))
+    const region = screen.getByRole('region', { name: `AMS slots of ${h2c.name}` })
+    expect(region.textContent).not.toMatch(/Bambuddy/)
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    expect((await screen.findByRole('alertdialog')).textContent).not.toMatch(/Bambuddy/)
+  })
+
+  it('says the printer has not reported lately, not Bambuddy', async () => {
+    server.use(
+      http.get('/api/v1/printers/:id/ams', () =>
+        HttpResponse.json({
+          printer_id: h2c.id,
+          name: 'H2C',
+          connected: false,
+          state: null,
+          printing: false,
+          ams_busy: false,
+          tray_now: null,
+          units: [],
+        }),
+      ),
+    )
+    await opened()
+    expect(await screen.findByText(/ScadBuddy has not heard from H2C lately/)).toBeInTheDocument()
   })
 })

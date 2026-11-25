@@ -206,6 +206,13 @@ function update(id: string, fields: Partial<PrinterRow>): PrinterRow {
   return next
 }
 
+/** #7276 — links a row over the LAN before a test renders, as `PUT /printers/{id}/lan` does; answers the row. */
+export function setLanLinked(id: string): PrinterRow {
+  const next = withLanLinked({ ...found(id)!, lan_host: '10.0.0.10', lan_cert_sha256: 'ab'.repeat(32), has_access_code: true })
+  state.printers = state.printers.map((printer) => (printer.id === id ? next : printer))
+  return next
+}
+
 /** The id the mocked sync gives Bambuddy's virtual printer 1's row. */
 export const VIRTUAL_ID = '00000000-0000-4000-8000-0000000000f1'
 

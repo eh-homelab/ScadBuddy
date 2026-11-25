@@ -1,16 +1,20 @@
 import { HttpResponse, http } from 'msw'
-import type { KProfile, KProfileRemove, KProfileSet, KProfileWriteResult } from '../../api/types'
+import type { KProfile, KProfileNotes, KProfileRemove, KProfileSet, KProfileTable, KProfileWriteResult } from '../../api/types'
+import { commandAnswer, keyRequired, lanRefusal } from './printerCommands'
+import { printersState } from './printers'
 
 /**
- * #7154 — a printer's K-profiles through Bambuddy (`backend/scadbuddy/api/printer_kprofiles.py`).
- * Printer 1's row (`printers.ts`, the dual-nozzle H2C linked to Bambuddy printer 1) holds two
- * profiles at 0.4 mm and one note; any other printer is not linked, a 409, as the route
- * answers. `setKProfileAdminOnly(true)` makes every write Bambuddy's admin-only scope problem;
- * `setKProfileUnconfirmed(true)` makes the printer leave every write unconfirmed.
+ * #7154, #7276 — a printer's K-profiles over ScadBuddy's LAN link
+ * (`backend/scadbuddy/api/printer_kprofiles.py`). The printer holds two profiles at 0.4 mm, and
+ * ScadBuddy one note. A printer `lan_linked` is false on is refused 409 `not_lan_linked`, as the
+ * route answers (`printerCommands.ts` `lanRefusal`), so a test links printer 1's row first. A
+ * write without an `Idempotency-Key` is a 428. `setKProfileUnconfirmed(true)` makes the printer
+ * leave every write unconfirmed; `printerCommands.ts` `setPrinterCommandSlow` makes every command
+ * a 202 to follow. The notes are ScadBuddy's own and need no LAN link.
  */
 
 export const H2C = '00000000-0000-4000-8000-000000000001'
-const SCOPE_PROBLEM = 'https://scadbuddy.dev/problems/bambuddy-scope'
+const FEATURE = 'K-profiles'
 
 function seedProfiles(): KProfile[] {
   return [
@@ -46,7 +50,6 @@ function seedProfiles(): KProfile[] {
 const state = {
   profiles: seedProfiles(),
   notes: { PFUS1: 'Calibrated on the textured plate' } as Record<string, string>,
-  adminOnly: false,
   unconfirmed: false,
   nextSlot: 3,
 }
@@ -54,13 +57,8 @@ const state = {
 export function reset(): void {
   state.profiles = seedProfiles()
   state.notes = { PFUS1: 'Calibrated on the textured plate' }
-  state.adminOnly = false
   state.unconfirmed = false
   state.nextSlot = 3
-}
-
-export function setKProfileAdminOnly(on: boolean): void {
-  state.adminOnly = on
 }
 
 export function setKProfileUnconfirmed(on: boolean): void {
@@ -75,30 +73,18 @@ export function mockKProfileNotes(): Record<string, string> {
   return state.notes
 }
 
-const notLinked = () =>
-  HttpResponse.json(
-    { detail: 'This printer is not linked to a Bambuddy printer, so ScadBuddy cannot reach its K-profiles' },
-    { status: 409 },
-  )
+/** A note is ScadBuddy's own: the printer needs only a row (`_notes_owner`), no LAN link. */
+const noPrinter = (id: string) =>
+  printersState().some((row) => row.id === id)
+    ? undefined
+    : HttpResponse.json({ title: `no printer ${id}`, status: 404, detail: `no printer ${id}` }, { status: 404 })
 
-const adminOnly = () =>
-  HttpResponse.json(
-    {
-      type: SCOPE_PROBLEM,
-      title: 'Bambuddy API key scope',
-      status: 409,
-      detail:
-        "Bambuddy refused the API key when asked to set a K-profile on printer 1. No Bambuddy API key can change a printer's K-profiles or their notes while Bambuddy's auth is on: turn its auth off, or make the change in Bambuddy",
-      required_scope: 'K-profiles (admin only)',
-    },
-    { status: 409 },
-  )
-
-const answer = (message: string): KProfileWriteResult => ({
-  success: true,
-  confirmed: !state.unconfirmed,
-  message: state.unconfirmed ? 'K-profile sent; the printer did not confirm it' : message,
-})
+const answer = (message: string) =>
+  ({
+    success: true,
+    confirmed: !state.unconfirmed,
+    message: state.unconfirmed ? 'K-profile sent; the printer did not confirm it' : message,
+  }) satisfies KProfileWriteResult
 
 function add(row: KProfileSet): void {
   const slot = state.nextSlot++
@@ -119,60 +105,61 @@ function add(row: KProfileSet): void {
 
 export const handlers = [
   http.get('/api/v1/printers/:id/kprofiles', ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
+    const refused = lanRefusal(String(params.id), FEATURE)
+    if (refused) return refused
     const nozzle = new URL(request.url).searchParams.get('nozzle_diameter') ?? '0.4'
-    return HttpResponse.json({
+    return commandAnswer(String(params.id), request, {
       profiles: state.profiles.filter((profile) => profile.nozzle_diameter === nozzle),
       nozzle_diameter: nozzle,
-    })
+    } satisfies KProfileTable)
   }),
   http.get('/api/v1/printers/:id/kprofiles/notes', ({ params }) =>
-    params.id === H2C ? HttpResponse.json({ notes: state.notes }) : notLinked(),
+    noPrinter(String(params.id)) ?? HttpResponse.json({ notes: state.notes } satisfies KProfileNotes),
   ),
   http.post('/api/v1/printers/:id/kprofiles', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly()
+    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request)
+    if (refused) return refused
     const row = (await request.json()) as KProfileSet
     const slot = row.slot_id ?? 0
     if (slot === 0) {
       add(row)
-      return HttpResponse.json(answer('K-profile added successfully'))
+      return commandAnswer(String(params.id), request, answer('K-profile added successfully'))
     }
     state.profiles = state.profiles.map((profile) =>
       profile.slot_id === slot && profile.extruder_id === (row.extruder_id ?? 0)
         ? { ...profile, name: row.name, k_value: Number.parseFloat(row.k_value).toFixed(6) }
         : profile,
     )
-    return HttpResponse.json(answer('K-profile updated successfully'))
+    return commandAnswer(String(params.id), request, answer('K-profile updated successfully'))
   }),
   http.post('/api/v1/printers/:id/kprofiles/batch', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly()
+    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request)
+    if (refused) return refused
     const { profiles } = (await request.json()) as { profiles: KProfileSet[] }
     profiles.forEach(add)
-    return HttpResponse.json(answer(`Added ${profiles.length} K-profiles`))
+    return commandAnswer(String(params.id), request, answer(`Added ${profiles.length} K-profiles`))
   }),
   http.post('/api/v1/printers/:id/kprofiles/delete', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly()
+    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request)
+    if (refused) return refused
     const row = (await request.json()) as KProfileRemove
     state.profiles = state.profiles.filter(
       (profile) => !(profile.slot_id === row.slot_id && profile.extruder_id === (row.extruder_id ?? 0)),
     )
-    return HttpResponse.json(answer('K-profile deleted successfully'))
+    return commandAnswer(String(params.id), request, answer('K-profile deleted successfully'))
   }),
   http.put('/api/v1/printers/:id/kprofiles/notes', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly()
+    const refused = noPrinter(String(params.id))
+    if (refused) return refused
     const { setting_id: key, note } = (await request.json()) as { setting_id: string; note: string }
     if (note.trim()) state.notes[key] = note
     else delete state.notes[key]
-    return HttpResponse.json({ success: true, confirmed: null, message: note.trim() ? 'Note saved' : 'Note deleted' })
+    return HttpResponse.json({ success: true, message: '' } satisfies KProfileWriteResult)
   }),
   http.delete('/api/v1/printers/:id/kprofiles/notes/:key', ({ params }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly()
+    const refused = noPrinter(String(params.id))
+    if (refused) return refused
     delete state.notes[String(params.key)]
-    return HttpResponse.json({ success: true, confirmed: null, message: 'Note deleted' })
+    return HttpResponse.json({ success: true, message: '' } satisfies KProfileWriteResult)
   }),
 ]
