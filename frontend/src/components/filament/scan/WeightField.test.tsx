@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { getSpool, listSpoolEvents } from '../../../api/filament'
 import { spoolId } from '../../../mocks/features/filament/seed'
@@ -77,5 +77,31 @@ describe('WeightField (#7273)', () => {
     await user.click(screen.getByRole('button', { name: 'Save weight' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('The weight is less than the empty spool.')
     expect(await listSpoolEvents(spool.id)).toHaveLength(before)
+  })
+
+  it('asks what is up when a new spool reads under its label, and saves the choice (#7683)', async () => {
+    // #9 is new: a 1000 g label, 1000 g left, no use, on a 180 g cardboard spool.
+    const spool = await getSpool(spoolId(9))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '950.5')
+    const group = await screen.findByRole('group', { name: 'The reading is 49.5 g under the label weight. What is up?' })
+    expect(within(group).getByRole('radio', { name: 'The scale was tared on the empty spool: 950.5 g of filament' })).toBeChecked()
+    expect(within(group).getByRole('radio', { name: 'The spool is short: 770.5 g of filament, 49.5 g under its label' })).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    const event = await lastWeighing(spool.id)
+    expect(event).toMatchObject({ source: 'person', grams_after: 950.5, data: { reading_g: 950.5, resolution: 'tared', shortfall_g: 49.5, empty_source: 'tared' } })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('saves the reading the person chose, even before the check answered (#7683)', async () => {
+    const spool = await getSpool(spoolId(9))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '800')
+    await user.click(await screen.findByRole('radio', { name: /The spool is short/ }))
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 620, data: { resolution: 'short' } })
+    expect((await getSpool(spool.id)).added_full).toBe(false)
   })
 })
