@@ -19,7 +19,6 @@ from scadbuddy.printers.lan_command_models import (
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.native import (
     command_response,
-    external_count,
     is_lan_linked,
     lan_row,
     live_status,
@@ -114,7 +113,6 @@ async def test_no_report_reads_as_offline() -> None:
     status = await live_status(Reports(None), row(), now=NOW)  # type: ignore[arg-type]
     assert status.connected is False
     assert status.ams == []
-    assert await external_count(Reports(None), row()) == 1  # type: ignore[arg-type]
 
 
 async def test_a_fresh_report_reads_as_connected() -> None:
@@ -122,7 +120,6 @@ async def test_a_fresh_report_reads_as_connected() -> None:
     status = await live_status(Reports(report), row(), now=NOW)  # type: ignore[arg-type]
     assert status.connected is True
     assert status.state == "IDLE"
-    assert await external_count(Reports(report), row()) == 2  # type: ignore[arg-type]
     stale = (report[0], NOW - timedelta(minutes=5))
     assert (await live_status(Reports(stale), row(), now=NOW)).connected is False  # type: ignore[arg-type]
 

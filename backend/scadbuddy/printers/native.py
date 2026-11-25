@@ -70,15 +70,6 @@ async def live_status(
     return report_status(row, report, now=now)
 
 
-async def external_count(reports: PrinterReportStore, row: PrinterRow) -> int:
-    """How many external holders the stored report lists (``vt_tray``); 1 with no report."""
-    report = await asyncio.to_thread(reports.get, row.id)
-    if report is None:
-        return 1
-    holders = report[0].get("vt_tray")
-    return len(holders) if isinstance(holders, list) else 1
-
-
 CommandView = Callable[[LanCommandRun, LanCommandOutcome], BaseModel]
 """A route's 200 body from the run it sent and the run's outcome."""
 
