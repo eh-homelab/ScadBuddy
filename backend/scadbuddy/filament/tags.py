@@ -49,6 +49,14 @@ class BindWithoutUidError(ValueError):
 #: How old a backup may be and still cover a write (#7273 R5).
 BACKUP_TTL: Final = timedelta(minutes=10)
 
+#: How long an armed job runs: arming sets its ``expires_at`` this far ahead, so the time
+#: that ended the wait for a page never ends a run early (`claim_job`, #7419 review).
+ARM_SECONDS: Final = 60
+
+#: How often an AMS report may mark the same tag seen again (`seen_on`): a report write
+#: inside it changes nothing it would write, so it skips the UPDATE.
+AMS_SEEN_THROTTLE_SECONDS: Final = 60
+
 
 class NoUidError(ValueError):
     """A backup of a tag with no UID."""
@@ -158,7 +166,9 @@ def draft_of(conn: Conn, decoded: m.DecodedSpool) -> m.SpoolCreate | None:
         return m.SpoolCreate.model_validate(values)
     except ValidationError as exc:
         for error in exc.errors():
-            values.pop(str(error["loc"][0]), None)
+            # An empty `loc` is a model-level error: no one field to leave out.
+            if error["loc"]:
+                values.pop(str(error["loc"][0]), None)
     return m.SpoolCreate.model_validate(values)
 
 
@@ -166,17 +176,27 @@ def seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]:
     """``(tag_id, holder_spool_id)`` of a reading, on ``conn``'s transaction, with the
     tag marked seen. A phone or an agent with a UID makes the tag; an AMS report only
     finds it. An AMS report skips the mark when the tag row is locked: its caller holds
-    spools, and binding locks the tag before them, so waiting could deadlock."""
+    spools, and binding locks the tag before them, so waiting could deadlock. An AMS mark
+    keeps the records a phone or an agent last read, and is skipped when the tag was last
+    seen by an AMS within `AMS_SEEN_THROTTLE_SECONDS`, since it would change nothing."""
     uid = clean_tag_uid(read.uid)
     tray = clean_tray_uuid(read.tray_uuid)
     if read.source == "ams":
         tag_id = _find(conn, uid, tray)
         if tag_id is not None:
             locked = conn.execute(
-                "SELECT id FROM filament_tags WHERE id = %s FOR UPDATE SKIP LOCKED", (tag_id,)
+                "SELECT id FROM filament_tags WHERE id = %s"
+                " AND (last_seen_source IS DISTINCT FROM 'ams' OR last_seen_at IS NULL"
+                " OR last_seen_at < now() - make_interval(secs => %s))"
+                " FOR UPDATE SKIP LOCKED",
+                (tag_id, AMS_SEEN_THROTTLE_SECONDS),
             ).fetchone()
             if locked is not None:
-                _mark(conn, tag_id, read)
+                conn.execute(
+                    "UPDATE filament_tags SET last_seen_at = now(), last_seen_source = 'ams'"
+                    " WHERE id = %s",
+                    (tag_id,),
+                )
     elif uid is None:
         return None, None
     else:
@@ -492,15 +512,15 @@ def records_for_spool(
     defaults: FilamentDefaults,
 ) -> m.TagRecords | None:
     """The records that put the spool on the tag, in the tag's own format, else
-    ``default``; ``None`` for no such spool. The backup must cover this write: it holds
-    the records the tag holds now (R19)."""
+    ``default``; ``None`` for no such spool, before the backup is checked. The backup must
+    cover this write: it holds the records the tag holds now (R19)."""
     with spools.transaction() as conn:
+        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
+        if spool is None:
+            return None
         backup = valid_backup(conn, body.backup_id, body.uid, "spool_write")
         if not same_records(body.records, backup.records):
             raise BackupMismatchError()
-        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
-    if spool is None:
-        return None
     return _encoded(spool, pick_format(body.records, default), empty_weight_g)
 
 
@@ -519,8 +539,13 @@ def written(
     format it would choose (R20). The check runs after the bind, which holds the spool's
     lock, so no edit slips in between; a refusal rolls the bind back. The spool then
     holds the tag, with the format's origin and the write's time (R11).
-    `SpoolNotFoundError` for no such spool."""
+    `SpoolNotFoundError` for no such spool, before the backup is checked."""
     with spools.transaction() as conn:
+        if (
+            conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
+            is None
+        ):
+            raise SpoolNotFoundError(spool_id)
         backup = valid_backup(conn, body.backup_id, body.uid, "spool_write")
         if not same_records(body.sent, body.read_back):
             raise ReadBackMismatchError()
@@ -615,8 +640,27 @@ class RecordsHashNotTakenError(ValueError):
 
 
 _JOB_COLUMNS: Final = (
-    "id, kind, records, created_by, state, result, created_at, expires_at, armed_by"
+    "id, kind, records, created_by, state, result, created_at, expires_at, armed_by,"
+    " EXISTS (SELECT 1 FROM filament_tag_backups AS b WHERE b.job_id = filament_nfc_jobs.id"
+    " AND b.reason = 'agent_write') AS write_begun"
 )
+
+#: The error a begun write ends with when no read-back came within `BACKUP_TTL`.
+NO_READ_BACK: Final = (
+    "no read-back came within 10 minutes of the backup: the tag may hold the new records,"
+    " and its backup can restore it"
+)
+
+
+class WriteBegunError(ValueError):
+    """A write job whose backup exists has begun: only its result ends it."""
+
+    code = "write_begun"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the write has begun (its tag is backed up): the job ends only with its result"
+        )
 
 
 def _job_of(row: dict[str, Any]) -> m.NfcJob:
@@ -624,16 +668,51 @@ def _job_of(row: dict[str, Any]) -> m.NfcJob:
 
 
 def expire_jobs(conn: Conn) -> None:
-    """End every open job whose time is up. Every job function runs it first."""
+    """End every open job whose time is up. Every job function runs it first. An armed job
+    whose ``agent_write`` backup exists has begun its write (``write_begun``), so it never
+    ends ``expired``: `finish_job` takes its result whenever it comes (#7419 review). Once
+    its newest backup is past `BACKUP_TTL`, which no result can be checked against, it ends
+    ``failed`` with the code ``no_read_back`` and that backup's id.
+
+    The due jobs are locked first, in id order, with ``SKIP LOCKED``: a job another
+    transaction holds (`back_up`'s ``FOR SHARE``, a finish or a cancel) is left for the next
+    call, so this never waits on a job's lock, and a read never queues behind a begun
+    write. A caller that then locks its own job can still meet a rare deadlock, which
+    Postgres ends by aborting one of the two. The backups are read after, in later
+    statements, so each one sees what committed before its job was locked (#7419 rounds 3
+    and 4)."""
+    due = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM filament_nfc_jobs WHERE state IN ('pending', 'armed')"
+            " AND expires_at <= now() ORDER BY id FOR UPDATE SKIP LOCKED"
+        ).fetchall()
+    ]
+    if not due:
+        return
     conn.execute(
-        "UPDATE filament_nfc_jobs SET state = 'expired'"
-        " WHERE state IN ('pending', 'armed') AND expires_at <= now()"
+        "UPDATE filament_nfc_jobs AS j SET state = 'failed', result = jsonb_build_object("
+        "'error', %s::text, 'code', 'no_read_back', 'backup_id',"
+        " (SELECT b.id::text FROM filament_tag_backups AS b WHERE b.job_id = j.id"
+        " AND b.reason = 'agent_write' ORDER BY b.at DESC, b.id DESC LIMIT 1))"
+        " WHERE j.id = ANY(%s) AND j.state = 'armed'"
+        " AND (SELECT max(b.at) FROM filament_tag_backups AS b WHERE b.job_id = j.id"
+        " AND b.reason = 'agent_write') <= now() - make_interval(secs => %s)",
+        (NO_READ_BACK, due, BACKUP_TTL.total_seconds()),
+    )
+    conn.execute(
+        "UPDATE filament_nfc_jobs AS j SET state = 'expired'"
+        " WHERE j.id = ANY(%s) AND j.state IN ('pending', 'armed')"
+        " AND NOT EXISTS (SELECT 1 FROM filament_tag_backups AS b"
+        " WHERE b.job_id = j.id AND b.reason = 'agent_write')",
+        (due,),
     )
 
 
 def create_job(spools: FilamentSpoolStore, body: m.NfcJobIn, *, actor: str) -> m.NfcJob:
-    """Queue a job for the phone page; it waits ``ttl_s`` seconds for a person to arm it
-    and finish it."""
+    """Queue a job for the phone page. ``ttl_s`` is how long it waits for a person to arm
+    it; arming gives the run `ARM_SECONDS` to finish (`claim_job`), and a write whose
+    backup exists is waited for until its result or `BACKUP_TTL` (`expire_jobs`)."""
     records = None if body.records is None else Jsonb([r.model_dump() for r in body.records])
     with spools.transaction() as conn:
         expire_jobs(conn)
@@ -668,11 +747,20 @@ def get_job(spools: FilamentSpoolStore, job_id: UUID) -> m.NfcJob | None:
 
 
 def _locked_job(conn: Conn, job_id: UUID) -> m.NfcJob:
-    row = conn.execute(
-        f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE id = %s FOR UPDATE", (job_id,)
-    ).fetchone()
-    if row is None:
+    """The job, locked ``FOR UPDATE``. Its row, ``write_begun`` included, is read in a
+    statement after the lock, so a backup `back_up` committed while this waited counts
+    (#7419 round 3)."""
+    if (
+        conn.execute(
+            "SELECT id FROM filament_nfc_jobs WHERE id = %s FOR UPDATE", (job_id,)
+        ).fetchone()
+        is None
+    ):
         raise NfcJobNotFoundError()
+    row = conn.execute(
+        f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert row is not None
     return _job_of(row)
 
 
@@ -693,7 +781,8 @@ def claim_job(
     job in any other state, so one page runs it; `NfcJobNotFoundError` for no such job. A
     write job is armed only with the hash of its records (#7273 R22): a missing or other
     one is `RecordsMismatchError`, and the job stays pending. A read job takes no hash
-    (`RecordsHashNotTakenError`)."""
+    (`RecordsHashNotTakenError`). Arming sets ``expires_at`` `ARM_SECONDS` ahead: the run
+    has its own time, whatever was left of the wait."""
     sent = None if body is None else body.records_sha256
     with spools.transaction() as conn:
         expire_jobs(conn)
@@ -706,9 +795,10 @@ def claim_job(
         elif sent != m.records_sha256(job.records):
             raise RecordsMismatchError()
         row = conn.execute(
-            "UPDATE filament_nfc_jobs SET state = 'armed', armed_by = %s WHERE id = %s"
+            "UPDATE filament_nfc_jobs SET state = 'armed', armed_by = %s,"
+            " expires_at = now() + make_interval(secs => %s) WHERE id = %s"
             f" RETURNING {_JOB_COLUMNS}",
-            (actor, job_id),
+            (actor, ARM_SECONDS, job_id),
         ).fetchone()
     assert row is not None
     return _job_of(row)
@@ -756,12 +846,16 @@ def finish_job(
 def cancel_job(spools: FilamentSpoolStore, job_id: UUID) -> m.NfcJob:
     """End a pending or armed job as ``cancelled``: its agent stopped waiting, so no page
     may arm it or post its result (#7273 M1). A job that has ended already is answered as
-    it is, unchanged. `NfcJobNotFoundError` for no such job."""
+    it is, unchanged. `WriteBegunError` for a write whose backup exists: the tag may hold
+    the new records, so only its result (or `expire_jobs`) ends it (#7419 review).
+    `NfcJobNotFoundError` for no such job."""
     with spools.transaction() as conn:
         expire_jobs(conn)
         job = _locked_job(conn, job_id)
         if job.state not in ("pending", "armed"):
             return job
+        if job.write_begun:
+            raise WriteBegunError()
         row = conn.execute(
             f"UPDATE filament_nfc_jobs SET state = 'cancelled' WHERE id = %s"
             f" RETURNING {_JOB_COLUMNS}",
