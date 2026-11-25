@@ -1213,7 +1213,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   /filament/label-sheets/{sheet_id}` (409 `label_sheet_name_taken`, `too_many_label_sheets`;
   in `NOT_NUDGED`); `GET /filament/label-templates` lists them as `saved`. Agent tools:
   `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  `filament_printer_labels` and `filament_label_templates` (all `read`), and
+  `filament_label_sheet_upsert` and `filament_label_sheet_delete` (`write`, #7216
+  R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`

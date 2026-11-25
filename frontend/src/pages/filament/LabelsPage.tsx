@@ -192,8 +192,9 @@ async function settingsBase(): Promise<string | null> {
 
 /**
  * #6264 — `/filament/labels?ids=<id>,<id>`: spool labels to print. Each spool is read
- * again (the ids are the page's only input) and drawn at the label template (#7157, the setting `filament_label_template`; 50 x 25 mm by default) with its number and a
- * QR code of `scadbuddy:spool:<id>`. The layout, `roll` (one label per page, for a label
+ * again (the ids are the page's only input) and drawn at the label template (#7157, the setting `filament_label_template`; 50 x 25 mm by default) with the fields of
+ * `filament_label_output` (#7216; by default its number, material, colour, brand and a QR
+ * code of `scadbuddy:spool:<id>`). The layout, `roll` (one label per page, for a label
  * printer) or `sheet` (packed on paper), is remembered in this browser.
  */
 export function LabelsPage() {

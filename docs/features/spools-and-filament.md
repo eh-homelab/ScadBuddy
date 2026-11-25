@@ -340,8 +340,10 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   inside Bambuddy's frame. A place label's PDF needs the label address or an https public
   URL (409 `no_label_base` otherwise). The browser print stays.
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
-  `filament_printer_labels`, and the label sizes with `filament_label_templates`; the PDF
-  route has no tool (R-7157-10).
+  `filament_printer_labels`, and the label sizes with `filament_label_templates`. It saves
+  and deletes saved sheets with `filament_label_sheet_upsert` and
+  `filament_label_sheet_delete` (`write`, #7216 R-7216-14). The PDF route has no tool
+  (R-7157-10).
 - Labels as PNG (#7216, plan `docs/superpowers/plans/2026-11-25-label-outputs.md`): with
   `format` `png` (or the setting `filament_label_output`), `POST /api/v1/filament/labels`
   gives each page of the PDF as a greyscale PNG at the chosen dpi, drawn by PDFium
