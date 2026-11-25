@@ -321,6 +321,28 @@ async def test_decisions_record_twice_and_delete(
         await remote.record_decision(_decision(call_id="gone"), at_hop="parent")
 
 
+async def test_an_answer_is_taken_over_and_withdrawn(
+    remote: RemoteFlowStore, store: FlowStore
+) -> None:
+    await started(store)
+    one = _decision(
+        kind="answer", outcome="answered", response={"answer": "one"}, responder="browser"
+    )
+    two = one.model_copy(update={"response": {"answer": "two"}})
+    assert await remote.record_decision(one) is True
+    assert await remote.call_operations("r1", "c") == []
+    assert await remote.take_over_answer(two, held=two, seen=[]) is False
+    assert await remote.take_over_answer(two, held=one, seen=[]) is True
+    assert await remote.take_over_answer(two, held=one, seen=[]) is True
+    held = await remote.get_decision(one.request_id)
+    assert held is not None and held.response == {"answer": "two"}
+    await remote.withdraw_answer(one)
+    assert await remote.get_decision(one.request_id) is not None
+    await remote.withdraw_answer(two)
+    await remote.withdraw_answer(two)
+    assert await remote.get_decision(one.request_id) is None
+
+
 async def test_a_request_id_with_a_slash_reaches_its_route(
     remote: RemoteFlowStore, store: FlowStore
 ) -> None:

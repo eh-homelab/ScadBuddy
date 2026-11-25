@@ -27,7 +27,7 @@ from scadbuddy.crud.guard import crud_router
 from scadbuddy.crud.operations import operations_router
 from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
-from scadbuddy.flows.models import Decision, Proposal, Run
+from scadbuddy.flows.models import CallOperation, Decision, Proposal, Run
 from scadbuddy.flows.operations import reset_execution
 from scadbuddy.flows.store import HopMovedError, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.workflows.flow_models import (
@@ -86,6 +86,12 @@ class HopMove(BaseModel):
 class DecisionWrite(BaseModel):
     decision: Decision
     at_hop: Hop | None = None
+
+
+class TakeOver(BaseModel):
+    decision: Decision
+    held: Decision
+    seen: list[str]
 
 
 class Recorded(BaseModel):
@@ -259,6 +265,26 @@ async def record_decision(body: DecisionWrite, flows: FlowsDep) -> Recorded:
 @router.post("/decisions/grant", name="crud_projects_record_grant_decision")
 async def record_grant_decision(body: Decision, flows: FlowsDep) -> Recorded:
     return Recorded(recorded=await flows.store.record_grant_decision(body))
+
+
+@router.get("/decisions/operations", name="crud_projects_call_operations")
+async def call_operations(run_id: str, call_id: str, flows: FlowsDep) -> list[CallOperation]:
+    return await flows.store.call_operations(run_id, call_id)
+
+
+@router.post("/decisions/take-over", name="crud_projects_take_over_answer")
+async def take_over_answer(body: TakeOver, flows: FlowsDep) -> Recorded:
+    taken = await flows.store.take_over_answer(body.decision, held=body.held, seen=body.seen)
+    return Recorded(recorded=taken)
+
+
+@router.post(
+    "/decisions/withdraw",
+    name="crud_projects_withdraw_answer",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def withdraw_answer(body: Decision, flows: FlowsDep) -> None:
+    await flows.store.withdraw_answer(body)
 
 
 def _same(held: Decision, decision: Decision) -> bool:

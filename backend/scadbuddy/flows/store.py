@@ -40,6 +40,7 @@ from scadbuddy.flows.grants import (
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
+    CallOperation,
     Decision,
     Proposal,
     Run,
@@ -61,6 +62,8 @@ _DECISION = (
     " input_hash, hops, created_at"
 )
 _DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
+#: An operation on a run's parked call: a task's id is its prompt's call id.
+_ON_CALL = "subject = %s AND coalesce(request->>'task_id', request->>'call_id') = %s"
 _GRANT = (
     "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
     " revoked_at, expires_at, created_at, parent_grant_id"
@@ -431,6 +434,22 @@ class FlowStore:
         """How long a parent hop lasts when the run never times out (spec §4.6): the
         agent's `approval_expiry_seconds`, else its default."""
         return await asyncio.to_thread(self._approval_expiry_s)
+
+    async def call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
+        """Every operation on record for the call; a running one with its request."""
+        return await asyncio.to_thread(self._call_operations, run_id, call_id)
+
+    async def take_over_answer(
+        self, decision: Decision, *, held: Decision, seen: list[str]
+    ) -> bool:
+        """Put `decision`'s answer in the row of `held` (#7575), only while the row has
+        `held`'s answer and the call has no operation but those `seen`, under the row's
+        lock. True too when the row has `decision`'s answer already; False otherwise."""
+        return await asyncio.to_thread(self._take_over_answer, decision, held, seen)
+
+    async def withdraw_answer(self, decision: Decision) -> None:
+        """Undo an answer that did not land, only while the row has that very answer."""
+        await asyncio.to_thread(self._withdraw_answer, decision)
 
     async def delete_decision(self, request_id: str) -> None:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
@@ -913,10 +932,11 @@ class FlowStore:
             ).fetchone()
             if row is not None:
                 return True
-            # In SQL: jsonb writes some numbers (1e23) another way than they came.
+            # In SQL: jsonb writes some numbers (1e23) another way than they came. Locked: a
+            # take-over under way ends first, and a later one sees this caller's operation.
             held = conn.execute(
                 "SELECT outcome = %s AND response = %s::jsonb AS same"
-                " FROM workflow_run_decisions WHERE request_id = %s",
+                " FROM workflow_run_decisions WHERE request_id = %s FOR SHARE",
                 (decision.outcome, Jsonb(decision.response), decision.request_id),
             ).fetchone()
         return held is not None and bool(held["same"])
@@ -1095,6 +1115,54 @@ class FlowStore:
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
         return DEFAULT_APPROVAL_EXPIRY_S
+
+    def _call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, CASE WHEN status = 'running' THEN request END AS request"
+                f" FROM operations WHERE {_ON_CALL}",
+                (f"flow:{run_id}", call_id),
+            ).fetchall()
+        return [CallOperation.model_validate(row) for row in rows]
+
+    def _take_over_answer(self, decision: Decision, held: Decision, seen: list[str]) -> bool:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT response = %s::jsonb AS same, response = %s::jsonb AS held"
+                " FROM workflow_run_decisions WHERE request_id = %s AND kind = 'answer'"
+                " AND responder = %s FOR UPDATE",
+                (
+                    Jsonb(decision.response),
+                    Jsonb(held.response),
+                    decision.request_id,
+                    decision.responder,
+                ),
+            ).fetchone()
+            if row is None:
+                return False
+            if row["same"]:
+                return True
+            # After the lock, so it sees the operation of whoever recorded the row again.
+            unseen = conn.execute(
+                f"SELECT 1 FROM operations WHERE {_ON_CALL} AND NOT id = ANY(%s::text[]) LIMIT 1",
+                (f"flow:{decision.run_id}", decision.call_id, seen),
+            ).fetchone()
+            if not row["held"] or unseen is not None:
+                return False
+            conn.execute(
+                "UPDATE workflow_run_decisions SET response = %s,"
+                " created_at = coalesce(%s, now()) WHERE request_id = %s",
+                (Jsonb(decision.response), decision.created_at, decision.request_id),
+            )
+        return True
+
+    def _withdraw_answer(self, decision: Decision) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM workflow_run_decisions WHERE request_id = %s AND kind = 'answer'"
+                " AND response = %s::jsonb",
+                (decision.request_id, Jsonb(decision.response)),
+            )
 
     def _delete_decision(self, request_id: str) -> None:
         with self._pool.connection() as conn:
@@ -1413,7 +1481,13 @@ class FlowStore:
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
             # Its links (#4252); a child's link to it stays, naming a run that is gone.
             conn.execute("DELETE FROM workflow_run_links WHERE run_id = %s", (run_id,))
+            # Before its tasks, as every write of a task by its run, and after its grant, as
+            # `_record_grant_decision`, whose row refers to the run.
+            conn.execute("SELECT 1 FROM workflow_runs WHERE id = %s FOR UPDATE", (run_id,))
+            tasks = self._tasks.delete_for_run_in(conn, run_id)
             cur = conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
+            # Last: it takes the event log's lock, and everything above takes row locks.
+            self._tasks.announce_cancelled_in(conn, tasks)
         return cur.rowcount > 0
 
 

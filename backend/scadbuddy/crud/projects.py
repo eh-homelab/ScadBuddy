@@ -20,7 +20,7 @@ from scadbuddy.core.secrets import Kek
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
 from scadbuddy.crud.guard import PREFIX
 from scadbuddy.flows.grants import ConsumeRequest, Grant, GrantUse
-from scadbuddy.flows.models import Decision, Proposal, Run
+from scadbuddy.flows.models import CallOperation, Decision, Proposal, Run
 from scadbuddy.flows.store import (
     RESET_CALL_S,
     HopMovedError,
@@ -147,6 +147,27 @@ class RemoteFlowStore:
     async def get_decision(self, request_id: str) -> Decision | None:
         body = await self._found(f"/decisions?request_id={_part(request_id)}")
         return None if body is None else Decision.model_validate(body)
+
+    async def call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
+        response = await self._send(
+            "GET", f"/decisions/operations?run_id={_part(run_id)}&call_id={_part(call_id)}"
+        )
+        return [CallOperation.model_validate(row) for row in response.json()]
+
+    async def take_over_answer(
+        self, decision: Decision, *, held: Decision, seen: list[str]
+    ) -> bool:
+        body = {
+            "decision": decision.model_dump(mode="json"),
+            "held": held.model_dump(mode="json"),
+            "seen": seen,
+        }
+        response = await self._send("POST", "/decisions/take-over", json=body)
+        return bool(response.json()["recorded"])
+
+    async def withdraw_answer(self, decision: Decision) -> None:
+        # A body, not a query: a URL is logged, and this one would hold the answer.
+        await self._send("POST", "/decisions/withdraw", json=decision.model_dump(mode="json"))
 
     async def delete_decision(self, request_id: str) -> None:
         await self._send("DELETE", f"/decisions?request_id={_part(request_id)}")

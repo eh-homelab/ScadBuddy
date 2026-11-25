@@ -111,6 +111,8 @@ def list_tasks(
     summary="Get a task",
 )
 async def get_task(task_id: TaskIdPath, tasks: TasksDep) -> Task:
+    # The answer and who gave it too, for every caller of an `api` route
+    # (`auth/routes.py`): only `answer_task` is a person's alone.
     return await _found(tasks, task_id)
 
 

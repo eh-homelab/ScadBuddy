@@ -1,7 +1,8 @@
 """A person's answer and approval as `projects` operations (#1057, plan
 2026-10-09-durable-phase-6-flows.md Task C1): the decision is recorded, then the
 harness is told. A decision the harness refuses, or whose Update Temporal never had, is
-deleted again; one whose Update landed stands, even when its reply was lost (#2247)."""
+deleted again; one whose Update landed stands, even when its reply was lost (#2247).
+An answer that never landed does not block another one (#7575)."""
 
 import asyncio
 import json
@@ -26,11 +27,13 @@ from scadbuddy.flows.operations import (
     STALE_ENTRY,
     TASK_ANSWER,
     TASK_NOT_OPEN,
+    answer_update_id,
     flow_kinds,
     request_id,
     seal_answer,
 )
 from scadbuddy.operations.kinds import OperationKind
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.tasks.models import TaskOpen
 from scadbuddy.tasks.store import TaskNotOpenError, TaskStore
 from scadbuddy.workflows.flow_models import FlowRecord, FlowWaiting, ProjectionWrite
@@ -518,7 +521,7 @@ async def test_a_task_answer_that_landed_stands_when_its_mark_fails(
     assert "s3cret" not in caplog.text
 
 
-async def _task_of(flows: Outward, run_id: str, call_id: str) -> TaskStore:
+async def _task_of(flows: Flows, run_id: str, call_id: str) -> TaskStore:
     tasks = TaskStore(flows.store._pool)
     await asyncio.to_thread(
         tasks.open, TaskOpen(id=call_id, run_id=run_id, title="q", schema={"type": "object"})
@@ -650,27 +653,6 @@ async def test_a_task_answer_that_lost_to_one_that_landed_marks_nothing(
     assert decision is not None and decision.response == {"answer": {"a": 1}}
 
 
-async def test_a_task_answer_that_lost_to_one_still_unsent_marks_nothing(flows: Flows) -> None:
-    run, call_id = await parked(flows)
-    left = Decision(
-        request_id=request_id(run, call_id),
-        run_id=run.id,
-        workflow_run_id=run.workflow_run_id,
-        call_id=call_id,
-        kind="answer",
-        outcome="answered",
-        response={"answer": {"a": 1}},
-        responder="browser",
-    )
-    assert await flows.store.record_decision(left)
-    marks = Marks()
-    request = await task_request(run, call_id, {"a": 2})
-    with pytest.raises(ApiError) as err:
-        await operate(flows, kinds(flows, marks)[TASK_ANSWER], request)
-    assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
-    assert marks.made == []
-
-
 async def test_a_task_answer_the_call_was_resolved_before_marks_nothing(
     flows: Flows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -683,3 +665,312 @@ async def test_a_task_answer_the_call_was_resolved_before_marks_nothing(
     assert (err.value.status, err.value.type) == (409, TASK_NOT_OPEN)
     assert marks.made == []
     assert await flows.store.get_decision(request_id(run, call_id)) is None
+
+
+# -- another answer's row (#7575) ------------------------------------------------
+
+BOTH = pytest.mark.parametrize("name", [TASK_ANSWER, FLOW_ANSWER])
+REFUSED = {TASK_ANSWER: TASK_NOT_OPEN, FLOW_ANSWER: ALREADY_RESOLVED}
+
+
+async def answering(name: str, run: Run, call_id: str, text: str) -> dict[str, Any]:
+    """A request of either kind, its answer sealed as its route seals it."""
+    if name == TASK_ANSWER:
+        return await task_request(run, call_id, {"a": text})
+    sealed = await seal_answer(Keys(), run.id, text)
+    return {"run_id": run.id, "call_id": call_id, "answer_sealed": sealed}
+
+
+def row_of(name: str, run: Run, call_id: str, text: str) -> Decision:
+    return Decision(
+        request_id=request_id(run, call_id),
+        run_id=run.id,
+        workflow_run_id=run.workflow_run_id,
+        call_id=call_id,
+        kind="answer",
+        outcome="answered",
+        response={"answer": {"a": text} if name == TASK_ANSWER else text},
+        responder="browser",
+    )
+
+
+def given(name: str, text: str) -> str:
+    """What the script got of an answer, as `_as_text` gave it."""
+    return json.dumps({"a": text}) if name == TASK_ANSWER else text
+
+
+async def started(flows: Flows, name: str, op_id: str, request: dict[str, Any]) -> OperationStore:
+    """The record of a running operation."""
+    operations = OperationStore(flows.store._pool)
+    await operations.insert(
+        op_id,
+        kind=name,
+        subject=f"flow:{request['run_id']}",
+        operation_key=op_id,
+        request=request,
+        workflow_id=f"operation-{op_id}",
+        workflow_run_id=op_id,
+        retention=None,
+    )
+    return operations
+
+
+async def stuck(flows: Flows, name: str, run: Run, call_id: str) -> Decision:
+    """The row of an answer that never landed, its operation over."""
+    operations = await started(flows, name, "first", await answering(name, run, call_id, "one"))
+    row = row_of(name, run, call_id, "one")
+    assert await flows.store.record_decision(row)
+    await operations.finish("first", result={})
+    return row
+
+
+async def responses(flows: Flows, run: Run, call_id: str) -> Any:
+    decision = await flows.store.get_decision(request_id(run, call_id))
+    return None if decision is None else decision.response
+
+
+@BOTH
+async def test_an_answer_takes_over_one_that_never_landed(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await parked(flows)
+    await stuck(flows, name, run, call_id)
+    tasks = await _task_of(flows, run.id, call_id)
+    _as_text(monkeypatch)
+    request = await answering(name, run, call_id, "two")
+    result = await operate(flows, kinds(flows, StoreMarks(tasks))[name], request)
+    assert result["outcome"] == "answered"
+    # The script's answer is the one on the audit row and on the task.
+    assert (await flows.finished(run.id)).result == f"result: {given(name, 'two')!r}"
+    assert await responses(flows, run, call_id) == row_of(name, run, call_id, "two").response
+    if name == TASK_ANSWER:
+        held = await asyncio.to_thread(tasks.get, call_id)
+        assert held is not None
+        assert (held.state, held.answer, held.answered_by) == ("answered", {"a": "two"}, "jane")
+
+
+@BOTH
+async def test_an_answer_whose_operation_still_runs_refuses_another_until_it_ends(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await parked(flows)
+    first = row_of(name, run, call_id, "one")
+    operations = await started(flows, name, "first", await answering(name, run, call_id, "one"))
+    assert await flows.store.record_decision(first)
+    sent = _as_text(monkeypatch)
+    answer = kinds(flows, Marks())[name]
+    request = await answering(name, run, call_id, "two")
+    await started(flows, name, "second", request)
+    with pytest.raises(ApiError) as err:
+        await operate(flows, answer, request)
+    assert (err.value.status, err.value.type) == (409, REFUSED[name])
+    assert sent == []
+    assert await responses(flows, run, call_id) == first.response
+    await operations.finish("first", result={})
+    assert (await operate(flows, answer, request))["outcome"] == "answered"
+    assert (await flows.finished(run.id)).result == f"result: {given(name, 'two')!r}"
+
+
+@BOTH
+async def test_the_first_answer_again_by_a_running_operation_refuses_another(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await parked(flows)
+    first = await stuck(flows, name, run, call_id)
+    await started(flows, name, "again", await answering(name, run, call_id, "one"))
+    _as_text(monkeypatch)
+    marks = Marks()
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows, marks)[name], await answering(name, run, call_id, "two"))
+    assert (err.value.status, err.value.type) == (409, REFUSED[name])
+    assert marks.made == []
+    assert await responses(flows, run, call_id) == first.response
+
+
+@BOTH
+@pytest.mark.parametrize("before", [False, True], ids=["tagged", "untagged"])
+async def test_an_answer_that_landed_is_never_taken_over(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str, before: bool
+) -> None:
+    """`untagged`: sent before #7575, under the request id alone."""
+    run, call_id = await two_questions(flows)
+    answer = kinds(flows, Marks())[name]
+    request = await answering(name, run, call_id, "two")
+    env = ActivityEnvironment(client=flows.client)
+    # Its check found the call waiting.
+    checked = await env.run(answer.check, request)
+    first = await stuck(flows, name, run, call_id)
+    update_id = first.request_id if before else await answer_update_id(Keys(), first)
+    client = AgentClient(flows.client, run.workflow_id)
+    await client.provide_callback_result(call_id, result={"answer": "one"}, update_id=update_id)
+    sent = _as_text(monkeypatch)
+    with pytest.raises(ApiError) as err:
+        await env.run(answer.run, request, checked)
+    assert (err.value.status, err.value.type) == (409, REFUSED[name])
+    assert sent == []
+    assert await responses(flows, run, call_id) == first.response
+
+
+@BOTH
+async def test_an_answer_whose_fate_is_unknown_is_not_taken_over(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await parked(flows)
+    first = await stuck(flows, name, run, call_id)
+    sent = _as_text(monkeypatch)
+
+    async def slow(self: WorkflowUpdateHandle[Any], **kwargs: Any) -> Any:
+        raise WorkflowUpdateRPCTimeoutOrCancelledError() from RPCError(
+            "deadline", RPCStatusCode.DEADLINE_EXCEEDED, b""
+        )
+
+    monkeypatch.setattr(WorkflowUpdateHandle, "result", slow)
+    request = await answering(name, run, call_id, "two")
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows, Marks())[name], request)
+    assert (err.value.status, err.value.type) == (409, REFUSED[name])
+    assert sent == []
+    assert await responses(flows, run, call_id) == first.response
+
+
+@BOTH
+async def test_of_two_answers_that_take_over_one_wins(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await parked(flows)
+    await stuck(flows, name, run, call_id)
+    sent = _as_text(monkeypatch)
+    answer = kinds(flows, Marks())[name]
+    texts = ["two", "three"]
+    requests = [await answering(name, run, call_id, text) for text in texts]
+    env = ActivityEnvironment(client=flows.client)
+    checks = [await env.run(answer.check, request) for request in requests]
+    for text, request in zip(texts, requests, strict=True):
+        await started(flows, name, text, request)
+    results = await asyncio.gather(
+        *(
+            ActivityEnvironment(client=flows.client).run(answer.run, request, checked)
+            for request, checked in zip(requests, checks, strict=True)
+        ),
+        return_exceptions=True,
+    )
+    [won] = [text for text, r in zip(texts, results, strict=True) if isinstance(r, dict)]
+    [lost] = [r for r in results if isinstance(r, ApiError)]
+    assert (lost.status, lost.type) == (409, REFUSED[name])
+    assert sent == [call_id]
+    assert (await flows.finished(run.id)).result == f"result: {given(name, won)!r}"
+    assert await responses(flows, run, call_id) == row_of(name, run, call_id, won).response
+
+
+@BOTH
+async def test_a_send_that_comes_after_the_take_over_undoes_nothing(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """A worker that was paused: its operation is over, and it sends all the same."""
+    run, call_id = await parked(flows)
+    requests = {t: await answering(name, run, call_id, t) for t in ("one", "two")}
+    operations = await started(flows, name, "first", requests["one"])
+    answer = kinds(flows, Marks())[name]
+    _as_text(monkeypatch)
+    typed = AgentClient.provide_callback_result
+    paused, go = asyncio.Event(), asyncio.Event()
+
+    async def pauses(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        if not paused.is_set():
+            paused.set()
+            await go.wait()
+        return await typed(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", pauses)
+    late = asyncio.ensure_future(operate(flows, answer, requests["one"]))
+    await paused.wait()
+    await operations.finish("first", result={})
+    await operate(flows, answer, requests["two"])
+    go.set()
+    with pytest.raises(ApiError):
+        await late
+    assert (await flows.finished(run.id)).result == f"result: {given(name, 'two')!r}"
+    assert await responses(flows, run, call_id) == row_of(name, run, call_id, "two").response
+
+
+@BOTH
+async def test_an_answer_that_lands_after_its_take_over_is_on_record_again(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await parked(flows)
+    first = await stuck(flows, name, run, call_id)
+    original = AgentClient.provide_callback_result
+
+    async def beaten(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
+        one = {"answer": given(name, "one")}
+        await original(self, tool_id, result=one, update_id=await answer_update_id(Keys(), first))
+        text = {"answer": given(name, "two")}
+        return await original(self, tool_id, result=text, update_id=update_id)
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", beaten)
+    marks = Marks()
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows, marks)[name], await answering(name, run, call_id, "two"))
+    assert (err.value.status, err.value.type) == (409, REFUSED[name])
+    assert marks.made == []
+    assert (await flows.finished(run.id)).result == f"result: {given(name, 'one')!r}"
+    assert await responses(flows, run, call_id) == first.response
+
+
+@BOTH
+async def test_a_reset_leaves_the_old_row_and_the_call_is_answered_again(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run_id = await outward.run(
+        script(
+            "a = await wait_for_human('First?', 600)",
+            "await wait_for_human('Second?', 600)",
+            "return a['answer']",
+        )
+    )
+    before = await outward.row(run_id, lambda r: r.status == "waiting")
+    call_id = before.waiting_on[0].call_id
+    first = await stuck(outward, name, before, call_id)
+    answer = kinds(outward, Marks())[name]
+    request = await answering(name, before, call_id, "two")
+    env = ActivityEnvironment(client=outward.client)
+    checked = await env.run(answer.check, request)
+    # Answered another way, and that undone: the call waits in the new execution too.
+    waited = await point_after(outward, before, before.steps[0].history_length)
+    client = AgentClient(outward.client, before.workflow_id)
+    await client.provide_callback_result(call_id, result={"answer": "y"}, update_id="other")
+    await outward.row(run_id, lambda r: [w.prompt for w in r.waiting_on] == ["Second?"])
+    await reset(outward, before, await point_after(outward, before, waited))
+    after = await outward.row(run_id, lambda r: r.workflow_run_id != before.workflow_run_id)
+    assert [w.call_id for w in after.waiting_on] == [call_id]
+    _as_text(monkeypatch)
+    with pytest.raises(ApiError) as err:
+        await env.run(answer.run, request, checked)
+    assert (err.value.status, err.value.type) == (409, STALE_ENTRY)
+    assert await responses(outward, before, call_id) == first.response
+    # The first answer was the old execution's: this one is the new one's first.
+    assert (await operate(outward, answer, request))["outcome"] == "answered"
+    second = await outward.row(run_id, lambda r: [w.prompt for w in r.waiting_on] == ["Second?"])
+    await client.provide_callback_result(
+        second.waiting_on[0].call_id, result={"answer": "z"}, update_id="z"
+    )
+    assert (await outward.finished(run_id)).result == f"result: {given(name, 'two')!r}"
+    assert await responses(outward, after, call_id) == row_of(name, after, call_id, "two").response
+    assert await responses(outward, before, call_id) == first.response
+
+
+async def test_two_answers_share_no_update_and_one_answer_keeps_its_own(flows: Flows) -> None:
+    run, call_id = await parked(flows)
+
+    async def update_id(answer: Any) -> str:
+        row = row_of(FLOW_ANSWER, run, call_id, "x").model_copy(
+            update={"response": {"answer": answer}}
+        )
+        return await answer_update_id(Keys(), row)
+
+    one = await update_id({"a": 1e23, "b": [1.5, 2]})
+    # As jsonb gives it back.
+    assert await update_id({"b": [1.5, 2.0], "a": 10**23}) == one
+    assert await update_id({"a": 1e23, "b": [1.5, 3]}) != one
+    assert await update_id({"a": True}) != await update_id({"a": 1})
+    assert one.startswith(request_id(run, call_id) + ":")

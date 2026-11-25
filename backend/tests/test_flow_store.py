@@ -3,6 +3,7 @@ versions, and the run rows only a run's own workflow writes."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -12,9 +13,10 @@ from psycopg import Connection
 
 from scadbuddy.core.events import Event, FlowRunEvent, TaskChanged
 from scadbuddy.flows import store as flow_store
-from scadbuddy.flows.models import RESULT_MAX
+from scadbuddy.flows.models import RESULT_MAX, Decision
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.tasks.models import TaskOpen
 from scadbuddy.tasks.store import TaskStore
@@ -239,6 +241,108 @@ async def test_delete_run(store: FlowStore) -> None:
     assert await store.delete_run("r1")
     assert await store.get_run("r1") is None
     assert not await store.delete_run("r1")
+
+
+def answer_row(text: str, **update: Any) -> Decision:
+    row = Decision(
+        request_id="flow:r1:wr1:c",
+        run_id="r1",
+        workflow_run_id="wr1",
+        call_id="c",
+        kind="answer",
+        outcome="answered",
+        response={"answer": text},
+        responder="browser",
+    )
+    return row.model_copy(update=update)
+
+
+async def insert_operation(jobs: JobProjection, op_id: str, request: dict[str, Any]) -> None:
+    await OperationStore(jobs.pool).insert(
+        op_id,
+        kind="task_answer",
+        subject="flow:r1",
+        operation_key=op_id,
+        request=request,
+        workflow_id=op_id,
+        workflow_run_id=op_id,
+        retention=None,
+    )
+
+
+async def test_call_operations_are_the_calls_own_and_a_request_only_while_it_runs(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    await insert_operation(jobs, "a", {"run_id": "r1", "task_id": "c", "answer_sealed": "s"})
+    await insert_operation(jobs, "b", {"run_id": "r1", "call_id": "c", "answer_sealed": "t"})
+    await insert_operation(jobs, "c", {"run_id": "r1", "call_id": "other"})
+    await insert_operation(jobs, "d", {"run_id": "r1", "event_id": 1})
+    await OperationStore(jobs.pool).finish("a", result={})
+    found = {op.id: op.request for op in await store.call_operations("r1", "c")}
+    assert found == {"a": None, "b": {"run_id": "r1", "call_id": "c", "answer_sealed": "t"}}
+    assert await store.call_operations("r2", "c") == []
+
+
+async def test_an_answer_is_taken_over_only_as_it_was_seen(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    await started(store)
+    one, two = answer_row("one"), answer_row("two")
+    assert not await store.take_over_answer(two, held=one, seen=[])  # no row
+    assert await store.record_decision(one)
+    await insert_operation(jobs, "a", {"run_id": "r1", "task_id": "c", "answer_sealed": "s"})
+    # An operation nobody looked at may be the one that sends.
+    assert not await store.take_over_answer(two, held=one, seen=[])
+    # The row moved on since it was read.
+    assert not await store.take_over_answer(two, held=answer_row("three"), seen=["a"])
+    assert await store.take_over_answer(two, held=one, seen=["a"])
+    # Sent again after a lost reply.
+    assert await store.take_over_answer(two, held=one, seen=["a"])
+    held = await store.get_decision(two.request_id)
+    assert held is not None and held.response == {"answer": "two"}
+    assert not await store.take_over_answer(answer_row("three"), held=one, seen=["a"])
+    # Only an answer's own row is withdrawn.
+    await store.withdraw_answer(one)
+    assert await store.get_decision(two.request_id) is not None
+    await store.withdraw_answer(two)
+    await store.withdraw_answer(two)
+    assert await store.get_decision(two.request_id) is None
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"kind": "approval", "outcome": "approved", "response": {}},
+        {"responder": "grant:g1"},
+    ],
+    ids=["approval", "grant"],
+)
+async def test_only_a_persons_answer_is_taken_over(store: FlowStore, update: Any) -> None:
+    await started(store)
+    held = answer_row("one", **update)
+    assert await store.record_decision(held)
+    assert not await store.take_over_answer(answer_row("two"), held=held, seen=[])
+
+
+async def test_an_answer_recorded_again_waits_for_a_take_over_under_way(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    await started(store)
+    one, two = answer_row("one"), answer_row("two")
+    assert await store.record_decision(one)
+    with jobs.pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "SELECT 1 FROM workflow_run_decisions WHERE request_id = %s FOR UPDATE",
+            (two.request_id,),
+        )
+        again = asyncio.ensure_future(store.record_decision(one))
+        await asyncio.sleep(0.5)
+        assert not again.done()
+        conn.execute(
+            "UPDATE workflow_run_decisions SET response = %s::jsonb WHERE request_id = %s",
+            ('{"answer": "two"}', two.request_id),
+        )
+    assert await again is False
 
 
 def parked(call_id: str, at: int) -> FlowWaiting:
