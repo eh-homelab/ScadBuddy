@@ -261,6 +261,17 @@ describe('PrinterAmsSlots (#7153)', () => {
     expect(screen.getByText('Unload the hotend to read a tag again.')).toBeInTheDocument()
   })
 
+  it('does not read the tag again when the status names a tray, though no slot shows it loaded', async () => {
+    // The report's `snow` and `tray_now` can disagree; the route refuses on either
+    // (`ams_slots.any_loaded`).
+    setAmsLoaded(null)
+    setAmsTrayNow(2)
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    expect(screen.getByRole('button', { name: 'Read the tag again' })).toBeDisabled()
+    expect(screen.getByText('Unload the hotend to read a tag again.')).toBeInTheDocument()
+  })
+
   it('does not read the tag again while a tray feeds the printer', async () => {
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))

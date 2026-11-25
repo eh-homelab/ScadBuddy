@@ -260,7 +260,10 @@ export const handlers = [
       if (!target.loaded) return problem(409, `H2C is not loaded from ${label}`, 'not_loaded')
       target.loaded = false
     }
-    if (action === 'refresh' && state.units.some((u) => u.slots.some((s) => s.loaded))) {
+    // As `ams_slots.any_loaded`: a slot shows `loaded`, or `tray_now` names a slot.
+    const trayNow = view().tray_now
+    const anyLoaded = (trayNow != null && trayNow !== 255) || state.units.some((u) => u.slots.some((s) => s.loaded))
+    if (action === 'refresh' && anyLoaded) {
       return problem(409, 'H2C has filament loaded; unload it before the AMS can read a tag again', 'filament_loaded')
     }
     if (action === 'reset') {

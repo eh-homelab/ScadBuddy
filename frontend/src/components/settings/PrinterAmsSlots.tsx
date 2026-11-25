@@ -183,9 +183,12 @@ function AmsBody({ row }: { row: PrinterRow }) {
   const unit = view?.units.find((u) => u.ams_id === picked?.ams)
   const slot = unit?.slots.find((s) => s.tray_id === picked?.tray)
   const locked = busy || !view?.connected || view.printing || view.ams_busy
-  // The route refuses a tag read while any extruder is loaded (`ams_slots.any_loaded`), which
-  // each slot's `loaded` says; `tray_now` names only the active extruder's slot.
-  const anyLoaded = view?.units.some((u) => u.slots.some((s) => s.loaded)) ?? false
+  // The route refuses a tag read while any extruder is loaded (`ams_slots.any_loaded`): a slot
+  // shows `loaded`, or `tray_now` names a slot (only the active extruder's; it can disagree with
+  // the slots when the report's `snow` does).
+  const anyLoaded =
+    view != null &&
+    ((view.tray_now != null && view.tray_now !== 255) || view.units.some((u) => u.slots.some((s) => s.loaded)))
 
   return (
     <div className="mt-2 space-y-3" role="region" aria-label={`AMS slots of ${row.name}`}>
