@@ -255,6 +255,11 @@ kubectl -n bambuddy scale deployment scadbuddy --replicas=1
 kubectl -n bambuddy rollout status deployment scadbuddy --timeout=10m
 ```
 
+The one replica copies every template to rows before it serves (`run` emptied
+`template_copy_runs`). If that takes longer than the startupProbe's budget, the pod restarts
+and the next start continues the copy (each batch keeps its rows); raise the startupProbe's
+`failureThreshold` for this step when the pod restarts.
+
 | Check | Expected |
 |---|---|
 | `GET /api/v1/model-records/copy-status` | `finished_at` is set and after the start; `incomplete` is false; `added` is the number of templates; `unreadable` is empty |

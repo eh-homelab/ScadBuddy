@@ -47,9 +47,11 @@ from tests.conftest import (
     PUBLIC_ADDRESS,
     UNUSED_DATABASE_URL,
     UNUSED_TEMPORAL_ADDRESS,
+    PgPool,
     make_library_upstream,
 )
 from tests.support.media import MemoryMediaStore
+from tests.support.template_rows import copy_template_rows, open_template_rows
 from tests.test_library_processes import _age, _running
 
 pytestmark = pytest.mark.requires_git
@@ -97,8 +99,13 @@ def store(paths: DataPaths, upstream: tuple[str, dict[str, str]]) -> LibraryStor
 
 
 @pytest.fixture
-def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
-    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+def catalogue(paths: DataPaths, history: ModelHistory, pg_pool: PgPool) -> Catalogue:
+    """With its rows, as the app wires them (#7317 phase 3: the readers read only rows)."""
+    catalogue = Catalogue(
+        paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
+    open_template_rows(catalogue, pg_pool)
+    return catalogue
 
 
 def _create(catalogue: Catalogue, slug: str = "widget") -> None:
@@ -701,7 +708,7 @@ def test_unpinning_takes_the_library_off_the_model(
 
 
 def test_a_listing_is_not_stopped_by_an_entry_it_cannot_read(
-    catalogue: Catalogue, paths: DataPaths
+    catalogue: Catalogue, paths: DataPaths, pg_pool: PgPool
 ) -> None:
     """The listing shows the pins it can read; the render is what refuses (below)."""
     _create(catalogue)
@@ -710,6 +717,8 @@ def test_a_listing_is_not_stopped_by_an_entry_it_cannot_read(
         "widget",
         {"name": "Widget", "libraries": ["BOSL2", {"name": "bad", "commit": "HEAD"}, good]},
     )
+    # Written with no commit: its row comes from a copy.
+    copy_template_rows(catalogue, pg_pool)
 
     assert [library.name for library in catalogue.record("widget").libraries] == ["ok"]
 

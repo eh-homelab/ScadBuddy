@@ -40,8 +40,9 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.conftest import read_png, write_openscad_3mf
+from tests.conftest import PgPool, read_png, write_openscad_3mf
 from tests.support.media import MemoryMediaStore, thumbnail_of
+from tests.support.template_rows import open_template_rows
 
 SLUG = "widget"
 CONFIG = Config(data_dir=Path("/unused"))
@@ -188,11 +189,12 @@ def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
 
 @pytest.mark.requires_postgres
 async def test_the_catalogue_ranks_its_own_image_over_the_preview(
-    store: PreviewStore, paths: DataPaths
+    store: PreviewStore, paths: DataPaths, pg_pool: PgPool
 ) -> None:
     catalogue = Catalogue(
         paths, previews=store, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
     )
+    open_template_rows(catalogue, pg_pool)
     store.write(SLUG, "a" * 64, b"preview")
 
     origin = catalogue.thumbnail_source(SLUG)
@@ -207,7 +209,7 @@ async def test_the_catalogue_ranks_its_own_image_over_the_preview(
 
 @pytest.mark.requires_postgres
 async def test_a_catalogue_not_serving_previews_shows_none(
-    store: PreviewStore, paths: DataPaths
+    store: PreviewStore, paths: DataPaths, pg_pool: PgPool
 ) -> None:
     store.write(SLUG, "a" * 64, b"preview")
     catalogue = Catalogue(
@@ -217,6 +219,7 @@ async def test_a_catalogue_not_serving_previews_shows_none(
         media_store=MemoryMediaStore(),
         wrapper_prefix=WRAPPER_PREFIX,
     )
+    open_template_rows(catalogue, pg_pool)
 
     assert catalogue.thumbnail_source(SLUG).source is None
     assert await thumbnail_of(catalogue, SLUG) is None

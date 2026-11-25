@@ -32,6 +32,7 @@ from tests.api.test_print_supports import routes
 from tests.api.test_send import _uploaded_3mf, upload_route
 from tests.api.test_versions import SLUG
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
 
@@ -58,6 +59,8 @@ def declare(
     row, _ = outputs.row_from_files(outputs.directory(output_id), model)
     assert row is not None and outputs.rows is not None
     outputs.rows.write_copy([], [row], outputs.rows.clock())
+    # The template's hand edits: the next copy run repairs its row (#7317 phase 3).
+    sync_template_rows(client)
 
 
 #: Each model.json typo the load refuses (#5653): the field, its value, and the name
@@ -289,6 +292,8 @@ def test_a_refused_model_json_refuses_the_quote(
     """#5649: never a price for a print the run refuses."""
     shop = Shop(bambuddy)
     misdeclare(state(bambuddy).paths, SLUG, field, value)
+    # A hand edit: the next copy run repairs its row (#7317 phase 3).
+    sync_template_rows(bambuddy)
     upload = upload_route(QUOTE_COPY)
     slices = BambuddySlices({1: sliced_plate(1, 3600, [12.5, 3.0])})
 
