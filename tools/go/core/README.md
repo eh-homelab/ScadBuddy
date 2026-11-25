@@ -82,7 +82,8 @@ Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
 `fleet.message` after its commit. An inbox page holds up to `limit` messages (50 by
 default, at most 200) and at most 4 MiB of message text: it stops before the message that
 would pass 4 MiB, always holds at least one, and then says `more`; the cursor moves only past
-the messages returned. A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
+the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
+`text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). `GET /changes` stays Python's.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and

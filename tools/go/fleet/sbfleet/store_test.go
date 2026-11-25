@@ -210,6 +210,13 @@ func TestStoreErrors(t *testing.T) {
 		{"not member", 403, "not-member", fleetchat.ErrNotMember},
 		{"handle taken", 409, "handle-taken", ErrHandleTaken},
 	}
+	t.Run("text too long", func(t *testing.T) {
+		s, _ := newStore(t, 422, `{"detail":"text is longer than 16777216 bytes","reason":"text-too-long"}`)
+		_, _, err := s.Send(ctx, sid, fleetchat.Target{Channel: "ops"}, "x")
+		if !errors.Is(err, fleetchat.ErrTooLong) || !strings.Contains(err.Error(), "16777216 bytes") {
+			t.Fatalf("err %v, want ErrTooLong naming core's limit", err)
+		}
+	})
 	t.Run("seq ahead", func(t *testing.T) {
 		s, _ := newStore(t, 422, problem(422, "seq-ahead"))
 		if err := s.Rewind(ctx, sid, 99); !errors.Is(err, fleetchat.ErrBadSeq) {

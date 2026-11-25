@@ -28,8 +28,9 @@ over HTTP (`TestNoCoreImports` checks it).
   A problem's `reason` maps to an error that `errors.Is` finds: `unknown-agent` (404)
   to `fleetchat.ErrUnknownAgent`, `not-member` (403) to `fleetchat.ErrNotMember`, and
   `handle-taken` (409, two session ids that share their first 8 hex characters) to
-  `sbfleet.ErrHandleTaken`, and `seq-ahead` (422, a rewind past the cursor) to
-  `fleetchat.ErrBadSeq`. Any other answer is an error that names the status. A 403
+  `sbfleet.ErrHandleTaken`, `seq-ahead` (422, a rewind past the cursor) to
+  `fleetchat.ErrBadSeq`, and `text-too-long` (422, a text over core's 16 MiB, detail
+  `text is longer than 16777216 bytes`) to `fleetchat.ErrTooLong`. Any other answer is an error that names the status. A 403
   with no `not-member` reason (the CRUD guard's refusal) is not `ErrNotMember`. Every
   request has a 30 s timeout.
 - `NewBus(coreURL, token)`: a `fleetchat.Bus`. `Publish` does nothing: core publishes
@@ -111,8 +112,9 @@ against a local stack sent none), so with `0` every run would leave its session
 and its subscription open for the life of the process. The MCP SDK counts only POSTs as activity, so a timeout also ends a
 session that only holds its GET stream open.
 
-Core caps a send's body at twice its own 16 MiB text limit plus 1 MiB, so a
-`-max-text` above 16 MiB does not let longer texts through.
+Core caps a send's body at twice its own 16 MiB text limit plus 1 MiB, and refuses a
+longer text with a 422 that names the limit, so a `-max-text` above 16 MiB does not let
+longer texts through.
 
 ## Commands
 

@@ -36,6 +36,7 @@ var reasons = map[string]error{
 	"not-member":    fleetchat.ErrNotMember,
 	"handle-taken":  ErrHandleTaken,
 	"seq-ahead":     fleetchat.ErrBadSeq,
+	"text-too-long": fleetchat.ErrTooLong,
 }
 
 type client struct {

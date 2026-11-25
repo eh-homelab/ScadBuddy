@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -263,7 +264,8 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 	from := b.UUID("from")
 	channel := b.OptText("channel", 1, 40, channelPattern)
 	agent := b.OptText("agent", 8, 8, handlePattern)
-	text := b.Text("text", 1, textMax)
+	// The length is checked below, in bytes, with a detail that names the limit.
+	text := b.Text("text", 1, math.MaxInt)
 	if err := b.Err(); err != nil {
 		return nil, err
 	}
@@ -271,9 +273,12 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 		return nil, httpx.Invalid(httpx.Issue{Loc: []string{"body"}, Msg: "give exactly one of channel or agent"})
 	}
 	if len(text) > textMax {
-		return nil, httpx.Invalid(httpx.Issue{
+		p := httpx.WithReason(http.StatusUnprocessableEntity,
+			fmt.Sprintf("text is longer than %d bytes", textMax), "text-too-long")
+		p.Extensions = append(p.Extensions, httpx.Field{Key: "errors", Value: []httpx.Issue{{
 			Loc: []string{"body", "text"}, Msg: fmt.Sprintf("text is at most %d bytes", textMax),
-		})
+		}}})
+		return nil, p
 	}
 	ctx := r.Context()
 	var seq int64

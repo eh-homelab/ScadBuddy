@@ -420,3 +420,12 @@ func TestAnInboxPageHoldsAtMostFourMiBOfText(t *testing.T) {
 	expect(t, seqs(page), sent[4:])
 	expect(t, more, false)
 }
+
+func TestATextOverTheLimitNamesIt(t *testing.T) {
+	a := newFleet(t)
+	ann, bob := a.agent(), a.agent()
+	out := a.send(ann, handle(bob), strings.Repeat("é", 8<<20+1)) // 16 MiB + 2 bytes, fewer characters
+	expect(t, out.status, 422)
+	expect(t, out.body["detail"], "text is longer than 16777216 bytes")
+	expect(t, out.body["reason"], "text-too-long")
+}
