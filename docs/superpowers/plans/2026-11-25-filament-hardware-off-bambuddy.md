@@ -582,3 +582,29 @@ This writes to a real printer. Do not start it without the owner's written OK on
 1. Settled by the controller (2026-11-25, recorded on #7276): no import (R-7276-16 stands). It keeps the port free of new Bambuddy reads; the cost is that a person re-enters a few notes and labels.
 2. Still open: the owner's written OK and a window for Task 14's live H2C check (R-7276-5).
 3. Settled by the controller: yes, the profile fill's K read moves in a follow-up, #7604 (R-7276-14).
+
+## Pre-flight rulings (controller, 2026-11-25)
+
+The pre-flight scan (`.superpowers/sdd/2026-11-25-filament-hardware-off-bambuddy/preflight.md`) found 21 conflicts. Each ruling below overrides the task text it names. Format: what — why — cost if wrong.
+
+- **P1 (T1, T6, T8):** an external holder's wire ids use `len(status.vt_tray)`, which already prefers `vir_slot`, never a `vt_tray` count from the raw report — the H2C report has no `vt_tray` and two `vir_slot` entries — a wrong count sends a single-holder id to a dual-holder printer.
+- **P2 (T7):** a K set sends `tray_id 0`, `ams_id 0` and `n_coef "0.000000"` as Bambuddy does (its #2718), never the body's `-1` — firmware answers `-1` with `fail` while it applies the write, which R-7276-9 would turn into a false 409 — none.
+- **P3 (T8):** configure ports the stopgap route's conversions: the `setting_id` back-fill (#2604), the generic `tray_info_idx` for an empty `preset_id`, and separate `preset_setting_id` and `k_setting_id` in `SlotParams` — the slot and the K selection take different setting ids — a slot shows the wrong preset.
+- **P4 (T1, T8):** `extrusion_cali_set_slot`'s tray index is defined per unit: an AMS `ams*4+tray`, an HT unit `(ams-128)*4`, an external holder the raw `tray_id`; tests cover AMS 0-3, AMS 4, an HT unit and both external holders — the stopgap route's rule (Bambuddy routes L3281-3286) — a K selection lands on another slot.
+- **P5 (T2):** `execute_lan_commands` maps the `_printer` refusals (`ApplicationError` wrapping `PrintRunError`, 409 and 503) to the route's problem with a command's own detail, never "print again" — the print path's text is wrong for a command — none.
+- **P6 (T2):** register the activity and workflow in `bambuddy_worker` (`workflows/client.py`), the print worker's builder; there is no `print_worker`; `main.py` needs no change; update the docstring and `docs/architecture/workflows.md` — the plan named a function that does not exist — none.
+- **P7 (T3):** the fake printer writes `ams_status` at the top level of `print`, as the H2C fixture has it, which T4 reads — consistency with the real report — none.
+- **P8 (T7, T8):** API tests script the printer by monkeypatching `LanPrinter.request` and guard Bambuddy with `tests/support/no_bambuddy.py` `forbid_bambuddy` — no other seam exists; no new fixture module — none.
+- **P9 (T2):** the workflow id is `lan-command-<printer>-<kind>-<key>` — a key reused for another command must not return the first command's result — none.
+- **P10 (T9):** T9 also changes where `filament_rfid_activity` is built (`main.py` ~2160); `LanCommandSender` lives in `printers/native.py` — the plan left both open — none.
+- **P11 (T12):** T12 also removes or rewrites `tests/bambuddy/test_client_rfid.py`'s uses of `SlotConfigure` and `configure_slot` — the suite would fail otherwise — none.
+- **P12 (T8, T12):** T8 adds `SlotParams` (in `printers/lan_commands.py`) and re-points `command_data.py`'s imports; T12 deletes `SlotConfigure` — "moved" in T8 conflicted with T12's delete — none.
+- **P13 (T10):** each new K-profile tool gets its `TOUCHES_NOTHING` entry in `agent/src/sessions/touched.ts` (or its touched rule), and T10 runs the touched test — the registry test fails otherwise — none.
+- **P14 (T6, T11):** the printer view gains a backend-computed `lan_linked` boolean from `is_lan_linked` (host, pinned cert, sealed code), and the UI gate reads it; the frontend never re-derives the rule — one source of truth; T11's gate omitted `lan_cert_sha256` — none.
+- **P15 (T12):** no test greps `client.py`'s source; the grep stays a verification step — such a test is scaffolding (repo rule) — none.
+- **P16 (T4):** T4's test builds its own report rows in the test file or uses `test_status.py`'s existing helpers; `ROW`, `NOW` and `with_print` do not exist — none.
+- **P17 (T5):** drop `preset_source` from `printer_slot_presets` — Bambuddy-only, nothing reads it (R-7276-16) — none.
+- **P18 (T8):** T8 fixes the `NOT_NUDGED` comment in `api/filament.py` (~240): the preset routes now write a ScadBuddy row; decide per route whether it nudges (a slot preset is not synced to Bambuddy, so it stays un-nudged) and say so — the comment would become false — none.
+- **P19 (T7):** before deploy, check that no `printer_kprofile_*` operation is open (a GET of `/api/v1/operations` or the activity list); the PR body names the check — a removed kind's open row is deferred forever (#4139) — one stuck operation row.
+- **P20 (T2, R-7276-10 amended):** each `lan_command` activity's `start_to_close` is the MQTT connect timeout + its reply wait + 2 s; the K read retries as Bambuddy does (3 tries of 5 s; cite the exact lines); the route waits for the workflow up to the sum of its commands' timeouts (a configure's three commands included), not a fixed 13 s — 13 s could not fit three connections — a slow printer makes a route wait longer.
+- **P21 (T13):** T13 adds the README note; the clusters PR that rolls `scadbuddy-print` with `Recreate` for the new `LanCommand` workflow type is opened by the controller in eh-homelab/clusters after #7276 merges, before deploy — it is another repo — a roll without it fails the new workflow's tasks until the new build is current.
