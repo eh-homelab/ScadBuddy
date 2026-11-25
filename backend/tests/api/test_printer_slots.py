@@ -874,6 +874,66 @@ def test_a_resent_reset_clears_no_newer_preset(
     assert len(scripted.published) == 1
 
 
+def test_a_reset_still_running_keeps_the_saved_preset(
+    client: TestClient, scripted: Scripted, pid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 202 is no acknowledged reset: the saved preset stays."""
+    data = printers_of(client).command_data
+    saved = SlotPresetBody(preset_id="GFSA00", preset_name="Basic", tray_info_idx="GFA00")
+    data.set_slot_preset(UUID(pid), 0, 1, saved)
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0)
+    pending = client.post(f"{slot(pid)}/reset", headers={"Idempotency-Key": "slow-reset"})
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 10.0)
+    assert pending.status_code == 202, pending.text
+    assert data.slot_presets(UUID(pid))[0, 1].preset_id == "GFSA00"
+    assert follow(client, pid, pending).status_code == 200
+
+
+def test_an_unacknowledged_reset_keeps_the_saved_preset(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    data = printers_of(client).command_data
+    saved = SlotPresetBody(preset_id="GFSA00", preset_name="Basic", tray_info_idx="GFA00")
+    data.set_slot_preset(UUID(pid), 0, 1, saved)
+    scripted.silent("ams_filament_setting")
+    response = client.post(f"{slot(pid)}/reset")
+    assert response.status_code == 200, response.text
+    assert response.json()["message"] == "sent; the printer did not acknowledge it in time"
+    assert data.slot_presets(UUID(pid))[0, 1].preset_id == "GFSA00"
+
+
+def test_a_key_with_a_slash_can_be_followed(
+    client: TestClient, scripted: Scripted, pid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key is hashed into the command id, so the follow route takes it."""
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0)
+    pending = client.post(f"{slot(pid)}/refresh", headers={"Idempotency-Key": "a/b c"})
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 10.0)
+    followed = follow(client, pid, pending)
+    assert followed.status_code == 200, followed.text
+    assert followed.json()["action"] == "refresh"
+
+
+def test_two_first_sends_of_one_key_answer_the_started_run(
+    client: TestClient, scripted: Scripted, pid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two first sends of one key at once both miss `_resent`; Temporal joins the second to
+    the first's run, and the second answers that run's values, never its own body's."""
+
+    async def missed(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(slot_routes, "_resent", missed)
+    first = client.post(f"{slot(pid)}/configure", json=BODY, headers={"Idempotency-Key": "race"})
+    assert first.status_code == 200, first.text
+    other = {**BODY, "colour": "#FF0000"}
+    again = client.post(f"{slot(pid)}/configure", json=other, headers={"Idempotency-Key": "race"})
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert again.json()["colour"] == "#FFFFFFFF"
+    assert len(scripted.sent("ams_filament_setting")) == 1
+
+
 def test_a_slot_preset_is_saved_and_cleared(
     client: TestClient, scripted: Scripted, pid: str
 ) -> None:

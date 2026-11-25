@@ -47,7 +47,11 @@ from scadbuddy.filament.locations import NoAmsKindError
 from scadbuddy.filament.presets import effective_k_values, effective_presets
 from scadbuddy.printers import ams_slots as sc
 from scadbuddy.printers.component import LanCommandsDep, PrintersDep
-from scadbuddy.printers.lan_command_models import LanCommandPending, LanCommandRun
+from scadbuddy.printers.lan_command_models import (
+    LanCommandOutcome,
+    LanCommandPending,
+    LanCommandRun,
+)
 from scadbuddy.printers.lan_commands import (
     UnsupportedUnitError,
     ams_change_filament_load,
@@ -62,6 +66,7 @@ from scadbuddy.printers.native import LanCommands, command_response, lan_row, li
 from scadbuddy.printers.store import printer_uuid
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.component import SlicingDep
+from scadbuddy.workflows.lan_command import LanCommandAnswer
 
 router = APIRouter(prefix="/printers", tags=["printers"], dependencies=[Depends(nudge_after_write)])
 
@@ -150,6 +155,23 @@ async def _resent(
     return command_response(await commands.run(row.id, run, key=_keyed(action, key)), run)
 
 
+async def _started(
+    commands: LanCommands,
+    row: PrinterRow,
+    status: PrinterStatus,
+    action: sc.Action,
+    ams_id: int,
+    tray_id: int,
+    key: str | None,
+    build: Callable[[AmsTray], LanCommandRun],
+) -> tuple[LanCommandAnswer, LanCommandRun]:
+    """Run what ``build`` makes of the slot once `guard` passes (P36): the answer, and the
+    run it belongs to, which is the first request's when two first sends of one key meet
+    (`LanCommands.run_started`)."""
+    run = build(sc.guard(status, action, ams_id, tray_id))
+    return await commands.run_started(row.id, run, key=_keyed(action, key))
+
+
 async def _send(
     commands: LanCommands,
     row: PrinterRow,
@@ -160,9 +182,10 @@ async def _send(
     key: str | None,
     build: Callable[[AmsTray], LanCommandRun],
 ) -> Response:
-    """Run what ``build`` makes of the slot once `guard` passes (P36)."""
-    run = build(sc.guard(status, action, ams_id, tray_id))
-    return command_response(await commands.run(row.id, run, key=_keyed(action, key)), run)
+    """`_started`'s answer as the route's response."""
+    return command_response(
+        *await _started(commands, row, status, action, ams_id, tray_id, key, build)
+    )
 
 
 def _one(
@@ -343,8 +366,10 @@ def _spool_presets(
     responses=ACCEPTED,
     summary="Reset an AMS slot",
     description=(
-        "Clears the slot's filament setting on the printer (an empty `ams_filament_setting`)"
-        " and ScadBuddy's saved slot preset." + STATE_FIRST + PRINTER
+        "Clears the slot's filament setting on the printer (an empty `ams_filament_setting`)."
+        " ScadBuddy's saved slot preset is cleared only when the printer acknowledged the"
+        " reset in this answer: a 202, or a `message` that says the printer did not"
+        " acknowledge it, keeps the preset." + STATE_FIRST + PRINTER
     ),
 )
 async def reset_printer_slot(
@@ -366,9 +391,16 @@ async def reset_printer_slot(
         payload = _wired(lambda: ams_reset(slot, sc.SEQ))
         return _one(row, "ams_filament_setting", payload, _sent(ams_id, tray_id, "reset"))
 
-    answer = await _send(commands, row, status, "reset", ams_id, tray_id, idempotency_key, build)
-    await asyncio.to_thread(printers.command_data.clear_slot_preset, UUID(row.id), ams_id, tray_id)
-    return answer
+    answer, run = await _started(
+        commands, row, status, "reset", ams_id, tray_id, idempotency_key, build
+    )
+    # Only a reset the printer acknowledged clears the preset: a run still open, or one
+    # sent but not acknowledged, may not have reached the slot.
+    if isinstance(answer, LanCommandOutcome) and all(r.confirmed for r in answer.replies):
+        await asyncio.to_thread(
+            printers.command_data.clear_slot_preset, UUID(row.id), ams_id, tray_id
+        )
+    return command_response(answer, run)
 
 
 @router.post(

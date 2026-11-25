@@ -6,7 +6,9 @@ here; its own tests are `test_lan_command_activity.py`. No printer is contacted.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
@@ -125,13 +127,32 @@ def test_a_commands_timeout_is_connect_wait_and_margin() -> None:
 
 def test_the_id_names_the_printer_the_commands_and_the_key() -> None:
     run = LanCommandRun(commands=[command("ams_filament_setting"), command("extrusion_cali_sel")])
+    key = hashlib.sha256(b"k1").hexdigest()[:32]
     assert (
         lan_command_id(PRINTER, run, "k1")
-        == "lan-command-printer-1-ams_filament_setting+extrusion_cali_sel-k1"
+        == f"lan-command-printer-1-ams_filament_setting+extrusion_cali_sel-{key}"
     )
+    assert lan_command_id(PRINTER, run, "k1") == lan_command_id(PRINTER, run, "k1")
+    assert lan_command_id(PRINTER, run, "k2") != lan_command_id(PRINTER, run, "k1")
     other = LanCommandRun(commands=[command("ams_reset")])
     assert lan_command_id(PRINTER, other, "k1") != lan_command_id(PRINTER, run, "k1")
     assert lan_command_id(PRINTER, run, None) != lan_command_id(PRINTER, run, None)
+
+
+#: The agent's check of a command id (`agent/src/tools/printerCommand.ts` `COMMAND_ID`).
+AGENT_COMMAND_ID = re.compile(r"^lan-command-[A-Za-z0-9_+-]{1,480}$")
+
+
+@pytest.mark.parametrize("key", ["a/b", "../x", "key with spaces", "\u00fc?#%", "k" * 200])
+def test_any_key_makes_an_id_the_read_route_and_the_agent_take(key: str) -> None:
+    """The key is hashed into the id: a `/` or another character the
+    ``GET /printers/{id}/commands/{command_id}`` path or the agent refuses never reaches it."""
+    run = LanCommandRun(commands=[command("ams_filament_setting")])
+    printer = "0b7a3a52-0000-4000-8000-000000000001"
+    command_id = lan_command_id(printer, run, key)
+    assert AGENT_COMMAND_ID.match(command_id), command_id
+    assert command_id.startswith(f"lan-command-{printer}-")
+    assert command_id == lan_command_id(printer, run, key)
 
 
 @pytest.mark.requires_temporal

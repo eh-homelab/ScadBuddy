@@ -32,6 +32,7 @@ from scadbuddy.workflows.lan_command import (
     execute_lan_commands,
     lan_command_exists,
     lan_command_keyed,
+    start_lan_commands,
 )
 
 
@@ -131,6 +132,15 @@ class LanCommands:
         self, printer_id: str, run: LanCommandRun, *, key: str | None = None
     ) -> LanCommandAnswer:
         return await execute_lan_commands(
+            self.client_getter(), self.task_queue, printer_id, run, key=key
+        )
+
+    async def run_started(
+        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+    ) -> tuple[LanCommandAnswer, LanCommandRun]:
+        """`run`'s answer with the run it belongs to: under ``key``, the run the first
+        request started, which two first sends at once share (`start_lan_commands`)."""
+        return await start_lan_commands(
             self.client_getter(), self.task_queue, printer_id, run, key=key
         )
 

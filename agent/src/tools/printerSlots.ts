@@ -135,7 +135,12 @@ export const printerSlotTools: Tool[] = [
       ),
   }),
 
-  slotCommand('reset', 'Reset an AMS slot', "Clear a slot's filament setting on the printer and ScadBuddy's saved slot preset."),
+  slotCommand(
+    'reset',
+    'Reset an AMS slot',
+    "Clear a slot's filament setting on the printer. ScadBuddy's saved slot preset is cleared only when the " +
+      'printer acknowledged the reset in this answer; a `running` answer or an unacknowledged one keeps it.',
+  ),
   slotCommand(
     'refresh',
     "Read an AMS slot's tag again",

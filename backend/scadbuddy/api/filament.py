@@ -238,8 +238,8 @@ NOT_NUDGED = frozenset(
         "cancel_nfc_job",
         "finish_nfc_job",
         # #7153, #7276: the slot commands write the printer over its LAN link, no
-        # ScadBuddy row (`api/printer_slots.py`; a reset also clears the slot's preset
-        # row). The slot preset routes write ScadBuddy's `printer_slot_presets` row, which
+        # ScadBuddy row (`api/printer_slots.py`; a reset the printer acknowledged also
+        # clears the slot's preset row). The slot preset routes write ScadBuddy's `printer_slot_presets` row, which
         # the filament sync does not send to Bambuddy, so they do not nudge either. The
         # AMS label routes rename a place, which the sync sends, so they nudge.
         "configure_printer_slot",

@@ -7,9 +7,12 @@ K-profile and AMS slot routes and the RFID override reconcile. A route waits at 
 `read_lan_commands` reads back (P27). It runs ``lan_command``
 (`printers/print_activities.py` `LanActivities`) once per command, in order, each tried
 once, and the first failure ends the run with it. The workflow id is
-``lan-command-<printer>-<commands>-<key>`` (P9): a key sent again attaches to the running
+``lan-command-<printer>-<commands>-<key hash>`` (P9; `KEY_HASH_CHARS` of the key's
+sha256, so a key with ``/`` or another character the command read route or the agent's
+``COMMAND_ID`` refuses still makes an id they take): a key sent again attaches to the running
 execution or reads the closed one's outcome, so the printer gets the command once, and a
-key reused for other commands is another execution.
+key reused for other commands is another execution. The answer is always the started
+run's (`start_lan_commands`), never a later request's own run.
 
 On the versioned print worker it is AUTO_UPGRADE (`client.print_deployment`), so a change
 to ``LanCommandWorkflow.run``'s commands goes behind ``workflow.patched``, and
@@ -20,6 +23,7 @@ roll ``scadbuddy-print`` with ``Recreate`` (README, "A release that needs ``Recr
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -75,6 +79,10 @@ NOT_LAN_LINKED = "not_lan_linked"
 
 _ONCE = RetryPolicy(maximum_attempts=1)
 
+KEY_HASH_CHARS = 32
+"""The hex characters of the key's sha256 in a workflow id: 128 bits, so two keys of one
+printer's command share an id only by a negligible chance."""
+
 
 @workflow.defn(name=LAN_COMMAND_WORKFLOW)
 class LanCommandWorkflow:
@@ -105,22 +113,40 @@ LanCommandAnswer = LanCommandOutcome | LanCommandPending
 
 
 def lan_command_id(printer_id: str, run: LanCommandRun, key: str | None) -> str:
-    """``lan-command-<printer>-<commands>-<key>`` (P9); a fresh id with no key."""
+    """``lan-command-<printer>-<commands>-<key hash>`` (P9); a fresh id with no key."""
     return _command_id(printer_id, [command.name for command in run.commands], key)
 
 
 def _command_id(printer_id: str, names: Sequence[str], key: str | None) -> str:
-    return f"lan-command-{printer_id}-{'+'.join(names)}-{key or uuid.uuid4().hex}"
+    """The key goes in as `KEY_HASH_CHARS` hex characters of its sha256: one key always
+    makes one id, and the id holds only ``[A-Za-z0-9_+-]`` past the printer's id."""
+    tail = (
+        uuid.uuid4().hex if not key else hashlib.sha256(key.encode()).hexdigest()[:KEY_HASH_CHARS]
+    )
+    return f"lan-command-{printer_id}-{'+'.join(names)}-{tail}"
 
 
 async def execute_lan_commands(
     client: Client, task_queue: str, printer_id: str, run: LanCommandRun, *, key: str | None
 ) -> LanCommandAnswer:
+    """`start_lan_commands`' answer alone."""
+    answer, _ = await start_lan_commands(client, task_queue, printer_id, run, key=key)
+    return answer
+
+
+async def start_lan_commands(
+    client: Client, task_queue: str, printer_id: str, run: LanCommandRun, *, key: str | None
+) -> tuple[LanCommandAnswer, LanCommandRun]:
     """Run ``run`` on ``task_queue`` (the ``bambuddy`` queue), bounded by the sum of its
     commands' timeouts (P20), and wait for it at most `LAN_ROUTE_WAIT_S` (P27): a run
     still open then is `LanCommandPending`, the route's 202, which `read_lan_commands`
     follows. A key sent again joins the open run or reads the closed one's outcome.
-    Failures are `_answer`'s."""
+    Failures are `_answer`'s.
+
+    With the answer comes the run it belongs to, which a route builds its body from. With a
+    key it is the run the execution was started with, read from its first event: two first
+    sends of one key at once both start, Temporal joins the second to the first
+    (USE_EXISTING), and the second must answer the first's run, not its own body's."""
     workflow_id = lan_command_id(printer_id, run, key)
     try:
         handle = await client.start_workflow(
@@ -136,7 +162,8 @@ async def execute_lan_commands(
     except WorkflowAlreadyStartedError:
         # It closed: its outcome, never the commands again (R-7276-8).
         handle = client.get_workflow_handle(workflow_id, result_type=LanCommandOutcome)
-    return await _answer(client, handle, run)
+    started = run if not key else await _started_run(client, handle)
+    return await _answer(client, handle, started), started
 
 
 async def read_lan_commands(

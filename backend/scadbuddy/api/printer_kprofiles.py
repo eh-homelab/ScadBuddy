@@ -116,7 +116,7 @@ async def _send(
             f"{row.name} has not been heard from lately, so its {FEATURE} cannot be reached.",
             code="printer_offline",
         )
-    return command_response(await commands.run(row.id, run, key=key), run)
+    return command_response(*await commands.run_started(row.id, run, key=key))
 
 
 def _write(row: PrinterRow, name: str, payload: dict[str, object]) -> LanCommandRun:
