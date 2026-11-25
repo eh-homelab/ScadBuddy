@@ -552,6 +552,10 @@
 .sf-estimate-updating .sf-estimate-price {
   opacity: 0.7;
 }
+/* #7523: reads the price again, under whatever the price says. */
+.sf-price-again {
+  margin-top: 12px;
+}
 
 /* The order. */
 .sf-panel {

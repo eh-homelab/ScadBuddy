@@ -223,40 +223,12 @@ def test_a_digest_changes_with_any_field() -> None:
         assert _slot(**{field: value}).digest() != base.digest(), field
 
 
-@respx.mock
-async def test_spoolbuddy_devices_lists_the_devices(bambuddy: BambuddyClient) -> None:
-    row = shaped("DeviceResponse", id=1, device_id="sb-1", hostname="spoolbuddy", online=True)
-    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[row]))
-
-    devices = await bambuddy.spoolbuddy_devices()
-
-    assert [(d.device_id, d.online) for d in devices] == [("sb-1", True)]
-
-
-@respx.mock
-async def test_queue_tag_write_returns_the_warnings(bambuddy: BambuddyClient) -> None:
-    route = respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
-        side_effect=[
-            httpx.Response(200, json={"status": "queued", "warnings": ["tag is small"]}),
-            httpx.Response(200, json={"status": "queued"}),
-        ]
-    )
-
-    assert await bambuddy.queue_tag_write("sb-1", 3) == ["tag is small"]
-    assert await bambuddy.queue_tag_write("sb-1", 3) == []
-    assert json.loads(route.calls.last.request.content) == {"device_id": "sb-1", "spool_id": 3}
-    assert route.call_count == 2
-
-
-@respx.mock
-async def test_cancel_write_posts_to_the_device_path(bambuddy: BambuddyClient) -> None:
-    route = respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
-        return_value=httpx.Response(200, json={})
-    )
-
-    await bambuddy.cancel_tag_write("sb-1")
-
-    assert route.call_count == 1
+@pytest.mark.parametrize(
+    "name",
+    ["next_tag_scan", "queue_tag_write", "cancel_tag_write", "spoolbuddy_devices", "ws_token"],
+)
+def test_the_client_makes_no_spoolbuddy_call(name: str) -> None:
+    assert not hasattr(BambuddyClient, name)
 
 
 def test_every_operation_the_client_passes_is_a_declared_name() -> None:
@@ -269,9 +241,6 @@ def test_every_operation_the_client_passes_is_a_declared_name() -> None:
         "spools.read",
         "settings.update",
         "printers.slot_configure",
-        "spoolbuddy.devices",
-        "spoolbuddy.write_tag",
-        "spoolbuddy.cancel_write",
     }
     assert new <= passed
     assert passed <= declared

@@ -406,10 +406,10 @@ describe('ImportPrintDialog', () => {
       nativeLibrary()
       const { dialog, user } = await chooseLibraryFile()
       const replies: ((files: { id: number; filename: string; folder_id: number | null }[]) => void)[] = []
+      let asked = 0
       const real = api.getPrintSources.bind(api)
       vi.spyOn(api, 'getPrintSources').mockImplementation((...args) => {
-        const at = replies.length
-        replies.push(() => undefined)
+        const at = asked++
         return new Promise((resolve) => {
           void real(...args).then((sources) => {
             replies[at] = (files) => resolve({ ...sources, suggested_library_files: files })
@@ -426,8 +426,7 @@ describe('ImportPrintDialog', () => {
       act(() => {
         window.dispatchEvent(new Event('focus'))
       })
-      await waitFor(() => expect(replies).toHaveLength(2))
-      await new Promise((r) => setTimeout(r, 50))
+      await waitFor(() => expect([replies[0], replies[1]].every(Boolean)).toBe(true))
       // The newer read lands first, the older one last.
       await act(async () => {
         replies[1]?.([{ id: 1_000_000_503, filename: 'newer.3mf', folder_id: null }])
@@ -436,6 +435,16 @@ describe('ImportPrintDialog', () => {
       const group = await within(dialog).findByRole('group', { name: 'Suggested library files' })
       expect(within(group).getByText('newer.3mf')).toBeInTheDocument()
       expect(within(group).queryByText('older.3mf')).not.toBeInTheDocument()
+    })
+
+    it('says on focus that the chosen file cannot be a target', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      vi.spyOn(api, 'checkImportTarget').mockRejectedValue(new ApiError(422, "library file 1000000501 is a print's own copy"))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
     })
 
     it('keeps the chosen file when the check on focus fails for another reason', async () => {

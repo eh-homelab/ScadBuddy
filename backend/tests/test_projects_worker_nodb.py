@@ -37,6 +37,7 @@ from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.crud.crud_support import TEST_KEK, DerivedPayloadKeys, agent_key_tables, crud_app
 from tests.flows.fake_api import FakeApi, Outward
 from tests.flows.flows_support import script
+from tests.flows.test_prompt import give, parked, task_of
 from tests.support.temporal import temporal_available, temporal_server
 
 
@@ -231,6 +232,13 @@ async def test_a_flow_runs_on_a_projects_worker_with_no_database(
                         grant=spec,
                     )
                     run = await flows.finished(run_id)
+                    asked = await flows.run(
+                        script("a = await prompt('q', {'type': 'object'})", "return a")
+                    )
+                    question = await parked(flows, asked)
+                    call_id = question.waiting_on[0].call_id
+                    await give(flows, question, call_id, {})
+                    answered = await flows.finished(asked)
                     async with httpx.AsyncClient() as probe:
                         assert (await probe.get(f"{health_url}/healthz")).status_code == 200
                         assert (await probe.get(f"{health_url}/readyz")).status_code in (200, 503)
@@ -249,6 +257,10 @@ async def test_a_flow_runs_on_a_projects_worker_with_no_database(
     assert use.request_id == decision.request_id
     assert len(fake.to("/api/v1/outputs/arrange")) == 1
     assert "SCADBUDDY_DATABASE_URL" not in caplog.text
+    # Its prompt's task too (#7364).
+    assert answered.result == "result: {}"
+    task = await task_of(flows, call_id)
+    assert (task.run_id, task.state, task.answer) == (asked, "answered", {})
 
 
 async def test_a_database_url_is_ignored_with_a_warning(

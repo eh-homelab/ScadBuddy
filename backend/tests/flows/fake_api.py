@@ -19,12 +19,12 @@ from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.grants import GrantSpec
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_activities import FlowActivities, FlowTaskActivities
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 from scadbuddy.workflows.projects_worker import projects_worker
-from tests.crud.crud_support import served_projects
+from tests.crud.crud_support import remote_tasks, served_projects
 from tests.flows.flows_support import HASH_KEY, Flows, define
 
 PROBLEM = "application/problem+json"
@@ -273,6 +273,13 @@ async def outward_worker(
     # (#5298).
     async with (
         served_projects(store, temporal_address) as (client, remote, worker_client),
-        projects_worker(worker_client, queue, outward_activities(remote, api)),
+        projects_worker(
+            worker_client,
+            queue,
+            [
+                *outward_activities(remote, api),
+                *FlowTaskActivities(remote_tasks(remote)).all(),
+            ],
+        ),
     ):
         yield Outward(client, queue, store, remote)

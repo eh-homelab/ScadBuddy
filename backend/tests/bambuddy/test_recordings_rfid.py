@@ -27,13 +27,6 @@ _EXPECTED_ROUTES = {
         "POST",
         "/api/v1/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure",
     ): Scope.CONTROL_PRINTER,
-    ("GET", "/api/v1/spoolbuddy/devices"): Scope.READ_STATUS,
-    ("POST", "/api/v1/spoolbuddy/nfc/tag-scanned"): Scope.MANAGE_INVENTORY,
-    ("POST", "/api/v1/spoolbuddy/nfc/tag-removed"): Scope.MANAGE_INVENTORY,
-    ("POST", "/api/v1/spoolbuddy/nfc/write-tag"): Scope.MANAGE_INVENTORY,
-    ("POST", "/api/v1/spoolbuddy/nfc/write-result"): Scope.MANAGE_INVENTORY,
-    ("POST", "/api/v1/spoolbuddy/devices/{device_id}/cancel-write"): Scope.MANAGE_INVENTORY,
-    ("POST", "/api/v1/auth/ws-token"): Scope.READ_STATUS,
 }
 
 
@@ -51,9 +44,7 @@ def test_the_rfid_recording_holds_what_the_plan_rests_on() -> None:
     conflict = rec["conflict_409"]
     assert conflict["code"] == "tag_already_linked"
     assert set(conflict) == {"code", "message", "spool_id", "field"}
-    assert {"device_id", "spool_id"} <= set(schemas["WriteTagRequest"]["required"])
     assert "auto_add_unknown_rfid" in schemas["AppSettingsUpdate"]["properties"]
-    assert {"spoolbuddy_tag_matched", "spoolbuddy_unknown_tag"} <= set(rec["ws_events"])
     assert {"tag_type", "data_origin"} <= set(schemas["SpoolResponse"]["properties"])
     origins = rec["data_origin_values"]
     for value in ("rfid_auto", "rfid_linked"):

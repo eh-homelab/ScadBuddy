@@ -26,7 +26,15 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
-    from scadbuddy.flows.inputs import inputs_model
+    from scadbuddy.flows.inputs import InputsError, filled, inputs_model
+    from scadbuddy.tasks.models import UNCHECKED_DEFAULTS, TaskOpen, open_problems
+    from scadbuddy.workflows.flow_activities import (
+        FLOW_TASK_ANSWERED,
+        FLOW_TASK_CLOSE,
+        FLOW_TASK_OPEN,
+        TASK_REFUSED,
+        TASK_RUN_OVER,
+    )
     from scadbuddy.workflows.flow_entries import (
         await_escalated,
         await_gated,
@@ -61,8 +69,19 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.flow_steps import StepOwner, project, step
 
 MIN_WAIT_S = 10
+#: What `wait_for_human` took before `WAIT_OPEN_PATCH`.
 MAX_WAIT_S = 86_400
 DEFAULT_WAIT_S = 3_600
+#: The declared timeout of the callbacks with no limit of their own: the harness takes one,
+#: and nobody meets this one.
+OPEN_WAIT = timedelta(days=3650)
+#: `wait_for_human` has no limit but its `timeout_s` (#7364). One id per call, as
+#: `FLOW_PINNED_CALL_PATCH`, so that a run from before asks its next question openly.
+WAIT_OPEN_PATCH = "flow-open-wait-7364"
+#: One try of a prompt's task write, past the CRUD client's own budget
+#: (`crud/client.UNAVAILABLE_BUDGET`). Tried again without limit: the task and the run
+#: must agree.
+_TASK_WRITE = timedelta(seconds=60)
 
 
 class HumanAnswer(BaseModel):
@@ -77,19 +96,155 @@ async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body
     ...
 
 
+@agent.callback_tool_defn(inherently_safe=True, timeout=OPEN_WAIT)
+async def human_answer_open(question: str) -> HumanAnswer:  # type: ignore[empty-body]
+    """Wait for a person to answer `question` on the Workflows page, with no limit."""
+    ...
+
+
+def _wait_s(timeout_s: int | None) -> int | None:
+    """The script's `timeout_s`. One past `OPEN_WAIT` is that: Temporal and a datetime take
+    no time that is too far."""
+    if timeout_s is None:
+        return None
+    if timeout_s < MIN_WAIT_S:
+        raise ValueError(f"timeout_s must be at least {MIN_WAIT_S} seconds")
+    return min(timeout_s, int(OPEN_WAIT.total_seconds()))
+
+
 @agent.tool_defn(inherently_safe=True)
-async def wait_for_human(question: str, timeout_s: int = DEFAULT_WAIT_S) -> HumanAnswer:
-    """Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400, an hour
-    if left out) for the answer. Raises TimeoutError if nobody answers in time."""
-    if not MIN_WAIT_S <= timeout_s <= MAX_WAIT_S:
-        raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
+async def wait_for_human(question: str, timeout_s: int | None = None) -> HumanAnswer:
+    """Ask a person `question` and wait for the answer, with no limit unless `timeout_s`
+    (at least 10 seconds) sets one. Raises TimeoutError if nobody answers in that time."""
+    timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
+    drawn = workflow.random().getstate() if timeout_s and timeout_s > MAX_WAIT_S else None
     call_id = str(workflow.uuid4())
+    callback = human_answer_open
+    if not workflow.patched(f"{WAIT_OPEN_PATCH}:{call_id}"):
+        # Replaying a call from before it.
+        callback = human_answer
+        timeout_s = DEFAULT_WAIT_S if timeout_s is None else timeout_s
+        if drawn is not None:
+            # Such a call was refused before it drew an id: the next call draws this one.
+            workflow.random().setstate(drawn)
+            raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
     async with step("wait_for_human", call_id, outward=False, waiting="answer", prompt=question):
         answer: HumanAnswer = await run_callback(
-            owner.runner.run_tool, human_answer, timeout_s, call_id=call_id, question=question
+            owner.runner.run_tool, callback, timeout_s, call_id=call_id, question=question
         )
         return answer
+
+
+class TaskAnswer(BaseModel):
+    """A person's answer to a prompt, as they sent it."""
+
+    answer: dict[str, Any]
+
+
+@agent.callback_tool_defn(inherently_safe=True, timeout=OPEN_WAIT)
+async def task_answer(  # type: ignore[empty-body]
+    title: str, schema: dict[str, Any]
+) -> TaskAnswer:
+    """Wait for a person to answer the task `title`, with no limit."""
+    ...
+
+
+def _prompt_task(call_id: str, run_id: str, **fields: Any) -> dict[str, Any]:
+    """The prompt's task as the open activity takes it. ValueError names what is wrong.
+
+    A refusal here schedules nothing, so a run replays only if its calls are refused and
+    taken as they were. A change of what this takes needs a patch, in either direction: a
+    rule added, a rule loosened, or a dependency bump that moves one."""
+    try:
+        task = TaskOpen.model_validate(
+            {"id": call_id, "run_id": run_id, **fields}, context=UNCHECKED_DEFAULTS
+        )
+        return task.model_dump(mode="json", by_alias=True)
+    except ValidationError as err:
+        raise ValueError(open_problems(err)) from None
+    except TypeError:
+        raise ValueError("the schema and the context must be JSON") from None
+
+
+async def _task_write(name: str, *args: Any) -> None:
+    await workflow.execute_activity(name, args=args, start_to_close_timeout=_TASK_WRITE)
+
+
+async def _open_task(task: dict[str, Any]) -> None:
+    """Open the prompt's task. A Reset to between this and the call's park does not open
+    it again: its timer starts anew, and the task keeps its first `expires_at`."""
+    try:
+        await _task_write(FLOW_TASK_OPEN, task)
+    except ActivityError as err:
+        cause = err.cause
+        if isinstance(cause, ApplicationError) and cause.type == TASK_REFUSED:
+            raise ValueError(cause.message) from None
+        if isinstance(cause, ApplicationError) and cause.type == TASK_RUN_OVER:
+            raise RouteRefusedError(cause.message) from None
+        raise
+
+
+@agent.tool_defn(inherently_safe=True)
+async def prompt(
+    title: str,
+    schema: dict[str, Any],
+    context: list[dict[str, Any]] | None = None,
+    place: str | None = None,
+    ui: str | None = None,
+    timeout_s: int | None = None,
+) -> dict[str, Any]:
+    """Ask a person the question `title` and wait for a typed answer, with no limit unless
+    `timeout_s` (at least 10 seconds) sets one. `schema` declares the answer's fields as a
+    flow's inputs.json does, and a string may also have a `format` of `email`, `date` or
+    `date-time`. Returns the answer as a dict by field name. A field left out is its
+    default; with no default, a boolean is False and any other field is None. `context` is
+    a list of JSON objects kept with the question, `place` the name of the place that shows
+    it, and `ui` the name of its screen. `title`, `context` and `ui` are limited in size,
+    and a refusal names the limit. Raises ValueError for a schema, title, context, place,
+    ui or timeout_s it does not take, and for an answer that fits the schema and not the
+    field's type (a huge number). Raises TimeoutError if nobody answers in time."""
+    timeout_s = _wait_s(timeout_s)
+    owner: StepOwner = workflow.instance()
+    call_id = str(workflow.uuid4())
+    expires = None if timeout_s is None else workflow.now() + timedelta(seconds=timeout_s)
+    task = _prompt_task(
+        call_id,
+        owner.run_id,
+        title=title,
+        schema=schema,
+        context=[] if context is None else context,
+        place=place,
+        ui=ui,
+        expires_at=expires,
+    )
+    await _open_task(task)
+    try:
+        async with step("prompt", call_id, outward=False, waiting="answer", prompt=title):
+            answered: TaskAnswer = await run_callback(
+                owner.runner.run_tool,
+                task_answer,
+                timeout_s,
+                call_id=call_id,
+                title=title,
+                schema=schema,
+            )
+    # The task is written once the step's end is on the run's row. In the other order a
+    # Reset to between the two has the run wait again on the row, which opens the task
+    # again, while the write is in the history and is not done again.
+    except TimeoutError:
+        await _task_write(FLOW_TASK_CLOSE, call_id, "expired")
+        raise
+    except agent.CallbackToolError:
+        # Ended with no answer, through the harness's own `error` or `close`.
+        await _task_write(FLOW_TASK_CLOSE, call_id, "cancelled")
+        raise
+    await _task_write(FLOW_TASK_ANSWERED, call_id, answered.answer)
+    try:
+        return filled(schema, answered.answer)
+    except InputsError as err:
+        # A number that fits the schema and not the model's type.
+        raise ValueError(f"the answer does not fit: {err}") from None
 
 
 @agent.tool_defn(inherently_safe=True)
@@ -1425,12 +1580,15 @@ async def ask_session_with_images(session_id: str, message: str, images: list[Im
     return await _ask(session_id, message, images)
 
 
-#: Registered with the harness plugin. `human_answer` is the callback behind
-#: `wait_for_human`, and the `approved_*` gated bodies, are never offered to a script.
+#: Registered with the harness plugin. The callbacks behind `wait_for_human` and `prompt`
+#: and the `approved_*` gated bodies are never offered to a script.
 FLOW_TOOLS: list[Any] = [
     sleep,
     wait_for_human,
     human_answer,
+    human_answer_open,
+    prompt,
+    task_answer,
     render,
     save_output,
     queue_print,
@@ -1446,7 +1604,15 @@ FLOW_TOOLS: list[Any] = [
     ask_session,
     ask_session_with_images,
 ]
-_INNER = (human_answer, approved_print, approved_arrange, approved_tool, approved_turn_tool)
+_INNER = (
+    human_answer,
+    human_answer_open,
+    task_answer,
+    approved_print,
+    approved_arrange,
+    approved_tool,
+    approved_turn_tool,
+)
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 

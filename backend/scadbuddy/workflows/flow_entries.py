@@ -89,17 +89,20 @@ async def flow_entry_timeout(entry: EntryTimeout) -> bool:
 async def run_callback(
     run_tool: Callable[..., Awaitable[Any]],
     tool: Callable[..., Awaitable[Any]],
-    timeout_s: float,
+    timeout_s: float | None,
     *,
     call_id: str | None = None,
     **kwargs: Any,
 ) -> Any:
     """Run the callback `tool` through the runner's `run_tool`, ending it after
-    `timeout_s` seconds with the harness's own Update. Raises `TimeoutError` then.
+    `timeout_s` seconds with the harness's own Update. Raises `TimeoutError` then. With
+    `timeout_s` None it waits with no timer of its own.
 
     `call_id` is the harness's id for the call (a fresh one when omitted): the id the
     entry is listed and answered under, which the caller may record first."""
     call_id = call_id if call_id is not None else str(workflow.uuid4())
+    if timeout_s is None:
+        return await run_tool(call_id, tool, **kwargs)
     call = asyncio.ensure_future(run_tool(call_id, tool, **kwargs))
     timed_out = False
     try:

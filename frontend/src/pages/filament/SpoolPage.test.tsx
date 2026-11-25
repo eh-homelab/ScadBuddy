@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
+import { createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
@@ -62,8 +62,19 @@ describe('the spool page', () => {
     open(8)
     await heading(8)
     const identity = screen.getByRole('region', { name: 'Identity' })
-    expect(within(identity).getByText('Its tag was written through SpoolBuddy.')).toBeInTheDocument()
+    expect(within(identity).getByText('Its tag was written as an OpenTag3D tag.')).toBeInTheDocument()
     expect(within(identity).getByText(`Tag written ${new Date('2026-11-10T15:30:00Z').toLocaleDateString(undefined, { dateStyle: 'medium' })}.`)).toBeInTheDocument()
+  })
+
+  it('names a tag written in OpenSpool from the phone page (#7273)', async () => {
+    const uid = '04:0C:0C:0C:0C:0C:0C'
+    const { backup_id } = await createTagBackup({ uid, records: [], reason: 'spool_write' })
+    const { records } = await spoolTagRecords(spoolId(1), { uid, records: [], backup_id })
+    await spoolTagWritten(spoolId(1), { uid, backup_id, sent: records, read_back: records })
+    open(1)
+    await heading(1)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByText('Its tag was written as an OpenSpool tag.')).toBeInTheDocument()
   })
 
   it('saves whether the spool was added full (#7149)', async () => {

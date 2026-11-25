@@ -111,7 +111,7 @@ from scadbuddy.render.read_budget import budget_of
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
-from scadbuddy.store.cache import StaleBlobError, materialize_result
+from scadbuddy.store.cache import StaleBlobError, materialize_result, result_file
 from scadbuddy.store.content_models import BlobMissingError
 
 if TYPE_CHECKING:
@@ -1161,7 +1161,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             if job.result is None:
                 return None
             await materialize_result(core.store.blobs, job.result)
-            path = core.paths.root / job.result.model_3mf
+            path = result_file(core.store.blobs, core.paths.root, job.result.model_3mf)
             return await asyncio.to_thread(model_digest, job.id, path)
 
         run = SliceRun(

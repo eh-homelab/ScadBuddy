@@ -22,6 +22,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.print_imports import LibraryFileSuggestion
 from scadbuddy.bambuddy import print_links
 from scadbuddy.bambuddy.print_links import PrintLink, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -1154,8 +1155,8 @@ def test_a_per_print_copy_at_the_record_step_looks_for_no_replacement(
             partial(_native(client).upload, path.name, data, None, print_subject="output:abc")
         )
 
-    async def stands(library: object, file_id: int) -> None:
-        return None
+    async def stands(library: object, file_id: int) -> LibraryFileSuggestion:
+        return LibraryFileSuggestion(id=file_id, filename=copy.name, folder_id=None)
 
     lookups: list[int] = []
 

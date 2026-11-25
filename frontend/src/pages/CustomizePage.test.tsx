@@ -2495,4 +2495,38 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     expect(await screen.findByRole('heading', { name: 'That model is not here' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
+
+  it('says a version that is gone is gone, and opens the current one (#7314)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () =>
+        HttpResponse.json({ title: 'Not Found', status: 404, detail: "no revision 'abc1234'" }, { status: 404 }),
+      ),
+    )
+    const { user } = render('/m/name-keychain?version=abc1234')
+    const alert = await screen.findByRole('alert')
+    expect(within(alert).getByRole('heading', { name: 'That version is not here' })).toBeInTheDocument()
+    await user.click(within(alert).getByRole('button', { name: 'Back to current' }))
+    await firstRender()
+    expect(screen.queryByTestId('version-badge')).not.toBeInTheDocument()
+  })
+
+  it('says a model that is gone is gone, whatever version the link names (#7314)', async () => {
+    const gone = () =>
+      HttpResponse.json({ title: 'Not Found', status: 404, detail: 'no model named x' }, { status: 404 })
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', gone),
+      // Later than the schema's answer: until it lands the page cannot know which is gone.
+      http.get('/api/v1/models/:slug', async () => {
+        await delay(50)
+        return gone()
+      }),
+    )
+    const { container } = render('/m/name-keychain?version=abc1234')
+    const seen: string[] = []
+    const watch = new MutationObserver(() => seen.push(container.textContent ?? ''))
+    watch.observe(container, { childList: true, subtree: true, characterData: true })
+    expect(await screen.findByRole('heading', { name: 'That model is not here' })).toBeInTheDocument()
+    watch.disconnect()
+    expect(seen.join('\n')).not.toContain('That version is not here')
+  })
 })
