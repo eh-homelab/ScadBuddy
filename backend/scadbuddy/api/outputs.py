@@ -1568,9 +1568,10 @@ _DRAWING: set[asyncio.Future[bool]] = set()
 
 async def _draw_and_keep(outputs: OutputStore, output_id: str) -> bool:
     """The `iso` view of the output's preview mesh (its blob's temporary file), drawn in
-    a thread and kept as its thumbnail, file and blob
-    (`put_drawn_thumbnail`), unless one landed first; False, and remembered, when the
-    mesh has nothing to draw. False, not remembered, when the preview is gone."""
+    a thread and kept as its thumbnail (`put_drawn_thumbnail`), unless one landed
+    first; False, and remembered, when the mesh has nothing to draw, or for
+    `RETRY_DRAW_AFTER` when its put failed. False, not remembered, when the preview is
+    gone."""
     async with outputs.local_role(output_id, "preview") as glb:
         if glb is None:
             return False
@@ -1578,8 +1579,14 @@ async def _draw_and_keep(outputs: OutputStore, output_id: str) -> bool:
     if png is None:
         outputs.remember_undrawable(output_id)
         return False
-    await outputs.put_drawn_thumbnail(output_id, png)
-    return True
+    if await outputs.put_drawn_thumbnail(output_id, png):
+        return True
+    # False: an upload landed first (it stays), or the put failed (a full store), which
+    # keeps nothing: then not drawn again until `RETRY_DRAW_AFTER` (#7257 B3 review).
+    if await asyncio.to_thread(outputs.has_role, output_id, "thumbnail"):
+        return True
+    outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
+    return False
 
 
 @router.get(

@@ -1783,7 +1783,7 @@ workers restart.
 | Variable | Default | What it does |
 |---|---|---|
 | `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
-| `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3` or `bambuddy`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). |
+| `SCADBUDDY_LIBRARY_BACKEND` | `bambuddy` | Seeds the stored **Print library** setting (`bambuddy` or `native`; applies on restart). A value saved in Settings wins. `native` keeps print files in ScadBuddy's own library, in the blob store, and needs `store_backend` `s3`: a start with `native` on the `local` store is refused, and so is a save in Settings (422, `NATIVE_LIBRARY_NOT_READY`). The `bambuddy` store is refused since #7257 (below). |
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render worker API key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
@@ -1809,14 +1809,17 @@ each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →
 
 ### Recovering an unready blob store
 
-With `store_backend` set to `bambuddy`, the API and the render worker refuse to start
-without a Bambuddy URL and a library folder (the store's inbox), so the Settings page
-is out of reach. The same holds for `s3` without its endpoint, bucket and both keys, and
-the recovery below is the same. Settings no longer saves that state, but a stored `bambuddy` beats
+With `store_backend` set to `bambuddy`, the API refuses to start (#7257): saved outputs
+live only in the blob store, and the `bambuddy` store holds none (spec 6.4). It refuses
+whether or not the install holds an output. Settings refuses to save that store (422,
+reason `outputs-need-a-blob-store`), and a store migration to it is refused, but a
+stored `bambuddy`, or `SCADBUDDY_STORE_BACKEND=bambuddy` with nothing stored, still
+reaches a start. The same recovery holds for `s3` without its endpoint, bucket and both
+keys, which Settings does not save either, and a stored value beats
 `SCADBUDDY_STORE_BACKEND`. To start on the local store, run this in ScadBuddy's
 database, in the schema `SCADBUDDY_DATABASE_URL` uses (the `settings` table is
-unqualified: on a custom schema, `SET search_path` to it first), then set the URL and
-folder (or the S3 values) in Settings and choose that store again:
+unqualified: on a custom schema, `SET search_path` to it first), then set the S3 values
+in Settings and choose that store again:
 
 ```sql
 UPDATE settings SET value = '"local"' WHERE name = 'store_backend';
@@ -1838,9 +1841,9 @@ set `SCADBUDDY_STORE_BACKEND=local` instead.
 when the API restarts; no worker needs a restart, since `library_backend` is not among
 the settings render workers read (`RENDER_FIELDS`) and the print worker reads a native
 file through the API, which answers for the library it serves. It needs a content
-store, so choose `store_backend` `s3` or `bambuddy` first; with `s3`, nothing at start
-needs Bambuddy, while `bambuddy` still needs its inbox folder at start
+store, so choose `store_backend` `s3` first; with `s3`, nothing at start needs Bambuddy
 (spec 2026-10-16 §4.5, `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md`).
+The `bambuddy` store is refused since #7257 ("Recovering an unready blob store").
 
 **A flip moves no files.** Switching to `native` starts an empty library, and Bambuddy's
 files stay in Bambuddy; switching back shows Bambuddy's again. Copy anything you want
@@ -2263,8 +2266,8 @@ What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822
   saying which is missing. The slicer pod must reach that URL, and so must the print
   worker, whose LAN print reads its sliced file there by a URL the API mints
   (`…/print/transfer-urls`; without either, that read fails with a 503 `not_configured`).
-- `store_backend` `s3` or `bambuddy`: `local` has no content store for the slices'
-  blobs, and a native slice there fails with a 503.
+- `store_backend` `s3`: `local` has no content store for the slices' blobs, and a native
+  slice there fails with a 503 (the `bambuddy` store is refused since #7257).
 - The print worker's `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` and
   `SCADBUDDY_TEMPORAL_TASK_QUEUE_SLICER` matching the API's: the dialog's slice is
   started from the print worker onto those queues, and the API's `library` worker runs
@@ -2296,7 +2299,7 @@ trays all ScadBuddy's own, over the LAN) takes four switches, in this order. Eac
 checked per run from the settings as they are then (`printers/hot_path.py`
 `hot_path_native`), so there is no fifth switch and no restart beyond the ones noted:
 
-1. **`store_backend` `s3` or `bambuddy`** (the blob store, restart; "Blob store and
+1. **`store_backend` `s3`** (the blob store, restart; "Blob store and
    render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API,
    which seals the printer's access code and opens it for the print worker (#5298) and
    signs a LAN print's blob reads (#5298 Task 32). The print worker holds no KEK; while

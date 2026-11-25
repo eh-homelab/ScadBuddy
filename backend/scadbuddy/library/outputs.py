@@ -50,7 +50,6 @@ from scadbuddy.library.output_bytes import (
     OutputBytes,
     OutputStream,
     blob_version,
-    server_error,
 )
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
 from scadbuddy.library.output_rows import (
@@ -123,13 +122,14 @@ ROLE_FILES: dict[Role, str] = {
     "preview": PREVIEW_NAME,
     "thumbnail": THUMBNAIL_NAME,
 }
-#: A blob the row names that the store cannot give whole: the reader raises
+#: A blob the row names that the store has lost: the reader raises
 #: `OutputBytesLostError` (#7257, plan D9). A stream raises it before its first chunk only
-#: for a missing blob, a corrupt blob of at most `output_bytes._PREFETCH` bytes, or a
-#: transport error during that prefetch; a larger corrupt blob, or a transport error past
-#: the prefetch, raises it mid-stream. An S3 5xx answer counts as a transport error
-#: (`output_bytes.server_error`); a 4xx does not.
-_LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError, *TRANSPORT_ERRORS)
+#: for a missing blob or a corrupt blob of at most `output_bytes._PREFETCH` bytes; a
+#: larger corrupt blob raises `BlobCorruptError` mid-stream. A store that does not answer
+#: now (a transport error, an S3 5xx such as ``SlowDown``) has not lost the blob: its error
+#: goes on as itself, an ordinary 500 with its own log line (#7257 B3 review). An S3 404
+#: or ``NoSuchKey`` counts as lost (`_object_missing`).
+_LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError)
 
 
 #: What a plate cover's read of the model blob can raise besides a lost blob
@@ -182,7 +182,7 @@ def _object_missing(error: Exception) -> bool:
 
 def _lost(error: Exception) -> bool:
     """Whether ``error`` says the store has lost the blob (`OutputBytesLostError`)."""
-    return isinstance(error, _LOST) or server_error(error)
+    return isinstance(error, _LOST) or _object_missing(error)
 
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
@@ -238,12 +238,25 @@ class OutputStoreUnusableError(RuntimeError):
     (spec §6.4, #7257 plan D2)."""
 
 
+#: What a plates read of the model blob answers no names for: a lost or unread blob, or
+#: a 3MF that is not one.
+_PLATE_NAMES_ERRORS: tuple[type[Exception], ...] = (
+    OutputBytesLostError,
+    OSError,
+    KeyError,
+    ValueError,
+    zipfile.BadZipFile,
+    ET.ParseError,
+    ClientError,
+    *TRANSPORT_ERRORS,
+)
+
 #: What a plate cover's derive from the model blob logs and answers no cover for.
 _COVER_DERIVE_ERRORS: tuple[type[Exception], ...] = (OutputBytesLostError, *_COVER_READ_ERRORS)
 
 
 #: Why the API refuses to start on the `bambuddy` store (#7257).
-OUTPUTS_NEED_A_BLOB_STORE = (
+START_NEEDS_A_BLOB_STORE = (
     "the outputs are kept only in the blob store (#7257), and the bambuddy store holds"
     " none (spec 6.4). Move the store to s3 or local (store_backend), then start again"
 )
@@ -1503,12 +1516,13 @@ class OutputStore:
 
     async def _derive_plate_cover(self, slug: str, output_id: str) -> bytes | None:
         """The cover read out of the output's 3MF, then kept (`_keep_plate_cover`).
-        An error of the blob read, a lost blob among them, is logged once. Only a missing
-        object (`_object_missing`) is kept as no cover, so it is not asked again. A
-        refusal (401, 403, other 4xx), a full spool or a transport error is not kept, so
-        the next ask reads again (a key rotation heals). What is kept names the sha256
-        of the model it was read from, so nothing is kept once the model key names other
-        bytes (`OutputRows.keep_plate_cover`)."""
+        An error of the blob read, a lost blob among them, is logged once. Only a lost
+        blob (`OutputBytesLostError`: missing or corrupt, and no file gives it back since
+        #7257) or a missing object (`_object_missing`) is kept as no cover, so it is not
+        asked again. A refusal (401, 403, other 4xx), a full spool, an S3 5xx or a
+        transport error is not kept, so the next ask reads again (a key rotation heals).
+        What is kept names the sha256 of the model it was read from, so nothing is kept
+        once the model key names other bytes (`OutputRows.keep_plate_cover`)."""
         # The model the read below asks for: a blob read that fails has no sha256 of its
         # own.
         expected = await asyncio.to_thread(self.model_sha, output_id)
@@ -1529,7 +1543,7 @@ class OutputStore:
                 "could not read an output's 3MF for its plate cover",
                 extra={"output_id": output_id, "error": str(error)},
             )
-            if _object_missing(error):
+            if isinstance(error, OutputBytesLostError) or _object_missing(error):
                 await self._keep_plate_cover(slug, output_id, None, expected)
             return None
         await self._keep_plate_cover(slug, output_id, png, read.sha256)
@@ -1572,15 +1586,7 @@ class OutputStore:
                 if read.path is None:
                     return {}
                 plates = await asyncio.to_thread(plates_of, read.path)
-        except (
-            OutputBytesLostError,
-            OSError,
-            KeyError,
-            ValueError,
-            zipfile.BadZipFile,
-            ET.ParseError,
-            ClientError,
-        ):
+        except _PLATE_NAMES_ERRORS:
             return {}
         names = {plate.index: plate.name for plate in plates if plate.name}
         try:
@@ -1786,12 +1792,9 @@ class OutputStore:
         (`OutputRows.draw_thumbnail`) points the thumbnail key at it, writes the file
         (`write_drawn_thumbnail`) and names the key in the row, only when neither the key
         nor the file is there; with the key there (a lost blob's), the file alone. A
-        failed put is logged, and the file alone is written
-        under the lock (True when it was this draw's): the row names no new blob, so a
-        reader finds no thumbnail and draws one again; no copy puts the file later and no
-        reader reads it (#7257). After the cut-over mark
-        with no folder, a failed put writes no file, so the drawn thumbnail is lost
-        (#7257); the answer is still True. False when the output has no row."""
+        failed put is logged and answers False with nothing written: no reader would read
+        a file (#7257), so the caller remembers the output as undrawable for a while
+        (`api/outputs.py` `_draw_and_keep`). False when the output has no row."""
         rows = self.rows
         slug = await asyncio.to_thread(rows.slug_of, output_id)
         if slug is None:
@@ -1803,23 +1806,18 @@ class OutputStore:
             )
         except Exception:
             logger.warning(
-                "could not put a drawn thumbnail's blob; its file stays",
+                "could not put a drawn thumbnail's blob",
                 extra={"output_id": output_id},
                 exc_info=True,
             )
-        else:
-            return await asyncio.to_thread(
-                rows.draw_thumbnail,
-                output_id,
-                output_blob_key(output_id, "thumbnail"),
-                staged,
-                slug=slug,
-                write=lambda: self.write_drawn_thumbnail(output_id, png),
-            )
+            return False
         return await asyncio.to_thread(
-            rows.write_thumbnail_file,
+            rows.draw_thumbnail,
             output_id,
-            lambda: self.write_drawn_thumbnail(output_id, png),
+            output_blob_key(output_id, "thumbnail"),
+            staged,
+            slug=slug,
+            write=lambda: self.write_drawn_thumbnail(output_id, png),
         )
 
     def _write_meta(self, directory: Path, meta: OutputMeta) -> None:

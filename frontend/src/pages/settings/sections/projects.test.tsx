@@ -128,7 +128,7 @@ describe('Projects & files, the blob store (#426)', () => {
             title: 'Unprocessable Content',
             status: 422,
             detail:
-              'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 or bambuddy first',
+              'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 first',
           },
           { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
         )
@@ -147,7 +147,7 @@ describe('Projects & files, the blob store (#426)', () => {
     await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ bambuddy_url: null })
-    expect(await screen.findByText(/set store_backend to s3 or bambuddy/)).toBeVisible()
+    expect(await screen.findByText(/set store_backend to s3/)).toBeVisible()
     expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('')
   })
 

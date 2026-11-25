@@ -415,18 +415,32 @@ async def test_plate_cover_missing_object_is_no_cover_once(
     assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": None})
 
 
-async def test_plate_cover_missing_object_in_local_backend_keeps_nothing(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
+async def test_plate_cover_of_lost_model_is_no_cover_once(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#7256 Task 8 review B-M1: through the real local backend, a missing object is a
-    lost blob (#7257, plan D9): no cover for now, and nothing is kept."""
+    """#7256 Task 8 review B-M1, #7257 B3 review: through the real local backend, a
+    missing object is a lost blob (plan D9). No file can give it back, so it is kept as
+    no cover, and the next ask reads nothing again."""
     store, meta = await _covered(tmp_path, projection, content)
     objects = [path for path in (tmp_path / "remote").rglob("*") if path.is_file()]
     assert objects
     for path in objects:
         path.unlink()
     assert await store.read_plate_cover(meta.slug) is None
-    assert store.rows.derived(meta.id, "plate_cover", 0) is None
+    assert store.rows.derived(meta.id, "plate_cover", 0) == ("1", {"key": None})
+    gets: list[Any] = []
+    get = content.get
+
+    def counted(ref: Any, *args: Any, **kwargs: Any) -> Any:
+        gets.append(ref)
+        return get(ref, *args, **kwargs)
+
+    monkeypatch.setattr(content, "get", counted)
+    assert await store.read_plate_cover(meta.slug) is None
+    assert gets == []
 
 
 async def test_plate_cover_disk_error_is_not_kept(

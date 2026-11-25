@@ -129,7 +129,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY
 from scadbuddy.library.outputs import (
-    OUTPUTS_NEED_A_BLOB_STORE,
+    START_NEEDS_A_BLOB_STORE,
     OutputStoreUnusableError,
     reap_orphan_holds,
 )
@@ -2512,7 +2512,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Bambuddy's library (spec §6.4), so the `bambuddy` store has none for them.
         if state.store.backend != "local" and not usable(state.store.content):
             await state.store.aclose()
-            raise OutputStoreUnusableError(OUTPUTS_NEED_A_BLOB_STORE)
+            raise OutputStoreUnusableError(START_NEEDS_A_BLOB_STORE)
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
         await asyncio.to_thread(state.settings_store.close)

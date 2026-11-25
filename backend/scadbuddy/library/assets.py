@@ -1240,7 +1240,8 @@ async def referenced_asset_ids(
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
 
     A source that exists but cannot be read raises OSError, a lost model blob
-    (`OutputBytesLostError`, #7257) among them: a sweep that cannot see every reference
+    (`OutputBytesLostError`, #7257) and a blob store that does not answer now (an S3
+    answer, a transport error) among them: a sweep that cannot see every reference
     must not remove anything, so the caller skips the whole sweep rather than guessing.
     One exception: a 3MF that can never be read as a 3MF
     (`DamagedArchiveError`) skips its own output, logged, so that one damaged output
@@ -1248,8 +1249,12 @@ async def referenced_asset_ids(
     for it, so it is read, and logged, once. The ids read before a raise are still
     kept. Every read runs in a thread.
     """
+    from botocore.exceptions import ClientError
+
+    from scadbuddy.library.output_bytes import TRANSPORT_ERRORS
     from scadbuddy.library.outputs import OutputBytesLostError
 
+    unread: tuple[type[Exception], ...] = (OutputBytesLostError, ClientError, *TRANSPORT_ERRORS)
     rows = outputs.rows
     # One span for the scan, with what it read (#7245).
     with span("assets.referenced") as current:
@@ -1270,7 +1275,7 @@ async def referenced_asset_ids(
                         ids = set()
                     found.update(ids)
                     kept.append((output_id, sorted(ids), model.sha256))
-        except OutputBytesLostError as error:
+        except unread as error:
             # No file is read in its place (#7257, plan D9): the sweep removes nothing.
             raise OSError(str(error)) from error
         finally:

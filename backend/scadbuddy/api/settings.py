@@ -66,11 +66,13 @@ from scadbuddy.filament.rfid_mode import (
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
+    OUTPUTS_NEED_A_BLOB_STORE_REASON,
     DestinationSort,
     DisplayUnit,
     MailLoginNeedsTlsError,
     ModelPrintChoices,
     ModelProject,
+    OutputsNeedABlobStoreError,
     PrinterPlate,
     SettingSource,
     SettingsPatch,
@@ -680,6 +682,12 @@ async def put_settings(
     timer_before = await asyncio.to_thread(store.read, timer_keys) if timer_keys else {}
     try:
         await asyncio.to_thread(store.save, patch)
+    except OutputsNeedABlobStoreError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(error),
+            reason=OUTPUTS_NEED_A_BLOB_STORE_REASON,
+        ) from None
     except (StoreNotReadyError, MailLoginNeedsTlsError) as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     snapshot = await asyncio.to_thread(store.snapshot)

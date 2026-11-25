@@ -39,6 +39,7 @@ from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
+from scadbuddy.store.content_models import StoreFullError
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
@@ -631,6 +632,40 @@ def test_a_draw_that_timed_out_or_failed_is_tried_again_later(
     response = client.get(url)
     assert response.status_code == 200
     assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_a_draw_whose_put_failed_is_tried_again_later(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7257 B3 review: a drawn thumbnail whose blob the store refused (a full store) is
+    kept nowhere, so the output is remembered as undrawable for `RETRY_DRAW_AFTER`: the
+    next reads do not draw again at once."""
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    store: OutputStore = state.outputs
+    monkeypatch.setattr(outputs_api, "RETRY_DRAW_AFTER", 3.0)
+    calls = _counting_draws(monkeypatch, draw_view)
+    assert store.bytes is not None
+    put = store.bytes.put
+
+    async def full(*args: Any, **kwargs: Any) -> Any:
+        raise StoreFullError("no room")
+
+    monkeypatch.setattr(store.bytes, "put", full)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    assert client.get(url).status_code == 404
+    _until(lambda: store.draws_running == 0)
+    assert client.get(url).status_code == 404
+    assert len(calls) == 1
+    monkeypatch.setattr(store.bytes, "put", put)
+    _until(lambda: store.drawable_thumbnail(created["id"]))
+    assert client.get(url).status_code == 200
+    assert len(calls) == 2
 
 
 def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str) -> None:

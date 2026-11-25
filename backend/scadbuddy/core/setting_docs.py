@@ -145,8 +145,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "store_backend": SettingDoc(
             "Blob store",
             "Where rendered pieces and other files are kept. This server's volume works with"
-            " renders in the API only; the Bambuddy library and an S3 store work with any"
-            " number of render workers. Takes effect when ScadBuddy and its render workers"
+            " renders in the API only; an S3 store works with any number of render workers."
+            " The Bambuddy library cannot be chosen: saved outputs are kept only in the blob"
+            " store, and it holds none. Takes effect when ScadBuddy and its render workers"
             " restart.",
         ),
         "library_backend": SettingDoc(

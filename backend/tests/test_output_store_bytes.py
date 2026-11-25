@@ -230,7 +230,22 @@ def _unreachable(after: list[bytes], error: Exception | None = None) -> Any:
     return get
 
 
-async def test_transport_error_in_prefetch_is_a_lost_blob(
+async def _none_lost(store: OutputStore, meta: OutputMeta, error: type[Exception]) -> None:
+    """Every reader of the output's bytes raises ``error`` itself, never
+    `OutputBytesLostError`: a store that does not answer now has not lost the blob (#7257
+    B3 review)."""
+    with pytest.raises(error):
+        await _read(store, meta.id)
+    with pytest.raises(error):
+        await store.model_3mf(meta.id)
+    with pytest.raises(error):
+        async with store.local_role(meta.id, "model"):
+            pass
+    with pytest.raises(error):
+        await store.open_file(meta.id, "a.stl")
+
+
+async def test_transport_error_in_prefetch_is_not_a_lost_blob(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     caplog: pytest.LogCaptureFixture,
@@ -239,21 +254,8 @@ async def test_transport_error_in_prefetch_is_a_lost_blob(
     store, meta = copied
     monkeypatch.setattr(content, "get", _unreachable([b"part"]))
     with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
-        await _all_lost(store, meta)
-    assert "blob" in caplog.text
-
-
-async def _all_lost(store: OutputStore, meta: OutputMeta) -> None:
-    """Every reader of the output's bytes raises `OutputBytesLostError`."""
-    with pytest.raises(OutputBytesLostError):
-        await _read(store, meta.id)
-    with pytest.raises(OutputBytesLostError):
-        await store.model_3mf(meta.id)
-    with pytest.raises(OutputBytesLostError):
-        async with store.local_role(meta.id, "model"):
-            pass
-    with pytest.raises(OutputBytesLostError):
-        await store.open_file(meta.id, "a.stl")
+        await _none_lost(store, meta, EndpointConnectionError)
+    assert "lost" not in caplog.text
 
 
 def _s3_error(status: int, code: str) -> ClientError:
@@ -262,7 +264,7 @@ def _s3_error(status: int, code: str) -> ClientError:
 
 
 @pytest.mark.parametrize(("status", "code"), [(503, "SlowDown"), (500, "InternalError")])
-async def test_s3_server_error_in_prefetch_is_a_lost_blob(
+async def test_s3_server_error_in_prefetch_is_not_a_lost_blob(
     copied: tuple[OutputStore, OutputMeta],
     content: ContentStore,
     caplog: pytest.LogCaptureFixture,
@@ -273,8 +275,8 @@ async def test_s3_server_error_in_prefetch_is_a_lost_blob(
     store, meta = copied
     monkeypatch.setattr(content, "get", _unreachable([], _s3_error(status, code)))
     with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
-        await _all_lost(store, meta)
-    assert "blob" in caplog.text
+        await _none_lost(store, meta, ClientError)
+    assert "lost" not in caplog.text
 
 
 async def test_s3_client_error_is_not_a_lost_blob(
@@ -1111,11 +1113,12 @@ async def test_put_drawn_thumbnail_failed_put_names_no_blob(
 
     monkeypatch.setattr(content, "put", refused)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        assert await store.put_drawn_thumbnail(meta.id, b"drawn") is True
+        assert await store.put_drawn_thumbnail(meta.id, b"drawn") is False
     assert "thumbnail" in caplog.text
     monkeypatch.undo()
-    assert (_dir(store, meta.id) / THUMBNAIL_NAME).read_bytes() == b"drawn"
-    # The row names no blob, so a reader finds no thumbnail; it reads no file (#7257).
+    # No file is written: none would be read (#7257). The row names no blob, so a
+    # reader finds no thumbnail.
+    assert not (_dir(store, meta.id) / THUMBNAIL_NAME).exists()
     row = store.rows.get(meta.id)
     assert row is not None and row.blobs.thumbnail is None
     assert await _read(store, meta.id, "thumbnail") is None

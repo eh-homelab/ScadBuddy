@@ -1047,7 +1047,7 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     const refused = await put({ library_backend: 'native' })
     expect(refused.status).toBe(422)
     expect(((await refused.json()) as { detail: string }).detail).toBe(
-      'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 or bambuddy first',
+      'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 first',
     )
     expect((await api.getSettings()).library_backend).toBe('bambuddy')
     // Both ways: native first, then the store going back to local.

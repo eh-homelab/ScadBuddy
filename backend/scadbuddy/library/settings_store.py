@@ -234,7 +234,7 @@ class UnknownPrinterError(ValueError):
 
 
 class StoreNotReadyError(ValueError):
-    """`store_backend = bambuddy` without the Bambuddy URL and inbox folder it needs, or
+    """`store_backend = bambuddy` (`OutputsNeedABlobStoreError`, #7257), or
     `store_backend = s3` without the endpoint, bucket, both keys and a prefix, or
     `library_backend = native` on `store_backend = local`."""
 
@@ -244,14 +244,25 @@ class MailLoginNeedsTlsError(ValueError):
     plain text (#5283)."""
 
 
+class OutputsNeedABlobStoreError(StoreNotReadyError):
+    """`store_backend = bambuddy`: the outputs live only in the blob store (#7257), and
+    the bambuddy store holds none (spec 6.4), so the API would refuse its next start."""
+
+
+#: The outputs' reason (#7257): the settings save's 422 names it, as the start's refusal
+#: (`main.py`) and a migration's to `bambuddy` (`store/migrate.py`) give its text.
+OUTPUTS_NEED_A_BLOB_STORE_REASON = "outputs-need-a-blob-store"
+OUTPUTS_NEED_A_BLOB_STORE = (
+    "the outputs are kept only in the blob store (#7257), and the bambuddy store holds"
+    " none (spec 6.4): use the s3 store (or local)"
+)
 S3_NOT_READY = (
     "the S3 store needs its endpoint, bucket, access key id and secret access key saved first"
 )
 #: A blank prefix (or "/", blank once its outer slashes go): `build_backend` refuses it.
 S3_PREFIX_NOT_READY = "the S3 store needs a prefix saved first"
 NATIVE_LIBRARY_NOT_READY = (
-    "ScadBuddy's own library keeps its files in the blob store: "
-    "set store_backend to s3 or bambuddy first"
+    "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 first"
 )
 #: What returns a refused start (`native` over the local store) to Bambuddy's library.
 RECOVER_BAMBUDDY_LIBRARY_SQL = (
@@ -1441,11 +1452,7 @@ class SettingsStore:
             if changes.get(secret) == "":
                 changes[secret] = None
         if changes.get("store_backend") == "bambuddy":
-            current = self.load()
-            url = changes.get("bambuddy_url", current.bambuddy_url)
-            inbox = changes.get("library_folder_id", current.library_folder_id)
-            if not url or inbox is None:
-                raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+            raise OutputsNeedABlobStoreError(OUTPUTS_NEED_A_BLOB_STORE)
         if changes.get("store_backend") == "s3":
             current = self.load()
             problem = _s3_not_ready(lambda name: changes.get(name, getattr(current, name)))
@@ -1514,10 +1521,9 @@ class SettingsStore:
                 return deployment(name)
 
         backend = merged("store_backend") or "local"
-        if backend == "bambuddy" and (
-            not merged("bambuddy_url") or merged("library_folder_id") is None
-        ):
-            raise StoreNotReadyError(BAMBUDDY_NOT_READY)
+        if backend == "bambuddy":
+            # A reset to an environment that names it, too (#7257).
+            raise OutputsNeedABlobStoreError(OUTPUTS_NEED_A_BLOB_STORE)
         if backend == "s3" and (problem := _s3_not_ready(merged)) is not None:
             raise StoreNotReadyError(problem)
         if merged("library_backend") == "native" and backend == "local":

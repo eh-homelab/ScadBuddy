@@ -373,7 +373,7 @@ function putSettings(body: Record<string, unknown>) {
     return problem(
       422,
       'Unprocessable Content',
-      "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 or bambuddy first",
+      "ScadBuddy's own library keeps its files in the blob store: set store_backend to s3 first",
     )
   }
   // #5283 — `SettingsStore.save`: a login is never sent on a plain connection.

@@ -23,7 +23,11 @@ from scadbuddy.api import operations as operations_api
 from scadbuddy.api import settings as settings_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import FilamentSync, Settings
-from scadbuddy.library.settings_store import RECOVER_BAMBUDDY_LIBRARY_SQL, StoreNotReadyError
+from scadbuddy.library.settings_store import (
+    OUTPUTS_NEED_A_BLOB_STORE_REASON,
+    RECOVER_BAMBUDDY_LIBRARY_SQL,
+    StoreNotReadyError,
+)
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.orders.component import ORDERS
@@ -619,10 +623,19 @@ def test_the_render_key_is_write_only_and_its_absence_is_flagged(client: TestCli
     assert "narrow" not in json.dumps(body)
 
 
-def test_choosing_the_bambuddy_store_without_an_inbox_is_refused(client: TestClient) -> None:
-    response = client.put("/api/v1/settings", json={"store_backend": "bambuddy"})
-    assert response.status_code == 422
-    assert "library folder" in response.json()["detail"]
+def test_choosing_the_bambuddy_store_is_refused(client: TestClient) -> None:
+    """#7257: the bambuddy store holds no outputs, so the next start would refuse it."""
+    ready = {
+        "bambuddy_url": "http://bambuddy.test",
+        "library_folder_id": 7,
+        "store_backend": "bambuddy",
+    }
+    for body in ({"store_backend": "bambuddy"}, ready):
+        response = client.put("/api/v1/settings", json=body)
+        assert response.status_code == 422
+        assert response.json()["reason"] == OUTPUTS_NEED_A_BLOB_STORE_REASON
+        assert "bambuddy store holds none" in response.json()["detail"]
+    assert client.get("/api/v1/settings").json()["store_backend"] == "local"
 
 
 def test_settings_view_names_the_library_backend(client: TestClient) -> None:
@@ -631,47 +644,7 @@ def test_settings_view_names_the_library_backend(client: TestClient) -> None:
 
 def test_a_native_library_on_local_is_422(client: TestClient) -> None:
     r = client.put("/api/v1/settings", json={"library_backend": "native"})
-    assert r.status_code == 422 and "store_backend to s3 or bambuddy" in r.json()["detail"]
-
-
-@pytest.mark.parametrize("cleared", ["bambuddy_url", "library_folder_id"])
-def test_clearing_what_the_bambuddy_store_needs_while_on_it_is_refused(
-    client: TestClient, cleared: str
-) -> None:
-    """The merged result is checked, not the patch: a store that could not start at the
-    next boot is never saved."""
-    ready = {
-        "bambuddy_url": "http://bambuddy.test",
-        "library_folder_id": 7,
-        "store_backend": "bambuddy",
-    }
-    assert client.put("/api/v1/settings", json=ready).status_code == 200
-    response = client.put("/api/v1/settings", json={cleared: None})
-    assert response.status_code == 422
-    assert "library folder" in response.json()["detail"]
-    assert client.get("/api/v1/settings").json()["store_backend"] == "bambuddy"
-    # Leaving the store first, then clearing, is fine.
-    assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
-    assert client.put("/api/v1/settings", json={cleared: None}).status_code == 200
-
-
-def test_resetting_what_the_bambuddy_store_needs_while_on_it_is_refused(
-    client: TestClient,
-) -> None:
-    """A reset clears the stored row, so the merged value is the deployment's (none here):
-    the same unready store as an explicit clear, refused before anything is deleted."""
-    ready = {
-        "bambuddy_url": "http://bambuddy.test",
-        "library_folder_id": 7,
-        "store_backend": "bambuddy",
-    }
-    assert client.put("/api/v1/settings", json=ready).status_code == 200
-    response = client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]})
-    assert response.status_code == 422
-    assert "library folder" in response.json()["detail"]
-    assert client.get("/api/v1/settings").json()["bambuddy_url"] == "http://bambuddy.test"
-    assert client.put("/api/v1/settings", json={"store_backend": "local"}).status_code == 200
-    assert client.put("/api/v1/settings", json={"reset": ["bambuddy_url"]}).status_code == 200
+    assert r.status_code == 422 and "store_backend to s3 first" in r.json()["detail"]
 
 
 def test_an_operation_retention_temporal_refuses_to_check_is_a_500(

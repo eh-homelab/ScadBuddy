@@ -231,7 +231,7 @@ class Settings(BaseSettings):
     bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     store_backend: StoreBackend = "local"
     # SCADBUDDY_LIBRARY_BACKEND: whose library the print routes serve (`native` needs a
-    # content store: `store_backend` s3 or bambuddy).
+    # content store: `store_backend` s3).
     library_backend: LibraryBackend = "bambuddy"
     # SCADBUDDY_ORDERS_CURRENCY: the ISO 4217 code an order copies when it is made
     # (orders spec 2026-10-18 §3.2, #4249) and never changes; a change applies to the

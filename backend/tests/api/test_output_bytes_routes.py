@@ -14,10 +14,11 @@ import tempfile
 from collections.abc import AsyncGenerator, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
+from botocore.exceptions import ClientError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -192,6 +193,46 @@ def test_download_of_lost_blob_is_500(
     assert response.json()["detail"] == LOST.format("model")
     assert any(
         record.levelno == logging.ERROR and "lost" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("the read timed out"),
+        ClientError(
+            cast(Any, {"Error": {"Code": "SlowDown"}, "ResponseMetadata": {"HTTPStatusCode": 503}}),
+            "GetObject",
+        ),
+    ],
+    ids=["timeout", "slow-down"],
+)
+def test_download_of_unreachable_blob_is_not_lost(
+    client: TestClient,
+    model: str,
+    outputs: OutputStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+) -> None:
+    """A store that does not answer now (a timeout, an S3 5xx) has not lost the blob
+    (#7257 B3 review): the answer is an ordinary 500 with its own log line, never D9's
+    text, and no "lost" line is logged."""
+    output_id = _copied(client, model, outputs)
+
+    async def unreachable(key: str) -> OutputStream:
+        raise error
+
+    assert outputs.bytes is not None
+    monkeypatch.setattr(outputs.bytes, "stream", unreachable)
+    plain = TestClient(client.app, raise_server_exceptions=False)
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+        response = plain.get(f"/api/v1/outputs/{output_id}/model.3mf")
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"] != LOST.format("model")
+    assert not any(
+        record.name == "scadbuddy.library.outputs" and "lost" in record.getMessage()
         for record in caplog.records
     )
 
