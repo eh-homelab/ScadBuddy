@@ -32,7 +32,9 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in seven
   unsent queue, `internal/telemetry` OTel; README there). Its unsent writes are the
   only copy of a save, under the state directory, never the cache. `core/` is the
   API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to Python
-  (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there). `fleetchat/` is the
+  agent fleet chat library (MCP tools over a host's `Store` and `Bus`, imports nothing else
+  from this repo; README there).
 
 ## See also
 
