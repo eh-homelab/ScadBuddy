@@ -205,13 +205,13 @@ refusals below cover it going away.
   `library_file_id`, with `kind` left out or `library_file`. Any other source (`output_id`,
   `slug`, `commit`, `inputs`), another `kind`, or a custom item's fields is 422. The route
   reads the file from the library that serves, as `POST /print/library/{file_id}/run` does
-  (`check_served`, `served_reads`; `orders/bambuddy.py` `ServedLibrary`): a file it does
+  (`check_served`, `served_reads`; `orders/served_library.py` `ServedLibrary`): a file it does
   not have (deleted, trashed, the other library's) or does not print (not a 3MF or STL)
   is 422 on `library_file_id`. The title defaults to the file's name. The item starts
   `draft`, approved with its quote.
 - Pricing is a manual quote, or a slice quote of the file: `quote.py` `_library_quote`
   slices every plate through the dialog's background slice of a library file
-  (`Slicer.start_library`, `orders/bambuddy.py` `start_library_quote_preview`), and its
+  (`Slicer.start_library`, `orders/quote_preview.py` `start_library_quote_preview`), and its
   first quote gives the item the colour slots its plates use (`library_colours`: colours
   from the file's filament requirements, grey where it names none), priced with the
   body's filaments. The quote names no revision. A sliced file has nothing to slice (the

@@ -80,7 +80,8 @@ async def follow_command(
     operation's 201, or 204 with no body, as the record keeps the body, not the status,
     and a client that follows reads the body (review #2836). An operation's body is its
     stored result as it is, which its kind's run stores as the route model's dump
-    (`OperationKind.run`, #3038). ``supersedes`` is a render's only (§5.3). The
+    (`OperationKind.run`, #3038), except a task answer's, which names the task to read
+    (#7364). ``supersedes`` is a render's only (§5.3). The
     answer is attributed in Activity as the route attributes it, since that route
     answered 202 first (#2834)."""
     if supersedes is not None and workflow_id.startswith((PRINT_PREFIX, OPERATION_PREFIX)):

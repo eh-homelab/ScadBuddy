@@ -1,7 +1,7 @@
 import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { ToggleGroup, ToggleGroupItem } from '../../components/ui/toggle-group'
-import { ActionKey, errorText, store, type Listing, type ParamValue, type StoreEstimate, type StoreRender } from '../api/client'
+import { ActionKey, StoreError, errorText, store, type Listing, type ParamValue, type StoreEstimate, type StoreRender } from '../api/client'
 import { Estimate } from '../components/Estimate'
 import { ListingView } from '../components/ListingView'
 import { clearChoices, loadChoices, saveChoices } from '../customizeState'
@@ -9,7 +9,7 @@ import { useDraftChanged } from '../draftCount'
 import { partFilaments, partsView, slotColours } from '../fileParts'
 import { keepOffered, listingUnavailable } from '../params'
 import type { PollTiming } from '../poll'
-import { changedListing, hasNumber, passing, refusalText } from '../refusals'
+import { changedListing, hasNumber, inTime, passing, priceLimitText, refusalText } from '../refusals'
 import { Preview } from '../viewer'
 
 /** The most of one design a visitor may order (`AddListingItem.quantity`, `le=100`). */
@@ -18,8 +18,22 @@ const MAX_QUANTITY = 100
 /** The longest a price read waits on a `Retry-After`: it is read at least this often. */
 const RETRY_CAP_MS = 30_000
 
-/** Refusals a read again cannot pass: the visitor reads why, and the page stops reading. */
+/**
+ * The wait past which a `last` price is over the visitor's limit (#7523: the shop answers the
+ * limit's wait with it). The shop's own wait for a slice that runs is 2 s
+ * (`slice_price.py` `PENDING_RETRY`), so a `last` price of one never reaches this; the limit's
+ * shorter waits are read again as a slice's are.
+ */
+const LIMIT_WAIT_MS = RETRY_CAP_MS
+
+/** The same, once the page's one automatic read is spent: well over a running slice's 2 s. */
+const SPENT_WAIT_MS = 5_000
+
+/** Refusals that pass only with time: the visitor reads why. */
 const LIMITS = new Set(['render_limited', 'rate_limited'])
+
+/** The wait of a limit that names none, as `inTime` words it. */
+const LIMIT_SECONDS = 60
 
 /** No firm price: the shop prices the design by hand. */
 const BY_HAND: StoreEstimate = { source: 'none', price_minor: null, currency: null, minor_exponent: null, retry_after: null }
@@ -42,6 +56,10 @@ function plateJob(url: string): StoreRender {
  * last known price stays on screen, marked as updating), and "Add to order" sends the
  * colours with no values. The page never shows a material, the file's own colours or its
  * name.
+ *
+ * #7523: over a limit the page reads the price once more on its own, after the wait the shop
+ * asks for (at most `timing.limitMs`). After that, and when a read fails or runs out of time,
+ * the visitor reads it again with "Try again", once any wait is over.
  */
 export function FileCustomize({
   initial,
@@ -49,6 +67,7 @@ export function FileCustomize({
   wait,
   now,
   debounceMs,
+  onSourceChange,
 }: {
   initial: Listing
   timing: PollTiming
@@ -56,6 +75,8 @@ export function FileCustomize({
   now: () => number
   /** How long the page waits after the last change before it reads the price. */
   debounceMs: number
+  /** The listing read again is a design: its page is the template's. */
+  onSourceChange: () => void
 }) {
   const [listing, setListing] = useState(initial)
   const view = useMemo(() => partsView(listing), [listing])
@@ -72,7 +93,14 @@ export function FileCustomize({
   const [priced, setPriced] = useState<{ key: string; estimate: StoreEstimate; heldFor?: string }>()
   /** The colours whose price the shop is working out (it answered `pending`). */
   const [pendingFor, setPendingFor] = useState<string>()
-  const [priceError, setPriceError] = useState<string | null>(null)
+  /** Why there is no price of the colours on screen; `limit` is the slug of a limit that is why. */
+  const [priceError, setPriceError] = useState<{ text: string; limit?: string | null } | null>(null)
+  /** "Try again", once the page reads no more on its own: `seconds` to wait first, and whether the refusal says them. */
+  const [again, setAgain] = useState<{ seconds: number; told?: boolean }>()
+  /** How often the visitor pressed "Try again". */
+  const [attempt, setAttempt] = useState(0)
+  /** The next read is the visitor's own: it does not wait out the debounce. */
+  const pressed = useRef(false)
   const [stale, setStale] = useState(false)
   const [reloading, setReloading] = useState(false)
   const [adding, setAdding] = useState(false)
@@ -94,7 +122,8 @@ export function FileCustomize({
   const chosen = useMemo(() => partFilaments(view, values), [view, values])
   const colours = useMemo(() => (chosen ? slotColours(listing, chosen) : undefined), [listing, chosen])
   const current = JSON.stringify([listing.updated_at, chosen])
-  const blocked = listingUnavailable(view) || chosen === null || stale
+  const orderable = !listingUnavailable(view) && chosen !== null
+  const blocked = !orderable || stale
   const previews = listing.previews ?? []
   /** Whether the price on screen is the firm price of the colours on screen. */
   const firm = !blocked && priced !== undefined && priced.key === current && priced.estimate.source === 'slice' && pendingFor !== current
@@ -119,14 +148,42 @@ export function FileCustomize({
     const key = current
     // A read is due: what an earlier one ended with says nothing about it.
     setPriceError(null)
-    setPriced((p) => (p?.heldFor === undefined ? p : { key: p.key, estimate: p.estimate }))
+    setAgain(undefined)
+    const resumed = () =>
+      setPriced((p) => {
+        if (!p || (p.key === key && !hasNumber(p.estimate))) return undefined
+        return p.heldFor === undefined ? p : { key: p.key, estimate: p.estimate }
+      })
+    resumed()
     // The key is the body: a change that keeps it (a pick of the colour on screen, a reload
     // that keeps the colours) reads nothing again and leaves a read that runs alone.
     const [listingUpdatedAt, colours] = JSON.parse(key) as [string, Record<string, string>]
     const body = { listing_updated_at: listingUpdatedAt, colours }
     const read = async () => {
-      const began = now()
+      let began = now()
       let delay = timing.firstMs
+      /** Whether the page's one automatic read after a limit's wait is spent. */
+      let spent = false
+      const waitsFor = (seconds: number) => !spent && seconds * 1000 <= timing.limitMs
+      /** Waits out a limit, then reads on with a time limit of its own; false when these colours are gone. */
+      const late = async (seconds: number) => {
+        spent = true
+        await wait(seconds * 1000)
+        if (!live) return false
+        setPriceError(null)
+        resumed()
+        began = now()
+        delay = timing.firstMs
+        return true
+      }
+      /** Offers "Try again", once the limit's wait is over. */
+      const offer = async (seconds: number, limit?: StoreError) => {
+        setAgain({ seconds, told: limit !== undefined })
+        await wait(seconds * 1000)
+        if (!live) return
+        setAgain({ seconds: 0 })
+        if (limit) setPriceError({ text: priceLimitText(limit, null), limit: limit.slug })
+      }
       const pause = async (seconds: number | null | undefined) => {
         const left = began + timing.limitMs - now()
         if (left <= 0) return false
@@ -146,13 +203,24 @@ export function FileCustomize({
             setPriced({ key, estimate: answer })
             return
           }
-          if (answer.source === 'last') setPriced({ key, estimate: answer })
+          if (answer.source === 'last') {
+            const seconds = answer.retry_after ?? 0
+            if (seconds * 1000 > (spent ? SPENT_WAIT_MS : LIMIT_WAIT_MS)) {
+              setPendingFor(undefined)
+              setPriced({ key, estimate: answer, heldFor: key })
+              if (!waitsFor(seconds)) return await offer(seconds)
+              if (await late(seconds)) continue
+              return
+            }
+            setPriced({ key, estimate: answer })
+          }
           setPendingFor(key)
           if (await pause(answer.retry_after)) continue
           if (!live) return
           // Past the time limit the last price stays; with none, the shop prices it by hand.
           setPendingFor(undefined)
           setPriced((p) => (p && hasNumber(p.estimate) ? { ...p, heldFor: key } : { key, estimate: BY_HAND }))
+          setAgain({ seconds: 0 })
           return
         } catch (caught) {
           if (!live) return
@@ -168,8 +236,18 @@ export function FileCustomize({
             // The shop refuses these colours: a price of others says nothing about them.
             return p.key !== key ? undefined : p
           })
+          if (limited) {
+            const seconds = caught.retryAfter ?? LIMIT_SECONDS
+            const waits = waitsFor(seconds)
+            setPriceError({ text: priceLimitText(caught, waits ? 'page' : 'visitor'), limit: caught.slug })
+            if (!waits) return await offer(seconds, caught)
+            if (await late(seconds)) continue
+            return
+          }
           if (changedListing(caught)) setStale(true)
-          setPriceError(refusalText(caught, shown.current))
+          setPriceError({ text: refusalText(caught, shown.current) })
+          // A refusal of these colours stands; a read that failed may pass.
+          if (!(caught instanceof StoreError) || passing(caught)) setAgain({ seconds: 0 })
           return
         }
       }
@@ -179,13 +257,19 @@ export function FileCustomize({
         started.current = true
         void read()
       },
-      started.current ? debounceMs : 0,
+      started.current && !pressed.current ? debounceMs : 0,
     )
+    pressed.current = false
     return () => {
       live = false
       clearTimeout(timer)
     }
-  }, [blocked, current, listing.id, timing, wait, now, debounceMs])
+  }, [blocked, current, attempt, listing.id, timing, wait, now, debounceMs])
+
+  const tryAgain = () => {
+    pressed.current = true
+    setAttempt((n) => n + 1)
+  }
 
   const setValue = (name: string, next: ParamValue | undefined) => {
     setValues((before) => {
@@ -221,13 +305,17 @@ export function FileCustomize({
     try {
       const fresh = await store.listing(listing.id)
       if (!alive.current) return
+      if (fresh.source !== 'library_file') {
+        onSourceChange()
+        return
+      }
       setListing(fresh)
       setValues(keepOffered(partsView(fresh), values))
       setStale(false)
       setPriceError(null)
       setAddError(null)
     } catch (caught) {
-      if (alive.current) setPriceError(errorText(caught))
+      if (alive.current) setPriceError({ text: errorText(caught) })
     } finally {
       if (alive.current) setReloading(false)
     }
@@ -277,20 +365,29 @@ export function FileCustomize({
             </button>
           </div>
         )}
-        {priceError && (
+        {/* What a limit's refusal says of the next read holds only while a read can follow. */}
+        {priceError && !(blocked && priceError.limit) && (
           <p className="sf-error" role="alert">
-            {priceError}
+            {priceError.text}
           </p>
+        )}
+        {priceError?.limit === 'render_limited' && !blocked && !(priced && hasNumber(priced.estimate)) && (
+          <p className="sf-hint">You can still add it to your order, and we will send you the price before you pay.</p>
         )}
         {priced && hasNumber(priced.estimate) ? (
           // The owner's rule: always show a price. The last one stays, marked as updating,
           // until the colours on screen are priced, or held when their read ended with none.
-          <Estimate estimate={priced.estimate} updating={!firm && !held} held={held} />
+          <Estimate estimate={priced.estimate} updating={!firm && !held} held={held} orderable={orderable} />
         ) : priced && priced.key === current ? (
-          <Estimate estimate={priced.estimate} />
+          <Estimate estimate={priced.estimate} orderable={orderable} />
         ) : (
           // From the change on, through the debounce, until the colours are priced.
           !blocked && !priceError && <Estimate estimate={WORKING} />
+        )}
+        {again && !blocked && (
+          <button type="button" className="sf-button sf-button-quiet sf-price-again" disabled={again.seconds > 0} onClick={tryAgain}>
+            {again.seconds > 0 && !again.told ? `Try again ${inTime(again.seconds)}` : 'Try again'}
+          </button>
         )}
         <div className="sf-order">
           <p className="sf-label" id="sf-quantity">

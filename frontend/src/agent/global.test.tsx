@@ -125,7 +125,10 @@ describe('global tools', () => {
     expect(screen.getByLabelText('Preset')).toHaveValue('')
 
     const key = await bridge.call('fill', { label: 'API key', value: 'secret' })
-    expect(!key.ok && key.error.code).toBe('refused')
+    expect(!key.ok && key.error).toEqual({
+      code: 'refused',
+      message: 'Credentials are for the user to type; an agent never fills them.',
+    })
     expect(screen.getByLabelText('API key')).toHaveValue('')
   })
 

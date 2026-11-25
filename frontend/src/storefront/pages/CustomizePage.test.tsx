@@ -86,6 +86,12 @@ describe('CustomizePage', () => {
     expect(await screen.findByText('You have made a lot of previews. Try again in 42 seconds.')).toBeInTheDocument()
   })
 
+  it('says a long wait in hours (#7523)', async () => {
+    server.use(http.post('/api/store/v1/renders', () => HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': '79000' } })))
+    show()
+    expect(await screen.findByText('You have made a lot of previews. Try again in 22 hours.')).toBeInTheDocument()
+  })
+
   it('renders once after a burst of changes, sending only what the visitor changed, with an Idempotency-Key', async () => {
     const sent: { body: unknown; key: string | null }[] = []
     server.events.on('request:start', async ({ request }) => {
@@ -1070,5 +1076,254 @@ describe('CustomizePage of a file listing (#6710)', () => {
     const { user } = show(FILE_ID)
     await user.click(await screen.findByRole('button', { name: 'Load the latest version' }))
     expect(await screen.findByRole('button', { name: /Part 1/ })).toBeInTheDocument()
+  })
+
+  describe('over a limit (#7523)', () => {
+    /** The page's real limit, with short poll waits: a limit's wait of 10 minutes or less is read once more. */
+    const LONG: PollTiming = { firstMs: 5, maxMs: 20, limitMs: 600_000 }
+    const FIRM = { ...LAST, source: 'slice', price_minor: 700, retry_after: null }
+    const SORRY = 'You have asked for a lot of previews and prices.'
+    const STILL = 'You can still add it to your order, and we will send you the price before you pay.'
+
+    /** The page, its long waits (over 1 s) held until `pass`, which ends the oldest. */
+    function held(timing: PollTiming = LONG, debounceMs = 10) {
+      const waits: { ms: number; pass: () => void }[] = []
+      const wait = (ms: number) =>
+        new Promise<void>((resolve) => {
+          if (ms > 1_000) waits.push({ ms, pass: resolve })
+          else setTimeout(resolve, ms)
+        })
+      const page = renderPage(<CustomizePage id={FILE_ID} timing={timing} debounceMs={debounceMs} wait={wait} />)
+      return { ...page, waits }
+    }
+
+    /** Answers each price read with the next of `answers`, then the last of them; its reads' colours. */
+    function answers(...each: (() => Response)[]) {
+      const reads: unknown[] = []
+      server.use(
+        http.post('/api/store/v1/listings/l4/price', async ({ request }) => {
+          reads.push(((await request.json()) as { colours: unknown }).colours)
+          return each[Math.min(reads.length, each.length) - 1]!()
+        }),
+      )
+      return reads
+    }
+    const limited = (seconds: number) => () => HttpResponse.json(LIMITED, { status: 429, headers: { 'Retry-After': String(seconds) } })
+    const last = (seconds: number) => () => HttpResponse.json({ ...LAST, retry_after: seconds })
+    const firm = () => HttpResponse.json(FIRM)
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 100))
+    const tryAgain = () => screen.queryByRole('button', { name: /Try again/ })
+
+    it('reads the price once more after the wait, with no price on screen', async () => {
+      const reads = answers(limited(42), firm)
+      const { waits } = held()
+      expect(await screen.findByRole('alert')).toHaveTextContent(`${SORRY} We will check this price again in 42 seconds.`)
+      // The design can be ordered: the shop prices it before the visitor pays.
+      expect(screen.getByText(STILL)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Add to order' })).toBeEnabled()
+      expect(tryAgain()).toBeNull()
+      await settle()
+      expect(reads).toHaveLength(1)
+      expect(waits.map(({ ms }) => ms)).toEqual([42_000])
+      waits[0]!.pass()
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(screen.queryByText(STILL)).toBeNull()
+      expect(reads).toHaveLength(2)
+    })
+
+    it('reads once only on its own; then the visitor tries again when the wait is over', async () => {
+      const reads = answers(limited(42), limited(50), firm)
+      const { user, waits } = held()
+      await screen.findByRole('alert')
+      waits[0]!.pass()
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(`${SORRY} Try again in 50 seconds.`))
+      expect(screen.getByRole('button', { name: 'Try again' })).toBeDisabled()
+      waits[1]!.pass()
+      const button = screen.getByRole('button', { name: 'Try again' })
+      await waitFor(() => expect(button).toBeEnabled())
+      expect(screen.getByRole('alert')).toHaveTextContent(SORRY)
+      expect(screen.getByRole('alert')).not.toHaveTextContent('Try again')
+      await settle()
+      expect(reads).toHaveLength(2)
+      await user.click(button)
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(reads).toHaveLength(3)
+      expect(tryAgain()).toBeNull()
+    })
+
+    it('holds a last price whose wait is the limit, and reads it once more', async () => {
+      const reads = answers(last(42), firm)
+      const { waits } = held()
+      expect(await screen.findByText(HELD_NOTE)).toBeInTheDocument()
+      expect(screen.getByText('$6.50 for one')).toBeInTheDocument()
+      expect(screen.queryByText('Updating this price…')).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(tryAgain()).toBeNull()
+      waits[0]!.pass()
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(screen.queryByText(HELD_NOTE)).toBeNull()
+      expect(reads).toHaveLength(2)
+    })
+
+    it('never repeats its own read for a last price with a wait of its own', async () => {
+      const reads = answers(last(42), last(12))
+      const { waits } = held()
+      await screen.findByText(HELD_NOTE)
+      waits[0]!.pass()
+      // 12 s is under the 30 s a first answer may wait, and the one late read is spent.
+      expect(await screen.findByRole('button', { name: 'Try again in 12 seconds' })).toBeDisabled()
+      expect(screen.getByText(HELD_NOTE)).toBeInTheDocument()
+      waits[1]!.pass()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled())
+      await settle()
+      expect(reads).toHaveLength(2)
+    })
+
+    it('follows a slice that the late read started, on a time limit of its own', async () => {
+      const reads = answers(last(42), last(2), last(2), firm)
+      let at = 0
+      const wait = (ms: number) => {
+        at += ms
+        return new Promise<void>((resolve) => setTimeout(resolve, 1))
+      }
+      renderPage(<CustomizePage id={FILE_ID} timing={{ ...LONG, limitMs: 43_000 }} debounceMs={10} wait={wait} now={() => at} />)
+      // 42 s waited and 2 s twice: past the first read's 43 s, inside the late read's.
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(reads).toHaveLength(4)
+      expect(at).toBeGreaterThan(43_000)
+    })
+
+    it('offers a wait over 10 minutes to the visitor only', async () => {
+      const reads = answers(last(79_000), firm)
+      const { user, waits } = held()
+      expect(await screen.findByRole('button', { name: 'Try again in 22 hours' })).toBeDisabled()
+      expect(screen.getByText(HELD_NOTE)).toBeInTheDocument()
+      expect(reads).toHaveLength(1)
+      waits[0]!.pass()
+      const button = await screen.findByRole('button', { name: 'Try again' })
+      await user.click(button)
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(reads).toHaveLength(2)
+    })
+
+    it('drops the wait of colours the visitor changed, and reads the new ones at once', async () => {
+      const reads = answers(last(42), firm)
+      const { user, waits } = held()
+      await screen.findByText(HELD_NOTE)
+      await user.click(screen.getByRole('button', { name: /Part 1/ }))
+      await user.click(await screen.findByRole('radio', { name: 'Signal orange' }))
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(reads).toEqual([
+        { 0: 'f-blue', 1: 'f-orange' },
+        { 0: 'f-orange', 1: 'f-orange' },
+      ])
+      waits[0]!.pass()
+      await settle()
+      expect(reads).toHaveLength(2)
+      expect(screen.queryByText(HELD_NOTE)).toBeNull()
+    })
+
+    it('says nothing of a next read once the shop changed the design', async () => {
+      answers(limited(42))
+      server.use(http.post('/api/store/v1/draft/items', () => HttpResponse.json(CHANGED, { status: 409 })))
+      const { user } = held()
+      await screen.findByText(/We will check this price again/)
+      await user.click(screen.getByRole('button', { name: 'Add to order' }))
+      await screen.findByRole('button', { name: 'Load the latest version' })
+      expect(screen.queryByText(/We will check this price again/)).toBeNull()
+      expect(screen.queryByText(STILL)).toBeNull()
+      expect(tryAgain()).toBeNull()
+    })
+
+    it('lets the visitor try again a read that failed or ran out of time, not one refused', async () => {
+      const gone = () => HttpResponse.json({ type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'The shop does not answer.' }, { status: 502 })
+      const pendingPrice = () => HttpResponse.json({ ...PENDING_PRICE, retry_after: 0 })
+      for (const end of [gone, pendingPrice]) {
+        let open = false
+        server.use(http.post('/api/store/v1/listings/l4/price', () => (open ? firm() : end())))
+        const { user, unmount } = show(FILE_ID, { ...FAST, limitMs: 60 })
+        const button = await screen.findByRole('button', { name: 'Try again' })
+        expect(button).toBeEnabled()
+        open = true
+        await user.click(button)
+        expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+        unmount()
+      }
+      answers(() => HttpResponse.json({ type: 'about:blank', title: 'Bad Request', status: 400, detail: 'No.' }, { status: 400 }))
+      show(FILE_ID)
+      await screen.findByRole('alert')
+      expect(tryAgain()).toBeNull()
+    })
+
+    it('sends one read per press, with no debounce', async () => {
+      const reads = answers(limited(0), limited(0), firm)
+      const { user } = held({ ...LONG, limitMs: -1 }, 60_000)
+      await user.click(await screen.findByRole('button', { name: 'Try again' }))
+      await waitFor(() => expect(reads).toHaveLength(2))
+      await user.click(await screen.findByRole('button', { name: 'Try again' }))
+      expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+      expect(reads).toHaveLength(3)
+    })
+  })
+
+  it('promises no price of an order for a design that cannot be ordered (#7523)', async () => {
+    const { user } = show(FILE_ID)
+    await screen.findByText('$7.00 for one')
+    server.use(
+      http.post('/api/store/v1/draft/items', () => HttpResponse.json(CHANGED, { status: 409 })),
+      http.get('/api/store/v1/listings/l4', () => HttpResponse.json({ ...FILE, available: false, updated_at: '2026-11-08T12:00:00Z' })),
+    )
+    await user.click(screen.getByRole('button', { name: 'Add to order' }))
+    const again = await screen.findByRole('button', { name: 'Load the latest version' })
+    expect(screen.getByText(HELD_NOTE)).toBeInTheDocument()
+    await user.click(again)
+    expect(await screen.findByText('This design cannot be ordered right now.')).toBeInTheDocument()
+    expect(screen.getByText('$7.00 for one')).toBeInTheDocument()
+    expect(screen.getByText('This was our last price.')).toBeInTheDocument()
+    expect(screen.queryByText(HELD_NOTE)).toBeNull()
+  })
+
+  const CHANGED = { type: `${PROBLEMS}listing_changed`, title: 'Conflict', status: 409, detail: 'This listing has changed. Load it again.' }
+
+  it('opens the template page when the shop made the listing a design', async () => {
+    const prices: string[] = []
+    server.use(
+      http.post('/api/store/v1/listings/l4/price', ({ request }) => {
+        prices.push(request.url)
+        return HttpResponse.json(CHANGED, { status: 409 })
+      }),
+    )
+    const { user } = show(FILE_ID)
+    const again = await screen.findByRole('button', { name: 'Load the latest version' })
+    server.use(
+      http.get('/api/store/v1/listings/l4', () => HttpResponse.json({ ...KEYCHAIN, id: FILE_ID })),
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE, { status: 202 })),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
+    )
+    await user.click(again)
+    expect(await screen.findByLabelText('Name')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Part 1/ })).toBeNull()
+    // The template page settled, debounce included: a read of the file page's would have come.
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
+    expect(prices).toHaveLength(1)
+  })
+
+  it('opens the file page when the shop made the listing a file', async () => {
+    server.use(http.post('/api/store/v1/renders', () => HttpResponse.json(CHANGED, { status: 409 })))
+    const { user } = show('l1')
+    const again = await screen.findByRole('button', { name: 'Load the latest version' })
+    const sent = renders()
+    server.use(
+      http.get('/api/store/v1/listings/l1', () => HttpResponse.json({ ...FILE, id: 'l1' })),
+      http.post('/api/store/v1/listings/l1/price', () => HttpResponse.json({ ...LAST, source: 'slice', price_minor: 700, retry_after: null })),
+    )
+    await user.click(again)
+    expect(await screen.findByRole('button', { name: /Part 1/ })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Name')).toBeNull()
+    // The file page settled: a render of the template page's would have come.
+    expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
+    expect(sent).toEqual([])
   })
 })

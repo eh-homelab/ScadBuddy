@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.items import ItemNotFound, ItemStore
 from scadbuddy.inventory.kinds import KindStore
@@ -868,3 +868,30 @@ def test_a_count_settles_a_negative_lot_first(
     assert [lot.on_hand for lot in stock.lots(item)] == [0, 0, 3]
     assert first not in {m.lot_id for m in down + up}
     _on_hand_is_the_sum_of_moves(pg_pool)
+
+
+def test_a_recost_whose_amount_would_not_fit_is_bad_quantity(
+    stock: StockStore, items: ItemStore, pg_pool: PgPool
+) -> None:
+    item = _item(items)
+    lot = stock.receive_lot(item, ReceiveLot(qty=Decimal(1), unit_cost_minor=Decimal(1)), BY)
+    _take(pg_pool, stock, item, 10**13)
+    stock.adjust_lot(lot.id, AdjustInput(on_hand=Decimal(0), note="found"), BY)
+    stock.set_lot_cost(lot.id, Decimal(100), BY)
+
+    with pytest.raises(BadQuantity), pg_pool.connection() as conn, conn.transaction():
+        stock.recost_lot(conn, lot.id)
+
+
+def test_a_cost_whose_lot_value_would_not_fit_is_bad_quantity(
+    stock: StockStore, items: ItemStore
+) -> None:
+    item = _item(items)
+    lot = stock.receive_lot(item, ReceiveLot(qty=Decimal(10**13)), BY)
+    with pytest.raises(BadQuantity):
+        stock.set_lot_cost(lot.id, Decimal(10**13), BY)
+
+
+def test_an_entity_ref_with_a_nul_is_a_bad_ref(stock: StockStore, pg_pool: PgPool) -> None:
+    with pytest.raises(BadEntityRef), pg_pool.connection() as conn:
+        stock._entity(conn, "order:\x00")

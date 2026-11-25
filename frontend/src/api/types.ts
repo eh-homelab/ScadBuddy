@@ -228,6 +228,14 @@ export type FlowRun = Schemas['Run']
 export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
+/** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`). */
+export type TaskQuestion = Schemas['TaskQuestion']
+export type Task = Schemas['Task']
+/** One thing wrong with an answer (a 422's `problems`): a property, an item of one (`tags/0`), or '' for the whole. */
+export interface AnswerProblem {
+  field: string
+  message: string
+}
 /** #2482 — a parent's narrowing beside the call it narrows. */
 export type FlowProposal = Schemas['ProposalView']
 export type FlowStep = Schemas['FlowStep']

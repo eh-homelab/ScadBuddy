@@ -50,6 +50,7 @@ from scadbuddy.api import (
     order_attachments,
     outputs,
     print_attachments,
+    tasks,
     telemetry,
 )
 from scadbuddy.api.accepting import install_accepting_handler, note_preference
@@ -2410,8 +2411,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
-            # #2788: on the API's /data, so every replica shares it.
+            # #2788: on the API's /data, so every replica shares it, unless set
+            # elsewhere: a node-local one (#7316) may be marked this container's alone.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
+            downloads_private=state.config.download_cache_dir is not None
+            and state.config.download_cache_private,
         )
         # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
         # (a save never checks a seeded value), `native` needs a content store.
@@ -2706,6 +2710,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
+            # A task's answer is small (#7364).
+            tasks.ANSWER_ROUTE_LIMIT,
             # The slicer worker's upload (plan 2026-10-16-native-slicer-rust-worker).
             internal_blobs.PUT_ROUTE_LIMIT,
             # A native run's per-print copy from the print worker (#3818 tier A Task 4).

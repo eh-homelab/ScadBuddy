@@ -24,6 +24,19 @@ class PieceStateLostError(LookupError):
 class BlobStore(Protocol):
     backend: str
 
+    @property
+    def root(self) -> Path:
+        """The directory every ``dir_for`` is under: the data volume's ``blobs/``, or a
+        remote store's piece cache wherever it is set (#7318). A `JobResult` names its
+        files ``blobs/<key>/<file>`` all the same (`core/paths.py` `result_path`)."""
+        ...
+
+    async def read_file(self, key: str, name: str) -> bytes | None:
+        """The file ``name`` of the blob ``key``, whole; None when the store holds no
+        such blob or file. For a small file read whole, which needs no path (#7318): a
+        remote store's miss reads the blob in memory and unpacks nothing onto the cache."""
+        ...
+
     def dir_for(self, key: str) -> Path:
         """The blob's directory, created if missing. Every call, for a blob that
         already exists too, refreshes its `touched_at`: a claimant calls this before

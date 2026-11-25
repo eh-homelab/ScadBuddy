@@ -471,14 +471,25 @@ class ThreeDfpSite:
         """`3dfp.mjs add`, once per filament (#7228): when the filament's My Spools page
         offers "Export slicer profile", the owner has a record of it and nothing is added.
         Only otherwise does it click "Add to My Spools" on the filament's page. 3DFP shows that
-        button every time, and each click adds one more 1000 g record (measured on
-        2026-11-23: one record per fetch)."""
+        button every time, and each click adds one more 1000 g record (the measurement is
+        on #7228 and in `docs/superpowers/plans/2026-11-23-my-spools-once.md`)."""
         page = self.page
         try:
             status = await self._signed_in(f"/my/spools/details/{tdfp_id}", settle_ms=0)
-            if status != 404 and await self._offers_export():
+            if status == 404:
+                logger.info("3DFP filament %d has no My Spools record (404)", tdfp_id)
+            elif await self._offers_export():
                 logger.info("3DFP filament %d is already in My Spools", tdfp_id)
                 return
+            else:
+                # A page with no record and a page slower than the wait look the same
+                # here, so a slow page adds a duplicate record (#7547).
+                logger.info(
+                    "the My Spools record check for 3DFP filament %d timed out after %d ms"
+                    " with no export button; adding a record (a slow page makes a duplicate)",
+                    tdfp_id,
+                    RECORD_WAIT_MS,
+                )
             await self._open(f"/filament/details/{tdfp_id}", tdfp_id, settle_ms=4000)
             button = page.get_by_role("button", name="Add to My Spools").first
             if await button.count():

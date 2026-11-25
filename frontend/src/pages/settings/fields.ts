@@ -222,6 +222,16 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'filament',
     kind: 'count',
   },
+  // #7273 — the format a spool tag write uses on a tag that holds neither format.
+  {
+    name: 'filament_tag_format',
+    section: 'filament',
+    kind: 'select',
+    choices: [
+      { value: 'openspool', label: 'OpenSpool' },
+      { value: 'opentag3d', label: 'OpenTag3D' },
+    ],
+  },
   {
     name: 'media_upload_max_bytes',
     section: 'uploads',

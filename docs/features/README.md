@@ -18,6 +18,7 @@ the [user guide](../user-guide.md).
 | Arrange and plates | [arrange-and-plates.md](arrange-and-plates.md) | `backend/scadbuddy/api/outputs.py:737` |
 | Print dialog, slicing and `process_overrides` | [print-dialog-and-slicing.md](print-dialog-and-slicing.md) | `frontend/src/components/PrintPicker.tsx:370`, `backend/scadbuddy/api/printing.py:1002` |
 | Printers and the native hot path | [printer-hot-path.md](printer-hot-path.md) | `backend/scadbuddy/printers/hot_path.py:32`, `backend/scadbuddy/printers/print_activities.py:302` |
+| Printer cameras (always-on recording) | [printer-cameras.md](printer-cameras.md) | `backend/scadbuddy/camera/relay.py`, `backend/scadbuddy/camera/recorder.py` |
 | Print library, search, copies and batches | [print-library.md](print-library.md) | `frontend/src/pages/LibraryPage.tsx`, `backend/scadbuddy/api/library_print.py:196` |
 | Prints, history and the print watcher | [print-history-and-watcher.md](print-history-and-watcher.md) | `frontend/src/pages/PrintsPage.tsx:38`, `backend/scadbuddy/print_watch/sweep.py` |
 | Spools and filament | [spools-and-filament.md](spools-and-filament.md) | `backend/scadbuddy/api/filament.py:173`, `frontend/src/pages/filament/FilamentPage.tsx:45` |

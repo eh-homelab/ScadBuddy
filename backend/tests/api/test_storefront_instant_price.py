@@ -317,7 +317,7 @@ def test_a_remembered_setup_keys_the_slice_the_instant_read_and_the_checkout_ali
 ) -> None:
     """#6710 §7.2, §7.4: the key holds the setup the dialog seeds from the model's
     remembered choices. The instant read and the cart's firm price build their keys from
-    those same choices (`_planned`), so with a remembered process override a priced variant
+    those same choices (`planned_variant`), so with a remembered process override a priced variant
     is still `slice` at once, its line is firm, and the checkout charges that price."""
     _state(crud.api).settings_store.set_model_choices(
         listing["slug"], ModelPrintChoices(process_overrides={"enable_support": "1"})

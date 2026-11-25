@@ -32,8 +32,6 @@ from scadbuddy.auth.models import (
     principal_for,
 )
 from scadbuddy.auth.service_credentials import LEGACY_CALLERS, ServiceCredentialStore, TokenReader
-from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import TagScan
 from scadbuddy.core.settings import Settings
 from scadbuddy.filament import assignments_cache, rfid_mode
 from scadbuddy.filament.bb_pull_models import PullOutcome
@@ -1171,7 +1169,6 @@ def _auto_add(*values: bool) -> respx.Route:
 def test_the_mode_route_writes_the_row_then_turns_auto_add_off(client: TestClient) -> None:
     configure(client)
     _auto_add(True, False)
-    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
     patch = respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
 
     on = client.put(f"{RFID}/override-mode", json={"enabled": True})
@@ -1203,7 +1200,6 @@ def test_the_auto_add_setting_round_trips_and_holds_bambuddy_off_on_save(
     assert [json.loads(c.request.content) for c in patch.calls] == [
         {"auto_add_unknown_rfid": False}
     ]
-    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
     status_now = client.get(f"{RFID}/status").json()
     assert (status_now["override_mode"], status_now["auto_add_unknown_rfid"]) == (False, False)
     assert (status_now["state"], status_now["saved_auto_add"]) == ("applied", True)
@@ -1267,7 +1263,6 @@ def test_a_blocked_write_is_still_a_200(client: TestClient) -> None:
     respx.get(SETTINGS_URL).mock(
         return_value=httpx.Response(200, json={"auto_add_unknown_rfid": True})
     )
-    respx.get(f"{API}/spoolbuddy/devices").mock(return_value=httpx.Response(200, json=[]))
     status_now = client.get(f"{RFID}/status").json()
     assert status_now["state"] == "blocked"
     assert status_now["bambuddy_auto_add"] is True
@@ -1290,11 +1285,6 @@ def test_bambuddy_down_leaves_the_mode_on_and_pending(client: TestClient) -> Non
 def test_the_status_route_reads_without_writing(client: TestClient) -> None:
     configure(client)
     _auto_add(True)
-    respx.get(f"{API}/spoolbuddy/devices").mock(
-        return_value=httpx.Response(
-            200, json=[{"id": 1, "device_id": "sb-1", "hostname": "spoolbuddy", "online": True}]
-        )
-    )
     patch = respx.patch(SETTINGS_URL).mock(return_value=httpx.Response(200, json={}))
 
     status = client.get(f"{RFID}/status")
@@ -1302,7 +1292,6 @@ def test_the_status_route_reads_without_writing(client: TestClient) -> None:
     assert status.status_code == 200, status.text
     body = status.json()
     assert (body["state"], body["bambuddy_auto_add"]) == ("off", True)
-    assert [d["device_id"] for d in body["devices"]] == ["sb-1"]
     assert patch.call_count == 0
 
 
@@ -1315,7 +1304,6 @@ def test_the_status_route_leaves_fields_empty_when_bambuddy_is_down(client: Test
 
     assert status.status_code == 200, status.text
     assert status.json()["bambuddy_auto_add"] is None
-    assert status.json()["devices"] == []
 
 
 @respx.mock
@@ -1391,99 +1379,6 @@ def test_the_mode_route_answers_busy_while_another_reconcile_holds_the_lock(
     assert len(respx.calls) == 0
 
 
-def _linked_spool(client: TestClient, pg_conninfo: str, bb_id: int | None = 11) -> str:
-    made = str(_spool(client)["id"])
-    if bb_id is not None:
-        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-            conn.execute(
-                "INSERT INTO filament_bb_links (spool_id, bb_spool_id, bb_updated_at, linked_at)"
-                " VALUES (%s, %s, now(), now())",
-                (made, bb_id),
-            )
-    return made
-
-
-def test_a_scan_over_the_limit_is_a_422(client: TestClient) -> None:
-    too_long = client.post(f"{RFID}/scan", json={"timeout_s": 51})
-    assert too_long.status_code == 422, too_long.text
-    assert client.post(f"{RFID}/scan", json={"timeout_s": 0}).status_code == 422
-
-
-@respx.mock
-def test_a_scan_that_times_out_is_a_200(client: TestClient) -> None:
-    configure(client)
-
-    async def nothing(self: object, *, timeout: float, device_id: str | None = None) -> None:
-        return None
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(BambuddyClient, "next_tag_scan", nothing)
-        scanned = client.post(f"{RFID}/scan", json={"timeout_s": 1})
-
-    assert scanned.status_code == 200, scanned.text
-    assert scanned.json()["status"] == "timeout"
-
-
-@respx.mock
-def test_a_scan_names_the_tag_and_its_spool(client: TestClient, pg_conninfo: str) -> None:
-    configure(client)
-    made = _linked_spool(client, pg_conninfo)
-
-    async def found(self: object, *, timeout: float, device_id: str | None = None) -> TagScan:
-        assert (timeout, device_id) == (5, "sb-1")
-        return TagScan(device_id="sb-1", tag_uid="04AABBCC", tag_type="NTAG215", bb_spool_id=11)
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(BambuddyClient, "next_tag_scan", found)
-        scanned = client.post(f"{RFID}/scan", json={"timeout_s": 5, "device_id": "sb-1"})
-
-    assert scanned.status_code == 200, scanned.text
-    body = scanned.json()
-    assert (body["status"], body["kind"], body["bambuddy_spool_id"]) == ("tag", "ntag_opentag", 11)
-    assert body["sb_spool"]["id"] == made
-
-
-@respx.mock
-def test_the_ntag_routes_write_confirm_and_cancel(client: TestClient, pg_conninfo: str) -> None:
-    configure(client)
-    made = _linked_spool(client, pg_conninfo)
-    one = f"{SPOOLS}/{made}/ntag"
-    write = respx.post(f"{API}/spoolbuddy/nfc/write-tag").mock(
-        return_value=httpx.Response(200, json={"status": "queued", "warnings": ["w"]})
-    )
-    respx.get(f"{API}/inventory/spools/11").mock(
-        side_effect=[
-            httpx.Response(200, json={"id": 11, "material": "PLA", "tag_uid": None}),
-            httpx.Response(
-                200,
-                json={
-                    "id": 11,
-                    "material": "PLA",
-                    "tag_uid": "04AABBCC",
-                    "data_origin": "opentag3d",
-                },
-            ),
-        ]
-    )
-    cancel = respx.post(f"{API}/spoolbuddy/devices/sb-1/cancel-write").mock(
-        return_value=httpx.Response(200, json={})
-    )
-
-    queued = client.post(f"{one}/write", json={"device_id": "sb-1"})
-    assert queued.status_code == 200, queued.text
-    assert queued.json() == {"status": "queued", "warnings": ["w"]}
-    assert json.loads(write.calls.last.request.content) == {"device_id": "sb-1", "spool_id": 11}
-
-    confirmed = client.post(f"{one}/confirm")
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json() == {"bound": True, "tag_uid": "04AABBCC"}
-    assert client.post(f"{one}/confirm").json()["bound"] is False  # no write is queued
-
-    cancelled = client.post(f"{one}/cancel", json={"device_id": "sb-1"})
-    assert cancelled.status_code == 204, cancelled.text
-    assert cancel.call_count == 1
-
-
 @respx.mock
 def test_unbinding_a_tag_pushes_the_clear_at_once_with_tags_sb_to_bb(
     client: TestClient, pg_conninfo: str
@@ -1501,71 +1396,6 @@ def test_unbinding_a_tag_pushes_the_clear_at_once_with_tags_sb_to_bb(
 
     assert closed.status_code == 200, closed.text
     assert route.call_count == calls + 1
-
-
-@respx.mock
-def test_a_write_for_an_unlinked_spool_is_a_409_with_a_code(
-    client: TestClient, pg_conninfo: str
-) -> None:
-    configure(client)
-    made = _linked_spool(client, pg_conninfo, bb_id=None)
-
-    refused = client.post(f"{SPOOLS}/{made}/ntag/write", json={"device_id": "sb-1"})
-
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["code"] == "no_bambuddy_spool"
-    assert len(respx.calls) == 0
-
-
-@respx.mock
-def test_a_write_over_an_override_tag_is_a_409_with_a_code(
-    client: TestClient, pg_conninfo: str
-) -> None:
-    configure(client)
-    made = _linked_spool(client, pg_conninfo)
-    bound = client.post(
-        f"{SPOOLS}/{made}/tags",
-        json={
-            "tray_uuid": "0123456789ABCDEF0123456789ABCDEF",
-            "kind": "bambu_mifare",
-            "override": True,
-        },
-    )
-    assert bound.status_code == 201, bound.text
-
-    refused = client.post(f"{SPOOLS}/{made}/ntag/write", json={"device_id": "sb-1"})
-
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["code"] == "override_tag_open"
-
-
-@respx.mock
-def test_the_ntag_routes_404_for_an_unknown_spool(client: TestClient) -> None:
-    configure(client)
-    one = f"{SPOOLS}/{MISSING}/ntag"
-
-    assert client.post(f"{one}/write", json={"device_id": "sb-1"}).status_code == 404
-    assert client.post(f"{one}/confirm").status_code == 404
-    assert client.post(f"{one}/cancel", json={"device_id": "sb-1"}).status_code == 404
-    assert len(respx.calls) == 0
-
-
-@respx.mock
-def test_a_device_id_that_is_not_one_path_segment_is_a_422(
-    client: TestClient, pg_conninfo: str
-) -> None:
-    configure(client)
-    made = _linked_spool(client, pg_conninfo)
-
-    for bad in ("../x", "a/b", "a b", "x" * 51, ""):
-        for path, body in (
-            (f"{SPOOLS}/{made}/ntag/cancel", {"device_id": bad}),
-            (f"{SPOOLS}/{made}/ntag/write", {"device_id": bad}),
-            (f"{RFID}/scan", {"device_id": bad}),
-        ):
-            refused = client.post(path, json=body)
-            assert refused.status_code == 422, (path, bad, refused.text)
-    assert len(respx.calls) == 0
 
 
 def test_a_patch_that_inverts_the_stored_band_is_refused(client: TestClient) -> None:

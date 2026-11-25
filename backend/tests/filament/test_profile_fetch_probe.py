@@ -25,6 +25,8 @@ class FakeService:
     def __init__(self, pollers: bool) -> None:
         self.pollers = pollers
         self.fail = False
+        #: Only this queue type's read fails (#7513); None for neither.
+        self.fail_type: int | None = None
         self.reads: list[tuple[str, int]] = []
 
     async def describe_task_queue(self, request: DescribeTaskQueueRequest, **_: object) -> Any:
@@ -32,7 +34,7 @@ class FakeService:
         # (`pollers.partition_name`) answer alike, unrecorded.
         if not request.task_queue.name.startswith("/_sys/"):
             self.reads.append((request.task_queue.name, request.task_queue_type))
-        if self.fail:
+        if self.fail or request.task_queue_type == self.fail_type:
             raise RuntimeError("Temporal is down")
         return DescribeTaskQueueResponse(pollers=[PollerInfo(identity="w")] if self.pollers else [])
 
@@ -117,6 +119,28 @@ def test_a_failed_read_is_not_kept() -> None:
     with pytest.raises(RuntimeError):
         asyncio.run(probe.has_pollers())
     client.workflow_service.fail = False
+    assert asyncio.run(probe.has_pollers()) is True
+
+
+def test_a_failed_activity_read_does_not_hide_the_workflow_pollers() -> None:
+    """#7513: both types are read at once (#7425); a poller on one is the answer even
+    when the other type's read failed."""
+    client = FakeClient(pollers=True)
+    client.workflow_service.fail_type = TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY
+    probe = TemporalQueueProbe(client, _queue(), PollerCache())  # type: ignore[arg-type]
+    assert asyncio.run(probe.has_pollers()) is True
+
+
+def test_a_failed_read_beside_an_empty_one_raises_and_is_not_kept() -> None:
+    """With no poller on the type that answered, the failed type may have one: the
+    probe cannot say no, so it raises, and keeps nothing (#7513)."""
+    client = FakeClient(pollers=False)
+    client.workflow_service.fail_type = TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW
+    probe = TemporalQueueProbe(client, _queue(), PollerCache())  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError):
+        asyncio.run(probe.has_pollers())
+    client.workflow_service.fail_type = None
+    client.workflow_service.pollers = True
     assert asyncio.run(probe.has_pollers()) is True
     assert len(client.workflow_service.reads) == 4
 

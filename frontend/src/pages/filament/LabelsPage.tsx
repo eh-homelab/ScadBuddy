@@ -379,7 +379,6 @@ export function LabelsPage() {
   ]
 
   // A place label's PDF needs an address from Settings; a spool label needs none.
-  const placesLoading = placeMode && readyPlaces === null
   const pdfNeedsBase = placeLabels.length > 0 && readyPlaces !== null && !readyPlaces.hasBase
 
   /** #7157 — the server's PDF of the labels drawn, at the template shown; saved through `downloadBlob`, which works inside Bambuddy's frame. */
@@ -448,7 +447,7 @@ export function LabelsPage() {
             type="button"
             size="sm"
             variant="outline"
-            disabled={count === 0 || pdfBusy || pdfNeedsBase || placesLoading}
+            disabled={count === 0 || pdfBusy || pdfNeedsBase}
             aria-describedby={pdfNeedsBase ? 'labels-pdf-needs-base' : undefined}
             onClick={downloadPdf}
           >

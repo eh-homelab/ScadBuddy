@@ -13,9 +13,16 @@ in the user's own tab (`mcp__scadbuddy__browser_*`).
 ## Adding it
 
 The server is deployed beside ScadBuddy, not by it, **in its own pod**:
-eh-homelab/clusters#2174 runs `mcr.microsoft.com/playwright/mcp` as its own Deployment
-and Service, with its Streamable HTTP endpoint at
-`http://playwright-mcp.bambuddy:8931/mcp`. Then, as an admin, in **Settings → Tools & plugins →
+eh-homelab/clusters#2174 runs it as its own Deployment and Service
+(`applications/scadbuddy/playwright-mcp.yaml`), with its Streamable HTTP endpoint at
+`http://playwright-mcp.bambuddy:8931/mcp`. Since eh-homelab/clusters#4237 the image is
+ScadBuddy's `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` (#7027: `@playwright/mcp` with
+each MCP session's context built from the `X-ScadBuddy-Browser` header,
+`workers/playwright-mcp/`), not `mcr.microsoft.com/playwright/mcp`. `build-image.yml`'s
+`playwright-mcp` job publishes it, and the deploy PR pins it to the build's digest like
+the other images (`deploy.reusable.yml`, `PLAYWRIGHT_MCP_IMAGE`, #7546). A build that
+published no playwright-mcp image keeps the pin and warns (the job is
+`continue-on-error`). Then, as an admin, in **Settings → Tools & plugins →
 Add endpoint**:
 
 - **Name** `playwright`. Its tools reach a session's turn as `mcp__playwright__browser_*`

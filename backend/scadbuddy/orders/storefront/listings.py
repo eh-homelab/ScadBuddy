@@ -1503,6 +1503,31 @@ def _offered_file(
     )
 
 
+def page_colours(
+    listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
+) -> dict[int, str] | None:
+    """The filament of each part a visitor's page of the published file ``listing`` opens
+    on (#7523): the page knows a part by its colour (`fileParts.ts` `partFilaments`), so it
+    takes the first filament of the part's default colour in the default's material. None
+    when a part has none: the listing cannot be ordered."""
+    snapshot = listing.file_snapshot
+    assert snapshot is not None
+    shown = _offered_file(listing, snapshot, filaments, shop_materials)
+    by_id = {f.id: f for f in shown.filaments}
+    colours: dict[int, str] = {}
+    for part in shown.slots:
+        if part.default is None:
+            return None
+        start = by_id[part.default]
+        colours[part.slot] = next(
+            f.id
+            for f in shown.filaments
+            if f.colour.casefold() == start.colour.casefold()
+            and material_key(f.material) == material_key(start.material)
+        )
+    return colours
+
+
 def _offered(
     listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
 ) -> _Offered:
@@ -1616,14 +1641,25 @@ def published_listing(
 ) -> Listing:
     """The listing, when it is published and sells ``source`` (either, for None); 404
     ``listing_not_found`` for an unpublished or unknown one alike, so a visitor cannot tell
-    them apart, and for an id that is not one, before any lookup. A template's render and
-    its prepare run take a template listing only; the public page takes either (#6710)."""
+    them apart, and for an id that is not one, before any lookup. A published one that
+    sells the other source is 409 ``listing_changed``: the shop switched it since the
+    page read it, and the page loads it again (#6710). The public page takes either."""
     listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
-    if (
-        listing is None
-        or not listing.published
-        or listing.snapshot is None
-        or (source is not None and listing.source != source)
-    ):
-        raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+    if listing is None or not listing.published or listing.snapshot is None:
+        raise no_such_listing()
+    if source is not None and listing.source != source:
+        raise page_outdated()
     return listing
+
+
+def no_such_listing() -> ApiError:
+    """404 ``listing_not_found``, as a visitor reads it."""
+    return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+
+
+def page_outdated() -> ApiError:
+    """409 ``listing_changed``, as a visitor reads it: the listing moved since its page
+    read it."""
+    return problem(
+        status.HTTP_409_CONFLICT, "listing_changed", "This listing has changed. Load it again."
+    )

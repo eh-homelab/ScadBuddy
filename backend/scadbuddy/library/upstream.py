@@ -153,35 +153,47 @@ def _read(history: ModelHistory, commit: str | None, path: str) -> bytes | None:
         return None
 
 
+def _known(history: ModelHistory, commit: str | None) -> str | None:
+    if commit is None:
+        return None
+    try:
+        return history.resolve(commit)
+    except RevisionNotFoundError:
+        return None
+
+
 def plan_merge(
     history: ModelHistory, slug: str, directory: Path, upstream: Upstream, revision: str
 ) -> MergePlan:
     """Merge ``upstream`` at ``revision`` into the template in ``directory``.
 
     ``base`` is read from ``upstream.path`` -- where the source lived at that
-    revision -- and ``theirs`` from where the upstream lives now.
+    revision -- and ``theirs`` from where the upstream lives now. A base the history no
+    longer has (#7314: the repository was replaced) is no base: the sources conflict
+    where they differ, and every other file of this template's own stays.
     """
     theirs_path = model_path(upstream.id)
+    base_commit = _known(history, upstream.base)
     # All three sides as bytes, decoded alike: no newline translation, so a CRLF
     # source compares line for line and keeps its line endings.
     ours_bytes = (directory / SOURCE_NAME).read_bytes()
     local: dict[str, bytes | None] = {SOURCE_NAME: ours_bytes}
     ours = ours_bytes.decode()
-    base = (_read(history, upstream.base, f"{upstream.path}/{SOURCE_NAME}") or b"").decode()
+    base = (_read(history, base_commit, f"{upstream.path}/{SOURCE_NAME}") or b"").decode()
     theirs = (_read(history, revision, f"{theirs_path}/{SOURCE_NAME}") or b"").decode()
-    base_label = f"{upstream.id}@{upstream.base[:7]}" if upstream.base else "base"
+    base_label = f"{upstream.id}@{base_commit[:7]}" if base_commit else "base"
     merged, conflicts = history.merge_file(
         ours, base, theirs, labels=(slug, base_label, upstream.id)
     )
 
     names = set(history.files_at(revision, theirs_path))
-    if upstream.base is not None:
-        names |= set(history.files_at(upstream.base, upstream.path))
+    if base_commit is not None:
+        names |= set(history.files_at(base_commit, upstream.path))
     names -= {SOURCE_NAME, MODEL_META_NAME}
     files: dict[str, bytes | None] = {}
     kept: list[str] = []
     for name in sorted(names):
-        at_base = _read(history, upstream.base, f"{upstream.path}/{name}")
+        at_base = _read(history, base_commit, f"{upstream.path}/{name}")
         at_theirs = _read(history, revision, f"{theirs_path}/{name}")
         if at_theirs == at_base:
             continue
@@ -194,7 +206,7 @@ def plan_merge(
             kept.append(name)
 
     patch = history.diff_dirs(
-        upstream.base,
+        base_commit,
         upstream.path,
         revision,
         theirs_path,
