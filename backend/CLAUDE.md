@@ -499,7 +499,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class; `GET /{name}/versions` lists
   the versions newest first for Settings' editor, #6937) and the agent's area
   `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
-  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. A marketplace
+  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. Each committed
+  hosted-plugin create, change, publish and delete, and each `plugin-packages` write (install,
+  re-pin, discard, approve, enable, delete), publishes `plugin_packages.changed`
+  (`core/events.py` `PluginPackagesChanged`, the name only) on the realtime topic
+  `plugin-packages`, which Settings → Tools & plugins follows (#7460). A marketplace
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
   read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
   module: each package at its current pin, whether it is approved, and a hosted one's version
