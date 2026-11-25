@@ -19,9 +19,11 @@ import {
   previewListing,
   savedKey,
   sellMedia,
+  shownParams,
   storedKey,
   switchSource,
   unsaveable,
+  withoutUnknown,
   type ListingDraft,
   type ListingRefusal,
 } from '../components/storefront/listingDraft'
@@ -168,7 +170,11 @@ function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefi
   if (refusal.kind === 'filament_unknown') return 'Not published: a colour on offer is no longer in the price book. Untick it under “Colours on offer”, then publish again.'
   // #6710 §9.6 — said in the Source block, or under the colours when it names them.
   if (refusal.kind === 'file') return refusal.name === 'colours' ? 'Not published: the colours on offer need a change. See “Colours on offer” below.' : 'Not published: the file needs a change. See the note under “What this listing sells” below.'
+  // #5701 — a save is refused too (what it cannot store), so it says nothing of publishing.
+  if (refusal.kind === 'inputs') return 'The design needs a change. See the note under “Design” below.'
   const param = schema?.parameters?.find((p) => p.name === refusal.name)
+  // #5701: a parameter the design sets itself has no row of its own.
+  if (refusal.kind === 'param' && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
   return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
 
@@ -394,21 +400,12 @@ export function StorefrontListingPage() {
       .finally(() => setSelling(false))
   }, [sell, models.data, models.error, book.data, book.error, settings.data, settings.error, setSearch, location.state])
 
-  // A version without some of the listing's parameters: they go, or the editor could
-  // neither show nor unlock them and publish would refuse the listing.
+  // A version without some of the listing's parameters, or whose pipeline sets them: they go,
+  // or the editor could neither show nor unlock them and publish would refuse the listing.
   useEffect(() => {
     if (!open || !schema.data) return
-    const names = new Set((schema.data.parameters ?? []).map((param) => param.name))
-    const { params, fixed } = open.draft
-    if (Object.keys(params).every((name) => names.has(name)) && Object.keys(fixed).every((name) => names.has(name))) return
-    setOpen({
-      ...open,
-      draft: {
-        ...open.draft,
-        params: Object.fromEntries(Object.entries(params).filter(([name]) => names.has(name))),
-        fixed: Object.fromEntries(Object.entries(fixed).filter(([name]) => names.has(name))),
-      },
-    })
+    const draft = withoutUnknown(open.draft, schema.data)
+    if (draft !== open.draft) setOpen({ ...open, draft })
   }, [open, schema.data])
 
   const listingId = open?.id ?? null

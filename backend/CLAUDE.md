@@ -2453,7 +2453,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   A pipeline template's listing (#5701, `orders/storefront/pipeline_inputs.py`, spec
   2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
   `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
-  ones on the render worker, and `listing_reference` writes the snapshot's around the
+  ones on the render worker (`RevisionSchema.pipeline`, `api/versions.py`, gives the editor the
+  same `pipeline_facts` at a revision), and `listing_reference` writes the snapshot's around the
   customer's `params`. A price, a preview and a cart line are of the listing's design while
   `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
   render of several outputs (`renders.py` `one_output`) has no firm price on any path until

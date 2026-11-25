@@ -288,6 +288,36 @@ def test_a_revisions_schema_carries_the_params_its_pipeline_sets(
 
 
 @pytest.mark.requires_git
+def test_a_revisions_schema_carries_what_its_pipeline_declares(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#5701 (spec 2026-11-17 §5): the listing editor sets a pipeline's inputs by the shape
+    and the version the revision declares, as publish reads them."""
+    before = _commit(paths, "no pipeline yet")
+    pipeline = paths.model_dir(model) / "pipeline"
+    pipeline.mkdir()
+    (pipeline / "pipeline.py").write_text("INPUTS_VERSION = 2\n", encoding="utf-8")
+    declared = {"module": "pipeline/pipeline.py", "api": 1}
+    _with_pipeline(paths, model, declared)
+    undeclared = _commit(paths, "no shape")
+    shape = {"type": "object", "properties": {"rows": {"type": "integer", "title": "Rows"}}}
+    (pipeline / "inputs.json").write_text(json.dumps(shape), encoding="utf-8")
+    _with_pipeline(paths, model, {**declared, "inputs": "pipeline/inputs.json"})
+    head = _commit(paths, "shape")
+
+    def pipeline_at(commit: str) -> object:
+        return client.get(f"/api/v1/models/{model}/versions/{commit}/schema").json()["pipeline"]
+
+    assert pipeline_at(before) is None
+    assert pipeline_at(undeclared) == {
+        "inputs_version": 2,
+        "inputs": None,
+        "fault": f"{model!r} declares no shape for its inputs (model.json pipeline.inputs)",
+    }
+    assert pipeline_at(head) == {"inputs_version": 2, "inputs": shape, "fault": ""}
+
+
+@pytest.mark.requires_git
 def test_ui_version_moves_only_with_ui(client: TestClient, model: str, paths: DataPaths) -> None:
     """#846: a commit that leaves ``ui/`` alone keeps the interface's revision, so the
     page keeps the mounted interface."""

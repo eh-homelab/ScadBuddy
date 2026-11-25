@@ -51,7 +51,7 @@ sequenceDiagram
   (`listings.py:230`, `file_listings.py`, `renders.py`, `drafts.py`, `submit.py:138`, `accounts.py`,
   `mail.py`, `turnstile.py`, `prepare.py`, `intake.py`).
 - Back office: `backend/scadbuddy/api/storefront.py:51`, `frontend/src/pages/StorefrontPage.tsx`,
-  `frontend/src/components/storefront/ListingEditor.tsx:826`.
+  `frontend/src/components/storefront/ListingEditor.tsx:927`.
 - Public UI: `frontend/src/storefront/` (router `App.tsx:86-97`, client
   `api/client.ts:67`); its OpenAPI is exported by
   `backend/scadbuddy/tools/export_openapi.py` `--storefront`.
@@ -87,7 +87,8 @@ sequenceDiagram
 - Venmo's pay page is off (`backend/scadbuddy/payments/venmo.py:48`;
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
 - A pipeline template is listed only when it declares its inputs (`model.json`
-  `pipeline.inputs`). The shop sets them through the API only, the customer never sets
+  `pipeline.inputs`). The shop sets them in the listing editor ("Set up the design",
+  `frontend/src/components/storefront/DesignDialog.tsx`), the customer never sets
   them, and a render of several outputs has no slice price yet: the shop prices that line
   by hand (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`;
   [#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).
