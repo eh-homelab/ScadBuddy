@@ -51,6 +51,16 @@ KINDS: dict[str, EntityKind] = {
         _kind("item", "items", "uuid"),
         _kind("lot", "stock_lots", "uuid"),
         _kind("unit", "stock_units", "uuid"),
+        # The filament catalogs' rows (`filament/catalog.py` `CATALOGS`).
+        _kind("material", "filament_materials", "uuid"),
+        _kind("subtype", "filament_subtypes", "uuid"),
+        _kind("brand", "filament_brands", "uuid"),
+        _kind("category", "filament_categories", "uuid"),
+        _kind("effect", "filament_effects", "uuid"),
+        _kind("insert_material", "filament_insert_materials", "uuid"),
+        _kind("insert_type", "filament_insert_types", "uuid"),
+        _kind("colour", "filament_colours", "uuid"),
+        _kind("location_kind", "filament_location_kinds", "uuid"),
     )
 }
 

@@ -21,7 +21,7 @@ function sessions(recorded: { decision: string } | undefined): SessionManager {
     approvals: { holdsGrant: () => Promise.resolve(false) },
     projection: {
       session: () =>
-        Promise.resolve({ mode: 'durable', owner: { kind: 'browser', id: 'browser', label: 'You' }, creator: { kind: 'browser', id: 'browser' } }),
+        Promise.resolve({ owner: { kind: 'browser', id: 'browser', label: 'You' }, creator: { kind: 'browser', id: 'browser' } }),
       inRun: () => Promise.resolve(false),
       parkTrace: () => Promise.resolve({ tool: 'mcp__scadbuddy__print_output', createdAt: new Date(), traceparent: null }),
       markDecision: () => Promise.resolve(),

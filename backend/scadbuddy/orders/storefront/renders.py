@@ -39,6 +39,7 @@ of them while the shop holds it.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -80,7 +81,9 @@ from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
     PriceRow,
     instant_price,
-    model_digest,
+    job_results,
+    kit_colours,
+    kit_digest,
     pending,
     slice_estimate,
 )
@@ -146,7 +149,7 @@ def store_render(job: Job, *, ready: bool = True) -> StoreRender:
         stage=stage if job.state == "running" else None,
         plates=list(result.plates) if result else [],
         bbox_mm=result.bbox_mm if result else None,
-        colors=list(result.colors) if result else None,
+        colors=kit_colours(job) if result else None,
         preview_url=(
             f"{STOREFRONT_PREFIX}/renders/{job.id}/preview.glb"
             if result is not None and job.state == "done" and ready
@@ -212,13 +215,24 @@ def files_lost(job_id: str) -> bool:
     return _failures(job_id)[0] >= FETCH_TRIES
 
 
+async def _materialize(state: AppState, job: Job) -> None:
+    """The files of every output of ``job`` (#5701) in this process's cache. A store that
+    no longer has one fails it, as a fetch that raises does: a kit with a file short has
+    no digest and no price."""
+    for result in job_results(job):
+        await materialize_result(state.store.blobs, result)
+        model = result_file(state.store.blobs, state.paths.root, result.model_3mf)
+        if not await asyncio.to_thread(model.is_file):
+            raise FileNotFoundError(result.model_3mf)
+
+
 async def _fetch(state: AppState, job: Job) -> bool:
-    """Starts the fetch of the done ``job``'s files (`materialize_result`) when none
-    runs, shared by every request, and waits on it at most `READY_WAIT` seconds: whether
-    it succeeded. It runs on when the wait ends, so the next request finds it done."""
+    """Starts the fetch of the done ``job``'s files (`_materialize`) when none runs, shared
+    by every request, and waits on it at most `READY_WAIT` seconds: whether it succeeded.
+    It runs on when the wait ends, so the next request finds it done."""
     task = _fetches.get(job.id)
     if task is None:
-        task = asyncio.create_task(materialize_result(state.store.blobs, job.result))
+        task = asyncio.create_task(_materialize(state, job))
         _fetches[job.id] = task
         task.add_done_callback(lambda done: _fetched(job.id, done))
     done, _ = await asyncio.wait({task}, timeout=READY_WAIT)
@@ -325,8 +339,8 @@ def _shared(state: AppState, conn: Any, render_key: str) -> bool:
     return row is not None or state.projection.reuse_done(render_key) is not None
 
 
-#: The slot colours (``job.result.colors``) of the visitor's render of a render key, or
-#: None when there is none to read. The second argument is the choices' variant key
+#: The slot colours (`kit_colours`) of the visitor's render of a render key, or None
+#: when there is none to read. The second argument is the choices' variant key
 #: (#6921): with no render, the slot colours a priced slice of the variant recorded.
 RenderColours = Callable[[str, str], Awaitable[Sequence[str] | None]]
 
@@ -699,9 +713,10 @@ async def estimate_of(
 
 
 def one_output(job: Job) -> bool:
-    """Whether the first output of ``job`` is the whole render. A pipeline's render of
-    several has no firm price yet: an order makes the first only, so the shop prices it
-    by hand (#5701, spec 2026-11-17 §7.4)."""
+    """Whether the first output of ``job`` is the whole render. The price of a pipeline's
+    render of several is built (`kit_digest`, `price_variant`) and no visitor gets it yet:
+    an order makes the first only, so the shop prices it by hand (#5701, spec 2026-11-17
+    §7.4)."""
     return len(job.outputs) <= 1
 
 
@@ -713,15 +728,16 @@ async def variant_of(
     material: str | None,
 ) -> tuple[str, list[Filament] | None]:
     """What the price of the done ``job`` (its files fetched, `_fetch`) rests on
-    (#6153): the sha256 of its 3MF, and the price-book filament of each slot of the
-    render (`_filament_for`, from ``colours`` and ``material``), or None when a slot's
-    colour has no listing filament. The estimate and a cart line's add both read it."""
-    assert job.result is not None
+    (#6153): the sha256 of its 3MF (of every output's, #5701 `kit_digest`), and the
+    price-book filament of each slot of the render (`kit_colours`; `_filament_for`, from
+    ``colours`` and ``material``), or None when a slot's colour has no listing filament.
+    The estimate and a cart line's add both read it."""
     filaments = await asyncio.to_thread(price_book, _orders(state))
-    by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
-    slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
-    model = result_file(state.store.blobs, state.paths.root, job.result.model_3mf)
-    digest = await asyncio.to_thread(model_digest, job.id, model)
+    kit = kit_colours(job)
+    by_colour = _filament_for(listing, filaments, colours, kit, material)
+    slots = [by_colour.get(colour.casefold()) for colour in kit]
+    file = functools.partial(result_file, state.store.blobs, state.paths.root)
+    digest = await asyncio.to_thread(kit_digest, job, file)
     return digest, None if None in slots else [slot for slot in slots if slot is not None]
 
 
@@ -829,10 +845,11 @@ async def instant_variant(state: AppState, visitor_id: str, body: RenderBody) ->
     price = await instant_price(state, reference=resolved.reference, newest=row)
     preview = None
     meta = None if row is None else await asyncio.to_thread(output_of, state, row, listing)
-    if meta is not None:
+    if row is not None and meta is not None:
         preview = VariantPreview(
             url=preview_path(key),
-            colors=list(meta.colors),
+            # The slots of every output, as the render's own (#5701).
+            colors=list(row.slot_colours or meta.colors),
             bbox_mm=meta.bbox_mm,
             plates=list(meta.layout_plates),
         )

@@ -17,8 +17,18 @@ every start; each catalogue write is one commit. The API process alone reads and
 the repository. Longer writes (duplicate, mesh-model creation) run as `library`
 operations ([workflows.md](../architecture/workflows.md#operations-one-shape-for-writes)).
 
-Each template also has a derived row of `templates` in Postgres (#7317, phase 1; nothing
-reads it yet). Every catalogue write refreshes its templates' rows under the models write
+Each template also has a derived row of `templates` in Postgres (#7317). Once a copy run
+has finished, the list, a template's record, its id list and the other readers (the pin
+index, which is the libraries the templates pin, the library associations, the print
+settings, the name check) read the rows; before that, they read the files. The list of a
+library's users (`GET /api/v1/libraries/{name}/users`) and the check before a library
+checkout's removal always read the files (spec §7.4). The catalogue thumbnail
+(`GET /api/v1/models/{slug}/thumbnail`) is named from the row too: its `ETag` is the
+template's own cover's sha256 (the same value as before the copy), `"output-<id>"` for an
+output's plate cover or `"preview-<id>"` for the default-render preview, so a matching
+`If-None-Match` answers 304 with no file read (except for a row that lags its media, which
+is read from the files); a 200 carries the tag of the image it read.
+Every catalogue write refreshes its templates' rows under the models write
 lock: a commit writes them in the transaction that records the models HEAD, and a write
 that commits nothing writes them in a transaction of its own. A failed refresh never fails
 the write; it is logged and counted, and the copy repairs it. The copy runs at each API
@@ -32,8 +42,9 @@ sequenceDiagram
     participant UI as Models page
     participant API
     participant Git as models git repo
+    participant PG as Postgres templates
     UI->>API: GET /api/v1/models?q=…
-    API->>Git: read model.json, model.scad
+    API->>PG: read the rows (after a copy run; before it, model.json from Git)
     UI->>API: POST /api/v1/models (upload / paste)
     API->>API: openscad parse check
     API->>Git: commit

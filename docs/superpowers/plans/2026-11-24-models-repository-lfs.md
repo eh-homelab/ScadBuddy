@@ -11,10 +11,10 @@ test first.
    move the endpoint; the credential is in no argv. Deploy before step 2.
 2. **Missing revisions.** An output, order or link whose revision is gone answers a clear
    4xx, and the UI says so. Tests per route.
-3. **Builder and check command.** Tests: pinned revisions, a pin of a deleted template, a
+3. **Builder and check command.** Tests: every version, a delete, pinned revisions, a pin of a deleted template, a
    built-in, a duplicate's upstream, videos, a second run, the old repository untouched.
 4. **Dry run on prod.** Build `models-next`, check, push to a trial branch, clone, compare.
    Report. Nothing serves it.
-5. **Switch command and runbook.** Tests: the rows, one transaction, a published listing's
-   hold, roll back. Run it in a window the owner agrees to.
+5. **Switch command and runbook.** Tests: each row and file of the spec's list, one
+   transaction, a second run, a published listing's hold, roll back. Run it in a window the owner agrees to.
 6. **Delete `models-old`.** Only on the owner's yes.

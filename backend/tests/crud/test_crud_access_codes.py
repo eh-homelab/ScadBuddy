@@ -26,6 +26,7 @@ import respx
 import uvicorn
 from fastapi import Depends, FastAPI
 
+import scadbuddy.crud.print as print_store
 from scadbuddy.api import crud_areas, crud_print
 from scadbuddy.api.crud_areas import CRUD_AREAS
 from scadbuddy.auth.check import auth_check
@@ -119,8 +120,15 @@ def _remote(app: FastAPI, caller: str = "print") -> Iterator[RemotePrinterStore]
     auth = ServiceAuth(_Token(f"sbsvc_{caller}"))
     client = CrudSyncClient(base_url, "print", auth, unavailable_budget=0.5)
     try:
-        warm_crud_routes(base_url, auth, "print")
-        yield RemotePrinterStore(client)
+        # The server thread shares one GIL with the test's loop, and on a loaded runner it
+        # can wait longer than the watch's 2 s bounds (#7619). These tests check the gate's
+        # answers, not its timing; test_an_api_out_of_reach_is_retried_never_read_as_no_key
+        # keeps the bounds.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(print_store, "WATCH_CALL_TIMEOUT", 30.0)
+            patch.setattr(print_store, "WATCH_CALL_BUDGET", 30.0)
+            warm_crud_routes(base_url, auth, "print")
+            yield RemotePrinterStore(client)
     finally:
         client.close()
         server.should_exit = True

@@ -140,7 +140,7 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
   return {
     [FLOW_SESSION_CHECK]: async (args: unknown) => {
       const sessionId = await allowed(deps, FLOW_SESSION_CHECK, (args as { session_id?: unknown } | null)?.session_id)
-      return { session_id: sessionId, mode: 'durable' }
+      return { session_id: sessionId }
     },
     [FLOW_SESSION_TURN]: async (args: unknown) => {
       const { session_id, turn_id } = (args ?? {}) as { session_id?: unknown; turn_id?: unknown }

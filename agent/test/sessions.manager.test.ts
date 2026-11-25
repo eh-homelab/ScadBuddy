@@ -901,8 +901,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
               updatedAt: expect.any(String),
               costUsd: 0,
               budgetUsd: 1,
-              // Plan 5d's default, durable: an AgentSession on this file's Temporal (agentSessions()).
-              mode: 'durable',
               offer: null,
             },
           ],

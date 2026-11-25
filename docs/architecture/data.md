@@ -36,8 +36,9 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
 | Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires`, `tasks` (`20261124T0449Z_tasks`, #7364) | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`; the tasks: `scadbuddy/api/crud_tasks.py`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
-| Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts*`, `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
+| Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later; `order_item_parts` and `model_part_rules` name `items` since `20261124T0918Z_parts_to_items`), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts_retired` and `part_stock_moves_retired` (the old `parts` and `part_stock_moves`, renamed by `20261124T0918Z_parts_to_items`; a follow-up drops them after a prod check, Ruling 6 of #7067), `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
 | Entities (files, links and properties on any row, #6950, #7026) | `entities`, `entity_links` (`20261122T0426Z_entities`), `entity_properties` (one row per entity and key) and `entity_property_schemas` (one row per kind, seeded for `spool_type` and `spool`; `20261123T0017Z_entity_properties`), `entity_attachments` (the old `order_attachments`, renamed there; an order's files are its rows with an `order_id`) | the API |
+| Inventory (#7067, spec 2026-11-21 §6.4-6.6) | `item_kinds`, `items`, `supplier_offers`, `offer_price_points`, `stock_lots`, `stock_units`, `stock_moves` (`20261124T0323Z_inventory_core`: also seeds the built-in kinds), and `part_item_map` (`20261124T0918Z_parts_to_items`: each old part id and its item id). `20261124T0918Z_parts_to_items` locks the four part tables `IN EXCLUSIVE MODE`, makes each `parts` row an item of kind `hardware` with an opening lot, converts `part_stock_moves` to `stock_moves`, makes an offer and a price point of each part's supplier and pack price, deletes the `part:` rows of `order_cost_entries` that the moves replace, and renames the old tables `*_retired`. The tables add foreign keys to `filament_suppliers`, `filament_locations`, `filament_invoice_lines` and `printers`, and change no filament table | the API |
 | Agent (`ai_*`) | `ai_credentials`, `ai_settings` (`20260927T2349Z_credentials_settings`), `ai_sessions`, `ai_session_entries`, `ai_session_events` (`20260928T0107Z_sessions`), `ai_approvals`, `ai_mcp_tokens`, `ai_plugins`, `ai_audit`, `ai_payload_keys`, `ai_forgotten_subjects`, `ai_session_files`, `ai_flow_blobs`, `ai_push_*`, `ai_notify_channels`, the hosted plugins and feeds (`ai_hosted_plugins`, `ai_hosted_plugin_files`, `ai_hosted_plugin_versions`, `ai_plugin_feeds`, `ai_plugin_feed_packages`) and more | the API, which serves the agent every area through `crud.agent` routes (`scadbuddy/api/crud_agent*.py`, areas listed at `scadbuddy/api/crud_areas.py:202-248`, #5299); the agent's own SQL to these tables remains only as the fallback while an area is unlisted |
 
 ### The two migration ledgers
@@ -147,8 +148,47 @@ migration `20261124T1824Z_templates.sql`): its parsed `model.json` (`meta`, or `
 and the raw `meta_text` when it cannot be read or stored), `name`, `version` (the last
 commit that touched it), `inputs_version`, its `// color` parameters, its media files'
 sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
-The row is derived: git stays the record, and any row can be rebuilt from the tree. In
-phase 1 nothing reads the rows yet; the readers move to them in phase 2.
+The row is derived: git stays the record, and any row can be rebuilt from the tree. Once a
+copy run has finished, `Catalogue.slugs`, `list_models` and `record` read the rows
+(phase 2), and so do the pin index, the library associations (`raw_metas`), the print
+settings, the name check, `duplicates_of`, and the callers that only name or filter
+models (`list_summaries`: the activity facets, the print-import suggestions and the
+outputs' `?tag=`); before that, they read the files. `library_users` and `library_pins`
+always read the files (spec §7.4).
+
+- A row whose folder is gone (a hand removal, a delete whose row drop failed) is a 404 for
+  `record` and for its thumbnail's 200, has no print settings, holds no name in the name
+  check, is no duplicate in `duplicates_of` and is made from no library file (the
+  associations' implied `mesh_source`): each of these readers makes one
+  `Catalogue.exists` check for it (a hit is one stat; a miss also revalidates the
+  directories). A thumbnail 304 makes no check, so a client that holds the tag gets 304
+  until the next copy run drops the row. The list keeps such a row until then too
+  (spec §10).
+- A row whose `model.json` Postgres cannot store (`meta` null, `meta_error` `not storable
+  (…)`: NaN, a lone surrogate) is read from its file by every reader, the list and
+  `list_summaries` included, as before the copy. When its folder is gone, the list and
+  `list_summaries` both leave it out (#7661).
+- A media file that the row's `files` lacks is stat'ed only while the template's media
+  changed after the row's `refreshed_at` (`TemplateRow.media_newer`, read with the row from
+  `templates.media_changed_at`): every media write (an add, a removal, a reorder, a
+  built-in's cover choice) sets that column in its own transaction, before the template's
+  row is refreshed, so a new item is on the disk first. Once the row is newer, such a file
+  is `missing` with no stat. An older pod's media write during a roll sets no
+  `media_changed_at`.
+- The catalogue thumbnail reads `Catalogue.thumbnail_ref`: the row's `cover`, else the
+  output's plate cover (`OutputStore.plate_cover_output`), else the preview
+  (`PreviewStore.preview_id`). Its `ETag` names the source: the cover's `sha256` (the hash
+  of the bytes, as before the copy), `"output-<id>"` or `"preview-<id>"`. A matching
+  `If-None-Match` is a 304 with no file read or stat, except for a row that lags its media,
+  which is read from the files. A 200 reads the source
+  (`OutputStore.plate_image`, `PreviewStore.current_image`, which reads the preview's id and
+  image from one row) and carries the tag of what it read (plan decision 12). No row is
+  one `Catalogue.exists` check: a template with files but no row (a failed refresh) is
+  read from the files, as its record is, and one with no folder either is a 404. A row
+  that lags its media is read from the files too; both are tagged by the bytes
+  (`scadbuddy/api/models.py` `get_thumbnail`). A cover that someone replaces by hand on the
+  volume keeps its row's old tag, so it is served stale until the next refresh or copy run
+  repairs the row (spec §10).
 
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,

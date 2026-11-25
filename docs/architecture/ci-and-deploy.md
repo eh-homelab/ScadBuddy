@@ -29,7 +29,7 @@ copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gate
 workflow: every other job is `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
-a `main.go` (`build-go-image.yml:46`, `:133`): today only `scadbuddy-bambuddy-fs`. Nothing
+a `main.go` (`build-go-image.yml:46`, `:133`): today `scadbuddy-bambuddy-fs` and `scadbuddy-core`. Nothing
 deploys it ([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)).
 
 ## How an image reaches prod

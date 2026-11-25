@@ -70,6 +70,26 @@ PATTERNS_BUDGET_S: Final = 0.5
 #: When the patterns of the check under way must be done by (monotonic), None outside one.
 patterns_deadline: ContextVar[float | None] = ContextVar("patterns_deadline", default=None)
 
+
+class _BudgetSpentError(TimeoutError):
+    """A pattern cut short by the check's shared `PATTERNS_BUDGET_S`, not by its own
+    `PATTERN_TIMEOUT_S`. Most often a busy pod, which a later check passes; but patterns
+    that need more than the budget together time out on every pod, so a caller that tries
+    again bounds its tries (`flow_activities.PATTERN_TIMEOUT_ATTEMPTS`). A pattern that
+    uses its whole `PATTERN_TIMEOUT_S` (`^(a|aa)+$`) times out on every check: refused."""
+
+
+class PatternsTimedOutError(TimeoutError):
+    """A default fails only because the check's shared budget ran out, and nothing else in
+    the schema is wrong: `schema_problems` with ``retry_timeouts`` raises it, for a caller
+    that tries again later, a bounded number of times (a prompt's task, #7437). A pattern
+    that uses its whole `PATTERN_TIMEOUT_S` is refused all the same. The message never
+    quotes the value."""
+
+    def __init__(self) -> None:
+        super().__init__("a default's pattern took too long to check: try again")
+
+
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TOP = {"$schema", "type", "title", "description", "properties", "required", "additionalProperties"}
 SCALARS: Final[dict[str, type]] = {
@@ -133,6 +153,7 @@ def schema_problems(
     reserved: Collection[str] = (),
     formats: bool = False,
     defaults: bool = True,
+    retry_timeouts: bool = False,
 ) -> list[str]:
     """Everything wrong with ``schema`` as an inputs schema; empty when it may be used.
 
@@ -145,6 +166,8 @@ def schema_problems(
     ``formats``: a string may have a ``format`` of `FORMATS` (a prompt's, #7364).
     ``defaults``: false skips the check of each ``default``, which runs its pattern within
     the budget below; the structure is still checked.
+    ``retry_timeouts``: raise `PatternsTimedOutError` when the only problem is a default whose
+    patterns ran out of time; without it, that default is refused as one that does not fit.
     ``reserved``: top-level names the host owns (a pipeline's ``params`` and ``v``).
 
     Every default's pattern runs within one `PATTERNS_BUDGET_S`, the caller's if it set
@@ -156,6 +179,7 @@ def schema_problems(
         reserved=reserved,
         formats=formats,
         defaults=defaults,
+        retry_timeouts=retry_timeouts,
     )
 
 
@@ -167,6 +191,7 @@ def _schema_problems(
     reserved: Collection[str],
     formats: bool,
     defaults: bool,
+    retry_timeouts: bool,
 ) -> list[str]:
     if not isinstance(schema, dict):
         return ["the inputs schema must be a JSON object"]
@@ -191,6 +216,7 @@ def _schema_problems(
             reserved=reserved,
             formats=formats,
             defaults=defaults,
+            retry_timeouts=retry_timeouts,
         )
     finally:
         if token is not None:
@@ -205,6 +231,7 @@ def _properties_problems(
     reserved: Collection[str],
     formats: bool,
     defaults: bool,
+    retry_timeouts: bool,
 ) -> list[str]:
     problems = [f"{key!r} is not supported at the top level" for key in schema if key not in _TOP]
     if schema.get("type") != "object":
@@ -216,18 +243,38 @@ def _properties_problems(
         return [*problems, "properties must be an object"]
     if len(properties) > MAX_INPUTS:
         problems.append(f"at most {MAX_INPUTS} inputs")
+    timed_out = False
     for name, prop in properties.items():
         if name in reserved:
             problems.append(f"{name}: {name!r} is reserved")
             continue
-        if objects and isinstance(prop, dict) and prop.get("type") == "object":
-            found = _object_problems(name, prop, stored=stored, formats=formats, defaults=defaults)
-        else:
-            found = _property_problems(
-                name, prop, stored=stored, formats=formats, defaults=defaults
-            )
+        try:
+            if objects and isinstance(prop, dict) and prop.get("type") == "object":
+                found = _object_problems(
+                    name,
+                    prop,
+                    stored=stored,
+                    formats=formats,
+                    defaults=defaults,
+                    retry_timeouts=retry_timeouts,
+                )
+            else:
+                found = _property_problems(
+                    name,
+                    prop,
+                    stored=stored,
+                    formats=formats,
+                    defaults=defaults,
+                    retry_timeouts=retry_timeouts,
+                )
+        except PatternsTimedOutError:
+            timed_out = True
+            continue
         problems += [f"{name}: {p}" for p in found]
     problems += _required_problems(schema, properties, stored=stored, what="an input")
+    if timed_out and not problems:
+        # Only then: a schema refused for another reason is refused, not tried again.
+        raise PatternsTimedOutError
     return problems
 
 
@@ -249,7 +296,13 @@ def _required_problems(
 
 
 def _object_problems(
-    name: str, prop: dict[str, Any], *, stored: bool, formats: bool, defaults: bool
+    name: str,
+    prop: dict[str, Any],
+    *,
+    stored: bool,
+    formats: bool,
+    defaults: bool,
+    retry_timeouts: bool,
 ) -> list[str]:
     """One level of object (#5701): scalar properties only, and no extra keys."""
     if not _NAME.match(name) or keyword.iskeyword(name):
@@ -265,14 +318,24 @@ def _object_problems(
         return [*problems, "properties must be an object"]
     if len(properties) > MAX_INPUTS:
         problems.append(f"at most {MAX_INPUTS} properties")
+    timed_out = False
     for inner, spec in properties.items():
-        problems += [
-            f"{inner}: {p}"
-            for p in _property_problems(
-                inner, spec, stored=stored, formats=formats, defaults=defaults
+        try:
+            found = _property_problems(
+                inner,
+                spec,
+                stored=stored,
+                formats=formats,
+                defaults=defaults,
+                retry_timeouts=retry_timeouts,
             )
-        ]
+        except PatternsTimedOutError:
+            timed_out = True
+            continue
+        problems += [f"{inner}: {p}" for p in found]
     problems += _required_problems(prop, properties, stored=stored, what="a property")
+    if timed_out and not problems:
+        raise PatternsTimedOutError
     return problems
 
 
@@ -284,7 +347,13 @@ def _format_problems(spec: dict[str, Any], where: str) -> list[str]:
 
 
 def _property_problems(
-    name: str, prop: Any, *, stored: bool = False, formats: bool = False, defaults: bool = True
+    name: str,
+    prop: Any,
+    *,
+    stored: bool = False,
+    formats: bool = False,
+    defaults: bool = True,
+    retry_timeouts: bool = False,
 ) -> list[str]:
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
@@ -335,11 +404,16 @@ def _property_problems(
         if unbounded and not stored:
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if defaults and "default" in prop and not problems:
-        try:
-            checker = FORMAT_CHECKER if formats else None
-            Validator(prop, format_checker=checker).validate(prop["default"])
-        except jsonschema.ValidationError as err:
-            problems.append(f"default does not fit: {err.message}")
+        checker = FORMAT_CHECKER if formats else None
+        errors = Validator(prop, format_checker=checker).iter_errors(prop["default"])
+        if (first := next(errors, None)) is not None:
+            if (
+                retry_timeouts
+                and isinstance(first.cause, _BudgetSpentError)
+                and all(isinstance(e.cause, _BudgetSpentError) for e in errors)
+            ):
+                raise PatternsTimedOutError
+            problems.append(f"default does not fit: {first.message}")
     return problems
 
 
@@ -385,12 +459,19 @@ def _pattern(
     if timeout <= 0:
         yield jsonschema.ValidationError(
             f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
-            cause=TimeoutError(),
+            cause=_BudgetSpentError(),
         )
         return
     try:
         found = regex.search(pattern, instance, timeout=timeout)
     except TimeoutError as err:
+        if timeout < PATTERN_TIMEOUT_S:
+            # The shared budget cut it short: it might have passed with its own deadline.
+            yield jsonschema.ValidationError(
+                f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
+                cause=_BudgetSpentError(),
+            )
+            return
         yield jsonschema.ValidationError(
             f"is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it", cause=err
         )

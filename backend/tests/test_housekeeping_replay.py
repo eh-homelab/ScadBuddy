@@ -51,7 +51,9 @@ sweeps, and ``output_bytes`` with ``OUTPUT_BYTES_PATCH`` (#7256, recorded withou
 ``template_copy_attempt_media`` with ``TEMPLATE_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``,
 which runs both, and ``template_output_copy`` with ``TEMPLATE_COPY_PATCH``,
 ``OUTPUT_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``, which runs those three, and
-``template_output_bytes`` with all four, which runs all four
+``template_output_bytes`` with all four, which runs all four, and ``warm_listings`` with
+``WARM_LISTINGS_PATCH`` (#7665) and every patch before it, which also runs
+``WARM_LISTINGS_SWEEP``
 (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them. ``template_copy``, ``template_copy_attempt_media`` and ``template_output_copy``
@@ -113,6 +115,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "template_copy_attempt_media",
         "template_output_copy",
         "template_output_bytes",
+        "warm_listings",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -130,7 +133,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_template_output_bytes(recording_temporal: str) -> None:
+async def test_record_warm_listings(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -159,4 +162,4 @@ async def test_record_template_output_bytes(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "template_output_bytes.json").write_text(history.to_json())
+    (HISTORIES / "warm_listings.json").write_text(history.to_json())

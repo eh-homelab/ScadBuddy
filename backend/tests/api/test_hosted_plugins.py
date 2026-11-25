@@ -68,6 +68,36 @@ def test_a_plugin_is_created_listed_read_and_deleted(client: TestClient) -> None
     assert client.delete(f"{BASE}/greeter").status_code == 404
 
 
+def test_a_create_change_publish_and_delete_tell_tools_and_plugins(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7460: each committed change of a hosted plugin publishes ``plugin_packages.changed``
+    with its name, so the editor and the Packages row read it again, whoever made it (the
+    assistant's ``hosted_plugin_publish`` too); a refused publish and a draft write do not."""
+    seen: list[Any] = []
+    monkeypatch.setattr("scadbuddy.api.hosted_plugins.emit", lambda _bus, event: seen.append(event))
+
+    def told() -> list[tuple[str, str]]:
+        found = [(e.kind, e.name) for e in seen]
+        seen.clear()
+        return found
+
+    changed = [("plugin_packages.changed", "greeter")]
+    assert _create(client).status_code == 201
+    assert told() == changed
+    assert _put(client, "skills/hello/SKILL.md", SKILL).status_code == 200
+    assert told() == []
+    assert client.patch(f"{BASE}/greeter", json={"tags": ["fun"]}).status_code == 200
+    assert told() == changed
+    assert client.post(f"{BASE}/greeter/publish").status_code == 200
+    assert told() == changed
+    same = client.post(f"{BASE}/greeter/publish")
+    assert (same.status_code, same.json()["reason"]) == (409, "nothing-to-publish")
+    assert told() == []
+    assert client.delete(f"{BASE}/greeter").status_code == 204
+    assert told() == changed
+
+
 @pytest.mark.parametrize("name", ["Greeter", "a--b", "claude", "x"])
 def test_a_name_the_package_rules_refuse_is_refused(client: TestClient, name: str) -> None:
     refused = _create(client, name)

@@ -539,9 +539,10 @@ A job with more than one output is priced over all its outputs (§7.4), not refu
 not priced by hand (owner, decision 4).
 
 **The slots of a pipeline render.** `renders.py` `variant_of` takes the slots from
-`job.result.colors` and the price key's digest from `job.result.model_3mf`, and the
-slice slices the output that `output_for_reference` saves from that job. For a pipeline
-job with one output, `result` is that output's: `model_3mf` is the whole kit's 3MF, every
+`kit_colours` and the price key's digest from `kit_digest` (§7.4), which for a job with
+one output are `job.result.colors` and the sha256 of `job.result.model_3mf`. The slice
+slices the outputs that `outputs_for_reference` saves from that job. For a pipeline job
+with one output, `result` is that output's: `model_3mf` is the whole kit's 3MF, every
 plate, and `colors` lists that 3MF's colours in its slot order (fact 8). So the key, the
 slot filaments and the slice all describe the same file. PR 3 tests this (§10.1),
 because a per-piece list would give a wrong price with no error. A job with several
@@ -563,7 +564,7 @@ preview is not in this design.
 ### 7.3 The slice price
 
 The slice run itself needs no pipeline-specific change. `price_variant` renders the
-reference through `output_for_reference`, which already takes whole inputs and marks the
+reference through `outputs_for_reference` (§7.4), which takes whole inputs and marks the
 output `source=storefront` (#6371). It slices every plate of the multi-plate 3MF through
 `slice_and_price`.
 
@@ -615,26 +616,31 @@ price. All of this runs in the CRUD service and on the `library` queue, as today
 **The kit's slots.** A new `slice_price.py` `kit_colours(job) -> list[str]` gives
 `job.result.colors` when `job.outputs` has at most one entry. Otherwise it gives the
 colours of `job.outputs[0].result.colors`, then each colour of the later outputs that is
-not in the list yet, compared casefolded, in output order. A slot of the kit is an index
-in that list. One colour is one slot across the kit, so one colour gets one filament, as
+not in the list yet, compared casefolded, in output order (`kit_slots`, which takes the
+lists themselves, so that the slice run uses it on the outputs it saved). A slot of the
+kit is an index in that list. One colour is one slot across the kit, so one colour gets one filament, as
 `renders.py` `_filament_for` already maps by colour, not by slot. The first output's
 slot numbers do not change. `renders.py` `variant_of`, `store_render` (its `colors`) and
-the `RenderColours` reader all take `kit_colours(job)` in place of `job.result.colors`,
-so the visitor's slot choices, the slot filaments and the key use one slot list.
+the `RenderColours` reader (`drafts.py` `_render_colours`) all take `kit_colours(job)` in
+place of `job.result.colors`, and the instant read's preview takes the row's
+`slot_colours`, so the visitor's slot choices, the slot filaments and the key use one slot
+list.
 
 For each output `k`, `slot_map(output_colours, kit) -> dict[int, int]` maps the
-output's own slot (from 0) to its kit slot. The slice of output `k` gets, as its
-`slot_presets`, the kit slot's presets under the output's own slot id
+output's own slot (from 0) to its kit slot: the n-th slot of a colour to the n-th of the
+kit, or to its last, so the first output maps to itself. The slice of output `k` gets, as
+its `slot_presets`, the kit slot's presets under the output's own slot id
 (`{local + 1: variant.slot_presets[kit + 1]}`), because `resolver.resolve` reads slot ids
 of the file it slices. `SliceVariant` keeps `slot_filaments` and `slot_presets` by kit
 slot. It gains no field: the run reads each output's colours from the outputs it saved.
 
 **The kit's digest, and the key.** `price_key` does not change and `KEY_VERSION` stays 4.
-Its `model` is a new `kit_digest(job, root) -> str`:
+Its `model` is a new `kit_digest(job, file) -> str`, where `file` finds a result's file
+in this process (`store/cache.py` `result_file`, #7318):
 
-- at most one output: `model_digest(job.id, root / job.result.model_3mf)`, as today;
-- several: the sha256 of the JSON text `["kit", d0, d1, …]` (sorted keys, no spaces),
-  where `dk` is the sha256 of output `k`'s `model_3mf`.
+- at most one output: `model_digest(job.id, file(job.result.model_3mf))`, as today;
+- several: the sha256 of the JSON text `["kit","d0","d1",…]` (no spaces), where `dk` is
+  the sha256 of output `k`'s `model_3mf`.
 
 `model_digest` keeps each digest by a cache key, not by job id only (fact 12): `job.id`
 for the first output, as today, and `f"{job.id}:{k}"` for output `k` > 0. Without that,
@@ -644,16 +650,19 @@ key through `filaments`, as today. A change to any output's 3MF gives another ke
 **The files.** `materialize_result` runs once per output's `JobResult` before any digest
 or slice: `renders.py` `_fetch` and `storefront_slice_run`'s digest read fetch every
 output's files. A job whose later output's files cannot be fetched is `files_lost`, as
-for the first.
+for the first. `materialize_result` does not raise for a key the store no longer holds, so
+`_fetch` also checks that each output's 3MF is there.
 
 **The render and the saved outputs.** A new `orders/rendering.py`
 `outputs_for_reference(reference, ..., saved_as: Callable[[int], str], source=...)
--> list[RenderedOutput]` renders the reference once (the same submit and wait as
-`output_for_reference`). It then saves each entry of `job.outputs` with `"index": k`
-under `saved_as(k)`, in index order, and reuses an output already saved there while it
-`reference_matches`. `output_for_reference` stays as it is for the order's render and
-the quote. `storefront_output_id(render_key, index=0)` keeps today's id for index 0. For
-a later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
+-> list[RenderedOutput]` gets the first output through `output_for_reference` (one submit
+and wait, or the output saved before). It then reads the job that output was saved from,
+saves each later entry of `job.outputs` with `"index": k` under `saved_as(k)`, in index
+order, and reuses an output already saved there while it `reference_matches`. A job that
+was pruned since gives the first output alone, which the check below refuses.
+`output_for_reference` stays as it is for the order's render and the quote.
+`storefront_output_id(render_key, index=0)` keeps today's id for index 0. For a
+later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
 `uuid5(NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}:{index}").hex`
 (`library/outputs.py` `storefront_output_id`). `library/output_index.py`
 `saved_by_storefront_run` recognises only the index-0 id. That matters only for an
@@ -664,8 +673,10 @@ the mark. The slice run passes
 
 **One slice operation.** `price_variant` calls `outputs_for_reference`. Its
 `rendered_sha256` check takes the list: every output must come from one job (`job_id`),
-and `kit_digest` of that job must equal `variant.model_sha256`, else
-`GEOMETRY_DIFFERS`. Then it calls `slice_and_price` once:
+that job must have no other output, and `kit_digest` of it must equal
+`variant.model_sha256`, else `GEOMETRY_DIFFERS`. So is a kit with another number of slots
+than the variant's filaments. Then it calls `slice_and_price` once. One output keeps
+today's `start` and has no `place`; several have both of `slice_price.py` `_kit`:
 
 - `start` starts every output's plates, output after output
   (`run.slicer.start(output_k, variant.slice, subject, slot_presets=presets_k)`), and
@@ -674,8 +685,10 @@ and `kit_digest` of that job must equal `variant.model_sha256`, else
   `place: Callable[[int, Plate], Plate] | None = None`. It is called with each plate's
   position in that list after `read_plate`, before `priced_for`. The storefront passes
   one that renumbers the plate (output 0's plates keep 1 … n0, output 1's are n0 + 1 …)
-  and moves each `PlateFilament.slot` to its kit slot. A back-office quote passes none,
-  so its plates do not change;
+  and moves each `PlateFilament.slot` to its kit slot, with the grams of two slots of one
+  kit slot added. A slot that the output has no colour for is a `QuoteError`: its number
+  may be another output's slot of the kit. A back-office quote passes none, so its plates
+  do not change;
 - `priced_for` runs `sliced_slots(plates, range(len(filaments)))` over the kit slots, as
   today;
 - `price_plates` prices all plates of all outputs once: grams per kit slot, one setup
@@ -709,8 +722,10 @@ dollhouse slice against it.
 (`output_for_reference`), because `OrderItem` holds one `output_id`. The customer's firm
 price covers the whole kit, and the price row's plates go to the item's job cost. The
 other outputs of an ordered kit are found by the job: each saved output records its
-`job_id`, and the job lists every output. An order page that renders and prints every
-output of an item is part of this build (PR 5, §11). **No customer pays for an output the
+`job_id`, and the job lists every output. The cart line has every slot of the kit, so
+until PR 5 a back-office slice quote of it, which slices output 0 alone, is refused for a
+slot that only another output uses (`quote.py` `unsliced_slots`): the shop types the
+price. An order page that renders and prints every output of an item is part of this build (PR 5, §11). **No customer pays for an output the
 order cannot make:** until PR 5 lands, a render with more than one output still answers
 `none`, so such a kit is priced by hand. PR 4 builds the kit price, and PR 5 turns it on
 together with the order's every-output render and print. The dollhouse makes one output
@@ -818,16 +833,18 @@ A listing pins a commit (fact 11). Here that means:
   - A plate of the second output that fails, and a kit slot at 0 g, each give a
     `failed` row and no price; no row is ever `done` with part of the kit.
   - Outputs saved from two jobs give `GEOMETRY_DIFFERS`.
-  - Until PR 5: the estimate route still answers `none` for a job of two outputs.
-- PR 5, the order of a kit item (`tests/orders/`): an item from a two-output render
-  attaches both outputs by `job_id`; its job cost meets every kit slot; the order page
-  offers a print of each output; the estimate route now answers the kit price.
+  - Until PR 5: the estimate route still answers `none` for a job of two outputs
+    (`tests/api/test_storefront_pipeline_listings.py`, also while the kit's `done` row
+    stands; the same file prices a real render of two outputs).
   - `slice_and_price` with no `place` gives the plates as today (a back-office quote
     test, unchanged).
   - One claim: a two-output variant takes one place of `storefront_slices_concurrent`;
     with `limit=1`, a second variant's read answers `pending`.
-- `outputs_for_reference`: saves every output under `storefront_output_id(key, k)`,
-  index 0 under today's id, and reuses saved outputs that match on a second call with
+- PR 5, the order of a kit item (`tests/orders/`): an item from a two-output render
+  attaches both outputs by `job_id`; its job cost meets every kit slot; the order page
+  offers a print of each output; the estimate route now answers the kit price.
+- `outputs_for_reference` (`tests/orders/test_rendering.py`): saves every output under
+  `storefront_output_id(key, k)`, index 0 under today's id, and reuses saved outputs that match on a second call with
   no new render.
 - One `requires_temporal` API test with a small pipeline fixture template (fake
   openscad, as `tests/api` renders): publish, a visitor's render through the storefront

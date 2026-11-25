@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 import psycopg
@@ -345,8 +345,24 @@ def fold(text: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
+class Selectable(Protocol):
+    """What the search and filters read of a model: a `ModelRecord`, or a
+    `ModelSummary` (#7317 Task 8)."""
+
+    @property
+    def slug(self) -> str: ...
+    @property
+    def origin(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def description(self) -> str: ...
+    @property
+    def tags(self) -> list[str]: ...
+
+
 def _selects(
-    record: ModelRecord, words: list[str], tags: list[str], origin: CatalogueOrigin | None
+    record: Selectable, words: list[str], tags: list[str], origin: CatalogueOrigin | None
 ) -> bool:
     if origin is not None and record.origin != origin:
         return False
@@ -357,12 +373,12 @@ def _selects(
     return all(word in text for word in words)
 
 
-def select_models(
-    records: list[ModelRecord],
+def select_models[T: Selectable](
+    records: list[T],
     q: str | None,
     tags: list[str] | None,
     origin: CatalogueOrigin | None,
-) -> list[ModelRecord]:
+) -> list[T]:
     """The records the search and filters select, in the catalogue's order."""
     words = fold(q or "").split()
     wanted = [fold(tag) for tag in tags or []]
@@ -2036,9 +2052,15 @@ async def get_schema(
 #: version, the thumbnail's source and its covering output): that key is not proven
 #: to change with the bytes. `version` is None wherever git is not available, so
 #: there a replaced thumbnail keeps the key it had; and the model directory and the
-#: outputs are plain files on a volume anyone with access can change. A strong
-#: ETag over the bytes served costs one hash and saves the whole download instead,
-#: without ever serving a stale image.
+#: outputs are plain files on a volume anyone with access can change. A strong ETag
+#: saves the download instead. Once the template rows are copied (#7317), the tag
+#: names the image's source: the cover's sha256 as its row's last refresh took it,
+#: ``output-<id>`` or ``preview-<id>``. Then a matching ``If-None-Match`` is a 304
+#: that reads no file. Before the copy, and for a row that lags its media
+#: (`TemplateRow.media_newer`), the tag is the sha256 of the bytes served. So a cover
+#: that someone replaces by hand on the volume, with no refresh, keeps its old tag:
+#: a client that holds it gets 304 and the old image until the next refresh or copy
+#: sweep repairs the row (model records spec §10).
 THUMBNAIL_CACHE_CONTROL = "no-cache"
 
 
@@ -2062,9 +2084,11 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
         "The model's cover -- its first media image, or the poster of its first "
         "video -- or, when it has none, the plate image of its first generated "
         "output, or else its default-render preview. 404 when there is none of the "
-        "three. Carries a strong `ETag` "
-        "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
-        "answered 304 with no body."
+        "three. Carries a strong `ETag` that names the image and `Cache-Control: "
+        "no-cache`; a matching `If-None-Match` is answered 304 with no body. Once the "
+        "template rows are copied, the tag is the cover's sha256, `output-<id>` or "
+        "`preview-<id>`; before that, and while a template's row lags its media, it "
+        "is the sha256 of the image."
     ),
 )
 async def get_thumbnail(
@@ -2072,18 +2096,24 @@ async def get_thumbnail(
     catalogue: CatalogueDep,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
 ) -> Response:
-    await asyncio.to_thread(require_model_exists, catalogue, slug)
     try:
-        # The plate cover comes from the output's model blob (#7256).
-        cover = await catalogue.read_thumbnail(slug)
+        ref = await catalogue.thumbnail_ref(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    if cover is None:
+    if ref is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
-    image, content_type = cover
-    # Over the bytes themselves, so it changes exactly when the image does, from
-    # whichever source -- a set, a removal, or the fallback moving to another output.
-    etag = f'"{hashlib.sha256(image).hexdigest()}"'
+    # The tag names the source (#7317): a match reads nothing.
+    if etag_matches(if_none_match, ref.etag):
+        headers = {"ETag": ref.etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    try:
+        found = await ref.read()
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
+    image, content_type, etag = found
+    # The tag of what was read, which may be newer than the ref's (plan decision 12).
     headers = {"ETag": etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
     if etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)

@@ -59,17 +59,21 @@ RETRY_AFTER_SECONDS = 2
 FAST_ACCEPT = timedelta(seconds=3)
 #: How long one follow of a command's Update waits on it (spec 2026-10-13 §5.2).
 FOLLOW_WAIT = COMMAND_ANSWER_DEADLINE
-#: The workflow task timeout of a short workflow (#7288): `Operation`, `SliceWorkflow`,
-#: `SensorNotifyPass`. Under slow persistence Temporal 1.32.1 records a task as started
-#: and then never hands it to the poller, so the task waits out its timeout (10 s by
+#: The workflow task timeout of a short workflow (#7288): `Operation`,
+#: `SliceWorkflow`, `SensorNotifyPass`, and of `RenderPiece` (#7652), whose own tasks
+#: are short. Under slow persistence Temporal 1.32.1 records a task as started and
+#: then never hands it to the poller, so the task waits out its timeout (10 s by
 #: default) before it is tried again. Measured on prod 2026-11-24 (`temporal workflow
 #: show`, WORKFLOW_TASK_STARTED to COMPLETED): `Operation` p99 0.86 s, max 1.15 s (605
 #: tasks in the 121 histories since 2026-11-22; `SliceWorkflow`'s 33 runs go back to
-#: 2026-11-20); every `library` and `bambuddy` short workflow max
-#: 1.16 s, except 2 of 2,922 `library` tasks at 4.0 s and 4.6 s (Housekeeping and
-#: SpoolRefresh, which keep the default); the API pod logged 1.0-2.9 s event-loop stalls
-#: (`core/loop_watch.py`) in its first minutes. A cold first task (fresh process, the
-#: app's sandboxed runner, local dev server) took 7-14 ms. A task over the timeout is not
+#: 2026-11-20); every `library` and `bambuddy` short workflow max 1.16 s, except 2 of
+#: 2,922 `library` tasks at 4.0 s and 4.6 s (Housekeeping and SpoolRefresh, which keep
+#: the default); the API pod logged 1.0-2.9 s event-loop stalls (`core/loop_watch.py`)
+#: in its first minutes. A cold first task (fresh process, the app's sandboxed runner,
+#: local dev server) took 7-14 ms. `RenderPiece`, measured on prod 2026-11-25 (the
+#: histories of its 28 runs since 2026-11-20): max 1.92 s (184 tasks), and 20 tasks in
+#: 10 runs waited out the 10 s default. `TemplatePipeline` keeps that default: its
+#: local activities run inside its tasks (max 10.0 s). A task over the timeout is not
 #: lost: the server times it out and runs it again.
 SHORT_TASK_TIMEOUT = timedelta(seconds=3)
 
