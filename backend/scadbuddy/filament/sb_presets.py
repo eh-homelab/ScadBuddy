@@ -57,7 +57,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.rfid_push import acquire_lock
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.orders.attachments import blob_path, keep_file
+from scadbuddy.orders.attachments import keep_file, read_blob
 from scadbuddy.slicing.own_presets import OwnRow, facts, sb_id, sb_ref
 from scadbuddy.store import BlobStore
 
@@ -406,11 +406,11 @@ class FilamentPresetStore:
     async def read(self, key: str) -> dict[str, Any] | None:
         """The document kept as blob ``key``, without print-host credential keys;
         ``None`` when the store lost it (logged)."""
-        path = await blob_path(self._blobs(), key)
-        if path is None:
+        data = await read_blob(self._blobs(), key)
+        if data is None:
             logger.warning("a filament preset's blob is missing", extra={"key": key})
             return None
-        doc = json.loads(await asyncio.to_thread(path.read_bytes))
+        doc = json.loads(data)
         return strip_credentials(doc) if isinstance(doc, dict) else {}
 
 

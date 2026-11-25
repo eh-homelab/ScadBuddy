@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
+from collections.abc import Callable
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -29,7 +32,7 @@ from scadbuddy.filament.models import (
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.tags import TagRead
 from scadbuddy.spools.models import SeenTray
-from tests.conftest import PgPool
+from tests.conftest import PgPool, open_pg_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -142,6 +145,51 @@ def test_an_ams_read_of_a_bound_tray_marks_it_seen(pg_pool: PgPool) -> None:
     with store.transaction() as conn:
         tag_id, holder = tags.seen_on(conn, TagRead(source="ams", uid=None, tray_uuid=_TRAY))
     assert holder == spool and _tag(pg_pool, tag_id)["last_seen_source"] == "ams"
+
+
+def test_an_ams_read_keeps_what_a_phone_read_and_skips_an_unchanged_mark(
+    pg_pool: PgPool,
+) -> None:
+    # #7419 review: an AMS sighting keeps `last_seen_records`, and a second one within
+    # `AMS_SEEN_THROTTLE_SECONDS` writes nothing.
+    store = FilamentSpoolStore(pg_pool)
+    record = NdefRecord(record_type="mime", data_hex="7b7d")
+    spool = _spool(store, pg_pool)
+    store.bind_tag(spool, tag_uid="04AA", kind="other", actor="ann")
+    read = tags.read(
+        store,
+        TagRead(source="phone", uid="04AA", records=(record,)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert read.tag is not None
+    with store.transaction() as conn:
+        tags.seen_on(conn, TagRead(source="ams", uid="04AA"))
+    first = _tag(pg_pool, read.tag.id)
+    assert first["last_seen_source"] == "ams"
+    assert first["last_seen_records"][0]["data_hex"] == "7b7d"
+    with pg_pool.connection() as conn:
+        xmin = conn.execute(
+            "SELECT xmin::text AS x FROM filament_tags WHERE id = %s", (read.tag.id,)
+        ).fetchone()
+    with store.transaction() as conn:
+        tags.seen_on(conn, TagRead(source="ams", uid="04AA"))
+    with pg_pool.connection() as conn:
+        again = conn.execute(
+            "SELECT xmin::text AS x FROM filament_tags WHERE id = %s", (read.tag.id,)
+        ).fetchone()
+    assert xmin == again
+    assert _tag(pg_pool, read.tag.id)["last_seen_at"] == first["last_seen_at"]
+    # Past the throttle the mark is written again.
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_tags SET last_seen_at = now() - make_interval(secs => %s)"
+            " WHERE id = %s",
+            (tags.AMS_SEEN_THROTTLE_SECONDS + 1, read.tag.id),
+        )
+    with store.transaction() as conn:
+        tags.seen_on(conn, TagRead(source="ams", uid="04AA"))
+    assert _tag(pg_pool, read.tag.id)["last_seen_at"] > first["last_seen_at"]
 
 
 def test_the_inventory_finds_a_tray_holder_through_the_same_lookup(pg_pool: PgPool) -> None:
@@ -500,6 +548,236 @@ def test_expire_jobs_ends_open_jobs_past_their_time(pg_pool: PgPool) -> None:
         armed: "expired",
         later: "pending",
     }
+
+
+def _age_job(pool: PgPool, job: UUID) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_nfc_jobs SET expires_at = now() - interval '1 second' WHERE id = %s",
+            (job,),
+        )
+
+
+def test_a_write_whose_time_ends_after_its_backup_still_takes_its_result(
+    pg_pool: PgPool,
+) -> None:
+    # #7419 review: the page backed the tag up and wrote it; the result comes after the
+    # job's time. The write has begun, so the job is not expired and takes the result.
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    backup = tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    _age_job(pg_pool, job)
+    with store.transaction() as conn:
+        tags.expire_jobs(conn)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "armed"
+    done = tags.finish_job(
+        store,
+        job,
+        NfcJobResultIn(
+            uid="04AA",
+            records=[NdefRecord(record_type="mime", data_hex="7b7d")],
+            backup_id=backup.id,
+        ),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert done.state == "done" and done.result is not None
+    assert done.result["backup_id"] == str(backup.id)
+
+
+def test_an_armed_job_with_no_backup_past_its_time_expires(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    # Another job's backup does not keep this one open.
+    other = _armed_job(store)
+    tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=other), actor="ann"
+    )
+    _age_job(pg_pool, job)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "expired"
+    with pytest.raises(tags.JobNotArmedError):
+        tags.finish_job(store, job, NfcJobResultIn(error="x"), actor="ann", defaults=DEFAULTS)
+
+
+def test_a_job_read_says_whether_its_write_began(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    found = tags.get_job(store, job)
+    assert found is not None and found.write_begun is False
+    tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    found = tags.get_job(store, job)
+    assert found is not None and found.write_begun is True
+
+
+def test_a_begun_write_cannot_be_cancelled(pg_pool: PgPool) -> None:
+    # #7419 round 2 (I1): its tag may hold the new records; the job ends only by its result.
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    with pytest.raises(tags.WriteBegunError) as refused:
+        tags.cancel_job(store, job)
+    assert refused.value.code == "write_begun"
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "armed"
+
+
+def test_a_begun_write_with_no_result_past_the_backup_ttl_fails_no_read_back(
+    pg_pool: PgPool,
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    tag = _backup(store)
+    with pg_pool.connection() as conn:
+        old = conn.execute(
+            "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor, at)"
+            " VALUES (%s, '04AA', '[]', 'agent_write', %s, 'ann', now() - interval '11 minutes')"
+            " RETURNING id",
+            (tag.tag_id, job),
+        ).fetchone()
+    assert old is not None
+    _age_job(pg_pool, job)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "failed" and found.result is not None
+    assert found.result["code"] == "no_read_back"
+    assert found.result["backup_id"] == str(old["id"])
+
+
+def _state(pool: PgPool, job: UUID) -> str:
+    with pool.connection() as conn:
+        row = conn.execute("SELECT state FROM filament_nfc_jobs WHERE id = %s", (job,)).fetchone()
+    assert row is not None
+    return str(row["state"])
+
+
+def _while_held(
+    pg_pool: PgPool,
+    pg_conninfo: str,
+    job: UUID,
+    run: Callable[[FilamentSpoolStore], object],
+    *,
+    waits: bool,
+    lock: str = "FOR SHARE",
+    backup: bool = True,
+) -> tuple[object, str]:
+    """Runs ``run`` on a store of one connection of its own (B) while this one (A) holds the
+    job by ``lock`` and, with ``backup``, has inserted its ``agent_write`` backup, as
+    `back_up` does (#7419 rounds 3 and 4). With ``waits`` A commits once B's own backend
+    waits on a lock; else B must return while A still holds the job. Answers what ``run``
+    returned or raised, and the job's state read while A held it."""
+    tag = _backup(FilamentSpoolStore(pg_pool), "04CC") if backup else None
+    answer: list[object] = []
+    pool_b = open_pg_pool(pg_conninfo, size=1)
+    try:
+        with pool_b.connection() as conn_b:
+            pid_row = conn_b.execute("SELECT pg_backend_pid() AS pid").fetchone()
+        assert pid_row is not None
+        store_b = FilamentSpoolStore(pool_b)
+
+        def other() -> None:
+            try:
+                answer.append(run(store_b))
+            except Exception as exc:  # the caller asserts on it
+                answer.append(exc)
+
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute(f"SELECT 1 FROM filament_nfc_jobs WHERE id = %s {lock}", (job,))
+            if tag is not None:
+                conn.execute(
+                    "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor)"
+                    " VALUES (%s, '04CC', '[]', 'agent_write', %s, 'ann')",
+                    (tag.tag_id, job),
+                )
+            thread = threading.Thread(target=other)
+            thread.start()
+            if waits:
+                with pg_pool.connection() as watch:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        found = watch.execute(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                            (pid_row["pid"],),
+                        ).fetchone()
+                        if found is not None and found["wait_event_type"] == "Lock":
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise AssertionError("B never waited on the job's lock")
+            else:
+                thread.join(10)
+                assert not thread.is_alive(), "B waited on the held job instead of skipping it"
+            held = _state(pg_pool, job)
+        thread.join(10)
+    finally:
+        pool_b.close()
+    assert not thread.is_alive() and len(answer) == 1
+    return answer[0], held
+
+
+def _expire(store: FilamentSpoolStore) -> None:
+    with store.transaction() as conn:
+        tags.expire_jobs(conn)
+
+
+def test_expire_jobs_skips_a_job_a_backup_holds_and_leaves_it_armed(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    # #7419 rounds 3 and 4: B skips the row `back_up` holds (round 2 waited, then expired it).
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    _age_job(pg_pool, job)
+    answer, held = _while_held(pg_pool, pg_conninfo, job, _expire, waits=False)
+    assert answer is None and held == "armed"
+    assert _state(pg_pool, job) == "armed"
+    _expire(store)
+    assert _state(pg_pool, job) == "armed"
+
+
+def test_expire_jobs_skips_a_due_job_held_for_update_and_ends_it_next_time(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    _age_job(pg_pool, job)
+    answer, held = _while_held(
+        pg_pool, pg_conninfo, job, _expire, waits=False, lock="FOR UPDATE", backup=False
+    )
+    assert answer is None and held == "armed"
+    _expire(store)
+    assert _state(pg_pool, job) == "expired"
+
+
+def test_a_cancel_waiting_on_a_backup_is_refused_write_begun(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    answer, _ = _while_held(
+        pg_pool, pg_conninfo, job, lambda other: tags.cancel_job(other, job), waits=True
+    )
+    assert isinstance(answer, tags.WriteBegunError)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "armed" and found.write_begun
+
+
+def test_arming_gives_the_run_its_own_time(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = tags.create_job(store, NfcJobIn(kind="read", ttl_s=5), actor="agent")
+    armed = tags.claim_job(store, job.id, None, actor="ann")
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT now() AS now").fetchone()
+    assert row is not None
+    left = (armed.expires_at - row["now"]).total_seconds()
+    assert tags.ARM_SECONDS - 5 < left <= tags.ARM_SECONDS
+    found = tags.get_job(store, job.id)
+    assert found is not None and found.expires_at == armed.expires_at
 
 
 def test_a_write_job_checks_the_read_back(pg_pool: PgPool) -> None:
