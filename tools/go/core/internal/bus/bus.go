@@ -8,8 +8,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,16 +29,21 @@ const (
 	PayloadMax = 4000
 	// TopicsMax is the most topics an event's envelope may carry (core/events.py).
 	TopicsMax = 64
+	// TopicMax is the most characters a topic may have (core/events.py
+	// MAX_OPAQUE_TOPIC_LENGTH).
+	TopicMax = 200
 )
+
+// kindPattern is core/events.py OPAQUE_KIND_PATTERN: a namespace, a dot, a name.
+var kindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`)
 
 // Publish logs and NOTIFYs the event kind with fields, which follow id, at and kind in its
 // JSON. As core/events.py emit, a failure is logged and never reaches the caller: the change
-// it tells of has happened, and a consumer can read again. An event whose `topics` field
-// names a topic outside its kind's namespace (the kind up to its first dot), or more than
-// TopicsMax topics, is refused, and nothing is written.
+// it tells of has happened, and a consumer can read again. An event Python could not decode
+// as an OpaqueEvent is refused, and nothing is written (validEnvelope).
 func Publish(ctx context.Context, pool *pgxpool.Pool, kind string, fields ...httpx.Field) {
-	if !inNamespace(kind, fields) {
-		slog.ErrorContext(ctx, "refused to publish an event with a topic outside its kind's namespace or too many topics", "kind", kind)
+	if !validEnvelope(kind, fields) {
+		slog.ErrorContext(ctx, "refused to publish an event whose kind or topics Python cannot decode", "kind", kind)
 		return
 	}
 	id := make([]byte, 16)
@@ -82,9 +89,14 @@ func envelope(id string, at time.Time, kind string, fields []httpx.Field) []http
 	}, fields...)
 }
 
-// inNamespace says whether every topic in fields starts with the kind's namespace and a colon.
-// A topics field that is not a list of strings, or that has more than TopicsMax, is refused.
-func inNamespace(kind string, fields []httpx.Field) bool {
+// validEnvelope says whether Python's OpaqueEvent (core/events.py) can decode the event: its
+// kind matches kindPattern, and its topics field, if any, is a list of strings of at most
+// TopicsMax, each at most TopicMax characters and starting with the kind's namespace (the
+// kind up to its first dot) and a colon.
+func validEnvelope(kind string, fields []httpx.Field) bool {
+	if !kindPattern.MatchString(kind) {
+		return false
+	}
 	namespace, _, _ := strings.Cut(kind, ".")
 	for _, f := range fields {
 		if f.Key != "topics" {
@@ -95,7 +107,7 @@ func inNamespace(kind string, fields []httpx.Field) bool {
 			return false
 		}
 		for _, topic := range topics {
-			if !strings.HasPrefix(topic, namespace+":") {
+			if !strings.HasPrefix(topic, namespace+":") || utf8.RuneCountInString(topic) > TopicMax {
 				return false
 			}
 		}
