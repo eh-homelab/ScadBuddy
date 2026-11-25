@@ -221,6 +221,7 @@ def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -
         assert list(paths.tombstones.iterdir()) == []
 
 
+@pytest.mark.usefixtures("model")
 def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
     orphan = paths.outputs / "gone" / "deadbeef"
     orphan.mkdir(parents=True)
@@ -230,6 +231,7 @@ def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) 
         assert list(paths.outputs.iterdir()) == []
 
 
+@pytest.mark.usefixtures("model")
 def test_an_orphaned_schema_cache_and_revision_are_swept_at_startup(
     app: FastAPI, paths: DataPaths
 ) -> None:
@@ -250,6 +252,9 @@ def test_a_delete_sweeps_other_models_orphans(
     orphan.mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    # A live template besides: a models directory with none sweeps nothing (#7649).
+    paths.model_dir("kept").mkdir()
+    paths.model_source("kept").write_text("cube(1);\n", encoding="utf-8")
 
     assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
@@ -257,6 +262,7 @@ def test_a_delete_sweeps_other_models_orphans(
     assert not paths.model_schema_cache("gone").exists()
 
 
+@pytest.mark.usefixtures("model")
 def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
     client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -278,6 +284,7 @@ def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
     assert "could not list for orphans" in caplog.text
 
 
+@pytest.mark.usefixtures("model")
 def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
     client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -321,10 +328,12 @@ def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
     ],
     ids=["roots", "listings", "liveness", "removals", "everything"],
 )
+@pytest.mark.usefixtures("model")
 def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...]) -> None:
     """#176: `main.lifespan` and `Catalogue.delete` call `sweep_orphans` unguarded, so
     it must swallow every filesystem error itself: a root it cannot check, a listing,
-    a slug's liveness and a removal, and the saved presets' pass."""
+    a slug's liveness and a removal, and the saved presets' pass. Where the models
+    directory itself cannot be listed, nothing is swept, presets included (#7649)."""
     (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
     paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
@@ -356,7 +365,8 @@ def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...
         removed = catalogue.sweep_orphans()
 
     assert removed == []
-    presets.sweep_orphans.assert_called_once()
+    listed = not {"is_dir", "iterdir"} & set(failing)
+    assert presets.sweep_orphans.call_count == (1 if listed else 0)
 
 
 def test_a_new_model_does_not_inherit_a_gone_models_leftovers(
@@ -399,6 +409,30 @@ def test_the_orphan_sweep_never_touches_a_live_model(
 
     assert catalogue.sweep_orphans() == []
     assert all(path.exists() for path in derived)
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "only built-ins"])
+def test_no_sweep_while_the_models_directory_has_no_template(
+    client: TestClient, model: str, paths: DataPaths, state: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7649: a wrong mount, a rename in progress or a restore that is not whole. Every
+    template would read as gone, and its outputs and presets with it."""
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    output = paths.output_dir(model, "deadbeef")
+    output.mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True, exist_ok=True)
+    paths.model_schema_cache(model).write_text("{}\n", encoding="utf-8")
+    kept = paths.models.with_name("models-kept")
+    paths.models.rename(kept)
+    if state != "missing":
+        paths.models.mkdir()
+    if state == "only built-ins":
+        (kept / "_builtin").rename(paths.models / "_builtin")
+    with caplog.at_level("WARNING"):
+        assert catalogue.sweep_orphans() == []
+        assert catalogue.sweep_orphan_previews() == []
+    assert output.is_dir() and paths.model_schema_cache(model).is_file()
+    assert "no template" in caplog.text
 
 
 def test_a_failed_startup_sweep_does_not_stop_the_boot(
