@@ -1,13 +1,11 @@
-import { ChevronLeftIcon, CopyIcon, NfcIcon } from 'lucide-react'
+import { CopyIcon, NfcIcon } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
 import { KnownTag } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
-import { filamentLinks } from '../../lib/filamentLinks'
 import { NfcSession, nfcSupport, type Reading, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -48,10 +46,10 @@ export function ScanPage() {
   const [support] = useState(nfcSupport)
   return (
     <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 text-[13px]">
-      <Link to={filamentLinks.spools} className="inline-flex items-center gap-1 text-muted-foreground hover:underline">
-        <ChevronLeftIcon className="size-3.5" /> Spools
-      </Link>
-      <h1 className="text-lg font-semibold tracking-tight">Scan a tag</h1>
+      <div className="flex flex-col gap-1">
+        <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
+        <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
+      </div>
       {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
     </div>
   )

@@ -9,7 +9,7 @@ import { installNdefStub, type NdefStub } from '../../test/ndefStub'
 import { renderPage } from '../../test/utils'
 import { ScanPage } from './ScanPage'
 
-const open = () => renderPage(<ScanPage />, { route: '/filament/scan', path: '/filament/scan' })
+const open = () => renderPage(<ScanPage />, { route: '/scan', path: '/scan' })
 const json = (text: string) => new TextEncoder().encode(text)
 const OPENSPOOL_PLA = json('{"protocol":"openspool","version":"1.0","type":"PLA","color_hex":"FFAABB","brand":"Generic","min_temp":"220","max_temp":"240"}')
 
@@ -37,7 +37,7 @@ function sent() {
 describe('the scan page without Web NFC (#7273)', () => {
   it('asks for Chrome on Android with a copyable link when Web NFC is missing', async () => {
     const { user } = open()
-    expect(screen.getByRole('heading', { level: 1, name: 'Scan a tag' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Scan' })).toBeInTheDocument()
     expect(screen.getByText('Open this page in Chrome on Android')).toBeInTheDocument()
     expect(screen.queryByText(/in its own tab, not inside Bambuddy/)).toBeNull()
     const field = screen.getByRole('textbox', { name: "This page's address" })
@@ -47,6 +47,12 @@ describe('the scan page without Web NFC (#7273)', () => {
     expect(await navigator.clipboard.readText()).toBe(window.location.href)
     expect(await screen.findByText('Copied')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Scan' })).toBeNull()
+  })
+
+  it('has no back link and names what it reads', () => {
+    open()
+    expect(screen.queryByRole('link', { name: 'Spools' })).not.toBeInTheDocument()
+    expect(screen.getByText('Hold a tag or a label to the phone: a spool\'s tag, a place\'s tag, or a label with a code such as L-12 or S-142.')).toBeInTheDocument()
   })
 
   it('says to open it in its own tab inside a frame', () => {

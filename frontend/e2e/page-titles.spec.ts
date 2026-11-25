@@ -69,8 +69,9 @@ const PAGES = [
   '/filament/ledger',
   // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
   '/filament/labels',
-  // The phone page that reads tags (#7273): without Web NFC it shows how to open it on a phone.
-  '/filament/scan',
+  // The phone page that reads tags (#7273, the hand-held Scan mode): without Web NFC it shows
+  // how to open it on a phone. `/filament/scan` redirects here.
+  '/scan',
   // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
   '/inventory',
   '/inventory/kinds',
