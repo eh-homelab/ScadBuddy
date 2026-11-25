@@ -17,13 +17,12 @@ from fastapi import Header, Request
 from fastapi.responses import StreamingResponse
 
 from scadbuddy.agent_changes.hub import Change
-from scadbuddy.api.crud_agent_changes import HubDep, change_stream
+from scadbuddy.api.crud_agent_changes import FLEET_KIND_PREFIX, HubDep, change_stream
 from scadbuddy.api.deps import StateDep
 from scadbuddy.core.events import PG_CHANNEL
 from scadbuddy.crud.guard import crud_router
 
 #: The kinds this caller's stream carries start with this.
-FLEET_KIND_PREFIX = "fleet."
 #: The streams the fleet caller may hold together: its own budget, never the agent's.
 FLEET_STREAMS_MAX = 8
 

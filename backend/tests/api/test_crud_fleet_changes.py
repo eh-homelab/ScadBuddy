@@ -184,3 +184,42 @@ async def test_fleet_streams_have_a_budget_of_their_own(served: Served) -> None:
         finally:
             for ctx, _ in opened:
                 await ctx.__aexit__(None, None, None)
+
+
+async def test_the_agent_stream_never_carries_fleet_kinds(served: Served) -> None:
+    """A fleet.message names session ids, the fleet's only identity: the agent's stream,
+    live and in replay, leaves it out."""
+    agent_base = "/api/v1/internal/crud/agent"
+    async with httpx.AsyncClient(timeout=None) as client:
+        ctx = client.stream(
+            "GET", f"{served.url}{agent_base}/changes", headers=served.token("agent")
+        )
+        response = await ctx.__aenter__()
+        assert response.status_code == 200
+        sse = Sse(response)
+        assert (await sse.next())["event"] == "ready"
+        hidden = _message()
+        _emit(served, hidden)
+        await _logged(served, hidden.id)
+        shown = ModelEvent(kind="model.updated", slug="m")
+        served.bus.publish(shown)
+        got = await sse.next()
+        assert got["id"] == shown.id
+        await ctx.__aexit__(None, None, None)
+
+        replay = client.stream(
+            "GET",
+            f"{served.url}{agent_base}/changes",
+            headers={**served.token("agent"), "last-event-id": "0"},
+        )
+        response = await replay.__aenter__()
+        sse = Sse(response)
+        seen = []
+        while True:
+            frame = await sse.next()
+            if frame["event"] == "ready":
+                break
+            seen.append(frame["id"])
+        assert hidden.id not in seen
+        assert shown.id in seen
+        await replay.__aexit__(None, None, None)
