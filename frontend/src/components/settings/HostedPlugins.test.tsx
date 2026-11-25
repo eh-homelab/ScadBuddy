@@ -4,8 +4,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
 import { hostedPlugins } from '../../api/hostedPlugins'
+import { SEEDED_SKILL } from '../../mocks/features/hostedPlugins'
+import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { PluginPackagesPanel } from './PluginPackages'
 import { PACKAGES_HREF } from './HostedPluginEditor'
 import { SettingsDirtyProvider, useDirtySections, useLeaveHolds } from '../../pages/settings/dirty'
 import { HostedPluginsPanel } from './HostedPlugins'
@@ -217,6 +220,35 @@ describe('HostedPluginsPanel', () => {
     expect(within(assistant).queryByRole('button', { name: 'Offer version 2' })).not.toBeInTheDocument()
     const pkg = (await aiPlugins.listPackages()).find((p) => p.name === 'print-notes')
     expect(pkg).toMatchObject({ version: 1, approved: false, pending: { version: 2 } })
+  })
+
+  it('follows a publish and re-pin made outside the page, in Packages and the editor (#7460)', async () => {
+    await aiPlugins.installPackage({ kind: 'hosted', name: 'print-notes' })
+    const { user } = renderPage(
+      <>
+        <PluginPackagesPanel />
+        <HostedPluginsPanel />
+      </>,
+    )
+    const card = await screen.findByRole('listitem', { name: 'Plugin package print-notes' })
+    const editor = await openPlugin(user, 'print-notes')
+    await within(editor).findByText('The draft is the same as version 1. Edit it to publish again.')
+    expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeDisabled()
+    expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument()
+
+    // What the assistant's `hosted_plugin_publish` does: a draft edit, a publish, a re-pin offer.
+    const edited = new TextEncoder().encode(`${SEEDED_SKILL}Keep it short.\n`)
+    await hostedPlugins.writeFile('print-notes', 'skills/print-notes/SKILL.md', edited, false)
+    await hostedPlugins.publish('print-notes')
+    await aiPlugins.installPackage({ kind: 'hosted', name: 'print-notes' })
+    emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
+
+    const pending = await within(card).findByLabelText('Pending re-pin')
+    expect(pending).toHaveTextContent('Re-pin at version 2.')
+    expect(within(pending).getByRole('button', { name: 'Approve re-pin…' })).toBeInTheDocument()
+    expect(await within(editor).findByRole('button', { name: 'Publish version 3' })).toBeDisabled()
+    expect(await within(editor).findByText('The draft is the same as version 2. Edit it to publish again.')).toBeInTheDocument()
+    expect(within(within(editor).getByRole('region', { name: 'Versions' })).getByText('Version 2')).toBeInTheDocument()
   })
 
   it('shows the server refusal of a name, and edits the description, category and tags', async () => {

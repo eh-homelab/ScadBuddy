@@ -31,6 +31,7 @@ from scadbuddy.core.events import (
     LibraryRemoved,
     ModelEvent,
     OutputEvent,
+    PluginPackagesChanged,
     PreviewSliceEvent,
     PrinterEvent,
     PrintEvent,
@@ -417,6 +418,8 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
             ["preview-slice:native:12"],
         ),
         (FlowChanged(name="swap"), ["flows"]),
+        # #7460: Settings → Tools & plugins.
+        (PluginPackagesChanged(name="greeter"), ["plugin-packages"]),
     ],
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:
@@ -487,6 +490,7 @@ def test_every_topic_an_event_names_is_one_a_client_may_follow() -> None:
         SettingsChanged(section="connection"),
         FlowRunEvent(run_id=FLOW_RUN_ID, definition_id="d1", status="running"),
         FlowChanged(name="swap"),
+        PluginPackagesChanged(name="greeter"),
         PreviewSliceEvent(kind="preview_slice.settled", slicer="bambuddy", job_id=7),
         PreviewSliceEvent(kind="preview_slice.progress", slicer="native", job_id=10**17),
     ]

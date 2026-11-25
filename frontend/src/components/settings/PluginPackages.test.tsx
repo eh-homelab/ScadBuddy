@@ -7,6 +7,7 @@ import { aiCapabilities } from '../../api/capabilities'
 import { BUILT_IN_ANSWER, seedHostedPackage, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { GREETER_SKILL, LONG_CHANGELOG, PREVIEW_CHARS } from '../../mocks/features/pluginPackageFiles'
 import { setPackageProblem } from '../../mocks/features/capabilities'
+import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { accessName, choose, optionsOf } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -345,6 +346,23 @@ describe('PluginPackagesPanel', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Approve this pin' }))
     await waitFor(() => expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument())
     expect(within(card).getByText('Publish a new version in Hosted plugins to re-pin it.')).toBeInTheDocument()
+  })
+
+  it('follows a re-pin offered and approved in another tab (#7460)', async () => {
+    seedHostedPackage('greeter', 1, 2)
+    renderPage(<PluginPackagesPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(within(card).getByText('Version 2 not offered')).toBeInTheDocument()
+
+    const repinned = await aiPlugins.installPackage({ kind: 'hosted', name: 'greeter' })
+    emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'greeter' })
+    const pending = await within(card).findByLabelText('Pending re-pin')
+    expect(within(pending).getByRole('button', { name: 'Approve re-pin…' })).toBeInTheDocument()
+
+    if (!repinned.pending) throw new Error('no re-pin to approve')
+    await aiPlugins.approvePackage('greeter', { version: 2 }, repinned.pending.content_hash)
+    emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'greeter' })
+    await waitFor(() => expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument())
   })
 
   it('keeps a package stored under a built-in name marked not loaded, saying why, and removable', async () => {
