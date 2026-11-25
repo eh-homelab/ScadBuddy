@@ -56,6 +56,13 @@ class LanCommandOutcome(BaseModel):
     replies: list[LanCommandReply]
 
 
+class LanCommandPending(BaseModel):
+    """A run still open when its route stopped waiting (`LAN_ROUTE_WAIT_S`, P27): the
+    route answers 202 with ``workflow_id``, which the command read route follows."""
+
+    workflow_id: str
+
+
 def tries(command: LanCommandInput) -> int:
     return LAN_READ_TRIES if command.kind == "read" else 1
 

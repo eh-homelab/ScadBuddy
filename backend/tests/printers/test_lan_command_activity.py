@@ -4,8 +4,10 @@ printer or Bambuddy is contacted."""
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 from collections.abc import Callable, Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest import mock
 
@@ -15,7 +17,7 @@ from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers import print_activities
-from scadbuddy.printers.lan import LanPrinter
+from scadbuddy.printers.lan import CertificateMismatchError, LanPrinter
 from scadbuddy.printers.lan_command_models import LanCommandInput
 from scadbuddy.printers.lan_commands import extrusion_cali_get, matches
 from scadbuddy.printers.models import LanLink, PrinterCreate
@@ -24,6 +26,7 @@ from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.workflows.print_models import (
     FAILED,
+    LAN_CERT_CHANGED,
     LAN_NO_ANSWER,
     LAN_READ_TRIES,
     LAN_REFUSED,
@@ -53,14 +56,24 @@ class Scripted:
         self.fails = fails
         self.published: list[dict[str, Any]] = []
         self.waits: list[float] = []
+        #: The seconds each request had left before its ``until``.
+        self.left: list[float] = []
 
     async def request(
-        self, command: dict[str, Any], *, name: str, seq: str, wait: float
+        self,
+        command: dict[str, Any],
+        *,
+        name: str,
+        seq: str,
+        wait: float,
+        until: float | None = None,
     ) -> dict[str, Any] | None:
         if self.fails is not None:
             raise self.fails
         self.published.append(command)
         self.waits.append(wait)
+        if until is not None:
+            self.left.append(until - asyncio.get_running_loop().time())
         return next((r for r in self.replies if matches(r, name, seq)), None)
 
 
@@ -104,6 +117,7 @@ async def _run(
     linked: bool = True,
     reports: PrinterReportStore | None = None,
     then: Callable[[str], None] | None = None,
+    start_to_close: timedelta = timedelta(seconds=60),
 ) -> Any:
     printers, printer_id = _printer(pg_pool, linked=linked)
     if then is not None:
@@ -115,8 +129,10 @@ async def _run(
         reports=reports,
     )
     activities = LanActivities(deps)
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, start_to_close_timeout=start_to_close)
     with mock.patch.object(print_activities, "LAN_READ_PAUSE", 0.0):
-        return await ActivityEnvironment().run(
+        return await env.run(
             activities.lan_command, input.model_copy(update={"printer_id": printer_id})
         )
 
@@ -253,3 +269,27 @@ async def test_the_reply_never_reaches_the_report_store(pg_pool: PgPool) -> None
 
 def _dump(problem: Any) -> Any:
     return problem.model_dump() if hasattr(problem, "model_dump") else problem
+
+
+async def test_the_reply_wait_ends_a_second_before_start_to_close(pg_pool: PgPool) -> None:
+    lan = Scripted()
+    await _run(pg_pool, lan, write_input(), start_to_close=timedelta(seconds=20))
+    [left] = lan.left
+    assert 18.0 < left <= 19.0
+
+
+async def test_a_read_stops_trying_once_its_deadline_has_passed(pg_pool: PgPool) -> None:
+    lan = Scripted()
+    with pytest.raises(ApplicationError) as raised:
+        await _run(pg_pool, lan, read_input(), start_to_close=timedelta(seconds=1))
+    assert raised.value.type == LAN_NO_ANSWER
+    # The first try is sent; no time is left for another.
+    assert len(lan.published) == 1
+
+
+async def test_a_changed_certificate_is_its_own_refusal(pg_pool: PgPool) -> None:
+    lan = Scripted(fails=CertificateMismatchError())
+    with pytest.raises(ApplicationError) as raised:
+        await _run(pg_pool, lan, write_input())
+    assert raised.value.type == LAN_CERT_CHANGED
+    assert raised.value.non_retryable

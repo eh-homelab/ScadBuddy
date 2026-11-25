@@ -277,6 +277,12 @@ LAN_COMMAND_ACTIVITY = "lan_command"
 LAN_COMMAND_WORKFLOW = "LanCommand"
 #: A read's reply that never came after its tries (`LAN_READ_TRIES`): the route's 502.
 LAN_NO_ANSWER = "lan_no_answer"
+#: The printer presented another certificate than the pinned one: nothing was sent, and
+#: the route answers 409 ``printer_cert_changed`` (P30).
+LAN_CERT_CHANGED = "lan_cert_changed"
+#: How long a command route waits for its ``LanCommand`` run before it answers 202 with
+#: the run's workflow id, under Envoy's 15 s route timeout (P27).
+LAN_ROUTE_WAIT_S = 10.0
 #: How long a K-profile write waits for its reply, in seconds: Bambuddy's
 #: ``await_cali_ack`` default (``bambu_mqtt.py`` L7636 at the pinned commit,
 #: https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7636-L7664).

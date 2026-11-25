@@ -98,6 +98,7 @@ from scadbuddy.slicing.slice_info import plate_grams
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
+    LAN_CERT_CHANGED,
     LAN_CHECK_ACTIVITY,
     LAN_COMMAND_ACTIVITY,
     LAN_NO_ANSWER,
@@ -663,22 +664,34 @@ class LanActivities:
         plan 2026-11-25 Task 2). Each try gets a fresh ``sequence_id`` (R-7276-10) and a
         connection of its own (`LanPrinter.request`), and only a reply with the same
         ``command`` and ``sequence_id`` counts. A refusal (``result: fail``) is
-        ``LAN_REFUSED`` with the printer's reason. No reply: a write answers
-        ``confirmed: false`` (sent, not acknowledged: older firmware may not answer,
-        R-7276-9), and is never sent twice; a read is tried `LAN_READ_TRIES` times, as
-        Bambuddy's ``get_kprofiles``, then is ``LAN_NO_ANSWER``. A printer that cannot be
-        reached is ``LAN_UNSURE``. The reply is returned only: no report is written."""
+        ``LAN_REFUSED`` with the printer's reason. No reply, or a connection dropped after
+        the publish (P30): a write answers ``confirmed: false`` (sent, not acknowledged:
+        older firmware may not answer, R-7276-9), and is never sent twice; a read is tried
+        `LAN_READ_TRIES` times, as Bambuddy's ``get_kprofiles``, then is
+        ``LAN_NO_ANSWER``. A printer that cannot be reached before the publish is
+        ``LAN_UNSURE``, and another certificate ``LAN_CERT_CHANGED``. Every reply wait
+        ends a second before the start-to-close, so the activity answers rather than being
+        timed out (P30). The reply is returned only: no report is written."""
         row, lan = await self._printer(input.printer_id, then="")
+        loop = asyncio.get_running_loop()
+        timeout = activity.info().start_to_close_timeout
+        until = None if timeout is None else loop.time() + timeout.total_seconds() - 1.0
         for attempt in range(tries(input)):
             if attempt:
+                if until is not None and loop.time() + LAN_READ_PAUSE >= until:
+                    break
                 await asyncio.sleep(LAN_READ_PAUSE)
             seq = str(secrets.randbelow(10**9))
             payload = copy.deepcopy(input.payload)
             payload["print"]["sequence_id"] = seq
             try:
-                reply = await lan.request(payload, name=input.name, seq=seq, wait=input.wait_s)
+                reply = await lan.request(
+                    payload, name=input.name, seq=seq, wait=input.wait_s, until=until
+                )
             except CertificateMismatchError as error:
-                raise _failed(str(error), status_code=status.HTTP_409_CONFLICT) from None
+                raise ApplicationError(
+                    str(error), type=LAN_CERT_CHANGED, non_retryable=True
+                ) from None
             except (OSError, aiomqtt.MqttError, TimeoutError, ConnectionError):
                 raise _unsure(f"{row.name} could not be reached over the LAN.") from None
             if reply is None:

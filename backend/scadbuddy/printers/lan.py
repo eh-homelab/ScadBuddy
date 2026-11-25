@@ -52,7 +52,7 @@ import socket
 import ssl
 import threading
 from collections.abc import AsyncIterator
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime
 from io import BytesIO
 from typing import Any, BinaryIO
@@ -453,25 +453,56 @@ class LanPrinter:
                 yield LanReport(serial=self.serial, received_at=datetime.now(UTC), print=merged)
 
     async def request(
-        self, command: dict[str, Any], *, name: str, seq: str, wait: float
+        self,
+        command: dict[str, Any],
+        *,
+        name: str,
+        seq: str,
+        wait: float,
+        until: float | None = None,
     ) -> dict[str, Any] | None:
         """Publish ``command`` on a connection of its own and return the first raw
         ``print`` object that answers it (`lan_commands.matches` on ``name`` and ``seq``),
-        never merged with another report; ``None`` when none came within ``wait`` seconds
-        (#7276). It subscribes before it publishes, so a fast reply is not missed. Nothing
-        here writes a report: the printer's watch keeps those (`PrinterReportStore`)."""
-        async with await self._client() as client:
-            await client.subscribe(self.report_topic)
-            await client.publish(self.request_topic, json.dumps(command))
-            try:
-                async with asyncio.timeout(wait):
-                    async for message in client.messages:
-                        reply = _print_of(message.payload)
-                        if reply is not None and matches(reply, name, seq):
-                            return reply
-            except TimeoutError:
-                return None
-        raise ConnectionError("the printer closed the connection before it answered")
+        never merged with another report (#7276). It subscribes before it publishes, so a
+        fast reply is not missed. Nothing here writes a report: the printer's watch keeps
+        those (`PrinterReportStore`).
+
+        Connect, subscribe and publish share one `MQTT_TIMEOUT` (P30), and what fails
+        there is raised: nothing was sent. Once the command is published, no reply within
+        ``wait`` seconds, or by ``until`` (the event loop's time) when that comes first, a
+        dropped connection or a failed close is ``None``: the printer may have taken it."""
+        loop = asyncio.get_running_loop()
+        published = False
+        reply: dict[str, Any] | None = None
+        try:
+            async with AsyncExitStack() as stack:
+                async with asyncio.timeout(MQTT_TIMEOUT):
+                    client = await stack.enter_async_context(await self._client())
+                    await client.subscribe(self.report_topic)
+                    await client.publish(self.request_topic, json.dumps(command))
+                published = True
+                left = wait if until is None else min(wait, until - loop.time())
+                reply = await self._reply(client, name, seq, max(left, 0.0))
+        except (aiomqtt.MqttError, ConnectionError, OSError, TimeoutError):
+            if not published:
+                raise
+        return reply
+
+    @staticmethod
+    async def _reply(
+        client: aiomqtt.Client, name: str, seq: str, wait: float
+    ) -> dict[str, Any] | None:
+        """The first message that answers ``name`` under ``seq`` within ``wait``, else
+        ``None``; a drop is raised to `request`."""
+        try:
+            async with asyncio.timeout(wait):
+                async for message in client.messages:
+                    reply = _print_of(message.payload)
+                    if reply is not None and matches(reply, name, seq):
+                        return reply
+        except TimeoutError:
+            return None
+        return None
 
     async def publish(self, command: dict[str, Any]) -> None:
         async with await self._client() as client:

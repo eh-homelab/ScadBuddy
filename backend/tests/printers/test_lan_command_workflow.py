@@ -5,8 +5,10 @@ here; its own tests are `test_lan_command_activity.py`. No printer is contacted.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
 
 import pytest
@@ -21,19 +23,23 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan import MQTT_TIMEOUT
 from scadbuddy.printers.lan_command_models import (
     LanCommandInput,
+    LanCommandPending,
     LanCommandReply,
     LanCommandRun,
     command_timeout,
     run_timeout,
 )
+from scadbuddy.workflows import lan_command as lan_command_module
 from scadbuddy.workflows.client import sandboxed_runner
 from scadbuddy.workflows.lan_command import (
     LanCommandWorkflow,
     execute_lan_commands,
     lan_command_id,
+    read_lan_commands,
 )
 from scadbuddy.workflows.print_models import (
     FAILED,
+    LAN_CERT_CHANGED,
     LAN_COMMAND_ACTIVITY,
     LAN_NO_ANSWER,
     LAN_REFUSED,
@@ -62,21 +68,23 @@ async def client() -> AsyncIterator[Client]:
         yield client
 
 
-Answer = Callable[[LanCommandInput], LanCommandReply]
+Answer = Callable[[LanCommandInput], LanCommandReply | Awaitable[LanCommandReply]]
+Outcome = LanCommandReply | LanCommandPending | ApiError
 
 
 async def _run(
     client: Client, answer: Answer, run: LanCommandRun, *, key: str | None = None, times: int = 1
-) -> tuple[list[LanCommandReply | ApiError], list[str]]:
+) -> tuple[list[Outcome], list[str]]:
     sent: list[str] = []
 
     @activity.defn(name=LAN_COMMAND_ACTIVITY)
     async def lan_command(input: LanCommandInput) -> LanCommandReply:
         sent.append(input.name)
-        return answer(input)
+        reply = answer(input)
+        return await reply if inspect.isawaitable(reply) else reply
 
     queue = f"lan-command-{uuid.uuid4().hex[:8]}"
-    outcomes: list[LanCommandReply | ApiError] = []
+    outcomes: list[Outcome] = []
     async with Worker(
         client,
         task_queue=queue,
@@ -87,7 +95,10 @@ async def _run(
         for _ in range(times):
             try:
                 outcome = await execute_lan_commands(client, queue, PRINTER, run, key=key)
-                outcomes.extend(outcome.replies)
+                if isinstance(outcome, LanCommandPending):
+                    outcomes.append(outcome)
+                else:
+                    outcomes.extend(outcome.replies)
             except ApiError as error:
                 outcomes.append(error)
     return outcomes, sent
@@ -170,8 +181,9 @@ async def test_the_printer_rows_refusals_keep_their_status(
     assert isinstance(outcome, ApiError)
     assert outcome.status == problem_status
     assert outcome.detail == detail
-    if problem_status == 409:
-        assert outcome.extensions["code"] == "not_lan_linked"
+    assert outcome.extensions["code"] == (
+        "not_lan_linked" if problem_status == 409 else "lan_unavailable"
+    )
 
 
 @pytest.mark.requires_temporal
@@ -194,3 +206,114 @@ async def test_a_resent_key_of_a_failed_run_answers_its_failure(client: Client) 
         "printer_refused",
         "printer_refused",
     ]
+
+
+@pytest.fixture
+def short_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command's start-to-close of about 0.7 s, so a stub that sleeps is timed out."""
+    monkeypatch.setattr("scadbuddy.printers.lan_command_models.MQTT_TIMEOUT", 0.1)
+    monkeypatch.setattr("scadbuddy.printers.lan_command_models.LAN_COMMAND_MARGIN", 0.5)
+
+
+def _sleeps(seconds: float) -> Answer:
+    async def answer(_: LanCommandInput) -> LanCommandReply:
+        await asyncio.sleep(seconds)
+        return LanCommandReply(confirmed=True)
+
+    return answer
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.usefixtures("short_timeouts")
+async def test_a_write_timed_out_is_unconfirmed_and_the_rest_still_run(client: Client) -> None:
+    run = LanCommandRun(commands=[command("ams_filament_setting"), command("extrusion_cali_sel")])
+
+    def answer(input: LanCommandInput) -> LanCommandReply | Awaitable[LanCommandReply]:
+        if input.name == "ams_filament_setting":
+            return _sleeps(5.0)(input)
+        return LanCommandReply(confirmed=True)
+
+    outcomes, sent = await _run(client, answer, run)
+    assert sent == ["ams_filament_setting", "extrusion_cali_sel"]
+    assert [o.confirmed for o in outcomes if isinstance(o, LanCommandReply)] == [False, True]
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.usefixtures("short_timeouts")
+async def test_a_read_timed_out_is_no_answer(client: Client) -> None:
+    run = LanCommandRun(commands=[command("extrusion_cali_get", kind="read", wait_s=0.0)])
+    # Three tries of 0.1 s and two pauses: about 1.8 s.
+    [outcome], _ = await _run(client, _sleeps(5.0), run)
+    assert isinstance(outcome, ApiError)
+    assert outcome.status == status.HTTP_502_BAD_GATEWAY
+    assert outcome.extensions["code"] == "printer_no_answer"
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.parametrize(("kind", "expect"), [("write", "unconfirmed"), ("read", "no_answer")])
+async def test_a_run_that_timed_out_whole(
+    client: Client, monkeypatch: pytest.MonkeyPatch, kind: str, expect: str
+) -> None:
+    monkeypatch.setattr(lan_command_module, "run_timeout", lambda _: timedelta(seconds=0.5))
+    run = LanCommandRun(commands=[command("extrusion_cali_set", kind=kind)])
+    [outcome], _ = await _run(client, _sleeps(3.0), run)
+    if expect == "unconfirmed":
+        assert isinstance(outcome, LanCommandReply)
+        assert not outcome.confirmed
+    else:
+        assert isinstance(outcome, ApiError)
+        assert outcome.status == status.HTTP_502_BAD_GATEWAY
+        assert outcome.extensions["code"] == "printer_no_answer"
+
+
+@pytest.mark.requires_temporal
+async def test_a_changed_certificate_is_409_printer_cert_changed(client: Client) -> None:
+    changed = ApplicationError("link it again", type=LAN_CERT_CHANGED, non_retryable=True)
+    [outcome], _ = await _run(client, _raises(changed), LanCommandRun(commands=[command("x")]))
+    assert isinstance(outcome, ApiError)
+    assert outcome.status == status.HTTP_409_CONFLICT
+    assert outcome.extensions["code"] == "printer_cert_changed"
+
+
+@pytest.mark.requires_temporal
+async def test_a_run_past_the_route_wait_is_pending_then_read(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0.2)
+    run = LanCommandRun(commands=[command("extrusion_cali_set")])
+    queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+
+    @activity.defn(name=LAN_COMMAND_ACTIVITY)
+    async def lan_command(input: LanCommandInput) -> LanCommandReply:
+        await asyncio.sleep(1.5)
+        return LanCommandReply(confirmed=True)
+
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[LanCommandWorkflow],
+        activities=[lan_command],
+        workflow_runner=sandboxed_runner(),
+    ):
+        pending = await execute_lan_commands(client, queue, PRINTER, run, key="slow-1")
+        assert isinstance(pending, LanCommandPending)
+        assert pending.workflow_id == lan_command_id(PRINTER, run, "slow-1")
+        still = await read_lan_commands(client, PRINTER, pending.workflow_id)
+        assert isinstance(still, LanCommandPending)
+        await client.get_workflow_handle(pending.workflow_id).result()
+        done = await read_lan_commands(client, PRINTER, pending.workflow_id)
+    assert not isinstance(done, LanCommandPending)
+    assert [reply.confirmed for reply in done.replies] == [True]
+
+
+@pytest.mark.requires_temporal
+async def test_a_read_of_another_printers_command_is_404(client: Client) -> None:
+    run = LanCommandRun(commands=[command("extrusion_cali_set")])
+    outcomes, _ = await _run(client, lambda _: LanCommandReply(confirmed=True), run, key="k404")
+    assert outcomes
+    with pytest.raises(ApiError) as raised:
+        await read_lan_commands(client, "printer-2", lan_command_id(PRINTER, run, "k404"))
+    assert raised.value.status == status.HTTP_404_NOT_FOUND
+    with pytest.raises(ApiError) as missing:
+        await read_lan_commands(client, PRINTER, f"lan-command-{PRINTER}-x-none")
+    assert missing.value.status == status.HTTP_404_NOT_FOUND
