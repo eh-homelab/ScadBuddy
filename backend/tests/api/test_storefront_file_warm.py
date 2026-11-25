@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import scadbuddy.main as main_module
 from scadbuddy.core.settings import Settings
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.storefront import prepare
@@ -37,6 +38,19 @@ pytestmark = pytest.mark.requires_postgres
 def settings(settings: Settings) -> Settings:
     """The tests' app warms no price (`tests/conftest.py`); these tests turn it on."""
     return settings.model_copy(update={"storefront_warm_prices": True})
+
+
+@pytest.fixture(autouse=True)
+def app_warm_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The app's own listing-price sweep (#7665) does nothing: the prune Schedule's boot
+    run calls it at a time the test does not choose, as `app_payment_sweep_off` says, and
+    with prices warmed it starts the run the test's own pass then finds open. These tests
+    call `prepare.warm_unpriced` themselves."""
+
+    async def off(_state: object) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_warm_listings_logged", off)
 
 
 def page_choice(crud: CrudCaller, listing: dict[str, Any]) -> dict[int, str]:
