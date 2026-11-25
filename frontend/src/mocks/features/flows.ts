@@ -503,7 +503,7 @@ function view(id: string): FlowRunView | undefined {
   }
   const found = runs.find((r) => r.id === id)
   if (!found) return undefined
-  const pending: FlowPending[] = found.waiting_on.map(({ call_id, kind, fn, prompt, since, hop, hop_until, reason, proposed, hops }) => ({
+  const pending: FlowPending[] = found.waiting_on.map(({ call_id, kind, fn, prompt, since, hop, hop_until, reason, proposed, hops, people_only }) => ({
     call_id,
     kind,
     fn,
@@ -517,6 +517,8 @@ function view(id: string): FlowRunView | undefined {
     summary: summaries.get(`${id}:${call_id}`)?.summary ?? null,
     bound_hash: summaries.get(`${id}:${call_id}`)?.bound_hash ?? null,
     task: taskQuestion(call_id),
+    // #7471: only a script's false opens a question to another answerer.
+    people_only: people_only !== false,
   }))
   return {
     id,

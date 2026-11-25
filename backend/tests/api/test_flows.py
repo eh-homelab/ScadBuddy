@@ -11,6 +11,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,13 +20,16 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.flows import PendingEntry
 from scadbuddy.core.gitrepo import git_env
 from scadbuddy.core.secrets import seal_bytes
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.agent_reads import waiting_entry
 from scadbuddy.flows.images import blob_context
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
 from scadbuddy.workflows import payload_codec
+from scadbuddy.workflows.flow_models import FlowWaiting
 from tests.api.conftest import FakeAgentTools
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
@@ -166,11 +170,30 @@ def test_a_waiting_run_lists_what_it_waits_on(client: TestClient) -> None:
     view = until(client, run_id, lambda v: v["status"] == "waiting" and v["pending"])
     assert view["live"] is True
     [entry] = view["pending"]
-    assert (entry["kind"], entry["fn"], entry["prompt"]) == (
+    assert (entry["kind"], entry["fn"], entry["prompt"], entry["people_only"]) == (
         "answer",
         "wait_for_human",
         "Swap to pink?",
+        False,
     )
+
+
+def test_a_people_only_question_says_so(client: TestClient) -> None:
+    definition = register(client, script("await wait_for_human('Swap?', people_only=True)"))
+    run_id = start(client, definition["id"], "w").json()["id"]
+    view = until(client, run_id, lambda v: v["status"] == "waiting" and v["pending"])
+    assert [e["people_only"] for e in view["pending"]] == [True]
+
+
+def test_an_entry_without_the_flag_reads_as_people_only() -> None:
+    """A question parked before #7471 has no flag: it is for people only."""
+    since = datetime(2026, 11, 25, tzinfo=UTC)
+    parked = FlowWaiting(call_id="c", kind="answer", fn="wait_for_human", since=since)
+    assert PendingEntry.model_validate(parked.model_dump()).people_only is True
+    assert waiting_entry(parked.model_dump(mode="json"))["people_only"] is True
+    opened = parked.model_copy(update={"people_only": False})
+    assert PendingEntry.model_validate(opened.model_dump()).people_only is False
+    assert waiting_entry(opened.model_dump(mode="json"))["people_only"] is False
 
 
 def test_a_definition_no_longer_type_checking_is_refused_at_start(

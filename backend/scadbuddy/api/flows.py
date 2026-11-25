@@ -278,6 +278,14 @@ class PendingEntry(BaseModel):
     #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
     #: for a `wait_for_human`, whose answer is a text. Its own route has the answer.
     task: TaskQuestion | None = None
+    #: Whether only a person may answer the question (#7471). True for an approval and for
+    #: a question parked before the flag: only a script's False opens it.
+    people_only: bool = True
+
+    @field_validator("people_only", mode="before")
+    @classmethod
+    def _unset_is_people_only(cls, value: object) -> object:
+        return True if value is None else value
 
 
 class GrantUseView(BaseModel):
@@ -957,6 +965,7 @@ async def _pending(
                 fn=seen.fn if seen else HOST_FN.get(callback.tool_name, callback.tool_name),
                 prompt=seen.prompt if seen else None,
                 since=seen.since if seen else None,
+                people_only=seen is None or seen.people_only is not False,
             )
         )
     return entries, True

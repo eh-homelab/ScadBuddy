@@ -62,6 +62,8 @@ def waiting_entry(raw: Any) -> dict[str, Any]:
     """A parked call's fields the agent reads."""
     entry = {name: raw.get(name) for name in WAITING_FIELDS}
     entry["proposed"] = raw.get("proposed") is True
+    # Only a script's False opens a question to another answerer (#7471).
+    entry["people_only"] = raw.get("people_only") is not False
     hops = raw.get("hops")
     entry["hops"] = [{name: h.get(name) for name in HOP_FIELDS} for h in _objects(hops)]
     return entry
