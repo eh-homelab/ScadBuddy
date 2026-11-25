@@ -336,6 +336,16 @@ def test_the_base_of_a_kept_base_is_kept(old: Old, dest: Path) -> None:
     assert problems(old, dest) == []
 
 
+def test_a_base_inside_another_template_is_not_a_template(old: Old, dest: Path) -> None:
+    inner = old.save("b", scad="cube(1);\n", mesh=ONE)
+    link = {"id": "b/meshes", "path": "b/meshes", "base": inner, "dismissed": inner}
+    old.save("a", scad="cube(1);\n", meta=meta(link))
+    made(old, dest)
+    assert {slug for slug, _ in ids(dest)} == {"a", "b"}
+    assert json.loads((dest / "a/model.json").read_bytes())["upstream"]["dismissed"] == inner
+    assert problems(old, dest) == []
+
+
 def test_a_base_the_old_one_does_not_have_stays(old: Old, dest: Path) -> None:
     old.save("b", scad="cube(1);\n")
     old.save("a", scad="cube(1);\n", meta=meta({"id": "b", "path": "b", "base": GONE}))
@@ -443,10 +453,24 @@ def test_a_second_run_over_a_copy_only_the_old_one_ignores(old: Old, dest: Path)
     made(old, dest)
     made(old, dest)
     assert (dest / "a/über.dat").read_bytes() == ONE
-    (dest / "a/über.dat").write_bytes(TWO)
     (dest / "a/other.dat").write_bytes(TWO)
     with pytest.raises(RefusedError, match=r"other\.dat"):
         build(old.root, dest, [], live=old.root)
+
+
+@pytest.mark.parametrize("name", ["media/clip.mp4", "über.dat"])
+def test_a_copy_that_was_changed_is_not_replaced(old: Old, dest: Path, name: str) -> None:
+    (old.root / ".git/info").mkdir(exist_ok=True)
+    (old.root / ".git/info/exclude").write_text("*.dat\n")
+    old.save("a", scad="cube();\n")
+    old.write("a", {name: ONE})
+    made(old, dest)
+    (dest / "a" / name).write_bytes(TWO)
+    with pytest.raises(RefusedError, match=Path(name).name):
+        build(old.root, dest, [], live=old.root)
+    (dest / "a" / name).unlink()
+    made(old, dest)
+    assert (dest / "a" / name).read_bytes() == ONE
 
 
 def test_modes_links_and_odd_names(old: Old, dest: Path) -> None:
@@ -908,7 +932,6 @@ def test_the_pins_are_the_orders_the_revisions_and_the_listings(pg_conninfo: str
     ]
 
 
-@pytest.mark.requires_postgres
 def test_the_trial_push_is_a_complete_copy(old: Old, dest: Path, tmp_path: Path) -> None:
     old.save("a", scad="cube();\n", mesh=ONE)
     new = made(old, dest)
@@ -943,6 +966,7 @@ def test_a_trial_push_of_anything_else_is_refused(old: Old, dest: Path) -> None:
         push_trial(dest, TRIAL_BRANCH, target, live=old.root)
 
 
+@pytest.mark.requires_postgres
 def test_the_trial_push_is_to_the_stored_remote_and_shows_no_token(
     old: Old,
     dest: Path,
@@ -977,6 +1001,7 @@ def test_the_trial_push_is_to_the_stored_remote_and_shows_no_token(
     assert "failed" in said.err and SECRET not in said.err + said.out
 
 
+@pytest.mark.requires_postgres
 def test_the_two_commands(
     old: Old,
     dest: Path,

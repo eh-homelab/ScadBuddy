@@ -52,7 +52,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, NamedTuple, Self
+from typing import IO, TYPE_CHECKING, Any, NamedTuple, Self, TypeGuard
 
 from scadbuddy.core.gitrepo import (
     _FIELD,
@@ -575,6 +575,11 @@ def _json(raw: bytes) -> Any:
         return None
 
 
+def _is_template(owner: object) -> TypeGuard[str]:
+    """A template's id, and not a path inside one."""
+    return isinstance(owner, str) and _model_id(f"{model_path(owner)}/{MODEL_META_NAME}") == owner
+
+
 def _upstream_refs(raw: bytes) -> dict[str, tuple[str, str]]:
     """Each upstream field of ``model.json`` that holds an id: the template it is a
     revision of, and the id."""
@@ -591,7 +596,7 @@ def _upstream_refs(raw: bytes) -> dict[str, tuple[str, str]]:
     found: dict[str, tuple[str, str]] = {}
     for name in UPSTREAM_FIELDS:
         value, owner = upstream.get(name), owners[name]
-        if isinstance(value, str) and _COMMIT.fullmatch(value) and isinstance(owner, str):
+        if isinstance(value, str) and _COMMIT.fullmatch(value) and _is_template(owner):
             found[name] = (owner, value)
     return found
 
@@ -857,7 +862,7 @@ def _destination(source: _Repo, dest: Path, live: Path) -> Path:
 
 def _may_replace(target: Path) -> None:
     """Only an empty directory, or what a run made, with nothing committed, changed or
-    left in it since. An ignored file there is a copy or a render's."""
+    left in it since. An ignored file that no run copied is a render's."""
     if not target.is_dir():
         raise RefusedError(f"{target} is not a directory")
     if not any(target.iterdir()):
@@ -867,7 +872,11 @@ def _may_replace(target: Path) -> None:
     head = held.get("head")
     if not isinstance(head, str) or not repo.available or repo.head() != head:
         raise RefusedError(f"{target} is not empty, and not as this command left it")
-    copied = set(held.get("copied", []))
+    copied: dict[str, str] = held.get("copied", {})
+    for name, digest in copied.items():
+        path = target / name
+        if os.path.lexists(path) and _copy_digest(path) != digest:
+            raise RefusedError(f"{target} holds changes this command did not make: {name}")
     status = os.fsdecode(repo.bytes_out("status", "--porcelain", "-z", "--untracked-files=all"))
     # A copied file that only the old repository ignores is untracked here.
     left = [line for line in status.split("\0") if line and line[3:] not in copied]
@@ -904,7 +913,7 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
     held = {
         "head": head,
         "old_head": plan.head,
-        "copied": report.copied,
+        "copied": {name: _copy_digest(repo.root / name) for name in report.copied},
         "map": [
             {"slug": slug, "old": old, "new": new}
             for (slug, old), new in sorted(report.ids.items())
@@ -929,6 +938,10 @@ def _copy_data(source: _Repo, repo: _Repo) -> list[str]:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source.root / name, target, follow_symlinks=False)
     return copied
+
+
+def _copy_digest(path: Path) -> str:
+    return f"link {os.readlink(path)}" if path.is_symlink() else _file_digest(path)
 
 
 def _is_derived(path: str) -> bool:
@@ -963,7 +976,8 @@ def _put(staged: Path, target: Path) -> None:
 
 def push_trial(dest: Path, branch: str, target: RemoteTarget, *, live: Path) -> str:
     """Push what a build made, meshes first, to a trial branch at ``target``; its HEAD.
-    Never a force, and never a branch that ScadBuddy itself pushes to."""
+    Never a force, and never a branch that ScadBuddy itself pushes to. Under the app's own
+    time limits, so that it shows whether the switch's first push fits them."""
     if not _TRIAL.fullmatch(branch):
         raise RefusedError(f"{branch} is not a trial branch ({TRIAL_BRANCH}…)")
     if dest.resolve() == live.resolve():
