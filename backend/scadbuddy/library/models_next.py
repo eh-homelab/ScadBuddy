@@ -10,22 +10,23 @@ the new repository, or changes a row.
 What the new history holds
 --------------------------
 A first commit of ``.gitignore`` and ``.gitattributes`` (what `ModelHistory.ensure_repo`
-writes), then one commit per version that is kept: each (slug, commit) an order item, an
-order revision or a listing pins, the current version of each template and built-in, and
-the upstream revisions that the ``model.json`` of any of these names.
-A commit changes its own template only. It has the old commit's author, committer, dates
+writes), then one commit per version of each template and built-in, deleted ones included:
+each commit of the old history that changed it. With them, the revisions HEAD does not
+reach that an order item, an order revision, a listing, an output or a ``model.json``'s
+upstream names. A commit changes its own template only: an old one that changed several is
+several here. It has the old commit's author, committer, dates
 and message, and an ``Imported-From: <old id>`` trailer. So the map of old ids to new ones
 is in git; `derived_map` reads it, and ``.git/scadbuddy-models-next.json`` is a copy.
 
 Versions of one template with the same tree, one after the other, are one commit with a
 trailer each: a commit that changed nothing would not be a revision of the template
-(`ModelHistory.touched`). A template that is pinned and gone since is committed, and then
-removed as its delete removed it.
+(`ModelHistory.touched`). A delete is a commit that removes the template. It is not in the
+map: its old id names nothing of the template.
 
-The order is the old history's, pins, current versions and built-ins together. A
+The order is the old history's, of all templates and built-ins together. A
 ``model.json`` can only name an upstream commit that is older than itself, so that commit
 is already in the new history when the file is written, and its new id is known: `base`
-and `dismissed` are pointed at it, in the pinned versions too. An id the new history does
+and `dismissed` are pointed at it, in the older versions too. An id the new history does
 not have (the old one has lost the revision) is left as it is: it resolves to nothing, which
 `upstream.plan_merge` takes as no base (#7534). Nothing else in a ``model.json`` is a
 commit of this repository; a library's pin is of the library's own.
@@ -52,7 +53,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any, NamedTuple, Self, TypeGuard
+from typing import IO, TYPE_CHECKING, Any, Final, NamedTuple, Self, TypeGuard
 
 from scadbuddy.core.gitrepo import (
     _FIELD,
@@ -108,6 +109,12 @@ GITLINK_MODE = "160000"
 #: The tables whose rows pin a version: what an order, a quote, a test print or a listing
 #: renders from. A quote and a print attempt name a row of `order_item_revisions`.
 PLACES = ("order_items", "order_item_revisions", "storefront_listings")
+#: An output's revision is a pin too: an order item's output must be of its commit. An
+#: arranged output has a content hash there, and an old one may have nothing.
+OUTPUTS: Final = (
+    "SELECT slug, meta->>'model_version' AS commit, 'outputs' AS place FROM outputs"
+    " WHERE meta->>'model_version' ~ '^[0-9a-f]{40}$'"
+)
 #: The fields of ``upstream`` in a ``model.json`` that hold a commit of this repository.
 UPSTREAM_FIELDS = ("base", "dismissed")
 
@@ -462,9 +469,12 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
     order = repo._out("rev-list", "--topo-order", "--reverse", head).split()
     index = {commit: at for at, commit in enumerate(order)}
     last: dict[str, str] = {}
+    #: Each template's versions: an old commit, and its tree (None where it was deleted).
+    kept: dict[str, dict[str, str | None]] = {}
     for commit, _, names in _walk(repo, head):
         for slug in _slugs(names):
             last.setdefault(slug, commit)
+            kept.setdefault(slug, {})[commit] = objects.tree(commit, slug)
     trees = _templates(objects, head)
 
     def position(commit: str) -> tuple[int, int]:
@@ -474,28 +484,27 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
         return 0, int(objects.commit(commit).committer.split()[-2])
 
     unresolved: list[Pin] = []
-    pinned: dict[str, dict[str, str]] = {}
     for pin in pins:
         commit_id = objects.commit_id(pin.commit)
         tree = None if commit_id is None else objects.tree(commit_id, pin.slug)
         if commit_id is None or tree is None:
             unresolved.append(pin)
         else:
-            pinned.setdefault(pin.slug, {})[commit_id] = tree
+            kept.setdefault(pin.slug, {})[commit_id] = tree
 
-    _keep_upstreams(objects, [*trees.values()], pinned)
+    _keep_upstreams(objects, [*trees.values()], kept)
     versions: list[_Version] = []
-    for slug in sorted({*trees, *pinned}):
+    for slug in sorted({*trees, *kept}):
         line: list[_Version] = []
-        held = pinned.get(slug, {})
+        held = kept.get(slug, {})
         for commit in sorted(held, key=position):
-            _add(line, slug, commit, held[commit], position(commit))
+            version = held[commit]
+            if version is not None or (line and line[-1].tree is not None):
+                _add(line, slug, commit, version, position(commit))
         if slug in trees:
             newest = last.get(slug, head)
             _add(line, slug, newest, trees[slug], position(newest))
-        elif slug in last:
-            _add(line, slug, last[slug], None, position(last[slug]))
-        else:
+        elif line and line[-1].tree is not None:
             gone = line[-1]
             subject = f"Delete {slug}\n".encode()
             line.append(_Version(slug, None, [], gone.source, gone.position, subject))
@@ -504,20 +513,26 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
     versions.sort(key=lambda version: version.position)
     current = {slug: last.get(slug, head) for slug in trees}
     wanted = {
-        (slug, commit): tree for slug, held in pinned.items() for commit, tree in held.items()
+        (slug, commit): tree
+        for slug, held in kept.items()
+        for commit, tree in held.items()
+        if tree is not None
     }
     wanted.update({(slug, commit): trees[slug] for slug, commit in current.items()})
     return _Plan(head, versions, unresolved, current, wanted)
 
 
-def _keep_upstreams(objects: _Objects, trees: list[str], pinned: dict[str, dict[str, str]]) -> None:
-    """Pin what each kept version's ``model.json`` names as its upstream's revision: without
+def _keep_upstreams(
+    objects: _Objects, trees: list[str], kept: dict[str, dict[str, str | None]]
+) -> None:
+    """Keep what each version's ``model.json`` names as its upstream's revision: without
     its base, a duplicate merges as one that has none, and all that differs conflicts."""
-    left = [*trees, *(tree for held in pinned.values() for tree in held.values())]
+    left: list[str | None] = [*trees]
+    left += [tree for held in kept.values() for tree in held.values()]
     seen: set[str] = set()
     while left:
         tree = left.pop()
-        if tree in seen:
+        if tree is None or tree in seen:
             continue
         seen.add(tree)
         entry = objects.files(tree).get(MODEL_META_NAME)
@@ -528,7 +543,7 @@ def _keep_upstreams(objects: _Objects, trees: list[str], pinned: dict[str, dict[
             below = None if found is None else objects.tree(found, slug)
             # One that is gone is reported when the version that names it is written.
             if found is not None and below is not None:
-                pinned.setdefault(slug, {})[found] = below
+                kept.setdefault(slug, {})[found] = below
                 left.append(below)
 
 
@@ -873,6 +888,7 @@ def _may_replace(target: Path) -> None:
     if not isinstance(head, str) or not repo.available or repo.head() != head:
         raise RefusedError(f"{target} is not empty, and not as this command left it")
     copied: dict[str, str] = held.get("copied", {})
+    # One that is gone is made again by the next build, and no push sends it.
     for name, digest in copied.items():
         path = target / name
         if os.path.lexists(path) and _copy_digest(path) != digest:
@@ -906,6 +922,7 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
                 builder.add(version)
     shutil.rmtree(repo.root / ".git" / "lfs" / "tmp", ignore_errors=True)
     repo._run("reset", "--quiet", "--hard")
+    _copy_times(source, repo)
     report.copied = _copy_data(source, repo)
     head = repo.head()
     assert head is not None
@@ -925,6 +942,19 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
     }
     repo.map_path.write_text(json.dumps(held, indent=1) + "\n", encoding="utf-8")
     return report
+
+
+def _copy_times(source: _Repo, repo: _Repo) -> None:
+    """Each file's time from the old repository's: a template's "Updated" is the newer of
+    its source's and its ``model.json``'s."""
+    for name in os.fsdecode(repo.bytes_out("ls-files", "-z")).split("\0"):
+        was = source.root / name
+        if name and os.path.lexists(was):
+            at = was.lstat()
+            os.utime(repo.root / name, ns=(at.st_atime_ns, at.st_mtime_ns), follow_symlinks=False)
+    # The index has the times of the checkout: without this, the first `git status` of the
+    # app would read every mesh.
+    repo._run("update-index", "-q", "--refresh")
 
 
 def _copy_data(source: _Repo, repo: _Repo) -> list[str]:
@@ -1232,7 +1262,7 @@ def _meta_fault(was: bytes, now: bytes, ids: Ids) -> str | None:
 
 
 def read_pins(conninfo: str) -> list[Pin]:
-    """Every (slug, commit) an order item, an order revision or a listing names."""
+    """Every (slug, commit) an order item, an order revision, a listing or an output names."""
     import psycopg
     from psycopg import sql
 
@@ -1243,6 +1273,7 @@ def read_pins(conninfo: str) -> list[Pin]:
         )
         for place in PLACES
     )
+    each = sql.SQL(" UNION ").join([each, sql.SQL(OUTPUTS)])
     query = sql.SQL(
         "SELECT slug, commit, array_agg(place ORDER BY place) FROM ({}) AS pins"
         " GROUP BY slug, commit ORDER BY slug, commit"
@@ -1293,7 +1324,7 @@ def _push(settings: Settings, dest: Path, branch: str, live: Path) -> int:
     store = SettingsStore(settings)
     # Not `store.open`, which migrates: this only reads. The URL and its token are of one
     # snapshot, as the app reads them.
-    store._pool.open(wait=True, timeout=store.connect_timeout)
+    store.pool.open(wait=True, timeout=store.connect_timeout)
     try:
         remote = store.snapshot().runtime
     finally:

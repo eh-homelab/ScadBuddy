@@ -1503,9 +1503,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `.lfsconfig` says (`tests/test_history_lfs.py`).
   `library/models_next.py` (`python -m scadbuddy.library.models_next build` and `check`,
   in the API's image) makes a second such repository from an older one, in
-  `data/models-next`: the versions the orders and listings pin, the current ones, and the
-  upstream revisions their `model.json` names, each with an `Imported-From` trailer. It
-  only reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
+  `data/models-next`: every version of every template, and the lost ones that an order, a
+  listing, an output or a `model.json` names, each with an `Imported-From` trailer. It only
+  reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
   the build to the git remote in Settings, and to no other branch.
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
