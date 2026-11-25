@@ -2242,17 +2242,24 @@ class SlotReport(BaseModel):
     """What one reconcile of the override slots did (#6264, #7276). ``no_preset``: the type
     has no preset for the nozzle, or the preset has no Bambu filament id ScadBuddy knows.
     ``no_temps``: the spool has no nozzle temperatures, the tray reports none, or the spool
-    has no material or colour to send. ``no_nozzle``: the report does not say which nozzle
-    the tray feeds. None of the three sends a command. ``unconfirmed``: the configure was
-    sent, but the printer had not acknowledged it when ScadBuddy stopped waiting (P36); it
-    may still apply, and a later pass sends it again unless the tray shows it."""
+    has no material or colour to send. ``invalid_temps``: the temperatures' minimum is above
+    their maximum. ``no_nozzle``: the report does not say which nozzle the tray feeds.
+    ``unsupported_unit``: the slot is on a unit ScadBuddy's LAN commands cannot address.
+    None of these sends a command. ``waiting``: the printer is printing or its AMS is busy
+    (`ams_slots.guard`), or the pass ran out of time before the slot's turn; a later pass configures
+    it. ``unconfirmed``: the configure was sent, but the printer had not acknowledged it
+    when ScadBuddy stopped waiting (P36); it may still apply, and a later pass joins a run
+    still open or sends it again unless the tray shows it."""
 
     configured: int = 0
     unconfirmed: int = 0
+    waiting: int = 0
     unchanged: int = 0
     no_preset: int = 0
     no_temps: int = 0
+    invalid_temps: int = 0
     no_nozzle: int = 0
+    unsupported_unit: int = 0
     failed: int = 0
 
 

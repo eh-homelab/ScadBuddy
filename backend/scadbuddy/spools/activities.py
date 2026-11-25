@@ -27,7 +27,7 @@ from scadbuddy.filament.bb_pull_models import PullOutcome, PullStart
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.rfid_mode import BUSY, NO_BAMBUDDY, reconcile_mode_now
 from scadbuddy.filament.rfid_push import push_pending
-from scadbuddy.filament.rfid_slots import reconcile_slots_now
+from scadbuddy.filament.rfid_slots import ACTIVITY_MARGIN_S, reconcile_slots_now, start_deadline
 from scadbuddy.filament.sb_presets import PresetImport
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
@@ -38,6 +38,7 @@ from scadbuddy.workflows.spool_refresh import (
     FILAMENT_PULL_ACTIVITY,
     FILAMENT_PULL_TIMEOUT,
     FILAMENT_RFID_ACTIVITY,
+    FILAMENT_RFID_TIMEOUT,
     HELD_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
@@ -230,6 +231,10 @@ def filament_rfid_activity(
 
     @activity.defn(name=FILAMENT_RFID_ACTIVITY)
     async def filament_rfid_reconcile() -> str:
+        # The slots start no run that could outlast the activity's timeout (P46).
+        deadline = start_deadline(
+            time.monotonic(), FILAMENT_RFID_TIMEOUT.total_seconds() - ACTIVITY_MARGIN_S
+        )
         failed = False
         try:
             mode = await reconcile_mode_now(filament.rfid, load)
@@ -256,7 +261,9 @@ def filament_rfid_activity(
                 reports=printers.reports,
                 commands=commands,
                 profiles=profiles(),
+                deadline=deadline,
             )
+            # An unconfirmed or waiting slot is not a failure: a later pass reads it again.
             failed = failed or (slots is not None and slots.failed > 0)
         except Exception as error:
             activity.logger.warning(

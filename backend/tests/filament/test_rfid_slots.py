@@ -6,13 +6,17 @@ whose unit rests on inlet A: the left extruder, a 0.4 nozzle."""
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
+import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,6 +27,7 @@ from scadbuddy.bambuddy.models import PresetRef
 from scadbuddy.bambuddy.models import Spool as BbSpool
 from scadbuddy.bambuddy.trays import seen_trays
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.settings import FilamentSync
 from scadbuddy.filament import rfid_slots
 from scadbuddy.filament.bambuddy_pull import pull
 from scadbuddy.filament.catalog import CatalogStore
@@ -49,19 +54,27 @@ from scadbuddy.filament.shopping import ShoppingStore
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
+from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers import ams_slots
 from scadbuddy.printers.ams_slots import nozzle_of
+from scadbuddy.printers.component import Printers
 from scadbuddy.printers.lan_command_models import (
     LanCommandOutcome,
     LanCommandPending,
     LanCommandReply,
     LanCommandRun,
 )
+from scadbuddy.printers.lan_commands import UnsupportedUnitError
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing.own_presets import sb_ref
+from scadbuddy.slicing.profiles import Profiles
+from scadbuddy.spools.activities import filament_rfid_activity
 from scadbuddy.workflows.lan_command import LanCommandAnswer
+from scadbuddy.workflows.print_models import LAN_ROUTE_WAIT_S
 from tests.conftest import PgPool
+from tests.slicing.conftest import PROFILES
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -95,22 +108,38 @@ def _catalogue(*extra: PresetChoice) -> Catalogue:
 class Sender:
     """A `LanCommandSender` that records each run and answers it: every reply
     ``confirmed`` by default, `LanCommandPending` with ``pending``, or raises the next of
-    ``errors``."""
+    ``errors``. As the ``LanCommand`` workflow does, a key sent again while its run is open
+    joins it: ``published`` lists the runs actually started. ``delay`` is how long each
+    answer takes; ``most`` is the most runs open at once."""
 
     def __init__(self) -> None:
         self.runs: list[tuple[str, LanCommandRun]] = []
+        self.keys: list[str | None] = []
+        self.published: list[str | None] = []
         self.errors: list[ApiError] = []
         self.pending = False
         self.confirmed = True
+        self.delay = 0.0
+        self.open = 0
+        self.most = 0
 
     async def run(
         self, printer_id: str, run: LanCommandRun, *, key: str | None = None
     ) -> LanCommandAnswer:
         self.runs.append((printer_id, run))
+        self.keys.append(key)
+        if key is None or key not in self.published:
+            self.published.append(key)
+        self.open += 1
+        self.most = max(self.most, self.open)
+        try:
+            await asyncio.sleep(self.delay)
+        finally:
+            self.open -= 1
         if self.errors:
             raise self.errors.pop(0)
         if self.pending:
-            return LanCommandPending(workflow_id="lan-command-pending")
+            return LanCommandPending(workflow_id=f"lan-command-{printer_id}-x-{key}")
         return LanCommandOutcome(
             replies=[LanCommandReply(confirmed=self.confirmed) for _ in run.commands]
         )
@@ -173,6 +202,7 @@ class World:
         self.printer = uuid4()
         self.sender = Sender()
         self.catalogue = _catalogue()
+        self.built = 0
         # A LAN-linked printer (host, pinned certificate, access code), no Bambuddy link.
         with pool.connection() as conn:
             conn.execute(
@@ -229,13 +259,18 @@ class World:
         with self.pool.connection() as conn:
             return list(conn.execute("SELECT * FROM filament_override_slots ORDER BY tray_id"))
 
-    async def run(self) -> SlotReport:
+    async def native(self) -> Catalogue | None:
+        self.built += 1
+        return self.catalogue
+
+    async def run(self, deadline: float | None = None) -> SlotReport:
         return await reconcile_slots(
             self.filament,
             self.sender,
             printers=self.printers,
             reports=self.reports,
-            catalogue=self.catalogue,
+            catalogue=self.native,
+            deadline=time.monotonic() + 60 if deadline is None else deadline,
         )
 
 
@@ -512,6 +547,7 @@ async def test_no_preset_for_the_nozzle_sends_nothing(pg_pool: PgPool) -> None:
 
     assert w.sender.runs == []
     assert report == SlotReport(no_preset=1)
+    assert w.built == 0  # no slot needed the catalogue
 
 
 async def test_a_tray_whose_nozzle_the_report_does_not_say_sends_nothing(pg_pool: PgPool) -> None:
@@ -552,7 +588,8 @@ async def test_a_busy_printer_is_sent_nothing_until_it_is_idle(
     report = await w.run()
 
     assert w.sender.runs == []
-    assert report == SlotReport()
+    assert report == SlotReport(waiting=1)  # P49
+    assert w.rows() == []
     w.report(_report())
     assert (await w.run()) == SlotReport(configured=1)
 
@@ -605,16 +642,33 @@ async def test_a_pending_configure_is_unconfirmed_not_done_or_failed(pg_pool: Pg
     assert len(w.sender.runs) == 1
     assert report == SlotReport(unconfirmed=1)
     (row,) = w.rows()
-    assert row["params_hash"] and row["last_error"] is None
+    assert row["params_hash"] and row["last_error"] == "unconfirmed"
+    assert row["run_key"] == w.sender.keys[0]
 
 
-async def test_an_unacknowledged_configure_is_unconfirmed(pg_pool: PgPool) -> None:
+async def test_an_unacknowledged_configure_is_unconfirmed_and_not_a_repeat(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P48: the row says ``unconfirmed``, a warning of its own says so, and the repeat
+    counter does not read an unacknowledged run as an AMS that does not echo."""
     w = World(pg_pool)
     w.sender.confirmed = False
 
-    report = await w.run()
+    with caplog.at_level(logging.WARNING, logger=rfid_slots.__name__):
+        for _ in range(4):
+            assert await w.run() == SlotReport(unconfirmed=1)
 
-    assert report == SlotReport(unconfirmed=1)
+    (row,) = w.rows()
+    assert (row["last_error"], row["attempts"], row["run_key"]) == ("unconfirmed", 0, None)
+    assert [r for r in caplog.records if "sent, not acknowledged" in r.message]
+    assert not [r for r in caplog.records if "same values" in r.message]
+    # Four closed runs: each pass sent its own (no key joins a closed run).
+    assert len(set(w.sender.published)) == 4
+
+    w.sender.confirmed = True
+    assert await w.run() == SlotReport(configured=1)
+    (row,) = w.rows()
+    assert (row["last_error"], row["attempts"]) == (None, 1)
 
 
 async def test_a_spool_without_temperatures_takes_the_trays(pg_pool: PgPool) -> None:
@@ -721,6 +775,7 @@ async def test_it_runs_with_no_bambuddy_configured(
         reports=w.reports,
         commands=w.sender,
         profiles=object(),  # type: ignore[arg-type]
+        deadline=time.monotonic() + 60,
     )
 
     assert report == SlotReport(configured=1)
@@ -731,7 +786,12 @@ async def test_with_no_slicer_profiles_a_slot_is_no_preset(pg_pool: PgPool) -> N
     w = World(pg_pool)
 
     report = await reconcile_slots_now(
-        w.filament, printers=w.printers, reports=w.reports, commands=w.sender, profiles=None
+        w.filament,
+        printers=w.printers,
+        reports=w.reports,
+        commands=w.sender,
+        profiles=None,
+        deadline=time.monotonic() + 60,
     )
 
     assert report == SlotReport(no_preset=1)
@@ -750,7 +810,234 @@ async def test_a_held_lock_skips_the_step(pg_pool: PgPool, monkeypatch: pytest.M
             reports=w.reports,
             commands=w.sender,
             profiles=object(),  # type: ignore[arg-type]
+            deadline=time.monotonic() + 60,
         )
     finally:
         holder.close()
     assert skipped is None and w.sender.runs == []
+
+
+def _tray(tray_id: int, uuid: str) -> dict[str, Any]:
+    return {
+        "id": str(tray_id),
+        "tray_color": "FF0000FF",
+        "tray_type": "PLA",
+        "tray_info_idx": "GFA00",
+        "tray_uuid": uuid,
+        "tag_uid": "0000000000000000",
+        "state": 11,
+    }
+
+
+def _four_slots(w: World) -> None:
+    """AMS 0's four trays, each an override tag of its own spool."""
+    more = []
+    for tray_id in (0, 2, 3):
+        uuid = f"{tray_id + 16:032X}"
+        spool = w.filament.spools.create(SpoolCreate(type_id=w.type_id), actor="ann").id
+        w.bind(override=True, spool=spool, tray=uuid)
+        more.append(_tray(tray_id, uuid))
+    w.report(_report(*more))
+
+
+async def test_the_slots_runs_are_sent_together(pg_pool: PgPool) -> None:
+    """P46: one pass waits about one run's wait, not one per slot."""
+    w = World(pg_pool)
+    _four_slots(w)
+    w.sender.delay = 0.5
+
+    started = time.monotonic()
+    report = await w.run()
+    took = time.monotonic() - started
+
+    assert report == SlotReport(configured=4)
+    assert w.sender.most == 4
+    assert took < 4 * w.sender.delay  # one after another would take at least 2 s
+
+
+async def test_at_most_so_many_runs_are_open_at_once(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    w = World(pg_pool)
+    _four_slots(w)
+    w.sender.delay = 0.05
+    monkeypatch.setattr(rfid_slots, "MAX_CONCURRENT_RUNS", 2)
+
+    assert await w.run() == SlotReport(configured=4)
+    assert w.sender.most == 2
+
+
+async def test_a_deadline_already_past_leaves_the_slots_waiting(pg_pool: PgPool) -> None:
+    w = World(pg_pool)
+    _four_slots(w)
+
+    report = await w.run(deadline=time.monotonic() - 1)
+
+    assert report == SlotReport(waiting=4)
+    assert w.sender.runs == [] and w.rows() == []
+    assert await w.run() == SlotReport(configured=4)
+
+
+async def test_a_slot_not_started_by_the_deadline_waits(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each run takes ten seconds of a fake clock; one at a time, only the first starts
+    before the deadline."""
+    w = World(pg_pool)
+    _four_slots(w)
+    clock = [0.0]
+    monkeypatch.setattr(rfid_slots, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(rfid_slots, "MAX_CONCURRENT_RUNS", 1)
+    answer = w.sender.run
+
+    async def slow(printer_id: str, run: LanCommandRun, *, key: str | None = None) -> Any:
+        clock[0] += 10
+        return await answer(printer_id, run, key=key)
+
+    monkeypatch.setattr(w.sender, "run", slow)
+
+    assert await w.run(deadline=5.0) == SlotReport(configured=1, waiting=3)
+
+
+def test_the_start_deadline_leaves_room_for_one_wait() -> None:
+    assert rfid_slots.start_deadline(100.0, rfid_slots.ROUTE_BUDGET_S) == pytest.approx(
+        100.0 + rfid_slots.ROUTE_BUDGET_S - LAN_ROUTE_WAIT_S
+    )
+
+
+async def test_a_pending_run_is_joined_by_the_next_pass_not_sent_again(pg_pool: PgPool) -> None:
+    """P47: the slot's key is kept while its run is open, so the next pass joins it."""
+    w = World(pg_pool)
+    w.sender.pending = True
+
+    assert await w.run() == SlotReport(unconfirmed=1)
+    assert await w.run() == SlotReport(unconfirmed=1)
+
+    assert len(w.sender.runs) == 2 and len(w.sender.published) == 1
+    assert w.sender.keys[0] == w.sender.keys[1]
+    key = w.sender.keys[0]
+    assert key is not None and key.startswith("slot-0-1-")
+
+    w.sender.pending = False  # the run closed, acknowledged
+    assert await w.run() == SlotReport(configured=1)
+    assert w.sender.keys[2] == key and len(w.sender.published) == 1
+    (row,) = w.rows()
+    assert (row["last_error"], row["run_key"]) == (None, None)
+
+    # The AMS never shows it: the next configure is a new run, not the closed one's outcome.
+    assert await w.run() == SlotReport(configured=1)
+    assert len(w.sender.published) == 2 and w.sender.keys[3] != key
+
+
+async def test_a_tray_showing_an_unconfirmed_configure_settles_it(pg_pool: PgPool) -> None:
+    w = World(pg_pool)
+    w.sender.pending = True
+    await w.run()
+    w.report(_report(tray_info_idx="GFL99"))  # it applied
+
+    assert await w.run() == SlotReport(unchanged=1)
+    (row,) = w.rows()
+    assert (row["last_error"], row["run_key"]) == (None, None)
+
+
+async def test_no_override_slot_builds_no_catalogue(pg_pool: PgPool) -> None:
+    w = World(pg_pool)
+    w.bind(override=False)
+
+    async def boom() -> Catalogue | None:
+        raise AssertionError("the catalogue is built only for a slot that needs it")
+
+    report = await reconcile_slots(
+        w.filament,
+        w.sender,
+        printers=w.printers,
+        reports=w.reports,
+        catalogue=boom,
+        deadline=time.monotonic() + 60,
+    )
+
+    assert report == SlotReport()
+
+
+async def test_the_catalogue_is_built_once_a_pass(pg_pool: PgPool) -> None:
+    w = World(pg_pool)
+    _four_slots(w)
+
+    await w.run()
+
+    assert w.built == 1
+
+
+async def test_an_unsupported_unit_is_recorded_once_and_never_sent(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """P22: a unit the LAN commands cannot address counts under its label each pass; its
+    row is written once while the params' hash is unchanged."""
+    w = World(pg_pool)
+
+    def unsupported(*_args: object, **_kwargs: object) -> object:
+        raise UnsupportedUnitError("no known wire ids for unit 0")
+
+    monkeypatch.setattr(ams_slots, "configure_commands", unsupported)
+
+    with caplog.at_level(logging.WARNING, logger=rfid_slots.__name__):
+        assert await w.run() == SlotReport(unsupported_unit=1)
+        assert await w.run() == SlotReport(unsupported_unit=1)
+
+    assert w.sender.runs == []
+    (row,) = w.rows()
+    assert (row["last_error"], row["attempts"]) == ("unsupported_unit", 1)
+    assert row["params_hash"]
+    assert len([r for r in caplog.records if "cannot configure" in r.message]) == 1
+
+    w.preset("0.4", "GFL98")  # new params: recorded again
+    assert await w.run() == SlotReport(unsupported_unit=1)
+    assert w.rows()[0]["attempts"] == 2
+
+
+async def test_a_minimum_above_the_maximum_is_invalid_temps(pg_pool: PgPool) -> None:
+    w = World(pg_pool, temps=False)
+    w.report(_report(nozzle_temp_min="240", nozzle_temp_max="190"))
+
+    report = await w.run()
+
+    assert w.sender.runs == []
+    assert report == SlotReport(invalid_temps=1)
+
+
+async def test_the_real_catalogue_configures_with_no_bambuddy(pg_pool: PgPool) -> None:
+    """The native catalogue of the test profiles, no `catalogue_for` stand-in."""
+    w = World(pg_pool)
+    w.preset("0.4", "Bambu PLA Basic @BBL H2C")
+
+    report = await reconcile_slots_now(
+        w.filament,
+        printers=w.printers,
+        reports=w.reports,
+        commands=w.sender,
+        profiles=Profiles(PROFILES),
+        deadline=time.monotonic() + 60,
+    )
+
+    assert report == SlotReport(configured=1)
+    assert w.sender.sent("ams_filament_setting")["tray_info_idx"] == "GFA00"
+
+
+async def test_an_unconfirmed_slot_does_not_fail_the_activity(pg_pool: PgPool) -> None:
+    w = World(pg_pool)
+    w.preset("0.4", "Bambu PLA Basic @BBL H2C")
+    w.sender.pending = True
+    printers = cast(Printers, SimpleNamespace(store=w.printers, reports=w.reports))
+    run = filament_rfid_activity(
+        printers,
+        w.filament,
+        StoredSettings,  # no Bambuddy: the mode is pending, not failed
+        lambda: FilamentSync(tags="off"),
+        w.sender,
+        lambda: Profiles(PROFILES),
+    )
+
+    assert await run() == "done"
+    assert len(w.sender.runs) == 1
+    (row,) = w.rows()
+    assert row["last_error"] == "unconfirmed"
