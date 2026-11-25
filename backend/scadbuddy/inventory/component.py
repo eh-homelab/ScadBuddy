@@ -17,6 +17,7 @@ from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.kinds import KindStore
 from scadbuddy.inventory.offers import OfferStore
+from scadbuddy.inventory.part_alias import PartAliases
 from scadbuddy.inventory.stock import StockStore
 from scadbuddy.rows.component import ROWS
 
@@ -31,6 +32,7 @@ class InventoryComponent:
         self._items = ItemStore(pool, entities)
         self._offers = OfferStore(pool, shop_currency)
         self._stock = StockStore(pool, entities, shop_currency)
+        self._parts = PartAliases(pool, entities, self._stock, shop_currency)
 
     def opened(self) -> ConnectionPool[Connection[DictRow]]:
         """The shared pool, opened on first use (an open pool ignores it)."""
@@ -56,6 +58,12 @@ class InventoryComponent:
     def stock(self) -> StockStore:
         self.opened()
         return self._stock
+
+    @property
+    def parts(self) -> PartAliases:
+        """The `/parts` aliases (#7067 Task 9)."""
+        self.opened()
+        return self._parts
 
 
 INVENTORY: Key[InventoryComponent] = Key("inventory")

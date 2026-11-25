@@ -55,9 +55,8 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
+from scadbuddy.core.paths import LEGACY_PRESETS_NAME, THUMBNAIL_NAME, DataPaths
 from scadbuddy.core.tracing import span
-from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
 from scadbuddy.render.solids import WRAPPER_PREFIX

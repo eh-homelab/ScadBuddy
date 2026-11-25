@@ -9,6 +9,9 @@ from scadbuddy.core.fontconfig import fonts_dir
 SOURCE_NAME = "model.scad"
 #: The model's own metadata. Since #90 it is NOT the schema cache -- see below.
 MODEL_META_NAME = "model.json"
+#: A template's legacy thumbnail, beside its source.
+THUMBNAIL_NAME = "thumbnail.png"
+README_NAME = "README.md"
 # The DERIVED customizer schema. Never `model.json` and never inside `models/`:
 # it is written lazily by the first render or schema read, outside any commit,
 # so keeping it in the versioned tree would leave the repository permanently

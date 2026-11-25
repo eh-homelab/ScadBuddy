@@ -1398,3 +1398,18 @@ def test_a_pipeline_the_parser_chokes_on_never_breaks_the_listing(
     assert {row["slug"] for row in listing.json()} >= {model, "other"}
     detail = client.get(f"/api/v1/models/{model}")
     assert detail.status_code == 200 and detail.json()["inputs_version"] == 0
+
+
+def test_the_hook_is_attached_after_the_migrations(client: TestClient) -> None:
+    """#7317, plan decision 2: the history writes template rows once the migrations
+    have made the table, and the catalogue shares the same hook."""
+    state = client.app.state.scadbuddy  # type: ignore[attr-defined]
+    refresh = state.catalogue.refresh
+    assert refresh is not None
+    assert state.history.template_rows is refresh
+
+    state.catalogue.create("rowed", "cube(1);\n", ModelMeta(name="Rowed"))
+
+    row = refresh.rows.get("rowed")
+    assert row is not None and row.name == "Rowed"
+    assert row.version == state.history.last_commit("rowed")

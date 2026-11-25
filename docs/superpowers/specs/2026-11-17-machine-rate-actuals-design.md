@@ -368,8 +368,12 @@ counted_to = t                          # d > 0; not for the "change nothing" ca
 on a report: state, subtask = its gcode_state and subtask_name, each only when present
 ```
 
-- **Gaps.** The watch writes at least every 10 s while the link is up (§2.3), so a gap
-  over 90 s means the watch or the link was down. If the same print still runs after the
+- **Gaps.** While the link is up, the row is written at least every
+  `reports.REFRESH_EVERY` (30 s) while reports arrive (a report with nothing new is
+  skipped only within that of the last written report, `report_seen_at`, which a touch
+  does not move, and of `counted_to`, #7389), and touched every `HEARD_EVERY` (10 s)
+  when the link is quiet (§2.3), so a gap over 90 s means the watch or the link was
+  down. If the same print still runs after the
   gap, the printer printed through it (a printer does not stop when ScadBuddy's link
   drops), so the gap counts. If the state or the print changed, ScadBuddy cannot know
   when, so it counts none of the gap and adds it to `unseen_seconds`. **(call)** The

@@ -109,6 +109,16 @@ LOST_SLICES_PATCH = "housekeeping-sweep-lost-slices"
 #: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
 GIT_SWEEP = "housekeeping_maintain_models_git"
 GIT_PATCH = "housekeeping-maintain-models-git"
+#: #7317: copy the templates' files to their `templates` rows and reconcile the rows
+#: with the folders (`library.template_copy.copy_templates`), as the API's start does
+#: once. It repairs what no refresh wrote: a pod on an older build, a failed refresh, a
+#: commit or a file edit made by hand on the volume, a restored volume. Its advisory
+#: lock keeps one run at a time: a run that does not get it (another replica's, or the
+#: start's copy) does nothing. Directly after `ACTIVITY_SWEEP` (which must stay right
+#: after `GIT_SWEEP`: prod runs it there), behind its own patch; on the sweeps' Schedule
+#: only, so it obeys their switch.
+TEMPLATE_COPY_SWEEP = "housekeeping_copy_templates"
+TEMPLATE_COPY_PATCH = "housekeeping-copy-templates"
 #: Activity retention and repair (spec 2026-10-09 §6). Last: it reads what the sweeps
 #: before it settled.
 ACTIVITY_SWEEP = "housekeeping_activity"
@@ -285,6 +295,7 @@ SWEEPS = (
     LOST_SLICES_SWEEP,
     GIT_SWEEP,
     ACTIVITY_SWEEP,
+    TEMPLATE_COPY_SWEEP,
     ATTACHMENTS_SWEEP,
     ENTITY_ORPHANS_SWEEP,
     LIBRARY_SWEEP,
@@ -455,6 +466,9 @@ OUTPUT_BYTES_TIMEOUT = timedelta(minutes=30)
 #: One read of the attempts, then one Temporal start per attempt; the downloads run in
 #: each attempt's own ``AttemptMedia`` step, not here.
 ATTEMPT_MEDIA_TIMEOUT = timedelta(minutes=5)
+#: One walk of every template folder (a few stats each), one walk of the models history,
+#: and a read and a write per batch of templates whose stamp or version changed.
+TEMPLATE_COPY_TIMEOUT = timedelta(minutes=15)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -517,6 +531,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return OUTPUT_BYTES_TIMEOUT
     if sweep == ATTEMPT_MEDIA_SWEEP:
         return ATTEMPT_MEDIA_TIMEOUT
+    if sweep == TEMPLATE_COPY_SWEEP:
+        return TEMPLATE_COPY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -591,6 +607,8 @@ class Housekeeping:
             if sweep == OUTPUT_BYTES_SWEEP and not workflow.patched(OUTPUT_BYTES_PATCH):
                 continue
             if sweep == ATTEMPT_MEDIA_SWEEP and not workflow.patched(ATTEMPT_MEDIA_PATCH):
+                continue
+            if sweep == TEMPLATE_COPY_SWEEP and not workflow.patched(TEMPLATE_COPY_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

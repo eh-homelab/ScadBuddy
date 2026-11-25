@@ -1528,6 +1528,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`OutputRows.write_derived_many`); the plate cover's key names its own sha256
   (`plate_cover_key`). The render worker's blob-index allowlist (`api/crud_render.py` `READ_KINDS`) never
   admits `output`.
+  Template records (#7317, spec `2026-11-25-model-records-in-postgres-design.md`, phase 1;
+  `docs/architecture/data.md` "Template records"): `template_rows.py` (`TemplateRows`, the
+  derived `templates` rows and the `template_copy_runs` ledger; git stays the record),
+  `template_refresh.py` (`TemplateRefresh`, the models history's hook: a commit's rows in
+  its HEAD transaction, a no-commit write's under the write lock; a failure is logged and
+  counted in `scadbuddy_template_refresh_failures_total`, never raised) and
+  `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
+  `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
+  of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
+  skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
@@ -2141,15 +2151,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
   `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
   `orders_profit_report` (read) and `order_list`'s new filters.
-  Job cost phase 6, parts (#5543, §11): `orders/parts.py` (`PartStore`, the `parts`,
-  `part_stock_moves`, `model_part_rules` and `order_item_parts` rows; a unit cost is a
-  `numeric` rate, each cost entry rounded once), routes `api/parts.py` (`/parts…`,
-  `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`). `Lifecycle.add_item` copies
-  the model's rule; `accept_fulfilment` making an item `fulfilled` takes its parts out of stock
-  as `material` cost entries `part:<item>:<part>` (`parts.used`), `unfulfil_item` gives them
-  back (`parts.returned`); a fulfilled item's parts are fixed (`item_parts_used`). The
-  unit-cost history takes `item_id` (`parts_unit_minor`). Agent `part_list`, `part_stock_add`,
-  `order_item_parts_set`.
+  Job cost phase 6, parts (#5543, §11; since #7067 a part is an inventory item whose kind
+  tracks lots): `orders/parts.py` (`PartStore`: the `model_part_rules` and `order_item_parts`
+  rows, over `item_id`; `part_id` is read the same for one release), routes `api/parts.py`
+  (`GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`, the rule routes). The
+  part-row routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are aliases
+  of the inventory for one release (`inventory/part_alias.py` `PartAliases`): a part is an
+  item of kind `hardware`, its pack and price its newest offer and price point. A part with
+  no supplier has no offer: it reads as a pack of 1 at 0, a pack on a create or an edit is 422
+  (R-P2-34), and Add stock takes the body's price and writes no price point (R-P2-25). The
+  unit cost leaves out lots of unknown cost with no cost entered; with none on hand and no
+  price point it is `cost_unknown` (R-P2-35).
+  `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
+  item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
+  first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then
+  its lots, so no receive or count adds a lot under it; `parts.used`), and `unfulfil_item` gives each use back to its lot
+  at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
+  `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
+  `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The
+  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list`,
+  `part_stock_add`, `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,
   `orders/machine_rate.py` (`compute`, pure; `MachineRateStore` over
   `printer_cost_profiles`, `printer_wear_parts` and `printer_maintenance_costs`, each in
@@ -2633,7 +2654,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the instant read has a firm price before any visitor asks. A file listing's run submits no
   render and prices the colours its page opens on, with no visitor charge (`_warm_file`,
   `file_prices.py` `default_choice`, `listings.py` `page_colours`, a copy of the page's
-  `fileParts.ts` `partFilaments` with no pick: change both together, #7523). A start that fails, or takes
+  `fileParts.ts` `partFilaments` with no pick, both tested on
+  `test-fixtures/storefront/file-page-colours.json`, #7523). A start that fails, or takes
   more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
   given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it
