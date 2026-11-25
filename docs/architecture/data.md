@@ -221,7 +221,10 @@ their objects are deleted: no key of the other output moved, so that output keep
 bytes. A put into a full store is a 507. On `bambuddy` (spec §6.4) no output blob is
 written: the bytes stay files. The `local` backend has no content store, so the outputs
 get one of their own under `data/output-blobs/`, with the shared index and spool (#7257,
-plan D7); the byte copy runs there too. A store migration to `bambuddy` is refused while the index holds an `output` blob
+plan D7); the byte copy runs there too. A store switch from `local` to `s3` (no store
+migration from `local`, `workflows/store_migration_models.py`) leaves `outputs` rows whose
+keys have index rows that name `local`: release A falls back to the files, and release B
+is to answer 500 for them. This affects dev stores only. A store migration to `bambuddy` is refused while the index holds an `output` blob
 (`scadbuddy/store/migrate.py` `refuse_outputs_to_bambuddy`). A delete deletes the row
 and releases its byte holds in one transaction, then removes the folder; the content sweep
 removes the blobs after its grace (`OutputRows.delete`).
@@ -407,14 +410,17 @@ After the mark, release A:
   whose oldest hold is past the grace and which has no `outputs` row and no claim younger
   than the grace. It scans no folder and reads no `output_hold_slugs`.
 
-A save claims its output id (#5390, a quote's attempts) in `output_claims` first, then
-makes the folder (`OutputStore.claim`). A pod of release B is to claim in the table only,
+A save that names its id (a quote's attempt, #5390) claims it in `output_claims` first,
+then makes the folder (`OutputStore.claim`). Other saves take a new id and no claim. As
+with a phase 2 pod's save, their holds are kept only while they are younger than the
+grace. A pod of release B is to claim in the table only,
 so both share one claim during release B's roll. A claim ends in one of three ways: the
 save's row deletes it in the row's transaction, a failed save releases it
 (`output_operations.py`), or the hold reaper prunes it once it is older than
 `ORPHAN_HOLD_GRACE` (1 hour). A release that fails is logged and left to the prune. So
 `ORPHAN_HOLD_GRACE` is also the claim's lease: a save that runs longer than it can lose its
-claim, and another pod can then claim the same id. Release B is to keep a live save's
+claim, and a release B pod can then claim the same id (a release A pod's row claim
+succeeds, but its `mkdir` fails on the live save's folder, and it releases the claim). Release B is to keep a live save's
 claim. A phase 2 pod that saves after the mark takes no table claim, and its holds are
 kept only while they are younger than the grace.
 
@@ -422,6 +428,11 @@ Release B's migration is to refuse to run while the mark is missing (unless `out
 and `output_index` are both empty), and while any row has `bytes_at` NULL. The migration
 runs at the API's start, so a refused release B pod does not start, and the release A
 pods go on serving.
+
+Before release A's roll, read `GET /api/v1/outputs/copy-status`: the row copy's
+`not_copied` must be empty (fix or remove each folder first). Such a folder has no
+readable `meta.json` and so no row. Once the mark exists, the rows-only reaper releases
+its Parts holds past the grace, and the content sweep then removes its pieces.
 
 After release A's roll ends:
 

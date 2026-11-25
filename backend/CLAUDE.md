@@ -1536,9 +1536,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   row names no blob (`bytes_at` NULL) or the blob is lost. #7257 cuts over in two
   releases (data.md "The cut-over"). Release A: the cut-over mark `output_cutover`
   stops both copies; after the mark a write into an output's folder skips a missing
-  folder (`OutputStore._folder_write`) and the hold reaper reads rows only; a save claims
-  its id in `output_claims` before its folder, and a claim older than `ORPHAN_HOLD_GRACE`
-  is pruned, so a save longer than that can lose its claim (release B is to keep a live
+  folder (`OutputStore._folder_write`) and the hold reaper reads rows only; a save that
+  names its id (a quote's attempt, #5390) claims it in `output_claims` before its folder
+  (other saves take a new id and no claim, and their holds are kept only while they are
+  younger than the grace), and a claim older than `ORPHAN_HOLD_GRACE` is pruned, so a save longer than that can lose its claim (release B is to keep a live
   save's claim). Release B (not built yet) is to remove the folders, the fallback and
   `output_index`, and its migration is to refuse to run without the mark. A reader that needs a path
   opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary

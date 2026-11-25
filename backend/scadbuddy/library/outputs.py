@@ -2484,10 +2484,11 @@ _RELEASE_ORPHANS = (
 
 def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
     """`reap_orphan_holds` after the cut-over mark (#7257): rows only, no folder and no
-    ``output_hold_slugs``. A save of this build holds its claim from before its first
-    hold until its row commits, so its holds are kept while the claim is younger than
-    ``grace``: a save that runs longer than ``grace`` can lose them. A phase 2 pod's save
-    takes no claim, so its holds are kept only while they are younger than ``grace``."""
+    ``output_hold_slugs``. A save that names its id (a quote's attempt, #5390) claims it
+    in ``output_claims`` before its folder, so its holds are kept while the claim is
+    younger than ``grace``: a save that runs longer than ``grace`` can lose them. Other
+    saves take a new id and no claim. As with a phase 2 pod's save, their holds are kept
+    only while they are younger than ``grace``."""
     with refs.pool.connection() as conn:
         found = conn.execute(_RELEASE_ORPHANS, {"kind": OUTPUT_HOLDER, "grace": grace}).fetchall()
     orphans = [str(row["holder_id"]) for row in found]

@@ -97,7 +97,10 @@ class _ReleaseFails(OutputRows):
 
 
 def test_failed_release_in_claim_is_logged_not_raised(
-    tmp_path: Path, pool: Pool, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    pool: Pool,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A row claim's release that fails (A4 review M2) is logged and left to the
     reaper's prune. A folder that is there still answers False, so a quote takes a fresh
@@ -111,11 +114,15 @@ def test_failed_release_in_claim_is_logged_not_raised(
         assert store.claim(SLUG, taken) is False
     assert "could not release a claim" in caplog.text
 
-    blocked = "e" * 32
-    parent = paths.output_dir(SLUG, blocked).parent
-    parent.chmod(0o500)
-    try:
-        with pytest.raises(PermissionError):
-            store.claim(SLUG, blocked)
-    finally:
-        parent.chmod(0o700)
+    # A refusal by mode would not show as root (CI's pytest), so the mkdir raises here.
+    blocked = paths.output_dir(SLUG, "e" * 32)
+    real_mkdir = Path.mkdir
+
+    def refuse(self: Path, *args: object, **kwargs: object) -> None:
+        if self == blocked:
+            raise PermissionError(13, "Permission denied", str(self))
+        real_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "mkdir", refuse)
+    with pytest.raises(PermissionError):
+        store.claim(SLUG, "e" * 32)

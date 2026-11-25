@@ -243,10 +243,12 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    each byte run that ended. After the mark, both copies do nothing (checked before and
    under their locks); `GET /outputs/copy-status` names it as `cut_over_at`. After the
    mark, a write into a missing folder skips its file step, and the hold reaper reads
-   rows only. The list and the print links read `outputs`. A save claims its id in
-   `output_claims` before its folder; the claim ends with the save's row, a failed save's
-   release, or the reaper's prune past `ORPHAN_HOLD_GRACE`, which is so the claim's lease:
-   a save longer than that can lose its claim (phase 3b keeps a live save's claim). A
+   rows only. The list and the print links read `outputs`. A save that names its id (a
+   quote's attempt, #5390) claims it in `output_claims` before its folder. Other saves
+   take a new id and no claim. As with a phase 2 pod's save, their holds are kept only
+   while they are younger than the grace. A claim ends with the save's row, a failed
+   save's release, or the reaper's prune past `ORPHAN_HOLD_GRACE`, which is so the claim's
+   lease: a save longer than that can lose its claim (phase 3b keeps a live save's claim). A
    phase 2 pod that saves after the mark takes no table claim; its holds are kept only
    within the grace. A phase 2 pod's row copy after the mark can leave a row with
    `bytes_at` NULL; the runbook in `docs/architecture/data.md` "The cut-over" checks
