@@ -285,8 +285,9 @@ def check_schema(
     pattern a person sent is ever compiled. `required` (spec 6.3b) is taken only with
     `allow_required`: a list of distinct keys, each in `defined` (the schema's own
     `properties` when not given; an item kind's merged ones). Other empty schemas, such as
-    an integer between two exclusive bounds, are not found. `format` is an annotation only (it checks nothing),
-    but "regex" is refused all the same. Any other keyword is refused."""
+    an integer between two exclusive bounds, are not found. `format` is an annotation only
+    (it checks nothing), but "regex" is refused all the same. Any other keyword is
+    refused."""
     if not isinstance(schema, dict):
         raise BadPropertySchema("a schema is a JSON object")
     if _has_nul(schema):

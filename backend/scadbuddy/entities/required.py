@@ -5,21 +5,26 @@ a schema change needs no backfill."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 from uuid import UUID
 
 from psycopg import Connection
 from psycopg.rows import DictRow
+from pydantic import JsonValue
 
 from scadbuddy.entities.properties import (
     ITEM,
     Completeness,
+    EntityPropertyStore,
     MissingRequiredProperties,
+    PropertyPatch,
     completeness,
     schema_for,
 )
 from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.registry import EntityStore
+from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
 
@@ -27,6 +32,36 @@ _VALUES = (
     "SELECT e.ref, p.key, p.value FROM entities e JOIN entity_properties p"
     " ON p.entity_id = e.id WHERE e.kind = %s AND e.ref = ANY(%s)"
 )
+
+
+#: Every method `save_properties_on` calls runs on the connection it is given.
+_PROPERTIES = EntityPropertyStore(None, EntityStore(None))
+
+#: The fields a row's save may send and still not be checked (spec 6.3b): an archive, a
+#: restore or a re-order is no form save.
+EXEMPT_FIELDS = frozenset({"archived", "sort_order"})
+
+
+def save_properties_on(
+    conn: Conn,
+    ref: EntityRef,
+    properties: Mapping[str, JsonValue] | None,
+    by: Actor,
+    *,
+    check: bool,
+) -> None:
+    """A create's or save's ``properties`` on the row it just wrote, in its transaction,
+    as ``manual`` (spec 6.3b); then, with ``check``, `check_row`."""
+    if properties:
+        _PROPERTIES.apply_on(conn, ref, PropertyPatch(set=dict(properties)), by)
+    if check:
+        check_row(conn, ref)
+
+
+def checks_save(fields_set: Iterable[str]) -> bool:
+    """Whether a save that sends ``fields_set`` is checked: not one that sends only
+    `EXEMPT_FIELDS` (spec 6.3b)."""
+    return bool(set(fields_set) - EXEMPT_FIELDS)
 
 
 def check_row(conn: Conn, ref: EntityRef) -> None:
@@ -42,13 +77,15 @@ def completeness_of_kind(conn: Conn, kind: str, refs: Iterable[str]) -> dict[str
     wanted = list(dict.fromkeys(refs))
     if not wanted:
         return {}
+    schema: dict[str, Any] = {}
+    if kind != ITEM:
+        schema = schema_for(conn, EntityRef(kind, wanted[0]))
+        if not schema.get("required") and not schema.get("properties"):
+            return {ref: Completeness() for ref in wanted}  # no values to read
     values: dict[str, dict[str, Any]] = {ref: {} for ref in wanted}
     for row in conn.execute(_VALUES, (kind, wanted)).fetchall():
         values[row["ref"]][row["key"]] = row["value"]
     if kind != ITEM:
-        schema = schema_for(conn, EntityRef(kind, wanted[0]))
-        if not schema.get("required") and not schema.get("properties"):
-            return {ref: Completeness() for ref in wanted}
         return {ref: completeness(schema, values[ref]) for ref in wanted}
     return _items(conn, wanted, values)
 

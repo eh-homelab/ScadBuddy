@@ -24,6 +24,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StringConstraints,
     field_validator,
     model_validator,
@@ -1177,6 +1178,9 @@ class SpoolCreate(_In):
     grams_left: Grams | None = None
     #: Whether the spool was added full (#7149 R-7149-2); ``None`` is not known.
     added_full: bool | None = None
+    #: #7703 (spec 6.3b): its properties, written with it; a key set to ``null`` is none.
+    #: Only the spool routes take it (`create_on` refuses it).
+    properties: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def _typed(self) -> SpoolCreate:
@@ -1240,6 +1244,8 @@ class SpoolPatch(_Patch):
     note: Note | None = None
     added_full: bool | None = None
     archived: bool | None = None
+    #: #7703 (spec 6.3b): properties to set with the save (`null` removes a key).
+    properties: dict[str, JsonValue] | None = None
 
 
 class SpoolNames(BaseModel):
@@ -1318,6 +1324,10 @@ class Spool(_Row):
     #: Server-computed (#7682): ``last_drift_g`` is at or over the setting
     #: ``filament_weighing_drift_notice_g``, either way.
     drift_notice: bool = False
+    #: #7703 (spec 6.3b): the required keys it has no value for, and its defined keys
+    #: whose value does not fit; both empty for an archived spool.
+    missing_properties: list[str] = Field(default_factory=list)
+    invalid_properties: list[str] = Field(default_factory=list)
 
 
 # -- the trays (`filament/inventory.py`) ----------------------------------------------
@@ -1762,6 +1772,8 @@ class SpoolBulkUpdate(SpoolIds):
     def _fields(self) -> SpoolBulkUpdate:
         if "archived" in self.patch.model_fields_set:
             raise ValueError("a bulk edit does not archive; use bulk-archive or bulk-restore")
+        if "properties" in self.patch.model_fields_set:
+            raise ValueError("a bulk edit sets no properties; set them on each spool")
         if not self.patch.model_fields_set:
             raise ValueError("the patch sets no field")
         return self

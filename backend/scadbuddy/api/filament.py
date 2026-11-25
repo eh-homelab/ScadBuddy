@@ -62,6 +62,8 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
+from scadbuddy.entities.problems import bad_property_value, missing_required
+from scadbuddy.entities.properties import BadPropertyValue, MissingRequiredProperties
 from scadbuddy.filament import (
     capture,
     label_pdf,
@@ -192,6 +194,7 @@ from scadbuddy.filament.types import (
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
+from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.profile_fetch.wire import (
@@ -312,6 +315,10 @@ def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
 
 
 def _refused(exc: ValueError) -> ApiError:
+    if isinstance(exc, MissingRequiredProperties):
+        return missing_required(exc)
+    if isinstance(exc, BadPropertyValue):
+        return bad_property_value(exc.key, exc.reason)
     if isinstance(exc, CatalogKeyClashError):
         holder: dict[str, Any] = {
             f"{exc.noun}_id": str(exc.holder_id),
@@ -1072,6 +1079,8 @@ _SPOOL_REFUSED = (
     TagKeysClashError,
     TypeRowsDuplicateError,
     PresetUnknownError,
+    MissingRequiredProperties,
+    BadPropertyValue,
 )
 
 
@@ -1125,7 +1134,15 @@ async def list_spools(
 )
 async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCreate) -> m.Spool:
     try:
-        return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
+        return await asyncio.to_thread(
+            partial(
+                filament.spools.create,
+                body,
+                actor=actor(caller),
+                by=current_actor(),
+                checked=True,
+            )
+        )
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
 
@@ -1160,7 +1177,7 @@ async def bulk_create_spools(
     body: m.SpoolBulkCreate,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> JSONResponse:
-    who = actor(caller)
+    who, by = actor(caller), current_actor()
     # A person's key, under their own name, as the CSV import keys it.
     key = f"{who}\x1f{required_key(idempotency_key)}"
     asked = body.model_dump(mode="json")
@@ -1172,7 +1189,7 @@ async def bulk_create_spools(
             def run() -> Replay:
                 try:
                     with conn.transaction():
-                        ids = filament.spools.bulk_on(conn, body, actor=who)
+                        ids = filament.spools.bulk_on(conn, body, actor=who, by=by, checked=True)
                 except pg_errors.ForeignKeyViolation as error:
                     # As `PUT …/presets` maps it: an unknown `sb-<id>` preset is its own 422.
                     if names_preset(error):
@@ -1384,7 +1401,14 @@ async def patch_spool(
 ) -> m.Spool:
     try:
         changed = await asyncio.to_thread(
-            filament.spools.update, spool_id, body, actor=actor(caller)
+            partial(
+                filament.spools.update,
+                spool_id,
+                body,
+                actor=actor(caller),
+                by=current_actor(),
+                checked=True,
+            )
         )
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None

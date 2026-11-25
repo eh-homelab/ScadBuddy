@@ -2883,7 +2883,7 @@ def test_an_unchanged_pull_reads_in_a_fixed_number_of_queries(pg_pool: PgPool, c
     # transactions for 12 spools before #6768. 20 is the exact count (Decision 238): a new
     # batch read in `_quiet` raises it here, on purpose.
     assert counts.transactions == 2
-    assert counts.statements <= 20
+    assert counts.statements <= 22  # +2: the spool kind's property schema (#7703)
     assert report.archived == 2
     assert (report.created, report.linked, report.updated, report.failed_bb_ids) == (0, 0, 0, [])
     assert _quiet_state(pg_pool) == before
