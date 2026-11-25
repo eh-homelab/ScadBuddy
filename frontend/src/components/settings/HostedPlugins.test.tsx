@@ -1,5 +1,5 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { act, screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse, type JsonBodyType } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
@@ -249,6 +249,78 @@ describe('HostedPluginsPanel', () => {
     expect(await within(editor).findByRole('button', { name: 'Publish version 3' })).toBeDisabled()
     expect(await within(editor).findByText('The draft is the same as version 2. Edit it to publish again.')).toBeInTheDocument()
     expect(within(within(editor).getByRole('region', { name: 'Versions' })).getByText('Version 2')).toBeInTheDocument()
+  })
+
+  it("keeps the newest draft diff when a topic read's answer lands after a save's (#7672)", async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await within(editor).findByText('The draft is the same as version 1. Edit it to publish again.')
+    // Let the subscription's confirmation and any read it starts finish first.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+
+    // The topic's read sees the draft before the save and answers only after the save's read.
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let asked: () => void = () => {}
+    const arrived = new Promise<void>((resolve) => (asked = resolve))
+    server.use(
+      http.get(
+        '/api/v1/hosted-plugins/:name/draft-diff',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as JsonBodyType
+          asked()
+          await held
+          return HttpResponse.json(seen)
+        },
+        { once: true },
+      ),
+      // The event's read also brings a version 2 published elsewhere.
+      http.get(
+        '/api/v1/hosted-plugins/:name/versions',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as { version: number }[]
+          return HttpResponse.json([...seen, { ...seen.at(-1)!, version: 2 }] as JsonBodyType)
+        },
+        { once: true },
+      ),
+    )
+    emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
+    await arrived
+
+    await user.click(within(editor).getByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    await user.type(await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md'), 'Keep it short.')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeEnabled())
+
+    release()
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+    expect(within(editor).queryByText('The draft is the same as version 1. Edit it to publish again.')).not.toBeInTheDocument()
+    // The save's draft read does not order the versions: the event's answer still lands.
+    expect(within(within(editor).getByRole('region', { name: 'Versions' })).getByText('Version 2')).toBeInTheDocument()
+  })
+
+  it("reads nothing again for another plugin's change (#7672)", async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await within(editor).findByText('The draft is the same as version 1. Edit it to publish again.')
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+
+    const reads: string[] = []
+    const listener = ({ request }: { request: Request }) => {
+      const path = new URL(request.url).pathname
+      if (/\/hosted-plugins\/print-notes\/(draft-diff|versions)$/.test(path)) reads.push(path)
+    }
+    server.events.on('request:start', listener)
+    try {
+      emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'greeter' })
+      await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+      expect(reads).toEqual([])
+
+      emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
+      await waitFor(() => expect(reads.length).toBeGreaterThan(0))
+    } finally {
+      server.events.removeListener('request:start', listener)
+    }
   })
 
   it('shows the server refusal of a name, and edits the description, category and tags', async () => {
