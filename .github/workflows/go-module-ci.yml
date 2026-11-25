@@ -7,7 +7,7 @@ name: Go Module CI
 # vendor build for a module that ships its own vendor/), then checks that the
 # root vendor/ is what `go work vendor` writes. gofmt is one walk of the whole
 # tree, gooey's step, and each CLI's image is built and run once
-# (build-go-image.yml publishes them).
+# (build-go-image.yml publishes them; build-image.yml's `core` job publishes core, #7667).
 #
 # Path-gated only on a docs-only change (ci.yml `docs_only`), where it skips.
 # Otherwise ci.yml's `go-select` decides whether this change touched Go
@@ -39,6 +39,20 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    # scadbuddy-core's tests; started on every run, as a service cannot be conditional.
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_INITDB_ARGS: "-c fsync=off -c full_page_writes=off -c synchronous_commit=off"
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - name: No Go changes
         if: ${{ inputs.run != 'true' }}
@@ -112,6 +126,8 @@ jobs:
           # Per-check cap, so one wedged `go test` cannot take the job budget.
           TASK_TIMEOUT: 12m
           MAX_PARALLEL: 2
+          SCADBUDDY_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+          SCADBUDDY_TEST_POSTGRES_REQUIRED: "1"
         run: |
           set -uo pipefail
           mods=()
@@ -233,8 +249,8 @@ jobs:
               mirrors = ["mirror.gcr.io"]
 
       # Each CLI's image (tools/go/<m>/Dockerfile, the repo root as context),
-      # built and run once, as build-go-image.yml will publish it (amd64, the
-      # only platform it publishes). Every CLI must have a Dockerfile, as there.
+      # built and run once, as build-go-image.yml (or, for core, build-image.yml)
+      # will publish it (amd64, the only platform they publish). Every CLI must have a Dockerfile, as there.
       - name: Build and run each CLI image
         if: ${{ !cancelled() && inputs.run == 'true' }}
         run: |

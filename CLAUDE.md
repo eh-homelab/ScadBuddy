@@ -32,6 +32,9 @@ reach the database. Every other process (the render, print and projects workers,
 agent services, agent-durable) is an HTTP client of the CRUD service, with a short-lived
 service credential (PR #5211). The owner decided this on 2026-11-05.
 
+- One exception (the owner, 2026-11-25, #7667): `tools/go/core`, the API's move to Go, is a
+  second database client with the API's own role while the move lasts. It runs no untrusted
+  code. No other process may be one.
 - Never add a new database client, a read or write of another service's tables, or a
   cross grant. A role per caller in one database is not a boundary: a table owner's
   triggers, rules, defaults and builtin-shadowing functions run with the other role's
@@ -292,17 +295,22 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
   that opens a file outside its tree) needs its path in that lane's pattern.
-- Docs-only changes: when every changed path is `docs/**/*.md`, `select-lanes.sh` prints
+- Docs-only changes: when every changed path is `docs/**/*.md`, or a `CLAUDE.md` or
+  `AGENTS.md` in any directory but a `vendor/` tree (these select no lane), `select-lanes.sh` prints
   `docs_only=true`, and the `lint`, `frontend*`, `agent`, `models`, `freshness`,
   `go-select` and `go` jobs skip too; `CI Summary` re-derives it. The `markdown` job
-  (markdownlint-cli2 0.20.0 over `docs/**/*.md`, config `.markdownlint-cli2.jsonc`, style
-  rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
-  nor `build-image.yml` (`paths-ignore`), so it builds and deploys nothing.
+  (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config
+  `.markdownlint-cli2.jsonc`, style rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
+  nor `build-image.yml` (their push `paths` exclude those files), so it builds and deploys nothing.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
-  touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
+  touching Go (a `CLAUDE.md` or `AGENTS.md` outside `vendor/` aside), a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
+  The one exception is `tools/go/core` (#7667): `build-image.yml`'s `core` job publishes
+  `scadbuddy-core` with every main build, under the app image's tags, and
+  `deploy.reusable.yml` pins it in `scadbuddy.yaml`. `build-go-image.yml` skips it, so
+  one workflow writes each tag.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)
   regenerates the root and client `vendor/` after a gomod bump and pushes the commit with
   the `RUNNER_APP` token, which a GITHUB_TOKEN push could not do (it starts no CI); no

@@ -38,6 +38,17 @@ export function NeedsType({ spool }: { spool: Spool }) {
   )
 }
 
+/** #7682: the newest weighing's drift is at or over the notice setting, either way. */
+export function DriftNotice({ spool }: { spool: Spool }) {
+  if (!spool.drift_notice) return null
+  const drift = spool.last_drift_g ?? 0
+  return (
+    <Badge variant="outline" className="font-normal text-muted-foreground" title={`The scale found ${Number(Math.abs(drift).toFixed(1))} g ${drift < 0 ? 'less' : 'more'} than the ledger expected`}>
+      Drift
+    </Badge>
+  )
+}
+
 function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, string>, check?: TrayCheck) {
   switch (column) {
     case 'number':
@@ -47,6 +58,7 @@ function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, str
             #{spool.number}
           </SpoolLink>
           <NeedsType spool={spool} />
+          <DriftNotice spool={spool} />
           <NeedsDrying spool={spool} />
           <CheckTray check={check} />
         </span>

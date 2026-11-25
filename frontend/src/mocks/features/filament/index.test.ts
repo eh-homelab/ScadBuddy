@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError, api, request } from '../../../api/client'
 import {
+  addSpoolEvent,
   archiveSpool,
   bindTag,
   bulkArchiveSpools,
@@ -156,6 +157,25 @@ describe('the filament mocks', () => {
     resetMockState()
     expect((await getSpool(spoolId(1))).effective?.rgba).toBe('#FFFFFFFF')
     expect(await listSpools()).toHaveLength(11)
+  })
+
+  it('keeps a weighing\'s breakdown and the spool\'s last drift when it has the reading (#7682)', async () => {
+    await addSpoolEvent(spoolId(1), { kind: 'weighed', source: 'scale', grams: 700 })
+    expect((await getSpool(spoolId(1))).last_drift_g).toBeNull()
+    const weighed = await addSpoolEvent(spoolId(1), { kind: 'weighed', source: 'scale', reading_g: 940 })
+    expect(weighed.grams_after).toBe(690)
+    expect(weighed.data).toMatchObject({ reading_g: 940, empty_g: 250, empty_source: 'insert', empty_name: 'Bambu reusable spool', expected_g: 700, drift_g: -10 })
+    const spool = await getSpool(spoolId(1))
+    expect(spool.last_drift_g).toBe(-10)
+    expect(spool.drift_notice).toBe(true)
+    expect(spool.last_weighing?.id).toBe(weighed.id)
+    const byHand = await addSpoolEvent(spoolId(1), { kind: 'weighed', reading_g: 900, grams: 640 })
+    expect(byHand.data).toMatchObject({ empty_g: 260, empty_source: 'person', empty_basis: null, empty_name: null })
+    await addSpoolEvent(spoolId(1), { kind: 'weighed', grams: 600 })
+    expect((await getSpool(spoolId(1))).last_drift_g).toBeNull()
+    const bare = await createSpool({ ...NEW_SPOOL, material_id: M.PLA, label_weight_g: 1000 })
+    expect(await refusal(addSpoolEvent(bare.id, { kind: 'weighed', reading_g: 900 }))).toMatchObject({ status: 422, code: 'no_empty_weight' })
+    expect(await refusal(addSpoolEvent(spoolId(1), { kind: 'weighed', reading_g: 100 }))).toMatchObject({ status: 422, code: 'reading_below_empty' })
   })
 
   it('answers 404 for a spool, type or tag that does not exist', async () => {

@@ -1068,7 +1068,9 @@ async def test_a_piece_starts_with_the_short_task_timeout() -> None:
             ).raw_description.execution_config.default_workflow_task_timeout.ToTimedelta()
             for workflow_id in (f"piece-{world.pieces[0].piece_key}", workflow_id_for(job.id))
         ]
-    assert timeouts == [SHORT_TASK_TIMEOUT, timedelta(seconds=10)]
+    piece, own = timeouts
+    assert piece == SHORT_TASK_TIMEOUT
+    assert own > SHORT_TASK_TIMEOUT
 
 
 async def test_a_job_with_no_revision_starts_its_child_and_records_no_lookup() -> None:

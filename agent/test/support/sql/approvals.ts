@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
-import type { ApprovalRoutes, NewApprovalRow, SessionAccessRow, SettleCall } from '../../../src/approvals/crudApprovals.js'
+import type { ApprovalRoutes, NewApprovalRow, SettleCall } from '../../../src/approvals/crudApprovals.js'
 import type { ApprovalRow } from '../../../src/approvals/service.js'
 import { type AuditOutcome, type AuditSurface, SYSTEM_ACTOR } from '../../../src/audit/log.js'
 import type { Logged } from '../../../src/gate/crudStore.js'
@@ -55,36 +55,8 @@ export class SqlApprovals implements ApprovalRoutes {
     return row
   }
 
-  async session(id: string): Promise<SessionAccessRow | undefined> {
-    const [row] = await this.#sql<SessionAccessRow[]>`
-      SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id,
-             CASE WHEN pending_owner_until > now() THEN pending_owner_kind END AS offer_kind,
-             CASE WHEN pending_owner_until > now() THEN pending_owner_id END AS offer_id
-      FROM ai_sessions WHERE id = ${id}`
-    return row
-  }
-
-  async visiblePending(who: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]> {
-    return await this.#sql.unsafe<ApprovalRow[]>(
-      `SELECT ${COLUMNS} FROM ai_approvals a
-       WHERE a.decision IS NULL AND (
-         (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
-         OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
-                    AND ((s.owner_kind = $1 AND s.owner_id = $2) OR (s.creator_kind = $1 AND s.creator_id = $2))))
-       ORDER BY a.created_at, a.id LIMIT 500`,
-      [who.kind, who.id],
-    )
-  }
-
-  async list(sessionId: string | undefined, pending: boolean): Promise<ApprovalRow[]> {
-    if (sessionId === undefined) {
-      return await this.#sql.unsafe<ApprovalRow[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL ORDER BY created_at, id LIMIT 500`)
-    }
-    return await this.#sql.unsafe<ApprovalRow[]>(
-      `SELECT ${COLUMNS} FROM ai_approvals WHERE session_id = $1 ${pending ? 'AND decision IS NULL' : ''}
-       ORDER BY created_at, id LIMIT 500`,
-      [sessionId],
-    )
+  async pending(): Promise<ApprovalRow[]> {
+    return await this.#sql.unsafe<ApprovalRow[]>(`SELECT ${COLUMNS} FROM ai_approvals WHERE decision IS NULL ORDER BY created_at, id LIMIT 500`)
   }
 
   async prepared(who: Pick<Owner, 'kind' | 'id'>): Promise<ApprovalRow[]> {

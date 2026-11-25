@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -120,6 +121,55 @@ def test_save_on_s3_names_its_blobs(s3_client: TestClient, model: str, pool: Poo
     assert row.blobs.preview == f"output-{output_id}-preview"
     held = {key for key, holder in _output_holds(pool) if holder == output_id}
     assert {row.blobs.model, row.blobs.preview} <= held
+
+
+def test_local_store_puts_output_bytes(client: TestClient, paths: DataPaths, pool: Pool) -> None:
+    """#7257 plan D7: on the `local` store the outputs have a blob store of their own,
+    under `data/output-blobs/`, so a save names its blobs there as on `s3`."""
+    assert _state(client).store.backend == "local"
+    created = client.post(
+        "/api/v1/models", json={"name": "Widget", "source": "width = 10;\n"}, headers=press()
+    )
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    saved = client.post(
+        f"/api/v1/models/{slug}/outputs",
+        json={"job_id": _finished_job(client, slug)},
+        headers=press(),
+    )
+    assert saved.status_code == 201, saved.text
+    output_id = saved.json()["id"]
+    rows = _state(client).outputs.rows
+    assert rows is not None
+    row = rows.get(output_id)
+    assert row is not None and row.bytes_at is not None
+    assert row.blobs.model == f"output-{output_id}-model"
+    held = {key for key, holder in _output_holds(pool) if holder == output_id}
+    assert {row.blobs.model, row.blobs.preview} <= held
+    assert any((paths.output_blobs / "output").iterdir())
+
+
+def test_output_blobs_folder_only_on_local(
+    client: TestClient, paths: DataPaths, tmp_path: Path
+) -> None:
+    """#7257 A3 review M2: `ensure` makes `data/output-blobs/` only for `local`'s output
+    store, never on the share of an `s3` or `bambuddy` store."""
+    assert _state(client).store.backend == "local"
+    assert paths.output_blobs.is_dir()
+    other = DataPaths(root=tmp_path / "other-data")
+    other.ensure()
+    assert other.outputs.is_dir()
+    assert not other.output_blobs.exists()
+    other.ensure(output_blobs=True)
+    assert other.output_blobs.is_dir()
+
+
+def test_s3_start_makes_no_output_blobs_folder(s3_client: TestClient) -> None:
+    """#7257 A3 review M2: an app on `s3` makes no `data/output-blobs/`."""
+    state = _state(s3_client)
+    assert state.store.backend == "s3"
+    assert state.paths.outputs.is_dir()
+    assert not state.paths.output_blobs.exists()
 
 
 def test_save_on_s3_reads_its_files_off_the_loop(

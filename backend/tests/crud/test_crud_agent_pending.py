@@ -154,6 +154,8 @@ def test_a_tab_wait_is_an_agent_sessions_only(agent: Agent, tables: PgPool) -> N
     session = _session(tables)
     attention = {"reason": "tab_disconnected", "on_timeout": None}
     agent.post("/gate/open", _open(session, kind="answer", attention=attention))
+    # A row names its runtime since #7323 ('unified' by default): a 'durable' one waits for no tab.
+    _sql(tables, "UPDATE ai_sessions SET runtime = 'durable' WHERE id = %s", (session,))
     assert agent.get("/pending-input/tab-wait", session_id=session) == {"waits": False}
     _sql(tables, "UPDATE ai_sessions SET runtime = 'unified' WHERE id = %s", (session,))
     assert agent.get("/pending-input/tab-wait", session_id=session) == {"waits": True}

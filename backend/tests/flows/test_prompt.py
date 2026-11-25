@@ -2,6 +2,7 @@
 Postgres. `tests/api/test_flow_prompt.py` answers a prompt through its route."""
 
 import asyncio
+import dataclasses
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -15,8 +16,10 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core import input_schema
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.tasks import RemoteTasks
+from scadbuddy.crud.wire import PATTERN_TIMEOUT
 from scadbuddy.flows.models import HOST_FN, TERMINAL, Run
 from scadbuddy.flows.sweep import sweep_flow_runs
 from scadbuddy.flows.typecheck import check_script
@@ -24,7 +27,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.tasks.models import Task, TaskOpen
 from scadbuddy.tasks.store import RunBehindError, RunEndedError, RunNotFoundError, TaskStore
 from scadbuddy.workflows import projects_worker as projects_worker_module
-from scadbuddy.workflows.flow_activities import FlowTaskActivities
+from scadbuddy.workflows.flow_activities import PATTERN_TIMEOUT_ATTEMPTS, FlowTaskActivities
 from scadbuddy.workflows.flow_entries import FLOW_ENTRY_TIMEOUT, EntryTimeout
 from scadbuddy.workflows.flow_tools import _INNER, FLOW_TOOLS, OPEN_WAIT
 from tests.flows.conftest import serve_flows
@@ -404,6 +407,93 @@ async def test_the_open_activity_checks_the_task_itself() -> None:
         )
     assert err.value.type == "TaskRefused" and "default does not fit" in err.value.message
     assert err.value.non_retryable and tasks.calls == []
+
+
+SLOW = {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64, "default": "a" * 60 + "!"}
+
+
+async def test_the_open_activity_tries_a_pattern_timeout_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7437: a busy pod is not a refusal, so the activity fails as one Temporal retries."""
+    monkeypatch.setattr(input_schema, "PATTERNS_BUDGET_S", 0)
+    tasks = Tasks()
+    schema = {"type": "object", "properties": {"x": SLOW}}
+    with pytest.raises(input_schema.PatternsTimedOutError):
+        await ActivityEnvironment().run(FlowTaskActivities(tasks).open, {**OPEN, "schema": schema})
+    assert tasks.calls == []
+
+
+def _at_attempt(attempt: int) -> ActivityEnvironment:
+    env = ActivityEnvironment()
+    env.info = dataclasses.replace(env.info, attempt=attempt)
+    return env
+
+
+async def test_the_open_activity_refuses_a_budget_timeout_on_its_last_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patterns that need more than the shared budget on every pod time out on every
+    attempt: past `PATTERN_TIMEOUT_ATTEMPTS` they are refused, naming the budget (#7437)."""
+    monkeypatch.setattr(input_schema, "PATTERNS_BUDGET_S", 0)
+    schema = {"type": "object", "properties": {"x": SLOW}}
+    with pytest.raises(input_schema.PatternsTimedOutError):
+        await _at_attempt(PATTERN_TIMEOUT_ATTEMPTS - 1).run(
+            FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
+        )
+    with pytest.raises(ApplicationError) as err:
+        await _at_attempt(PATTERN_TIMEOUT_ATTEMPTS).run(
+            FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
+        )
+    assert err.value.type == "TaskRefused" and err.value.non_retryable
+    assert "took too long to check" in err.value.message
+
+
+async def test_the_open_activity_refuses_the_apis_pattern_timeout_on_its_last_attempt() -> None:
+    """The API's 503 ``pattern-timeout`` is bounded the same way."""
+    timed_out = CrudUnavailableError("503", "unavailable", {"reason": PATTERN_TIMEOUT})
+    with pytest.raises(CrudUnavailableError):
+        await _at_attempt(PATTERN_TIMEOUT_ATTEMPTS - 1).run(
+            FlowTaskActivities(Tasks(timed_out)).open, OPEN
+        )
+    with pytest.raises(ApplicationError) as err:
+        await _at_attempt(PATTERN_TIMEOUT_ATTEMPTS).run(
+            FlowTaskActivities(Tasks(timed_out)).open, OPEN
+        )
+    assert err.value.type == "TaskRefused" and err.value.non_retryable
+
+
+async def test_the_open_activity_tries_a_full_deadline_timeout_again_then_refuses() -> None:
+    """A pattern that uses its whole `PATTERN_TIMEOUT_S` may be a starved pod, so it is
+    tried again; one that times out on every pod (`^(a|aa)+$`) is refused at the last
+    attempt, a final refusal and not a retry without end (#7437, #7688)."""
+    schema = {"type": "object", "properties": {"x": SLOW}}
+    with pytest.raises(input_schema.PatternsTimedOutError):
+        await ActivityEnvironment().run(
+            FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
+        )
+    tasks = Tasks()
+    with pytest.raises(ApplicationError) as err:
+        await _at_attempt(PATTERN_TIMEOUT_ATTEMPTS).run(
+            FlowTaskActivities(tasks).open, {**OPEN, "schema": schema}
+        )
+    assert err.value.type == "TaskRefused" and err.value.non_retryable
+    assert "took too long to check" in err.value.message
+    assert tasks.calls == []
+
+
+async def test_the_open_activity_refuses_a_timed_out_schema_with_another_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(input_schema, "PATTERNS_BUDGET_S", 0)
+    wrong = {"type": "string", "maxLength": 5, "default": 3}
+    schema = {"type": "object", "properties": {"x": SLOW, "y": wrong}}
+    with pytest.raises(ApplicationError) as err:
+        await ActivityEnvironment().run(
+            FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
+        )
+    assert err.value.type == "TaskRefused" and err.value.non_retryable
+    assert err.value.message == "schema: y: default does not fit: 3 is not of type 'string'"
 
 
 @pytest.mark.parametrize(

@@ -7,7 +7,9 @@ name: Build Go CLI Images
 # modules, `build-and-push` builds and pushes each in its own matrix job. Every
 # `tools/go/*/main.go` is a CLI and every CLI must ship a Dockerfile; `discover`
 # fails if one is missing rather than skipping it. A library module
-# (scadbuddy-client, no main.go) is never discovered.
+# (scadbuddy-client, no main.go) is never discovered. scadbuddy-core is
+# discovered but not published here: build-image.yml's `core` job publishes it
+# with every main build, so the deploy can pin it (#7667).
 #
 # Unlike forge: hosted runners only (the repo is public; CLAUDE.md, "CI and
 # caching rules"), the repo root as build context (the Dockerfiles need go.work
@@ -31,6 +33,10 @@ on:
       - "go.work.sum"
       - "vendor/**"
       - ".github/workflows/build-go-image.yml"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      # A vendored module's CLAUDE.md or AGENTS.md is code (select-lanes.sh).
+      - "**/vendor/**"
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -77,6 +83,15 @@ jobs:
             echo "::error::Missing Dockerfile for Go CLI module(s) — every tools/go CLI must publish an image: ${missing[*]}"
             exit 1
           fi
+
+          # build-image.yml's `core` job publishes scadbuddy-core with every main
+          # build, under the same tags, and deploy.reusable.yml pins it (#7667).
+          # A second push here would give one `sha-<short>` tag two digests.
+          publish=()
+          for m in "${mods[@]}"; do
+            [ "$m" = tools/go/core ] || publish+=("$m")
+          done
+          mods=("${publish[@]}")
 
           matrix=$(printf '%s\n' "${mods[@]}" | jq -R . | jq -s -c .)
           echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
