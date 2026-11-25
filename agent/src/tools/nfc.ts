@@ -64,23 +64,35 @@ async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: n
     return Date.parse(job.expires_at) + (job.state === 'armed' ? ARMED_MARGIN_MS : ctx.pollIntervalMs)
   }
   let found: Job = made
-  while (!ENDED.has(found.state) && Date.now() < deadline(found) && !ctx.signal.aborted) {
-    try {
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
-    } catch (err) {
-      if (ctx.signal.aborted) break
-      throw err
+  const wait = async () => {
+    while (!ENDED.has(found.state) && Date.now() < deadline(found) && !ctx.signal.aborted) {
+      try {
+        await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      } catch (err) {
+        if (ctx.signal.aborted) break
+        throw err
+      }
+      found = await read()
+      await ctx.progress(0, undefined, found.state)
     }
-    found = await read()
-    await ctx.progress(0, undefined, found.state)
   }
+  const begun = () => json({ job_id, state: found.state, result: found.result ?? null, write_begun: true })
+  await wait()
   // A begun write is never cancelled: the tag may hold the new records, and the server ends it.
-  if (!ENDED.has(found.state) && found.write_begun) return json({ job_id, state: found.state, result: found.result ?? null, write_begun: true })
+  if (!ENDED.has(found.state) && found.write_begun) return begun()
   if (!ENDED.has(found.state)) {
     // The answer comes even when the cancel or the read after it fails: the last state read,
     // and why the cancel did not go through, so the agent knows the job may still be open.
     try {
-      await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs/{job_id}/cancel', path), `cancel NFC job ${job_id}`)
+      const cancel = await ctx.backend.POST('/api/v1/filament/nfc-jobs/{job_id}/cancel', path)
+      const code = (cancel.error as { code?: unknown } | undefined)?.code
+      if (cancel.response.status === 409 && code === 'write_begun') {
+        // The write began after the last read (#7419 round 3): wait for it as for any begun write.
+        found = { ...(await read()), write_begun: true }
+        await wait()
+        return ENDED.has(found.state) ? json({ job_id, state: found.state, result: found.result ?? null }) : begun()
+      }
+      await ok(Promise.resolve(cancel), `cancel NFC job ${job_id}`)
       found = await read()
     } catch (err) {
       const cancel_failed = err instanceof Error ? err.message : String(err)

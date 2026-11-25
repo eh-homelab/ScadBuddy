@@ -232,6 +232,31 @@ describe('NFC job tools', () => {
     expect(cancels).toBe(0)
   })
 
+  it('waits for a write that began just before its cancel, which answers 409 write_begun', async () => {
+    // #7419 round 3: the page backed the tag up after the last read, so the cancel is refused.
+    const expires_at = new Date(Date.now() + 100).toISOString()
+    const result = { uid: '04AA', records: [REC], backup_id: 'b' }
+    let cancelled = 0
+    let reads = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC], expires_at }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => {
+        reads += 1
+        if (cancelled === 0) return HttpResponse.json(job('pending', { kind: 'write', expires_at, write_begun: false }))
+        return HttpResponse.json(
+          reads < 6 ? job('armed', { kind: 'write', expires_at, write_begun: true }) : job('done', { kind: 'write', expires_at, write_begun: true, result }),
+        )
+      }),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancelled += 1
+        return HttpResponse.json({ title: 'Conflict', status: 409, detail: 'the write has begun', code: 'write_begun' }, { status: 409 })
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), pollIntervalMs: 20 })
+    expect(cancelled).toBe(1)
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+  })
+
   it('does not cancel a begun write when the call is aborted', async () => {
     let cancels = 0
     server.use(
