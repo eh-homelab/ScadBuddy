@@ -151,6 +151,30 @@ async def read_lan_commands(client: Client, printer_id: str, command_id: str) ->
     return await _answer(client, handle, None)
 
 
+async def lan_command_run(client: Client, command_id: str) -> LanCommandRun:
+    """The commands the run ``command_id`` was started with (what its route sent)."""
+    return await _started_run(
+        client, client.get_workflow_handle(command_id, result_type=LanCommandOutcome)
+    )
+
+
+async def lan_command_exists(
+    client: Client, printer_id: str, run: LanCommandRun, key: str | None
+) -> bool:
+    """Whether ``key`` already started ``run``'s commands for ``printer_id`` (P38): a resend
+    then joins that run or reads its outcome, and is never sent again."""
+    if not key:
+        return False
+    handle = client.get_workflow_handle(lan_command_id(printer_id, run, key))
+    try:
+        await handle.describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return False
+        raise
+    return True
+
+
 async def _answer(
     client: Client,
     handle: WorkflowHandle[Any, LanCommandOutcome],

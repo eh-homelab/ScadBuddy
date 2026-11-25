@@ -17,13 +17,13 @@ from scadbuddy.printers.lan_command_models import (
 )
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.native import (
-    NOT_LAN_LINKED,
     command_response,
     external_count,
     is_lan_linked,
     lan_row,
     live_status,
 )
+from scadbuddy.workflows.lan_command import NOT_LAN_LINKED
 
 NOW = datetime(2026, 11, 25, 12, 0, tzinfo=UTC)
 ID = "5f0c3c5e-3b0e-4a44-9b43-2f0d0a3c1111"

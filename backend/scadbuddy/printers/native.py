@@ -10,11 +10,17 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from fastapi import Response, status
+from pydantic import BaseModel
 from temporalio.client import Client
 
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.core.problems import ApiError
-from scadbuddy.printers.lan_command_models import LanCommandPending, LanCommandRun
+from scadbuddy.printers.kprofiles import kprofile_table_view, kprofile_write_view
+from scadbuddy.printers.lan_command_models import (
+    LanCommandOutcome,
+    LanCommandPending,
+    LanCommandRun,
+)
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore, report_status
 from scadbuddy.printers.store import PrinterStore, printer_uuid
@@ -22,6 +28,8 @@ from scadbuddy.workflows.lan_command import (
     NOT_LAN_LINKED,
     LanCommandAnswer,
     execute_lan_commands,
+    lan_command_exists,
+    lan_command_run,
 )
 
 
@@ -68,16 +76,42 @@ async def external_count(reports: PrinterReportStore, row: PrinterRow) -> int:
     return len(holders) if isinstance(holders, list) else 1
 
 
-def command_response(answer: LanCommandAnswer) -> Response:
-    """The one HTTP answer of a LAN command run: 200 with its outcome, or 202 with the run's
-    workflow id while it is open (P27). A write that may have been sent is ``confirmed:
-    false`` in a 200 (P30); the failures are `ApiError`s raised before this."""
-    pending = isinstance(answer, LanCommandPending)
-    return Response(
-        content=answer.model_dump_json(),
-        status_code=status.HTTP_202_ACCEPTED if pending else status.HTTP_200_OK,
-        media_type="application/json",
-    )
+CommandView = Callable[[LanCommandRun, LanCommandOutcome], BaseModel]
+"""A route's 200 body from the run it sent and the run's outcome."""
+
+#: Each command's view, by the command's name (P37): the route that sends it and the command
+#: read route answer the same body. A run whose commands do not all map to one view answers
+#: its `LanCommandOutcome`.
+COMMAND_VIEWS: dict[str, CommandView] = {
+    "extrusion_cali_get": kprofile_table_view,
+    "extrusion_cali_set": kprofile_write_view,
+    "extrusion_cali_del": kprofile_write_view,
+}
+
+
+def command_view(run: LanCommandRun | None, outcome: LanCommandOutcome) -> BaseModel:
+    """``outcome`` as the route that sent ``run`` answers it (`COMMAND_VIEWS`)."""
+    if run is None:
+        return outcome
+    views = {COMMAND_VIEWS.get(command.name) for command in run.commands}
+    if len(views) != 1:
+        return outcome
+    [view] = views
+    return outcome if view is None else view(run, outcome)
+
+
+def command_response(answer: LanCommandAnswer, run: LanCommandRun | None = None) -> Response:
+    """The one HTTP answer of a LAN command run: 200 with its outcome as ``run``'s route
+    answers it (`command_view`), or 202 with the run's workflow id while it is open (P27). A
+    write that may have been sent is ``confirmed: false`` in a 200 (P30); the failures are
+    `ApiError`s raised before this."""
+    if isinstance(answer, LanCommandPending):
+        body: BaseModel = answer
+        code = status.HTTP_202_ACCEPTED
+    else:
+        body = command_view(run, answer)
+        code = status.HTTP_200_OK
+    return Response(content=body.model_dump_json(), status_code=code, media_type="application/json")
 
 
 @dataclass(frozen=True)
@@ -93,3 +127,11 @@ class LanCommands:
         return await execute_lan_commands(
             self.client_getter(), self.task_queue, printer_id, run, key=key
         )
+
+    async def exists(self, printer_id: str, run: LanCommandRun, key: str | None) -> bool:
+        """Whether ``key`` already started ``run``'s commands (P38)."""
+        return await lan_command_exists(self.client_getter(), printer_id, run, key)
+
+    async def started(self, command_id: str) -> LanCommandRun:
+        """The commands the run ``command_id`` was started with."""
+        return await lan_command_run(self.client_getter(), command_id)

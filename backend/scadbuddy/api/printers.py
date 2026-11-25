@@ -22,7 +22,13 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.models import Printer, VirtualPrinter, VirtualPrinterDiagnostic
+from scadbuddy.bambuddy.models import (
+    KProfileTable,
+    KProfileWriteResult,
+    Printer,
+    VirtualPrinter,
+    VirtualPrinterDiagnostic,
+)
 from scadbuddy.bambuddy.virtual_printers import (
     VirtualPrinterCreate,
     VirtualPrinterDeleted,
@@ -383,14 +389,17 @@ async def get_printer(printers: PrintersDep, printer_id: str) -> PrinterRow:
 
 @router.get(
     "/{printer_id}/commands/{command_id}",
-    response_model=LanCommandOutcome,
+    response_model=KProfileTable | KProfileWriteResult | LanCommandOutcome,
     responses={status.HTTP_202_ACCEPTED: {"model": LanCommandPending}},
     summary="Follow a LAN command a route answered 202 for",
     description=(
         "A K-profile, AMS slot or configure route that did not finish within its wait answers"
-        " 202 with a `workflow_id`: this is that command's id. It answers 200 with the"
-        " finished replies (a write that may have been sent is `confirmed: false`), or 202"
-        " while the command runs. 404 `command_not_found` for an unknown id or one that"
+        " 202 with a `workflow_id`: this is that command's id. It answers 200 with the body"
+        " that route would have answered (`KProfileTable` for the K-profile list,"
+        " `KProfileWriteResult` for a K-profile write; a write that may have been sent is"
+        " `confirmed: false`), or `LanCommandOutcome`, the finished replies, for a command"
+        " with no such view; 202 while the command runs. 404 `command_not_found` for an"
+        " unknown id or one that"
         " belongs to another printer. 409 `printer_refused`, `printer_cert_changed` or"
         " `not_lan_linked`, 502 `printer_no_answer` or `printer_unreachable`, and 503"
         " `lan_unavailable` as the command's own route answers them."
@@ -402,9 +411,10 @@ async def get_printer_command(
     owner = printer_uuid(printer_id)
     if owner is None:
         raise command_not_found()
-    return command_response(
-        await read_lan_commands(commands.client_getter(), str(owner), command_id)
-    )
+    answer = await read_lan_commands(commands.client_getter(), str(owner), command_id)
+    if isinstance(answer, LanCommandPending):
+        return command_response(answer)
+    return command_response(answer, await commands.started(command_id))
 
 
 @router.patch("/{printer_id}", response_model=PrinterRow, summary="Rename it, or set its path")

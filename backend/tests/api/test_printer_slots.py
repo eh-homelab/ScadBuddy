@@ -23,12 +23,30 @@ from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.component import FILAMENT, Filament
 from scadbuddy.filament.models import Material, SpoolCreate, SpoolKValueCreate, SpoolPresetCreate
 from scadbuddy.filament.sb_presets import create_on
+from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing.own_presets import sb_ref
-from tests.api.test_printer_kprofiles import SERIAL, linked, store
 from tests.api.test_send import API, configure
 
 pytestmark = pytest.mark.requires_postgres
+
+SERIAL = "01P00A000000071"
+
+
+def store(client: TestClient) -> PrinterStore:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    return state.components.get(PRINTERS).store
+
+
+def linked(client: TestClient, bambuddy_id: int = 3) -> str:
+    configure(client)
+    return (
+        store(client)
+        .create_linked(serial=SERIAL, name="H2C", model="H2C", bambuddy_printer_id=bambuddy_id)
+        .id
+    )
+
 
 RECORDED = json.loads(
     (Path(__file__).parents[1] / "bambuddy" / "recordings" / "printer-status.json").read_text(

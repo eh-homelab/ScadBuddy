@@ -219,11 +219,12 @@ def extrusion_cali_set(
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7666-L7825
 
     ``tray_id`` and ``ams_id`` are 0 and ``n_coef`` ``"0.000000"`` (L7718-L7736,
-    L7794-L7809): single-nozzle firmware answers ``tray_id`` -1 with ``fail``, "invalid
+    L7795-L7809): single-nozzle firmware answers ``tray_id`` -1 with ``fail``, "invalid
     tray_id", while it applies the write (#2718 there, P2). A new profile's
     ``setting_id`` is the caller's: Bambuddy makes one (``PF`` and 17 random digits,
-    L7710-L7716), which a pure builder cannot. Every entry takes the command's
-    ``nozzle_diameter``, as the batch does (L7803)."""
+    L7711-L7716, and one per new row of a batch, L7790-L7792), which a pure builder
+    cannot. Every entry takes the command's ``nozzle_diameter``, as the batch does
+    (L7803)."""
     return {
         "print": {
             "command": "extrusion_cali_set",

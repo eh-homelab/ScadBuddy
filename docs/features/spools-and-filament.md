@@ -251,7 +251,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - `bb_sync_*.py` and `bambuddy_pull.py`;
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
     `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them);
-  - a printer's K-profiles: `backend/scadbuddy/bambuddy/kprofiles.py` (the bodies and the operation kinds, `kprofile_kinds` at `:168`) and `BambuddyClient.set_k_profile` and its siblings in `backend/scadbuddy/bambuddy/client.py`.
+  - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); no route calls `BambuddyClient.set_k_profile` and its siblings in `backend/scadbuddy/bambuddy/client.py` now.
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
