@@ -894,9 +894,24 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Where the API reaches the agent sidecar in its own pod. The flow routes read the"
             " agent's tools from it, and refuse when it does not answer.",
         ),
-        "camera_edge_url": SettingDoc(
-            "Camera edge URL",
-            "Where the API reaches the live camera edge inside the cluster. Unset, the camera"
+        "camera_edge_whep_url": SettingDoc(
+            "Camera edge WHEP URL",
+            "Where the API reaches the live camera edge's WebRTC (WHEP) port inside the"
+            " cluster. Unset, the camera dialog offers no live view.",
+        ),
+        "camera_edge_hls_url": SettingDoc(
+            "Camera edge HLS URL",
+            "Where the API reaches the live camera edge's LL-HLS port inside the cluster."
+            " Unset, the camera dialog offers no live view.",
+        ),
+        "camera_edge_read_user": SettingDoc(
+            "Camera edge read user",
+            "The user the API reads the live camera edge as. Unset, the camera dialog offers"
+            " no live view.",
+        ),
+        "camera_edge_read_pass": SettingDoc(
+            "Camera edge read password",
+            "The password of the camera edge read user. It is never shown. Unset, the camera"
             " dialog offers no live view.",
         ),
         "api_internal_url": SettingDoc(

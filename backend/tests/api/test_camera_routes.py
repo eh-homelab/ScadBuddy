@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from scadbuddy.agent_changes.hub import Change
 from scadbuddy.api.crud_camera import keep_camera
@@ -97,9 +98,16 @@ def test_live_is_false_without_an_edge_url(client: TestClient, printer: str) -> 
     assert body["live"] is False
 
 
-def test_live_is_true_with_an_edge_url(client: TestClient, printer: str) -> None:
+def test_live_is_true_with_an_edge_set_up(client: TestClient, printer: str) -> None:
     state = _state(client)
-    state.settings = state.settings.model_copy(update={"camera_edge_url": "http://edge:8889"})
+    state.settings = state.settings.model_copy(
+        update={
+            "camera_edge_whep_url": "http://edge:8889",
+            "camera_edge_hls_url": "http://edge:8888",
+            "camera_edge_read_user": "reader",
+            "camera_edge_read_pass": SecretStr("read-pass"),
+        }
+    )
     assert client.get(f"/api/v1/printers/{printer}/camera").json()["live"] is True
 
 

@@ -494,6 +494,8 @@ def _bootstrap(settings: Settings) -> list[BootstrapValue]:
         value = resolved[name] if name in resolved else getattr(settings, name)
         if name == "database_url":
             value = _redacted_database_url(settings.database_url)
+        elif name == "camera_edge_read_pass" and value is not None:
+            value = "set"
         values.append(
             BootstrapValue(
                 name=name,

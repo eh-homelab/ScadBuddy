@@ -205,6 +205,11 @@ class CameraStore:
             indexed_until=current["indexed_until"],
         )
 
+    def recorded(self, printer_id: str) -> bool:
+        """Whether the printer qualifies for recording: false for anything else, a printer
+        that is gone or an id that is no uuid included."""
+        return bool(self._sources(printer_id))
+
     def camera_state(self, printer_id: str) -> tuple[bool, list[CameraFeed]]:
         """Whether the printer is recorded, and its stored feed states (relay first).
         Raises `PrinterNotFoundError` when the printer is gone."""

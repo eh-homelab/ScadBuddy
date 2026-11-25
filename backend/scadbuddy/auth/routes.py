@@ -199,6 +199,8 @@ SCRIPTLESS_GETS = frozenset(
         ("scadbuddy.api.print_history", "/prints/{archive_id}/timelapse/frames/{index}"),
         ("scadbuddy.api.printing", "/print/printers/{printer_id}/camera"),
         ("scadbuddy.api.printing", "/print/printers/{printer_id}/camera/stream"),
+        # hls.js and Safari's native <video> send no header (camera live view).
+        ("scadbuddy.api.camera", "/camera/live/{printer_id}/hls/{name}"),
         (
             "scadbuddy.api.order_attachments",
             "/orders/{order_id}/attachments/{attachment_id}/content",
