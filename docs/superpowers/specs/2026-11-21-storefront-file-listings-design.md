@@ -799,7 +799,9 @@ A file listing has no render, so its price is read by the listing and the colour
   limits (`storefront_renders_per_minute`, `…_per_day`, spec 2026-11-02 §5.4). A read that
   finds a price, or joins a running slice, costs nothing, as a reused render does. So a
   visitor cannot keep the slicer busy by changing colours.
-- 409 `listing_changed` when `listing_updated_at` is not the listing's, as for a render.
+- 409 `listing_changed` when `listing_updated_at` is not the listing's, as for a render, or
+  when the published listing sells a template now (a render of a file listing answers the
+  same).
 
 As built (PR 6): "always show a price". While the visitor's colours have no price yet
 (`slice_estimate` answers `pending`), the route answers `last`: the listing's last firm

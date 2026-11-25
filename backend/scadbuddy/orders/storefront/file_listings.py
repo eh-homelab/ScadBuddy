@@ -48,6 +48,7 @@ from scadbuddy.orders.storefront.listings import (
     check_sliceable,
     file_copy_key,
     listing_not_found,
+    no_such_listing,
     picture_key,
     problem,
     published_listing,
@@ -539,9 +540,10 @@ async def held_preview(
     (§6.3, §8.1), which a visitor's page recolours by each mesh's slot. 404
     ``listing_not_found`` for a listing that is not a published file listing, and
     ``preview_not_found`` for a plate with no held preview or one the store lost."""
-    listing = await asyncio.to_thread(published_listing, store, listing_id, source="library_file")
+    listing = await asyncio.to_thread(published_listing, store, listing_id, source=None)
     snapshot = listing.file_snapshot
-    assert snapshot is not None
+    if snapshot is None:
+        raise no_such_listing()
     held = snapshot.previews
     stat = None if plate not in held else await _content(state).stat(held[plate])
     if stat is None:
