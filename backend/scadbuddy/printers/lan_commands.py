@@ -63,12 +63,38 @@ def _known_slot(ams_id: int, tray_id: int, *, holders: int = 2) -> None:
         raise UnsupportedUnitError(f"unit {ams_id} has no slot {tray_id}")
 
 
-def _known_global_tray(global_tray: int) -> None:
-    """A load or unload's tray: an AMS 0-3's ``ams*4+slot``, an AMS-HT's unit id, or an
-    external holder's 254 or 255 (P24). An AMS 4-15 has no global tray Bambuddy loads."""
-    if not (
-        0 <= global_tray <= 15 or _is_ht(global_tray) or global_tray in (EXTERNAL_TRAY, EXTERNAL)
+def _known_wire_slot(slot: WireSlot) -> None:
+    """``UnsupportedUnitError`` unless ``slot`` is one ``wire_slot`` makes (P25): an AMS
+    0-3 ``(ams, t, t)``, an AMS 4-15 or an AMS-HT ``(unit, 0, 0)``, the single external
+    holder ``(255, 254, 0)``, or one of two holders ``(254, 0, 0)`` and ``(255, 0, 0)``."""
+    if slot in (
+        WireSlot(EXTERNAL, EXTERNAL_TRAY, 0),
+        WireSlot(EXTERNAL_TRAY, 0, 0),
+        WireSlot(EXTERNAL, 0, 0),
     ):
+        return
+    if slot.ams_id in (EXTERNAL_TRAY, EXTERNAL):
+        raise UnsupportedUnitError(f"no external holder is {slot}")
+    _known_slot(slot.ams_id, slot.tray_id)
+    if slot.slot_id != (slot.tray_id if slot.ams_id <= 3 else 0):
+        raise UnsupportedUnitError(f"no unit sends {slot}")
+
+
+def _known_global_tray(global_tray: int, *, holders: int) -> None:
+    """A load or unload's tray: an AMS 0-3's ``ams*4+slot``, an AMS-HT's unit id, or an
+    external holder the printer has: 254 with one holder or more, 255 with two (P24, P25;
+    ``holders`` as ``wire_slot``'s ``external_count``). Trays past 15 are refused on purpose:
+    Bambuddy's layout maps 16-63 as ``(tray // 4, tray % 4)``, where 24-27 is the A2L AMS
+    Lite's normalised unit 6 (unit 16 on the wire) and 28-36 the AMS 3H's (L322-L323), so
+    such a tray is ambiguous without that layout:
+    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/utils/tray_ids.py#L308-L324"""
+    if global_tray == EXTERNAL_TRAY:
+        known = holders >= 1
+    elif global_tray == EXTERNAL:
+        known = holders >= 2
+    else:
+        known = 0 <= global_tray <= 15 or _is_ht(global_tray)
+    if not known:
         raise UnsupportedUnitError(f"no known wire ids for global tray {global_tray}")
 
 
@@ -274,6 +300,7 @@ def _filament_setting(
     nozzle_temp_max: int,
     seq: str,
 ) -> dict[str, Any]:
+    _known_wire_slot(slot)
     return {
         "command": "ams_filament_setting",
         "ams_id": slot.ams_id,
@@ -445,7 +472,12 @@ def ams_get_rfid(ams_id: int, slot_id: int, seq: str) -> dict[str, Any]:
 
 
 def ams_change_filament_load(
-    global_tray: int, *, extruder_id: int | None, right_temp: int, seq: str
+    global_tray: int,
+    *,
+    external_count: int,
+    extruder_id: int | None,
+    right_temp: int,
+    seq: str,
 ) -> dict[str, Any]:
     """Load a slot's filament (``ams_load_filament``):
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L8337-L8429
@@ -456,8 +488,10 @@ def ams_change_filament_load(
     an AMS ``(tray // 4, tray % 4)`` with the global tray as target
     (``change_filament_wire_ids``, L239-L254). ``extruder_id`` only when given
     (L8415-L8416). Any other tray is ``UnsupportedUnitError`` (P24): the A2L AMS-Lite's
-    24-27, for one, goes out as unit 16 in Bambuddy."""
-    _known_global_tray(global_tray)
+    24-27, for one, goes out as unit 16 in Bambuddy. So is a holder the printer lacks
+    (P25): 255 with fewer than two holders, 254 with none; ``external_count`` as in
+    ``wire_slot``."""
+    _known_global_tray(global_tray, holders=external_count)
     if global_tray == EXTERNAL:
         temp = right_temp if right_temp >= UNLOAD_FLOOR else RIGHT_DEFAULT
         ams_id, slot_id, curr, tar = EXTERNAL, 0, temp, temp
@@ -482,15 +516,17 @@ def ams_change_filament_load(
     return {"print": body}
 
 
-def ams_change_filament_unload(source_tray: int, *, nozzle_temp: int, seq: str) -> dict[str, Any]:
+def ams_change_filament_unload(
+    source_tray: int, *, external_count: int, nozzle_temp: int, seq: str
+) -> dict[str, Any]:
     """Unload (``ams_unload_filament``):
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L8431-L8543
 
     Addressed to the source's unit (255 for an external holder, an AMS-HT's own id, an
     AMS ``tray // 4``; L8467-L8471), slot and target 255, at the nozzle's temperature or
     ``UNLOAD_DEFAULT`` below ``UNLOAD_FLOOR`` (L8516-L8518). Any other tray is
-    ``UnsupportedUnitError``, as for a load (P24)."""
-    _known_global_tray(source_tray)
+    ``UnsupportedUnitError``, as is a holder the printer lacks, as for a load (P24, P25)."""
+    _known_global_tray(source_tray, holders=external_count)
     if source_tray in (EXTERNAL, EXTERNAL_TRAY):
         ams_id = EXTERNAL
     elif _is_ht(source_tray):

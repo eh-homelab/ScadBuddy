@@ -16,6 +16,7 @@ from scadbuddy.printers.lan_commands import (
     UNLOAD_DEFAULT,
     KProfileRow,
     UnsupportedUnitError,
+    WireSlot,
     ams_change_filament_load,
     ams_change_filament_unload,
     ams_filament_setting,
@@ -226,9 +227,11 @@ def test_a_holder_the_printer_lacks_is_refused(
 @pytest.mark.parametrize("global_tray", [16, 24, 32, 63, 127, 136, 200, 253, 256, -1])
 def test_load_and_unload_refuse_an_unknown_tray(global_tray: int) -> None:
     with pytest.raises(UnsupportedUnitError):
-        ams_change_filament_load(global_tray, extruder_id=None, right_temp=0, seq="1")
+        ams_change_filament_load(
+            global_tray, external_count=2, extruder_id=None, right_temp=0, seq="1"
+        )
     with pytest.raises(UnsupportedUnitError):
-        ams_change_filament_unload(global_tray, nozzle_temp=220, seq="1")
+        ams_change_filament_unload(global_tray, external_count=2, nozzle_temp=220, seq="1")
 
 
 def test_cali_set_sends_tray_zero_ams_zero_and_the_command_nozzle() -> None:
@@ -375,7 +378,9 @@ def test_cali_del_dual_has_no_setting_id_and_single_does() -> None:
     ],
 )
 def test_load_wire_ids(global_tray: int, ids: tuple[int, int, int]) -> None:
-    body = ams_change_filament_load(global_tray, extruder_id=None, right_temp=0, seq="6")
+    body = ams_change_filament_load(
+        global_tray, external_count=2, extruder_id=None, right_temp=0, seq="6"
+    )
     assert body == {
         "print": {
             "command": "ams_change_filament",
@@ -390,30 +395,40 @@ def test_load_wire_ids(global_tray: int, ids: tuple[int, int, int]) -> None:
 
 
 def test_load_of_ext_r_takes_the_right_nozzle_temperature() -> None:
-    hot = ams_change_filament_load(255, extruder_id=None, right_temp=230, seq="6")["print"]
+    hot = ams_change_filament_load(
+        255, external_count=2, extruder_id=None, right_temp=230, seq="6"
+    )["print"]
     assert (hot["ams_id"], hot["slot_id"], hot["target"]) == (255, 0, 255)
     assert (hot["curr_temp"], hot["tar_temp"]) == (230, 230)
-    cold = ams_change_filament_load(255, extruder_id=None, right_temp=30, seq="6")["print"]
+    cold = ams_change_filament_load(
+        255, external_count=2, extruder_id=None, right_temp=30, seq="6"
+    )["print"]
     assert (cold["curr_temp"], cold["tar_temp"]) == (RIGHT_DEFAULT, RIGHT_DEFAULT)
 
 
 def test_load_names_the_extruder_only_when_given() -> None:
     assert (
         "extruder_id"
-        not in ams_change_filament_load(2, extruder_id=None, right_temp=0, seq="1")["print"]
+        not in ams_change_filament_load(
+            2, external_count=2, extruder_id=None, right_temp=0, seq="1"
+        )["print"]
     )
     assert (
-        ams_change_filament_load(2, extruder_id=1, right_temp=0, seq="1")["print"]["extruder_id"]
+        ams_change_filament_load(2, external_count=2, extruder_id=1, right_temp=0, seq="1")[
+            "print"
+        ]["extruder_id"]
         == 1
     )
     assert (
-        ams_change_filament_load(2, extruder_id=0, right_temp=0, seq="1")["print"]["extruder_id"]
+        ams_change_filament_load(2, external_count=2, extruder_id=0, right_temp=0, seq="1")[
+            "print"
+        ]["extruder_id"]
         == 0
     )
 
 
 def test_unload_takes_the_floor_temperature() -> None:
-    body = ams_change_filament_unload(5, nozzle_temp=25, seq="9")
+    body = ams_change_filament_unload(5, external_count=2, nozzle_temp=25, seq="9")
     assert body == {
         "print": {
             "command": "ams_change_filament",
@@ -425,14 +440,24 @@ def test_unload_takes_the_floor_temperature() -> None:
             "tar_temp": UNLOAD_DEFAULT,
         }
     }
-    assert ams_change_filament_unload(5, nozzle_temp=240, seq="9")["print"]["curr_temp"] == 240
+    assert (
+        ams_change_filament_unload(5, external_count=2, nozzle_temp=240, seq="9")["print"][
+            "curr_temp"
+        ]
+        == 240
+    )
 
 
 @pytest.mark.parametrize(
     ("source", "ams_id"), [(3, 0), (13, 3), (131, 131), (254, 255), (255, 255)]
 )
 def test_unload_addresses_the_source_unit(source: int, ams_id: int) -> None:
-    assert ams_change_filament_unload(source, nozzle_temp=220, seq="1")["print"]["ams_id"] == ams_id
+    assert (
+        ams_change_filament_unload(source, external_count=2, nozzle_temp=220, seq="1")["print"][
+            "ams_id"
+        ]
+        == ams_id
+    )
 
 
 def test_rfid_shape() -> None:
@@ -463,3 +488,82 @@ def test_refusal_reads_fail_case_folded() -> None:
     assert refusal({"result": "fail"}) == "printer reported failure"
     assert refusal({"result": "success"}) is None
     assert refusal({}) is None
+
+
+def _setting(slot: WireSlot) -> object:
+    return ams_filament_setting(
+        slot,
+        tray_info_idx="GFL05",
+        tray_type="PLA",
+        tray_sub_brands="PLA Basic",
+        tray_color="FF0000FF",
+        nozzle_temp_min=190,
+        nozzle_temp_max=230,
+        setting_id=None,
+        seq="1",
+    )
+
+
+@pytest.mark.parametrize(
+    "slot",
+    [
+        WireSlot(16, 2, 0),  # the A2L AMS-Lite
+        WireSlot(32, 0, 0),  # the AMS 3H
+        WireSlot(0, 2, 0),  # an AMS 0-3 sends its slot twice
+        WireSlot(0, 4, 4),
+        WireSlot(4, 1, 0),  # an AMS 4-15 is one slot
+        WireSlot(128, 0, 1),
+        WireSlot(255, 1, 0),  # neither holder form
+        WireSlot(254, 254, 0),
+        WireSlot(-1, 0, 0),
+    ],
+)
+def test_a_wire_slot_no_unit_has_is_refused(slot: WireSlot) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        _setting(slot)
+    with pytest.raises(UnsupportedUnitError):
+        ams_reset(slot, "1")
+
+
+@pytest.mark.parametrize(
+    "slot",
+    [
+        WireSlot(0, 2, 2),
+        WireSlot(4, 0, 0),
+        WireSlot(128, 0, 0),
+        WireSlot(255, 254, 0),  # the single holder
+        WireSlot(254, 0, 0),  # Ext-L of two
+        WireSlot(255, 0, 0),  # Ext-R of two
+    ],
+)
+def test_every_wire_slot_wire_slot_makes_is_taken(slot: WireSlot) -> None:
+    assert _setting(slot) is not None
+    assert ams_reset(slot, "1") is not None
+
+
+@pytest.mark.parametrize(
+    ("global_tray", "external_count"),
+    [
+        (255, 1),  # Ext-R on a printer with one holder
+        (255, 0),
+        (254, 0),  # a printer that reports no holder
+    ],
+)
+def test_load_and_unload_refuse_a_holder_the_printer_lacks(
+    global_tray: int, external_count: int
+) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        ams_change_filament_load(
+            global_tray, external_count=external_count, extruder_id=None, right_temp=0, seq="1"
+        )
+    with pytest.raises(UnsupportedUnitError):
+        ams_change_filament_unload(
+            global_tray, external_count=external_count, nozzle_temp=220, seq="1"
+        )
+
+
+def test_load_and_unload_take_the_single_holder() -> None:
+    load = ams_change_filament_load(254, external_count=1, extruder_id=None, right_temp=0, seq="1")
+    assert load["print"]["slot_id"] == 254
+    unload = ams_change_filament_unload(254, external_count=1, nozzle_temp=220, seq="1")
+    assert unload["print"]["ams_id"] == 255
