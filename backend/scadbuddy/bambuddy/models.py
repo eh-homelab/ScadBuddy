@@ -629,6 +629,10 @@ class AmsTray(BambuddyModel):
     nozzle_temp_max: int | None = None
     state: int | None = None
     exists: bool | None = None
+    #: The printer's K-profile index and K value for the tray (#7276); a mistyped one reads
+    #: as absent.
+    cali_idx: int | None = None
+    k: float | None = None
     #: The RFID tag's UID and the spool's UUID (#3818), all zeros for an untagged spool:
     #: OpenBambuAPI ``mqtt.md`` at ``cc383a2c``, the ``pushing.pushall`` example, and
     #: ``tests/bambuddy/recordings/printer-status-rack.json``. `spools.models` cleans them.
@@ -636,6 +640,16 @@ class AmsTray(BambuddyModel):
     #: status the API serves (#4336 review M6), so a dump of this model drops them.
     tag_uid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
     tray_uuid: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
+
+    @field_validator("cali_idx", mode="before")
+    @classmethod
+    def _cali_idx(cls, value: Any) -> Any:
+        return _number(value, int)
+
+    @field_validator("k", mode="before")
+    @classmethod
+    def _k(cls, value: Any) -> Any:
+        return _number(value, float)
 
 
 class AmsUnit(BambuddyModel):

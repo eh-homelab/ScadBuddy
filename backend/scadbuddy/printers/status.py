@@ -312,8 +312,18 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
     ams = ams_units(data)
     switch = _fila_switch(data)
     extruders, inlets = _routing(data, switch is not None)
+    block = data.get("ams")
+    ams_status = data.get("ams_status")
     status = PrinterStatus.model_validate(
         {
+            # Bambuddy ``bambu_mqtt.py`` L2819-L2831 (``tray_now``) and L3644-L3655 (the
+            # AMS state is the second byte of ``ams_status``).
+            "tray_now": block.get("tray_now") if isinstance(block, dict) else None,
+            "ams_status_main": (
+                (int(ams_status) >> 8) & 0xFF
+                if isinstance(ams_status, int) and not isinstance(ams_status, bool)
+                else None
+            ),
             "id": row.bambuddy_printer_id or 0,
             "name": row.name,
             "connected": is_fresh(report.received_at, now),
