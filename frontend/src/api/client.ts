@@ -3534,10 +3534,10 @@ export const api = {
   /** The long edge the assistant panel scales attached images to, served by the agent service. */
   getImageSettings: () => request<ImageSettings>('/ai/settings/images'),
 
-  putImageSettings: (longEdge: number) =>
+  putImageSettings: (changes: { long_edge?: number; tool_inline_max_bytes?: number }) =>
     request<ImageSettings>('/ai/settings/images', {
       method: 'PUT',
-      body: JSON.stringify({ long_edge: longEdge }),
+      body: JSON.stringify(changes),
     }),
 
   /** The automatic Hindsight recall query's cap, in characters, served by the agent service. */

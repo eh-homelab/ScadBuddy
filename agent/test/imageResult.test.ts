@@ -6,7 +6,7 @@ import { DEFAULT_TOOL_IMAGE_INLINE_MAX } from '../src/tools/imageLimits.js'
 import type { ToolContext } from '../src/tools/registry.js'
 import { firstText, services } from './helpers/mcp.js'
 import { createHash } from 'node:crypto'
-import type { SessionFiles } from '../src/workspace/store.js'
+import type { WorkspaceFiles as SessionFiles } from '../src/workspace/store.js'
 
 // Tool images (#7745): inline up to the limit, a workspace pointer over it, a note for a type the model cannot view.
 
