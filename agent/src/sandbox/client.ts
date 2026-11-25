@@ -161,8 +161,8 @@ export function checkedExecResult(raw: unknown): ExecResult {
   }
 }
 
-/** The longest watch line read: a data line's base64 of WATCH_CHUNK_BYTES with its JSON around it, and room to spare. */
-export const WATCH_LINE_MAX_BYTES = Math.ceil(WATCH_CHUNK_BYTES / 3) * 4 + 1024
+/** The longest watch line read: a frame's JSON, never its raw bytes (a status's is the longest, well under this). */
+export const WATCH_LINE_MAX_BYTES = 4096
 
 /** An output file's path as the pod names it: shown to the model, so a plain absolute path only. */
 const outputFile = (value: unknown): value is string => typeof value === 'string' && /^\/[A-Za-z0-9_./-]{1,200}$/.test(value) && !value.includes('..')
@@ -200,8 +200,11 @@ export type SlotEvent =
   | { type: 'end'; status: SlotStatus }
   | { type: 'gone' }
 
-/** One watch line, checked: the pod controls it. A heartbeat is `{ type: 'beat' }`. */
-export function checkedWatchLine(line: Buffer): SlotEvent | { type: 'beat' } {
+/** A `data` line's header: its raw bytes follow it. */
+type DataHeader = { type: 'header'; at: number; stream: 'stdout' | 'stderr'; bytes: number }
+
+/** One watch line, checked: the pod controls it. A heartbeat is `{ type: 'beat' }`; a `data` line is the header of the raw bytes after it. */
+export function checkedWatchLine(line: Buffer): Exclude<SlotEvent, { type: 'data' }> | DataHeader | { type: 'beat' } {
   let raw: unknown
   try {
     raw = JSON.parse(line.toString('utf8'))
@@ -214,9 +217,8 @@ export function checkedWatchLine(line: Buffer): SlotEvent | { type: 'beat' } {
   if (r.type === 'lost' && isCount(r.from) && isCount(r.to) && (r.to as number) >= (r.from as number)) {
     return { type: 'lost', from: r.from as number, to: r.to as number }
   }
-  if (r.type === 'data' && isCount(r.at) && (r.stream === 'stdout' || r.stream === 'stderr') && typeof r.data === 'string' && /^[A-Za-z0-9+/]*={0,2}$/.test(r.data)) {
-    const data = Buffer.from(r.data, 'base64')
-    if (data.length <= WATCH_CHUNK_BYTES) return { type: 'data', at: r.at as number, stream: r.stream, data }
+  if (r.type === 'data' && isCount(r.at) && (r.stream === 'stdout' || r.stream === 'stderr') && isCount(r.bytes) && (r.bytes as number) <= WATCH_CHUNK_BYTES) {
+    return { type: 'header', at: r.at as number, stream: r.stream, bytes: r.bytes as number }
   }
   throw new SandboxError('the sandbox sent a watch line that is not one')
 }
@@ -408,6 +410,8 @@ export class SandboxClient {
     try {
       if (!res.ok || !reader) throw new SandboxError(`the sandbox answered ${res.status} to the watch of slot ${id}`)
       let pending = Buffer.alloc(0)
+      // A data line's header, while its raw bytes are still to come.
+      let header: DataHeader | undefined
       for (;;) {
         let read
         try {
@@ -418,15 +422,29 @@ export class SandboxClient {
         if (read.done) throw new SandboxError(`the watch of slot ${id} ended before the slot did`)
         arm()
         pending = Buffer.concat([pending, Buffer.from(read.value)])
-        for (let nl = pending.indexOf(10); nl >= 0; nl = pending.indexOf(10)) {
+        for (;;) {
+          if (header) {
+            if (pending.length < header.bytes) break
+            const data = Buffer.from(pending.subarray(0, header.bytes))
+            pending = pending.subarray(header.bytes)
+            yield { type: 'data', at: header.at, stream: header.stream, data }
+            header = undefined
+            continue
+          }
+          const nl = pending.indexOf(10)
+          if (nl < 0) break
           const line = pending.subarray(0, nl)
           pending = pending.subarray(nl + 1)
           const event = checkedWatchLine(line)
           if (event.type === 'beat') continue
+          if (event.type === 'header') {
+            header = event
+            continue
+          }
           yield event
           if (event.type === 'end') return
         }
-        if (pending.length > WATCH_LINE_MAX_BYTES) throw new SandboxError(`the watch of slot ${id} sent a line past ${WATCH_LINE_MAX_BYTES} bytes`)
+        if (!header && pending.length > WATCH_LINE_MAX_BYTES) throw new SandboxError(`the watch of slot ${id} sent a line past ${WATCH_LINE_MAX_BYTES} bytes`)
       }
     } finally {
       clearTimeout(timer)

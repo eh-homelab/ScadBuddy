@@ -105,7 +105,7 @@ export const SLOT_UNWATCHED_MS = 6 * 60_000
 export const SLOT_ENDED_KEEP_MS = 10 * 60_000
 /** A slot's id: the server makes it, 32 lowercase hex digits; any other id is refused. */
 export const SLOT_ID_RE = /^[0-9a-f]{32}$/
-/** The most raw bytes one watch line carries (base64 in the line). */
+/** The most raw bytes one watch `data` frame carries. */
 export const WATCH_CHUNK_BYTES = 32 * 1024
 
 /** POST /v1/slots. */
@@ -126,11 +126,12 @@ export type SlotStatus = {
   output_file: string
 }
 /**
- * One line of GET /v1/slots/<id>/watch?from=<offset> (newline-delimited JSON): output from byte
- * `at` of the slot's output (`data` is base64), a range no longer kept, a heartbeat, or the end.
+ * One line of GET /v1/slots/<id>/watch?from=<offset> (a JSON line each): output from byte `at`
+ * of the slot's output, whose `bytes` raw bytes follow the line at once (no encoding), a range no
+ * longer kept, a heartbeat, or the end.
  */
 export type WatchLine =
-  | { type: 'data'; at: number; stream: 'stdout' | 'stderr'; data: string }
+  | { type: 'data'; at: number; stream: 'stdout' | 'stderr'; bytes: number }
   | { type: 'lost'; from: number; to: number }
   | { type: 'beat' }
   | { type: 'end'; status: SlotStatus }

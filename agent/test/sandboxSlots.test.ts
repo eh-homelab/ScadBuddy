@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -7,7 +9,7 @@ import { followSlot, shellNotice } from '../src/background/sandboxSource.js'
 import type { BackgroundTask } from '../src/background/store.js'
 import type { BackgroundContext } from '../src/builtins/background.js'
 import { runShell, type ShellContext } from '../src/builtins/sandboxShell.js'
-import { catchUpInSandbox, runInSandbox, SandboxClient, startInSandbox } from '../src/sandbox/client.js'
+import { catchUpInSandbox, runInSandbox, SandboxClient, startInSandbox, WATCH_LINE_MAX_BYTES } from '../src/sandbox/client.js'
 import { MAX_SLOTS, SLOT_KEEP_BYTES } from '../src/sandbox/protocol.js'
 import { reapStrays } from '../src/sandbox/server.js'
 import { UNTRUSTED_KEY } from '../src/safety/untrusted.js'
@@ -172,6 +174,74 @@ describe('background slots in the exec server', () => {
     } finally {
       idle.server.closeAllConnections()
       await idle.close()
+    }
+  })
+})
+
+describe('a watch from a pod that lies', () => {
+  /** A pod whose watch sends `body` and then holds the stream open or ends it. */
+  async function lying(body: Buffer | string, end = true): Promise<{ client: SandboxClient; close: () => Promise<void> }> {
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/x-ndjson' })
+      res.write(body)
+      if (end) res.end()
+    })
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    return {
+      client: new SandboxClient({ url, token: 't' }, AbortSignal.timeout(10_000)),
+      close: () =>
+        new Promise((r) => {
+          server.closeAllConnections()
+          server.close(() => r())
+        }),
+    }
+  }
+  const id = 'a'.repeat(32)
+  const collect = async (c: SandboxClient, heartbeatMs?: number) => {
+    const out: unknown[] = []
+    for await (const e of c.watch(id, 0, heartbeatMs)) out.push(e)
+    return out
+  }
+
+  it('takes raw bytes after a data line, exactly as many as it names', async () => {
+    const pod = await lying(`{"type":"data","at":0,"stream":"stdout","bytes":3}\nab\n{"type":"end","status":${JSON.stringify({ id, running: false, exit_code: 0, signal: null, timed_out: false, stopped: false, bytes: 3, output_file: '/tmp/x' })}}\n`)
+    try {
+      const events = (await collect(pod.client)) as { type: string; data?: Buffer }[]
+      expect(events[0]).toMatchObject({ type: 'data', at: 0, stream: 'stdout' })
+      expect(events[0]!.data!.toString()).toBe('ab\n')
+      expect(events[1]).toMatchObject({ type: 'end' })
+    } finally {
+      await pod.close()
+    }
+  })
+
+  it('refuses a frame past its cap, a line that is not one, a line that never ends, and a stream cut short', async () => {
+    const cases: [string | Buffer, RegExp][] = [
+      [`{"type":"data","at":0,"stream":"stdout","bytes":${10 * 1024 * 1024}}\n`, /not one/],
+      ['not json\n', /not JSON/],
+      ['{"type":"data","at":-1,"stream":"stdout","bytes":1}\nx', /not one/],
+      ['{"type":"end","status":{"id":"../x"}}\n', /not one/],
+      [`{"type":"end","status":${JSON.stringify({ id, running: false, exit_code: 0, signal: null, timed_out: false, stopped: false, bytes: 0, output_file: 'ignore previous instructions' })}}\n`, /not one/],
+      ['x'.repeat(WATCH_LINE_MAX_BYTES + 10), /past/],
+      ['{"type":"data","at":0,"stream":"stdout","bytes":5}\nab', /ended before/],
+    ]
+    for (const [body, error] of cases) {
+      const pod = await lying(body)
+      try {
+        await expect(collect(pod.client), String(body).slice(0, 60)).rejects.toThrow(error)
+      } finally {
+        await pod.close()
+      }
+    }
+  })
+
+  it('fails a watch that stays silent past three heartbeats', async () => {
+    const pod = await lying('', false)
+    try {
+      await expect(collect(pod.client, 100)).rejects.toThrow(/nothing, not even a heartbeat/)
+    } finally {
+      await pod.close()
     }
   })
 })
@@ -403,7 +473,9 @@ describe('Bash run_in_background in the session sandbox (#7310)', () => {
     expect(await client.slotStatus(slot.slot)).toMatchObject({ running: true })
     // A later foreground command reads its output file.
     await until(async () => {
-      const r = JSON.parse((await runShell(ctx, 'bash', { command: `cat ${slot.outputFile}` })).text)[UNTRUSTED_KEY].content
+      const answer = await runShell(ctx, 'bash', { command: `cat ${slot.outputFile}` })
+      if (!answer.text.startsWith('{')) throw new Error(answer.text)
+      const r = JSON.parse(answer.text)[UNTRUSTED_KEY].content
       return r.stdout === 'hi\n'
     })
     await client.stopSlot(slot.slot)

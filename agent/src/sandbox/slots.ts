@@ -246,9 +246,10 @@ export class SlotManager {
       closed = true
       wakeUp?.()
     })
-    const send = async (line: WatchLine) => {
+    const send = async (line: WatchLine, raw?: Buffer) => {
       if (closed) return
-      if (!res.write(`${JSON.stringify(line)}\n`)) {
+      const head = res.write(`${JSON.stringify(line)}\n`)
+      if (!(raw ? res.write(raw) && head : head)) {
         await new Promise<void>((r) => {
           const done = () => {
             res.off('drain', done)
@@ -260,7 +261,8 @@ export class SlotManager {
         })
       }
     }
-    let at = Math.max(0, Math.min(from, slot.status.bytes))
+    // An offset past what the slot wrote so far waits for it (a watch begun before any output).
+    let at = Math.max(0, from)
     try {
       for (;;) {
         if (closed) return true
@@ -274,7 +276,7 @@ export class SlotManager {
           if (end <= at) continue
           for (let off = Math.max(at - chunk.at, 0); off < chunk.data.length && !closed; off += WATCH_CHUNK_BYTES) {
             const piece = chunk.data.subarray(off, off + WATCH_CHUNK_BYTES)
-            await send({ type: 'data', at: chunk.at + off, stream: chunk.stream, data: piece.toString('base64') })
+            await send({ type: 'data', at: chunk.at + off, stream: chunk.stream, bytes: piece.length }, piece)
             at = chunk.at + off + piece.length
           }
         }
