@@ -182,6 +182,20 @@ def test_a_cut_before_a_combining_mark_moves_before_its_base() -> None:
     assert label_pdf._cut_back("Zoe", 2) == 2
 
 
+@needs_font("NotoSansDevanagari-Regular.ttf")
+def test_a_cut_keeps_a_spacing_vowel_sign_with_its_base() -> None:
+    # U+093F is category Mc, combining class 0 and has an advance, so only the category
+    # tells `_cut_back` that it belongs to the consonant before it.
+    sign = "\N{DEVANAGARI VOWEL SIGN I}"
+    ka, kha, ga, gha = "क", "ख", "ग", "घ"
+    ellipsis = label_pdf.ELLIPSIS
+    assert label_pdf._cut_back(f"{ka}{kha}{sign}{ga}", 2) == 1
+    column = label_pdf._width(f"{ka}{kha}{ellipsis}", label_pdf.PLAIN, 3.0) + 0.05
+    assert label_pdf._width(f"{ka}{kha}{sign}{ellipsis}", label_pdf.PLAIN, 3.0) > column
+    fitted = label_pdf._fit(f"{ka}{kha}{sign}{ga}{gha}", label_pdf.PLAIN, 3.0, column)
+    assert fitted == f"{ka}{ellipsis}"
+
+
 def test_the_ellipsis_cut_keeps_a_combining_mark_with_its_base() -> None:
     name = f"Zoe{WIDE_MARK} Smith"
     # Room for "Zoe…" but not for "Zoe" with its mark and the ellipsis.

@@ -226,10 +226,16 @@ def _width(text: str, font: Weight, size: float) -> float:
     return width_mm(text, font, size)
 
 
+def _is_mark(ch: str) -> bool:
+    return unicodedata.combining(ch) != 0 or unicodedata.category(ch) in {"Mn", "Mc", "Me"}
+
+
 def _cut_back(text: str, end: int) -> int:
     """``end``, moved back to before the base character when a cut there would fall before
-    a combining mark, so a cut never parts a base from the marks after it (#7216)."""
-    while 0 < end < len(text) and unicodedata.combining(text[end]):
+    a mark, so a cut never parts a base from the marks after it (#7216). A mark is a
+    character with a combining class or a category Mn, Mc or Me: a spacing vowel sign such
+    as U+093F has class 0 and an advance of its own."""
+    while 0 < end < len(text) and _is_mark(text[end]):
         end -= 1
     return end
 
