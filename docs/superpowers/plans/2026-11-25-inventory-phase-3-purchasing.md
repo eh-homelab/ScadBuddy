@@ -7,7 +7,9 @@ item of kind `filament` and a spool is a unit of it, in the same model as every 
 and unit (owner, R-P3-30). An invoice line of any kind receives lots or units, or goes to the
 entities it links to. A confirmed invoice can be amended, and the confirmed invoices that
 are missing their non-filament lines get them back through a reviewed amend. Order purchases
-link invoice lines. Job cost reads spool cost from the spool's unit (#7068, epic #6949).
+link invoice lines. Job cost reads spool cost from the spool's unit. Every line keeps what
+was billed apart from what was received, so a person sees what came free: 11 received for
+10 billed, or the grams a spool really held against its label (#7068, epic #6949).
 
 **Architecture:** The filament purchasing tables get their generic names (`suppliers`,
 `invoices`, `invoice_lines`). `filament_supplier_products` and `filament_price_points` move
@@ -29,7 +31,8 @@ invoice file), §6.3a (the filament kind's schema), §6.4 (filament items and un
 §6.6 (cost snapshots, job cost), §6.7, §6.11, D1, D7, D9, D13, D14, D15, D16, §9 phase 3.
 The phase 2 plan `docs/superpowers/plans/2026-11-23-inventory-phase-2-item-core.md` and its
 rulings R-P2-1 to R-P2-44 (comment on #7067). #7648 (the filament skill and non-filament
-invoice lines).
+invoice lines; read whole). #7681 (weighing as reconciliation, spec in PR #7687, owned by
+session scadbuddy-53): phase 3 reads its weighings and builds no second weighing model.
 
 ## What exists on main today (verified at `814f1285c`, 2026-11-25)
 
@@ -109,6 +112,7 @@ spools just have a different work flow associated with them."
 | Receive, confirm, amend, candidates, re-cost (`StockStore`, `InvoiceStore`) | The ledger of spool events (`filament_spool_events`, D1), AMS capture, presets, K values |
 | The unit's cost (`stock_units.cost_minor`) | `filament_spools.cost_per_kg`, the per-kg form of the unit's cost, written only with it |
 | Job cost's snapshot rule (D14) and "Re-cost past uses" | A use is a ledger event with `cost_per_kg_at`, not a `stock_moves` row (D1) |
+| Billed against received on every line (`received_units`, the free part) | Received grams: a spool's first scale or person weighing, read from the ledger (#7681 owns weighing) |
 
 The workflow joins the model at two points. `StockStore` calls a `UnitExtension` for a kind
 whose `tracking` is `filament` when it receives, retypes, changes the status of, or deletes a
@@ -157,6 +161,13 @@ answer `WrongTracking`, as a unit kind's do.
 - SKU unique per `(supplier_id, upper(sku), item_id)` among the unarchived (D13).
 - Entity wire form `kind:ref`. New kind `invoice_line` (uuid). `spool_type:<id>` and
   `spool:<id>` stay accepted as aliases of `item:<id>` and `unit:<id>` (R-P3-5).
+- Billed and received are two figures on every line, filament included (owner,
+  2026-11-25; R-P3-37). The price paid is spread over everything received; the free part
+  (received − billed) is stored as both figures and shown, never hidden in a cost.
+- No double receive: a good already received outside an invoice (#7648's interim rule) is
+  adopted by its line, never received again (R-P3-43).
+- Weighing belongs to #7681. Phase 3 reads a spool's measured net grams from the ledger and
+  adds no weighing column or event (R-P3-39).
 - Nothing changes a confirmed invoice's lines without a person: an amend that writes is
   confirmed by a person in the UI, or by a person's approval of the agent's gated
   `invoice_amend` (R-P3-34).
@@ -211,7 +222,7 @@ answer `WrongTracking`, as a unit kind's do.
    - `SELECT count(*) FROM blob_refs WHERE holder_kind = 'filament_invoice'` and the count of invoices with a file (expect equal);
    - `SELECT currency, count(*) FROM filament_price_points GROUP BY 1`;
    - `SELECT count(*) FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id WHERE i.status = 'confirmed' AND l.supplier_product_id IS NULL` (expect 0);
-   - the backfill signals (R-P3-31): `SELECT count(*) FROM invoices i WHERE status = 'confirmed' AND (abs(subtotal - (SELECT sum(line_subtotal) FROM invoice_lines WHERE invoice_id = i.id)) > 0.05 OR abs(tax - (SELECT sum(line_tax) FROM invoice_lines WHERE invoice_id = i.id)) > 0.05)`.
+   - the backfill signals (R-P3-31): `SELECT count(*) FROM invoices i WHERE status = 'confirmed' AND (abs(subtotal - (SELECT sum(line_subtotal) FROM invoice_lines WHERE invoice_id = i.id)) > 0.05 OR abs(tax - (SELECT sum(line_tax) FROM invoice_lines WHERE invoice_id = i.id)) > 0.05 OR note LIKE 'Not filament:%')`, and the count of lots and units with no invoice line whose note names a supplier (#7648's interim receipts, which Task 14 adopts).
    Where an "expect" does not hold, Task 7 must already convert that case (for example:
    cut a SKU to 128, store a bad URL as no URL, suffix a clashing name, leave a typeless
    spool without a unit, price a costless use as unknown).
@@ -219,7 +230,19 @@ answer `WrongTracking`, as a unit kind's do.
    saves `GET /api/v1/orders/reports/profit?from=<now − 30 days>` and `GET
    /api/v1/orders/{id}/costs` for each order accepted in that range. Right after the deploy,
    the owner reads them again. Layer 4 changes only reads, so the diff is the change. The
-   layer-4 PR gets the table as a comment.
+   layer-4 PR gets the table as a comment. Owner accepted (2026-11-25): it is posted on the
+   PR after the deploy.
+8. **#7681's interface** (session scadbuddy-53). Phase 3 needs only what is on main:
+   `ledger.events(conn, spool_id)`, whose first `weighed` event with `source` in `('scale',
+   'person')` has the spool's measured net grams in `grams_after` (filament only; the empty
+   spool is already off), and `filament_spools.last_weighed_g` / `last_weighed_at`. Slice A
+   (#7682: `SpoolDetail.last_weighing`, `data.reading_g`, `data.empty_g`, `data.expected_g`,
+   `data.drift_g`, `last_drift_g`, `ledger.expected_before`) is optional: Task 12 shows
+   `data.drift_g` when it is there and nothing when it is not. Phase 3 waits for no slice.
+   In return, phase 3 keeps `filament_spools.unit_id` on the spool row (equal to its id, set
+   for every typed spool), so #7681's empty-weight resolver
+   (`filament/empty_weight.py`) can reach the carrier and the parts through it (#7278,
+   R-P3-41).
 
 ## Review Focus
 
@@ -230,8 +253,10 @@ answer `WrongTracking`, as a unit kind's do.
    deleted and the new one written in one transaction, the order gets a
    `cost.invoice_line_changed` event, and a repeat of the same change writes nothing.
    Tests in Task 4.
-3. A line whose SKU covers two items at the supplier (a bundle, D13) and that names no item:
-   confirm refuses it with a line error that names both items, never a guess. Test in Task 5.
+3. A backfill line for goods that #7648's interim rule already received as a lot outside
+   the invoice: the amend adopts the lot, `on_hand` does not change, and no second receive
+   move is written. A line that received 11 for 10 billed spreads the price over 11 and
+   shows 1 free. Tests in Task 3 and Task 5.
 4. A spool that is archived, restored, retyped or deleted after the migration, or whose cost
    a person edits: its unit follows (`retired`, `in_stock`, the new type's item, gone) and
    `cost_minor` and `cost_per_kg` still agree. A typeless spool gets its unit when it gets a
@@ -266,7 +291,8 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 - `invoice_lines ADD COLUMN item_id uuid REFERENCES items (id)`, `offer_id uuid REFERENCES
   supplier_offers (id)`, `kind text NOT NULL DEFAULT 'stock' CHECK (kind IN
   ('stock','expense','asset'))`, `pack_size numeric(20,6) NOT NULL DEFAULT 1 CHECK (pack_size
-  > 0)`, `proposed_item jsonb`, `CHECK (proposed_type IS NULL OR proposed_item IS NULL)`.
+  > 0)`, `received_units numeric(20,6) CHECK (received_units > 0)` (NULL: as billed until
+  layer 3 fills the old rows, R-P3-37), `proposed_item jsonb`, `CHECK (proposed_type IS NULL OR proposed_item IS NULL)`.
   Index `(item_id) WHERE item_id IS NOT NULL` (R-P3-7).
 - `invoice_line_links (id uuid PK DEFAULT gen_random_uuid(), line_id uuid NOT NULL REFERENCES
   invoice_lines (id) ON DELETE CASCADE, entity_id uuid NOT NULL REFERENCES entities (id),
@@ -304,7 +330,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
   - `test_an_offer_sku_takes_128_characters`: 128 inserts; 129 raises `CheckViolation`.
   - `test_a_shopping_item_needs_a_type_an_item_or_a_material`.
   - `test_a_line_pack_size_is_positive`: `pack_size = 0` raises `CheckViolation`; the
-    default is 1.
+    default is 1; `received_units = 0` raises `CheckViolation`.
   - `test_registry.py`: `KINDS["invoice_line"].table == "invoice_lines"`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_purchasing_schema.py tests/entities/test_registry.py -q` — Expected: FAIL.
 - [ ] **Step 3: Write the migration; move every SQL name.** No behavior changes in this step.
@@ -375,10 +401,16 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
     It takes `unit` and `filament` kinds alike and calls the kind's extension, if any, after
     the inserts. `in_service` writes a `use` move per unit, as `set_unit_status` does
     (R-P3-8).
-  - `fill_units_in(conn, item_id, unit_ids: Sequence[UUID], cost_minor: Decimal, by, *,
-    invoice_line_id: UUID) -> list[Unit]`: units received earlier with no invoice line take
-    the line and its cost (today's `update_spool_ids`, #6700, #6707, for every unit item;
-    R-P3-30). A unit on another line, of another item, or listed twice is refused.
+  - `adopt_in(conn, item_id, ids: Sequence[UUID], unit_cost_minor: Decimal, by, *,
+    invoice_line_id: UUID) -> tuple[list[Lot], list[Unit]]`: lots and units of the item
+    received earlier with no invoice line take the line and the cost (today's
+    `update_spool_ids`, #6700, #6707, now for every item, and #7648's interim receipts,
+    R-P3-30, R-P3-43). It writes no move, so `on_hand` does not change. A lot or unit on
+    another line, of another item, or listed twice is refused.
+  - `adoptable(conn, item_id, *, near: date, note_has: Sequence[str] = ()) -> list[Lot |
+    Unit]`: the item's lots and units with no invoice line, those whose note holds every
+    term of `note_has` (case-insensitive) first,
+    then by distance of `received_at` from `near`, at most 30 days away (R-P3-43).
   - `set_lot_cost_in(conn, lot_id, unit_cost_minor, by) -> Lot`;
     `set_unit_cost_in(conn, unit_id, cost_minor: Decimal | None, by) -> Unit` (None sets
     `cost_unknown`; no move changes, D14; calls the extension's `cost_set`). It is the one
@@ -408,8 +440,14 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
   - `test_a_received_unit_calls_its_kinds_extension`: a fake extension registered for
     `unit` records one `received` call with the two units; `set_unit_cost_in` calls
     `cost_set`; a lot item calls nothing.
-  - `test_fill_units_in_takes_the_line`: a unit received by hand at 0 cost-unknown takes
+  - `test_adopt_in_takes_the_line`: a unit received by hand at 0 cost-unknown takes
     line `L` and 3000; a unit on another line is refused and nothing is written.
+  - `test_an_adopted_lot_keeps_its_on_hand`: a lot of 100 received by hand on 2026-11-02
+    with note "Amazon order 112-4455", 40 used, so `on_hand == 60`; `adopt_in(…, [lot],
+    Decimal("15"), invoice_line_id=L)` → `invoice_line_id == L`, `unit_cost_minor == 15`,
+    `on_hand == 60`, and the lot's move count is unchanged; `adoptable(item, near=2026-11-01,
+    note_has=["Amazon", "112-4455"])` lists it first; with `["Acme", "112-4455"]` it is listed
+    after the note matches, by date.
   - `test_set_unit_cost_in_moves_no_past_move`; `test_recost_unit_names_the_order_items`.
   - `test_match_in_finds_the_offer_of_one_item_in_a_bundle`: one SKU, two items → `match_in`
     with item A returns A's offer; `by_sku_in` returns both (D13).
@@ -504,9 +542,18 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
 - Consumes: Tasks 2-4.
 - Produces (`purchasing_models.py`): `LineKind = Literal["stock", "expense", "asset"]`;
   `InvoiceLineIn` gains `item_id: UUID | None`, `offer_id: UUID | None`, `kind: LineKind =
-  "stock"`, `pack_size: Decimal | None` (None takes the offer's, else 1), `proposed_item:
-  ItemInput | None`. `proposed_type` and `proposed_item` are exclusive (422).
-  `InvoiceLine` gains the same fields plus `lot_ids`, `unit_ids`, `links: list[LineLink]`.
+  "stock"`, `pack_size: Decimal | None` (None takes the offer's, else 1),
+  `received_units: Decimal | None` (None: as billed), `adopt_ids: list[UUID]`,
+  `proposed_item: ItemInput | None`. `proposed_type` and `proposed_item` are exclusive (422).
+  `InvoiceLine` gains the same fields plus `lot_ids`, `unit_ids`, `links: list[LineLink]`,
+  and the computed `billed_units` (`quantity × pack_size`), `free_units` (`received_units −
+  billed_units`; negative is a short delivery), `cost_per_unit` (`allocated_cost /
+  received_units`, 4 places); for a filament item (from layer 3, Task 9) also `billed_g` (`billed_units × label
+  weight`), `received_g` (Σ the spools' `received_net_g`, None until every spool is
+  weighed), `weighed_spools`, `free_g` and `cost_per_kg` (`allocated_cost / received_g ×
+  1000`, else over `billed_g`) (R-P3-37, R-P3-39, R-P3-42). `ItemCandidate` gains
+  `adoptable: list[AdoptableStock]` (`AdoptableStock(kind: Literal["lot","unit"], id,
+  received_at, qty, note, note_match: bool, ui_path)`).
   `ItemCandidate(item_id, name, kind_id, matched_by: Literal["sku", "mpn", "name",
   "colour"], offer_id)`; `LineCandidates.items: list[ItemCandidate]`. `InvoiceAmend(subtotal,
   tax, shipping, total, lines: list[InvoiceLineIn] (1..200), respread: bool = False)`;
@@ -526,10 +573,13 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
     `match_in(supplier, item, sku or description)`, else a new one (`sku` = the line's SKU,
     else its description, at most 128). With no item named and a SKU that covers two or more
     items (`by_sku_in`), the line fails and names them (R-P3-23);
-  - units = `quantity × line.pack_size`. `stock` or `asset` on a `lot` item: one lot of
-    `units` at `allocated_cost × 10^exp / units`; on a `unit` or `filament` item: the
-    line's `fill_unit_ids` are filled (`fill_units_in`) and `units − filled` more are
-    received (`receive_units_in`, at most 100, else a line error), each at that cost,
+  - billed = `quantity × line.pack_size`; received = `line.received_units`, else billed
+    (R-P3-37). The cost per received unit is `allocated_cost × 10^exp / received`, so the
+    price paid is spread over everything received and the total stays the price paid. The
+    line's `adopt_ids` (lots or units already received outside the invoice) are adopted
+    first (`adopt_in`) and count toward received; then `stock` or `asset` on a `lot` item
+    receives one lot of what is left; on a `unit` or `filament` item, `received − adopted`
+    more units (`receive_units_in`, at most 100, else a line error), each at that cost,
     `in_service` for `asset`; `asset` on a lot item and `stock` or `asset` on a `none` item
     are line errors; `expense` receives nothing;
   - with an item, one invoice price point `pack_price(line_total, quantity, line.pack_size,
@@ -541,8 +591,9 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
   `AmendShortError` becomes `InvoiceAmendShortError` (409 `amend_short`); with it,
   `_recompute` re-allocates every line, and each kept line's lots (`set_lot_cost_in`), units
   (`set_unit_cost_in`, spools included from layer 3) and price point (`set_line_price_in`)
-  take the new cost, the cost per unit being the new `allocated_cost` over the units the
-  line received (`of_line`), and become `recost` targets. The reconcile check runs; the new
+  take the new cost, the cost per unit being the new `allocated_cost` over the line's
+  `received_units`, and become `recost` targets. New lines may adopt lots and units
+  (`adopt_ids`), as at confirm. The reconcile check runs; the new
   lines are confirmed; every line's links are rewritten; one `invoice_events` row (`amended`
   or `respread`) holds each line's allocation before and after (spec §6.7); the stored
   `amend_proposal` is cleared and `lines_review` becomes `done`. `preview` raises a private
@@ -555,7 +606,9 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
   at this supplier has the line's SKU (`sku`), whose `mpn` property equals the SKU (`mpn`),
   whose name equals or is inside the description (`name`); and, per item candidate of a
   unit or filament kind, its units with no invoice line (today's spool candidates, archived
-  ones marked). A kind's extension may add a matcher: the filament one adds `colour` (the
+  ones marked), and for every item candidate its `adoptable` lots and units (`adoptable`,
+  `near` = the invoice date, `note_has` = the supplier's name and the invoice number, which
+  the interim rule writes in the lot's note). A kind's extension may add a matcher: the filament one adds `colour` (the
   line's colour code or proposed type's material and RGBA, today's `_line_key`).
 
 - [ ] **Step 1: Write the failing tests**:
@@ -566,14 +619,20 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
   - `test_a_unit_line_receives_units`: a `nozzle` item, no offer, quantity 3, allocated
     90.00 → 3 units at `cost_minor == 3000`; a new offer with the line's SKU; 101 units → a
     line error.
-  - `test_a_unit_line_fills_units_first`: a hand-received nozzle unit in `fill_unit_ids`,
+  - `test_a_unit_line_fills_units_first`: a hand-received nozzle unit in `adopt_ids`,
     quantity 2 → that unit takes the line and one new unit is received.
+  - `test_received_beyond_billed_is_free`: a `tool` line, quantity 10, `received_units` 11,
+    `allocated_cost` 110.00 → 11 units at `cost_minor == 1000`, `free_units == 1`,
+    `cost_per_unit == Decimal("10.0000")`; a lot line of 2 packs of 100 with
+    `received_units` 210 and allocated 30.00 → one lot of 210 at `unit_cost_minor ==
+    Decimal("14.285714")`, `free_units == 10`; `received_units` 9 of 10 billed →
+    `free_units == -1`, cost per unit `12.2222`.
   - `test_an_asset_line_puts_units_in_service`.
   - `test_an_expense_line_receives_nothing_and_feeds_its_links`: a `service` item, link to
     `order:o1` → no lot, a cost entry of the whole `allocated_cost`.
   - `test_a_service_on_a_stock_line_is_refused`: `InvoiceLineError` naming the line; nothing
     written.
-  - `test_a_bundle_sku_with_no_item_is_refused` (Review Focus 3): the message names both items.
+  - `test_a_bundle_sku_with_no_item_is_refused`: the message names both items.
   - `test_a_proposed_item_is_made_at_confirm`; a clash → line error.
   - `test_filament_lines_confirm_as_before`: the existing `test_invoice_confirm.py` cases pass unchanged.
   - `test_invoice_amend.py`: `test_an_amend_keeps_the_old_allocation` (the Task 2 receipt: the
@@ -582,7 +641,9 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
     `test_a_respread_names_what_to_recost`: a lot and a unit whose cost moved are `recost`
     targets and their costs changed; `test_a_preview_writes_nothing`; one `invoice_events`
     row per amend with before and after; the amend clears `amend_proposal` and sets
-    `lines_review == "done"`.
+    `lines_review == "done"`; `test_an_amend_adopts_an_early_lot` (Review Focus 3): the lot
+    of `test_an_adopted_lot_keeps_its_on_hand` on a new `consumable` line with `adopt_ids`
+    → `on_hand` stays 60, no new lot, no `receive` move, `of_line` returns the lot.
   - `test_candidates_propose_items` (`test_invoice_candidates.py`): the SKU matches an offer
     (`matched_by == "sku"`); an item whose property `mpn` equals the SKU (`"mpn"`); an item
     named as the description (`"name"`), in that order; a nozzle candidate lists its unit
@@ -632,14 +693,18 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
     `line_not_expense`; the invoice problems keep their codes.
 - Produces (`InvoiceStore.review_list(*, all: bool = False) -> list[InvoiceReview]`,
   R-P3-31): `InvoiceReview(invoice: Invoice, signals: list[ReviewSignal], ui_path)`, with
-  `ReviewSignal = Literal["subtotal_differs", "tax_differs", "flagged", "has_file",
-  "imported", "has_note"]`. Each is a fact the data holds: `subtotal_differs` = `|subtotal −
+  `ReviewSignal = Literal["subtotal_differs", "tax_differs", "not_filament_note", "flagged",
+  "has_file", "imported", "has_note"]`. Each is a fact the data holds: `subtotal_differs` = `|subtotal −
   Σ line_subtotal| > 0.05` (`RECONCILE_TOLERANCE`; confirm never compared them);
-  `tax_differs` = `|tax − Σ line_tax| > 0.05`; `flagged` = `lines_review = 'flagged'`;
+  `tax_differs` = `|tax − Σ line_tax| > 0.05`; `not_filament_note` = the note starts with
+  `Not filament:` (the interim #7648 rule, PR #7704: the header took the filament lines'
+  share so the invoice reconciled, and the note holds the printed totals and each other
+  line with its description, quantity, subtotal and the inventory item it went to);
+  `flagged` = `lines_review = 'flagged'`;
   `has_file` = an invoice file is stored; `imported` = `import_run_id` is set; `has_note` =
   a note is set (spec §6.7: the Micro Center invoice kept its full totals there). The list
   holds confirmed invoices with `lines_review` not `done` and at least one of the first
-  three signals; with `all`, every confirmed invoice not `done`. Newest first.
+  four signals; with `all`, every confirmed invoice not `done`. Newest first.
 - Produces (`OrderLifecycle.record_purchase`): with `invoice_line_id`, under the order's
   lock, then the invoice's (R-P3-11): the line must be on a confirmed invoice (409
   `invoice_not_confirmed`), an `expense` line (409 `line_not_expense`), in the order's
@@ -663,7 +728,9 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
   `test_review_list_uses_the_signals` (`test_invoices.py`): a confirmed invoice with header
   subtotal 4900.00 over lines of 160.00 → `subtotal_differs`, `has_note`; one whose
   subtotal and tax match its lines → absent, and present with `all=true`; a person's flag →
-  `flagged`; `lines_review = 'done'` → absent even with `all=true`.
+  `flagged`; a note `Not filament: printed total 5234.28; AMS 2 Pro x1 …` with matching
+  header and lines → `not_filament_note`; `lines_review = 'done'` → absent even with
+  `all=true`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_purchasing.py tests/api/test_filament_purchasing.py tests/orders/test_purchases.py tests/filament/test_shopping.py tests/filament/test_invoices.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement** the routes and the coverage entries (reason: "Inventory phase 3
   (#7068, spec §6.5, §6.7); its `invoice_*` and `supplier_*` tools follow in layer 6 of the
@@ -714,9 +781,10 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
    `price`, `currency`, `on_date`, `source`, `invoice_line_id`, `created_at`.
 8. `invoice_lines`: `offer_id = supplier_product_id`, `item_id = type_id` where set,
    `pack_size = 1` (a filament line counted spools, so each spool is a pack of 1, R-P3-7);
-   rename `update_spool_ids` → `fill_unit_ids`; drop `supplier_product_id`. The view
+   `received_units = quantity × pack_size` where NULL, then `SET NOT NULL` (an old line
+   received what it billed, R-P3-37); rename `update_spool_ids` → `adopt_ids`; drop `supplier_product_id`. The view
    `filament_invoice_lines` is made again with `offer_id AS supplier_product_id` and
-   `fill_unit_ids AS update_spool_ids`.
+   `adopt_ids AS update_spool_ids`.
 9. Invoice files: for each invoice with a `file_key`, its `invoice:<id>` entity (made here),
    one `entity_attachments` row (`id = gen_random_uuid()::text`, `subject`, `kind` = `image`
    for an `image/*` type else `document`, `role = 'invoice'`, `filename = file_name`,
@@ -741,7 +809,7 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
     `L` naming it with quantity 8, a price point `79.9600` USD of source `invoice` → an offer
     with id `P`, `item_id` = the type's id, `pack_size == 4`, `pack_uom == "spool"`; a price
     point with the old id and `invoice_line_id == L`; `invoice_lines.offer_id == P`,
-    `quantity == 8`, `pack_size == 1`; `SELECT … FROM filament_supplier_products` answers
+    `quantity == 8`, `pack_size == 1`, `received_units == 8`; `SELECT … FROM filament_supplier_products` answers
     `P` with `type_id`.
   - `test_a_bad_product_url_becomes_no_url`: `product_url = 'www.x'` → offer `url IS NULL`.
   - `test_spool_types_become_filament_items`: a live and an archived type → two items with
@@ -794,13 +862,23 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
   `type_id`; `status_set` sets or clears `archived_at` (`retired` ↔ `in_stock`; a spool
   workflow archive calls `StockStore.set_unit_status_in`, which calls back here, so either
   side writes both); `cost_set` writes `filament_spools.cost_per_kg = cost_minor /
-  10^exp / (label weight / 1000)`, or NULL for an unknown cost; `deleting` deletes the
+  10^exp / (net g / 1000)`, or NULL for an unknown cost, where net g is
+  `received_net_g`, else the label weight (R-P3-40); `deleting` deletes the
   spool row's workflow rows as `spools.delete` does today.
 - Produces: `FilamentSpoolStore.create_on` becomes `StockStore.receive_units_in(item = the
-  type, unit_ids=[new id], extra=…)` and returns the spool; a spool `cost_per_kg` write from
+  type, unit_ids=[new id], extra=…)` and returns the spool, with `unit_id` set on the spool
+  row (R-P3-41); a spool `cost_per_kg` write from
   a person, the agent or the pull calls `set_unit_cost_in` with `cost_per_kg × label weight
-  / 1000 × 10^exp`. A label weight change keeps `cost_minor` (what was paid) and writes the
-  new `cost_per_kg`.
+  / 1000 × 10^exp`. A label weight change keeps `cost_minor` (what was paid; owner
+  accepted) and writes the new `cost_per_kg`.
+- Produces (R-P3-39, R-P3-40): `SpoolUnits.received_net_g(conn, spool_id) -> float | None`:
+  the `grams_after` of the spool's first `weighed` event with `source` in `('scale',
+  'person')`, read with `ledger.events` (Pre-flight 8), when no use event (`print_run`,
+  `bb_usage`) comes before it; else None (a spool first weighed after use cannot say what
+  it held). `SpoolUnits.weighed_on(conn, spool_id, event)`, called by `spools.add_event`
+  after it books a `weighed` event: when that event is the one `received_net_g` reads, it
+  rewrites `cost_per_kg` by the rule above. No past use moves (D14); "Re-cost past uses"
+  carries it to job cost.
 - Produces (`Item` for a `filament` item): `on_hand` = the grams left of its in-stock units'
   spools, `stock_value_minor` = Σ `cost_minor × grams_left / label weight`, `cost_unknown`
   when a unit's cost is unknown; `type_ui_path`. `Unit.spool_ui_path`. Creating a filament
@@ -825,7 +903,10 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
   `stock_value_minor == 2500`; an offer for it is created; `entity_link` on `item:<it>` and
   on `spool_type:<it>` land on one entity; a property on `spool:<s>` lists under `unit:<s>`;
   `set_schema("spool_type", …)` raises `SchemaOwnedByKind` (as R-P2-5); a lot call on a
-  filament item → `WrongTracking`.
+  filament item → `WrongTracking`; a spool of unit cost 2500 and label 1000 g weighed first
+  by scale at 1010 g net → `received_net_g == 1010`, `cost_per_kg == 24.7525`,
+  `cost_minor == 2500`; a spool whose first weighing follows a print → `received_net_g is
+  None`, `cost_per_kg == 25.0000`; every typed spool row has `unit_id == id`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament tests/inventory tests/entities -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same with `-n auto` — Expected: PASS.
@@ -840,7 +921,7 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
   item through the type store; `file_key`/`set_file`/`delete` over the `invoice`
   attachment), `backend/scadbuddy/filament/purchasing_models.py` (`type_id` reads and
   writes `item_id`, `supplier_product_id` writes `offer_id`, `update_spool_ids` writes
-  `fill_unit_ids`, each as a `validation_alias`), `backend/scadbuddy/filament/suppliers.py`
+  `adopt_ids`, each as a `validation_alias`), `backend/scadbuddy/filament/suppliers.py`
   (products, prices, sheet, stats and `type_prices` over `supplier_offers` of filament items;
   `SupplierProduct.type_id` = `item_id`; `_newest` over `offer_price_points`),
   `backend/scadbuddy/filament/bb_sync_plan.py` (l.350, l.727 with `created_at`,
@@ -868,7 +949,11 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
 - [ ] **Step 1: Write the failing tests**: every `test_invoice_confirm.py` case passes on the
   one path (spools made, filled, archived filled, `cost_per_kg` as before, one price point);
   a mixed invoice (a filament line, an NFC tag `consumable` lot line, a `tool` unit line)
-  confirms in one call; the filament supplier, product, price and sheet tests pass with
+  confirms in one call and reconciles with its printed totals (#7648, R-P3-42); a spool
+  line of 4 spools, label 1000 g, allocated 100.00, weighed at 1010, 1000, 995 and 1015 g
+  → `billed_g == 4000`, `received_g == 4020`, `free_g == 20`, `cost_per_kg ==
+  Decimal("24.8756")`; with one spool not weighed → `received_g is None`, `weighed_spools
+  == 3`; the filament supplier, product, price and sheet tests pass with
   offers; the orders price book import (`orders/spool_import.py`) and the type page's "Use
   as default cost" (`type_prices`) read a migrated price point (spec §6.5); candidates of a
   filament line list colour-matched types and their spools as before;
@@ -983,7 +1068,11 @@ Load `frontend-design` first.
 - Produces (InvoicePage): one line editor for every item: an item search over
   `/inventory/items` (a filament item shows its colour swatch; "New spool type" opens the
   type fields as `proposed_type`), a `kind` select, an offer, a pack size, and units to
-  fill (spools or any unit item's units); candidates show `matched_by`; each confirmed line
+  adopt (lots or units received outside an invoice, note matches first, R-P3-43); a
+  "Received" field beside the billed quantity (defaults to billed); each confirmed line
+  shows "Billed 10, received 11, 1 free" and its cost per unit, and a filament line
+  "Paid for 4,000 g, got 4,020 g (3 of 4 spools weighed)" with its cost per kg (R-P3-42);
+  candidates show `matched_by`; each confirmed line
   has a links list (add entity by `kind:ref` search, share, note, its amount and consumer
   link); "Amend" opens new lines plus header totals and a "Re-spread over all lines" switch,
   shows the preview's before and after per line, then confirms; after a respread it lists
@@ -993,7 +1082,8 @@ Load `frontend-design` first.
 
 - [ ] **Step 1: Write the failing tests**: `/filament/invoices/x` lands on
   `/inventory/invoices/x`; a `hardware` line sends `{item_id, kind: "stock"}`; a filament
-  line sends `{item_id, fill_unit_ids}`; an amend preview shows `171.12 → 171.12` and the new
+  line sends `{item_id, adopt_ids}`; a line with `received_units` 11 of 10 billed shows
+  "1 free" and the cost per unit `10.00`; adopting a lot sends its id in `adopt_ids`; an amend preview shows `171.12 → 171.12` and the new
   line's `5063.16`; a 409 `amend_short` shows its detail; adding a link to `order:o1` shows
   its amount; a respread lists a spool's unit with "Re-cost past uses"; the fixture paths
   match both link modules.
@@ -1009,12 +1099,14 @@ Load `frontend-design` first.
   /entities/{ref}/invoice-lines`), `frontend/src/pages/inventory/InvoiceReviewPage.tsx`
 - Modify: `frontend/src/pages/inventory/ItemPage.tsx` (the panel; a filament item's page
   shows its units as spools and links to its type page; "Add to shopping list"),
-  `LotPage.tsx` and `UnitPage.tsx` (the panel; "From invoice line" links; "Re-cost past
-  uses" on a unit; a spool unit links to its spool), `frontend/src/pages/OrderPage.tsx`
+  `LotPage.tsx` and `UnitPage.tsx` (the panel; "From invoice line" links with the line's
+  billed, received and free figures; "Re-cost past uses" on a unit; a spool unit links to
+  its spool), `frontend/src/pages/OrderPage.tsx`
   (the panel for the order), `frontend/src/components/orders/CustomerModels.tsx` (record a
   purchase with an optional invoice line picked from the order's linked or the supplier's
   expense lines), `frontend/src/pages/filament/SpoolPage.tsx` (the panel; "Re-cost past
-  uses" through the unit route), `frontend/src/pages/filament/ShoppingListTab.tsx` (item
+  uses" through the unit route; "Label 1,000 g, received 1,010 g (first weighing), cost per
+  kg 24.75"; slice A's `drift_g` beside it when present, Pre-flight 8), `frontend/src/pages/filament/ShoppingListTab.tsx` (item
   rows), `frontend/src/pages/inventory/InvoicePage.tsx` ("May be missing lines" flag;
   "Review missing lines" starts the backfill session (Task 14) and opens Amend prefilled
   from `amend_proposal`, with "Re-spread over all lines" on), `frontend/src/App.tsx`
@@ -1036,7 +1128,9 @@ Load `frontend-design` first.
   item row on the shopping list links to its item; the review page shows a row with
   `subtotal_differs` and "4900.00 / 160.00"; "Mark done" sends `{lines_review: "done"}`;
   the invoice page with an `amend_proposal` opens Amend with its lines and the respread
-  switch on, and nothing is sent until the person confirms.
+  switch on, and nothing is sent until the person confirms; a proposed line with
+  `adopt_ids` shows the lot it adopts and "no new stock"; the spool page shows "received
+  1,010 g" for a weighed spool and "not weighed" for one without.
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/components/inventory src/pages src/components/orders/CustomerModels.test.tsx` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd frontend && pnpm lint && pnpm typecheck && pnpm test` — Expected: PASS.
@@ -1064,9 +1158,10 @@ Load `frontend-design` first.
 
 **Interfaces:**
 - Produces tools (route; risk): `supplier_list` (read), `supplier_upsert` (write),
-  `invoice_list` (read), `invoice_get` (read; lines with links, lots, units),
-  `invoice_candidates` (read; items and their fillable units), `invoice_upsert` (write;
-  lines take `item_id`, `offer_id`, `kind`, `pack_size`, `fill_unit_ids`,
+  `invoice_list` (read), `invoice_get` (read; lines with links, lots, units, and billed, received, free and
+  cost per unit or per kg, R-P3-42),
+  `invoice_candidates` (read; items with their adoptable lots and units), `invoice_upsert` (write;
+  lines take `item_id`, `offer_id`, `kind`, `pack_size`, `received_units`, `adopt_ids`,
   `proposed_item`, `proposed_type`), `invoice_confirm` (write), `invoice_amend_preview`
   (read; `POST …/amend?preview=true` writes nothing), `invoice_amend_propose` (write; `PUT
   …/amend-proposal`, no line changes), `invoice_amend` (outward, gated: a person approves it,
@@ -1096,7 +1191,7 @@ Load `frontend-design` first.
   `agent/src/filament/invoiceImportPrompt.ts` (the `invoice_*` tools; every printed line
   goes on the invoice, a non-filament one as an item line; items of any kind by SKU, then
   MPN, then name), `plugins/scadbuddy/skills/filament/SKILL.md`,
-  `plugins/scadbuddy/.claude-plugin/plugin.json` (`0.1.62`, `check-plugin-version.sh`)
+  `plugins/scadbuddy/.claude-plugin/plugin.json` (above PR #7704's `0.1.62`: `0.1.63` or the next free one, `check-plugin-version.sh`)
 - Test: `agent/test/invoiceImportRoute.test.ts`, `agent/test/invoiceImportPrompt.test.ts`,
   `agent/test/invoiceBackfillPrompt.test.ts`
 
@@ -1107,17 +1202,25 @@ Load `frontend-design` first.
   line, and pairs each with a kept line by SKU, then description, then amount. It proposes
   only the printed lines with no kept line, as item lines (`stock` for a lot or unit item,
   `asset` for equipment put in use, `expense` for a service, a fee or a repair), each with
-  an item from `invoice_candidates` or a `proposed_item`, plus the printed header subtotal,
+  an item from `invoice_candidates` or a `proposed_item`. When a candidate lists an
+  adoptable lot or unit (same item, near the invoice date, the supplier and order number in
+  its note: #7648's interim receipts; the `Not filament:` note names the item each other
+  line went to), the proposed line adopts it (`adopt_ids`) instead of receiving
+  the goods again (R-P3-43). A printed quantity received in another amount is
+  `received_units`. It adds the printed header subtotal,
   tax, shipping and total. It checks the proposal with `invoice_amend_preview`
   (`respread: true`) and stores it with `invoice_amend_propose`. It never calls
   `invoice_amend`. It ends by naming the lines it proposed, the ones it could not read, and
   each spool whose cost the respread lowers.
-- Produces (`SKILL.md`): #7648's section, changed to phase 3 (R-P3-36): "### A line that is
-  not filament": an invoice may hold NFC tags, nozzles, desiccant or tools; each goes on the
+- Produces (`SKILL.md`): layer 6 rewrites the interim #7648 section completely (the
+  interim section is PR #7704; R-P3-36, R-P3-44): "### A line
+  that is not filament": an invoice may hold NFC tags, nozzles, desiccant or tools; each goes on the
   invoice as an item line (`invoice_upsert` with `item_id` from `inventory_item_list` `q`,
   or `proposed_item`; `kind` `stock`, `asset` or `expense`), so the header keeps the printed
   totals, reconciles, and spreads tax and shipping over every line; never leave a line off
-  and never cut the header to the filament share. And "### Confirmed invoices that are
+  and never cut the header to the filament share; goods already received by the interim
+  rule are adopted (`adopt_ids`), never received again; a delivery that differs from the
+  bill sets `received_units`. And "### Confirmed invoices that are
   missing lines": use `invoice_review_list`, start the backfill from the invoice page, and
   leave the amend to the person. The section cites #7648 and spec §6.7.
 
@@ -1127,7 +1230,8 @@ Load `frontend-design` first.
   invoice → 409 `confirmed` as today; the backfill prompt names `invoice_amend_propose` and
   `invoice_amend_preview` and says it never calls `invoice_amend`; the import prompt names
   `invoice_get` and `invoice_upsert`, not the old names, and says a non-filament line is an
-  item line.
+  item line; the backfill prompt names `adopt_ids` and `received_units`; the skill has no
+  text left of the interim section (no `inventory_lot_receive` outside an invoice).
 - [ ] **Step 2: Run** `cd agent && pnpm exec vitest run test/invoiceImportRoute.test.ts test/invoiceImportPrompt.test.ts test/invoiceBackfillPrompt.test.ts` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd agent && pnpm lint && pnpm typecheck && pnpm test` and `.github/scripts/lint-plugin.sh` — Expected: PASS.
@@ -1147,7 +1251,8 @@ Load `frontend-design` first.
   invoice, supplier and review routes; the redirects), `backend/CLAUDE.md` (the
   `inventory/` and `filament/` layout lines), `agent/CLAUDE.md` (the tool families), the
   spec's §9 phase 3 line (a "done in" note with the PRs), and §6.4's filament paragraph and
-  D1 where R-P3-30 changes them (the unit carries the cost; grams stay in the ledger).
+  D1 where R-P3-30 changes them (the unit carries the cost; grams stay in the ledger), and
+  §6.7 for billed and received (R-P3-37).
 
 - [ ] **Step 1: Edit**, each fact with its source (file:line, PR or issue).
 - [ ] **Step 2: Run** `grep -rn "filament_supplier_products\|filament_price_points\|filament_invoices\b\|filament_invoice_lines\|supplier_product_id\|update_spool_ids" docs backend/CLAUDE.md frontend/CLAUDE.md agent/CLAUDE.md plugins` — Expected: only historical specs and plans, and the retired names in `data.md`.
@@ -1179,15 +1284,18 @@ Load `frontend-design` first.
 - **R-P3-3.** A filament item keeps its spool type's id and is named by its `code`; a spool's
   unit keeps the spool's id. Reason: one id per thing; `code` is unique among unarchived
   types, as the item name must be.
-- **R-P3-4** (changed by R-P3-30). A filament item takes every call a unit item takes:
+- **R-P3-4** (changed by R-P3-30; owner accepted 2026-11-25 that creating a filament item
+  takes the type's fields). A filament item takes every call a unit item takes:
   receive, status, cost, re-cost, offers. Receiving its units makes its spools. Its lot
   calls answer `WrongTracking`, as a unit item's do. Creating one takes the type's fields.
   Reason: the owner's ruling; the type fields are what the spool workflow needs.
-- **R-P3-5** (changed by R-P3-30). `item:` and `unit:` refs of spool types and spools work.
+- **R-P3-5** (changed by R-P3-30; owner accepted 2026-11-25: the aliases last one release,
+  then a follow-up removes them). `item:` and `unit:` refs of spool types and spools work.
   The migration moves the `spool_type` and `spool` entities, files and schemas to `item` and
   `unit`; `spool_type:` and `spool:` stay accepted as aliases for one release. Reason: one
   entity per thing, with no refusal.
-- **R-P3-6** (changed by R-P3-30). The unit carries the spool's cost in `cost_minor`, as
+- **R-P3-6** (changed by R-P3-30 and R-P3-40; owner accepted 2026-11-25 that a label weight
+  change keeps the price paid). The unit carries the spool's cost in `cost_minor`, as
   every unit does. `filament_spools.cost_per_kg` is its per-kg form (cost over label
   weight), kept for the spool workflow (Bambuddy, labels, summaries). `set_unit_cost_in` is
   the one writer of both. A label weight change keeps what was paid. The type's
@@ -1226,7 +1334,7 @@ Load `frontend-design` first.
   /inventory/units/{id}/recost` for every unit; for a spool unit it re-snapshots its use
   events. The spool route is an alias. Reason: one re-cost path; spec §6.6 names it for
   spools.
-- **R-P3-18.** Job cost before and after is read on prod just before and after layer 4
+- **R-P3-18** (owner accepted 2026-11-25). Job cost before and after is read on prod just before and after layer 4
   deploys. Reason: the change is read-only, and prod data never leaves prod.
 - **R-P3-19.** Shopping items take `item_id`; `material` becomes nullable under a CHECK.
   Reason: spec §6.5; a non-filament row has no material.
@@ -1266,9 +1374,10 @@ Load `frontend-design` first.
   -7, -16, -17, -22, -24 and Tasks 3, 5, 7, 8, 9, 10.
 - **R-P3-31.** The backfill list uses only signals the data holds: header `subtotal` or
   `tax` that differ from the lines' sums by more than 0.05 (confirm never compared them,
-  `filament/invoices.py:571`), and a person's flag; `has_file`, `imported` and `has_note`
-  are shown, not filtered on. Reason: a cut header still reconciles on `total`, so only the
-  subtotal, the tax or a person can show a missing line.
+  `filament/invoices.py:571`), a note that starts with `Not filament:` (the interim #7648
+  rule, PR #7704), and a person's flag; `has_file`, `imported` and `has_note` are shown,
+  not filtered on. Reason: a cut header still reconciles on `total`, so only the subtotal,
+  the tax, the interim note or a person can show a missing line.
 - **R-P3-32.** `invoices.lines_review` (`flagged`, `done`) holds a person's flag and the end of
   a review; an amend sets `done`. Reason: the list must shrink as invoices are reviewed.
 - **R-P3-33.** The backfill is a `missing_lines` mode of the existing invoice-import session.
@@ -1282,6 +1391,40 @@ Load `frontend-design` first.
   each spool unit whose cost dropped with "Re-cost past uses". Reason: the old header spread
   tax and shipping over the filament lines only, so their spools' cost is overstated, and
   the re-cost carries the fix to past job cost.
-- **R-P3-36.** The filament skill takes #7648's section, changed so that a non-filament line
-  becomes an item line on the same invoice, with the printed header kept; layer 6 closes
-  #7648. Reason: phase 3 answers #7648's open question with line kinds.
+- **R-P3-36.** The filament skill's invoice text makes a non-filament line an item line on
+  the same invoice, with the printed header kept; layer 6 closes #7648. Reason: phase 3
+  answers #7648's open question (R-P3-42).
+- **R-P3-37** (owner, 2026-11-25: "we should be able to understand what we got 'for free'
+  -- actual amount of filament or items. i.e. we bought 10 but got 11"). Every line keeps
+  billed (`quantity × pack_size`) and received (`received_units`, as billed when not
+  given). The price paid is spread over everything received, so the cost per unit falls
+  and the total stays the price paid. The free part is received − billed; below 0 it is a
+  short delivery and the cost per unit rises. Old rows get received = billed (layer 3).
+  Reason: the owner's rule, for every item (R-P3-30).
+- **R-P3-38.** The free part is a fact of the line, read through `invoice_line_id` from its
+  lots and units; no lot or unit column holds it. Reason: one place, and all units of a
+  line cost the same.
+- **R-P3-39.** A spool's received grams are its measured net grams: the first `weighed`
+  event by scale or person (`grams_after`), when no use comes before it; else unknown.
+  Billed grams are units × label weight. Phase 3 reads this from the ledger on main and
+  adds no weighing column or event; slice A of #7681 is optional. Reason: #7681 owns
+  weighing (session scadbuddy-53's interface).
+- **R-P3-40.** A spool's `cost_per_kg` is its unit cost over its received grams when known,
+  else over its label weight; the first weighing rewrites it, and past uses move only by
+  "Re-cost past uses". Reason: the price paid spread over what was got, as R-P3-37 does
+  for units.
+- **R-P3-41.** `filament_spools.unit_id` stays on the spool row, equal to its id and set for
+  every typed spool. Reason: #7681's empty-weight resolver adds the carrier and the parts
+  (#7278) through it.
+- **R-P3-42.** #7648's open question (cut the header to the filament share, or add a "not
+  filament" line kind) has the generic answer: every good is a line of the one line model,
+  so a mixed invoice reconciles with its printed totals and nothing is cut. Lines, items,
+  lots, units and spools show billed, received, free and the cost per unit or per kg.
+  Reason: R-P3-30 and R-P3-37.
+- **R-P3-43.** No double receive. A line's `adopt_ids` names lots or units of its item that
+  were received outside an invoice (#7648's interim rule, or by hand); the line adopts them
+  with no move, so `on_hand` does not change, and receives only the rest. Candidates rank
+  them by the supplier's name and the order number in their note (the interim rule writes
+  both), then by received date within 30 days of the invoice date. Reason: such lots may already exist on prod.
+- **R-P3-44.** The interim #7648 skill section lands first in its own PR (#7704, plugin
+  `0.1.62`); layer 6 replaces it completely and bumps the plugin past it. Reason: agents stop improvising before phase 3 ships.
