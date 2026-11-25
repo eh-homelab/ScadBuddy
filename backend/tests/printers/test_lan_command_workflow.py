@@ -158,6 +158,36 @@ async def test_a_refusal_stops_the_rest_and_is_409(client: Client) -> None:
 
 
 @pytest.mark.requires_temporal
+async def test_a_later_failure_names_the_commands_the_printer_confirmed(client: Client) -> None:
+    """P61: a configure whose second command is refused still changed the slot with its
+    first, so the problem says which earlier commands the printer confirmed."""
+    run = LanCommandRun(
+        commands=[
+            command("ams_filament_setting"),
+            command("ams_filament_setting"),
+            command("extrusion_cali_sel"),
+        ]
+    )
+    refused = ApplicationError(
+        "H2C refused extrusion_cali_sel: busy.", type=LAN_REFUSED, non_retryable=True
+    )
+    replies = iter([LanCommandReply(confirmed=True), LanCommandReply(confirmed=False)])
+
+    def answer(input: LanCommandInput) -> LanCommandReply:
+        if input.name == "extrusion_cali_sel":
+            raise refused
+        return next(replies)
+
+    [outcome], sent = await _run(client, answer, run)
+    assert sent == ["ams_filament_setting", "ams_filament_setting", "extrusion_cali_sel"]
+    assert isinstance(outcome, ApiError)
+    assert outcome.extensions["code"] == "printer_refused"
+    assert outcome.detail.startswith("H2C refused extrusion_cali_sel: busy.")
+    assert "confirmed ams_filament_setting" in outcome.detail
+    assert "unacknowledged: ams_filament_setting" in outcome.detail
+
+
+@pytest.mark.requires_temporal
 @pytest.mark.parametrize(
     ("kind", "code"), [(LAN_NO_ANSWER, "printer_no_answer"), (LAN_UNSURE, "printer_unreachable")]
 )

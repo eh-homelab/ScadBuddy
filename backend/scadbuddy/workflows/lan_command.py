@@ -39,6 +39,7 @@ from temporalio.exceptions import (
 
 with workflow.unsafe.imports_passed_through():
     from fastapi import status
+    from temporalio.api.enums.v1 import EventType
     from temporalio.client import (
         Client,
         WorkflowExecutionStatus,
@@ -50,6 +51,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.runs import PrintRunError
     from scadbuddy.core.problems import ApiError
     from scadbuddy.printers.lan_command_models import (
+        LanCommandInput,
         LanCommandOutcome,
         LanCommandPending,
         LanCommandReply,
@@ -223,11 +225,56 @@ async def _answer(
         if isinstance(cause, ActivityError) and isinstance(cause.cause, CancelledError):
             cause = cause.cause
         if not isinstance(cause, (TemporalTimeoutError, CancelledError, TerminatedError)):
-            raise _problem(failure) from failure
+            raise await _with_earlier(client, handle, _problem(failure)) from failure
         commands = (run or await _started_run(client, handle)).commands
         if any(command.kind == "read" for command in commands):
             raise _no_answer() from failure
         return LanCommandOutcome(replies=[LanCommandReply(confirmed=False) for _ in commands])
+
+
+async def _with_earlier(
+    client: Client, handle: WorkflowHandle[Any, LanCommandOutcome], problem: ApiError
+) -> ApiError:
+    """``problem`` with the commands that ran before the failed one (P61): a configure is
+    two or three writes, so a later one's failure leaves an earlier one applied, and the
+    problem must not read as though nothing changed. Each earlier command the printer
+    confirmed is named, and each sent but not acknowledged (it may have applied, P30)."""
+    names: dict[int, str] = {}
+    confirmed: list[str] = []
+    unacknowledged: list[str] = []
+    async for event in handle.fetch_history_events():
+        if event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
+            scheduled = event.activity_task_scheduled_event_attributes
+            [command] = await client.data_converter.decode(
+                list(scheduled.input.payloads), [LanCommandInput]
+            )
+            names[event.event_id] = command.name
+        elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED:
+            done = event.activity_task_completed_event_attributes
+            [reply] = await client.data_converter.decode(
+                list(done.result.payloads), [LanCommandReply]
+            )
+            name = names.get(done.scheduled_event_id, "a command")
+            (confirmed if reply.confirmed else unacknowledged).append(name)
+        elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT:
+            # Only a write timed out lets the run go on (`LanCommandWorkflow.run`).
+            timed_out = event.activity_task_timed_out_event_attributes
+            unacknowledged.append(names.get(timed_out.scheduled_event_id, "a command"))
+    if not confirmed and not unacknowledged:
+        return problem
+    said = []
+    if confirmed:
+        said.append(f"Before it, the printer confirmed {', '.join(confirmed)}.")
+    if unacknowledged:
+        said.append(f"Sent before it, unacknowledged: {', '.join(unacknowledged)}.")
+    return ApiError(
+        problem.status,
+        " ".join([problem.detail, *said]),
+        title=problem.title,
+        type_=problem.type,
+        headers=problem.headers,
+        **problem.extensions,
+    )
 
 
 async def _started_run(
