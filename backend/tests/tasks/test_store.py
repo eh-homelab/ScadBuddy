@@ -849,3 +849,52 @@ def test_of_run_reads_no_answer(store: TaskStore) -> None:
     read = store.of_run("run-1", ["a"])["a"]
     assert read.state == "answered"
     assert not {"answer", "answered_by"} & set(read.model_dump())
+
+
+def test_forgetting_a_run_announces_its_open_tasks(
+    store: TaskStore, recorder: Recorder, pg_pool: PgPool
+) -> None:
+    for task in ("t1", "t2"):
+        store.open(_task(task, place="room/a"))
+    store.open(_task("other", "run-2"))
+    store.close_or_current("t2", "expired")
+    recorder.events.clear()
+    assert FlowStore(pg_pool, events=recorder)._delete_run("run-1")
+    assert recorder.changes() == [("t1", "cancelled")]
+    [event] = recorder.events
+    assert isinstance(event, TaskChanged)
+    assert (event.run_id, event.place) == ("run-1", "room/a")
+    assert [t.id for t in store.list(state=None)] == ["other"]
+    assert not FlowStore(pg_pool, events=recorder)._delete_run("run-1")
+    assert recorder.changes() == [("t1", "cancelled")]
+
+
+def test_a_run_that_is_not_forgotten_after_all_announces_nothing(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    """The event is in the deletion's own transaction."""
+    store.open(_task("t1"))
+
+    class Away:
+        def publish_in(self, conn: Connection[Any], event: Event) -> None:
+            raise RuntimeError("no event log")
+
+    with pytest.raises(RuntimeError):
+        FlowStore(pg_pool, events=Away())._delete_run("run-1")
+    assert _states(store, "run-1") == {"t1": "open"}
+
+
+def test_forgetting_a_run_while_its_task_is_closed_does_not_deadlock(
+    store: TaskStore, pg_pool: PgPool
+) -> None:
+    store.open(_task("t1"))
+    store.events = Log()
+    runs = FlowStore(pg_pool, events=Log())
+    closed, gone = _race(
+        pg_pool,
+        lambda: store.close_or_current("t1", "expired", workflow_run_id="x"),
+        lambda: runs._delete_run("run-1"),
+    )
+    assert closed.state == "expired"
+    assert gone is True
+    assert store.get("t1") is None

@@ -9,7 +9,8 @@
    forgets a subject through its CRUD route with the same statements
    (`agent_data/forget.py`, `api/crud_agent_forget.py`, #5299 step 6).
 2. The workflow terminated if open, then its execution deleted.
-3. The `workflow_runs` row.
+3. The `workflow_runs` row, and its tasks with it. Each one that was open is announced as
+   cancelled in the same transaction.
 """
 
 from __future__ import annotations
