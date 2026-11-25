@@ -399,6 +399,8 @@ def _property_problems(
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if defaults and "default" in prop and not problems:
         checker = FORMAT_CHECKER if formats else None
+        # Every error, not only the first: `best_match` picks among them, and a timeout must
+        # not hide a real error. Each pattern is still bounded by the shared budget (#7688).
         errors = list(Validator(prop, format_checker=checker).iter_errors(prop["default"]))
         real = [e for e in errors if not isinstance(e.cause, TimeoutError)]
         if errors and not real and retry_timeouts:
