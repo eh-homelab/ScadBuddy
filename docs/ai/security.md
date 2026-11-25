@@ -376,7 +376,9 @@ drive sessions over `/mcp`. What bounds them:
 - **The approval grant** is per token (`ai_mcp_tokens.approval_grant`), off by default,
   `outward` tokens only (route check and table `CHECK`), read on every decision so a
   revoke withdraws it. `ApprovalService.authorize` still refuses a grant holder's own
-  calls and sessions (spec §8.2: "never for its own calls or sessions"). OIDC subjects
+  calls, its MCP prepares; a session's parked calls are decided through the gate's
+  `respond`, whose role check (`gate/role.ts` `roleOf`) refuses the session's owner or
+  creator (spec §8.2: "never for its own calls or sessions"). OIDC subjects
   and `anonymous` never hold it.
 - **Not from inside a session.** The same tools are offered to a session's model as the
   session's owner, but deciding an approval and handing off, accepting or declining a
@@ -876,8 +878,10 @@ outside ScadBuddy. These rules hold:
   `oidc` mode, or anyone in `disabled` mode. A revoked or expired token stops reading at
   once. A change to `/mcp`'s tokens, auth mode or anonymous cap changes the feed with it
   ([operating.md §9](operating.md#the-marketplace-feed-6933)).
-- **LAN-only.** The feed has no public prefix on the SSO host (eh-homelab/clusters#4017).
-  The zip URLs follow the request's origin, because Claude Code sends a marketplace's
+- **Public.** The feed prefix, `/mcp` and `/mcp/workspace/` are reached on the public URL
+  with no sign-in at the ingress (eh-homelab/clusters#4017, merged 2026-11-25), so the
+  agent's bearer check is the only gate there. `disabled` mode then serves anyone on the
+  internet, not only the LAN. The zip URLs follow the request's origin, because Claude Code sends a marketplace's
   `headers` only to its own origin.
 - **Only approved pins.** A package is listed only at its current approved pin; a pending
   re-pin, a draft or an unapproved package is 404. A hosted zip and an archive are served

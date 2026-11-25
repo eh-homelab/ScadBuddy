@@ -1587,12 +1587,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   counted in `scadbuddy_template_refresh_failures_total`, never raised) and
   `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
   `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
-  of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
-  skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
-  Phase 2: once a copy run has finished (`Catalogue._from_rows`), the catalogue's readers
-  read the rows, not the files (the list, the record, the ids, `list_summaries`,
-  `raw_metas`, the pin index, the print settings, the name check, `duplicates_of`);
-  `library_users` and `library_pins` still read the files. The thumbnail's `ETag` names
+  of the write lock; `GET /model-records/copy-status` answers its last run).
+  Phase 3: the catalogue's readers read only the rows, with no walk of the files before
+  a copy run has finished (the list, the record, the ids, `list_summaries`, `raw_metas`,
+  the pin index, the print settings, the name check, `duplicates_of`; `Catalogue._rows`,
+  which raises `RuntimeError` when no rows are open). One template's files are still
+  read when it has no row, when Postgres cannot store its `model.json`, or while its row
+  lags its media; `library_users` and `library_pins` still read the files. A database
+  where no run has finished gets its first copy before the app serves
+  (`main._first_template_copy`). A test's app runs that first copy too, but skips the
+  background start copy unless the test is marked `template_copy` (`tests/conftest.py`).
+  A test that writes template files by hand after its app started calls
+  `tests/support/template_rows.py` `sync_template_rows` (or `copy_template_rows` for a
+  catalogue it made itself), or the lists do not show the edit. The thumbnail's `ETag` names
   its source (`Catalogue.thumbnail_ref`: the cover's sha256, `"output-<id>"`,
   `"preview-<id>"`), so a 304 reads no file (except for a row that lags its media,
   `TemplateRow.media_newer`, which is read from the files); a 200 tags what it read.

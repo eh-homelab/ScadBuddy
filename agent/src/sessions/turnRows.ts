@@ -23,7 +23,7 @@ export const QUEUED_DROPPED = 'queued_message_dropped'
 export type Logged = { events: ServerEvent[]; seqs: number[] }
 
 /** What a send's claim found: the status before it, which a give-back restores, and the runtime. */
-export type SendClaimed = { prior_status: SessionStatus; runtime: SessionRuntime | null }
+export type SendClaimed = { prior_status: SessionStatus; runtime: SessionRuntime }
 
 /** A send's claim: whose turn, which, the tiers its tool activities run with, and whether it is bare (no background built-ins). */
 export type SendClaim = { author: Who; turnId: string; tiers: readonly string[] | null; bare: boolean }
@@ -42,7 +42,7 @@ export type TurnState = {
   turn_attempt: string | null
   interrupt_requested: boolean
   owner_kind: string
-  runtime: SessionRuntime | null
+  runtime: SessionRuntime
   /** The claim the sweep's guard reads. */
   event_seq: string
   cost_usd: number

@@ -39,7 +39,9 @@ from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore, thumbnail_of
+from tests.support.template_rows import copy_template_rows, open_template_rows
 
 
 @pytest.mark.parametrize(
@@ -157,8 +159,9 @@ def store(pg_conninfo: str, data: DataPaths) -> Iterator[PostgresMediaStore]:
 
 
 @pytest.fixture
-def catalogue(data: DataPaths, store: PostgresMediaStore) -> Catalogue:
+def catalogue(data: DataPaths, store: PostgresMediaStore, pg_pool: PgPool) -> Catalogue:
     catalogue = Catalogue(data, media_store=store, wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo"))
     return catalogue
 
@@ -356,11 +359,12 @@ def test_the_store_reads_many_templates_in_one_query(store: PostgresMediaStore) 
 
 @pytest.mark.requires_postgres
 def test_the_listing_reads_every_templates_media_in_one_query(
-    data: DataPaths, store: PostgresMediaStore
+    data: DataPaths, store: PostgresMediaStore, pg_pool: PgPool
 ) -> None:
-    """ONE media query for the page, not one per model, as with the git walk."""
+    """ONE media query for the page, not one per model."""
     counting = _CountingStore(store)
     catalogue = Catalogue(data, media_store=counting, wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
     for slug in ("one", "two", "three"):
         catalogue.create(slug, "cube(1);\n", ModelMeta(name=slug))
     catalogue.add_media("two", _stage(catalogue, PNG, "image", "png"), caption="Two")
@@ -375,7 +379,7 @@ def test_the_listing_reads_every_templates_media_in_one_query(
 
 @pytest.mark.requires_postgres
 def test_the_listing_reads_the_built_ins_covers_in_one_more_query(
-    data: DataPaths, store: PostgresMediaStore
+    data: DataPaths, store: PostgresMediaStore, pg_pool: PgPool
 ) -> None:
     (data.builtins / "keychain").mkdir(parents=True)
     (data.builtins / "keychain" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
@@ -383,6 +387,7 @@ def test_the_listing_reads_the_built_ins_covers_in_one_more_query(
     (data.builtins / "tag" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
     counting = _CountingStore(store)
     catalogue = Catalogue(data, media_store=counting, wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
     catalogue.create("mine", "cube(1);\n", ModelMeta(name="Mine"))
     for slug in ("builtin:keychain", "builtin:tag"):
         catalogue.add_media(slug, _stage(catalogue, PNG, "image", "png"))
@@ -412,7 +417,7 @@ def test_the_store_keeps_one_cover_per_template(store: PostgresMediaStore) -> No
 
 
 @pytest.fixture
-def builtin(data: DataPaths, catalogue: Catalogue) -> str:
+def builtin(data: DataPaths, catalogue: Catalogue, pg_pool: PgPool) -> str:
     """A built-in shipping one image in its bundled model.json, and a thumbnail."""
     directory = data.builtins / "keychain"
     (directory / "media").mkdir(parents=True)
@@ -422,6 +427,8 @@ def builtin(data: DataPaths, catalogue: Catalogue) -> str:
         '{"name": "Keychain", "media": [{"id": "front", "file": "front.png", "kind": "image"}]}',
         encoding="utf-8",
     )
+    # Written by hand: its row comes from a copy.
+    copy_template_rows(catalogue, pg_pool)
     return "builtin:keychain"
 
 

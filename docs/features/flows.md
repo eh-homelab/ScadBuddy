@@ -188,7 +188,9 @@ is no row (#7588). It runs the input that the row approves: the call as it was p
 narrowed input, which must match the row's hash. A run that made an approved call before
 #2482 reads the row from its next call on, by a marker of the call's own.
 
-So a call stops, and its step fails, when its approval reached the run but its row is gone.
+So a call stops, and its step fails with `NoApprovalError`, when its approval reached the run
+but its row is gone or is not an approval. A narrowed input that does not match the row's hash
+fails with `NarrowedInputError`.
 That happens when the row was undone because Temporal said that the Update never arrived and
 it then arrived, when a grant's approval was withdrawn and its Update then arrived, or when a
 Reset falls between the decision and the call. In the last case the person was told
