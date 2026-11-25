@@ -107,7 +107,8 @@ def _read(
             (spool_id,),
         ).fetchone()
         slot = conn.execute(
-            "SELECT spool_id, params_hash, last_error, run_key FROM filament_override_slots"
+            "SELECT spool_id, params_hash, last_error, run_key, configured_at"
+            " FROM filament_override_slots"
             " WHERE printer_id = %s AND ams_id = %s AND tray_id = %s",
             (printer_id, ams_id, tray_id),
         ).fetchone()
@@ -142,8 +143,10 @@ def _configured(
     run_key: str | None,
 ) -> int:
     """Write the row after a configure and return its ``attempts``: the consecutive
-    acknowledged configures of an unchanged hash for the same spool (0 for a new hash or
-    spool: ``repeat`` false, read before `_started` wrote the hash). An unacknowledged one
+    acknowledged configures of an unchanged hash for the same spool. It is 0 when
+    ``repeat`` is false (`_repeat`, read before `_started` wrote the hash): a new hash or
+    spool, or a row whose last outcome was not an acknowledged configure (a failed run, an
+    unacknowledged one, or a run that only `_started` recorded). An unacknowledged one
     (``confirmed`` false) does not count, writes ``last_error`` `UNCONFIRMED`, and keeps
     ``run_key`` while its run is still open."""
     with store.spools.transaction() as conn:
@@ -241,6 +244,20 @@ def _settled(store: Filament, printer_id: UUID, ams_id: int, tray_id: int) -> No
         )
 
 
+def _repeat(slot: dict[str, Any] | None, spool_id: UUID, digest: str) -> bool:
+    """Whether the row's last outcome was an acknowledged configure of ``digest`` for
+    ``spool_id`` (N1). `_started` and a failed run (``last_error`` ``internal``) keep the
+    hash with no acknowledged configure, and an unacknowledged one is `UNCONFIRMED`: none
+    of them is a repeat."""
+    return (
+        slot is not None
+        and slot["spool_id"] == spool_id
+        and slot["params_hash"] == digest
+        and slot["configured_at"] is not None
+        and slot["last_error"] not in ("internal", UNCONFIRMED)
+    )
+
+
 def _run_key(ams_id: int, tray_id: int, digest: str, slot: dict[str, Any] | None) -> str:
     """The key of a slot's configure run (P47). A run left open by an earlier pass for the
     same spool and params is joined by its kept key (``run_key``). Otherwise a new key:
@@ -265,7 +282,8 @@ class _Send:
     digest: str
     run: LanCommandRun
     key: str
-    #: Whether the row holds this hash for this spool already (`_configured`).
+    #: Whether the row's last outcome was an acknowledged configure of this hash for this
+    #: spool (`_repeat`, `_configured`).
     repeat: bool
 
 
@@ -472,7 +490,7 @@ async def reconcile_slots(
                     digest=digest,
                     run=run,
                     key=_run_key(ams_id, tray_id, digest, slot if same else None),
-                    repeat=same and slot is not None and slot["params_hash"] == digest,
+                    repeat=_repeat(slot, spool.id, digest),
                 )
             )
         await asyncio.to_thread(_drop_stale, store, printer, keep)
@@ -487,13 +505,15 @@ async def reconcile_slots(
             if time.monotonic() >= deadline:
                 report.waiting += 1
                 return
-            await _send(store, commands, job, report)
+            await _send(store, commands, job, report, deadline)
 
     # A TaskGroup, not gather: when the pass ends, or is cancelled, no slot's task is still
     # running, so none writes its row after the caller releases SLOTS_LOCK. `_send` records
-    # every error but a cancel, so one slot's failure never cancels the others. A cancelled
-    # task's run may stay open on Temporal: its row already holds the run's key (`_started`),
-    # and the next pass joins that run.
+    # every error of a slot's send (the run and `_started`) but a cancel, so such an error
+    # never cancels the other slots. A database error in `_configured` or `_failed` still
+    # raises and cancels the siblings; their keys are already stored, so nothing is sent
+    # twice. A cancelled task's run may stay open on Temporal: its row already holds the
+    # run's key (`_started`), and the next pass joins that run.
     async with asyncio.TaskGroup() as group:
         for job in sends:
             group.create_task(send(job))
@@ -501,10 +521,16 @@ async def reconcile_slots(
 
 
 async def _send(
-    store: Filament, commands: LanCommandSender, job: _Send, report: m.SlotReport
+    store: Filament,
+    commands: LanCommandSender,
+    job: _Send,
+    report: m.SlotReport,
+    deadline: float,
 ) -> None:
     """Run one slot's configure and record what came of it (`reconcile_slots`). The row
-    takes the run's key first (`_started`). A problem (`ApiError`) is the run's closed
+    takes the run's key first (`_started`). When that write takes the pass to ``deadline``
+    (N2), the run is not sent: the slot counts ``waiting``, and its row keeps the key for
+    the next pass. A problem (`ApiError`) is the run's closed
     outcome: the row drops the key and the hash. Any other error (a Temporal RPC error, a
     database error) may leave the run open: the row keeps the key and the hash, so the next
     pass joins the run. Both count ``failed``. A cancel is not caught."""
@@ -513,6 +539,9 @@ async def _send(
         await asyncio.to_thread(
             _started, store, job.printer, job.ams_id, job.tray_id, job.spool, job.digest, job.key
         )
+        if time.monotonic() >= deadline:
+            report.waiting += 1
+            return
         answer = await commands.run(job.printer_id, job.run, key=job.key)
     except ApiError as exc:
         label = _label(exc)

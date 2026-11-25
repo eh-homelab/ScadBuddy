@@ -697,10 +697,11 @@ async def test_an_unacknowledged_configure_is_unconfirmed_and_not_a_repeat(
     # Four closed runs: each pass sent its own (no key joins a closed run).
     assert len(set(w.sender.published)) == 4
 
+    # N1: the first acknowledged configure after unacknowledged ones is not a repeat.
     w.sender.confirmed = True
     assert await w.run() == SlotReport(configured=1)
     (row,) = w.rows()
-    assert (row["last_error"], row["attempts"]) == (None, 1)
+    assert (row["last_error"], row["attempts"]) == (None, 0)
 
 
 async def test_a_spool_without_temperatures_takes_the_trays(pg_pool: PgPool) -> None:
@@ -889,7 +890,7 @@ async def _settle() -> None:
 
 
 async def test_two_printers_run_at_once_but_one_printers_slots_one_at_a_time(
-    pg_pool: PgPool,
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """P46 and P58: printers' runs are sent together, so a pass waits about one run's wait
     per slot of its busiest printer; each run opens its own MQTT connection, so a printer
@@ -898,10 +899,26 @@ async def test_two_printers_run_at_once_but_one_printers_slots_one_at_a_time(
     _four_slots(w)
     other = w.another_printer(0, 1)
     w.sender.hold = asyncio.Event()
+    # Count the slots that entered `_send` (on the loop) and the `_started` writes that
+    # finished (in their threads), so the check below waits until every slot let through
+    # has written its row and sent its run. With a broken per-printer lock, all six enter.
+    entered, wrote = [0], [0]
+    send, started = rfid_slots._send, rfid_slots._started
+
+    async def counted_send(*args: Any) -> None:
+        entered[0] += 1
+        await send(*args)
+
+    def counted_started(*args: Any) -> None:
+        started(*args)
+        wrote[0] += 1
+
+    monkeypatch.setattr(rfid_slots, "_send", counted_send)
+    monkeypatch.setattr(rfid_slots, "_started", counted_started)
 
     task = asyncio.create_task(w.run())
-    await _until(lambda: w.sender.open >= 2)  # one run of each printer, at once
-    await _settle()
+    # One run of each printer, at once, and no other slot between `_started` and its run.
+    await _until(lambda: w.sender.open >= 2 and entered[0] == wrote[0] == len(w.sender.runs))
     assert w.sender.open == 2
     w.sender.hold.set()
     report = await asyncio.wait_for(task, timeout=10)
@@ -967,6 +984,54 @@ async def test_a_cancelled_pass_leaves_each_runs_key_for_the_next_pass(pg_pool: 
     assert await w.run() == SlotReport(configured=1)
     assert w.sender.keys[1] == w.sender.keys[0]
     assert len(w.sender.published) == 1
+    # N1: the joined run is the slot's first acknowledged configure, not a repeat.
+    assert w.rows()[0]["attempts"] == 0
+
+
+async def test_failed_passes_do_not_count_as_repeats(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """N1: only acknowledged configures are repeats. Two passes that fail ``internal`` keep
+    the hash, but the configure that then lands is the slot's first."""
+    w = World(pg_pool)
+    w.sender.errors = [RuntimeError("the RPC broke"), RuntimeError("the RPC broke")]
+
+    assert await w.run() == SlotReport(failed=1)
+    assert await w.run() == SlotReport(failed=1)
+    assert w.rows()[0]["attempts"] == 2
+
+    with caplog.at_level(logging.WARNING, logger=rfid_slots.__name__):
+        assert await w.run() == SlotReport(configured=1)
+
+    assert w.rows()[0]["attempts"] == 0
+    assert not [r for r in caplog.records if "same values" in r.message]
+
+
+async def test_a_run_started_past_the_deadline_waits_and_keeps_its_key(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N2: the row's write (`_started`) can take the pass past its deadline. The run is then
+    not sent: the slot counts ``waiting``, and the next pass starts it under the stored key."""
+    w = World(pg_pool)
+    clock = [0.0]
+    monkeypatch.setattr(rfid_slots, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    started = rfid_slots._started
+
+    def slow(*args: Any) -> None:
+        started(*args)
+        clock[0] += 10
+
+    monkeypatch.setattr(rfid_slots, "_started", slow)
+
+    assert await w.run(deadline=5.0) == SlotReport(waiting=1)
+    assert w.sender.runs == []
+    (row,) = w.rows()
+    assert row["run_key"] and row["params_hash"]
+    key = row["run_key"]
+
+    monkeypatch.setattr(rfid_slots, "_started", started)
+    assert await w.run(deadline=clock[0] + 5.0) == SlotReport(configured=1)
+    assert w.sender.keys == [key]
 
 
 async def test_a_deadline_already_past_leaves_the_slots_waiting(pg_pool: PgPool) -> None:
