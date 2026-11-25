@@ -48,8 +48,10 @@ life as expected: drill_1 used 2, 2.4%, warn False, book value 11742.86
 history as expected: nozzle_4: 2026-12-01 received 0 0.00% 2500.00; 2026-12-02 use 600 40.00% 1500.00; 2027-01-12 use 1350 90.00% 250.00; 2027-01-13 manual 1400 93.33% 166.67; 2027-01-15 use 1450 96.67% 83.33
 history as expected: nozzle_3: 2026-12-01 received 0 0.00% 2500.00; 2026-12-02 use 600 40.00% 1500.00; 2027-01-13 use 700 46.67% 1333.33; 2027-01-14 params_changed 700 35.00% 1625.00
 history as expected: drill_1: 2026-12-01 received 0 0.00% 12000.00; 2027-01-25 refresh 2 2.38% 11742.86
+property history as expected: item:pla_plus_gold: 2026-12-01 set colour_name None -> 'Gold' by import; 2026-12-01 set diameter_mm None -> 1.75 by import; 2026-12-01 set label_g None -> 1000 by import; 2026-12-01 set rgba None -> 'E4BD68FF' by import; 2027-01-20 set colour_name 'Gold' -> 'Silk Gold' by person
+property history as expected: item:nozzle_hs_04: 2026-12-01 set diameter_mm None -> 0.4 by import; 2026-12-01 set material None -> 'hardened_steel' by import; 2027-01-22 remove material 'hardened_steel' -> None by person
 config history as expected: unit:nozzle_3 life.hours 1500 -> 2000
-ok: 33 kinds, 38 handlers, 16 items, 17 instances, 16 relationships, 13 history events, 6 lives, 21 value history rows
+ok: 33 kinds, 38 handlers, 16 items, 17 instances, 16 relationships, 16 history events, 6 lives, 21 value history rows, 16 property history rows
 ```
 
 ## 1. What a thing is: the class
@@ -494,6 +496,20 @@ erDiagram
     handler_values ||--o{ handler_value_history : "each change"
     handler_config_history ||--o{ handler_value_history : "params_changed"
 ```
+
+### Property history
+
+Every property set and remove, on any entity, is recorded with its old value, who and
+when (design §4.8). The current properties are that history replayed. `check.py` replays
+it and checks both:
+
+| Item | At | Change | By |
+|---|---|---|---|
+| Bambu PLA+ Gold 1 kg | 2026-12-01 | `colour_name` set to `Gold` (and `rgba`, `diameter_mm`, `label_g`) | import |
+| Bambu PLA+ Gold 1 kg | 2027-01-20 | `colour_name` `Gold` → `Silk Gold` | person |
+| Bambu PLA+ Gold 1 kg | 2027-01-21 | `colour_name` set to `Silk Gold` again: no row | person |
+| H2C hardened steel nozzle 0.4 mm | 2026-12-01 | `diameter_mm`, `material` set | import |
+| H2C hardened steel nozzle 0.4 mm | 2027-01-22 | `material` removed (was `hardened_steel`) | person |
 
 ## 7. The life of a unit
 

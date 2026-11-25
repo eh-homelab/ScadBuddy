@@ -140,7 +140,9 @@ relations:
 #   set_params   - a person changes a handler parameter on a unit;
 #   reading      - a person enters a measured value by hand (the unit page's Advanced
 #                  section), as a weighing sets a spool's grams. Later uses count on top;
-#   refresh      - recompute the cached values of one unit or all, now.
+#   refresh      - recompute the cached values of one unit or all, now;
+#   set_property, remove_property - a person changes an item's property. Every set and
+#                  remove is recorded with its old value (design §4.8).
 # Each event recomputes the cached handler values it touches; a history row is written
 # only when a value changes. Then `expect_life`, `expect_history` and
 # `expect_config_history` must hold.
@@ -156,6 +158,9 @@ history:
   - {at: 2027-01-13, do: reading, target: "unit:nozzle_4", step: life, value: 1400}
   - {at: 2027-01-14, do: set_params, target: "unit:nozzle_3", step: life, params: {hours: 2000}}
   - {at: 2027-01-15, do: run, printer: "unit:h2c_2", hours: 50, prints: 30}
+  - {at: 2027-01-20, do: set_property, target: "item:pla_plus_gold", key: colour_name, value: Silk Gold}
+  - {at: 2027-01-21, do: set_property, target: "item:pla_plus_gold", key: colour_name, value: Silk Gold}
+  - {at: 2027-01-22, do: remove_property, target: "item:nozzle_hs_04", key: material}
   - {at: 2027-01-25, do: refresh, scope: "unit:drill_1", expect_changed: ["unit:drill_1"]}
   - {at: 2027-01-25, do: refresh, scope: all, expect_changed: []}
 
@@ -190,6 +195,20 @@ expect_history:
   drill_1:
     - {at: 2026-12-01, reason: received, used: 0, share: 0.0, book: 12000.0}
     - {at: 2027-01-25, reason: refresh, used: 2, share: 0.0238, book: 11742.86}
+
+# Property history: the item's first values (written when it was made, here by the
+# import), then each change. The second set to the same value wrote nothing.
+expect_property_history:
+  "item:pla_plus_gold":
+    - {key: colour_name, at: 2026-12-01, op: set, old: null, new: Gold, actor: import}
+    - {key: diameter_mm, at: 2026-12-01, op: set, old: null, new: 1.75, actor: import}
+    - {key: label_g, at: 2026-12-01, op: set, old: null, new: 1000, actor: import}
+    - {key: rgba, at: 2026-12-01, op: set, old: null, new: E4BD68FF, actor: import}
+    - {key: colour_name, at: 2027-01-20, op: set, old: Gold, new: Silk Gold, actor: person}
+  "item:nozzle_hs_04":
+    - {key: diameter_mm, at: 2026-12-01, op: set, old: null, new: 0.4, actor: import}
+    - {key: material, at: 2026-12-01, op: set, old: null, new: hardened_steel, actor: import}
+    - {key: material, at: 2027-01-22, op: remove, old: hardened_steel, new: null, actor: person}
 
 expect_config_history:
   - {target: "unit:nozzle_3", step: life, key: hours, old: 1500, new: 2000}

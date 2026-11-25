@@ -246,6 +246,32 @@ for a refresh".
   relationships and the parameters. A rebuild from them must give the cached values; the
   Go tests check it after every replayed history, as `check.py` does.
 
+### 4.8 Property history (owner, 2026-11-25)
+
+The owner: "all property sets recorded and historied". Today `entity_properties` keeps
+only the current value (`migrations/20261123T0017Z_entity_properties.sql`); a set
+overwrites and a remove leaves no trace.
+
+- New `entity_property_history`, append only: one row per set or remove, with
+  `entity_id`, the entity's `kind` and `ref` (copied, so the row outlives the entity),
+  `key`, `op` (`set`, `remove`), `old` and `new` values, `source`, `at` and `actor`. A set
+  to the value already there writes nothing.
+- It covers every entity's properties (items, units, lots, kinds, suppliers, orders and
+  the rest of spec §6.1), not only inventory's. The first values of a new entity are
+  recorded as sets from nothing. An entity merge (`entities/registry.py`) records each
+  key it moves.
+- A property schema change (`entity_property_schemas`, a kind's `schema`) is recorded the
+  same way in `entity_property_schema_history`.
+- Every writer records the row in the same transaction as the write. My call: a database
+  trigger on `entity_properties` writes it, so no writer, Python or Go, can skip it. The
+  actor of a set is the row's `updated_by`; the actor of a remove comes from
+  `SET LOCAL scadbuddy.actor`, which both writers set per transaction, and the trigger
+  refuses a remove without it.
+- The current properties must equal the history replayed (last row per key). The proof
+  checks it; the Go tests do too.
+- The item, unit and kind pages show a property's history, and the agent's
+  `entity_property_*` tools can read it.
+
 ## 5. Relationships
 
 A relationship joins two entities (spec §6.1: `unit:`, `item:`, `item_kind:` refs). Its
@@ -346,6 +372,8 @@ layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
 - New `inventory_signals`: one row per signal raised, so the schedule never raises one
   twice.
 - New `idempotency_keys` for §6.1.
+- New `entity_property_history` and `entity_property_schema_history` (append only, a
+  trigger writes them), §4.8.
 - New `handler_values` (the cache, primary key `entity_id`, `step`),
   `handler_value_history` and `handler_config_history` (append only), §4.7.
 - `order_items`: one nullable `service_item_id` (a `custom` item that sells a service,
@@ -375,8 +403,10 @@ parameters, every instance and every relationship (each container field's `max`
 included), checks that five relationships the design must refuse are refused for their
 stated reason, and checks that the README's table is the resolved one. On 2026-11-25 it
 passed (`uvx --with pyyaml python -I docs/inventory-model/check.py`): 33 kinds, 38
-handlers, 16 items, 17 instances, 16 relationships, and a history of 13 events whose 6
-unit lives, 21 value history rows and parameter history it checks. Its 15 Mermaid diagrams rendered with
+handlers, 16 items, 17 instances, 16 relationships, and a history of 16 events whose 6
+unit lives, 21 value history rows, the parameter history, and 16 property history rows (8
+of them against expected rows, and all of them replayed into the current properties) it
+checks. Its 15 Mermaid diagrams rendered with
 `@mermaid-js/mermaid-cli` 11.4.2.
 
 The first Go task ports `check.py` to a Go test over the same YAML, so the proof becomes
@@ -417,6 +447,8 @@ Each is an issue under #6949, with layers as stacked PRs.
   units, moves, the internal routes, the Python forwarders for the phase 2 routes, the
   idempotency keys, and the migration of §8. The YAML test. It needs `scadbuddy-core`
   deployed with its CRUD port (#7702), not the front process: Python calls Go directly.
+- K1 also adds the property history (§4.8): it touches only `entity_properties`, so it can
+  land first, on its own.
 - K2. Life, services and relationships: `unit_uses`, the life handlers, the handler
   cache with its history and refresh, term instances, the relationship types and
   container fields, the schedule.
@@ -468,6 +500,7 @@ of #7667's phase 6 into this work).
     rewrites old rows.
 14. A manual reading replaces the counted measure from its time on; it does not change
     the life's length (`hours`), which is a parameter.
+15. Property history is written by a database trigger, for every entity kind (§4.8).
 
 ## 12. Left to the builder
 

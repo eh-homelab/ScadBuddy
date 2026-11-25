@@ -251,6 +251,24 @@ uses: list[dict] = []  # unit_uses rows: unit, at, hours, prints, via
 cache: dict = {}  # unit -> current value (handler_values)
 value_history: list[dict] = []  # handler_value_history
 config_history: list[dict] = []  # handler_config_history
+property_history: list[dict] = []  # entity_property_history (§4.8)
+
+
+def set_property(ref: str, key: str, value, at, op: str, actor: str = "person") -> None:
+    """Every property set or remove is recorded, append only, with the old value."""
+    target, rid = ref.split(":", 1)
+    props = (ITEMS[rid] if target == "item" else INST[rid]).setdefault("properties", {})
+    old = props.get(key)
+    if op == "remove":
+        if key not in props:
+            raise Broken(f"{at}: {ref} has no property {key} to remove")
+        del props[key]
+    else:
+        if old == value:
+            return
+        props[key] = value
+    property_history.append({"ref": ref, "key": key, "at": at, "op": op, "old": old,
+                             "new": None if op == "remove" else value, "actor": actor})
 
 
 def unit_params(unit: str, step: str) -> tuple[str, dict]:
@@ -309,6 +327,10 @@ def recompute(unit: str, at, reason: str) -> bool:
 
 
 TRACKED = [f"unit:{i['id']}" for i in X["instances"] if "cost_minor" in i]
+for it in X["items"]:
+    for k, v in sorted(dict(it.get("properties") or {}).items()):
+        it["properties"].pop(k)
+        set_property(f"item:{it['id']}", k, v, X["history"][0]["at"], "set", "import")
 for u in TRACKED:
     recompute(u, X["history"][0]["at"], "received")
 
@@ -357,6 +379,9 @@ for ev in X.get("history", []):
         uses.append({"unit": unit, "at": at, "hours": 0, "prints": 0, "via": None, "seq": len(uses),
                      "reading": ev["value"], "actor": ev.get("actor", "person")})
         recompute(unit, at, "manual")
+    elif ev["do"] in ("set_property", "remove_property"):
+        set_property(ev["target"], ev["key"], ev.get("value"), at,
+                     "remove" if ev["do"] == "remove_property" else "set", ev.get("actor", "person"))
     elif ev["do"] == "refresh":
         scope = TRACKED if ev["scope"] == "all" else [ev["scope"]]
         changed = [u for u in scope if recompute(u, at, "refresh")]
@@ -389,6 +414,25 @@ for unit, rows_ in (X.get("expect_history") or {}).items():
         raise Broken(f"history of {unit}: expected {want}, got {got}")
     print(f"history as expected: {unit}: " + "; ".join(
         f"{r['at']} {r['reason']} {r['used']} {r['share']:.2%} {r['book']:.2f}" for r in got))
+for ref, rows_ in (X.get("expect_property_history") or {}).items():
+    got = [{k: r[k] for k in ("key", "at", "op", "old", "new", "actor")}
+           for r in property_history if r["ref"] == ref]
+    if got != rows_:
+        raise Broken(f"property history of {ref}: expected {rows_}, got {got}")
+    print(f"property history as expected: {ref}: " + "; ".join(
+        f"{r['at']} {r['op']} {r['key']} {r['old']!r} -> {r['new']!r} by {r['actor']}" for r in got))
+# The current properties are the history replayed: the last row per key wins.
+for it in X["items"]:
+    ref = f"item:{it['id']}"
+    replayed: dict = {}
+    for r in property_history:
+        if r["ref"] == ref:
+            if r["op"] == "remove":
+                replayed.pop(r["key"], None)
+            else:
+                replayed[r["key"]] = r["new"]
+    if replayed != (it.get("properties") or {}):
+        raise Broken(f"{ref}: properties {it.get('properties')} differ from their history {replayed}")
 for exp in X.get("expect_config_history", []):
     if not any(c["target"] == exp["target"] and c["step"] == exp["step"] and c["old"].get(exp["key"]) == exp["old"]
                and c["new"].get(exp["key"]) == exp["new"] for c in config_history):
@@ -412,4 +456,4 @@ if not m or m.group(1).strip() != table.strip():
 print(f"ok: {len(K)} kinds, {len(HANDLERS)} handlers, {len(ITEMS)} items, "
       f"{len(INST)} instances, {len(X['relations'])} relationships, "
       f"{len(X.get('history', []))} history events, {len(X.get('expect_life', []))} lives, "
-      f"{len(value_history)} value history rows")
+      f"{len(value_history)} value history rows, {len(property_history)} property history rows")
