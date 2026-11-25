@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import pytest
+
 from scadbuddy.codes.parse import Code
 from scadbuddy.filament.models import NdefRecord
 from scadbuddy.filament.tag_codes import code_in
@@ -88,3 +90,32 @@ def test_other_record_types_are_skipped() -> None:
 
 def test_no_records_name_nothing() -> None:
     assert code_in([]) is None
+
+
+def test_a_url_record_that_is_not_a_url_is_skipped() -> None:
+    # `urlsplit` raises on an unclosed IPv6 host; a tag's bytes never raise.
+    bad = NdefRecord(record_type="url", data_hex=b"http://[abc".hex())
+    assert code_in([bad, text("L-4")]) == Code("L", 4)
+
+
+def test_a_url_record_with_a_host_that_is_not_nfkc_is_skipped() -> None:
+    bad = NdefRecord(record_type="url", data_hex="http://ex℀ample.com/x/L-4".encode().hex())
+    assert code_in([bad, text("L-4")]) == Code("L", 4)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "data"),
+    [("idna", b"xn--a-"), ("punycode", b"a-" + b"9" * 40), ("utf-7", b"+")],
+)
+def test_an_encoding_web_nfc_never_gives_is_skipped(encoding: str, data: bytes) -> None:
+    # Only `utf-8` and `utf-16` come from Web NFC; a codec that raises a bare `UnicodeError`
+    # (idna, punycode) must not reach the bytes at all.
+    odd = NdefRecord(record_type="text", encoding=encoding, data_hex=data.hex())
+    assert code_in([odd, text("L-4")]) == Code("L", 4)
+
+
+@pytest.mark.parametrize("encoding", ["UTF-8", "utf8", "utf-16le", "utf-16be", "UTF-16"])
+def test_the_web_nfc_encodings_are_read_under_any_spelling(encoding: str) -> None:
+    codec = "utf-16-be" if encoding.lower() in {"utf-16", "utf-16be"} else encoding
+    record = NdefRecord(record_type="text", encoding=encoding, data_hex="L-4".encode(codec).hex())
+    assert code_in([record]) == Code("L", 4)

@@ -15,17 +15,37 @@ from scadbuddy.filament import models as m
 _SPOOL_TEXT = re.compile(r"^scadbuddy:spool:([0-9a-f-]{36})$", re.IGNORECASE)
 
 
+#: The encodings Web NFC gives a text record (`NDEFRecord.encoding`: "utf-8", "utf-16",
+#: "utf-16le" or "utf-16be"), by their lower-case spellings with or without the dash, to the
+#: codec. Any other label is skipped: the stdlib's other codecs (idna, punycode, utf-7) are
+#: never a tag's, and some raise a bare `UnicodeError` on bad bytes.
+_CODECS: dict[str, str] = {
+    "utf-8": "utf-8",
+    "utf8": "utf-8",
+    "utf-16": "utf-16",
+    "utf16": "utf-16",
+    "utf-16le": "utf-16-le",
+    "utf-16-le": "utf-16-le",
+    "utf-16be": "utf-16-be",
+    "utf-16-be": "utf-16-be",
+}
+
+
 def decode_text(data: bytes, encoding: str | None) -> str | None:
-    """The text of a text record's bytes in ``encoding``, or ``None`` when they are not valid
-    text in it. UTF-16 with no byte order named is read as the frontend's `decodeText`
-    (`frontend/src/lib/webNfc.ts`) reads it: little-endian by a FF FE BOM, else big-endian,
-    and a BOM that matches is dropped."""
-    label = (encoding or "utf-8").lower()
-    if label == "utf-16":
-        label = "utf-16-le" if data[:2] == b"\xff\xfe" else "utf-16-be"
+    """The text of a text record's bytes in ``encoding``, or ``None`` when the encoding is not
+    one Web NFC gives or the bytes are not valid text in it. UTF-16 with no byte order named is
+    read as the frontend's `decodeText` (`frontend/src/lib/webNfc.ts`) reads it: little-endian
+    by a FF FE BOM, else big-endian. A leading BOM is dropped (the frontend keeps a UTF-8 one
+    for its preview; a code never starts with one)."""
+    codec = _CODECS.get((encoding or "utf-8").lower())
+    if codec is None:
+        return None
+    if codec == "utf-16":
+        codec = "utf-16-le" if data[:2] == b"\xff\xfe" else "utf-16-be"
     try:
-        return data.decode(label).removeprefix("﻿")
-    except (UnicodeDecodeError, LookupError):
+        return data.decode(codec).removeprefix("\N{ZERO WIDTH NO-BREAK SPACE}")
+    except ValueError:
+        # `UnicodeDecodeError`, and any other `UnicodeError` a codec raises.
         return None
 
 
@@ -33,7 +53,12 @@ def _code_in_url(record: m.NdefRecord) -> Code | None:
     href = decode_text(bytes.fromhex(record.data_hex), "utf-8")
     if href is None:
         return None
-    segments = [part for part in urlsplit(href).path.split("/") if part]
+    try:
+        path = urlsplit(href).path
+    except ValueError:
+        # An unclosed IPv6 host, or a host that is not NFKC: not a label's URL.
+        return None
+    segments = [part for part in path.split("/") if part]
     if len(segments) < 2 or segments[-2] != "x":
         return None
     return parse_code(segments[-1])
