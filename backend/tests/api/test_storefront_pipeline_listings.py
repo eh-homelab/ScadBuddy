@@ -37,9 +37,8 @@ from tests.api.test_storefront_listings import (  # noqa: F401  (fixtures)
     template,
 )
 from tests.api.test_storefront_prepare import pla_blue, prepare_path, wait_ready  # noqa: F401
-from tests.api.test_storefront_public import TOKEN_A
+from tests.api.test_storefront_public import CRUD, TOKEN_A
 from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
-    CRUD,
     CrudCaller,
     FakeSlicer,
     crud,
