@@ -1,6 +1,25 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { FILE } from '../mocks/features/storefrontPublic'
+import type { Listing } from './api/client'
 import { partFilaments, partsView, slotColours } from './fileParts'
+
+/** #7523: the vectors the backend's `page_colours` is tested against too. */
+const VECTORS = JSON.parse(readFileSync(`${import.meta.dirname}/../../../test-fixtures/storefront/file-page-colours.json`, 'utf8')) as {
+  case: string
+  materials: string[]
+  filaments: Listing['colours']
+  slots: { slot: number; default: string | null }[]
+  want: Record<string, string> | null
+}[]
+
+describe('the colours the page opens on, which the shop prices at publish (#7523)', () => {
+  it.each(VECTORS.map((vector) => [vector.case, vector] as const))('%s', (_name, vector) => {
+    const slots = vector.slots.map((part, index) => ({ slot: part.slot, label: `Part ${index + 1}`, default: part.default }))
+    const listing: Listing = { ...FILE, materials: vector.materials, colours: vector.filaments, slots }
+    expect(partFilaments(partsView(listing), {})).toEqual(vector.want)
+  })
+})
 
 describe("a file listing's parts (#6710 §6.2)", () => {
   const view = partsView(FILE)
