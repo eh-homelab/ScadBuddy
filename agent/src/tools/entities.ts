@@ -33,19 +33,6 @@ const caption = z.string().max(1000)
 const linkKind = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text, `other` when left out: `support`, `datasheet`, `store`, ...')
 
 const deleted = (what: string) => json({ deleted: what })
-/** A kept file's extension by its type, so a later upload of it is named as the type it is. */
-const EXTENSIONS: Readonly<Record<string, string>> = {
-  'application/pdf': '.pdf',
-  'image/svg+xml': '.svg',
-  'text/plain': '.txt',
-  'text/csv': '.csv',
-  'application/json': '.json',
-  'video/mp4': '.mp4',
-  'video/quicktime': '.mov',
-  'application/zip': '.zip',
-  'model/3mf': '.3mf',
-  'model/stl': '.stl',
-}
 /** The most of a file entity_attachment_get reads: the workspace's default file cap. */
 const FILE_READ_MAX = 25 * 1024 * 1024
 
@@ -210,15 +197,24 @@ export const entityTools = [
       thumbnail: z.boolean().optional().describe('A small WebP copy of a photo instead of the file itself'),
     }),
     risk: 'read',
-    routes: ['GET /api/v1/entities/{ref}/attachments/{attachment_id}/content', 'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail'],
+    routes: [
+      'GET /api/v1/entities/{ref}/attachments',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
+    ],
     handler: async ({ entity: ref, attachment_id, thumbnail }, ctx) => {
       const params = { params: { path: { ref, attachment_id } }, parseAs: 'stream' as const }
       const what = `get file ${attachment_id} of ${ref}`
+      // The file's own name and type: the content route sends any type it does not serve inline
+      // as application/octet-stream (backend api/attachment_serving.py), so its header cannot say.
+      const { attachments } = await onEntity(ref, ctx.backend.GET('/api/v1/entities/{ref}/attachments', { params: { path: { ref } } }), `list the files of ${ref}`)
+      const record = attachments.find((a) => a.id === attachment_id)
+      if (!record) throw new ToolError(`${what} failed: ${ref} has no file ${attachment_id}; entity_attachment_list lists them`, 404)
       const result = await (thumbnail
         ? ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail', params)
         : ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/content', params))
       const stream = (await ok(Promise.resolve(result), what)) as ReadableStream<Uint8Array> | null
-      const mimeType = result.response.headers.get('content-type')?.split(';')[0]?.trim() || (thumbnail ? 'image/webp' : 'application/octet-stream')
+      const mimeType = thumbnail ? 'image/webp' : record.media_type
       const length = result.response.headers.get('content-length')
       const read = await readCapped(stream, length !== null && /^\d+$/.test(length) ? Number(length) : undefined, FILE_READ_MAX)
       // Never a backend path: a model given one guessed a URL for it (#7727).
@@ -259,7 +255,8 @@ export const entityTools = [
         return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: 'There is no workspace to keep it in here.' })
       }
       try {
-        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${attachment_id}${EXTENSIONS[mimeType] ?? ''}`, new Uint8Array(bytes), {
+        const name = record.filename.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.+/, '').slice(0, 100) || 'file'
+        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${attachment_id}-${name}`, new Uint8Array(bytes), {
           mediaType: mimeType,
           source: { tool: 'entity_attachment_get', entity: ref, attachment_id },
         })
