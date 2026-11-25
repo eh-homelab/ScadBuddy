@@ -411,3 +411,12 @@ def test_a_timed_out_default_is_refused_when_the_schema_has_another_problem() ->
 def test_a_timed_out_default_is_refused_without_retry_timeouts() -> None:
     [problem] = _past_deadline(_top(x=SLOW_DEFAULT))
     assert problem.startswith("x: default does not fit:")
+
+
+def test_a_default_with_a_timeout_and_a_real_error_names_the_real_error() -> None:
+    """#7688: the refusal is jsonschema's pick among the real errors, so a timeout does
+    not hide a value that is too long; and it is a refusal, not a retry."""
+    both = {**SLOW_DEFAULT, "maxLength": 8}
+    [problem] = _past_deadline(_top(x=both), retry_timeouts=True)
+    assert problem.startswith("x: default does not fit:") and "too long" in problem
+    assert "to check" not in problem
