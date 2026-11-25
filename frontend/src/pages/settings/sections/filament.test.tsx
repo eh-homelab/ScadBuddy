@@ -638,7 +638,7 @@ describe('Filament (#6262)', () => {
         HttpResponse.json({
           mode: { override_mode: true, state: 'applied', devices: [] },
           tags: { pushed: 0, moved: 0, cleared: 0, unchanged: 0, failed: 2 },
-          slots: { configured: 0, unchanged: 0, no_preset: 0, no_temps: 0, no_nozzle: 0, failed: 1 },
+          slots: { configured: 0, unconfirmed: 2, waiting: 3, unchanged: 0, no_preset: 0, no_temps: 0, invalid_temps: 0, no_nozzle: 0, unsupported_unit: 0, failed: 1 },
         }),
       ),
     )
@@ -648,15 +648,17 @@ describe('Filament (#6262)', () => {
     await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
     expect(await within(filament).findByText(/2 tags were not sent/)).toBeInTheDocument()
     expect(within(filament).getByText(/1 slot was not set/)).toBeInTheDocument()
+    expect(within(filament).getByText(/2 slots were sent, but the printer did not confirm in time/)).toBeInTheDocument()
+    expect(within(filament).getByText(/3 slots were not sent yet/)).toBeInTheDocument()
   })
 
-  it('says which slots were skipped for no preset or no nozzle', async () => {
+  it('says which slots were skipped for no preset, no nozzle, bad temperatures or an unsupported unit', async () => {
     server.use(
       http.post('*/api/v1/filament/rfid/reconcile', () =>
         HttpResponse.json({
           mode: { override_mode: true, state: 'applied', devices: [] },
           tags: { pushed: 1, moved: 0, cleared: 0, unchanged: 0, failed: 0 },
-          slots: { configured: 0, unchanged: 0, no_preset: 2, no_temps: 0, no_nozzle: 1, failed: 0 },
+          slots: { configured: 0, unconfirmed: 0, waiting: 0, unchanged: 0, no_preset: 2, no_temps: 0, invalid_temps: 1, no_nozzle: 1, unsupported_unit: 2, failed: 0 },
         }),
       ),
     )
@@ -666,6 +668,8 @@ describe('Filament (#6262)', () => {
     await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
     expect(await within(filament).findByText(/2 spools have no preset for the nozzle/)).toBeInTheDocument()
     expect(within(filament).getByText(/1 slot: the printer does not report the nozzle for its tray, so it is not set/)).toBeInTheDocument()
+    expect(within(filament).getByText(/1 spool has a minimum nozzle temperature above the maximum/)).toBeInTheDocument()
+    expect(within(filament).getByText(/2 slots are on a unit ScadBuddy cannot configure/)).toBeInTheDocument()
   })
 
   it('saves the thresholds and shows the server refusing 101 percent', async () => {

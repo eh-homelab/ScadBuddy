@@ -227,6 +227,11 @@ class AmsView(BaseModel):
     units: list[AmsUnitView]
 
 
+#: The ``code`` of `configure_values`' 422 for a minimum temperature above the maximum, so
+#: a caller tells it from missing values (`filament/rfid_slots.py` ``invalid_temps``).
+INVALID_TEMPS = "invalid_temps"
+
+
 def refused(code: str, detail: str) -> ApiError:
     return ApiError(http.HTTP_409_CONFLICT, detail, code=code)
 
@@ -479,7 +484,8 @@ def configure_values(
     temperatures where neither has one. The spool's preset for the nozzle gives the slot's
     ids through `slot_ids` on ``catalogue`` (409 ``no_preset`` when it has no filament id;
     503 with no catalogue); with no preset at all the material's generic is sent (P3).
-    409 ``no_nozzle`` when the nozzle is not known; 422 naming what is still missing."""
+    409 ``no_nozzle`` when the nozzle is not known; 422 naming what is still missing, or
+    ``invalid_temps`` (`INVALID_TEMPS`) when the minimum temperature is above the maximum."""
     nozzle = body.nozzle_diameter or nozzle_of(status, ams_id, tray_id)
     if nozzle is None:
         raise refused(
@@ -554,7 +560,11 @@ def configure_values(
         )
     assert material and colour and low is not None and high is not None
     if low > high:
-        raise invalid("nozzle_temp_min is above nozzle_temp_max")
+        raise ApiError(
+            http.HTTP_422_UNPROCESSABLE_CONTENT,
+            "nozzle_temp_min is above nozzle_temp_max",
+            code=INVALID_TEMPS,
+        )
     rgba = _rgba(colour)
     name = preset_name or material
     tray_info_idx = preset_id or generic_filament_id(material)

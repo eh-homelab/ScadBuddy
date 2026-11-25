@@ -8,6 +8,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 
 from fastapi import Response, status
 from pydantic import BaseModel
@@ -116,6 +117,17 @@ def command_response(answer: LanCommandAnswer, run: LanCommandRun | None = None)
         body = command_view(run, answer)
         code = status.HTTP_200_OK
     return Response(content=body.model_dump_json(), status_code=code, media_type="application/json")
+
+
+class LanCommandSender(Protocol):
+    """What runs a printer's LAN commands (`LanCommands` meets it): the outcome, or
+    `LanCommandPending` while the run is still open (P36). A failed run raises the
+    `ApiError` its route would answer (``printer_refused``, ``printer_no_answer``,
+    ``printer_unreachable`` and the rest)."""
+
+    async def run(
+        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+    ) -> LanCommandAnswer: ...
 
 
 @dataclass(frozen=True)

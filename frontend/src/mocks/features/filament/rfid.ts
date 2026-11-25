@@ -43,7 +43,7 @@ export const handlers = [
     HttpResponse.json({
       mode: status(),
       tags: { pushed: 0, moved: 0, cleared: 0, unchanged: 0, failed: 0 },
-      slots: { configured: 0, unchanged: 0, no_preset: 0, no_temps: 0, no_nozzle: 0, failed: 0 },
+      slots: { configured: 0, unconfirmed: 0, waiting: 0, unchanged: 0, no_preset: 0, no_temps: 0, invalid_temps: 0, no_nozzle: 0, unsupported_unit: 0, failed: 0 },
     } satisfies S['RfidReconcileReport']),
   ),
 ]
