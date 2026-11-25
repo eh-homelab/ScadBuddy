@@ -79,20 +79,22 @@ function slotOf(mesh: THREE.Object3D): number | null {
  * #6710 §8.2 — gives each mesh that names a slot materials of its own to recolour, each
  * holding its design colour and opacity, as `recolourParts` reads them. `scene` is a
  * `clone(true)` of the loader's scene, whose materials are shared: no shared material
- * changes. A mesh with no slot keeps its materials. Returns the clones, for the caller to
+ * changes. A material in `already` (`withPartOpacity`'s clones) is the mesh's own, so it is
+ * kept. A mesh with no slot keeps its materials. Returns the new clones, for the caller to
  * dispose.
  */
-export function ownSlotMaterials(scene: THREE.Object3D): THREE.Material[] {
+export function ownSlotMaterials(scene: THREE.Object3D, already: readonly THREE.Material[] = []): THREE.Material[] {
   const owned: THREE.Material[] = []
+  const kept = new Set(already)
   scene.traverse((node) => {
     const mesh = node as THREE.Mesh
     if (!mesh.isMesh || slotOf(mesh) === null) return
     const opacity = designOpacityOf(mesh)
     const own = (Array.isArray(mesh.material) ? mesh.material : [mesh.material]).map((material) => {
-      const copy = material.clone()
+      const copy = kept.has(material) ? material : material.clone()
       copy.userData.designColor = designColorOf(mesh, copy)
       copy.userData.designOpacity = opacity
-      owned.push(copy)
+      if (copy !== material) owned.push(copy)
       return copy
     })
     mesh.material = Array.isArray(mesh.material) ? own : own[0]!

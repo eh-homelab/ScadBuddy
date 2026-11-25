@@ -169,7 +169,7 @@ REQUEST_ID_PREFIX = "order-item-print-"
 
 class ServedFiles(LibraryFiles, Protocol):
     """What a library file item's print check reads of the library that serves
-    (``orders/bambuddy.py`` ``ServedLibrary``): besides ``LibraryFiles``, a file's row and
+    (``orders/served_library.py`` ``ServedLibrary``): besides ``LibraryFiles``, a file's row and
     its bytes, so a storefront item's pinned sha256 is checked (#6710 §10.2)."""
 
     async def file(self, file_id: int) -> LibraryFile | None:

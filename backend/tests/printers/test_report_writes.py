@@ -6,19 +6,23 @@ write is a span of its own (`traced_transaction`)."""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.camera.models import rtsp_url
 from scadbuddy.core.tracing import COMMIT_SPAN, span, traced_transaction
 from scadbuddy.printers import run_hours
-from scadbuddy.printers.models import LanLink, PrinterCreate
+from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterRow
 from scadbuddy.printers.reports import (
     REFRESH_EVERY,
     Advance,
@@ -26,7 +30,7 @@ from scadbuddy.printers.reports import (
     PrinterReportStore,
     read_view,
 )
-from scadbuddy.printers.status import STALE_AFTER
+from scadbuddy.printers.status import STALE_AFTER, status_from_report
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
 
@@ -92,6 +96,44 @@ def test_the_read_view_leaves_out_what_no_reader_reads() -> None:
     switched["device"] = {**switched["device"], "fila_switch": {"stat": 0}}
     assert read_view(_report()) != read_view(switched)
     assert read_view(_report()) != read_view(_report(ams={"ams": [{"id": "0", "temp": "25"}]}))
+    # The camera relay reads the stored ``ipcam`` (#7328).
+    camera_a = _report(ipcam={"rtsp_url": "rtsps://10.0.0.9:322/a"})
+    assert read_view(camera_a) != read_view(_report(ipcam={"rtsp_url": "rtsps://10.0.0.8:322/a"}))
+
+
+H2C = Path(__file__).parent / "fixtures" / "lan-report-h2c.json"
+
+
+def test_two_reports_with_one_view_read_alike() -> None:
+    """Every reader of a stored report answers the same for two reports with one
+    `read_view`, so skipping the second loses nothing; a reader of a field the view leaves
+    out fails here until the field joins `READ_FIELDS`."""
+    recorded = json.loads(H2C.read_text(encoding="utf-8"))
+    first = recorded["print"]
+    second = json.loads(json.dumps(first))
+    for name in ("nozzle_temper", "bed_temper", "chamber_temper", "cooling_fan_speed"):
+        second[name] = 99
+    second["sequence_id"] = "9999"
+    for info in second["device"]["extruder"]["info"]:
+        info["temp"] += 65536
+    assert read_view(first) == read_view(second)
+    now = datetime.now(UTC)
+    row = PrinterRow.model_validate(
+        {
+            "id": "p1",
+            "serial": recorded["serial"],
+            "name": "H2C",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+
+    def status(report: dict[str, Any]) -> Any:
+        lan = LanReport(serial=recorded["serial"], received_at=now, print=report)
+        return status_from_report(row, lan, now=now)
+
+    assert status(first) == status(second)
+    assert rtsp_url(first) == rtsp_url(second)
 
 
 def test_an_unchanged_report_writes_nothing_until_the_refresh(
@@ -151,6 +193,23 @@ def test_a_change_a_reader_reads_is_written_at_once(
         ended=PrintEnd(subtask_name=JOB, timed=True)
     )
     assert reports.get(pid) == (_report("FINISH"), _at(2))
+
+
+def test_a_camera_change_is_written_at_once(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    camera_a = {"rtsp_url": "rtsps://10.0.0.9:322/a"}
+    camera_b = {"rtsp_url": "rtsps://10.0.0.8:322/a"}
+    reports.advance(pid, _report(ipcam=camera_a), _at(0))
+    reports.advance(pid, _report(ipcam=camera_b), _at(1))
+    assert reports.get(pid) == (_report(ipcam=camera_b), _at(1))
+    # A delta with no ``ipcam`` keeps the stored camera, so it shows nothing new.
+    written = _versions(pg_pool, pid)
+    assert reports.advance(pid, _report(nozzle=230.0), _at(2)) == Advance()
+    assert _versions(pg_pool, pid) == written
+    assert reports.get(pid) == (_report(ipcam=camera_b), _at(1))
 
 
 def test_skipped_reports_count_the_same_hours(

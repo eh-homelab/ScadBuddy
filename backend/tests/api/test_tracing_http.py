@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Any
+
 import pytest
+from fastapi import FastAPI
+from fastapi.routing import _EffectiveRouteContext
 from fastapi.telemetry import _runtime as fastapi_runtime
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -46,6 +51,30 @@ def test_an_api_request_is_a_server_span_named_by_its_route(
     server = wait_for_span(spans, http_server_span)
     assert (server.attributes or {}).get("http.route") == "/api/v1/models"
     assert "?" not in server.name
+
+
+def test_the_routes_are_built_off_the_loop_before_the_first_request(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7359: the server span's name comes from a walk of every route, and FastAPI
+    builds each route's dependencies on the first walk. Left to the first traced
+    request, that held a new API pod's loop 1.1 to 9.7 s. The start builds them, in a
+    thread."""
+    built_on: list[int] = []
+    from_api_route = _EffectiveRouteContext.from_api_route
+
+    def watched(cls: type[_EffectiveRouteContext], /, **kwargs: Any) -> _EffectiveRouteContext:
+        built_on.append(threading.get_ident())
+        return from_api_route(**kwargs)
+
+    monkeypatch.setattr(_EffectiveRouteContext, "from_api_route", classmethod(watched))
+    with TestClient(app) as client:
+        loop_thread = client.portal.call(threading.get_ident)  # type: ignore[union-attr]
+        at_start = len(built_on)
+        assert client.get("/api/v1/models").status_code == 200
+    assert at_start > 0
+    assert loop_thread not in built_on
+    assert len(built_on) == at_start
 
 
 def test_its_queries_are_children_of_the_request(

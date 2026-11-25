@@ -107,6 +107,18 @@ def _patient_workflow_worker_init(self: Any, *args: Any, **kwargs: Any) -> None:
 temporal_workflow_worker._WorkflowWorker.__init__ = _patient_workflow_worker_init  # type: ignore[method-assign]
 
 
+@pytest.fixture
+def sdk_deadlock_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every worker the test builds keeps the SDK's 2 s bound, its own or one a helper
+    builds (`verify_pipeline.verify`): a test whose activation never yields needs the
+    detector to fire as in production. With the session's 30 s, the worker's shutdown
+    waited for the stuck activation until the detector fired (#7522). The bound is read
+    when a worker is built, so a worker built in a fixture that pytest sets up before
+    this one keeps the 30 s bound: build it in the test, or in a fixture that takes this
+    one (#7539)."""
+    monkeypatch.setitem(globals(), "TEST_DEADLOCK_SECONDS", SDK_DEADLOCK_SECONDS)
+
+
 @pytest.fixture(autouse=True)
 def _agent_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """The API applies the agent's migrations at start (#5299 D6), about a second per

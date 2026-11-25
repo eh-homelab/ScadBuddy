@@ -900,6 +900,19 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Download cache size",
             "How much of the Bambuddy downloads the cache keeps. The least recently used go first.",
         ),
+        "download_cache_private": SettingDoc(
+            "Download cache is private",
+            "On, the download cache's folder is this container's alone, such as an emptyDir,"
+            " so a cached file is checked and read in place, with no copy. Never on a shared"
+            " folder or a render worker.",
+        ),
+        "spool_dir": SettingDoc(
+            "Download spool folder",
+            "Where the API, and a render worker where it is set, keeps its temporary"
+            " files: copies of cached downloads and of the library files it reads, the"
+            " slicer's and print worker's uploads, slice files, thumbnail copies and"
+            " order archive copies. Unset, they go under the data volume's cache folder.",
+        ),
         "storefront_public_url": SettingDoc(
             "Storefront URL",
             "The storefront edge's https origin. The links in the storefront's mails, and"

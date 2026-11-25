@@ -49,8 +49,8 @@ describe('the filament search (#6894)', () => {
     expect(skus.get('t')).toEqual(['A', 'B'])
   })
 
-  it('reads property values as text: strings, list items, numbers and booleans (#7026)', () => {
-    expect(propertyTexts({ gtin: ['0123', '0456'], td: 1.8, ok: true })).toEqual(['0123', '0456', '1.8', 'true'])
+  it('reads property values as text: strings, list items and numbers, never booleans (#7026, #7379)', () => {
+    expect(propertyTexts({ gtin: ['0123', '0456'], td: 1.8, ok: true, dried: false })).toEqual(['0123', '0456', '1.8'])
     expect(propertyTexts(undefined)).toEqual([])
   })
 

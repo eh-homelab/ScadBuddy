@@ -19,8 +19,6 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from fastapi import status
-
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import ColourSlot, Filament, LibraryFileRef
 from scadbuddy.orders.storefront.held_file import priced_file
@@ -32,7 +30,7 @@ from scadbuddy.orders.storefront.inputs import (
     material_key,
 )
 from scadbuddy.orders.storefront.limits import RenderLimited, RenderLimits
-from scadbuddy.orders.storefront.listings import problem, published_listing
+from scadbuddy.orders.storefront.listings import page_outdated, published_listing
 from scadbuddy.orders.storefront.renders import (
     limited,
     listing_refusals,
@@ -121,15 +119,6 @@ def file_choice(
     return FileChoice(snapshot=snapshot, slots=tuple(slots))
 
 
-def _changed(listing: Listing, at: datetime) -> None:
-    if listing.updated_at != at:
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "listing_changed",
-            "This listing has changed. Load it again.",
-        )
-
-
 async def checked_file_choice(
     orders: OrdersComponent,
     listing_id: str,
@@ -141,12 +130,14 @@ async def checked_file_choice(
 ) -> tuple[Listing, FileChoice]:
     """The published file listing ``listing_id`` and the visitor's colours on it. A file
     has no parameters, so any of ``values`` is outside it. Refusals: 404
-    ``listing_not_found``, 409 ``listing_changed``, 422 ``input_outside_listing`` (with
-    ``name`` and ``reason``), 422 ``listing_colours_clash`` (with ``parts``)."""
+    ``listing_not_found``, 409 ``listing_changed`` (moved, or switched to a template, since
+    the page read it), 422 ``input_outside_listing`` (with ``name`` and ``reason``), 422
+    ``listing_colours_clash`` (with ``parts``)."""
     listing = await asyncio.to_thread(
         published_listing, orders.listings, listing_id, source="library_file"
     )
-    _changed(listing, listing_updated_at)
+    if listing.updated_at != listing_updated_at:
+        raise page_outdated()
     filaments = await asyncio.to_thread(price_book, orders)
     with listing_refusals():
         for name in values:

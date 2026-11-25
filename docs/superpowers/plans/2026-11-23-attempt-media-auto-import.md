@@ -126,8 +126,9 @@ below record what that PR built; do not build them again.
 
 PR #7241 (merged) added `timelapse_scanned_at` and `stamp_timelapse_scanned` before the
 drop. #7341 (#7272) removed `stamp_timelapse_scanned` and `Fulfilment.timelapse_scanned_at`.
-The column stays until that release is on prod, because the previous build's replicas
-still select it. Then a new migration drops it (#7366). Merged migrations are never edited.
+The column stayed until that release was on prod, because the previous build's replicas
+still selected it. Once it was, a new migration dropped it (#7366,
+`20261124T2224Z_drop_timelapse_scanned_at.sql`). Merged migrations are never edited.
 
 **Files:**
 - Created: `backend/scadbuddy/migrations/20261123T1649Z_attempt_media_provenance.sql`

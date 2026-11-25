@@ -64,6 +64,10 @@ logger = logging.getLogger(__name__)
 SWEEP_DAYS = timedelta(days=14)
 #: The sweep starts a step for an attempt last read for media at least this long ago.
 SWEEP_CHECK_EVERY = timedelta(hours=1)
+#: The most attempts one sweep starts (#7453). Each start may wait `START_TIMEOUT` (5 s),
+#: so 40 take at most 200 s of the sweep's `ATTEMPT_MEDIA_TIMEOUT` (5 min), with room for
+#: the read; the rest wait for the next pass.
+SWEEP_BATCH = 40
 #: How long after its print completed an archive can still gain a timelapse (spec
 #: 2026-11-05 §4.4): Bambuddy writes it minutes after, and the UI says "waiting" till then.
 FRESH = timedelta(hours=1)
@@ -222,6 +226,23 @@ async def _skipped(
     return present | refused
 
 
+def _not_offered(
+    facts: list[ArchiveFacts], skipped: set[tuple[int, ArchiveCopyMedia]], now: datetime
+) -> set[tuple[int, ArchiveCopyMedia]]:
+    """Each ``(archive_id, medium)`` that :func:`_missing` no longer counts, though the
+    attempt has no copy of it: an archive that completed ``FRESH`` ago or more does not
+    offer it (#7453). The sweep leaves these out."""
+    absent: set[tuple[int, ArchiveCopyMedia]] = set()
+    for archive in facts:
+        if archive.completed_at is None or now - archive.completed_at < FRESH:
+            continue
+        offered = {what for what, _ in _wanted(archive)}
+        for what in ROLES:
+            if what not in offered and (archive.archive_id, what) not in skipped:
+                absent.add((archive.archive_id, what))
+    return absent
+
+
 def _missing(
     facts: list[ArchiveFacts], skipped: set[tuple[int, ArchiveCopyMedia]], now: datetime
 ) -> bool:
@@ -330,7 +351,8 @@ async def mirror_attempt(
     Logged, never raised. ``missing`` is true while no archive could be read yet, or an
     archive lacks its finish photo or its timelapse and either offers it or completed
     less than ``FRESH`` ago (or has no completion time yet), so the workflow steps again.
-    A medium refused as too large at this limit is not missing (#7281 review).
+    A medium refused as too large at this limit is not missing (#7281 review). The media
+    an archive past ``FRESH`` does not offer are recorded for the sweep (#7453).
     ``missing`` is false without a Bambuddy or once the attempt is gone. A failure, a
     failed database read included, answers ``missing``; a failed stamp is logged and
     keeps the answer."""
@@ -343,7 +365,14 @@ async def mirror_attempt(
         attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
         await mirror_media(lifecycle, integrations, blobs, claims, attempt, facts, limit=limit)
         skipped = await _skipped(lifecycle, attempt, limit)
-        missing = _missing(facts, skipped, datetime.now(UTC))
+        now = datetime.now(UTC)
+        missing = _missing(facts, skipped, now)
+        await asyncio.to_thread(
+            lifecycle.store.record_media_not_offered,
+            attempt.id,
+            _not_offered(facts, skipped, now),
+            now,
+        )
     except Exception:
         logger.warning("could not import the media of attempt %s", fulfilment_id, exc_info=True)
         missing = True
@@ -366,14 +395,20 @@ async def sweep_media(
     lacks a medium and was not read for media in the last `SWEEP_CHECK_EVERY`. It catches
     what the triggers missed (Temporal down, an outcome not heard, a timelapse Bambuddy
     got later). A medium the import refused as too large at ``limit`` (the upload limit)
-    or a higher one is not missing (#7281 review). It asks Bambuddy nothing itself, and
-    nothing without a Bambuddy. A failed start is logged, and the next attempt is
-    started. The number of starts asked for."""
+    or a higher one is not missing (#7281 review), nor is one that the last step found an
+    archive past ``FRESH`` not offering (#7453). At most `SWEEP_BATCH` attempts, least
+    lately read first (#7453). It asks Bambuddy nothing itself, and nothing without a
+    Bambuddy. A failed start is logged, and the next attempt is started. The number of
+    starts asked for."""
     if not integrations.linked:
         return 0
     now = datetime.now(UTC)
     attempts = await asyncio.to_thread(
-        lifecycle.store.attempts_missing_media, now - SWEEP_DAYS, now - SWEEP_CHECK_EVERY, limit
+        lifecycle.store.attempts_missing_media,
+        now - SWEEP_DAYS,
+        now - SWEEP_CHECK_EVERY,
+        limit,
+        batch=SWEEP_BATCH,
     )
     for fulfilment_id in attempts:
         await start_media(starter, fulfilment_id, retries=False)

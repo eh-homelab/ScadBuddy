@@ -300,6 +300,24 @@ describe('filament type tools', () => {
     }
   })
 
+  it('says the properties were set when the read after a properties-only edit fails (#7379)', async () => {
+    server.use(
+      http.patch(`${BACKEND}/api/v1/entities/:ref/properties`, () =>
+        HttpResponse.json({ properties: [{ key: 'td', value: 1.5, source: 'manual' }] }),
+      ),
+      http.get(`${BACKEND}/api/v1/filament/types/${ROW}`, () => HttpResponse.json({ detail: 'down' }, { status: 503 })),
+      http.get(`${BACKEND}/api/v1/filament/spools/${ROW}`, () => HttpResponse.json({ detail: 'down' }, { status: 503 })),
+    )
+    for (const [name, args] of [
+      ['filament_type_upsert', { type_id: ROW, properties: { td: 1.5 } }],
+      ['filament_spool_upsert', { spool_id: ROW, properties: { td: 1.5 } }],
+    ] as const) {
+      const result = await runTool(tool(name), args, ctx())
+      expect(result.isError, name).toBe(true)
+      expect(String(firstText(result)), name).toContain('the properties were set')
+    }
+  })
+
   it('replaces the presets and the K values', async () => {
     const bodies: unknown[] = []
     server.use(

@@ -19,6 +19,7 @@ import {
   type LoadedPlugins,
   type RemotePlugin,
 } from './registry.js'
+import type { SessionBrowser } from '../sessions/rows.js'
 
 // The loopback forwarder between Claude Code and plugin endpoints (#297).
 //
@@ -49,6 +50,13 @@ import {
 //     transport headers (content-type, accept, mcp-session-id,
 //     mcp-protocol-version, last-event-id) in, and content-type,
 //     mcp-session-id and cache-control out;
+//   - adds `X-ScadBuddy-Browser` (BROWSER_HEADER, #7027) to every request of
+//     a route registered with a session's browser options: their JSON, which
+//     the playwright-mcp wrapper (workers/playwright-mcp/) reads when a session
+//     starts. It goes to every remote plugin of the run: it carries only the
+//     options the session chose, nothing secret, and a plugin that is no
+//     browser ignores it. The model cannot set it: it is a route option, and
+//     a client's own header is dropped with every other one not listed above;
 //   - enforces tool names (registry.ts "TOOL NAMES"): a `tools/list` result
 //     loses its disabled tools and every tool whose harness name collides
 //     with another's, and a `tools/call` is refused for a disabled or hidden
@@ -90,6 +98,16 @@ export type ForwardOptions = {
    * switched off), or undefined. A read that fails refuses the call.
    */
   callCheck?: (tool: string) => Promise<string | undefined>
+  /** The session's browser options (#7027), sent as BROWSER_HEADER on every request; none when unset or empty. */
+  browser?: SessionBrowser
+}
+
+/** The header a route sends a session's browser options in (#7027). */
+export const BROWSER_HEADER = 'x-scadbuddy-browser'
+
+/** The header's value for these options: undefined for none, or for an empty object (the browser's defaults). */
+function browserHeaderValue(browser: SessionBrowser | undefined): string | undefined {
+  return browser && Object.keys(browser).length > 0 ? JSON.stringify(browser) : undefined
 }
 
 export type Registration = {
@@ -124,6 +142,8 @@ type Route = {
   filterTools: boolean
   maxResponseBytes: number | undefined
   callCheck: ((tool: string) => Promise<string | undefined>) | undefined
+  /** BROWSER_HEADER's value on every request, or undefined to send none. */
+  browserHeader: string | undefined
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
   /** The requests this route has forwarded whose responses are rewritten, on whichever stream they arrive. */
@@ -424,6 +444,7 @@ export class PluginForwarder {
       filterTools: options.filterTools ?? true,
       maxResponseBytes: options.maxResponseBytes,
       callCheck: options.callCheck,
+      browserHeader: browserHeaderValue(options.browser),
       collided: new Set(),
       rewrites: { lists: new Set(), calls: new Map() },
     }
@@ -555,6 +576,7 @@ export class PluginForwarder {
     const send = (retried: boolean): void => {
       const headers: OutgoingHttpHeaders = { ...pick(req.headers, REQUEST_HEADERS), host: target.host }
       if (auth) headers[auth.name] = auth.value
+      if (route.browserHeader) headers[BROWSER_HEADER] = route.browserHeader
       if (body) headers['content-length'] = body.length
       upstream = requestFor(target)({ ...pinnedRequestOptions(target, route.address), method, headers })
       upstream.on('error', (err) => {
@@ -786,16 +808,21 @@ export type PluginsForRun = {
 }
 
 /** What a plugin's route depends on, hashed: equal fingerprints forward the same way. */
-export function pluginFingerprint({ plugin, address }: CheckedPlugin): string {
+export function pluginFingerprint({ plugin, address }: CheckedPlugin, browser?: SessionBrowser): string {
   const { url, header, oauth, toolTiers, disabledTools } = plugin
   const auth = oauth ? ['oauth', oauth.grant] : [header?.name ?? null, header?.value ?? null]
   return createHash('sha256')
-    .update(JSON.stringify([url, ...auth, address, toolTiers, disabledTools]))
+    .update(JSON.stringify([url, ...auth, address, toolTiers, disabledTools, browserHeaderValue(browser) ?? null]))
     .digest('base64url')
 }
 
-/** Registers the loaded plugins for one run; `release()` when the run ends. */
-export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder, options: Pick<ForwardOptions, 'record'> = {}): PluginsForRun {
+/** Registers the loaded plugins for one run, with the session's browser options (#7027) when it has them; `release()` when the run ends. */
+export function forwardForRun(
+  loaded: LoadedPlugins,
+  forwarder: PluginForwarder,
+  options: Pick<ForwardOptions, 'record' | 'browser'> = {},
+): PluginsForRun {
+  const { browser } = options
   const registrations = loaded.plugins.map(({ plugin, address }) => ({
     plugin,
     registration: forwarder.register(plugin, address, options),
@@ -815,7 +842,10 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder,
     keep: (name) => {
       const checked = loaded.plugins.find(({ plugin }) => plugin.name === name)
       return checked
-        ? { fingerprint: pluginFingerprint(checked), register: () => forwarder.register(checked.plugin, checked.address, { record: true }) }
+        ? {
+            fingerprint: pluginFingerprint(checked, browser),
+            register: () => forwarder.register(checked.plugin, checked.address, { record: true, ...(browser ? { browser } : {}) }),
+          }
         : undefined
     },
     terminate: async () => {

@@ -59,6 +59,19 @@ RETRY_AFTER_SECONDS = 2
 FAST_ACCEPT = timedelta(seconds=3)
 #: How long one follow of a command's Update waits on it (spec 2026-10-13 §5.2).
 FOLLOW_WAIT = COMMAND_ANSWER_DEADLINE
+#: The workflow task timeout of a short workflow (#7288): `Operation`, `SliceWorkflow`,
+#: `SensorNotifyPass`. Under slow persistence Temporal 1.32.1 records a task as started
+#: and then never hands it to the poller, so the task waits out its timeout (10 s by
+#: default) before it is tried again. Measured on prod 2026-11-24 (`temporal workflow
+#: show`, WORKFLOW_TASK_STARTED to COMPLETED): `Operation` p99 0.86 s, max 1.15 s (605
+#: tasks in the 121 histories since 2026-11-22; `SliceWorkflow`'s 33 runs go back to
+#: 2026-11-20); every `library` and `bambuddy` short workflow max
+#: 1.16 s, except 2 of 2,922 `library` tasks at 4.0 s and 4.6 s (Housekeeping and
+#: SpoolRefresh, which keep the default); the API pod logged 1.0-2.9 s event-loop stalls
+#: (`core/loop_watch.py`) in its first minutes. A cold first task (fresh process, the
+#: app's sandboxed runner, local dev server) took 7-14 ms. A task over the timeout is not
+#: lost: the server times it out and runs it again.
+SHORT_TASK_TIMEOUT = timedelta(seconds=3)
 
 
 class CommandStillAcceptingError(Exception):
@@ -350,10 +363,13 @@ async def start_command[T](
     deadline: timedelta = COMMAND_ANSWER_DEADLINE,
     update_id: str | None = None,
     execution_timeout: timedelta | None = None,
+    task_timeout: timedelta | None = None,
 ) -> T:
     """Start ``workflow`` as ``id`` (or attach to its running execution) and return its
     ``update``'s answer. ``update_id`` names the Update: Temporal answers a second one
-    with the same id on the same execution with the first's outcome."""
+    with the same id on the same execution with the first's outcome. ``task_timeout``
+    is the workflow task timeout (`SHORT_TASK_TIMEOUT` for a short workflow; None is
+    Temporal's 10 s)."""
     operation: WithStartWorkflowOperation[object, object] = WithStartWorkflowOperation(
         workflow,
         arg,
@@ -364,6 +380,7 @@ async def start_command[T](
         search_attributes=search_attributes,
         memo=memo,
         execution_timeout=execution_timeout,
+        task_timeout=task_timeout,
     )
     # `rpc_timeout` bounds each RPC, not the Update: the server may answer a poll
     # with no outcome just before it, and the SDK then polls again. So the outer bound

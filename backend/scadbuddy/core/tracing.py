@@ -16,7 +16,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from opentelemetry import context, propagate, trace
 from opentelemetry.context import Context
@@ -27,11 +27,12 @@ from opentelemetry.sdk.trace.sampling import Decision, ParentBased, Sampler, Sam
 from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import Attributes
-from psycopg import Connection
-from psycopg.pq import TransactionStatus
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
+
+if TYPE_CHECKING:
+    from psycopg import Connection
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,8 @@ def traced_transaction(conn: Connection[Any]) -> Iterator[None]:
     so it gets no span. That includes a connection out of autocommit that has already run
     a statement (implicitly ``INTRANS``): the commit of that outer transaction, made by
     its owner, is not traced here either."""
+    from psycopg.pq import TransactionStatus
+
     if conn.info.transaction_status != TransactionStatus.IDLE:
         with conn.transaction():
             yield

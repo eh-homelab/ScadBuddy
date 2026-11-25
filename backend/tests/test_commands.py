@@ -20,6 +20,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.commands import (
+    SHORT_TASK_TIMEOUT,
     AlreadyClosedError,
     CommandClosedError,
     CommandClosingError,
@@ -304,6 +305,27 @@ async def test_the_memo_reaches_the_execution(client: Client, queue: str) -> Non
         )
         described = await client.get_workflow_handle(workflow_id).describe()
     assert await described.memo_value("activity_timeout") == 42.0
+
+
+async def test_the_task_timeout_reaches_the_execution(client: Client, queue: str) -> None:
+    """#7288: a workflow task the server loses times out after ``task_timeout``, not
+    Temporal's 10 s default."""
+    workflow_id = f"echo-{uuid.uuid4().hex}"
+    async with Worker(client, task_queue=queue, workflows=[EchoCommand]):
+        await start_command(
+            client,
+            "EchoCommand",
+            EchoInput(finish_at_once=True),
+            id=workflow_id,
+            task_queue=queue,
+            update="accepted",
+            result_type=EchoAnswer,
+            reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            task_timeout=SHORT_TASK_TIMEOUT,
+        )
+        described = await client.get_workflow_handle(workflow_id).describe()
+    config = described.raw_description.execution_config
+    assert config.default_workflow_task_timeout.ToTimedelta() == SHORT_TASK_TIMEOUT
 
 
 async def test_an_execution_ended_before_its_update_answered_is_a_closed_command(

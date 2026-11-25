@@ -113,9 +113,11 @@ REFRESH_EVERY = timedelta(seconds=30)
 #: the print error (`advance_print`, `run_hours`, `progress.from_lan_report`, `lan_ended`),
 #: the card's progress fields, the trays and AMS units (`capture`'s tray projection, the
 #: AMS sensors, `rfid_slots` `_tray_temps`), the HMS errors and the nozzle fields
-#: (`status.status_from_report`). ``device`` is read only in part (`read_view`).
+#: (`status.status_from_report`), and the camera (``ipcam``, the camera relay and the
+#: watch's `printer.changed`, #7328). ``device`` is read only in part (`read_view`).
 READ_FIELDS = (
     "gcode_state",
+    "ipcam",
     "subtask_name",
     "print_error",
     "mc_percent",
@@ -185,6 +187,15 @@ def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None,
     if named != running:
         return now_running, PrintEnd(subtask_name=running, timed=False)
     return None, PrintEnd(subtask_name=running, timed=state in ("FINISH", "FAILED"))
+
+
+def _keep_camera(old: DictRow | None, report: dict[str, Any]) -> dict[str, Any]:
+    """``report`` with the stored row's ``ipcam`` when it has none: a delta before a
+    reconnect's ``pushall`` answer has no ``ipcam``, and the camera relay would read the
+    camera as gone (#7328)."""
+    if "ipcam" not in report and old is not None and "ipcam" in (old["report"] or {}):
+        return {**report, "ipcam": old["report"]["ipcam"]}
+    return report
 
 
 def _unchanged(
@@ -396,6 +407,7 @@ class PrinterReportStore:
             return Advance()
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
+        report = _keep_camera(old, report)
         if (
             old is not None
             and _unchanged(old, report, seen_at, running, ended)
@@ -409,6 +421,7 @@ class PrinterReportStore:
             return Advance()  # a touch committed between the two reads
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
+        report = _keep_camera(old, report)
         written = conn.execute(
             "INSERT INTO printer_reports"
             " (printer_id, report, seen_at, report_seen_at, running_subtask)"
@@ -450,6 +463,11 @@ class PrinterReportStore:
                 (printer_id,),
             ).fetchone()
         return None if data is None else (dict(data["report"]), data["seen_at"])
+
+    def watch_get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+        """`get`, for the printer watch: the print worker's store bounds it as the watch's
+        writes (`crud/print.py` `RemoteReports`)."""
+        return self.get(printer_id)
 
     def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:
         with self.pool.connection() as conn:

@@ -34,7 +34,8 @@ printing is the print dialog's job.
 
 ## Data
 
-- Tables: `render_jobs`, `blob_refs`, `piece_geometry`, `output_index`.
+- Tables: `render_jobs`, `blob_refs`, `piece_geometry`, `outputs` (each output's record,
+  #7255) and `output_index` (until #7257).
 - Blob keys: a piece's key (64-hex), `output-<job>-<i>`
   ([data.md](../architecture/data.md#keys-and-content-addressing)).
 

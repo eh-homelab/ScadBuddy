@@ -1071,4 +1071,37 @@ describe('CustomizePage of a file listing (#6710)', () => {
     await user.click(await screen.findByRole('button', { name: 'Load the latest version' }))
     expect(await screen.findByRole('button', { name: /Part 1/ })).toBeInTheDocument()
   })
+
+  const CHANGED = { type: `${PROBLEMS}listing_changed`, title: 'Conflict', status: 409, detail: 'This listing has changed. Load it again.' }
+
+  it('opens the template page when the shop made the listing a design', async () => {
+    const prices: string[] = []
+    server.use(
+      http.post('/api/store/v1/listings/l4/price', ({ request }) => {
+        prices.push(request.url)
+        return HttpResponse.json(CHANGED, { status: 409 })
+      }),
+    )
+    const { user } = show(FILE_ID)
+    const again = await screen.findByRole('button', { name: 'Load the latest version' })
+    server.use(http.get('/api/store/v1/listings/l4', () => HttpResponse.json({ ...KEYCHAIN, id: FILE_ID })))
+    await user.click(again)
+    expect(await screen.findByLabelText('Name')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Part 1/ })).toBeNull()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(prices).toHaveLength(1)
+  })
+
+  it('opens the file page when the shop made the listing a file', async () => {
+    server.use(http.post('/api/store/v1/renders', () => HttpResponse.json(CHANGED, { status: 409 })))
+    const { user } = show('l1')
+    const again = await screen.findByRole('button', { name: 'Load the latest version' })
+    const sent = renders()
+    server.use(http.get('/api/store/v1/listings/l1', () => HttpResponse.json({ ...FILE, id: 'l1' })))
+    await user.click(again)
+    expect(await screen.findByRole('button', { name: /Part 1/ })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Name')).toBeNull()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(sent).toEqual([])
+  })
 })

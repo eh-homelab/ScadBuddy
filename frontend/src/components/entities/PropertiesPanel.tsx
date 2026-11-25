@@ -61,10 +61,15 @@ function draftOf(value: PropertyValue): Draft {
 /**
  * A type change carries what it can: text to a one-item list; a list to text as its non-empty
  * items joined by ", ", or to a number as its first non-empty item, for the person to correct.
- * Text is never split into items (R12).
+ * Text is never split into items (R12). A list taken to text and back, with the text as the
+ * list left it, gets its items back.
  */
 function retyped(draft: Draft, type: ValueType): Draft {
-  if (type === 'list' && draft.type !== 'list' && draft.text !== '') return { ...draft, type, items: [draft.text] }
+  if (type === 'list' && draft.type !== 'list' && draft.text !== '') {
+    const items = draft.items.filter((item) => item !== '')
+    if (items.length > 0 && draft.text === items.join(', ')) return { ...draft, type }
+    return { ...draft, type, items: [draft.text] }
+  }
   if (draft.type === 'list' && (type === 'text' || type === 'number')) {
     const items = draft.items.filter((item) => item !== '')
     return { ...draft, type, text: type === 'text' ? items.join(', ') : (items[0] ?? '') }
@@ -404,6 +409,8 @@ function PropertyRow({
     const parsed = touched ? valueOf(draft) : { value: property.value }
     if ('error' in parsed) return patch.fail(parsed.error)
     const next = newKey.trim()
+    // Nothing changed: no write, which would mark an imported value manual.
+    if (!touched && next === key) return close(key)
     if (next === key) return patch.send({ [key]: parsed.value }, { done: () => close(key) })
     patch.send({ [key]: null, [next]: parsed.value }, { replaces: keys.has(next) ? next : undefined, done: () => close(next) })
   }
@@ -560,7 +567,9 @@ function AddProperty({
           onChange={(event) => {
             patch.cancel()
             setKey(event.target.value)
-            if (!typePicked) setDraft(retyped(draft, typeOfSchema(docs[event.target.value.trim()])))
+            // Only a key the schema knows sets the type: typing through `gtin` to another key leaves it.
+            const known = docs[event.target.value.trim()]
+            if (!typePicked && known) setDraft(retyped(draft, typeOfSchema(known)))
           }}
           aria-label="New property key"
           list={keysId}

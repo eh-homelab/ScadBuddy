@@ -38,9 +38,11 @@ print, wait and notify the customer (`backend/scadbuddy/orders/builtin_flow.py:4
 Attempt media: with Bambuddy linked, an attempt that names an archive gets the archive's
 latest finish photo and its timelapse as attachments with no click. The `AttemptMedia`
 workflow imports them (`backend/scadbuddy/workflows/attempt_media.py`, `orders/archives.py`
-`mirror_attempt`); a hand attempt, a heard print outcome, a read of the attempt's archives
-and a housekeeping sweep start it. A medium larger than the upload limit is recorded in
+`mirror_attempt`). Four starters start it: a hand attempt, a heard print outcome, a read
+of the attempt's archives and the housekeeping sweep `housekeeping_import_attempt_media`. A medium larger than the upload limit is recorded in
 `order_attempt_media_refusals`, and no import tries it again until the limit is higher.
+A medium an archive does not offer an hour after it completed (a printer with timelapse
+off) is recorded in `order_attempt_media_not_offered`, and the sweep leaves it out (#7453).
 The order page's row shows what is attached, says to attach a refused medium by hand, and
 offers a copy only for what is still missing ([orders spec §8.2](../superpowers/specs/2026-10-18-orders-design.md#82-archives)).
 
@@ -61,6 +63,8 @@ offers a copy only for what is still missing ([orders spec §8.2](../superpowers
 - Tables: `customers`, `customer_contacts`, `customer_addresses`, `orders`, `order_items`,
   `order_item_quotes`, `order_item_revisions`, `order_item_fulfilments`,
   `order_attempt_media_refusals` (an attempt's media the import refused as too large),
+  `order_attempt_media_not_offered` (an attempt's media its archives did not offer an hour
+  after they completed; the sweep skips them),
   `order_shipments`,
   `order_events`, `order_payments`, `order_charges`, `entity_attachments` (an order's files, the rows with an `order_id`), `order_messages`,
   `order_time_entries`, `order_cost_entries`, `parts*`, `filaments` (the price book),

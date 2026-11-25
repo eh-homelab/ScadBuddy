@@ -1,6 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes, useLocation } from 'react-router'
+import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
+import { server } from '../../mocks/server'
+import { seedEntityProperties } from '../../mocks/features/entities'
 import { spoolId, T } from '../../mocks/features/filament/seed'
 import { PICKER_FILTERS_KEY } from '../../lib/filamentPickerFilters'
 import { renderPage } from '../../test/utils'
@@ -65,6 +68,27 @@ describe('the filament quick find', () => {
     expect(within(listbox).getByRole('group', { name: 'Types' })).toHaveTextContent('EL-PLA-SILK-GOLD')
     await user.keyboard('{ArrowDown}{Enter}')
     await waitFor(() => expect(screen.getByTestId('here').textContent).toBe(`/filament/types/${T.GOLD}`))
+  })
+
+  it('finds a spool and a type by a property value (#7026, #7379)', async () => {
+    seedEntityProperties(`spool:${spoolId(3)}`, { lot: 'LOT-77' })
+    seedEntityProperties(`spool_type:${T.GOLD}`, { gtin: ['0099887766'] })
+    const { user } = render()
+    await user.keyboard('{Control>}k{/Control}')
+    const input = await screen.findByRole('combobox')
+    await user.type(input, 'LOT-77')
+    await waitFor(async () => expect((await options()).map((one) => one.textContent)).toEqual([expect.stringContaining('#3 ·')]))
+    await user.clear(input)
+    await user.type(input, '0099887766')
+    await waitFor(async () => expect((await options()).map((one) => one.textContent)).toEqual([expect.stringContaining('EL-PLA-SILK-GOLD')]))
+  })
+
+  it('still opens and searches when the property values cannot be read (#7379)', async () => {
+    server.use(http.get('/api/v1/entity-kinds/:kind/properties', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    const { user } = render()
+    await user.keyboard('{Control>}k{/Control}')
+    await user.type(await screen.findByRole('combobox'), 'elegoo gold')
+    await waitFor(async () => expect(await options()).toHaveLength(2))
   })
 
   it('finds by hex without # and says when nothing matches', async () => {

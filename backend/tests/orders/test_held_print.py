@@ -25,18 +25,19 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders import store as order_store
-from scadbuddy.orders.bambuddy import BambuddyShelf, served_shelf
-from scadbuddy.orders.held_print import (
-    STOREFRONT_FOLDER,
-    NativeShelf,
-    Shelf,
-    Shelved,
-    restore_held,
-)
+from scadbuddy.orders.bambuddy import BambuddyShelf
+from scadbuddy.orders.held_print import restore_held
 from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import LibraryFileRef, Order, OrderItem
 from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.problems import PROBLEMS
+from scadbuddy.orders.served_library import (
+    STOREFRONT_FOLDER,
+    NativeShelf,
+    Shelf,
+    Shelved,
+    served_shelf,
+)
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.native import NativeLibrary
