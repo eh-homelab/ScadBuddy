@@ -820,6 +820,123 @@ describe('saved sheets (#7216)', () => {
     expect(screen.queryByRole('option', { name: 'Shelf strip' })).toBeNull()
   })
 
+  it('keeps a sheet saved before the template list answers', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    const sheets: object[] = []
+    // The first GET (the mount read) waits until the test lets it answer, with the list from before the save.
+    let releaseFirst!: () => void
+    const firstHeld = new Promise<void>((resolve) => (releaseFirst = resolve))
+    let gets = 0
+    server.use(
+      http.get('*/api/v1/filament/label-templates', async () => {
+        gets += 1
+        if (gets === 1) {
+          const before = [...sheets]
+          await firstHeld
+          return HttpResponse.json({ ...LABEL_TEMPLATES, saved: before })
+        }
+        return HttpResponse.json({ ...LABEL_TEMPLATES, saved: sheets })
+      }),
+      http.post('*/api/v1/filament/label-sheets', async ({ request }) => {
+        const body = (await request.json()) as { name: string; layout: object }
+        const made = sheet(SHEET_ID, body.name, body.layout)
+        sheets.push(made)
+        return HttpResponse.json(made, { status: 201 })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('button', { name: 'New sheet…' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Name'), 'Drawer fronts')
+    await user.click(within(dialog).getByRole('button', { name: 'Save sheet' }))
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'saved', sheet_id: SHEET_ID } }]))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Drawer fronts'))
+    // The mount read answers last, without the new sheet: the page keeps the newer list.
+    act(() => releaseFirst())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText('The saved sheet was deleted. Choose another template.')).toBeNull()
+    expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Drawer fronts')
+  })
+
+  it('does not bring back a sheet deleted just after its save, when the list reads answer out of order', async () => {
+    serve()
+    serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    let sheets: object[] = []
+    // The GET after the save waits until the test lets it answer, with the list it read at its start.
+    let releaseSaveRead!: () => void
+    const saveReadHeld = new Promise<void>((resolve) => (releaseSaveRead = resolve))
+    let holdNext = false
+    server.use(
+      http.get('*/api/v1/filament/label-templates', async () => {
+        const now = [...sheets]
+        if (holdNext) {
+          holdNext = false
+          await saveReadHeld
+        }
+        return HttpResponse.json({ ...LABEL_TEMPLATES, saved: now })
+      }),
+      http.post('*/api/v1/filament/label-sheets', async ({ request }) => {
+        const body = (await request.json()) as { name: string; layout: object }
+        const made = sheet(SHEET_ID, body.name, body.layout)
+        sheets.push(made)
+        holdNext = true
+        return HttpResponse.json(made, { status: 201 })
+      }),
+      http.delete('*/api/v1/filament/label-sheets/:id', () => {
+        sheets = []
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Roll label 50 x 25 mm'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await user.click(await screen.findByRole('button', { name: 'New sheet…' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Name'), 'Drawer fronts')
+    await user.click(within(dialog).getByRole('button', { name: 'Save sheet' }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Drawer fronts'))
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete sheet' }))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Roll label 50 x 25 mm'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    // The read after the save answers last, with the deleted sheet in it.
+    act(() => releaseSaveRead())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    await user.click(screen.getByRole('combobox', { name: 'Label' }))
+    await screen.findAllByRole('option')
+    expect(screen.queryByRole('option', { name: 'Drawer fronts' })).toBeNull()
+  })
+
+  it('keeps a pick made while a delete of the chosen sheet is in flight', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let sheets = [sheet(SHEET_ID, 'Shelf strip')]
+    serveSaved(() => sheets)
+    let releaseDelete!: () => void
+    const deleteHeld = new Promise<void>((resolve) => (releaseDelete = resolve))
+    let deleteArrived = false
+    server.use(
+      http.delete('*/api/v1/filament/label-sheets/:id', async () => {
+        deleteArrived = true
+        await deleteHeld
+        sheets = []
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Shelf strip'))
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete sheet' }))
+    await waitFor(() => expect(deleteArrived).toBe(true))
+    await choose(user, screen.getByRole('combobox', { name: 'Label' }), /Avery L7160/)
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'avery_l7160' } }]))
+    act(() => releaseDelete())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent(/Avery L7160/)
+    expect(puts).toEqual([{ filament_label_template: { template: 'avery_l7160' } }])
+  })
+
   it('shows a note when the saved sheet is gone', async () => {
     serve()
     serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })

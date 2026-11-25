@@ -213,6 +213,10 @@ export function LabelsPage() {
   // #7157 — the label template: the setting `filament_label_template`, saved at each change.
   const [templates, setTemplates] = useState<LabelTemplates | null>(null)
   const [choice, setChoice] = useState<LabelTemplateChoice>(DEFAULT_CHOICE)
+  // The choice now, for a request that answers after the render that sent it (a delete).
+  const choiceNow = useRef<LabelTemplateChoice>(DEFAULT_CHOICE)
+  // #7216 — each template list read takes the next number, and only the newest read's answer lands.
+  const templatesRead = useRef(0)
   const [editingCustom, setEditingCustom] = useState(false)
   const [draft, setDraft] = useState({ width: '', height: '' })
   const [customProblem, setCustomProblem] = useState<string | null>(null)
@@ -252,9 +256,7 @@ export function LabelsPage() {
   useEffect(() => {
     let live = true
     // A list that cannot be read leaves the default label, which needs none.
-    listLabelTemplates()
-      .then((list) => live && setTemplates(list))
-      .catch(() => {})
+    readTemplates(() => live)
     // An unreadable setting leaves the default too; the place labels say so themselves.
     api
       .getSettings()
@@ -276,7 +278,8 @@ export function LabelsPage() {
         if (picked || ticks.length > 0) outputSaver.save(value)
         const template = settings.filament_label_template
         if (!template || templateSaver.savedBeforeRead) return
-        setChoice(cleanChoice(template))
+        choiceNow.current = cleanChoice(template)
+        setChoice(choiceNow.current)
         if (template.template === 'custom' && !customOpened.current) setDraft({ width: String(template.width_mm ?? ''), height: String(template.height_mm ?? '') })
       })
       .catch(() => {
@@ -296,6 +299,7 @@ export function LabelsPage() {
   }, [])
 
   const save = (next: LabelTemplateChoice) => {
+    choiceNow.current = next
     setChoice(next)
     templateSaver.save(cleanChoice(next))
   }
@@ -342,10 +346,16 @@ export function LabelsPage() {
     save(value.startsWith(SAVED_PREFIX) ? { template: 'saved', sheet_id: value.slice(SAVED_PREFIX.length) } : { template: value as LabelTemplateChoice['template'] })
   }
 
-  /** The template list read again after a sheet changed; a failed read keeps the list the page has. */
-  const readTemplates = () => {
+  /**
+   * Reads the template list, at the start and again after a sheet changed. Only the newest read's answer lands, so an
+   * older list never replaces a sheet saved or deleted since; a failed read keeps the list the page has.
+   */
+  function readTemplates(live: () => boolean = () => true) {
+    const read = ++templatesRead.current
     listLabelTemplates()
-      .then(setTemplates)
+      .then((list) => {
+        if (live() && read === templatesRead.current) setTemplates(list)
+      })
       .catch(() => {})
   }
 
@@ -372,7 +382,9 @@ export function LabelsPage() {
       }
     }
     setTemplates((was) => was && { ...was, saved: was.saved.filter((one) => one.id !== sheet.id) })
-    if (choice.template === 'saved' && choice.sheet_id === sheet.id) save(DEFAULT_CHOICE)
+    // The choice when the DELETE answers: a pick made while it was in flight stays.
+    const now = choiceNow.current
+    if (now.template === 'saved' && now.sheet_id === sheet.id) save(DEFAULT_CHOICE)
     readTemplates()
   }
 

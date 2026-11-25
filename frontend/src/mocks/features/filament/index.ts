@@ -261,11 +261,19 @@ export const LABEL_TEMPLATES: S['LabelTemplates'] = {
 /** #7216 — the saved sheets (`label_sheets.py` `LabelSheetStore`); none until the Labels page saves one. */
 let savedSheets: S['SavedLabelSheet'][] = []
 
-/** `label_sheets.py` `name_key`: NFC, then case folded. */
-const sheetKey = (name: string) => name.normalize('NFC').toLowerCase()
+/**
+ * Python's `str.casefold()` for the common cases: `toLowerCase()`, then `ß` (and `ẞ`, which lowers to it) to `ss`,
+ * and the final sigma `ς` to `σ`. JavaScript has no casefold. Not covered: the other full case folds, such as the
+ * ligatures (`ﬁ` to `fi`), `ŉ`, the Greek letters with a iota subscript and the Cherokee letters, so two such names
+ * the real route refuses can both save in the mock.
+ */
+const casefold = (text: string) => text.toLowerCase().replace(/ß/g, 'ss').replace(/ς/g, 'σ')
+
+/** `label_sheets.py` `name_key`: NFC, then case folded (`casefold` says where it differs). */
+const sheetKey = (name: string) => casefold(name.normalize('NFC'))
 
 /** `label_sheets.py` `sort_key`: the name with its marks removed, then its key. */
-const sheetSort = (name: string) => name.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+const sheetSort = (name: string) => casefold(name.normalize('NFKD').replace(/\p{M}/gu, ''))
 
 /**
  * #7216 — a sheet body as `LabelSheetIn` and `SheetLayout` check it, or the refusal: the name, the bounds and the

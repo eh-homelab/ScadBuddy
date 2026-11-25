@@ -7,6 +7,7 @@ import {
   bulkCreateSpools,
   bulkUpdateSpools,
   copySpool,
+  createLabelSheet,
   createSpool,
   deleteSpool,
   getForecast,
@@ -515,5 +516,18 @@ describe('the sensors list (#6684)', () => {
     expect(ids).not.toContain(SENSOR.BOX_TEMP)
     expect(ids).toContain(SENSOR.SHELF_HUMIDITY)
     expect(await listSensors(L.DRY_BOX)).toEqual([])
+  })
+})
+
+describe('the saved label sheets (#7216)', () => {
+  const layout = { page: 'letter' as const, width_mm: 60, height_mm: 30, cols: 2, rows: 5, top_mm: 10, left_mm: 5, col_gap_mm: 2, row_gap_mm: 1 }
+
+  it('refuses a name that matches another by case folding, as `name_key` does', async () => {
+    resetMockState()
+    await createLabelSheet({ name: 'Straße', layout })
+    await expect(createLabelSheet({ name: 'STRASSE', layout })).rejects.toMatchObject({ status: 409 })
+    await expect(createLabelSheet({ name: 'ΣΟΦΟΣ', layout })).resolves.toMatchObject({ name: 'ΣΟΦΟΣ' })
+    // A final sigma (ς) and a plain one (σ) fold the same.
+    await expect(createLabelSheet({ name: 'σοφοσ', layout })).rejects.toMatchObject({ status: 409 })
   })
 })
