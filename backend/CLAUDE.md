@@ -2609,7 +2609,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   §7.4): a sha256 of the file the slice reads (the render's 3MF content, or a file
   listing's pinned sha256), the subject's kind (`key_subject`), the price-book filament per
   slot (its slot, id, material, cost, colour, and its type's preset it is sliced with), the
-  profile, the choices, the remembered setup (`key_setup`), and the
+  profile, the choices, the remembered setup (`key_setup`; for a render also the template's
+  own `print_settings` and `part_print_settings`, each only when not empty, read once in
+  `planned_variant` and carried to the run as `SliceVariant.template_settings`, which the
+  slice takes in place of a live read, #7633), and the
   book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
   read again at most once a minute per process, `RATE_TTL`, and carried to the run,
   `SliceVariant.machine_rate`). Any change is a new

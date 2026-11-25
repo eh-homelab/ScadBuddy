@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.filaments import (
     SpoolOption,
 )
 from scadbuddy.bambuddy.models import SlotChoice
+from scadbuddy.bambuddy.output_reader import TemplateSettings
 from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import resolve
@@ -160,9 +161,16 @@ class Recording(FakeSlicer):
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         self.requests.append(request)
-        return await super().start(output_id, request, subject, slot_presets=slot_presets)
+        return await super().start(
+            output_id,
+            request,
+            subject,
+            slot_presets=slot_presets,
+            template_settings=template_settings,
+        )
 
 
 def _printers() -> Any:

@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.output_reader import TemplateSettings
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsPatch
@@ -61,6 +62,7 @@ from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.sb_rows import seed_app_type
 from tests.support.sliced3mf import sliced_3mf
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -440,6 +442,8 @@ class FakeSlicer:
 
     file: ClassVar[bytes] = sliced_3mf(plates={1: (3600, [10.0])}, gcode={1: b"M620 S0A\n"})
     started: ClassVar[list[tuple[str, SliceQuoteRequest, str, SlotPresets | None]]] = []
+    #: Each output start's template settings (#7633).
+    template_settings: ClassVar[list[TemplateSettings | None]] = []
 
     def __init__(self, *_args: Any) -> None:
         pass
@@ -451,8 +455,10 @@ class FakeSlicer:
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         FakeSlicer.started.append((output_id, request, subject, slot_presets))
+        FakeSlicer.template_settings.append(template_settings)
         return [PreviewStarted(job_id=1, plate_id=1)]
 
     async def start_library(
@@ -485,6 +491,7 @@ def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer
     import scadbuddy.orders.storefront.slice_price as slice_price
 
     monkeypatch.setattr(FakeSlicer, "started", [])
+    monkeypatch.setattr(FakeSlicer, "template_settings", [])
     monkeypatch.setattr(order_operations, "PreviewSlicer", FakeSlicer)
     status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
 
@@ -555,6 +562,37 @@ def test_the_price_is_a_slice_through_the_quote_path(
     assert crud.get(f"/renders/{job['id']}/estimate", token=TOKEN_B).json() == est
     assert len(sliced.started) == 1
     assert output_id
+
+
+def _set_print_settings(crud: CrudCaller, slug: str, settings: dict[str, Any]) -> None:
+    """The template's ``print_settings`` in its model.json, as a shop's edit leaves them."""
+    model_json = _state(crud.api).paths.model_meta(slug)
+    body = json.loads(model_json.read_text()) if model_json.is_file() else {}
+    model_json.write_text(json.dumps({**body, "print_settings": settings}))
+    sync_template_rows(crud.api)
+
+
+def test_a_templates_print_settings_move_its_price(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#7633: the shop turns supports on in the template after a price was made. The old
+    price is not the price any more: the key moves, and the slice takes the settings the
+    key holds. With the settings gone again, the key is the one of before, which a
+    template with no settings has always had."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 41})
+    first = priced(crud, job["id"])
+    assert first["source"] == "slice"
+    assert sliced.template_settings == [TemplateSettings()]
+    _set_print_settings(crud, listing["slug"], {"enable_support": "1"})
+    again = priced(crud, job["id"])
+    assert again["source"] == "slice" and again["price_key"] != first["price_key"]
+    assert sliced.template_settings == [
+        TemplateSettings(),
+        TemplateSettings(print_settings={"enable_support": "1"}),
+    ]
+    _set_print_settings(crud, listing["slug"], {})
+    assert priced(crud, job["id"])["price_key"] == first["price_key"]
+    assert len(sliced.started) == 2
 
 
 def test_a_render_of_the_listing_before_it_moved_has_no_price(
