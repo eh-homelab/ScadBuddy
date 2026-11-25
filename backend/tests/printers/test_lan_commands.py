@@ -490,6 +490,12 @@ def test_refusal_reads_fail_case_folded() -> None:
     assert refusal({}) is None
 
 
+def test_a_refusals_reason_keeps_its_printable_start() -> None:
+    reason = refusal({"result": "fail", "reason": "\x1b[31m" + "x" * 500 + "\n"})
+    assert reason == "[31m" + "x" * 196
+    assert refusal({"result": "fail", "reason": "\x00\x07"}) == "printer reported failure"
+
+
 def _setting(slot: WireSlot) -> object:
     return ams_filament_setting(
         slot,

@@ -558,14 +558,21 @@ def matches(reply: Mapping[str, Any], command: str, seq: str) -> bool:
     )
 
 
+#: The most characters of a printer's refusal reason a problem's detail carries.
+REASON_MAX = 200
+
+
 def refusal(reply: Mapping[str, Any]) -> str | None:
     """The printer's reason when its answer's ``result`` is ``fail`` in any case, else
     ``None``, as ``await_cali_ack`` (L7655-L7659) and ``_send_rfid_command``
     (L8669-L8670) read it:
-    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7636-L7664"""
+    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7636-L7664
+    The reason is the printer's and goes into a 409's detail, which the UI and the agent
+    show: only its printable characters are kept, at most `REASON_MAX` of them."""
     if str(reply.get("result", "")).lower() != "fail":
         return None
-    return str(reply.get("reason", "") or "") or _FAILED
+    reason = "".join(ch for ch in str(reply.get("reason", "") or "") if ch.isprintable())
+    return reason.strip()[:REASON_MAX] or _FAILED
 
 
 #: Every payload builder, each citing its source.

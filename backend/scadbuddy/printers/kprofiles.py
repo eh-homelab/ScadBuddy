@@ -155,6 +155,8 @@ def table_of(reply: dict[str, Any], nozzle_diameter: str) -> KProfileTable:
     `KProfile` (``slot_id`` is its ``cali_idx``), an entry that names another nozzle
     diameter dropped, as Bambuddy's ``_parse_kprofile_entries`` does (L7392-L7438):
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7392-L7438
+    The reply is the printer's, so an entry whose numbers do not parse, or that the model
+    refuses, is dropped too, never a 500.
     """
     entries = reply.get("filaments")
     profiles: list[KProfile] = []
@@ -164,8 +166,8 @@ def table_of(reply: dict[str, Any], nozzle_diameter: str) -> KProfileTable:
         diameter = str(entry.get("nozzle_diameter") or nozzle_diameter)
         if diameter != nozzle_diameter:
             continue
-        profiles.append(
-            KProfile(
+        try:
+            profile = KProfile(
                 slot_id=int(entry.get("cali_idx", 0)),
                 extruder_id=int(entry.get("extruder_id", 0)),
                 nozzle_id=str(entry.get("nozzle_id") or ""),
@@ -178,7 +180,9 @@ def table_of(reply: dict[str, Any], nozzle_diameter: str) -> KProfileTable:
                 ams_id=int(entry.get("ams_id", 0)),
                 tray_id=int(entry.get("tray_id", -1)),
             )
-        )
+        except (TypeError, ValueError):  # a pydantic ValidationError is a ValueError
+            continue
+        profiles.append(profile)
     return KProfileTable(profiles=profiles, nozzle_diameter=nozzle_diameter)
 
 
