@@ -129,10 +129,16 @@ function reportLine(report: RfidReconcileReport): string {
   if (failedSlots > 0) parts.push(`${plural(failedSlots, 'slot was', 'slots were')} not set; ${failedSlots === 1 ? 'it is' : 'they are'} tried again on the next refresh`)
   const unconfirmed = report.slots?.unconfirmed ?? 0
   if (unconfirmed > 0) parts.push(`${plural(unconfirmed, 'slot was', 'slots were')} sent, but the printer did not confirm in time; ${unconfirmed === 1 ? 'it is' : 'they are'} checked again on the next refresh`)
+  const waiting = report.slots?.waiting ?? 0
+  if (waiting > 0) parts.push(`${plural(waiting, 'slot was', 'slots were')} not sent yet (the printer was printing or its AMS busy, or time ran out); ${waiting === 1 ? 'it is' : 'they are'} set on a later refresh`)
   const noTemps = report.slots?.no_temps ?? 0
   if (noTemps > 0) parts.push(`${plural(noTemps, 'spool has', 'spools have')} no nozzle temperatures, so its slot is not set`)
   const noPreset = report.slots?.no_preset ?? 0
   if (noPreset > 0) parts.push(`${plural(noPreset, 'spool has', 'spools have')} no preset for the nozzle, so ${noPreset === 1 ? 'its slot is' : 'their slots are'} not set`)
+  const invalidTemps = report.slots?.invalid_temps ?? 0
+  if (invalidTemps > 0) parts.push(`${plural(invalidTemps, 'spool has', 'spools have')} a minimum nozzle temperature above the maximum, so ${invalidTemps === 1 ? 'its slot is' : 'their slots are'} not set`)
+  const unsupported = report.slots?.unsupported_unit ?? 0
+  if (unsupported > 0) parts.push(`${plural(unsupported, 'slot is', 'slots are')} on a unit ScadBuddy cannot configure`)
   const noNozzle = report.slots?.no_nozzle ?? 0
   if (noNozzle > 0) parts.push(`${plural(noNozzle, 'slot', 'slots')}: the printer does not report the nozzle for ${noNozzle === 1 ? 'its tray, so it is' : 'their trays, so they are'} not set`)
   return `${parts.join('. ')}.`

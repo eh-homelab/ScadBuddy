@@ -1485,8 +1485,9 @@ const tools: Tool[] = [
       'the override mode; push the queued tag changes (only with tag sync set to push (`sb_to_bb` or `two_way`)); then configure ' +
       "the AMS slot of each override tag over ScadBuddy's own LAN link (a printer-control write; Bambuddy is not " +
       'called for it). Each step fails alone. Answers the mode status, the tag push counts (`tags`) and the slot ' +
-      'counts (`slots`: configured, unconfirmed (sent, not acknowledged in time), unchanged, no_preset, no_temps, ' +
-      'no_nozzle, failed; null when another reconcile holds the slots). ' +
+      'counts (`slots`: configured, unconfirmed (sent, not acknowledged in time), waiting (printer printing or AMS busy, ' +
+      'or out of time; set on a later pass), unchanged, no_preset, no_temps, invalid_temps (minimum above maximum), ' +
+      'no_nozzle, unsupported_unit, failed; null when another reconcile holds the slots). ' +
       'Writes Bambuddy and the printers to match ScadBuddy, and ScadBuddy (the queue, the saved auto-add value, the ' +
       'slot rows). Approved first.',
     input: z.object({}),
