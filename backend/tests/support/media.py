@@ -3,8 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from scadbuddy.library.media import MediaItem
+
+if TYPE_CHECKING:
+    from scadbuddy.library.catalogue import Catalogue
+
+
+async def thumbnail_of(catalogue: Catalogue, slug: str) -> tuple[bytes, str] | None:
+    """The catalogue thumbnail and its content type, as `GET …/thumbnail` reads it."""
+    ref = await catalogue.thumbnail_ref(slug)
+    found = None if ref is None else await ref.read()
+    return None if found is None else (found[0], found[1])
 
 
 class MemoryMediaStore:

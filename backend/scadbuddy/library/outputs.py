@@ -1779,6 +1779,13 @@ class OutputStore:
         output_id = await asyncio.to_thread(self.plate_cover_output, slug)
         if output_id is None:
             return None
+        return await self.plate_image(slug, output_id)
+
+    async def plate_image(self, slug: str, output_id: str) -> bytes | None:
+        """The ``plate_1.png`` of ``slug``'s output ``output_id``, or None when it is gone
+        or has none: the catalogue thumbnail's output source (#7317). Read as
+        `read_plate_cover` reads it: the kept cover blob first, else out of the output's
+        3MF (its model blob, else its file), then kept."""
         kept = await asyncio.to_thread(self._kept_plate_cover, output_id)
         if kept is not None:
             key = kept.get("key")
