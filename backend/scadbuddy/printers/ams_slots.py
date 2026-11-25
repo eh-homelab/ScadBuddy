@@ -1,6 +1,6 @@
 """A printer's AMS slots over ScadBuddy's own LAN link (#7276, plan
 ``docs/superpowers/plans/2026-11-25-filament-hardware-off-bambuddy.md`` Task 8; the bodies,
-views and checks are #7153's, moved from ``bambuddy/slot_control.py``).
+views and checks are #7153's, once in a Bambuddy client module that #7276 removed).
 
 Every write that reaches the printer checks the printer's stored LAN report first and
 refuses what is unsafe (`guard`, R-7276-12); its commands are built here

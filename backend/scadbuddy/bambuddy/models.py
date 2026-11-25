@@ -7,7 +7,6 @@ Bambuddy's own OpenAPI, not a guess.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -664,9 +663,6 @@ class AmsUnit(BambuddyModel):
     is_ams_ht: bool = False
     module_type: str = ""
     tray: list[AmsTray] = Field(default_factory=list)
-    #: The unit's serial, which Bambuddy keys an AMS label by (#7153). Read in the backend
-    #: only, never in a status the API serves, as the tag keys are.
-    serial_number: SkipJsonSchema[str | None] = Field(default=None, exclude=True)
 
     @field_validator("humidity", mode="before")
     @classmethod
@@ -1719,47 +1715,3 @@ class QueueItemCreate(BambuddyModel):
     #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False
-
-
-class SlotPreset(BambuddyModel):
-    """A row of ``GET /api/v1/printers/{id}/slot-presets`` (#7153): the slicer preset
-    Bambuddy shows for a slot, kept in its database, not on the printer
-    (``routes/printers.py`` line 2689, maziggy/bambuddy v1.3.1)."""
-
-    ams_id: int
-    tray_id: int
-    preset_id: str
-    preset_name: str
-    tray_info_idx: str | None = None
-
-
-class SlotControlAnswer(BambuddyModel):
-    """Bambuddy's ``{success, message}`` after a slot reset, refresh, load or unload
-    (#7153). It says the command was sent, not that the printer did it."""
-
-    success: bool = True
-    message: str = ""
-
-
-class SlotConfigure(BaseModel):
-    """The query of ``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` (#6264;
-    the route's parameters in ``rfid-routes.json``, v1.3.1). ``tray_color`` is
-    ``RRGGBBAA`` without ``#``."""
-
-    tray_info_idx: str
-    tray_type: str
-    tray_sub_brands: str
-    tray_color: str
-    nozzle_temp_min: int
-    nozzle_temp_max: int
-    cali_idx: int | None = None
-    nozzle_diameter: str
-    setting_id: str | None = None
-    k_value: float | None = None
-
-    def query(self) -> dict[str, str | int | float]:
-        return {k: v for k, v in self.model_dump().items() if v is not None}
-
-    def digest(self) -> str:
-        body = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(body.encode()).hexdigest()

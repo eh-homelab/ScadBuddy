@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -144,3 +145,32 @@ def test_a_run_still_open_answers_202_with_its_id() -> None:
     response = command_response(LanCommandPending(workflow_id="lan-command-x"))
     assert response.status_code == 202
     assert json.loads(bytes(response.body)) == {"workflow_id": "lan-command-x"}
+
+
+REMOVED = (
+    "set_k_profile",
+    "set_k_profiles_batch",
+    "delete_k_profile",
+    "k_profile_notes",
+    "set_k_profile_note",
+    "delete_k_profile_note",
+    "configure_slot",
+    "reset_slot",
+    "refresh_slot",
+    "load_filament",
+    "unload_filament",
+    "slot_presets",
+    "set_slot_preset",
+    "delete_slot_preset",
+    "ams_labels",
+    "set_ams_label",
+    "delete_ams_label",
+)
+
+
+def test_no_filament_hardware_write_goes_through_bambuddy() -> None:
+    root = Path(__file__).parents[2] / "scadbuddy/bambuddy"
+    assert not (root / "slot_control.py").exists()
+    src = (root / "client.py").read_text()
+    for name in REMOVED:
+        assert f"def {name}(" not in src
