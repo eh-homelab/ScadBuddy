@@ -5,6 +5,8 @@ live output's blobs stay, and the hold reaper never releases a live output's hol
 
 from __future__ import annotations
 
+import asyncio
+import shutil
 from collections.abc import AsyncGenerator, Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -284,3 +286,46 @@ async def test_reaper_keeps_folder_of_output_with_row_and_no_holds(
     (directory / META_NAME).unlink()
     assert reap_orphan_holds(BlobRefs(pool), store, grace=timedelta(0)) == 0
     assert directory.is_dir()
+
+
+def _mark(pool: Pool, rows: OutputRows) -> None:
+    """The cut-over mark (#7257), over a row copy run and a byte run that finished."""
+    with pool.connection() as conn:
+        conn.execute("INSERT INTO output_copy_runs (finished_at) VALUES (clock_timestamp())")
+        conn.execute("INSERT INTO output_byte_runs (finished_at) VALUES (clock_timestamp())")
+    assert rows.try_cut_over() is True
+
+
+async def test_reaper_after_cut_over_reads_rows_only(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    """#7257 plan A5: after the mark the reaper scans no folder and reads no
+    ``output_hold_slugs`` (release B drops it while release A pods run). Past the grace, a
+    deleted output's holds go; a live output's holds and a claimed id's holds stay."""
+    store, job, files = await _with_files(tmp_path)
+    _wire(store, projection, content)
+    rows = store.rows
+    assert rows is not None
+    live = await store.save(job, name="live", files_dir=files)
+    gone = await store.save(job, name="gone")
+    refs = BlobRefs(pool)
+    live_holds = _holds(pool, live.id)
+    assert live_holds
+    _mark(pool, rows)
+    await asyncio.to_thread(store.delete, gone.id)
+    # A hold taken after the delete's release (a byte copy's or a thumbnail's).
+    refs.add("piece-late", OUTPUT_HOLDER, gone.id)
+    claimed = "c" * 32
+    assert rows.claim(claimed, live.slug)
+    refs.add("piece-claimed", OUTPUT_HOLDER, claimed)
+    for output_id in (live.id, gone.id, claimed):
+        _age_holds(pool, output_id)
+    with pool.connection() as conn:
+        conn.execute("DROP TABLE output_hold_slugs")
+    # Any scan of the share raises: the outputs folder is a plain file.
+    shutil.rmtree(store.paths.outputs)
+    store.paths.outputs.write_text("not a folder")
+    assert reap_orphan_holds(refs, store, grace=timedelta(hours=1)) == 1
+    assert _holds(pool, gone.id) == set()
+    assert _holds(pool, live.id) == live_holds
+    assert _holds(pool, claimed) == {"piece-claimed"}

@@ -256,6 +256,16 @@ def _replace_bytes(path: Path, data: bytes) -> None:
     temporary.replace(path)
 
 
+def _geometry_name(plate: int) -> str:
+    """The file name of a plate's geometry analysis cache."""
+    return GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
+
+
+def _attributed_name(plate: int) -> str:
+    """The file name of a plate's attributed analysis."""
+    return "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
+
+
 def _holds_plate_cover(model: Path) -> bool:
     """Whether the 3MF at ``model`` holds plate 1's cover image. False when it cannot be
     read."""
@@ -645,6 +655,39 @@ class OutputStore:
     def _copied(self) -> bool:
         """Whether the rows hold every output: a copy run finished (#7255)."""
         return self.rows is not None and self.rows.copied()
+
+    def _cut_over(self) -> bool:
+        """Whether the cut-over mark exists (#7257, plan D2): the rows and the blobs are
+        the record, and an output's folder may be missing (a release B pod saved it)."""
+        return self.rows is not None and self.rows.cut_over()
+
+    def _folder_write[T](
+        self,
+        output_id: str,
+        write: Callable[[Path], T],
+        *,
+        missing: T,
+        directory: Path | None = None,
+    ) -> T:
+        """Run ``write`` on the output's folder (``directory``, else `_find_dir`): a file
+        step beside the row's. After the cut-over mark a missing folder is no error
+        (#7257, plan D1): the step is logged at debug and skipped, and ``missing`` is the
+        answer; the row step runs as before. Before the mark, a missing folder raises
+        `FileNotFoundError`, as in phase 2. Blocking."""
+        if directory is None:
+            directory = self._find_dir(output_id)
+        try:
+            return write(directory)
+        except FileNotFoundError:
+            # Only a missing folder is skipped: the stat and the mark are read only here,
+            # so a write that succeeds costs nothing more.
+            if directory.is_dir() or not self._cut_over():
+                raise
+        logger.debug(
+            "an output's folder is gone after the cut-over; its file step is skipped",
+            extra={"output_id": output_id, "path": str(directory)},
+        )
+        return missing
 
     def _find_dir(self, output_id: str) -> Path:
         held, row = self._held_row(output_id)
@@ -1307,7 +1350,10 @@ class OutputStore:
 
     def _write_backfill(self, output_id: str, state: BackfillState) -> None:
         """The file first, then the row (#7255)."""
-        _replace(self.directory(output_id) / BACKFILL_NAME, state.model_dump_json())
+        text = state.model_dump_json()
+        self._folder_write(
+            output_id, lambda directory: _replace(directory / BACKFILL_NAME, text), missing=None
+        )
         if self.rows is not None:
             self.rows.set_backfill(output_id, state.model_dump(mode="json"))
 
@@ -1347,11 +1393,15 @@ class OutputStore:
         """Give the output what a new one records (§7, §8.4) from its re-render, keeping
         its id, name and files. Run again, it writes the same files."""
         directory = self.directory(output_id)
-        if not (directory / RECORD_NAME).is_file():
-            _replace(directory / RECORD_NAME, chosen.record.model_dump_json())
         manifest = [m.model_dump(mode="json") for m in chosen.manifest]
-        _replace(directory / MANIFEST_NAME, json.dumps(manifest))
-        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+
+        def write(folder: Path) -> None:
+            if not (folder / RECORD_NAME).is_file():
+                _replace(folder / RECORD_NAME, chosen.record.model_dump_json())
+            _replace(folder / MANIFEST_NAME, json.dumps(manifest))
+            (folder / BACKFILL_NAME).unlink(missing_ok=True)
+
+        self._folder_write(output_id, write, missing=None, directory=directory)
         if self.rows is not None:
             # The record it has stays, as the file's does: one statement.
             self.rows.attach_backfill(output_id, chosen.record.model_dump(mode="json"), manifest)
@@ -1617,8 +1667,12 @@ class OutputStore:
         before #6371. A second writer of it needs a lock here, or one rename loses."""
         meta, directory = self._stored_meta(output_id)
         renamed = meta.model_copy(update={"name": name or None})
-        _replace(
-            directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
+        text = json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
+        self._folder_write(
+            output_id,
+            lambda folder: _replace(folder / META_NAME, text),
+            missing=None,
+            directory=directory,
         )
         if self.rows is not None:
             self.rows.update_meta(output_id, renamed)
@@ -1633,7 +1687,13 @@ class OutputStore:
         it writes the index row."""
         meta, directory = self._stored_meta(output_id)
         marked = meta.model_copy(update={"source": STOREFRONT})
-        _replace(directory / META_NAME, json.dumps(marked.model_dump(mode="json"), indent=2) + "\n")
+        text = json.dumps(marked.model_dump(mode="json"), indent=2) + "\n"
+        self._folder_write(
+            output_id,
+            lambda folder: _replace(folder / META_NAME, text),
+            missing=None,
+            directory=directory,
+        )
         if self.rows is not None:
             self.rows.update_meta(output_id, marked)
         return marked
@@ -1969,8 +2029,7 @@ class OutputStore:
         return analysis
 
     def _geometry_path(self, output_id: str, plate: int) -> Path:
-        name = GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
-        return self._find_dir(output_id) / name
+        return self._find_dir(output_id) / _geometry_name(plate)
 
     def _cached_geometry(self, output_id: str, plate: int) -> GeometryAnalysis | None:
         """The row's analysis of this `ANALYSIS_VERSION`, else the file cache's.
@@ -2004,9 +2063,11 @@ class OutputStore:
         # Written aside and renamed, so a concurrent reader never sees half a file. A
         # failed write (no folder: the bytes are only blobs) loses only that cache; the
         # analysis is still the answer.
+        name = _geometry_name(plate)
+        text = analysis.model_dump_json(indent=2) + "\n"
         try:
-            _replace(
-                self._geometry_path(output_id, plate), analysis.model_dump_json(indent=2) + "\n"
+            self._folder_write(
+                output_id, lambda folder: _replace(folder / name, text), missing=None
             )
         except (OSError, OutputNotFoundError):
             logger.debug(
@@ -2052,20 +2113,22 @@ class OutputStore:
                 body,
                 model_sha=model_sha,
             )
-        _replace(self._attributed_path(output_id, plate), json.dumps(body, indent=2) + "\n")
+        name = _attributed_name(plate)
+        text = json.dumps(body, indent=2) + "\n"
+        self._folder_write(output_id, lambda folder: _replace(folder / name, text), missing=None)
 
     def _attributed_path(self, output_id: str, plate: int) -> Path:
-        name = (
-            "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
-        )
-        return self._find_dir(output_id) / name
+        return self._find_dir(output_id) / _attributed_name(plate)
 
     def thumbnail_path(self, output_id: str) -> Path:
         return self._find_dir(output_id) / THUMBNAIL_NAME
 
     def write_thumbnail(self, output_id: str, png: bytes) -> None:
-        """Whole, by a rename: a reader of the old file never gets half of this one."""
-        _replace_bytes(self.thumbnail_path(output_id), png)
+        """Whole, by a rename: a reader of the old file never gets half of this one.
+        After the cut-over mark, nothing when the folder is gone (`_folder_write`)."""
+        self._folder_write(
+            output_id, lambda folder: _replace_bytes(folder / THUMBNAIL_NAME, png), missing=None
+        )
 
     async def put_thumbnail(self, output_id: str, png: bytes) -> None:
         """``png`` as the thumbnail (#7256). Its blob is put first, under its own key
@@ -2138,17 +2201,23 @@ class OutputStore:
 
     def write_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
         """``png`` as the thumbnail only when the output still has none: an upload that
-        landed while the server drew stays (#4775). Written whole or not at all."""
-        path = self.thumbnail_path(output_id)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-        temporary.write_bytes(png)
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            return False
-        finally:
-            temporary.unlink()
-        return True
+        landed while the server drew stays (#4775). Written whole or not at all. After the
+        cut-over mark, True when the folder is gone: the row decides, as
+        `OutputRows.draw_thumbnail` names the key only while the row names none."""
+
+        def write(folder: Path) -> bool:
+            path = folder / THUMBNAIL_NAME
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+            temporary.write_bytes(png)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                return False
+            finally:
+                temporary.unlink()
+            return True
+
+        return self._folder_write(output_id, write, missing=True)
 
     async def put_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
         """``png`` as the thumbnail only while the output has none (#4775): an upload that
@@ -2365,14 +2434,56 @@ def reap_orphan_holds(
     (#5453). An unmounted or empty volume lists no slug at all, so
     releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
     and with no live output to learn it from) is never released here. The cost of all
-    this: holds orphaned by a model's whole deletion stay until a person drops them."""
+    this: holds orphaned by a model's whole deletion stay until a person drops them.
+
+    After the cut-over mark (#7257, plan A5) the rows are the record: the reaper lists no
+    folder and reads no ``output_hold_slugs`` (release B drops it while release A pods
+    run). In one statement it releases every `output` hold past ``grace`` whose output
+    has no ``outputs`` row and no claim younger than ``grace`` (`_reap_rows_only`). A
+    model's whole deletion then frees its outputs' holds too."""
     with span("outputs.reap_orphan_holds") as current:
         if store.rows is not None:
             # First, so a share that cannot be listed does not keep stale claims (#7257).
             current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))
-        released = _reap_orphan_holds(refs, store, grace)
+        if store.rows is not None and store.rows.cut_over():
+            current.set_attribute("scadbuddy.rows_only", True)
+            released = _reap_rows_only(refs, grace)
+        else:
+            released = _reap_orphan_holds(refs, store, grace)
         current.set_attribute("scadbuddy.released", released)
         return released
+
+
+#: The `output` holds past the grace of every output with no row and no claim younger
+#: than the grace, released in one statement; the ids of the outputs they were.
+_RELEASE_ORPHANS = (
+    "WITH aged AS (SELECT holder_id FROM blob_refs WHERE holder_kind = %(kind)s"
+    "  GROUP BY holder_id HAVING min(created_at) < now() - %(grace)s),"
+    " orphans AS (SELECT a.holder_id FROM aged a"
+    "  WHERE NOT EXISTS (SELECT 1 FROM outputs o WHERE o.output_id = a.holder_id)"
+    "  AND NOT EXISTS (SELECT 1 FROM output_claims c WHERE c.output_id = a.holder_id"
+    "   AND c.claimed_at >= now() - %(grace)s)),"
+    " released AS (DELETE FROM blob_refs r USING orphans o"
+    "  WHERE r.holder_kind = %(kind)s AND r.holder_id = o.holder_id RETURNING r.holder_id)"
+    " SELECT DISTINCT holder_id FROM released ORDER BY holder_id"
+)
+
+
+def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
+    """`reap_orphan_holds` after the cut-over mark (#7257): rows only, no folder and no
+    ``output_hold_slugs``. A save holds its claim from before its first hold until its
+    row commits, so its holds are kept while it runs."""
+    with refs.pool.connection() as conn:
+        found = conn.execute(_RELEASE_ORPHANS, {"kind": OUTPUT_HOLDER, "grace": grace}).fetchall()
+    orphans = [str(row["holder_id"]) for row in found]
+    if orphans:
+        # One line to spot an unexpected mass release (#1806 review).
+        logger.warning(
+            "released the Parts and byte blobs of %d orphaned outputs (rows only, #7257)",
+            len(orphans),
+            extra={"ids": orphans[:50]},
+        )
+    return len(orphans)
 
 
 def _with_rows(store: OutputStore, output_ids: Iterable[str]) -> set[str]:

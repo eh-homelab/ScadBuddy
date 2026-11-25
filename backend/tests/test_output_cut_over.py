@@ -5,6 +5,7 @@ housekeeping sweeps."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import threading
@@ -280,3 +281,119 @@ async def test_mark_another_replica_wrote_is_not_logged(
         assert await main._try_cut_over(rows) is True
     logged = [r for r in caplog.records if r.getMessage() == "the outputs are cut over (#7257)"]
     assert logged == []
+
+
+THUMBNAIL_PNG = b"\x89PNG\r\n\x1a\nthumbnail after the mark"
+
+
+async def _without_folder(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> tuple[OutputStore, OutputMeta, Path]:
+    """Review Focus 2: the mark is written, the store puts blobs, and the first output's
+    folder is gone, as for an output that a release B pod saved."""
+    store, metas = saved
+    await _cut_over(store, content, projection)
+    store.bytes = OutputBytes(content)
+    directory = store.directory(metas[0].id)
+    shutil.rmtree(directory)
+    return store, metas[0], directory
+
+
+async def test_rename_without_folder_after_cut_over(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    store, meta, directory = await _without_folder(saved, content, projection)
+    renamed = await asyncio.to_thread(store.rename, meta.id, "renamed")
+    assert renamed.name == "renamed"
+    row = _rows(store).get(meta.id)
+    assert row is not None and row.meta.name == "renamed"
+    assert not directory.exists()
+
+
+async def test_put_thumbnail_without_folder_after_cut_over(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    store, meta, directory = await _without_folder(saved, content, projection)
+    await store.put_thumbnail(meta.id, THUMBNAIL_PNG)
+    row = _rows(store).get(meta.id)
+    assert row is not None and row.blobs.thumbnail == output_blob_key(meta.id, "thumbnail")
+    async with store.local_role(meta.id, "thumbnail") as path:
+        assert path is not None and path.read_bytes() == THUMBNAIL_PNG
+    assert not directory.exists()
+
+
+async def test_put_drawn_thumbnail_without_folder_after_cut_over(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    """The row decides: the drawn thumbnail's key is named while the row names none."""
+    store, meta, directory = await _without_folder(saved, content, projection)
+    row = _rows(store).get(meta.id)
+    assert row is not None and row.blobs.thumbnail is None
+    assert await store.put_drawn_thumbnail(meta.id, THUMBNAIL_PNG) is True
+    row = _rows(store).get(meta.id)
+    assert row is not None and row.blobs.thumbnail == output_blob_key(meta.id, "thumbnail")
+    async with store.local_role(meta.id, "thumbnail") as path:
+        assert path is not None and path.read_bytes() == THUMBNAIL_PNG
+    assert not directory.exists()
+
+
+async def test_write_attributed_without_folder_after_cut_over(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    store, meta, directory = await _without_folder(saved, content, projection)
+    analysis = await store.geometry(meta.id, 1)
+    named = analysis.model_copy(update={"height_mm": 7.0})
+    sha = await asyncio.to_thread(store.model_sha, meta.id)
+    await asyncio.to_thread(store.write_attributed, meta.id, 1, "a" * 40, named, model_sha=sha)
+    found = await asyncio.to_thread(store.attributed, meta.id, 1, "a" * 40)
+    assert found is not None and found.height_mm == 7.0
+    assert not directory.exists()
+
+
+async def test_backfill_writes_without_folder_after_cut_over(
+    tmp_path: Path,
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    store, meta, directory = await _without_folder(saved, content, projection)
+    _, _, chosen = await finished_job(tmp_path / "other")
+    store.start_backfill(meta.id, "j9")
+    started = store.backfill(meta.id)
+    assert started is not None and started.job_id == "j9" and started.error is None
+    store.fail_backfill(meta.id, "j9", "boom")
+    failed = store.backfill(meta.id)
+    assert failed is not None and failed.error == "boom"
+    store.clear_backfill(meta.id)
+    assert store.backfill(meta.id) is None
+    store.start_backfill(meta.id, "j10")
+    store.attach_backfill(meta.id, chosen)
+    assert store.backfill(meta.id) is None
+    assert store.manifest(meta.id) == chosen.manifest
+    assert store.record(meta.id) is not None
+    assert not directory.exists()
+
+
+async def test_missing_folder_raises_before_cut_over(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    projection: JobProjection,
+) -> None:
+    """With no mark, a missing folder fails the write, as in phase 2."""
+    store, metas = saved
+    assert copy_outputs(store, _rows(store), projection.conninfo) is not None
+    assert _rows(store).cut_over_at() is None
+    shutil.rmtree(store.directory(metas[0].id))
+    with pytest.raises(FileNotFoundError):
+        store.rename(metas[0].id, "renamed")
+    with pytest.raises(FileNotFoundError):
+        store.start_backfill(metas[0].id, "j9")
