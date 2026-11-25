@@ -548,6 +548,8 @@ _TYPE_REFUSED = (
     TypeTempError,
     TypeRowsDuplicateError,
     PresetUnknownError,
+    MissingRequiredProperties,
+    BadPropertyValue,
 )
 
 
@@ -580,6 +582,9 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
     status_code=status.HTTP_201_CREATED,
     summary="Add a spool type",
     description=(
+        "`properties` (a key-to-value map) are written with the type in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the type's "
+        "required properties are not all filled after it; nothing is written (#7703). "
         "A type has a `code`, a material, an `rgba` (`#RRGGBB` or `#RRGGBBAA`, stored with "
         "its alpha), a `label_weight_g` and optional print values a spool inherits. With a "
         "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
@@ -593,7 +598,9 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
 )
 async def create_type(filament: FilamentDep, body: m.SpoolTypeCreate) -> m.SpoolType:
     try:
-        return await asyncio.to_thread(filament.types.create, body)
+        return await asyncio.to_thread(
+            partial(filament.types.create, body, by=current_actor(), checked=True)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
 
@@ -709,6 +716,10 @@ async def get_type(filament: FilamentDep, type_id: UUID) -> m.SpoolTypeDetail:
     response_model=m.SpoolType,
     summary="Change a spool type",
     description=(
+        "`properties` (a key-to-value map) are written with the type in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the type's "
+        "required properties are not all filled after the save (a patch that sends only "
+        "`archived` is not checked); nothing is written (#7703). "
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the type off the lists and frees its code, `false` puts it back. A priced type "
         "keeps its price book row in step. 404 for no such type, 409 when another "
@@ -719,7 +730,42 @@ async def patch_type(
     filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.SpoolTypePatch
 ) -> m.SpoolType:
     try:
-        changed = await asyncio.to_thread(filament.types.update, type_id, body, actor=actor(caller))
+        changed = await asyncio.to_thread(
+            partial(
+                filament.types.update,
+                type_id,
+                body,
+                actor=actor(caller),
+                by=current_actor(),
+                checked=True,
+            )
+        )
+    except _TYPE_REFUSED as exc:
+        raise _refused(exc) from None
+    if changed is None:
+        raise _no_type(type_id)
+    return changed
+
+
+@router.put(
+    "/types/{type_id}/cost-per-kg",
+    response_model=m.SpoolType,
+    summary="Set a spool type's cost",
+    description=(
+        "Only `cost_per_kg` (`null` clears it), written as `PATCH` writes it, price book "
+        "row included. Not checked for required properties (#7703): a one-field action, so "
+        "a type its required keys leave incomplete can still take a price. 404 for no such "
+        "type, 422 for a bad cost."
+    ),
+)
+async def put_type_cost(
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.TypeCost
+) -> m.SpoolType:
+    patch = m.SpoolTypePatch(cost_per_kg=body.cost_per_kg)
+    try:
+        changed = await asyncio.to_thread(
+            filament.types.update, type_id, patch, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if changed is None:
@@ -1126,6 +1172,9 @@ async def list_spools(
     status_code=status.HTTP_201_CREATED,
     summary="Add a spool",
     description=(
+        "`properties` (a key-to-value map) are written with the spool in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the spool's "
+        "required properties are not all filled after it; nothing is written (#7703). "
         "A spool names a `type_id`, or, while it needs a type, its own `material_id`. Every "
         "other value overrides the type's. `grams_left` is the first reading on its ledger. "
         "422 for a bad field, a row it points at that does not exist, or an effective "
@@ -1156,6 +1205,9 @@ BULK_ROUTE = "POST /filament/spools/bulk"
     status_code=status.HTTP_201_CREATED,
     summary="Add several identical spools",
     description=(
+        "`properties` (a key-to-value map) are written with the spool in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the spool's "
+        "required properties are not all filled for each spool; nothing is written (#7703). "
         "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
         "gets its own number and its own `created` event (`grams_left` is each one's first "
         "reading), its move to `location_id`, and its own `presets` and `k_values`. "
@@ -1389,6 +1441,10 @@ async def get_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDetail:
     response_model=m.Spool,
     summary="Change a spool",
     description=(
+        "`properties` (a key-to-value map) are written with the spool in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the spool's "
+        "required properties are not all filled after the save (a patch that sends only "
+        "`archived` is not checked); nothing is written (#7703). "
         "Only the fields sent change; `null` on an override clears it, and the spool takes "
         "its type's value again. One `edited` ledger event records each change as `[before, "
         "after]`. `archived` takes the spool off the lists or puts it back. 404 for no such "

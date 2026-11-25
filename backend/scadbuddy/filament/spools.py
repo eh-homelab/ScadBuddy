@@ -25,7 +25,7 @@ from pydantic import JsonValue
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.entities.refs import EntityRef
-from scadbuddy.entities.required import checks_save, completeness_of_kind, save_properties_on
+from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
@@ -92,12 +92,11 @@ _SPOOL_FIELDS = tuple(
         "hours_outside_dry",
         "needs_drying",
         "drift_notice",
-        "missing_properties",
-        "invalid_properties",
+        *m.COMPLETENESS,
     }
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
-_TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
+_TYPE_COLUMNS = ", ".join(f for f in m.SpoolType.model_fields if f not in m.COMPLETENESS)
 _TAG_COLUMNS = ", ".join(m.Tag.model_fields)
 _BINDING_COLUMNS = ", ".join(m.TagBinding.model_fields)
 _TAG_COLUMNS_T = ", ".join(f"t.{f}" for f in m.Tag.model_fields)
@@ -286,14 +285,6 @@ def _properties(
         )
 
 
-def _mark_incomplete(conn: Conn, spools: list[m.Spool]) -> None:
-    """#7703 (spec 6.3b): each unarchived spool's missing and ill-fitting properties."""
-    by_ref = {str(spool.id): spool for spool in spools if spool.archived_at is None}
-    for ref, found in completeness_of_kind(conn, "spool", by_ref).items():
-        by_ref[ref].missing_properties = list(found.missing)
-        by_ref[ref].invalid_properties = [key for key, _ in found.invalid]
-
-
 def _hydrate(
     conn: Conn,
     rows: list[dict[str, Any]],
@@ -378,7 +369,7 @@ def _hydrate(
                 }
             )
         )
-    _mark_incomplete(conn, spools)
+    mark_incomplete(conn, "spool", spools)
     return spools
 
 

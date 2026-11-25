@@ -34,6 +34,9 @@ from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
 
+#: The fields a read computes from a row's properties (#7703, spec 6.3b): no column.
+COMPLETENESS: Final = ("missing_properties", "invalid_properties")
+
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
 
@@ -818,6 +821,7 @@ class SpoolTypeCreate(_In):
     safety_margin_days: Days | None = None
     tdfp_id: TdfpId | None = None
     note: Note | None = None
+    properties: dict[str, JsonValue] | None = None
 
 
 class SpoolTypePatch(_Patch):
@@ -848,6 +852,7 @@ class SpoolTypePatch(_Patch):
     tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
+    properties: dict[str, JsonValue] | None = None
 
 
 class SpoolType(_Row):
@@ -878,6 +883,14 @@ class SpoolType(_Row):
     tdfp_id: int | None
     note: str | None
     archived_at: datetime | None
+    missing_properties: list[str] = Field(default_factory=list)
+    invalid_properties: list[str] = Field(default_factory=list)
+
+
+class TypeCost(_In):
+    """`PUT /filament/types/{type_id}/cost-per-kg` (#7703): only the cost, not checked."""
+
+    cost_per_kg: Cost | None
 
 
 class TypePresetCreate(_In):

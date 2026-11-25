@@ -5,8 +5,9 @@ a schema change needs no backfill."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from typing import Any
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import datetime
+from typing import Any, Protocol
 from uuid import UUID
 
 from psycopg import Connection
@@ -56,6 +57,27 @@ def save_properties_on(
         _PROPERTIES.apply_on(conn, ref, PropertyPatch(set=dict(properties)), by)
     if check:
         check_row(conn, ref)
+
+
+class Marked(Protocol):
+    """A row a read marks: its id, whether it is archived and the two lists."""
+
+    @property
+    def id(self) -> Any: ...
+    @property
+    def archived_at(self) -> datetime | None: ...
+
+    missing_properties: list[str]
+    invalid_properties: list[str]
+
+
+def mark_incomplete(conn: Conn, kind: str, rows: Sequence[Marked]) -> None:
+    """Each unarchived row's missing and ill-fitting keys (spec 6.3b); an archived row is
+    never marked."""
+    by_ref = {str(row.id): row for row in rows if row.archived_at is None}
+    for ref, found in completeness_of_kind(conn, kind, by_ref).items():
+        by_ref[ref].missing_properties = list(found.missing)
+        by_ref[ref].invalid_properties = [key for key, _ in found.invalid]
 
 
 def checks_save(fields_set: Iterable[str]) -> bool:

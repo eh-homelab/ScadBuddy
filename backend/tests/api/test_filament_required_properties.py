@@ -9,7 +9,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.api.test_filament import SPOOLS, _material_id
+from tests.api.test_filament import SPOOLS, TYPES, _material_id
+from tests.api.test_filament_purchasing import URL, _confirmable
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
@@ -115,3 +116,54 @@ def test_a_stored_value_that_no_longer_fits_is_reported_and_blocks_a_save(
     refused = client.patch(f"{SPOOLS}/{spool['id']}", json={"note": "x"})
     assert refused.status_code == 422, refused.text
     assert [i["key"] for i in refused.json()["invalid"]] == ["lot_number"]
+
+
+def _new_type(client: TestClient, code: str = "PLA-RED", **extra: Any) -> Any:
+    body = {"code": code, "material_id": _material_id(client), "rgba": "#ff0000"}
+    return client.post(TYPES, json=body | {"label_weight_g": 1000} | extra)
+
+
+def test_a_type_create_is_checked_and_takes_its_properties(client: TestClient) -> None:
+    _require(client, "spool_type", "mpn")
+    _refused(_new_type(client), ["mpn"])
+    assert client.get(TYPES).json() == []
+    made = _new_type(client, properties={"mpn": "A00-R1"})
+    assert made.status_code == 201, made.text
+    assert made.json()["missing_properties"] == []
+    assert _props(client, f"spool_type:{made.json()['id']}") == {"mpn": "A00-R1"}
+
+
+def test_a_type_save_is_checked_but_an_archive_and_the_cost_route_are_not(
+    client: TestClient,
+) -> None:
+    made = _new_type(client).json()
+    _require(client, "spool_type", "mpn")
+    path = f"{TYPES}/{made['id']}"
+    assert client.get(path).json()["missing_properties"] == ["mpn"]
+    assert client.get(TYPES).json()[0]["missing_properties"] == ["mpn"]
+    _refused(client.patch(path, json={"note": "x"}), ["mpn"])
+    _refused(client.patch(path, json={"cost_per_kg": "20"}), ["mpn"])
+    cost = client.put(f"{path}/cost-per-kg", json={"cost_per_kg": "20"})
+    assert cost.status_code == 200, cost.text
+    assert cost.json()["cost_per_kg"] == "20.0000"
+    assert cost.json()["missing_properties"] == ["mpn"]
+    assert client.patch(path, json={"archived": True}).status_code == 200
+    assert client.patch(path, json={"archived": False}).status_code == 200
+    saved = client.patch(path, json={"note": "x", "properties": {"mpn": "M"}})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["missing_properties"] == []
+
+
+def test_the_cost_route_answers_404_for_no_type(client: TestClient) -> None:
+    gone = "00000000-0000-0000-0000-000000000000"
+    assert client.put(f"{TYPES}/{gone}/cost-per-kg", json={"cost_per_kg": "1"}).status_code == 404
+
+
+def test_an_invoice_confirm_is_not_checked(client: TestClient) -> None:
+    invoice_id = _confirmable(client)
+    _require(client, "spool", "lot_number")
+    _require(client, "spool_type", "mpn")
+    done = client.post(f"{URL}/invoices/{invoice_id}/confirm")
+    assert done.status_code == 200, done.text
+    spool_id = done.json()["lines"][0]["spool_ids"][0]
+    assert client.get(f"{SPOOLS}/{spool_id}").json()["missing_properties"] == ["lot_number"]
