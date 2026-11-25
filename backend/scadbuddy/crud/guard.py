@@ -8,12 +8,13 @@ missing or dead credential is 401 ``â€¦/auth/signed-out``; any other is 403 ``â€
 
 A database error that passes (`psycopg.OperationalError`: out of reach, a cancelled
 statement, a deadlock, a serialization failure) is a 503 with reason
-``database-unavailable``. A body whose schema default's pattern ran out of time
-(`PatternsTimedOutError`, a prompt's task, #7437) is a 503 too, so the client sends it
-again. An exception the app has a handler for gets that handler's answer; any other is a
-500. Every response of a CRUD router, a refusal and an error's included, carries
-``X-ScadBuddy-Crud: 1`` and ``Cache-Control: no-store``, so a client can tell an answer of
-these routes from a proxy's.
+``database-unavailable``. A body whose schema default's pattern ran out of the check's
+shared budget (`PatternsTimedOutError`, a prompt's task, #7437) is a 503 too, with reason
+``pattern-timeout``, so the client sends it again. An exception the app has a handler
+for gets that handler's answer; any other is a 500. Every response of a CRUD router, a
+refusal and an error's included, carries ``X-ScadBuddy-Crud: 1`` and
+``Cache-Control: no-store``, so a client can tell an answer of these routes from a
+proxy's.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.wire import CRUD_HEADER as CRUD_HEADER
 from scadbuddy.crud.wire import CRUD_HEADERS as CRUD_HEADERS
 from scadbuddy.crud.wire import DATABASE_UNAVAILABLE as DATABASE_UNAVAILABLE
+from scadbuddy.crud.wire import PATTERN_TIMEOUT
 from scadbuddy.crud.wire import PREFIX as PREFIX
 from scadbuddy.crud.wire import CrudCaller as CrudCaller
 
@@ -104,7 +106,9 @@ class _CrudRoute(APIRoute):
             except PatternsTimedOutError as error:
                 # Raised as the body is read (a prompt's `TaskOpen`, #7437): a busy pod, not
                 # a refusal, so the client sends it again.
-                raise ApiError(503, str(error), headers=CRUD_HEADERS) from error
+                raise ApiError(
+                    503, str(error), headers=CRUD_HEADERS, reason=PATTERN_TIMEOUT
+                ) from error
             except psycopg.OperationalError as error:
                 # The database out of reach (a pool timeout is one too), or a statement
                 # it cancelled, a deadlock or a serialization failure: states that pass,

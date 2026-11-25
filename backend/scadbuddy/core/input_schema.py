@@ -71,10 +71,17 @@ PATTERNS_BUDGET_S: Final = 0.5
 patterns_deadline: ContextVar[float | None] = ContextVar("patterns_deadline", default=None)
 
 
+class _BudgetSpentError(TimeoutError):
+    """A pattern cut short by the check's shared `PATTERNS_BUDGET_S`, not by its own
+    `PATTERN_TIMEOUT_S`: a busy pod, which a later check can pass. A pattern that uses its
+    whole `PATTERN_TIMEOUT_S` (`^(a|aa)+$`) times out on every check, so it is refused."""
+
+
 class PatternsTimedOutError(TimeoutError):
-    """A default fails only because its patterns ran out of time, and nothing else in the
-    schema is wrong: `schema_problems` with ``retry_timeouts`` raises it, for a caller that
-    tries again later (a prompt's task, #7437). The message never quotes the value."""
+    """A default fails only because the check's shared budget ran out, and nothing else in
+    the schema is wrong: `schema_problems` with ``retry_timeouts`` raises it, for a caller
+    that tries again later (a prompt's task, #7437). A pattern that uses its whole
+    `PATTERN_TIMEOUT_S` is refused all the same. The message never quotes the value."""
 
     def __init__(self) -> None:
         super().__init__("a default's pattern took too long to check: try again")
@@ -399,8 +406,8 @@ def _property_problems(
         if (first := next(errors, None)) is not None:
             if (
                 retry_timeouts
-                and isinstance(first.cause, TimeoutError)
-                and all(isinstance(e.cause, TimeoutError) for e in errors)
+                and isinstance(first.cause, _BudgetSpentError)
+                and all(isinstance(e.cause, _BudgetSpentError) for e in errors)
             ):
                 raise PatternsTimedOutError
             problems.append(f"default does not fit: {first.message}")
@@ -449,12 +456,19 @@ def _pattern(
     if timeout <= 0:
         yield jsonschema.ValidationError(
             f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
-            cause=TimeoutError(),
+            cause=_BudgetSpentError(),
         )
         return
     try:
         found = regex.search(pattern, instance, timeout=timeout)
     except TimeoutError as err:
+        if timeout < PATTERN_TIMEOUT_S:
+            # The shared budget cut it short: it might have passed with its own deadline.
+            yield jsonschema.ValidationError(
+                f"is refused: the patterns took over {PATTERNS_BUDGET_S}s to check together",
+                cause=_BudgetSpentError(),
+            )
+            return
         yield jsonschema.ValidationError(
             f"is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it", cause=err
         )

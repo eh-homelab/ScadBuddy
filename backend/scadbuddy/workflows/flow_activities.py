@@ -103,8 +103,9 @@ class FlowTaskActivities:
         Final: a task the model or the route refuses (422), a run that has ended, and a run
         that is not there. Every other refusal is tried again without limit: a credential
         refused (401, 403), any other 4xx, a 5xx, a route that is missing during a roll, an
-        API that is away, and a default's pattern that ran out of time here
-        (`PatternsTimedOutError`) or in the API (its 503, #7437). Those are ScadBuddy's to
+        API that is away, and a default's pattern cut short by the check's shared budget
+        here (`PatternsTimedOutError`) or in the API (its 503, #7437); a pattern that uses
+        its own whole deadline is the script's, and refused. Those are ScadBuddy's to
         mend and not the script's, so they must not fail a run that may have worked for
         weeks. Nothing is lost while it waits: the question is not asked yet, and a cancel
         still ends the run."""

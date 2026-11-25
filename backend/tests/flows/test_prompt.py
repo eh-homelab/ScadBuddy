@@ -422,6 +422,18 @@ async def test_the_open_activity_tries_a_pattern_timeout_again(
     assert tasks.calls == []
 
 
+async def test_the_open_activity_refuses_a_pattern_that_always_times_out() -> None:
+    """A pattern that uses its whole `PATTERN_TIMEOUT_S` times out on every pod, so it is
+    the script's to mend: a final refusal, not a retry without end (#7437)."""
+    tasks = Tasks()
+    schema = {"type": "object", "properties": {"x": SLOW}}
+    with pytest.raises(ApplicationError) as err:
+        await ActivityEnvironment().run(FlowTaskActivities(tasks).open, {**OPEN, "schema": schema})
+    assert err.value.type == "TaskRefused" and err.value.non_retryable
+    assert f"its pattern took over {input_schema.PATTERN_TIMEOUT_S}s" in err.value.message
+    assert tasks.calls == []
+
+
 async def test_the_open_activity_refuses_a_timed_out_schema_with_another_problem(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
