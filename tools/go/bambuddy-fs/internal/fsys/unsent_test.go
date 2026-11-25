@@ -513,7 +513,7 @@ func saveByRename(t *testing.T, dir, data string) {
 // -race) is cancelled and answers EINTR (api.Errno, #7718). Retry only calls that have
 // changed nothing when they answer it: the wait in tree.list before Rename changes
 // anything, a rename of a queued save or one refused before a library call, and the
-// xattr handlers. A stored-file or folder rename whose library call was cancelled in
+// xattr and statfs handlers. A stored-file or folder rename whose library call was cancelled in
 // flight may already have been applied, so a test of one must not retry it blindly.
 func retryEINTR(call func() error) error {
 	for {

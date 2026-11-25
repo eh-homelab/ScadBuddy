@@ -497,7 +497,7 @@ func TestStatfsReportsTheCachesFreeSpace(t *testing.T) {
 	}
 	for _, name := range []string{"", "a.3mf"} {
 		var st syscall.Statfs_t
-		if err := syscall.Statfs(filepath.Join(dir, name), &st); err != nil {
+		if err := retryEINTR(func() error { return syscall.Statfs(filepath.Join(dir, name), &st) }); err != nil {
 			t.Fatal(err)
 		}
 		free := st.Bavail * uint64(st.Bsize)
@@ -792,7 +792,7 @@ func TestXattrsSymlinksAndLinks(t *testing.T) {
 		if err := retryEINTR(func() error { return syscall.Setxattr(path, "user.x", []byte("1"), 0) }); !errors.Is(err, refused) {
 			t.Fatalf("ro %v setxattr: %v", ro, err)
 		}
-		if err := syscall.Removexattr(path, "user.x"); !errors.Is(err, refused) {
+		if err := retryEINTR(func() error { return syscall.Removexattr(path, "user.x") }); !errors.Is(err, refused) {
 			t.Fatalf("ro %v removexattr: %v", ro, err)
 		}
 		if err := os.Symlink("a.3mf", filepath.Join(dir, "s")); !errors.Is(err, refused) {
@@ -807,7 +807,12 @@ func TestXattrsSymlinksAndLinks(t *testing.T) {
 		}); !errors.Is(err, syscall.ENODATA) {
 			t.Fatalf("ro %v getxattr: %v", ro, err)
 		}
-		if n, err := syscall.Listxattr(path, make([]byte, 16)); err != nil || n != 0 {
+		var n int
+		if err := retryEINTR(func() error {
+			var err error
+			n, err = syscall.Listxattr(path, make([]byte, 16))
+			return err
+		}); err != nil || n != 0 {
 			t.Fatalf("ro %v listxattr: %d %v", ro, n, err)
 		}
 	}
