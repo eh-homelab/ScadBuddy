@@ -117,7 +117,8 @@ def _wired[T](make: Callable[[], T]) -> T:
         ) from None
 
 
-#: The command names each route's run may have, which name its workflow (P9).
+#: The command names each route's run may have, which name its workflow (P9) with the
+#: route's action (`_keyed`).
 KINDS: dict[sc.Action, list[list[str]]] = {
     "configure": [
         ["ams_filament_setting", "extrusion_cali_sel"],
@@ -130,16 +131,23 @@ KINDS: dict[sc.Action, list[list[str]]] = {
 }
 
 
+def _keyed(action: sc.Action, key: str | None) -> str | None:
+    """The run key of the route ``action`` for the request's ``key``: the action goes into
+    the run's workflow id (P9), since load and unload send the same command, so a key
+    reused for another action is a run of its own, never the first one's answer."""
+    return None if key is None else f"{action}-{key}"
+
+
 async def _resent(
     commands: LanCommands, row: PrinterRow, action: sc.Action, key: str | None
 ) -> Response | None:
     """The answer of the run ``key`` already started for the route (P38, P41): joined or
     read, built from that run's own ``answer`` (not the resend's body), with no state
     check and nothing sent again; ``None`` when the key started none."""
-    run = await commands.keyed(row.id, KINDS[action], key)
+    run = await commands.keyed(row.id, KINDS[action], _keyed(action, key))
     if run is None:
         return None
-    return command_response(await commands.run(row.id, run, key=key), run)
+    return command_response(await commands.run(row.id, run, key=_keyed(action, key)), run)
 
 
 async def _send(
@@ -154,7 +162,7 @@ async def _send(
 ) -> Response:
     """Run what ``build`` makes of the slot once `guard` passes (P36)."""
     run = build(sc.guard(status, action, ams_id, tray_id))
-    return command_response(await commands.run(row.id, run, key=key), run)
+    return command_response(await commands.run(row.id, run, key=_keyed(action, key)), run)
 
 
 def _one(
