@@ -2056,6 +2056,9 @@ class SpoolDetail(Spool):
     type_suppliers: list[SpoolTypeSupplier] = Field(default_factory=list)
     #: The newest ``weighed`` event; its ``data`` holds the breakdown when it has one (#7682).
     last_weighing: SpoolEvent | None = None
+    #: An archived spool's closing: the newest ``archived`` event's reconciliation (#7684);
+    #: None while the spool is not archived.
+    closing: Closing | None = None
 
 
 class TagRow(Tag):

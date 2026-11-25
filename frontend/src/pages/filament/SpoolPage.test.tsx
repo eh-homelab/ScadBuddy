@@ -205,6 +205,8 @@ describe('the spool page', () => {
     expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument()
     expect(screen.queryByRole('dialog')).toBeNull()
     expect((await getSpool(spoolId(3))).archived_at).not.toBeNull()
+    // The Weight section now says the closing: no final weighing, so the ledger's side only.
+    expect(within(screen.getByRole('region', { name: 'Weight' })).getByTestId('closing-summary')).toHaveTextContent(/^Other on .*: started with .*; not weighed at the end\.$/)
   })
 
   it('continues a respooled spool as a new one from the archive dialog (#7684)', async () => {

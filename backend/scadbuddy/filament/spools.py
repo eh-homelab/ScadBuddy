@@ -674,11 +674,19 @@ class FilamentSpoolStore:
                 (spool_id,),
             ).fetchall()
             weighings = [e for e in history if e.kind == "weighed"]
+            # #7684: an archived spool's closing is its newest `archived` event's data.
+            archives = [e for e in history if e.kind == "archived"]
+            closing = (
+                m.Closing.model_validate(archives[-1].data)
+                if spool.archived_at and archives
+                else None
+            )
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
                     "drying_defaults": _drying_defaults(conn, spool_id, defaults),
                     "last_weighing": weighings[-1] if weighings else None,
+                    "closing": closing,
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(

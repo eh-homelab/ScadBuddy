@@ -32,6 +32,7 @@ import {
   type SpoolTypeDetail,
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
+import { ClosingSummary } from '../../components/filament/ClosingSummary'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
@@ -508,7 +509,7 @@ export function SpoolPage() {
     return () => {
       live = false
     }
-  }, [id, asked])
+  }, [id, asked, continues, continuedGrams])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
   /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
@@ -1002,6 +1003,7 @@ export function SpoolPage() {
               <div className="grid gap-4 rounded-md border p-3 md:grid-cols-2">
                 <div className="flex flex-col gap-2">
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
+                  {saved?.archived_at && saved.closing && <ClosingSummary closing={saved.closing} at={saved.archived_at} />}
                   {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
                     <WeighingBreakdown event={saved.last_weighing} />
                   ) : (

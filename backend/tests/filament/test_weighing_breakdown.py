@@ -558,6 +558,25 @@ def test_a_patch_archive_closes_with_no_reason(pg_pool: PgPool) -> None:
     assert data["started_g"] == 1000 and data["scale_consumed_g"] is None
 
 
+@pg
+def test_detail_carries_the_closing_of_an_archived_spool(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    before = store.detail(spool)
+    assert before is not None and before.closing is None
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=680)
+    detail = store.detail(spool)
+    assert detail is not None and detail.closing is not None
+    assert detail.closing.reason == "finished"
+    # The spool was made with its grams by hand: that reading is the start, not the label.
+    assert detail.closing.started_g == 1000 and detail.closing.started_from == "reading"
+    assert detail.closing.final_filament_g == 480
+    store.archive(spool, False, actor="t")
+    restored = store.detail(spool)
+    assert restored is not None and restored.closing is None
+
+
 # -- a respooled spool continues as a new one (#7684) --------------------------------
 
 

@@ -513,6 +513,8 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
     last_weighing: [...ledger].reverse().find((event) => event.kind === 'weighed') ?? null,
+    // #7684: an archived spool's closing is its newest `archived` event's data.
+    closing: row.archived_at ? (([...ledger].reverse().find((event) => event.kind === 'archived')?.data as S['Closing'] | undefined) ?? null) : null,
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],

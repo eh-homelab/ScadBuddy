@@ -218,6 +218,40 @@ so it raises no Drift mark: the person just explained the gap. The timeline says
 100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
 scale was tared on the spool)". Design: the same spec, §5.3.
 
+### End of life: finished, respooled, damaged out (#7684)
+
+Archive asks why the spool goes and offers one last weighing. The spool page's Archive
+button opens a dialog: a reason (`finished`, `respooled`, `damaged`, `other`; the dialog
+needs one, the API keeps it optional, and the sync's archives record `other`), and the
+scale reading with the spool when its empty weight is known, else the filament left.
+`GET /filament/spools/{id}/closing` previews, as the inputs settle, what the archive would
+record, and says when the numbers disagree with the reason: a finished spool with more
+than the setting `filament_weighing_finished_left_g` (5 g by default) still on it ("30 g of
+filament are still on it."), or any other reason at or under it ("It reads empty; is it
+finished?"). The person can go on; nothing refuses. `POST /filament/spools/{id}/archive`
+takes `reason`, `final_reading_g` and `final_grams`: a final weighing is booked as a
+`weighed` event just before the `archived` event, by the same rules as any weighing
+(422 `no_empty_weight`, `reading_below_empty`; a restore takes neither).
+
+The `archived` event's `data` keeps the lifetime reconciliation: `reason`, `started_g` and
+`started_from` (`reading`, the spool's first scale or by-hand filament reading, or `label`,
+the label weight of an added-full spool), `ledger_consumed_g` (the plates since that start,
+never reset by a used-counter reset), `final_filament_g`, `scale_consumed_g` (start less
+final filament, null without a final weighing) and `drift_g` (ledger less scale: negative
+means the scale found less filament than the ledger expected). An archived spool's Weight
+section says it in one sentence ("Finished on 25 Nov 2026: started with 1000 g (from the
+label), the ledger used 508 g, the scale says 520 g were used; 12 g less than the ledger
+expected." or "…the ledger used 508 g; not weighed at the end."), and the timeline shows
+the reason on the archive.
+
+Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
+filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
+with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and the
+request makes one spool. The new spool's `created` event keeps `continued_from`, the source's
+newest `archived` event gets `continued_as`, and the timeline links the two ends. The agent's
+`filament_spool_archive` takes the reason and the final reading, and `filament_spool_upsert`
+takes `continued_from`. Design: the same spec, §5.4 and §5.5.
+
 ### The phone page, the hand-held Scan mode (#7273)
 
 `/scan` ("Scan" in the nav; `/filament/scan` redirects there) reads and writes tags with the
