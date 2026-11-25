@@ -29,6 +29,12 @@ def is_slug(value: str) -> bool:
     return bool(_SLUG_RE.match(value)) and len(value) <= MAX_SLUG_LENGTH
 
 
+def is_model_id(value: str) -> bool:
+    """Is ``value``, whole, a template's id (:data:`MODEL_ID_PATTERN`)? ``fullmatch``: the
+    pattern's own ``$`` takes a trailing newline."""
+    return re.fullmatch(MODEL_ID_PATTERN, value) is not None
+
+
 def slugify(value: str) -> str:
     """Kebab-case a filename or title into a slug. Raises when nothing usable is left."""
     slug = _SEPARATORS.sub("-", value.strip().lower()).strip("-")

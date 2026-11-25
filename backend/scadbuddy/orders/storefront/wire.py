@@ -328,7 +328,8 @@ class ListingInput(BaseModel):
     #: template with no pipeline, and for a library file. At most 16 KiB serialised.
     inputs: dict[str, JsonValue] = Field(default_factory=dict)
     #: The inputs version ``inputs`` were made at (``inputs.v`` of the output or render
-    #: they came from). None: the commit's own ``INPUTS_VERSION``.
+    #: they came from). None: the commit's own ``INPUTS_VERSION``, which a save stores
+    #: (`listings.py` `with_inputs_version`).
     inputs_v: int | None = Field(default=None, ge=0, le=2**31 - 1)
     #: Price-book filament ids (plan point 12).
     colours: list[str] = Field(default_factory=list)
