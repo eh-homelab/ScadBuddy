@@ -1007,6 +1007,35 @@ async def test_failed_passes_do_not_count_as_repeats(
     assert not [r for r in caplog.records if "same values" in r.message]
 
 
+async def test_a_new_hash_recorded_with_no_outcome_is_not_a_repeat(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q1: `_started` clears the last configure's time when the hash changes, so a pass
+    that records H2 and stops at its deadline leaves no acknowledged configure of H2: the
+    next pass's first acknowledged configure of H2 counts 0 and warns of nothing."""
+    w = World(pg_pool)
+    assert await w.run() == SlotReport(configured=1)  # H1, acknowledged
+    w.report(_report(tray_info_idx="GFL99"))
+    w.preset("0.4", "GFL98")  # H2
+    clock = [0.0]
+    monkeypatch.setattr(rfid_slots, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    started = rfid_slots._started
+
+    def slow(*args: Any) -> None:
+        started(*args)
+        clock[0] += 10
+
+    monkeypatch.setattr(rfid_slots, "_started", slow)
+    assert await w.run(deadline=5.0) == SlotReport(waiting=1)
+
+    monkeypatch.setattr(rfid_slots, "_started", started)
+    with caplog.at_level(logging.WARNING, logger=rfid_slots.__name__):
+        assert await w.run(deadline=clock[0] + 5.0) == SlotReport(configured=1)
+
+    assert w.rows()[0]["attempts"] == 0
+    assert not [r for r in caplog.records if "same values" in r.message]
+
+
 async def test_a_run_started_past_the_deadline_waits_and_keeps_its_key(
     pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -217,7 +217,8 @@ def _started(
     """Write the run's key and the params' hash before the run is sent (I1), so a pass
     that is cancelled, or whose task raises, while it waits for the answer leaves a key
     the next pass joins (`_run_key`) rather than sending the commands again. ``attempts``
-    restarts at 0 for a new hash or spool; ``last_error`` is left for the outcome."""
+    restarts at 0, and ``configured_at`` is cleared, for a new hash or spool;
+    ``last_error`` is left for the outcome."""
     with store.spools.transaction() as conn:
         conn.execute(
             "INSERT INTO filament_override_slots"
@@ -228,6 +229,10 @@ def _started(
             " IS NOT DISTINCT FROM EXCLUDED.params_hash"
             " AND filament_override_slots.spool_id = EXCLUDED.spool_id"
             " THEN filament_override_slots.attempts ELSE 0 END,"
+            " configured_at = CASE WHEN filament_override_slots.params_hash"
+            " IS NOT DISTINCT FROM EXCLUDED.params_hash"
+            " AND filament_override_slots.spool_id = EXCLUDED.spool_id"
+            " THEN filament_override_slots.configured_at ELSE NULL END,"
             " spool_id = EXCLUDED.spool_id, params_hash = EXCLUDED.params_hash,"
             " run_key = EXCLUDED.run_key",
             (printer_id, ams_id, tray_id, spool_id, digest, run_key),
