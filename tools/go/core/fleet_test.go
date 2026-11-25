@@ -134,6 +134,14 @@ func TestTheFleetRoutesServeTheStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	for _, q := range []string{"?peek=true&limit=0", "?peek=1&limit=99999999999999999999999", "?peek=true&limit=500"} {
+		got, more := a.inbox(bob, q)
+		expect(t, seqs(got), seqs(peeked))
+		expect(t, more, false)
+	}
+	a.fleet("GET", "/agents/"+bob+"/inbox?limit=-1", "", 422)
+	a.fleet("GET", "/agents/"+bob+"/inbox?limit=-99999999999999999999999", "", 422)
+	a.fleet("GET", "/agents/"+bob+"/inbox?limit=ten", "", 422)
 	first, more := a.inbox(bob, "?limit=1")
 	expect(t, more, true)
 	expect(t, seqs(first), seqs(peeked)[:1])
@@ -352,7 +360,18 @@ func TestAnEventWithATopicOutsideItsKindIsNotPublished(t *testing.T) {
 	bus.Publish(ctx, a.pool, "fleet.message", httpx.Field{Key: "topics", Value: []string{"fleet:agent:x", "tasks"}})
 	bus.Publish(ctx, a.pool, "fleet.message", httpx.Field{Key: "topics", Value: []string{"fleetx:agent:x"}})
 	bus.Publish(ctx, a.pool, "fleet.message", httpx.Field{Key: "topics", Value: "fleet:agent:x"})
+	many := make([]string, bus.TopicsMax+1)
+	for i := range many {
+		many[i] = fmt.Sprint("fleet:agent:", i)
+	}
+	bus.Publish(ctx, a.pool, "fleet.message", httpx.Field{Key: "topics", Value: many})
 	expect(t, a.count(`SELECT count(*) FROM events`), 0)
+	bus.Publish(ctx, a.pool, "fleet.message", httpx.Field{Key: "topics", Value: many[:bus.TopicsMax]})
+	expect(t, a.count(`SELECT count(*) FROM events`), 1)
+	a.sql(`DELETE FROM events`)
+	if _, _, ok := heard(t, conn, 5*time.Second); !ok {
+		t.Fatal("no event for 64 topics")
+	}
 	bus.Publish(ctx, a.pool, "fleet.message", httpx.Field{Key: "topics", Value: []string{"fleet:agent:x"}})
 	bus.Publish(ctx, a.pool, "plugin_packages.changed", httpx.Field{Key: "name", Value: "x"})
 	expect(t, a.count(`SELECT count(*) FROM events`), 2)

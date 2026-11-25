@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,11 +85,12 @@ func channelOf(p crud.Params) (string, error) {
 	})
 }
 
-// cursorOf is the agent's cursor, or unknownAgent. With lock, its row is locked FOR UPDATE.
+// cursorOf is the agent's cursor, or unknownAgent. With lock, its row is locked FOR NO KEY
+// UPDATE, which a send's foreign key check (FOR KEY SHARE) does not wait for.
 func cursorOf(ctx context.Context, tx pgx.Tx, session string, lock bool) (int64, error) {
 	query := `SELECT cursor FROM fleet_agents WHERE session_id = $1`
 	if lock {
-		query += ` FOR UPDATE`
+		query += ` FOR NO KEY UPDATE`
 	}
 	var cursor int64
 	err := tx.QueryRow(ctx, query, session).Scan(&cursor)
@@ -298,13 +300,16 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 				return err
 			}
 		} else {
-			var member bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM fleet_members
-				WHERE channel = $1 AND session_id = $2)`, *channel, from).Scan(&member); err != nil {
-				return err
-			}
-			if !member {
+			// The sender's member row is locked FOR SHARE, so a leave cannot slip between this
+			// check and the deliveries below.
+			var one int
+			err := tx.QueryRow(ctx, `SELECT 1 FROM fleet_members
+				WHERE channel = $1 AND session_id = $2 FOR SHARE`, *channel, from).Scan(&one)
+			if errors.Is(err, pgx.ErrNoRows) {
 				return notMember(*channel)
+			}
+			if err != nil {
+				return err
 			}
 			if err := tx.QueryRow(ctx, `INSERT INTO fleet_messages (from_session, channel, text)
 				VALUES ($1, $2, $3) RETURNING seq`, from, *channel, text).Scan(&seq); err != nil {
@@ -344,10 +349,11 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 // announce publishes the committed send as fleet.message events. As Python's outbox, it does
 // not stop when the request ends, and a failure is the bus's to log: the rows are the record.
 func (f *Fleet) announce(r *http.Request, seq int64, recipients []recipient, channel string) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), announceTimeout)
-	defer cancel()
 	for _, fields := range events(seq, recipients, channel) {
+		// Each event has its own budget: a slow commit must not starve the later ones.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), announceTimeout)
 		bus.Publish(ctx, f.Pool, kind, fields...)
+		cancel()
 	}
 }
 
@@ -405,14 +411,10 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit, given, err := crud.QueryInt(r, "limit", 1, 1<<31-1)
+	limit, err := pageLimit(r)
 	if err != nil {
 		return nil, err
 	}
-	if !given {
-		limit = pageDefault
-	}
-	limit = min(limit, pageMax)
 	peek, err := queryBool(r, "peek")
 	if err != nil {
 		return nil, err
@@ -484,6 +486,33 @@ func (f *Fleet) rewind(r *http.Request, p crud.Params) (any, error) {
 		return nil, unknownAgent()
 	}
 	return map[string]int64{"seq": seq}, nil
+}
+
+// pageLimit is the query's limit: absent or 0 is pageDefault, anything above pageMax is
+// pageMax (however large), and a negative or non-numeric one is a 422.
+func pageLimit(r *http.Request) (int64, error) {
+	values := r.URL.Query()["limit"]
+	if len(values) == 0 {
+		return pageDefault, nil
+	}
+	raw := strings.TrimSpace(values[len(values)-1])
+	n, err := strconv.ParseInt(raw, 10, 64)
+	var numErr *strconv.NumError
+	switch {
+	case err == nil && n == 0:
+		return pageDefault, nil
+	case err == nil && n > 0:
+		return min(n, pageMax), nil
+	case errors.As(err, &numErr) && numErr.Err == strconv.ErrRange && !strings.HasPrefix(raw, "-"):
+		return pageMax, nil
+	case err == nil:
+		return 0, httpx.Invalid(httpx.Issue{
+			Loc: []string{"query", "limit"}, Msg: "Input should be greater than or equal to 0",
+		})
+	}
+	return 0, httpx.Invalid(httpx.Issue{
+		Loc: []string{"query", "limit"}, Msg: "Input should be a valid integer, unable to parse string as an integer",
+	})
 }
 
 // queryBool is the query parameter name as pydantic reads a bool; false when absent.

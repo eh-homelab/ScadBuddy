@@ -32,11 +32,11 @@ const (
 // Publish logs and NOTIFYs the event kind with fields, which follow id, at and kind in its
 // JSON. As core/events.py emit, a failure is logged and never reaches the caller: the change
 // it tells of has happened, and a consumer can read again. An event whose `topics` field
-// names a topic outside its kind's namespace (the kind up to its first dot) is refused, and
-// nothing is written.
+// names a topic outside its kind's namespace (the kind up to its first dot), or more than
+// TopicsMax topics, is refused, and nothing is written.
 func Publish(ctx context.Context, pool *pgxpool.Pool, kind string, fields ...httpx.Field) {
 	if !inNamespace(kind, fields) {
-		slog.ErrorContext(ctx, "refused to publish an event with a topic outside its kind's namespace", "kind", kind)
+		slog.ErrorContext(ctx, "refused to publish an event with a topic outside its kind's namespace or too many topics", "kind", kind)
 		return
 	}
 	id := make([]byte, 16)
@@ -83,7 +83,7 @@ func envelope(id string, at time.Time, kind string, fields []httpx.Field) []http
 }
 
 // inNamespace says whether every topic in fields starts with the kind's namespace and a colon.
-// A topics field that is not a list of strings is refused.
+// A topics field that is not a list of strings, or that has more than TopicsMax, is refused.
 func inNamespace(kind string, fields []httpx.Field) bool {
 	namespace, _, _ := strings.Cut(kind, ".")
 	for _, f := range fields {
@@ -91,7 +91,7 @@ func inNamespace(kind string, fields []httpx.Field) bool {
 			continue
 		}
 		topics, ok := f.Value.([]string)
-		if !ok {
+		if !ok || len(topics) > TopicsMax {
 			return false
 		}
 		for _, topic := range topics {
