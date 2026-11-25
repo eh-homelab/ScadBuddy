@@ -2709,23 +2709,24 @@ ScadBuddy records each qualifying printer's camera all the time, as fMP4 segment
 4 s in a bucket with an index in Postgres (phase 1 of #7334). What it does, and the code, are
 in [docs/features/printer-cameras.md](docs/features/printer-cameras.md); the design is
 `docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md`. eh-homelab/clusters
-holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 3.
+holds the manifests. Phase 1 added two Deployments, the relay and the recorders. Phase 3
+(live view, #7330) adds a third, the live edge.
 
-- **Two images.** `ghcr.io/eh-homelab/scadbuddy-camera-relay` and
-  `ghcr.io/eh-homelab/scadbuddy-camera-recorder` are the Dockerfile targets `camera-relay` and
-  `camera-recorder` (python:3.12-slim-bookworm, uid 10001, `tini`, `curl`, the controller's
+- **Three images.** `ghcr.io/eh-homelab/scadbuddy-camera-relay`,
+  `ghcr.io/eh-homelab/scadbuddy-camera-recorder` and `ghcr.io/eh-homelab/scadbuddy-camera-edge`
+  are the Dockerfile targets `camera-relay`, `camera-recorder` and `camera-edge` (python:3.12-slim-bookworm, uid 10001, `tini`, `curl`, the controller's
   venv with no database client library, and MediaMTX v1.21.4 from the `mediamtx` stage, pinned
   by sha256). Each holds its MediaMTX config at `/etc/mediamtx/mediamtx.yml`, from
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
-  `build-image.yml` job `camera` publishes both (amd64); `ci.yml` job `camera-image` builds and
-  checks both. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
+  `build-image.yml` job `camera` publishes all three (amd64); `ci.yml` job `camera-image` builds and
+  checks all three. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
   relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
   (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
   (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
-  `python -m scadbuddy.camera.relay` or `python -m scadbuddy.camera.recorder`). The controller
+  `python -m scadbuddy.camera.relay`, `.recorder` or `.edge`). The controller
   drives MediaMTX's control API on `127.0.0.1:9997`, and MediaMTX's hooks run `curl` against
   the controller on `127.0.0.1:9091`, so the two must share the pod. The control API and the
   metrics (`127.0.0.1:9998`) listen on localhost only (`deploy/camera/*.yml`).
@@ -2769,10 +2770,49 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
     same variables replaced it, so the control API answered 401 (same date and image). The
     recorders' MediaMTX gets the read user inside each path's source URL, which the
     controller puts through the control API.
-- **The relay read secret.** One user and password, in two pods: the relay's MediaMTX
-  (`MTX_AUTHINTERNALUSERS_0_*`) and the recorder controllers
+- **The relay read secret.** One user and password, in three pods: the relay's MediaMTX
+  (`MTX_AUTHINTERNALUSERS_0_*`), the recorder controllers and the edge controller
   (`SCADBUDDY_CAMERA_RELAY_READ_USER`/`_PASS`). It allows reading the relay's paths over
   RTSP and nothing else.
+- **`scadbuddy-camera-edge` (live view, #7330).** One replica, strategy `Recreate`. It pulls
+  from the relay only while someone watches, and serves WebRTC (WHEP) on 8889 and LL-HLS on
+  8888 to the API's proxy. Browsers never reach it: `GET`/`POST`/`PATCH`/`DELETE`
+  `/api/v1/camera/live/{printer_id}/…` on the API's origin forwards each call
+  (`api/camera.py`). ServiceAccount `scadbuddy-camera-edge` (CRUD caller `camera`,
+  `auth/exchange.py` `SERVICE_ACCOUNTS`). Its controller (`python -m scadbuddy.camera.edge`)
+  puts one on-demand path per recorded printer in its MediaMTX
+  (`source: rtsp://<read user>@<relay>/<printer id>`, `sourceOnDemand: true`,
+  `sourceOnDemandCloseAfter: 10s`), and sets `scadbuddy_camera_viewers`. It holds no
+  access code, no bucket key and no database secret, and refuses to start with one
+  (`EdgeSettings.check_environment`, exit 2). The image's config is
+  `deploy/camera/mediamtx-edge.yml`. Ports: 8888 (LL-HLS) and 8889 (WHEP) for the API
+  only, 8189/udp (WebRTC media) for browsers, 9090 (controller probes and metrics).
+  MediaMTX's control API (9997) and metrics (9998) listen on localhost only.
+  - Edge controller environment: `SCADBUDDY_API_INTERNAL_URL`, `SCADBUDDY_SERVICE_TOKEN_FILE`,
+    `SCADBUDDY_LOG_LEVEL`, `SCADBUDDY_CAMERA_MEDIAMTX_API_URL` (default
+    `http://127.0.0.1:9997`), `SCADBUDDY_CAMERA_RELAY_RTSP_URL` and the relay read secret
+    (`SCADBUDDY_CAMERA_RELAY_READ_USER`/`_PASS`) (`EdgeSettings`).
+  - Edge MediaMTX container: `MTX_AUTHINTERNALUSERS_0_USER` and `MTX_AUTHINTERNALUSERS_0_PASS`
+    from **the edge read secret**, a second 1Password item. Entry 0 of
+    `mediamtx-edge.yml` is the read user, so HLS and WHEP fail closed: without the two
+    variables it keeps a placeholder no client can use. Measured 2026-11-25 (MediaMTX
+    v1.21.4, arm64, the pinned binary and the `camera-edge` image in Docker): HLS and
+    WHEP answer 401 with no credentials and with a wrong password; with the right
+    password HLS answers 200 and WHEP gets past auth (400 for an empty offer). Only the
+    API holds this secret and adds HTTP Basic auth to every call.
+  - `MTX_WEBRTCADDITIONALHOSTS`: the host name or address a browser can reach on UDP 8189
+    (a comma list). WebRTC media does not pass the API. Without a reachable address the
+    player falls back to LL-HLS after 6 s ([MediaMTX WebRTC](https://mediamtx.org/docs/features/webrtc-specific-features)).
+  - The API's four variables (all needed for `camera_live`; with one unset, the live
+    routes answer 503 `camera-edge-unset` and the dialog keeps the MJPEG view):
+    `SCADBUDDY_CAMERA_EDGE_WHEP_URL` (the edge Service on 8889),
+    `SCADBUDDY_CAMERA_EDGE_HLS_URL` (on 8888), `SCADBUDDY_CAMERA_EDGE_READ_USER` and
+    `SCADBUDDY_CAMERA_EDGE_READ_PASS` (the edge read secret). They are bootstrap fields;
+    the Settings view shows the password as `set`, never its value.
+  - Lifetime of a pull (measured 2026-11-25, v1.21.4, by the real-MediaMTX e2e): the edge
+    config sets `hlsMuxerCloseAfter: 10s`. The relay's reader of the edge is gone about
+    50 s after the last HLS request (48.5 s measured; 69.2 s with the default 60 s). All
+    viewers of a printer share one pull from the relay, and the printer sees no extra client.
 - **No database and no key.** Both controllers refuse to start when
   `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` is set (exit 2, #5295; `camera/settings.py`).
@@ -2817,9 +2857,11 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
 - **Metrics.** `/metrics` on each controller's 9090: the relay's
   `scadbuddy_camera_relay_pulling` and `scadbuddy_camera_relay_reconnects_total`, the
   recorders' `scadbuddy_camera_segments_indexed_total`, `_upload_lag_seconds`,
-  `_backlog_bytes`, `_leader` and `_last_segment_age_seconds` (the "Cameras" row of the
+  `_backlog_bytes`, `_leader` and `_last_segment_age_seconds`, and the edge's
+  `scadbuddy_camera_viewers` (MediaMTX readers of each printer's live path: one per WebRTC
+  session, one for the whole HLS muxer, so not a count of people) (the "Cameras" row of the
   printing dashboard). Scrape them as the workers are: a Service per Deployment
-  (`scadbuddy-camera-relay`, `scadbuddy-camera-recorder`) with a ServiceMonitor, as the
+  (`scadbuddy-camera-relay`, `scadbuddy-camera-recorder`, `scadbuddy-camera-edge`) with a ServiceMonitor, as the
   render worker's `servicemonitor-render.yaml` in eh-homelab/clusters. The dashboard's
   queries need the scrape's `namespace` and `pod` labels.
 - **Pod security.** uid 10001, `runAsNonRoot`, `allowPrivilegeEscalation: false`, every
@@ -2829,7 +2871,11 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
   metrics scrape on 9090; egress to
   the printers' LAN (RTSPS, port 322 on the H2C, spec §2), the API's CRUD port 8082, and DNS.
   The recorders: egress to the relay's 8554, the API's 8082, the bucket and DNS; no ingress
-  but the metrics scrape on 9090. Temporal egress is phase 4's.
+  but the metrics scrape on 9090. Temporal egress is phase 4's. The relay's 8554 also
+  admits the edge's pods. The edge: ingress on 8888 and 8889 from the API's pods only (with
+  the edge read password, the two guards for the HLS session id, which acts as a bearer key
+  once made and which only the API's proxy sees), 8189/udp from the browsers' networks, and
+  the scrape on 9090; egress to the relay's 8554, the API's 8082 and DNS.
 
 ### Switching continuous deploy off
 
