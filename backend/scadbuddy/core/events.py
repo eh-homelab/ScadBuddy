@@ -540,11 +540,6 @@ class OpaqueEvent(BaseModel):
 AnyEvent = Event | OpaqueEvent
 
 
-def namespace_of(kind: str) -> str:
-    """The part of a kind before its first dot."""
-    return kind.split(".", 1)[0]
-
-
 def decode_known_event(payload: str | bytes) -> Event:
     """Only a kind this process models; anything else is ``ValueError``."""
     return _EVENT_ADAPTER.validate_json(payload)

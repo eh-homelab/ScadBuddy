@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import logging
 import threading
 import time
 from collections.abc import Callable
@@ -471,75 +469,26 @@ def _opaque(kind: str, topics: list[str]) -> OpaqueEvent:
     return OpaqueEvent.model_validate({**raw, "payload": raw})
 
 
-def test_topics_of_opaque_namespaced() -> None:
-    event = _opaque("fleet.message", ["fleet:agent:a", "job:abc", "orders", "fleet:"])
-    assert realtime.topics_of(event) == ["fleet:agent:a"]
+def test_an_opaque_event_reaches_no_browser_socket() -> None:
+    event = _opaque("fleet.message", ["fleet:agent:a", "fonts", "job:abc"])
+    assert realtime.topics_of(event) == []
 
+    async def scenario() -> list[dict[str, Any]]:
+        bus = InProcessEventBus()
+        subscription: Subscription = bus.subscribe()
+        bus.deliver(event)
+        bus.publish(FontInstalled(family="DejaVu Sans"))
+        sent: list[dict[str, Any]] = []
 
-def test_a_skipped_opaque_topic_is_logged_by_the_tap(caplog: pytest.LogCaptureFixture) -> None:
-    event = _opaque("fleet.message", ["fleet:a", "job:abc", "orders"])
-    with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
-        realtime.warn_skipped_topics("{}", event)
-    records = [r for r in caplog.records if r.name == realtime.logger.name]
-    assert len(records) == 1
-    assert records[0].__dict__["event_id"] == "x"
-    assert records[0].__dict__["kind"] == "fleet.message"
-    assert records[0].__dict__["skipped"] == ["job:abc", "orders"]
-    caplog.clear()
-    with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
-        realtime.warn_skipped_topics("{}", _opaque("fleet.message", ["fleet:a"]))
-        realtime.warn_skipped_topics("{}", None)
-    assert caplog.records == []
+        async def send(frame: dict[str, Any]) -> None:
+            sent.append(frame)
+            subscription.close()
 
+        await realtime.pump(subscription, {"fleet:agent:a", "fonts", "job:abc"}, send)
+        return sent
 
-def test_topics_of_stays_silent_for_every_socket(caplog: pytest.LogCaptureFixture) -> None:
-    event = _opaque("fleet.message", ["fleet:a", "job:abc"])
-    with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
-        assert realtime.topics_of(event) == ["fleet:a"]
-        assert realtime.topics_of(event) == ["fleet:a"]
-    assert caplog.records == []
-
-
-def test_an_opaque_event_cannot_pose_as_a_known_namespace() -> None:
-    job = f"job:{'a' * 32}"
-    assert realtime.topics_of(_opaque("job.sneaky", [job])) == []
-
-
-def test_an_opaque_event_frame_is_a_signal_only() -> None:
-    raw = {
-        "id": "x",
-        "at": "2026-11-25T00:00:00Z",
-        "kind": "fleet.message",
-        "topics": ["fleet:agent:a", "fleet:agent:b"],
-        "recipients": ["secret"],
-        "retention_seconds": 5,
-    }
-    event = OpaqueEvent.model_validate({**raw, "payload": raw})
-    frame = realtime.event_frame(event, ["fleet:agent:a"])
-    assert frame["data"] == {}
-    assert frame["topics"] == ["fleet:agent:a"]
-    assert (frame["id"], frame["kind"]) == ("x", "fleet.message")
-    assert "at" in frame
-    text = json.dumps(frame)
-    assert "recipients" not in text
-    assert "secret" not in text
-    assert "agent:b" not in text
-
-
-def test_every_known_topic_namespace_is_reserved() -> None:
-    for topic in ["job:" + "a" * 32, "model:m", "printer:" + FLOW_RUN_ID, "order:" + FLOW_RUN_ID]:
-        if realtime.valid_topic(topic):
-            assert topic.split(":", 1)[0] in realtime._KNOWN_NAMESPACES
-    assert {"job", "model", "print", "tasks", "workflow-run"} <= realtime._KNOWN_NAMESPACES
-
-
-def test_valid_topic_namespaced() -> None:
-    assert realtime.valid_topic("fleet:agent:54a63686")
-    assert not realtime.valid_topic("fleet:")
-    assert not realtime.valid_topic("fleet:a\n")
-    assert not realtime.valid_topic("Fleet:a")
-    assert not realtime.valid_topic("fleet:" + "x" * 201)
-    assert not realtime.valid_topic("job:abc")
+    sent = asyncio.run(scenario())
+    assert [frame["kind"] for frame in sent] == ["font.installed"]
 
 
 def test_topics_of_handles_every_event_in_the_union() -> None:

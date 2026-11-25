@@ -70,7 +70,7 @@ from scadbuddy.api.limits import (
     RouteLimit,
 )
 from scadbuddy.api.printing import end_gone_sequences
-from scadbuddy.api.realtime import EventCursor, warn_skipped_topics
+from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
@@ -2704,8 +2704,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backfill: asyncio.Task[None] | None = None
     # A change saved on any replica, this one's included, applies its live fields here.
     unfollow = follow_changes(state)
-    if isinstance(state.events, PgNotifyEventBus):
-        state.events.taps.append(warn_skipped_topics)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None

@@ -115,7 +115,6 @@ from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Person
 from scadbuddy.core.events import (
-    MAX_OPAQUE_TOPICS,
     TASK_PLACE_CHAR,
     TASK_PLACE_MAX,
     ActivityEvent,
@@ -153,7 +152,6 @@ from scadbuddy.core.events import (
     TaskChanged,
     UpstreamAvailable,
     VersionCommitted,
-    namespace_of,
 )
 from scadbuddy.core.origins import origin_allowed as origin_allowed
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
@@ -167,7 +165,7 @@ router = APIRouter(tags=["realtime"])
 #: How often the server pings; a client that hears nothing for twice this reconnects.
 PING_SECONDS = 25.0
 #: Topics one connection may follow at once.
-MAX_TOPICS = MAX_OPAQUE_TOPICS
+MAX_TOPICS = 64
 #: Inbound frames: a burst of RATE_BURST, refilled at RATE_PER_SECOND.
 RATE_BURST = 40
 RATE_PER_SECOND = 20.0
@@ -216,80 +214,47 @@ def _strip_anchors(pattern: str) -> str:
     return pattern.removeprefix("^").removesuffix("$")
 
 
-_TOPIC_SHAPES = [
-    f"job:{_strip_anchors(HEX_ID_PATTERN)}",
-    f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
-    f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
-    # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
-    r"print:library:[1-9][0-9]{0,17}",
-    # The print dialog's background slice (#265): its slicer and its job id.
-    r"preview-slice:(?:bambuddy|native):[1-9][0-9]{0,17}",
-    f"workflow-run:{FLOW_RUN_ID_PATTERN}",
-    # A registry printer (#3823): its id is a UUID, as `printers/store.py` makes.
-    f"printer:{FLOW_RUN_ID_PATTERN}",
-    # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
-    f"order:{FLOW_RUN_ID_PATTERN}",
-    # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
-    # the tasks shown in one place.
-    f"task:{FLOW_RUN_ID_PATTERN}",
-    f"tasks:{TASK_PLACE_CHAR}{{1,{TASK_PLACE_MAX}}}",
-    # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
-    r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
-    *sorted(COLLECTION_TOPICS),
-]
 _TOPIC = re.compile(
     "^(?:"
-    + "|".join(_TOPIC_SHAPES)
+    + "|".join(
+        [
+            f"job:{_strip_anchors(HEX_ID_PATTERN)}",
+            f"model:{_strip_anchors(MODEL_ID_PATTERN)}",
+            f"print:{_strip_anchors(OUTPUT_ID_PATTERN)}",
+            # A library file's print run (#742): its ``output_id`` is ``library:<file id>``.
+            r"print:library:[1-9][0-9]{0,17}",
+            # The print dialog's background slice (#265): its slicer and its job id.
+            r"preview-slice:(?:bambuddy|native):[1-9][0-9]{0,17}",
+            f"workflow-run:{FLOW_RUN_ID_PATTERN}",
+            # A registry printer (#3823): its id is a UUID, as `printers/store.py` makes.
+            f"printer:{FLOW_RUN_ID_PATTERN}",
+            # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
+            f"order:{FLOW_RUN_ID_PATTERN}",
+            # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
+            # the tasks shown in one place.
+            f"task:{FLOW_RUN_ID_PATTERN}",
+            f"tasks:{TASK_PLACE_CHAR}{{1,{TASK_PLACE_MAX}}}",
+            # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
+            r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
+            *sorted(COLLECTION_TOPICS),
+        ]
+    )
     + r")\Z"  # not `$`, which also matches before a trailing newline
 )
 
 
-#: The namespaces `_TOPIC` gives a shape of its own, read from it. An opaque event never routes
-#: in one.
-_KNOWN_NAMESPACES = frozenset(shape.split(":", 1)[0] for shape in _TOPIC_SHAPES if ":" in shape)
-#: A topic of an unknown kind's namespace (a kind `fleet.message` owns `fleet:...`).
-_OPAQUE_TOPIC = re.compile(r"^[a-z][a-z0-9_]*:[A-Za-z0-9:._-]{1,200}\Z")
-
-
-def _opaque_namespace_topic(topic: str) -> bool:
-    return _OPAQUE_TOPIC.match(topic) is not None and (
-        topic.split(":", 1)[0] not in _KNOWN_NAMESPACES
-    )
-
-
 def valid_topic(topic: object) -> bool:
-    if not isinstance(topic, str):
-        return False
-    if _opaque_namespace_topic(topic):
-        return True
-    if not _TOPIC.match(topic):
+    if not isinstance(topic, str) or not _TOPIC.match(topic):
         return False
     return not topic.startswith("model:") or len(topic) - 6 <= MAX_MODEL_ID_LENGTH
-
-
-def opaque_topics(event: OpaqueEvent) -> tuple[list[str], list[str]]:
-    """The topics of ``event`` in its kind's own namespace, and the rest (skipped)."""
-    prefix = f"{namespace_of(event.kind)}:"
-    kept = [t for t in event.topics if t.startswith(prefix) and _opaque_namespace_topic(t)]
-    return kept, [t for t in event.topics if t not in kept]
-
-
-def warn_skipped_topics(payload: str, event: AnyEvent | None) -> None:
-    """A tap on the bus: runs once per event heard in this process, not once per socket
-    (`topics_of` is called by each one, and again on a replay, so it stays silent)."""
-    if isinstance(event, OpaqueEvent) and (skipped := opaque_topics(event)[1]):
-        logger.warning(
-            "skipped topics of an opaque event outside its namespace",
-            extra={"event_id": event.id, "kind": event.kind, "skipped": skipped},
-        )
 
 
 def topics_of(event: AnyEvent) -> list[str]:
     """Every topic ``event`` is news for."""
     match event:
         case OpaqueEvent():
-            # Only its own kind's namespace, so an unknown kind cannot pose as `job:` news.
-            return opaque_topics(event)[0]
+            # An unknown kind is not browser news (#7768).
+            return []
         case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
@@ -351,17 +316,6 @@ def topics_of(event: AnyEvent) -> list[str]:
 def event_frame(event: AnyEvent, topics: list[str]) -> dict[str, Any]:
     # An order event's `cart` (#5282) is for the flow triggers only: the frame keeps
     # spec 2026-10-18 §7.1's fields, plus `deleted: true` for a cart the draft sweep took.
-    if isinstance(event, OpaqueEvent):
-        # A signal only: an opaque kind has no authorisation hook, so its payload never
-        # reaches a browser. A consumer that may read it fetches it through its own route.
-        return {
-            "type": "event",
-            "id": event.id,
-            "at": event.at.isoformat(),
-            "kind": event.kind,
-            "topics": topics,
-            "data": {},
-        }
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})
     if isinstance(event, OrderChanged) and not event.deleted:
         del data["deleted"]

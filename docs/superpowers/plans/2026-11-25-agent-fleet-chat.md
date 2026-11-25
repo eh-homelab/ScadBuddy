@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Kind pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`. A kind's namespace is the part before the first dot; an opaque event's topics must start with `<namespace>:`.
+- Kind pattern: `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`. A kind's namespace is the part before the first dot.
 - Retention: `0` means forever. Defaults: global seconds `0`, global rows `0`, per-kind `{}`. Precedence: the event's `retention_seconds`, then the longest matching kind prefix, then the global seconds; the rows cap only covers rows no other rule covers.
 - Fleet event: kind `fleet.message`, fields `seq`, `recipients` (session ids), `topics` (`fleet:agent:<handle>`, `fleet:channel:<name>`). Payload ≤ 4000 bytes; more recipients → several events.
 - `session_id`: canonical lower-case UUID; handle = first 8 hex characters. Channel `^[a-z0-9-]{1,40}$`.
@@ -23,7 +23,7 @@
 ## Review Focus
 
 1. A stored opaque event whose payload has extra unknown fields: decodes, replays and routes; it never resyncs a stream.
-2. An opaque event that declares `job:abc` topics: those topics are dropped; the browser following `job:abc` hears nothing.
+2. An opaque event, whatever topics it declares, reaches no browser socket.
 3. A row with `retention_seconds: 0` under a per-kind rule of 1 h: kept forever (the event's own value wins).
 4. A channel post to more recipients than fit in 4000 bytes: every recipient is named in some event.
 5. The fleet change stream after a pruned or unknown `Last-Event-ID`: sends `resync`, and `sbfleet`'s `Bus` turns it into `Event{Resync: true}`.
@@ -34,7 +34,7 @@
 
 **Files:**
 - Modify: `backend/scadbuddy/core/events.py` (`decode_event`, new `OpaqueEvent`)
-- Modify: `backend/scadbuddy/api/realtime.py` (`topics_of`, `valid_topic`)
+- Modify: `backend/scadbuddy/api/realtime.py` (`topics_of`)
 - Test: `backend/tests/test_event_bus.py`, `backend/tests/test_pg_event_bus.py`, `backend/tests/api/test_realtime.py`
 
 **Interfaces:**
@@ -45,11 +45,10 @@
   - `test_decode_known_kind_unchanged`: an existing kind still decodes to its model.
   - `test_decode_broken_envelope_refused`: no `kind`, kind `"Bad"`, or `topics` not a list of strings → raises.
   - `test_replay_returns_opaque` (pg): insert an unknown-kind row; `replay(0)` returns it as `OpaqueEvent`, no raise.
-  - `test_topics_of_opaque_namespaced` (Review Focus 2): topics `["fleet:agent:a", "job:abc"]` → `["fleet:agent:a"]`.
-  - `test_valid_topic_namespaced`: `"fleet:agent:54a63686"` valid; `"fleet:"` invalid.
+  - `test_an_opaque_event_reaches_no_browser_socket` (Review Focus 2): `topics_of` is `[]`, and a socket subscribed to the declared topics is sent nothing.
   - `test_opaque_extra_fields` (Review Focus 1): extra fields in the payload are kept and do not fail.
 - [ ] **Step 2:** `cd backend && uv run pytest tests/test_event_bus.py tests/test_pg_event_bus.py tests/api/test_realtime.py -q` → FAIL.
-- [ ] **Step 3:** Implement: `decode_event` tries the union; on a validation error whose cause is an unknown discriminator, validates the envelope into `OpaqueEvent`. `topics_of` gains a `case OpaqueEvent()` arm. `valid_topic` accepts `^[a-z][a-z0-9_]*:[A-Za-z0-9:._-]{1,200}$` for namespaces that no known topic uses.
+- [ ] **Step 3:** Implement: `decode_event` tries the union; on a validation error whose cause is an unknown discriminator, validates the envelope into `OpaqueEvent`. `topics_of` gains a `case OpaqueEvent(): return []` arm (#7768 routes by topic).
 - [ ] **Step 4:** Same command → PASS; then `uv run pytest -q -n auto` for the backend suite.
 - [ ] **Step 5: Commit** — `feat(events): pass routable events of unknown kinds through the bus`.
 

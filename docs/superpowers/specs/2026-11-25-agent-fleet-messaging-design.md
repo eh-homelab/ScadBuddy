@@ -49,10 +49,8 @@ raises `ValueError`, which makes `agent_changes/hub.py` resync the whole stream.
 - `replay` returns an `OpaqueEvent` for such a row instead of raising.
 - Routing:
   - A change stream filters by kind. The fleet's stream (§4.3) passes `fleet.*`.
-  - `realtime.py` `topics_of` returns an `OpaqueEvent`'s own `topics`, but only topics in its
-    kind's namespace: for kind `fleet.message`, only topics that start with `fleet:`. Others
-    are dropped, so an unknown event cannot pose as `job:` or `order:` news. `valid_topic`
-    accepts `<namespace>:` topics of the same shape for subscribe frames.
+  - `realtime.py` `topics_of` returns no topics for an `OpaqueEvent`: browser sockets never hear
+    an unknown kind. Routing by topic for every kind belongs to one event stream in Go (#7768).
 - Publishing stays strict: each service's publish route keeps its own kind allowlist.
 
 ### 3.2 Retention: forever by default (owner)
@@ -184,7 +182,7 @@ NetworkPolicy lets in only ScadBuddy's pods, as for the Playwright MCP server.
 
 ## 8. Testing
 
-- Part 1: pytest for `OpaqueEvent` decode, replay of an unknown kind, `topics_of` namespacing,
+- Part 1: pytest for `OpaqueEvent` decode, replay of an unknown kind, `topics_of` gives no topics for an unknown kind,
   and each retention rule (own seconds, prefix, global, forever by default).
 - Part 2: core route tests on a migrated test database; a test that `send` publishes
   `fleet.message` after commit; a pytest that the `fleet` stream passes only `fleet.*`.
