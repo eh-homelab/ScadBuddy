@@ -1041,9 +1041,10 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   minutes); a background shell's has none but the pod's 4-hour deadline. While a slot runs, the
   pod does not idle out. The slot is started by the tool in the turn, after the usual sync in;
   the task's activity, on the replica that ran the turn, follows it through
-  `GET /v1/slots/<id>/watch` (newline-delimited JSON with a heartbeat every 10 s; the client
-  fails a watch that is silent for 30 s, a line past its cap, or one that is not a watch line,
-  and treats every byte as untrusted) and applies Monitor's caps there (200 ms batching,
+  `GET /v1/slots/<id>/watch` (JSON lines, each data line followed by the raw bytes it names, at
+  most 32 KiB, with a heartbeat every 10 s; the client fails a watch that is silent for 30 s, a
+  line past its cap, a frame past its cap, or a line that is not a watch line, and treats every
+  byte as untrusted) and applies Monitor's caps there (200 ms batching,
   8000-character lines, 200 events, end on exit). A slot no watch has followed for 6 minutes is
   stopped (`SLOT_UNWATCHED_MS`), so a slot whose activity died does not run on. `TaskStop`, the
   panel's cancel and the session's end stop the task, and the activity stops the slot
