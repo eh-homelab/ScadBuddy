@@ -216,7 +216,10 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
   `#files-and-links` stays), and the same three panels under a catalog row's edit form in the
-  Catalog tab (`frontend/src/components/filament/CatalogList.tsx`). A list value has one field per item. A rename or an add onto a key the entity
+  Catalog tab (`frontend/src/components/filament/CatalogList.tsx`). A kind's own keys are edited
+  from the panel's "Edit the kind's keys" and the Catalog tab's "Property keys"
+  (`frontend/src/components/entities/KindKeysForm.tsx`, #7656); an item's are its item kind's,
+  on `/inventory/kinds`. A list value has one field per item. A rename or an add onto a key the entity
   already has asks first, since it replaces that key's value.
 - Search: the Spools and Types tabs' search also matches property values, beside the hex
   match on a spool's tag UID and tray UUID (#7151)
