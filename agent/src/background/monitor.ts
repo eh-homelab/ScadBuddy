@@ -77,16 +77,61 @@ export function monitorEnv(env: NodeJS.ProcessEnv = process.env): Record<string,
   return kept
 }
 
+/**
+ * Claude Code's Monitor batching over a stream of text: each line an event's line (lineSplitter),
+ * the lines within BATCH_MS one event of at most EVENT_CHARS, sent through `onEvent` one at a time.
+ * `stop` is called once an event is refused (too many) or cannot be recorded. `end` flushes what
+ * is left and waits for every event to be written. Shared by a command on this replica
+ * (runCommand) and one in the session's sandbox pod (background/activities.ts, #5916).
+ */
+export function eventBatcher(options: { onEvent: EventSink; stop: (why: MonitorEnd) => void }): { push(chunk: string): void; end(): Promise<void> } {
+  let batch: string[] = []
+  let batchChars = 0
+  let dropped = 0
+  let timer: NodeJS.Timeout | undefined
+  let writing = Promise.resolve()
+  const flush = () => {
+    timer = undefined
+    if (!batch.length) {
+      dropped = 0
+      return
+    }
+    const text = batch.join('\n') + (dropped ? `\n[…${dropped} more line${dropped === 1 ? '' : 's'} in this batch cut]` : '')
+    batch = []
+    batchChars = 0
+    dropped = 0
+    writing = writing
+      .then(async () => {
+        if (!(await options.onEvent(text))) options.stop({ outcome: 'too_many' })
+      })
+      // An event that could not be written ends the watch: the chain never stays rejected.
+      .catch((err: unknown) => options.stop({ outcome: 'failed', reason: `an event could not be recorded: ${(err as Error).message}` }))
+  }
+  const lines = lineSplitter((line) => {
+    // One batch is one event: past EVENT_CHARS its lines are counted, not kept; its first line always is.
+    if (batch.length && batchChars + line.length > EVENT_CHARS) dropped += 1
+    else {
+      batch.push(line)
+      batchChars += line.length + 1
+    }
+    timer ??= setTimeout(flush, BATCH_MS)
+  })
+  return {
+    push: (chunk) => lines.push(chunk),
+    end: async () => {
+      lines.end()
+      if (timer) clearTimeout(timer)
+      flush()
+      await writing
+    },
+  }
+}
+
 /** Runs `command` with bash in `cwd` until it exits, expires, makes too many events, or `signal` aborts. */
 export function runCommand(options: { command: string; cwd: string; timeoutMs: number; signal: AbortSignal; onEvent: EventSink }): Promise<MonitorEnd> {
   return new Promise((resolve) => {
     const child = spawn('bash', ['-c', options.command], { cwd: options.cwd, env: monitorEnv(), detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let ended: MonitorEnd | undefined
-    let batch: string[] = []
-    let batchChars = 0
-    let dropped = 0
-    let timer: NodeJS.Timeout | undefined
-    let writing = Promise.resolve()
     const kill = (why: MonitorEnd) => {
       ended ??= why
       try {
@@ -95,35 +140,9 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
         // gone already
       }
     }
-    const flush = () => {
-      timer = undefined
-      if (!batch.length) {
-        dropped = 0
-        return
-      }
-      const text = batch.join('\n') + (dropped ? `\n[…${dropped} more line${dropped === 1 ? '' : 's'} in this batch cut]` : '')
-      batch = []
-      batchChars = 0
-      dropped = 0
-      writing = writing
-        .then(async () => {
-          if (!(await options.onEvent(text))) kill({ outcome: 'too_many' })
-        })
-        // An event that could not be written ends the watch: the chain never stays rejected.
-        .catch((err: unknown) => kill({ outcome: 'failed', reason: `an event could not be recorded: ${(err as Error).message}` }))
-    }
-    const lines = lineSplitter((line) => {
-      // One batch is one event: past EVENT_CHARS its lines are counted, not kept; its first line always is.
-      if (batch.length && batchChars + line.length > EVENT_CHARS) dropped += 1
-      else {
-        batch.push(line)
-        batchChars += line.length + 1
-      }
-      timer ??= setTimeout(flush, BATCH_MS)
-    })
+    const events = eventBatcher({ onEvent: options.onEvent, stop: kill })
     child.stdout.setEncoding('utf8')
-    child.stdout.on('data', (chunk: string) => lines.push(chunk))
-    child.stdout.on('end', () => lines.end())
+    child.stdout.on('data', (chunk: string) => events.push(chunk))
     const expiry = setTimeout(() => kill({ outcome: 'expired' }), options.timeoutMs)
     const onAbort = () => kill({ outcome: 'cancelled' })
     options.signal.addEventListener('abort', onAbort, { once: true })
@@ -137,10 +156,8 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
         // gone already
       }
       clearTimeout(expiry)
-      if (timer) clearTimeout(timer)
-      flush()
       options.signal.removeEventListener('abort', onAbort)
-      void writing.finally(() => resolve(ended ?? { outcome: 'exited', code, ...(signal ? { signal } : {}) }))
+      void events.end().finally(() => resolve(ended ?? { outcome: 'exited', code, ...(signal ? { signal } : {}) }))
     })
   })
 }

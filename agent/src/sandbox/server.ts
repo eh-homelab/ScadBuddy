@@ -19,10 +19,14 @@ import {
   SEGMENT_RE,
   SHA_HEADER,
   SHELLS,
+  SLOT_ID_RE,
+  SLOT_MAX_TIMEOUT_MS,
+  type SlotRequest,
   STREAM_MAX_BYTES,
   syncPath,
   UNSYNCED_MAX,
 } from './protocol.js'
+import { type SlotOptions, SlotManager } from './slots.js'
 
 // The exec server in a session's sandbox pod (#5864, issue comment "Design"). It holds no secret:
 // its token is one the agent made for this pod, which reaches only this pod. It runs each command
@@ -56,6 +60,8 @@ export type SandboxServerOptions = {
   reapUid?: number
   /** The largest file a PUT may write (BODY_MAX_BYTES by default). */
   fileMaxBytes?: number
+  /** Tests only: the background slots' timings and cap (slots.ts). */
+  slots?: Pick<SlotOptions, 'unwatchedMs' | 'endedKeepMs' | 'heartbeatMs' | 'maxSlots'>
 }
 
 /**
@@ -70,6 +76,12 @@ export async function reapStrays(options: {
   keep?: readonly number[]
   procRoot?: string
   kill?: (pid: number) => Promise<void> | void
+  /**
+   * Whether a process group is spared: a running background slot's (#5916, #7310). Asked for each
+   * process as it is found, so a slot started while the sweep runs is spared too. A process that
+   * left its slot's group is not in it, so it is killed.
+   */
+  spare?: (pgid: number) => boolean
 }): Promise<number> {
   const root = options.procRoot ?? '/proc'
   const keep = new Set([1, process.pid, ...(options.keep ?? [])])
@@ -91,7 +103,12 @@ export async function reapStrays(options: {
       if (keep.has(pid)) continue
       const status = await readFile(path.join(root, name, 'status'), 'utf8').catch(() => '')
       const uid = /^Uid:\s+(\d+)/m.exec(status)?.[1]
-      if (uid !== undefined && Number(uid) === options.uid) found.push(pid)
+      if (uid === undefined || Number(uid) !== options.uid) continue
+      if (options.spare) {
+        const pgid = groupOf(await readFile(path.join(root, name, 'stat'), 'utf8').catch(() => ''))
+        if (pgid !== undefined && options.spare(pgid)) continue
+      }
+      found.push(pid)
     }
     if (found.length === 0) break
     for (const pid of found) await kill(pid)
@@ -100,6 +117,15 @@ export async function reapStrays(options: {
     if (!options.kill) await new Promise((r) => setTimeout(r, 20))
   }
   return killed
+}
+
+/** A process's group from its /proc/<pid>/stat: the fifth field, after the command name in parentheses (which may hold any character). */
+export function groupOf(stat: string): number | undefined {
+  const close = stat.lastIndexOf(')')
+  if (close < 0) return undefined
+  const fields = stat.slice(close + 2).split(' ')
+  const pgid = Number(fields[2])
+  return Number.isSafeInteger(pgid) && pgid > 0 ? pgid : undefined
 }
 
 const BODY_MAX_BYTES = 256 * 1024 * 1024
@@ -128,7 +154,7 @@ function argv(shell: ExecRequest['shell'], command: string, maxProcesses: number
 
 /** Runs one command; never rejects. An abort of `signal` (the caller went away) kills it as the deadline would. */
 export function runCommand(
-  options: Pick<SandboxServerOptions, 'work' | 'home' | 'proxy' | 'pathEnv' | 'maxProcesses' | 'reapUid'>,
+  options: Pick<SandboxServerOptions, 'work' | 'home' | 'proxy' | 'pathEnv' | 'maxProcesses' | 'reapUid'> & { spare?: (pgid: number) => boolean },
   request: ExecRequest,
   signal?: AbortSignal,
 ): Promise<ExecResult> {
@@ -164,7 +190,7 @@ export function runCommand(
     // The group, then (in the pod) every other process of the sandbox's uid: what left the group too.
     const killAll = () => {
       killGroup()
-      if (options.reapUid !== undefined) void reapStrays({ uid: options.reapUid })
+      if (options.reapUid !== undefined) void reapStrays({ uid: options.reapUid, ...(options.spare ? { spare: options.spare } : {}) })
     }
     const timer = setTimeout(() => {
       timedOut = true
@@ -185,7 +211,7 @@ export function runCommand(
     })
     const finish = async (code: number | null, signal: NodeJS.Signals | null) => {
       // Nothing of the command runs on once its result is out: a second sweep after the pipes closed.
-      if (options.reapUid !== undefined) await reapStrays({ uid: options.reapUid })
+      if (options.reapUid !== undefined) await reapStrays({ uid: options.reapUid, ...(options.spare ? { spare: options.spare } : {}) })
       resolve({
         exit_code: spawnError ? 127 : code,
         signal: signal ?? null,
@@ -354,15 +380,42 @@ function authorized(req: IncomingMessage, token: string): boolean {
   return given.length === want.length && timingSafeEqual(given, want)
 }
 
-function parseExec(body: unknown): ExecRequest | string {
+function parseExec(body: unknown, maxTimeoutMs = MAX_TIMEOUT_MS): ExecRequest | string {
   if (typeof body !== 'object' || body === null) return 'the body must be a JSON object'
   const { shell, command, timeout_ms } = body as Record<string, unknown>
   if (typeof shell !== 'string' || !(SHELLS as readonly string[]).includes(shell)) return `shell must be one of ${SHELLS.join(', ')}`
   if (typeof command !== 'string' || command.length === 0) return 'command must be a non-empty string'
-  if (typeof timeout_ms !== 'number' || !Number.isInteger(timeout_ms) || timeout_ms < 1 || timeout_ms > MAX_TIMEOUT_MS) {
-    return `timeout_ms must be an integer from 1 to ${MAX_TIMEOUT_MS}`
+  if (typeof timeout_ms !== 'number' || !Number.isInteger(timeout_ms) || timeout_ms < 1 || timeout_ms > maxTimeoutMs) {
+    return `timeout_ms must be an integer from 1 to ${maxTimeoutMs}`
   }
   return { shell: shell as ExecRequest['shell'], command, timeout_ms }
+}
+
+/** A PUT /v1/base body, checked: `{ base: null }` or sync paths, each with a sha256; else a reason. */
+function parseBase(body: unknown): Record<string, string> | null | string {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return 'the body must be a JSON object'
+  const base = (body as Record<string, unknown>).base
+  if (base === null) return null
+  if (typeof base !== 'object' || base === undefined || Array.isArray(base)) return 'base must be an object or null'
+  const entries = Object.entries(base as Record<string, unknown>)
+  if (entries.length > MANIFEST_MAX_ENTRIES) return `at most ${MANIFEST_MAX_ENTRIES} paths`
+  const out: Record<string, string> = {}
+  for (const [rel, sha] of entries) {
+    if (!syncPath(rel) || typeof sha !== 'string' || !/^[0-9a-f]{64}$/.test(sha)) return `${JSON.stringify(rel).slice(0, 200)} is not a base entry`
+    out[rel] = sha
+  }
+  return out
+}
+
+/** A JSON body read under `max` and checked by `parse`; a string is the reason it was refused. */
+async function jsonBody<T>(req: IncomingMessage, max: number, parse: (body: unknown) => T | string): Promise<T | string> {
+  const raw = await readBody(req, max)
+  if (!raw) return 'the body is too large'
+  try {
+    return parse(JSON.parse(raw.toString('utf8')))
+  } catch {
+    return 'the body is not JSON'
+  }
 }
 
 /** A PUT /v1/kept body, checked: sync paths only, each with a KeptRecord value; else a reason. */
@@ -383,12 +436,33 @@ export function sandboxServer(options: SandboxServerOptions): Server {
   const cache: ShaCache = new Map()
   // What the workers' syncs left here (client.ts Kept): in this process's memory, outside /work.
   let kept: KeptRecord = {}
+  // The pod's files as the last sync left them (protocol.ts BaseRecord), in memory too.
+  let base: Record<string, string> | null = null
   let running = 0
   let idle: NodeJS.Timeout | undefined
+  // A running slot's group is spared by every sweep; what left it is not (#5916, #7310).
+  const spare = (pgid: number) => slots.spares(pgid)
+  const slots: SlotManager = new SlotManager({
+    ...options.slots,
+    home: options.home,
+    spawn: (request: SlotRequest) =>
+      spawn('bash', argv(request.shell, request.command, options.maxProcesses), {
+        cwd: options.work,
+        env: commandEnv(options),
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    onEnd: () => {
+      // What a slot left outside its group goes, unless a foreground command runs (its own sweep follows).
+      if (options.reapUid !== undefined && running === 0) void reapStrays({ uid: options.reapUid, spare })
+      touch()
+    },
+  })
+  // A pod with a running slot does not idle out: it ends at its deadline (pods.ts ACTIVE_DEADLINE_S) at the latest.
   const touch = () => {
     if (idle) clearTimeout(idle)
     idle = setTimeout(() => {
-      if (running === 0) options.onIdle()
+      if (running === 0 && slots.running === 0) options.onIdle()
       else touch()
     }, options.idleMs)
     idle.unref()
@@ -401,6 +475,47 @@ export function sandboxServer(options: SandboxServerOptions): Server {
       if (!authorized(req, options.token)) return json(res, 401, { error: 'unauthorized' })
       touch()
       if (req.method === 'GET' && url.pathname === '/v1/manifest') return json(res, 200, await manifestOf(options.work, cache))
+      if (url.pathname === '/v1/base') {
+        if (req.method === 'GET') return json(res, 200, { base })
+        if (req.method === 'PUT') {
+          const parsed = await jsonBody(req, 4 * 1024 * 1024, parseBase)
+          if (typeof parsed === 'string') return json(res, 400, { error: parsed })
+          base = parsed
+          return json(res, 200, { paths: base === null ? null : Object.keys(base).length })
+        }
+        return json(res, 405, { error: 'method not allowed' })
+      }
+      if (url.pathname === '/v1/slots') {
+        if (req.method === 'GET') return json(res, 200, { slots: slots.list() })
+        if (req.method === 'POST') {
+          const parsed = await jsonBody(req, 1024 * 1024, (body) => parseExec(body, SLOT_MAX_TIMEOUT_MS))
+          if (typeof parsed === 'string') return json(res, 400, { error: parsed })
+          const started = slots.start(parsed)
+          return 'refused' in started ? json(res, 409, { error: started.refused }) : json(res, 200, started)
+        }
+        return json(res, 405, { error: 'method not allowed' })
+      }
+      if (url.pathname.startsWith('/v1/slots/')) {
+        const [id, rest, ...more] = url.pathname.slice('/v1/slots/'.length).split('/')
+        // The id is the server's own; anything else (a path, another form) names no slot.
+        if (!SLOT_ID_RE.test(id ?? '') || more.length > 0 || (rest !== undefined && rest !== 'watch')) return json(res, 404, { error: 'no such slot' })
+        if (rest === 'watch') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' })
+          const from = Number(url.searchParams.get('from') ?? '0')
+          if (!Number.isSafeInteger(from) || from < 0) return json(res, 400, { error: 'from must be a byte offset' })
+          if (!(await slots.watch(id!, from, res))) return json(res, 404, { error: 'no such slot' })
+          return
+        }
+        if (req.method === 'GET') {
+          const status = slots.status(id!)
+          return status ? json(res, 200, status) : json(res, 404, { error: 'no such slot' })
+        }
+        if (req.method === 'DELETE') {
+          const status = await slots.stop(id!)
+          return status ? json(res, 200, status) : json(res, 404, { error: 'no such slot' })
+        }
+        return json(res, 405, { error: 'method not allowed' })
+      }
       if (url.pathname === '/v1/kept') {
         if (req.method === 'GET') return json(res, 200, kept)
         if (req.method === 'PUT') {
@@ -478,7 +593,7 @@ export function sandboxServer(options: SandboxServerOptions): Server {
           if (!res.writableFinished) gone.abort()
         })
         try {
-          return json(res, 200, await runCommand(options, parsed, gone.signal))
+          return json(res, 200, await runCommand({ ...options, spare }, parsed, gone.signal))
         } finally {
           running--
           touch()
@@ -492,6 +607,9 @@ export function sandboxServer(options: SandboxServerOptions): Server {
   })
   // A command may run MAX_TIMEOUT_MS; Node's default request timeout (300 s) would cut it off.
   server.requestTimeout = MAX_TIMEOUT_MS + 60_000
-  server.on('close', () => idle && clearTimeout(idle))
+  server.on('close', () => {
+    if (idle) clearTimeout(idle)
+    slots.close()
+  })
   return server
 }
