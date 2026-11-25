@@ -285,6 +285,7 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
           note={editing.kind === 'edit' ? noteOf(noted, editing.profile) : undefined}
           onCancel={() => setEditing(null)}
           onWaiting={() => setMessage(WAITING)}
+          onStopped={() => setMessage(null)}
           onDone={(next) => {
             setMessage(next)
             setEditing(null)
@@ -309,6 +310,7 @@ function KProfileForm({
   note,
   onCancel,
   onWaiting,
+  onStopped,
   onDone,
 }: {
   row: PrinterRow
@@ -319,6 +321,8 @@ function KProfileForm({
   note: { key: string; note: string } | undefined
   onCancel: () => void
   onWaiting: () => void
+  /** The follow was stopped: leave the status empty rather than a stale "Waiting…". */
+  onStopped: () => void
   onDone: (message: { text: string; warn: boolean }) => void
 }) {
   const was = editing.kind === 'edit' ? editing.profile : undefined
@@ -367,7 +371,10 @@ function KProfileForm({
         }
       }
     } catch (cause) {
-      if (stopped(cause)) return
+      if (stopped(cause)) {
+        onStopped()
+        return
+      }
       // A write that may have reached the printer closes the form, so it is not sent again.
       if (mayHaveRun(cause)) {
         onDone({ text: problem(cause, 'The printer has not answered. Do not send it again.'), warn: true })

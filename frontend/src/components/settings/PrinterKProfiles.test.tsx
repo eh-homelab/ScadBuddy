@@ -414,6 +414,21 @@ describe('PrinterKProfiles (#7154)', () => {
     release()
   })
 
+  it('clears the waiting text when a nozzle change stops the follow of an edit', async () => {
+    printRunPoll.intervalMs = 5
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Edit Bambu PLA Basic' }))
+    const form = screen.getByRole('form', { name: 'Edit Bambu PLA Basic' })
+    await user.clear(within(form).getByLabelText('K value'))
+    await user.type(within(form).getByLabelText('K value'), '0.025')
+    const release = latchPrinterCommands()
+    await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
+    const status = await said('Sent to the printer. Waiting for it to answer.')
+    await choose(user, screen.getByRole('combobox', { name: 'Nozzle diameter' }), '0.6 mm')
+    await waitFor(() => expect(status).toBeEmptyDOMElement())
+    release()
+  })
+
   it('says not to send it again when the printer has not answered in time', async () => {
     printRunPoll.intervalMs = 1
     const { user } = await opened()
