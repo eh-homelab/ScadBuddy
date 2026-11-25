@@ -221,7 +221,7 @@ and mounts no database secret and no KEK; see
 The Rust `scadbuddy-slicer` serves the `slice_plate` activity on `slicer` and runs the
 Bambu Studio CLI (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`,
 `workers/rust/crates/sb-slicer/src/runner.rs:103-135`). It reads only the Temporal and
-concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`) and
+concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`; traces, metrics and logs over OTLP, `workers/rust/crates/sb-temporal/src/telemetry.rs`) and
 holds no credential: its inputs carry transfer URLs. See
 [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md).
 
