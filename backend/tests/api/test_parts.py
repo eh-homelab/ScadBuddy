@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -393,3 +394,20 @@ def test_the_parts_page_reads_items_made_elsewhere(client: TestClient) -> None:
     assert "M3 nut" in names
     assert "0.4 nozzle" not in names
     assert client.get(f"/api/v1/parts/{nozzle.json()['id']}/moves").status_code == 404
+
+
+def test_a_blank_link_clears_a_migrated_purchase_link(client: TestClient, pg_conninfo: str) -> None:
+    """A part with no supplier but a link: the migration wrote its `purchase` link with
+    `source` 'parts_migration', and a blank `link` through the alias clears it as the old
+    route did."""
+    part = _no_supplier(client, link="https://example.com/old")
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE entity_links SET source = 'parts_migration' WHERE kind = 'purchase'"
+            " AND entity_id IN (SELECT id FROM entities WHERE kind = 'item' AND ref = %s)",
+            (part["id"],),
+        )
+    cleared = client.patch(f"/api/v1/parts/{part['id']}", json={"link": ""})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["link"] == ""
+    assert client.get(f"/api/v1/entities/item:{part['id']}/links").json()["links"] == []

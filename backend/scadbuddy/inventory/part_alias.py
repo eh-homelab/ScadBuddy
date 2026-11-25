@@ -449,10 +449,11 @@ class PartAliases:
         )
 
     def _drop_purchase_links(self, conn: Conn, item_id: UUID) -> None:
-        """The item's `purchase` links the aliases wrote (`source` 'parts')."""
+        """The item's `purchase` links the aliases wrote (`source` 'parts') or the parts
+        migration wrote ('parts_migration'), so a blank link clears either."""
         conn.execute(
-            "DELETE FROM entity_links WHERE kind = 'purchase' AND source = %s AND entity_id IN"
-            " (SELECT id FROM entities WHERE kind = 'item' AND ref = %s)",
+            "DELETE FROM entity_links WHERE kind = 'purchase' AND source IN (%s, 'parts_migration')"
+            " AND entity_id IN (SELECT id FROM entities WHERE kind = 'item' AND ref = %s)",
             (_SOURCE, str(item_id)),
         )
 
