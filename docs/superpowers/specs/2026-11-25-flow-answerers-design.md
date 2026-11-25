@@ -29,7 +29,8 @@ The facts below were read in the code at `4911d1da0` (2026-11-25). Nothing was r
 
 1. **Tool access is not this policy.** The default of a ScadBuddy tool is its declared tier
    (`agent/src/access/resolve.ts`) and only the agent knows it. An `outward` approval may
-   come from an agent token that holds `approval_grant` (`agent/src/approvals/service.ts`).
+   come from an agent token that holds `approval_grant` (`agent/src/approvals/service.ts`
+   `hasGrant`, `agent/src/auth/tokens.ts` `approvalGrantCheck`).
    So it is not "a person approves each answer", and `ai_access` has no caller.
 2. **A run grant goes the other way.** Its rules admit calls that the run makes
    (`flows/grants.py` `match_grant`). An answer is a call into the run from outside.
@@ -67,8 +68,8 @@ One store method reads the session's row. All of these must hold:
 - its owner holds `write` now;
 - it is not a flow's: `background_tools` is true and `turn_flow` is false
   (`ai_sessions`). Those columns mark the sessions that a flow started, their forks and the
-  sessions started from them, and a flow's turn in another session. `nfc_write` uses the same
-  rule (`agent/src/tools/nfc.ts`).
+  sessions started from them, and a flow's turn in another session. `nfc_write` asks the same
+  (`agent/src/tools/nfc.ts` `withoutPerson`, through `withoutBackground` and `ctx.flowTurn`).
 
 A step's `session_id` is not that mark. `ask_session` sets it for a session that the run did
 not start, and a Reset drops it.
