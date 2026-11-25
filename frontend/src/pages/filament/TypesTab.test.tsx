@@ -5,6 +5,7 @@ import { api } from '../../api/client'
 import { listCatalog, listTypes, upsertCatalog, upsertType, type SpoolTypeCreate } from '../../api/filament'
 import { listShopping } from '../../api/filamentPurchasing'
 import { server } from '../../mocks/server'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { M, ST, T } from '../../mocks/features/filament/seed'
 import { FILAMENT_PETG } from '../../mocks/features/orders/state'
@@ -275,5 +276,17 @@ describe('the Types tab', () => {
     expect(within(report).getAllByText(/the type has no slicer preset/).length).toBeGreaterThan(0)
     const jade = (await listTypes()).find((type) => type.id === T.JADE)!
     expect([jade.nozzle_temp_min, jade.density_g_cm3]).toEqual([190, '1.26'])
+  })
+
+  it('marks a type its required keys leave incomplete, and filters to those (#7703)', async () => {
+    entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+    const types = await listTypes()
+    for (const type of types.slice(1)) seedEntityProperties(`spool_type:${type.id}`, { mpn: 'M' })
+    const { user } = renderPage(<TypesTab />)
+    const lacking = await screen.findByRole('link', { name: types[0]!.code })
+    expect(within(lacking.closest('tr')!).getByText('Missing required: mpn')).toBeVisible()
+    await user.click(screen.getByRole('checkbox', { name: 'Only incomplete' }))
+    await waitFor(() => expect(screen.queryByRole('link', { name: types[1]!.code })).toBeNull())
+    expect(screen.getByRole('link', { name: types[0]!.code })).toBeInTheDocument()
   })
 })

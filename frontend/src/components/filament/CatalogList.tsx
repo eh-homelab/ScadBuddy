@@ -7,7 +7,8 @@ import { useAsync } from '../../lib/useAsync'
 import { entityApi, type PropertyValue } from '../entities/api'
 import { AttachmentsPanel } from '../entities/AttachmentsPanel'
 import { DefinedFields } from '../entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../entities/definedProperties'
+import { IncompleteMark } from '../entities/IncompleteMark'
+import { fieldErrorsOf, isIncomplete, propertiesPatch, refusalText, type FieldErrors } from '../entities/definedProperties'
 import { KindKeysForm } from '../entities/KindKeysForm'
 import { LinksPanel } from '../entities/LinksPanel'
 import { PropertiesPanel } from '../entities/PropertiesPanel'
@@ -23,7 +24,7 @@ import { RgbaSwatch } from './RgbaSwatch'
 import { CATALOGS, type Field } from './catalogs'
 import { ColourSources } from './ColourSources'
 
-type Row = { id: string; name: string; sort_order: number; archived_at: string | null } & Record<string, unknown>
+type Row = { id: string; name: string; sort_order: number; archived_at: string | null; missing_properties?: string[]; invalid_properties?: string[] } & Record<string, unknown>
 type Value = string | boolean | null
 type Draft = { id: string | null; name: string; values: Record<string, Value> }
 
@@ -108,6 +109,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const spec = CATALOGS.find((one) => one.kind === kind)!
   const [params, setParams] = useSearchParams()
   const archived = params.get('archived') === 'true'
+  // #7703: only the rows their required properties leave incomplete; a re-order needs every row, so it is off then.
+  const onlyIncomplete = params.get('incomplete') === 'true'
   const [rows, setRows] = useState<Row[] | null>(null)
   const [names, setNames] = useState<Map<string, string>>(new Map())
   const [options, setOptions] = useState<Partial<Record<CatalogKind, Row[]>>>({})
@@ -378,6 +381,19 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           />
           Show archived
         </label>
+        <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+          <Checkbox
+            checked={onlyIncomplete}
+            aria-label="Only incomplete"
+            onCheckedChange={(on) => {
+              const next = new URLSearchParams(params)
+              if (on === true) next.set('incomplete', 'true')
+              else next.delete('incomplete')
+              setParams(next, { replace: true })
+            }}
+          />
+          Incomplete
+        </label>
         <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-expanded={editingKeys} onClick={() => setEditingKeys((open) => !open)}>
           Property keys
         </Button>
@@ -432,7 +448,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
               </tr>
             </thead>
             <tbody>
-              {(searched ? rows.slice(0, SHOWN_MAX) : rows).flatMap((row, at) => {
+              {(searched ? rows.slice(0, SHOWN_MAX) : rows.filter((row) => !onlyIncomplete || isIncomplete(row))).flatMap((row, at) => {
                 const gone = row.archived_at != null
                 const from = provenance(row)
                 return [
@@ -442,6 +458,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                         {typeof row.rgba === 'string' && <RgbaSwatch rgba={row.rgba} size="md" />}
                         <span className={gone ? 'text-muted-foreground line-through' : 'font-medium'}>{row.name}</span>
                         {gone && <span className="text-[12px] text-muted-foreground">Archived</span>}
+                        <IncompleteMark row={row} />
                       </span>
                       {Array.isArray(row.aliases) && row.aliases.length > 0 && (
                         <span className="mt-1 block">
@@ -455,7 +472,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                     </td>
                     <td className={`${TD} text-right tabular-nums`}>{row.sort_order}</td>
                     <td className={`${TD} whitespace-nowrap text-right`}>
-                      {!searched && (
+                      {!searched && !onlyIncomplete && (
                         <>
                           <Button type="button" size="xs" variant="ghost" data-move="-1" aria-label={`Move ${row.name} up`} disabled={at === 0} onClick={() => void move(at, -1)}>
                             <ArrowUpIcon />

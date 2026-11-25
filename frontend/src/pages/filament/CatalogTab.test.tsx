@@ -3,7 +3,7 @@ import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { listCatalog, upsertCatalog } from '../../api/filament'
 import { server } from '../../mocks/server'
-import { entityMock } from '../../mocks/features/entities'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { M } from '../../mocks/features/filament/seed'
 import { renderPage } from '../../test/utils'
 import { CATALOGS } from '../../components/filament/catalogs'
@@ -257,5 +257,18 @@ describe('the Catalog tab', () => {
       await user.click(screen.getByRole('button', { name: 'Save' }))
       await waitFor(() => expect(within(screen.getByRole('table', { name: 'Brands' })).getByText('SUNLU')).toBeInTheDocument())
     })
+  })
+
+  it('marks a row its required keys leave incomplete, and filters to those (#7703)', async () => {
+    entityMock.schemas.brand = { type: 'object', properties: { site: { type: 'string' } }, required: ['site'] }
+    const sunlu = (await listCatalog('brands')).find((row) => row.name === 'Sunlu')!
+    for (const row of (await listCatalog('brands')).filter((one) => one.id !== sunlu.id)) seedEntityProperties(`brand:${row.id}`, { site: 'x' })
+    const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=brands' })
+    const brands = await list('Brands')
+    expect(within(rowOf(brands, 'Sunlu')).getByText('Missing required: site')).toBeVisible()
+    expect(within(rowOf(brands, 'Polymaker')).queryByText(/Missing required/)).toBeNull()
+    await user.click(screen.getByRole('checkbox', { name: 'Only incomplete' }))
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Brands' })).queryByText('Polymaker')).toBeNull())
+    expect(within(screen.getByRole('table', { name: 'Brands' })).getByText('Sunlu')).toBeInTheDocument()
   })
 })

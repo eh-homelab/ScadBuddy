@@ -57,3 +57,6 @@ export function propertiesPatch(schema: Record<string, unknown>, before: Values,
   return patch
 }
 
+
+/** Whether a read marks the row incomplete (#7703). */
+export const isIncomplete = (row: { missing_properties?: string[]; invalid_properties?: string[] }) => (row.missing_properties?.length ?? 0) + (row.invalid_properties?.length ?? 0) > 0
