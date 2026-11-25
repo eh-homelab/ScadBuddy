@@ -29,6 +29,13 @@ no binary and no storage of its own: **the host supplies the `Store` and the
   ([go-sdk](https://github.com/modelcontextprotocol/go-sdk) v1.8.0), and
   `NewHandler` serves it over streamable HTTP. Both subscribe to the `Bus` with
   `ctx`.
+- `NewHandler` accepts request bodies up to `2 × MaxText + 1 MiB`. Text that is
+  mostly control bytes (6× when JSON-escaped), or HTML-heavy text from an encoder
+  that escapes `<>&`, can get HTTP 413 before `ErrTooLong`.
+- `Config.SessionTimeout` closes a `NewHandler` session, with its subscriptions,
+  after that long without a request; `0` (the default) never does, so a client
+  that exits without a DELETE leaves its session open. The SDK counts only POSTs
+  as activity, so a timeout also ends a session that only holds a GET stream.
 
 An agent is its Claude Code `session_id`, a canonical lower-case UUID; its
 handle is the first 8 hex characters. A channel is `^[a-z0-9-]{1,40}$`.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"time"
 )
 
 // UntrustedLine leads every result that carries message text.
@@ -15,6 +16,10 @@ type Config struct {
 	MaxText     int // largest message text, in bytes
 	PageSize    int // inbox page when no limit is given
 	MaxPageSize int // largest inbox page
+	// SessionTimeout closes an MCP session of NewHandler's after this long
+	// without a request; 0 never closes one. The SDK counts only POSTs as
+	// activity, so a timeout also ends a session that only holds a GET stream.
+	SessionTimeout time.Duration
 }
 
 // DefaultConfig returns 16 MiB texts and pages of 50, at most 200.
@@ -163,7 +168,7 @@ func (s *Service) Rewind(ctx context.Context, sessionID string, seq int64) error
 		return err
 	}
 	if seq < 0 {
-		return fmt.Errorf("seq must be 0 or more, not %d", seq)
+		return fmt.Errorf("%w, not %d", ErrBadSeq, seq)
 	}
 	if err := s.touch(ctx, sessionID); err != nil {
 		return err

@@ -3,6 +3,7 @@ package fleetchat
 import (
 	"context"
 	"encoding/json"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -313,5 +314,36 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met in 5s")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestHandlerTooLong sends one byte over MaxText through NewHandler: the
+// request body limit leaves room, so the answer is ErrTooLong, not HTTP 413.
+func TestHandlerTooLong(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := DefaultConfig()
+	// The SDK's default body limit, so without NewHandler's own limit this is a 413.
+	cfg.MaxText = 4 << 20
+	svc := NewService(newFakeStore(), newFakeBus(), cfg)
+	ts := httptest.NewServer(NewHandler(ctx, svc, "fleetchat-test", "0"))
+	defer ts.Close()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, &mcp.StreamableClientTransport{Endpoint: ts.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cs.Close() }()
+	if _, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "fleet_join", Arguments: map[string]any{"session_id": sidA, "channel": "ops"}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: "fleet_send", Arguments: map[string]any{
+		"session_id": sidA, "channel": "ops", "text": strings.Repeat("x", cfg.MaxText+1),
+	}})
+	if err != nil {
+		t.Fatalf("fleet_send over HTTP: %v", err)
+	}
+	if !res.IsError || !strings.Contains(resultText(res), ErrTooLong.Error()) {
+		t.Fatalf("fleet_send of MaxText+1 bytes: IsError=%v %q; want %q", res.IsError, resultText(res), ErrTooLong)
 	}
 }

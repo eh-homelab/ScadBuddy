@@ -70,6 +70,9 @@ func TestValidation(t *testing.T) {
 	if len(st.messages) != 0 || len(bus.publishedCalls()) != 0 {
 		t.Errorf("an invalid send reached the store or the bus")
 	}
+	if err := svc.Rewind(ctx, sidA, -1); !errors.Is(err, ErrBadSeq) {
+		t.Errorf("Rewind(-1): %v; want ErrBadSeq", err)
+	}
 	if _, err := svc.Send(ctx, sidA, Target{Agent: "ffffffff"}, "hi"); !errors.Is(err, ErrUnknownAgent) {
 		t.Errorf("Send to an unknown agent: %v; want ErrUnknownAgent", err)
 	}

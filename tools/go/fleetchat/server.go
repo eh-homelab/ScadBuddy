@@ -29,7 +29,11 @@ func NewHandler(ctx context.Context, svc *Service, name, version string) http.Ha
 	srv := NewServer(ctx, svc, name, version)
 	return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{
 		// The largest text, with room for its JSON escaping and the envelope.
+		// Text that is mostly control bytes (6x when escaped), or HTML-heavy
+		// text from an encoder that escapes <>&, can get HTTP 413 before
+		// ErrTooLong.
 		MaxRequestBodyBytes: 2*int64(svc.cfg.MaxText) + 1<<20,
+		SessionTimeout:      svc.cfg.SessionTimeout,
 	})
 }
 

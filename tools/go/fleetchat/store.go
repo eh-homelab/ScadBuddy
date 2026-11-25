@@ -69,6 +69,7 @@ var (
 	ErrBadTarget    = errors.New("give exactly one of channel or agent; agent is an 8-character lower-case hex handle")
 	ErrEmptyText    = errors.New("text is empty")
 	ErrTooLong      = errors.New("text is longer than the largest message allowed")
+	ErrBadSeq       = errors.New("seq must be 0 or more")
 	ErrUnknownAgent = errors.New("no agent has that handle")
 	ErrNotMember    = errors.New("not a member of that channel")
 )
