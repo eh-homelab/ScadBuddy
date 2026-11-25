@@ -439,7 +439,7 @@ func TestARunningTurnsState(t *testing.T) {
 	got := a.ok("GET", "/sessions/"+sid+"/turn?grace_ms=1000", "")
 	expect(t, got.body["turn"], map[string]any{
 		"status": "idle", "durable_turn_id": turn, "turn_attempt": "run:1",
-		"interrupt_requested": false, "owner_kind": "browser", "runtime": nil,
+		"interrupt_requested": false, "owner_kind": "browser", "runtime": "unified",
 		"event_seq": "1", "cost_usd": 0.25, "settled": true,
 	})
 	expect(t, a.ok("GET", "/sessions/"+sid+"/turn?grace_ms=60000", "").body["turn"].(map[string]any)["settled"], false)
