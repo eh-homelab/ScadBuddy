@@ -282,6 +282,7 @@ type Body struct {
 	fields map[string]json.RawMessage
 	issues []httpx.Issue
 	at     []string
+	parent *Body
 }
 
 // ReadBody is the request's body as an object whose members are all among names.
