@@ -162,7 +162,9 @@ and makes orders after it dated every fake deposit a day early (#6307). A shard 
 in 2 to 3 minutes. With six shards it tested in 27 to 46, and slow runners hit
 `backend-pytest`'s limit of 55 (#6288, #6783: runs 44785128035, 44800511189); eight
 shards on fresh timings give about 25 minutes of tests each. Never raise the limit:
-add a shard, or refresh the timings.
+add a shard, or refresh the timings. `ci.yml` runs at most four shards at a time
+(`max-parallel: 4`, #7510), so the lane takes two waves of shards; the limit is per job,
+so a longer lane is not a slow runner.
 Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
