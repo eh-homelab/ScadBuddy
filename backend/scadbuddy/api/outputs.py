@@ -6,7 +6,7 @@ import logging
 import re
 import tarfile
 import zipfile
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -1084,9 +1084,15 @@ async def list_recent_outputs(
     an output id; a page is `limit` outputs (50 when omitted) and `X-Total-Count` counts
     what the filters select. Outputs carry no tags: `tag` matches the model's catalogue
     tags, case and accents folded. The storefront slice run's outputs are left out unless
-    `include_storefront` (#6371)."""
-    index = outputs.index
-    if index is None:
+    `include_storefront` (#6371). Once a row copy run has finished, the list reads the
+    ``outputs`` rows; before that, ``output_index`` (#7257)."""
+    rows = outputs.rows
+    run: Callable[[OutputQuery], tuple[list[str], int]]
+    if rows is not None and await asyncio.to_thread(rows.copied):
+        run, on_index = rows.query, False
+    elif outputs.index is not None:
+        run, on_index = outputs.index.query, True
+    else:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
     slugs: list[str] | None = list(slug) if slug else None
     if tag is not None:
@@ -1104,20 +1110,22 @@ async def list_recent_outputs(
         limit=limit,
     )
     try:
-        ids, total = await asyncio.to_thread(index.query, query)
+        ids, total = await asyncio.to_thread(run, query)
     except AfterNotListedError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"no output {after!r} is listed any more to page after; list again without `after`",
         ) from None
     response.headers[TOTAL_COUNT_HEADER] = str(total)
-    metas = await asyncio.to_thread(_metas_or_forget, outputs, ids)
+    metas = await asyncio.to_thread(_metas_or_forget, outputs, ids, forget=on_index)
     return await _details(outputs, uploads, state.print_runs.store, metas)
 
 
-def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
-    """The outputs ``ids`` name, in order; a row whose output is gone (its model deleted
-    with its directory) is dropped from the index and from the page."""
+def _metas_or_forget(outputs: OutputStore, ids: list[str], *, forget: bool) -> list[OutputMeta]:
+    """The outputs ``ids`` name, in order; a row whose output is gone is left off the
+    page. With ``forget`` (the list read ``output_index``) it is dropped from the index
+    too: its model was deleted with its directory. An ``outputs`` row is the record, so
+    the list on rows forgets nothing (#7257)."""
     metas: list[OutputMeta] = []
     gone: list[str] = []
     for output_id in ids:
@@ -1127,7 +1135,7 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
             gone.append(output_id)
         except (OSError, ValueError):
             logger.warning("outputs: %s is unreadable; left out of the list", output_id)
-    if gone and outputs.index is not None:
+    if forget and gone and outputs.index is not None:
         outputs.index.forget(*gone)
     return metas
 

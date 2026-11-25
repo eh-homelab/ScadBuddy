@@ -36,6 +36,7 @@ from scadbuddy.library.outputs import (
     META_NAME,
     PARAMS_NAME,
     OutputMeta,
+    tolerate_dropped,
 )
 
 if TYPE_CHECKING:
@@ -81,38 +82,49 @@ class OutputIndex:
                 "UPDATE outputs SET params_text = %s WHERE output_id = %s AND slug = %s",
                 (text, meta.id, meta.slug),
             )
-            conn.execute(
-                "INSERT INTO output_index"
-                " (output_id, slug, name, created_at, params_text, source)"
-                " VALUES (%s, %s, %s, %s, %s, %s)"
-                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug,"
-                " name = EXCLUDED.name, created_at = EXCLUDED.created_at,"
-                " params_text = EXCLUDED.params_text, source = EXCLUDED.source,"
-                " indexed_at = clock_timestamp()",
-                (
-                    meta.id,
-                    meta.slug,
-                    meta.name,
-                    meta.created_at,
-                    text,
-                    meta.source,
-                ),
-            )
+
+            def index() -> None:
+                # A savepoint: with the table gone, the row's text above still commits.
+                with conn.transaction():
+                    conn.execute(
+                        "INSERT INTO output_index"
+                        " (output_id, slug, name, created_at, params_text, source)"
+                        " VALUES (%s, %s, %s, %s, %s, %s)"
+                        " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug,"
+                        " name = EXCLUDED.name, created_at = EXCLUDED.created_at,"
+                        " params_text = EXCLUDED.params_text, source = EXCLUDED.source,"
+                        " indexed_at = clock_timestamp()",
+                        (meta.id, meta.slug, meta.name, meta.created_at, text, meta.source),
+                    )
+
+            tolerate_dropped(index, "output_index record")
 
     def rename(self, output_id: str, name: str | None) -> None:
-        with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE output_index SET name = %s WHERE output_id = %s", (name, output_id)
-            )
+        def rename() -> None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "UPDATE output_index SET name = %s WHERE output_id = %s", (name, output_id)
+                )
+
+        tolerate_dropped(rename, "output_index rename")
 
     def forget(self, *output_ids: str) -> None:
-        with self._pool.connection() as conn:
-            conn.execute("DELETE FROM output_index WHERE output_id = ANY(%s)", (list(output_ids),))
+        def forget() -> None:
+            with self._pool.connection() as conn:
+                conn.execute(
+                    "DELETE FROM output_index WHERE output_id = ANY(%s)", (list(output_ids),)
+                )
+
+        tolerate_dropped(forget, "output_index forget")
 
     def forget_slug(self, slug: str) -> None:
         """Drop every row of ``slug``'s outputs: its outputs' directory is gone."""
-        with self._pool.connection() as conn:
-            conn.execute("DELETE FROM output_index WHERE slug = %s", (slug,))
+
+        def forget() -> None:
+            with self._pool.connection() as conn:
+                conn.execute("DELETE FROM output_index WHERE slug = %s", (slug,))
+
+        tolerate_dropped(forget, "output_index forget_slug")
 
     def query(self, query: OutputQuery) -> tuple[list[str], int]:
         """The page's output ids, newest first, and how many the filters select.

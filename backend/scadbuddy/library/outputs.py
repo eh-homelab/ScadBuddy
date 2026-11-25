@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol
 
 from botocore.exceptions import ClientError
 from fastapi import status
+from psycopg.errors import UndefinedTable
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from scadbuddy.bambuddy.models import ProcessValue
@@ -231,6 +232,16 @@ class BackfillState(BaseModel):
 
     job_id: str
     error: str | None = None
+
+
+def tolerate_dropped(action: Callable[[], None], what: str) -> None:
+    """Run ``action``, a write to ``output_index`` or ``output_hold_slugs``. Release B
+    drops both tables (#7257, plan D1), and a release A pod still runs during its roll:
+    a missing table is logged and skipped. Any other error raises."""
+    try:
+        action()
+    except UndefinedTable:
+        logger.warning("%s skipped: its table is gone (#7257)", what)
 
 
 def _replace(path: Path, text: str) -> None:
@@ -2202,17 +2213,24 @@ def hold_parts(
 
 def release_parts(refs: BlobRefs, output_id: str) -> None:
     refs.drop_holder(OUTPUT_HOLDER, output_id)
-    with refs.pool.connection() as conn:
-        conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+    def forget() -> None:
+        with refs.pool.connection() as conn:
+            conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+    tolerate_dropped(forget, "an output's hold slug delete")
 
 
 def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
-    with refs.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
-            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
-            (output_id, slug),
-        )
+    def record() -> None:
+        with refs.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
+                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
+                (output_id, slug),
+            )
+
+    tolerate_dropped(record, "an output's hold slug")
 
 
 def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
@@ -2222,14 +2240,18 @@ def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
     if not slugs:
         return
     ids = sorted(slugs)
-    with refs.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO output_hold_slugs (output_id, slug)"
-            " SELECT * FROM unnest(%s::text[], %s::text[])"
-            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
-            " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
-            (ids, [slugs[output_id] for output_id in ids]),
-        )
+
+    def record() -> None:
+        with refs.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO output_hold_slugs (output_id, slug)"
+                " SELECT * FROM unnest(%s::text[], %s::text[])"
+                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
+                " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
+                (ids, [slugs[output_id] for output_id in ids]),
+            )
+
+    tolerate_dropped(record, "the held outputs' slugs")
 
 
 def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:

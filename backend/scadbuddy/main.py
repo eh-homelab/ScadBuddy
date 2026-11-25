@@ -188,11 +188,12 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
-from scadbuddy.store.content import sweep_content
+from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
-from scadbuddy.store.factory import build_store
+from scadbuddy.store.factory import blob_spool, build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import (
     MAKE_CURRENT_BACKOFF,
@@ -528,6 +529,15 @@ async def _sweep_blobs_logged(state: AppState) -> None:
             removed = await asyncio.to_thread(
                 sweep_blobs, state.blobs, state.refs, grace=state.config.sweep_grace
             )
+            if state.outputs.bytes is not None:
+                # `local`'s output store (#7257, plan D7): a deleted output's blobs.
+                outputs_swept = await sweep_content(
+                    state.outputs.bytes.content, state.refs, grace=state.config.sweep_grace
+                )
+                if outputs_swept:
+                    logger.info(
+                        "removed unreferenced output blobs", extra={"count": len(outputs_swept)}
+                    )
         else:
             failed = False
             try:
@@ -692,9 +702,13 @@ async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> Non
     rows = state.outputs.rows
     if rows is None:
         return
+    # On `local` the outputs' own content store (plan D7), else the shared one.
+    content = (
+        state.outputs.bytes.content if state.outputs.bytes is not None else state.store.content
+    )
     try:
         result = await copy_output_bytes(
-            state.outputs, rows, state.store.content, state.projection.conninfo, stop
+            state.outputs, rows, content, state.projection.conninfo, stop
         )
     except Exception:
         logger.exception(
@@ -2611,9 +2625,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
-    # #7256: the outputs' bytes are read from the blob store first, never on `local`
-    # (no content store) or `bambuddy`.
-    if usable(state.store.content):
+    # #7256: the outputs' bytes are read from the blob store first, never on `bambuddy`.
+    # #7257 plan D7: `local` has no content store, so outputs get one of their own under
+    # `data/output-blobs/`, with the shared index and spool.
+    #: `local`'s output store, which the bundle does not close.
+    output_content: ContentStore | None = None
+    if state.store.backend == "local":
+        output_content = ContentStore(
+            LocalContentBackend(state.paths.output_blobs),
+            BlobIndex(pool),
+            spool=blob_spool(state.config, state.paths),
+        )
+        state.outputs.bytes = OutputBytes(output_content)
+    elif usable(state.store.content):
         assert state.store.content is not None
         state.outputs.bytes = OutputBytes(state.store.content)
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
@@ -2796,6 +2820,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with AsyncExitStack() as closing:
             closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
             closing.push_async_callback(state.store.aclose)
+            if output_content is not None:
+                closing.push_async_callback(output_content.aclose)
             closing.push_async_callback(state.events.aclose)
             closing.push_async_callback(asyncio.to_thread, state.presets.close)
             closing.push_async_callback(asyncio.to_thread, state.projection.close)

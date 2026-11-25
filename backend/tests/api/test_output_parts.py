@@ -63,10 +63,13 @@ def pool(app: FastAPI, pg_conninfo: str) -> Iterator[Pool]:
 
 
 def held(pool: Pool) -> set[tuple[str, str]]:
-    """Every (Part, output) pair `blob_refs` holds for an output."""
+    """Every (Part, output) pair `blob_refs` holds for an output. An output's own bytes
+    (`output-` keys, held by the same holder kind) are not its Parts."""
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT key, holder_id FROM blob_refs WHERE holder_kind = %s", (OUTPUT_HOLDER,)
+            "SELECT key, holder_id FROM blob_refs WHERE holder_kind = %s"
+            " AND NOT starts_with(key, 'output-')",
+            (OUTPUT_HOLDER,),
         ).fetchall()
     return {(row["key"], row["holder_id"]) for row in rows}
 

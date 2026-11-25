@@ -30,7 +30,7 @@ def _rows(last_run: dict[str, Any] | None = FINISHED_RUN) -> Any:
 
 def _state(rows: object | None = None) -> Any:
     return SimpleNamespace(
-        outputs=SimpleNamespace(rows=_rows() if rows is None else rows),
+        outputs=SimpleNamespace(rows=_rows() if rows is None else rows, bytes=None),
         projection=SimpleNamespace(conninfo="postgresql://unused.invalid/scadbuddy"),
         store=SimpleNamespace(content=object()),
     )

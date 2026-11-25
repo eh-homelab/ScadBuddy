@@ -275,6 +275,7 @@ async def test_mark_another_replica_wrote_is_not_logged(
         return False if len(calls) == 1 else real()
 
     monkeypatch.setattr(rows, "cut_over", late)
+    caplog.clear()  # the mark the other replica wrote above
     with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
         assert await main._try_cut_over(rows) is True
     logged = [r for r in caplog.records if r.getMessage() == "the outputs are cut over (#7257)"]

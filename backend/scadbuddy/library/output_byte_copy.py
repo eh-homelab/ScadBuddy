@@ -40,8 +40,9 @@ there (phase 1's rule): an outputs folder that is missing or lists no slug folde
 rows exist makes the run write nothing, and an output whose folder is missing gets no
 write. Before any upload, the
 bytes and blobs still to copy are checked against the store's caps; past one, the run
-is ``refused`` and uploads nothing. On the `local` store (no content store, Ruling R1)
-and on `bambuddy` (spec §6.4) every run is refused.
+is ``refused`` and uploads nothing. On `bambuddy` (spec §6.4), and with no content store
+at all, every run is refused. On the `local` store the API passes the outputs' own
+content store (#7257, plan D7), so the run copies there.
 
 A run has ``finished_at`` only when nothing was refused, failed or incomplete and it was
 not stopped. One replica copies at a time, under a session advisory lock on a

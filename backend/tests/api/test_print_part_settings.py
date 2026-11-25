@@ -17,6 +17,7 @@ from scadbuddy.bambuddy.send import PART_SETTINGS_AS_IS, PART_SETTINGS_UNWRITABL
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.orders.quote import SliceQuoteRequest
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, layout_of
+from tests.api.conftest import files_only
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_library import (
@@ -183,6 +184,7 @@ def test_an_output_that_prints_as_it_is_refuses_part_settings(
     """#5571 review: an output whose 3MF nothing can be written into (``as_is``: here
     without its ``project_settings.config``) is refused before anything is uploaded,
     never printed under a key that names settings its copy lacks."""
+    files_only(client)
     output_id = prepared(client, model)
     upload = upload_route()
     routes()

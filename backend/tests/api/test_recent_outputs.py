@@ -4,6 +4,7 @@ them, paged as `GET /models/{slug}/outputs`; and the index's repair at start."""
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -183,3 +184,70 @@ def test_storefront_outputs_are_listed_only_when_asked(
     detail = client.get(f"/api/v1/outputs/{second}")
     assert detail.status_code == 200, detail.text
     assert detail.json()["source"] == "storefront"
+
+
+def test_recent_outputs_list_from_rows(client: TestClient, three: tuple[str, str, str]) -> None:
+    """#7257: once a row copy run has finished, the list reads ``outputs``, so it gives
+    the same answers with ``output_index`` gone (release B drops it)."""
+    first, second, third = three
+    order = create_order(client, create_customer(client)["id"])
+    add_item(client, order["id"], output_id=second, quantity=1)
+    queries: list[dict[str, Any]] = [
+        {},
+        {"q": "door"},
+        {"q": "width=14"},
+        {"slug": SLUG},
+        {"limit": 1, "after": second},
+        {"ordered": "yes"},
+        {"ordered": "no"},
+    ]
+    before = [(listed(client, **query), query) for query in queries]
+    rows = state_of(client).outputs.rows
+    assert rows is not None
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    with rows._pool.connection() as conn:
+        conn.execute("DROP TABLE output_index")
+    assert [(listed(client, **query), query) for query in queries] == before
+    assert before[0][0] == [third, second, first]
+    total = client.get("/api/v1/outputs", params={"slug": SLUG}).headers["X-Total-Count"]
+    assert total == "2"
+    gone = client.get("/api/v1/outputs", params={"after": "f" * 32})
+    assert gone.status_code == 409, gone.text
+
+
+def test_index_writes_tolerate_dropped_table(
+    client: TestClient, three: tuple[str, str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7257 plan D1: release B drops ``output_index`` and ``output_hold_slugs`` while
+    release A pods still run. A save, a rename, a delete and a model's delete then pass,
+    and each skipped write is logged."""
+    first, second, third = three
+    rows = state_of(client).outputs.rows
+    assert rows is not None
+    with rows._pool.connection() as conn:
+        conn.execute("DROP TABLE output_index")
+        conn.execute("DROP TABLE output_hold_slugs")
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library"):
+        fourth = saved(client, SLUG, {"width": 16}, "Gate")
+        renamed = client.patch(
+            f"/api/v1/outputs/{fourth}", json={"name": "Gate tag"}, headers=press()
+        )
+        assert renamed.status_code == 200, renamed.text
+        deleted = client.delete(f"/api/v1/outputs/{first}", headers=press())
+        assert deleted.status_code in (200, 204), deleted.text
+        plate = client.get(f"/api/v1/outputs/{third}").json()["slug"]
+        model = client.delete(f"/api/v1/models/{plate}", headers=press())
+        assert model.status_code == 204, model.text
+    skipped = {r.getMessage() for r in caplog.records if "its table is gone" in r.getMessage()}
+    assert {
+        "output_index record skipped: its table is gone (#7257)",
+        "output_index rename skipped: its table is gone (#7257)",
+        "output_index forget skipped: its table is gone (#7257)",
+        "output_index forget_slug skipped: its table is gone (#7257)",
+        "an output's hold slug skipped: its table is gone (#7257)",
+        "an output's hold slug delete skipped: its table is gone (#7257)",
+    } <= skipped
+    assert rows.get(fourth) is not None and rows.get(first) is None
+    assert rows.get(third) is None and rows.get(second) is not None
+    fourth_row = rows.get(fourth)
+    assert fourth_row is not None and fourth_row.meta.name == "Gate tag"

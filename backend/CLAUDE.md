@@ -299,8 +299,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   second run at once do nothing. The byte copy (#7256, `OUTPUT_BYTES_SWEEP`, after
   `OUTPUT_COPY_SWEEP`, behind `OUTPUT_BYTES_PATCH`, timeout `OUTPUT_BYTES_TIMEOUT`, 30
   min) runs `library/output_byte_copy.py` `copy_output_bytes` the same way, after the
-  row copy at start: it puts the files' bytes as `output` blobs, refuses on `local`,
-  `bambuddy` or a store past its caps, and its session advisory lock holds one autocommit
+  row copy at start: it puts the files' bytes as `output` blobs (on `local` into the
+  outputs' own store, `data/output-blobs/`, #7257), refuses on `bambuddy` or a store past
+  its caps, and its session advisory lock holds one autocommit
   connection of its own for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an

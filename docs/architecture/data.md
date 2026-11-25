@@ -218,9 +218,10 @@ holds, in one transaction; then it deletes its staged keys. When the row fails (
 that another output holds, `orders/quote.py` `operation_output_id`, among the causes), the
 save fails, its folder is removed (`OutputStore._insert_row`) and its staged keys and
 their objects are deleted: no key of the other output moved, so that output keeps its
-bytes. A put into a full store is a 507. On the `local` backend (no
-content store) and on `bambuddy` (spec §6.4) no output blob is written: the bytes stay
-files. A store migration to `bambuddy` is refused while the index holds an `output` blob
+bytes. A put into a full store is a 507. On `bambuddy` (spec §6.4) no output blob is
+written: the bytes stay files. The `local` backend has no content store, so the outputs
+get one of their own under `data/output-blobs/`, with the shared index and spool (#7257,
+plan D7); the byte copy runs there too. A store migration to `bambuddy` is refused while the index holds an `output` blob
 (`scadbuddy/store/migrate.py` `refuse_outputs_to_bambuddy`). A delete deletes the row
 and releases its byte holds in one transaction, then removes the folder; the content sweep
 removes the blobs after its grace (`OutputRows.delete`).
