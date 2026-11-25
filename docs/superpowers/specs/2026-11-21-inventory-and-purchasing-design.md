@@ -700,8 +700,9 @@ Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
    - the invoices list and page for every line, with candidates, confirm, amend, the file
      preview and the links to what a line made;
    - the shopping list for every item;
-   - unit codes, unit labels (#7169) and NTAG tags bound to any unit; quick find and
-     property search over every item and unit;
+   - codes and labels for items, units and lots (#7169, Q1) and NTAG tags bound to any
+     unit; quick find and property search over every item and unit; inline properties on
+     the unit and lot tools;
    - the invoice import flow and the back-fill flow, on #7445's typed prompts (§6.7);
    - the generic agent tools with the filament aliases, and the `purchasing` skill;
    - the exit check: the parity test of §6.11 on a `filament` item and a `hardware` item.
@@ -765,7 +766,7 @@ closes (§9).
 | 5 | Bulk create, copy | `POST /filament/spools/bulk`, `GET /filament/spools/{id}/copy` | Receive N units or one lot (`POST /inventory/items/{id}/units`, `/lots`) | (a) | "Copy" on an item and a unit | S | 3b |
 | 6 | Bulk edit, archive, restore | `POST /filament/spools/bulk-update`, `bulk-archive`, `bulk-restore`; `components/filament/BulkBar.tsx` | None | (a) | Bulk edit, archive and restore of items and units, one request, all or none | M | 3b |
 | 7 | CSV import | `POST /filament/spools/import` (`filament/csv_import.py`; `SpoolImport.tsx`) | None | (c) | Item and stock CSV import (Q5) | M | 3b or follow-up |
-| 8 | Search by property values | Spools and Types tabs and the agent load property values only for the `spool` and `spool_type` kinds (`lib/filamentSearch.ts` `propertyTexts`, `components/entities/api.ts` `loadKindPropertyTexts`; the copy in `agent/src/tools/filamentSearch.ts`; reported by session scadbuddy-09, 2026-11-25) | The items list's `q` matches property values on the server (`inventory/items.py` l.113), so `inventory_item_list` does too | (a) | One search over item and unit properties for the Item types list, the stock list (row 4) and quick find (row 48) | S | 3b |
+| 8 | Search by property values | Spools and Types tabs and the agent load property values only for the `spool` and `spool_type` kinds (`lib/filamentSearch.ts` `propertyTexts`, `components/entities/api.ts` `loadKindPropertyTexts`; the copy in `agent/src/tools/filamentSearch.ts`; reported by session scadbuddy-09, 2026-11-25) | The items list's `q` matches property values on the server (`inventory/items.py` l.113), so `inventory_item_list` does too. Inline properties on the item upsert exist: `inventory_item_upsert` calls `setPropertiesAfter` (`agent/src/tools/inventory.ts` l.256, l.280), so the only tools without them are the unit and lot tools | (a) | Inline `properties` on `inventory_unit_receive`/`_update` and `inventory_lot_receive`/`_update`; one search over item and unit properties for the Item types list, the stock list (row 4) and quick find (row 48) | S | 3b |
 | 9 | Search by tag UID | `filamentSearch.ts` hex match | n/a | (b) | — | — | — |
 | 10 | Catalog: materials, subtypes | Catalog tab (`filament/catalog.py` `CATALOGS`; `pages/filament/CatalogTab.tsx`) | Item kinds tree with attribute schemas (`pages/inventory/KindsPage.tsx`) | (a) | Child kinds of `filament` (owner, 2026-11-25; §6.4): the material's and subtype's values become the kind's defaults, inherited down the tree | L | 3a (data), 3b (UI) |
 | 11 | Catalog: brands | `filament_brands`, with aliases | `items.manufacturer` text | (c) | A shared manufacturers table (Q2) | M | 3a or follow-up |
@@ -773,7 +774,7 @@ closes (§9).
 | 13 | Catalog: location kinds | `filament_location_kinds` | Lots and units take a place (`pages/inventory/PlaceSelect.tsx`) | (a) | Move with the plain `locations` table (§6.4) | S | 3a |
 | 14 | Locations: tree, place page with what is there | Locations tab, `/filament/locations/:id` (`LocationPage.tsx`: spools only) | A lot or a unit names a place; no page lists them | (a) | `/inventory/locations/:id` lists the lots, units and spools at the place | S | 3b |
 | 15 | Sensors, drying, AMS places | `filament/sensors.py`, `dry_hours.py`, `locations.py` `ensure_printer_on` | n/a | (b) | — | — | — |
-| 16 | Codes and QR labels | `L-` and `S-` codes (`codes/resolve.py` `PREFIXES`), `/filament/labels`, label PDF (`filament/label_pdf.py`, `filament/labels.py`) | None for items, lots or units | (a) | A unit code prefix in `PREFIXES` and a unit drawer in `labels.py`. The label output layer (#7216) does not depend on the subject. A unit label's fields are its item's property keys plus number, place, note, added date and QR. Folds #7169 into 3b (session fix-sync-status-review-findings, 2026-11-25). Lot codes: Q1 | M | 3b |
+| 16 | Codes and QR labels | `L-` and `S-` codes (`codes/resolve.py` `PREFIXES`), `/filament/labels`, label PDF (`filament/label_pdf.py`, `filament/labels.py`) | None for items, lots or units | (a) | Labels for items, units and lots (#7169, folded into 3b): a new prefix in `PREFIXES` and a drawer in `labels.py`. The label output layer (#7216) does not depend on the subject. A label's fields are the item's property keys plus number, place, note, added date and QR (session fix-sync-status-review-findings, 2026-11-25). Which of them get a code is Q1 | M | 3b |
 | 17 | NTAG tags bound to a unit | `filament_spool_tags`; `filament/tag_formats.py` (OpenSpool, OpenTag3D); `/filament/scan` | n/a | (a) | A generic NDEF URL record of the unit's code (a new format in `pick_format`), and a tag bound to any unit, not only through `filament_spool_tags` (session fix-sync-status-review-findings, 2026-11-25) | M | 3b |
 | 17b | Bambu RFID; K-profiles and AMS slots over the LAN | `filament/rfid_*.py`; #7670 | n/a | (b) | — | — | — |
 | 18 | Suppliers list with stats | Suppliers tab (`SuppliersTab.tsx`; `GET /filament/suppliers/stats`: spools, grams left, grams used, spend) | None; offers pick a supplier from the filament list (`ItemOffers.tsx` l.174) | (a) | `/inventory/suppliers`: products (offers) per supplier, spend, items and units received, stock value; grams stay as the `filament` columns | M | 3b |
@@ -829,15 +830,16 @@ the code at `4b2438ba0`:
 - **No `inventory_moves` view.** §6.6 unions `stock_moves` with spool events for reports.
   It is not on main; `docs/features/inventory.md` moves it to phase 3.
 - **No codes or labels for items, lots or units.** `codes/resolve.py` `PREFIXES` knows `L`
-  and `S` only. Row 16 plans unit codes and labels in 3b (#7169); lot codes are Q1.
+  and `S` only. Row 16 proposes them in 3b (#7169); Q1 asks the owner.
 - **Invoices still make no stock for items.** That is phase 3 by design, but meanwhile
   non-filament lines are kept as a note on the invoice and received by hand (#7648, #7704).
 
 ### 11.4 Questions for the owner (class c)
 
-- **Q1. Lot codes.** Units get codes, labels and NTAG binding in 3b (rows 16 and 17,
-  #7169). Do lots get a code and a label too? The designer's proposal: yes, so a scan of a
-  bin of bearings opens its lot.
+- **Q1. Codes and labels.** Do items, units and lots each get a code and a printed label,
+  as spools and places do? The designer's proposal (row 16, from #7169): yes for all three
+  in 3b, with one new prefix per kind in `PREFIXES` and a drawer in `labels.py`, so a scan
+  of a bin of bearings opens its lot. NTAG binding is for units (row 17).
 - **Q2. Brands.** Do filament brands become one manufacturers table that every item's
   `manufacturer` names, or stay a filament catalog? The designer's proposal: one table in
   3a, since a brand is not filament-specific (Bambu Lab sells nozzles too).
