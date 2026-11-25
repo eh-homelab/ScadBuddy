@@ -33,8 +33,9 @@ class FilamentItemRefused(ValueError):  # noqa: N818
     """Items of a `filament` kind wait for phase 3 (#7068; the plan's Ruling 9)."""
 
 
-#: Every item with its kind's figures and its stock. A lot counts at its `on_hand`; its
-#: value and unknown cost only while it holds stock. A unit counts while `in_stock`.
+#: Every item with its kind's figures, its stock and its unarchived offers' count (R-P2-37).
+#: A lot counts at its `on_hand`; its value and unknown cost only while it holds stock. A
+#: unit counts while `in_stock`.
 _ITEMS = """
 SELECT i.id, i.kind_id, k.tracking, k.uom, i.name, i.manufacturer, i.compatible_with,
     i.low_stock, i.life_hours, i.life_months, i.saleable,
@@ -45,7 +46,8 @@ SELECT i.id, i.kind_id, k.tracking, k.uom, i.name, i.manufacturer, i.compatible_
     CASE k.tracking WHEN 'lot' THEN l.value WHEN 'unit' THEN u.value ELSE 0 END
         AS stock_value_minor,
     CASE k.tracking WHEN 'lot' THEN l.unknown WHEN 'unit' THEN u.unknown ELSE false END
-        AS cost_unknown
+        AS cost_unknown,
+    o.offer_count
 FROM items i
 JOIN item_kinds k ON k.id = i.kind_id
 CROSS JOIN LATERAL (
@@ -59,6 +61,10 @@ CROSS JOIN LATERAL (
         coalesce(bool_or(cost_unknown), false) AS unknown
     FROM stock_units WHERE item_id = i.id AND status = 'in_stock'
 ) u
+CROSS JOIN LATERAL (
+    SELECT count(*) AS offer_count FROM supplier_offers
+    WHERE item_id = i.id AND archived_at IS NULL
+) o
 """
 
 #: `low_stock > 0 and on_hand <= low_stock`; never for a kind that is not counted.

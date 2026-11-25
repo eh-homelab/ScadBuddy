@@ -200,9 +200,10 @@ class ItemList(BaseModel):
     description=(
         "Items by name, with their stock: `on_hand` (the lots' sum, or the units in stock; "
         "0 for a kind that is not counted), `stock_value_minor` in minor units of the shop "
-        "currency, `cost_unknown` and `low`. `kind` takes the kind with its descendants "
-        "unless `descendants` is false; `q` matches the name, the manufacturer or any "
-        "property value, in any case; `low` keeps those at or below their `low_stock`; "
+        "currency, `cost_unknown` and `low`, and `offer_count`, its unarchived offers. "
+        "`kind` takes the kind with its descendants unless `descendants` is false; `q` "
+        "matches the name, the manufacturer or any property value, in any case; `low` "
+        "keeps those at or below their `low_stock`; "
         "`compatible` those that name the printer model code; `archived` adds archived "
         "items. Up to `limit` (1 to 5000, 1000 when absent)."
     ),
@@ -255,7 +256,7 @@ async def create_item(body: ItemInput, inventory: InventoryDep) -> Item:
     "/inventory/items/{item_id}",
     response_model=Item,
     summary="An inventory item",
-    description="The item with its stock figures, archived or not.",
+    description="The item with its stock figures and `offer_count`, archived or not.",
     responses=codes((404, "`item_not_found`")),
 )
 async def get_item(item_id: UUID, inventory: InventoryDep) -> Item:

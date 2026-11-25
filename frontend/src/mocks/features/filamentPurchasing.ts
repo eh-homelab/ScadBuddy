@@ -548,6 +548,11 @@ export function reset() {
   state = build()
 }
 
+/** #7067 — a supplier by id, archived ones too, for the inventory mock's offers. */
+export function supplierById(id: string): { id: string; name: string; archived_at: string | null } | undefined {
+  return state.suppliers.find((row) => row.id === id)
+}
+
 // -- the routes -------------------------------------------------------------------------------
 
 /** A 1 x 1 PNG: the bytes a photo's file answers with. */

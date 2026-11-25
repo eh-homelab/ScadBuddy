@@ -247,12 +247,6 @@ import type {
   OrderEstimate,
   UnitCostHistory,
   ProfitReport,
-  InventoryPart,
-  PartCreate,
-  PartPatch,
-  StockAdd,
-  StockAdjust,
-  StockMove,
   PartRule,
   PartRuleLine,
   ItemPart,
@@ -3041,13 +3035,7 @@ export const api = {
     request<UnitCostHistory>(
       `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice), ...(itemId ? { item_id: itemId } : {}) })}`,
     ),
-  // -- the parts inventory (#5543, job cost spec §11) -------------------------------------------
-  parts: (low = false) => request<InventoryPart[]>(`/parts${low ? '?low=true' : ''}`),
-  createPart: (body: PartCreate) => request<InventoryPart>('/parts', { method: 'POST', body: JSON.stringify(body) }),
-  updatePart: (id: string, body: PartPatch) => request<InventoryPart>(`/parts/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  addPartStock: (id: string, body: StockAdd) => request<InventoryPart>(`/parts/${seg(id)}/stock`, { method: 'POST', body: JSON.stringify(body) }),
-  adjustPartStock: (id: string, body: StockAdjust) => request<InventoryPart>(`/parts/${seg(id)}/adjust`, { method: 'POST', body: JSON.stringify(body) }),
-  partMoves: (id: string) => request<StockMove[]>(`/parts/${seg(id)}/moves`),
+  // -- order parts and model rules (#5543, job cost spec §11); a part is an inventory item (#7067) --
   partRule: (slug: string) => request<PartRule>(`/parts/rules/${seg(slug)}`),
   setPartRule: (slug: string, lines: PartRuleLine[]) => request<PartRule>(`/parts/rules/${seg(slug)}`, { method: 'PUT', body: JSON.stringify({ lines }) }),
   orderParts: (orderId: string) => request<OrderParts>(`/orders/${seg(orderId)}/parts`),

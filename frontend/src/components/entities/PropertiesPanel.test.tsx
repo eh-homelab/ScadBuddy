@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { server } from '../../mocks/server'
 import { resetMockState } from '../../mocks/handlers'
 import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
+import { seedItem } from '../../mocks/features/inventory'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { PropertiesPanel } from './PropertiesPanel'
@@ -463,5 +464,18 @@ describe('PropertiesPanel (#7026)', () => {
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
     expect(screen.getByLabelText('Key of mpn')).toBeInTheDocument()
+  })
+
+  it("types an item's keys by its item kind's schema, merged down the kind tree (#7067)", async () => {
+    await fetch('/api/v1/inventory/kinds/part', { method: 'PATCH', body: JSON.stringify({ attribute_schema: { type: 'object', properties: { thread: { type: 'string', description: 'Thread size, such as M3' } } } }) })
+    const item = seedItem({ kind_id: 'hardware', name: 'Bolt' })
+    seedEntityProperties(`item:${item.id}`, { thread: 'M3' })
+    const { user } = renderPage(<PropertiesPanel entity={`item:${item.id}`} />)
+
+    const thread = await screen.findByRole('row', { name: /thread/ })
+    expect(within(thread).getByText('Thread size, such as M3')).toBeInTheDocument()
+    await user.type(screen.getByLabelText('New property key'), 'thread_pitch')
+    // The schema came from the item, never from GET /entity-kinds/item/property-schema (409).
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
