@@ -309,8 +309,10 @@ async def copy_output_bytes(
     whole run (up to `workflows.housekeeping.OUTPUT_BYTES_TIMEOUT`, 30 minutes, in the
     sweep; with no bound at a start). It is not taken from the API's pool, so the pool's
     other users keep every connection during a run. It is autocommit, so it is never
-    idle in a transaction and holds no row lock. Closing the connection ends its
-    session, which releases the lock, also when the run fails.
+    idle in a transaction and holds no row lock. The run releases the lock
+    (`pg_advisory_unlock`) before it returns, also when it fails, so
+    `OutputRows.try_cut_over` called next finds it free (#7769). Closing the connection
+    releases it too when that unlock could not run.
 
     After the cut-over mark (#7257, plan D4) it does nothing and returns ``None``. It
     checks the mark before the lock and again once it holds the lock, as the mark may
@@ -341,7 +343,17 @@ async def copy_output_bytes(
         finally:
             # Released here, not by the close: the server frees a closed session's locks a
             # moment later, and `_try_cut_over`, called next, checks both (#7769).
-            await lock.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (BYTES_LOCK,))
+            # A dropped connection's unlock fails; the server freed the lock with the
+            # session, and the run's own outcome must come through.
+            try:
+                await lock.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (BYTES_LOCK,)
+                )
+            except psycopg.Error as e:
+                logger.warning(
+                    "the byte copy's lock could not be released; its closed session frees it",
+                    extra={"error": type(e).__name__},
+                )
 
 
 class _FailedError(Exception):
