@@ -88,8 +88,8 @@ Each fact names where and how it was measured. "Read" means a read of the code o
 9. **The slice price.** `slice_price.py` `price_variant` renders the variant through
    `output_for_reference`, with `source=STOREFRONT`, so the output stays out of Recent
    renders (#6371, merged in 8de2907a9). It slices every plate through
-   `quote.py` `slice_and_price`. `renders.py` `render_estimate` gives no price when the
-   render's slug or commit is no longer the listing's. Read.
+   `quote.py` `slice_and_price`. `renders.py` `render_estimate` gave no price when the
+   render's slug or commit was no longer the listing's (PR 3 added the inputs, §7.2). Read.
 10. **Sell on storefront reads `params` only.** `frontend/src/components/storefront/sellSource.ts`
     takes `job.params` or `output.params`, and the agent's `storefront_listing_draft`
     takes `output.params` (`agent/src/tools/storefront.ts`). Both drop `house`. Read.
@@ -493,27 +493,46 @@ at publish and after Prepare colours) both ask it, so the rule goes there and no
 
 - the job's inputs other than `params` differ from the listing's `snapshot.inputs`, or
   its `v` from `inputs_version`. That is the shop republishing other inputs at the same
-  commit. It extends today's slug-and-commit check (fact 9). The comparison is deep
+  commit. It extends the slug-and-commit check (fact 9), in one function,
+  `pipeline_inputs.py` `shows_design`. It is for a pipeline's listing only: the render of
+  a template with no pipeline is keyed on `params` alone, so one that visitors share may
+  carry another UI's state. The comparison is deep
   equality of the parsed JSON values (Python `==` on the dicts), never of their text:
   a value read from `jsonb` comes back with its keys reordered (backend `CLAUDE.md`,
   #6302), and a text comparison would take a correct firm price away.
 
 `line_prices.py` `price_of` applies the same rule. It is the one caller of `firm_price`,
 for the add and for `reprice` at submit, so a cart line never keeps a firm price for a
-design the listing no longer sells.
+design the listing no longer sells. `variant_at_add` applies it to the visitor's own job.
 
-**The instant read (#6921), a requirement of PR 3.** `renders.py` `instant_variant`, the
+**Several outputs.** Until PR 5, `renders.py` `one_output` (at most one entry in
+`job.outputs`) is asked by `estimate_of`, so by the estimate and the warming, and by
+`variant_at_add`. A variant key is recorded only through `estimate_of`, so the instant
+read and an add from it find no row of such a render. A line of one keeps no variant, so
+the submit prices nothing. The submit has no job to ask: the render is pruned after a day.
+So a line's row says whether its 3MF is the whole render (`storefront_item_prices`
+`every_output`, true on each row written since PR 3), and `price_of` gives a pipeline's
+line no price without it. A line that PR 2 added has the first output's 3MF, whatever else
+its render made. It stays priced by hand, as its customer was told.
+
+**One price for one 3MF.** `price_key` holds no slug and no inputs. That is right for a
+pipeline's variant: the key holds the sha256 of the 3MF that is sliced, each slot's
+filament, the choices and the setup, so the same file made by another template, or before
+the template had a pipeline, has the same price (§7.3). The row keeps the variant key and
+the output of the render that made it: a price is never moved to another variant's key,
+and `output_of` shows no preview of another commit. A template's own `print_settings` are
+not in the key, for any listing ([#7633](https://github.com/eh-homelab/ScadBuddy/issues/7633)).
+
+**The instant read (#6921).** `renders.py` `instant_variant`, the
 cart add without a render (`_priced_variant`) and the preview file (`variant_preview`)
 find a `done` row by `variant_key`. The key holds the listing's `updated_at`, which each
 save and publish changes, so a republish with other inputs is another key and finds no
-old row (PR 2 has the test, with a row planted on the old key). But `output_of` compares
-the output's slug and commit only, and `variant_preview` reads the listing as it is now:
-an old key's URL on a listing republished with other inputs at the same commit would
-still serve the old house. In PR 2 no row has a pipeline's `variant_key`, since only
-`estimate_of` leads to one, so none of the three is reached. PR 3 makes `output_of`
-compare the output's inputs other than `params`, and its `v`, with the snapshot's (deep
-equality, as above), and tests that a republish with other inputs serves
-no old price and no old preview. The `variant_key` of a template with no pipeline must not
+old row. But `output_of` compared the output's slug and commit only, and
+`variant_preview` reads the listing as it is now: an old key's URL on a listing
+republished with other inputs at the same commit would still serve the old house. So
+`output_of` asks `shows_design` too, with the output's inputs. A republish with other
+inputs serves no old price and no old preview, and one with the same inputs still serves
+both by the old key (tested). The `variant_key` of a template with no pipeline does not
 change (PR 2 pins one by its hex).
 
 A job with more than one output is priced over all its outputs (§7.4), not refused and
@@ -562,8 +581,9 @@ names below are read from `main` after that merge:
 - in the storefront, `slice_price.py` `plan_variant(..., printer: PrinterOpening,
   type_presets: Mapping[UUID, Sequence[EffectivePreset]])`, with the presets read by
   `read_type_presets` (`filament_spool_type_presets`, #6262);
-- `slice_profile.py` `slice_request(profile, choices)`, which sends no spools and takes
-  no slot materials. The shop slice profile maps each material to a filament type id
+- `slice_profile.py` `slice_request(profile, choices, remembered)`, which sends no
+  spools and takes no slot materials. `remembered` is the model's remembered print
+  sequence, process overrides and settings per part (#6710 §7.2). The shop slice profile maps each material to a filament type id
   (`slot_types`), and each slot gets that type's presets (`slot_presets`). The slots go
   as `SliceVariant.slot_presets`, then to `resolve(..., slot_presets=)`. The 3MF gives
   the colour.
@@ -580,9 +600,7 @@ adds no field to the key, because the 3MF's sha256 already differs when the inpu
 differ. For several outputs, the key's `model` is the kit digest of §7.4. Publish's `check_sliceable` (`listings.py`, 422
 `listing_material_unsliceable`) applies to a pipeline listing as it is: after #6581 it
 refuses a material with no filament type in the shop slice profile (its text says
-"no filament type for"). #6581 is merged, so
-the work that touches `slice_price.py` or `line_prices.py` can start once this design is
-approved (§11).
+"no filament type for"). PR 3 changed neither `plan_variant` nor `slice_request`.
 
 ### 7.4 A render with several outputs (owner, decision 4)
 
@@ -765,14 +783,21 @@ A listing pins a commit (fact 11). Here that means:
   pipeline case.
 - A visitor's `values` with a key named like an input (`house`) is refused
   `input_outside_listing`, and never reaches `inputs`.
-- PR 2: a pipeline render starts no slice and gets `none` through every path: the
+- PR 2 (its price tests are replaced by PR 3's): a pipeline render starts no slice and
+  gets `none` through every path: the
   estimate, the warming at publish and after Prepare colours (with
   `storefront_warm_prices` on, no `storefront_slice_prices` row), the instant read, the
   add and the submit; also when a `done` row of the same 3MF and filaments exists. A firm
   line whose listing is republished as a pipeline is told at submit (409
   `prices_changed`, `by_hand`).
-- PR 3: `estimate_of` and `price_of`: `none` for a job whose inputs other than `params`
-  differ from the snapshot; the instant read and the preview of §7.2.
+- PR 3 (`tests/api/test_storefront_pipeline_listings.py`,
+  `tests/orders/storefront/test_pipeline_inputs.py`): `estimate_of` and `price_of`:
+  `none` for a job whose inputs other than `params` differ from the snapshot; the instant
+  read and the preview of §7.2; the price of the same 3MF made before the template had a
+  pipeline is the kit's, with no new slice; a line PR 2 added stays by hand at submit, and
+  one added while its slice ran is told of its price; a job of two outputs gets `none` at
+  the warming, the estimate, the instant read, the add and the submit, though a `done`
+  price of its first output's 3MF stands; a kit is one counted render and one slice.
 - PR 3, the slots of a pipeline render: a fixture pipeline that packs two pieces of
   different colours onto two plates. The job's `result.colors` lists every colour of
   both plates in the 3MF's slot order, `result.model_3mf` is the file the slice run
@@ -873,18 +898,20 @@ until the step that makes it safe.
    instant read (§7.2), the slice request through #6581's `plan_variant`
    and `slice_request` (§7.3), and the slice-price test for a pipeline variant. It
    builds on #6581, which is merged (bd5889e76). A job with more than one output still
-   answers `none` in this PR, so a kit is priced by hand until PR 5.
+   answers `none` in this PR, so a kit is priced by hand until PR 5. A migration adds
+   `storefront_item_prices.every_output` (§7.2).
 4. **`feat(storefront): price every output of a pipeline render`** (backend). §7.4:
    `kit_colours`, `slot_map`, `kit_digest` and the `model_digest` cache key;
    `outputs_for_reference` and `storefront_output_id(..., index)`; the `place` keyword of
    `slice_and_price`; `price_variant` over every output; `variant_of`, `store_render` and
    `RenderColours` on the kit's slots; every output's files fetched; §10.1's several-output
-   tests, run through the price path directly. PR 3's `none` for several outputs stays in
-   the estimate route. After 3.
+   tests, run through the price path directly. PR 3's `none` for several outputs
+   (`one_output`) stays in `estimate_of` and `variant_at_add`. After 3.
 5. **`feat(orders): render and print every output of a kit item`** (backend and frontend).
    The order's render saves and attaches every output of the item (by `job_id`), its job
    cost meets every kit slot, and the order page prints each output. This PR removes PR
-   3's `none` for several outputs, so the kit price goes live only with it. After 4.
+   3's `none` for several outputs (`one_output`), so the kit price goes live only with it.
+   `every_output` stays: a line added before PR 3 holds one output's digest for good. After 4.
 6. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
    the "Set up the design" dialog (owner, decision 1), the schema form fallback, Sell's
    inputs, the refusal mapping, `shownParams` over `pipeline_params`, the mocks and the

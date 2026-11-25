@@ -2452,9 +2452,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
   `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
   ones on the render worker, and `listing_reference` writes the snapshot's around the
-  customer's `params`. No render of one is priced until #5701's PR 3: `estimate_of` starts
-  no slice and `line_prices.py` `price_of` finds no firm price, since `price_key` holds no
-  slug and no inputs. A file listing has no `inputs`.
+  customer's `params`. A price, a preview and a cart line are of the listing's design while
+  `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
+  render of several outputs (`renders.py` `one_output`) has no firm price on any path until
+  #5701's PR 5, and a pipeline's cart line needs its row's `every_output`. A file listing has
+  no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`
@@ -2580,7 +2582,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `slice` when that key has a `done` row, else that row's price as `last`, else
   `none`; each read runs `_planned`, whose live rate and printer opening are kept
   `RATE_TTL` per process), `preview` (that row's output, while it is of
-  the listing's slug and commit, as `/api/store/v1/variants/{key}/preview.glb`, which
+  the listing's design (`shows_design`), as `/api/store/v1/variants/{key}/preview.glb`, which
   `…/variants/{key}/preview.glb` streams; 404 `variant_not_found` for none, or when the
   row's listing is not published; never the output id), `render` (the visitor's own render of these choices while it is held) and
   `values`. `last` is never a line's price: `firm_price` and `line_prices.py` read by key
@@ -2597,7 +2599,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   draft view answers each item's `price` (`firm` with `unit_price_minor` and
   `total_minor`, else `by_hand` and no number) and `pay_now` (every item firm). The
   submit prices each line again (`reprice`: a fresh key from the kept variant, no price
-  when the listing is gone, unpublished or at another slug or commit, or a slot
+  when the listing is gone, unpublished or of another design (`shows_design`), or a slot
   filament is gone or archived). A price that changed, came or went is written and
   refused 409 `prices_changed`, with `items` of `{id, price}` (`firm` or `by_hand`), so
   the customer sees a price that went before the shop prices the line; the next submit
