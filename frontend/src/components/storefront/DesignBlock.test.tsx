@@ -51,6 +51,9 @@ function Harness({ start = {}, schema = SCHEMA, refusal = null, seen = [] }: { s
       <button type="button" onClick={() => setDraft({ ...draft, commit: 'f'.repeat(40) })}>
         Another version
       </button>
+      <button type="button" onClick={() => setDraft({ ...draft, inputs: structuredClone(draft.inputs) })}>
+        Same inputs again
+      </button>
       <DesignBlock
         draft={draft}
         onChange={(next) => {
@@ -131,6 +134,11 @@ describe('the Design block (#5701 §5.1)', () => {
     expect(seen.at(-1)?.inputs).toEqual({ house: HOUSE })
   })
 
+  it('leaves a refusal of another code under its own parameter', () => {
+    renderPage(<Harness start={SET} refusal={{ kind: 'param', code: 'default_invalid', name: 'piece', detail: 'no' }} />)
+    expect(within(block()).queryByRole('alert')).toBeNull()
+  })
+
   it('shows a refusal of a parameter the design sets, which has no row', () => {
     renderPage(<Harness start={SET} refusal={{ kind: 'param', code: 'pipeline_set', name: 'piece', detail: 'no' }} />)
     expect(within(block()).getByRole('alert')).toHaveTextContent('the design sets “Piece” itself')
@@ -151,7 +159,9 @@ describe('"Set up the design" (#5701 §5.2, §5.3)', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(seen.at(-1)).toMatchObject({ inputs: { house: { ...HOUSE, cols: 4 } }, inputs_v: 1, fixed: { course_height: 240 } })
     expect(seen.at(-1)?.inputs).not.toHaveProperty('params')
-    // The template's own words, while these are the inputs.
+    // The template's own words, while these are the inputs, even as a copy (a save's answer).
+    expect(block()).toHaveTextContent('4×1-module house')
+    await user.click(screen.getByText('Same inputs again'))
     expect(block()).toHaveTextContent('4×1-module house')
   })
 

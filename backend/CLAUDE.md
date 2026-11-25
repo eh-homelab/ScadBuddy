@@ -127,8 +127,10 @@ headless saves no form data to find: it needs a `DISPLAY` (`xvfb-run -a`, as CI'
 `profile-fetch-image` job runs it) and skips without one unless that variable is set.
 Playwright is pinned exactly in the
 `profile-fetch` dependency group, which `dev` includes.
-Under pytest-xdist each worker makes its schemas in a database of its own
-(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+Under pytest-xdist each worker works in databases of its own: `<test db>_gw<N>`
+(`tests/conftest.py::_pg_database_url`), one migrated template made from it
+(`_pg_template`), and a clone of that template per test (`pg_conninfo`; an empty database
+for a test marked `pg_empty`), all named after `<test db>_gw<N>`. That is
 because advisory locks and NOTIFY channels are per database: workers sharing one would
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
@@ -177,7 +179,7 @@ an app whose renders never run uses `tests.conftest.UNUSED_TEMPORAL_ADDRESS`.
 `tests/api` renders on Temporal too, and skips without one: one dev server per session
 (`tests/api/conftest.py::temporal_address`), and each test's app runs its own in-process
 worker on a task queue of its own (the api `settings` fixture), because every test has
-its own data directory and schema. The render is the real pipeline behind the fake
+its own data directory and database (a clone of the migrated template, `pg_conninfo`). The render is the real pipeline behind the fake
 openscad (`FAKE_3MF`, `FAKE_STDERR` in `fake-env.json`; `width=999` fails). Every
 test's queue registers with one worker-deployment version, so the dev server raises
 `matching.maxTaskQueuesInDeploymentVersion` past Temporal's default of 100 (past it,
@@ -2666,7 +2668,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   §7.4): a sha256 of the file the slice reads (the render's 3MF content, or a file
   listing's pinned sha256), the subject's kind (`key_subject`), the price-book filament per
   slot (its slot, id, material, cost, colour, and its type's preset it is sliced with), the
-  profile, the choices, the remembered setup (`key_setup`), and the
+  profile, the choices, the remembered setup (`key_setup`; for a render also the template's
+  own `print_settings` and `part_print_settings`, each only when not empty, read once in
+  `planned_variant` and carried to the run as `SliceVariant.template_settings`, which the
+  slice takes in place of a live read, #7633), and the
   book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
   read again at most once a minute per process, `RATE_TTL`, and carried to the run,
   `SliceVariant.machine_rate`). Any change is a new

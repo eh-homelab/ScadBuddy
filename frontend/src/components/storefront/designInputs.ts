@@ -336,17 +336,27 @@ export function fieldValues(groups: readonly FieldGroup[], inputs: Readonly<Reco
   return values
 }
 
-/** The inputs the form's `values` (by path) make. An object nobody needs stays out while nothing in it is set. */
-export function fieldInputs(groups: readonly FieldGroup[], values: Readonly<Record<string, unknown>>): JsonObject {
-  const inputs: JsonObject = {}
+/**
+ * The inputs the form's `values` (by path) make, over `base`, the inputs it opened on: what the
+ * form draws comes from its fields (a field left empty is left out), and what it cannot draw
+ * (a deeper object, a list of objects) stays as it was. An object nobody needs stays out while
+ * nothing in it is set.
+ */
+export function fieldInputs(groups: readonly FieldGroup[], values: Readonly<Record<string, unknown>>, base: Readonly<Record<string, unknown>> = {}): JsonObject {
+  const inputs: JsonObject = { ...(base as JsonObject) }
   for (const group of groups) {
     const own = Object.fromEntries(group.fields.filter((field) => Object.hasOwn(values, field.name)).map((field) => [field.name, values[field.name]])) as JsonObject
     if (group.title === null) {
+      for (const field of group.fields) delete inputs[field.name]
       Object.assign(inputs, own)
       continue
     }
     const inner = Object.fromEntries(Object.entries(own).map(([path, value]) => [path.slice(group.key.length + 1), value])) as JsonObject
-    if (group.required || Object.values(inner).some((value) => value !== false)) inputs[group.key] = inner
+    const before = base[group.key]
+    const drawn = new Set(group.fields.map((field) => field.name.slice(group.key.length + 1)))
+    const kept = isJsonObject(before) ? Object.fromEntries(Object.entries(before).filter(([key]) => !drawn.has(key))) : {}
+    delete inputs[group.key]
+    if (group.required || Object.keys(kept).length > 0 || Object.values(inner).some((value) => value !== false)) inputs[group.key] = { ...(kept as JsonObject), ...inner }
   }
   return inputs
 }
