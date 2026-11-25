@@ -49,6 +49,14 @@ class BindWithoutUidError(ValueError):
 #: How old a backup may be and still cover a write (#7273 R5).
 BACKUP_TTL: Final = timedelta(minutes=10)
 
+#: How long an armed job runs: arming sets its ``expires_at`` this far ahead, so the time
+#: that ended the wait for a page never ends a run early (`claim_job`, #7419 review).
+ARM_SECONDS: Final = 60
+
+#: How often an AMS report may mark the same tag seen again (`seen_on`): a report write
+#: inside it changes nothing it would write, so it skips the UPDATE.
+AMS_SEEN_THROTTLE_SECONDS: Final = 60
+
 
 class NoUidError(ValueError):
     """A backup of a tag with no UID."""
@@ -158,7 +166,9 @@ def draft_of(conn: Conn, decoded: m.DecodedSpool) -> m.SpoolCreate | None:
         return m.SpoolCreate.model_validate(values)
     except ValidationError as exc:
         for error in exc.errors():
-            values.pop(str(error["loc"][0]), None)
+            # An empty `loc` is a model-level error: no one field to leave out.
+            if error["loc"]:
+                values.pop(str(error["loc"][0]), None)
     return m.SpoolCreate.model_validate(values)
 
 
@@ -166,17 +176,27 @@ def seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]:
     """``(tag_id, holder_spool_id)`` of a reading, on ``conn``'s transaction, with the
     tag marked seen. A phone or an agent with a UID makes the tag; an AMS report only
     finds it. An AMS report skips the mark when the tag row is locked: its caller holds
-    spools, and binding locks the tag before them, so waiting could deadlock."""
+    spools, and binding locks the tag before them, so waiting could deadlock. An AMS mark
+    keeps the records a phone or an agent last read, and is skipped when the tag was last
+    seen by an AMS within `AMS_SEEN_THROTTLE_SECONDS`, since it would change nothing."""
     uid = clean_tag_uid(read.uid)
     tray = clean_tray_uuid(read.tray_uuid)
     if read.source == "ams":
         tag_id = _find(conn, uid, tray)
         if tag_id is not None:
             locked = conn.execute(
-                "SELECT id FROM filament_tags WHERE id = %s FOR UPDATE SKIP LOCKED", (tag_id,)
+                "SELECT id FROM filament_tags WHERE id = %s"
+                " AND (last_seen_source IS DISTINCT FROM 'ams' OR last_seen_at IS NULL"
+                " OR last_seen_at < now() - make_interval(secs => %s))"
+                " FOR UPDATE SKIP LOCKED",
+                (tag_id, AMS_SEEN_THROTTLE_SECONDS),
             ).fetchone()
             if locked is not None:
-                _mark(conn, tag_id, read)
+                conn.execute(
+                    "UPDATE filament_tags SET last_seen_at = now(), last_seen_source = 'ams'"
+                    " WHERE id = %s",
+                    (tag_id,),
+                )
     elif uid is None:
         return None, None
     else:
@@ -624,10 +644,17 @@ def _job_of(row: dict[str, Any]) -> m.NfcJob:
 
 
 def expire_jobs(conn: Conn) -> None:
-    """End every open job whose time is up. Every job function runs it first."""
+    """End every open job whose time is up. Every job function runs it first. An armed job
+    whose ``agent_write`` backup exists has begun its write, so it is left for
+    `finish_job` to end with the result whenever it comes (#7419 review), until that
+    backup is past `BACKUP_TTL` and can no longer cover the write."""
     conn.execute(
-        "UPDATE filament_nfc_jobs SET state = 'expired'"
-        " WHERE state IN ('pending', 'armed') AND expires_at <= now()"
+        "UPDATE filament_nfc_jobs AS j SET state = 'expired'"
+        " WHERE j.state IN ('pending', 'armed') AND j.expires_at <= now()"
+        " AND NOT (j.state = 'armed' AND EXISTS (SELECT 1 FROM filament_tag_backups AS b"
+        " WHERE b.job_id = j.id AND b.reason = 'agent_write'"
+        " AND b.at > now() - make_interval(secs => %s)))",
+        (BACKUP_TTL.total_seconds(),),
     )
 
 
@@ -693,7 +720,8 @@ def claim_job(
     job in any other state, so one page runs it; `NfcJobNotFoundError` for no such job. A
     write job is armed only with the hash of its records (#7273 R22): a missing or other
     one is `RecordsMismatchError`, and the job stays pending. A read job takes no hash
-    (`RecordsHashNotTakenError`)."""
+    (`RecordsHashNotTakenError`). Arming sets ``expires_at`` `ARM_SECONDS` ahead: the run
+    has its own time, whatever was left of the wait."""
     sent = None if body is None else body.records_sha256
     with spools.transaction() as conn:
         expire_jobs(conn)
@@ -706,9 +734,10 @@ def claim_job(
         elif sent != m.records_sha256(job.records):
             raise RecordsMismatchError()
         row = conn.execute(
-            "UPDATE filament_nfc_jobs SET state = 'armed', armed_by = %s WHERE id = %s"
+            "UPDATE filament_nfc_jobs SET state = 'armed', armed_by = %s,"
+            " expires_at = now() + make_interval(secs => %s) WHERE id = %s"
             f" RETURNING {_JOB_COLUMNS}",
-            (actor, job_id),
+            (actor, ARM_SECONDS, job_id),
         ).fetchone()
     assert row is not None
     return _job_of(row)

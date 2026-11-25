@@ -26,6 +26,8 @@ const STOPPED_WAITING = 'The agent stopped waiting.'
 const EXPIRED = 'expired'
 /** The reason a run is stopped with when the server ended the job another way (R23: the agent cancelled it). */
 const ENDED = 'ended'
+/** The steps after the backup: the write has begun, so the server takes its result whenever it comes (#7419 review). */
+const WRITE_BEGUN: ReadonlySet<Phase> = new Set(['writing', 'reading_back', 'tap_again'])
 /** How many bytes of a record the page shows as hex; it says how many more there are. */
 const HEX_PREVIEW_BYTES = 64
 
@@ -168,7 +170,11 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       const running = stop.current
       if (running?.id !== armedId) return
       getNfcJob(armedId).then(
-        (now) => now.state !== 'armed' && running.controller.abort(now.state === 'expired' ? EXPIRED : ENDED),
+        (now) => {
+          if (now.state !== 'armed') running.controller.abort(now.state === 'expired' ? EXPIRED : ENDED)
+          // The page follows the job's current `expires_at`: arming moved it.
+          else setRun((shown) => (shown?.job.id === now.id ? { ...shown, job: now } : shown))
+        },
         () => {},
       )
     }
@@ -179,7 +185,9 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
 
   const job = run?.job ?? pending.find((one) => !gone.includes(one.id)) ?? null
   const left = job ? Date.parse(job.expires_at) - now : 0
-  const expired = job !== null && left <= 0
+  // Once the write has begun, 0:00 ends nothing: the server waits for its result.
+  const begun = run !== null && WRITE_BEGUN.has(run.phase)
+  const expired = job !== null && left <= 0 && !begun
 
   const shownId = job?.id ?? null
   useEffect(() => {
@@ -202,7 +210,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
     }
   }, [recordsKey, hash])
 
-  // At 0:00 a running job stops: the server has ended it.
+  // At 0:00 a running job stops before its write begins: the server has ended it.
   useEffect(() => {
     if (expired && run) stop.current?.controller.abort(EXPIRED)
   }, [expired, run])
@@ -219,11 +227,10 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
     reload()
   }
 
-  /** Claims `job` for this page; on a refusal, says why and answers false. */
-  async function claim(target: NfcJob, sha: string | null): Promise<boolean> {
+  /** Claims `job` for this page and answers it as armed (its `expires_at` moved); on a refusal, says why and answers null. */
+  async function claim(target: NfcJob, sha: string | null): Promise<NfcJob | null> {
     try {
-      await claimNfcJob(target.id, sha ? { records_sha256: sha } : {})
-      return true
+      return await claimNfcJob(target.id, sha ? { records_sha256: sha } : {})
     } catch (cause) {
       setRun(null)
       const code = codeOf(cause)
@@ -235,7 +242,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
         setNotice(STOPPED_WAITING)
       } else setNotice(`ScadBuddy could not arm the job: ${detailOf(cause)}.`)
       announce.current?.(code === 'records_mismatch' ? CHANGED : code === 'job_not_pending' ? STOPPED_WAITING : 'The job was not armed.')
-      return false
+      return null
     }
   }
 
@@ -263,8 +270,9 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
         say(`NFC could not start: ${detailOf(cause)}. Nothing was armed.`)
         return
       }
-      if (!(await claim(target, sha))) return
-      setRun({ job: target, phase: 'tap' })
+      const armed = await claim(target, sha)
+      if (!armed) return
+      setRun({ job: armed, phase: 'tap' })
       if (target.kind === 'read') {
         let reading
         try {
@@ -304,7 +312,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       jobId: target.id,
       prepare: async () => records,
       confirm: (_now, backupId, _sent, back) => postNfcJobResult(target.id, { uid: back.uid, records: back.records, backup_id: backupId }).then(() => null),
-      onStep: (phase) => !signal.aborted && setRun({ job: target, phase }),
+      onStep: (phase) => !signal.aborted && setRun((shown) => (shown?.job.id === target.id ? { ...shown, phase } : { job: target, phase })),
       signal,
     })
     if (outcome.status === 'checked') {
@@ -363,7 +371,9 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
         <>
           <div className="flex items-baseline justify-between gap-3">
             <span className="font-semibold text-primary">Agent job</span>
-            <span className={cn('tabular-nums', expired ? 'font-semibold text-warn' : 'text-muted-foreground')}>{expired ? 'Expired' : `Expires in ${clockOf(left)}`}</span>
+            <span className={cn('tabular-nums', expired ? 'font-semibold text-warn' : 'text-muted-foreground')}>
+              {expired ? 'Expired' : begun && left <= 0 ? 'Finishing the write' : `Expires in ${clockOf(left)}`}
+            </span>
           </div>
           <h2 className="text-base font-semibold tracking-tight">{job.kind === 'read' ? 'Agent wants to read a tag' : `Agent wants to write ${count} ${count === 1 ? 'record' : 'records'}`}</h2>
           {job.records && (

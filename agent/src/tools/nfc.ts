@@ -32,20 +32,30 @@ const ROUTES = [
 
 type Job = { id: string; state: string; expires_at: string; result?: Record<string, unknown> | null }
 
+/** How long an armed run has: the backend's `ARM_SECONDS` (filament/tags.py), which arming sets `expires_at` to. */
+const ARM_MS = 60_000
+/**
+ * How long past an armed job's `expires_at` the wait goes on. The backend never expires an armed job whose
+ * write has begun (its backup exists, #7419 review), so its result may come after that time; this bounds the wait.
+ */
+const ARMED_MARGIN_MS = 60_000
+
 /**
  * Queue the job, then wait as activity_watch does until it ends, the call is aborted or the
- * job's own time is up. The wait runs to the server's `expires_at` and one poll past it
- * (#7273 I1), so the answer is the job's real state, never a guess. A job still open then, or
- * when the call is aborted, is cancelled first, so no page can arm it later (M1).
+ * job's own time is up. The wait follows the job's current `expires_at` as each read answers it
+ * (arming moves it), to one poll past it (#7273 I1), so the answer is the job's real state, never
+ * a guess. An armed job may still be open past it while its write finishes, so the wait goes on to
+ * `ARMED_MARGIN_MS` past it. A job still open then, or when the call is aborted, is cancelled
+ * first, so no page can arm it later (M1).
  */
 async function runJob(ctx: ToolContext, body: { kind: 'read' | 'write'; ttl_s: number; records?: z.infer<typeof RECORD>[] }) {
   const made: Job = await ok(ctx.backend.POST('/api/v1/filament/nfc-jobs', { body }), `queue an NFC ${body.kind}`)
   const job_id = made.id
   const path = { params: { path: { job_id } } }
   const read = async () => ok(ctx.backend.GET('/api/v1/filament/nfc-jobs/{job_id}', path), `read NFC job ${job_id}`)
-  const deadline = Date.parse(made.expires_at) + ctx.pollIntervalMs
+  const deadline = (job: Job) => Date.parse(job.expires_at) + (job.state === 'armed' ? ARMED_MARGIN_MS : ctx.pollIntervalMs)
   let found: Job = made
-  while (!ENDED.has(found.state) && Date.now() < deadline && !ctx.signal.aborted) {
+  while (!ENDED.has(found.state) && Date.now() < deadline(found) && !ctx.signal.aborted) {
     try {
       await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
     } catch (err) {
@@ -82,7 +92,7 @@ export const nfcTools = [
     risk: 'write',
     source: SOURCE,
     routes: ROUTES,
-    waitsMs: ({ timeout_s }) => timeout_s * 1000,
+    waitsMs: ({ timeout_s }) => timeout_s * 1000 + ARM_MS + ARMED_MARGIN_MS,
     handler: async ({ timeout_s }, ctx) => runJob(ctx, { kind: 'read', ttl_s: timeout_s }),
   }),
   defineTool({
@@ -98,7 +108,7 @@ export const nfcTools = [
     approval: 'none',
     source: SOURCE,
     routes: ROUTES,
-    waitsMs: ({ timeout_s }) => timeout_s * 1000,
+    waitsMs: ({ timeout_s }) => timeout_s * 1000 + ARM_MS + ARMED_MARGIN_MS,
     handler: async ({ records, timeout_s }, ctx) => runJob(ctx, { kind: 'write', records, ttl_s: timeout_s }),
   }),
 ]

@@ -144,6 +144,51 @@ def test_an_ams_read_of_a_bound_tray_marks_it_seen(pg_pool: PgPool) -> None:
     assert holder == spool and _tag(pg_pool, tag_id)["last_seen_source"] == "ams"
 
 
+def test_an_ams_read_keeps_what_a_phone_read_and_skips_an_unchanged_mark(
+    pg_pool: PgPool,
+) -> None:
+    # #7419 review: an AMS sighting keeps `last_seen_records`, and a second one within
+    # `AMS_SEEN_THROTTLE_SECONDS` writes nothing.
+    store = FilamentSpoolStore(pg_pool)
+    record = NdefRecord(record_type="mime", data_hex="7b7d")
+    spool = _spool(store, pg_pool)
+    store.bind_tag(spool, tag_uid="04AA", kind="other", actor="ann")
+    read = tags.read(
+        store,
+        TagRead(source="phone", uid="04AA", records=(record,)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert read.tag is not None
+    with store.transaction() as conn:
+        tags.seen_on(conn, TagRead(source="ams", uid="04AA"))
+    first = _tag(pg_pool, read.tag.id)
+    assert first["last_seen_source"] == "ams"
+    assert first["last_seen_records"][0]["data_hex"] == "7b7d"
+    with pg_pool.connection() as conn:
+        xmin = conn.execute(
+            "SELECT xmin::text AS x FROM filament_tags WHERE id = %s", (read.tag.id,)
+        ).fetchone()
+    with store.transaction() as conn:
+        tags.seen_on(conn, TagRead(source="ams", uid="04AA"))
+    with pg_pool.connection() as conn:
+        again = conn.execute(
+            "SELECT xmin::text AS x FROM filament_tags WHERE id = %s", (read.tag.id,)
+        ).fetchone()
+    assert xmin == again
+    assert _tag(pg_pool, read.tag.id)["last_seen_at"] == first["last_seen_at"]
+    # Past the throttle the mark is written again.
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_tags SET last_seen_at = now() - make_interval(secs => %s)"
+            " WHERE id = %s",
+            (tags.AMS_SEEN_THROTTLE_SECONDS + 1, read.tag.id),
+        )
+    with store.transaction() as conn:
+        tags.seen_on(conn, TagRead(source="ams", uid="04AA"))
+    assert _tag(pg_pool, read.tag.id)["last_seen_at"] > first["last_seen_at"]
+
+
 def test_the_inventory_finds_a_tray_holder_through_the_same_lookup(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     spool = _spool(store, pg_pool)
@@ -500,6 +545,72 @@ def test_expire_jobs_ends_open_jobs_past_their_time(pg_pool: PgPool) -> None:
         armed: "expired",
         later: "pending",
     }
+
+
+def _age_job(pool: PgPool, job: UUID) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE filament_nfc_jobs SET expires_at = now() - interval '1 second' WHERE id = %s",
+            (job,),
+        )
+
+
+def test_a_write_whose_time_ends_after_its_backup_still_takes_its_result(
+    pg_pool: PgPool,
+) -> None:
+    # #7419 review: the page backed the tag up and wrote it; the result comes after the
+    # job's time. The write has begun, so the job is not expired and takes the result.
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    backup = tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    _age_job(pg_pool, job)
+    with store.transaction() as conn:
+        tags.expire_jobs(conn)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "armed"
+    done = tags.finish_job(
+        store,
+        job,
+        NfcJobResultIn(
+            uid="04AA",
+            records=[NdefRecord(record_type="mime", data_hex="7b7d")],
+            backup_id=backup.id,
+        ),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert done.state == "done" and done.result is not None
+    assert done.result["backup_id"] == str(backup.id)
+
+
+def test_an_armed_job_with_no_backup_past_its_time_expires(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    # Another job's backup does not keep this one open.
+    other = _armed_job(store)
+    tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=other), actor="ann"
+    )
+    _age_job(pg_pool, job)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "expired"
+    with pytest.raises(tags.JobNotArmedError):
+        tags.finish_job(store, job, NfcJobResultIn(error="x"), actor="ann", defaults=DEFAULTS)
+
+
+def test_arming_gives_the_run_its_own_time(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = tags.create_job(store, NfcJobIn(kind="read", ttl_s=5), actor="agent")
+    armed = tags.claim_job(store, job.id, None, actor="ann")
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT now() AS now").fetchone()
+    assert row is not None
+    left = (armed.expires_at - row["now"]).total_seconds()
+    assert tags.ARM_SECONDS - 5 < left <= tags.ARM_SECONDS
+    found = tags.get_job(store, job.id)
+    assert found is not None and found.expires_at == armed.expires_at
 
 
 def test_a_write_job_checks_the_read_back(pg_pool: PgPool) -> None:

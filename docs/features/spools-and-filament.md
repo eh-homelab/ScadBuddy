@@ -179,7 +179,9 @@ records in the tag's own format (else the `filament_tag_format` setting), reads 
 and binds it only when the read-back equals what was sent. Every write keeps a backup, which
 the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
 `nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
-and holds a tag.
+and holds a tag. Arming gives the run 60 seconds of its own (`ARM_SECONDS`). Once the page has
+backed the tag up for a write, the job no longer expires at that time: it takes the write's
+result when it comes, and the agent waits for it.
 
 ### Properties (#7026)
 

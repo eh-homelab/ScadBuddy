@@ -22,7 +22,9 @@ type S = components['schemas']
  * write's time. Both check the backup before they look the spool up, as the routes do.
  *
  * The agents' NFC jobs (`tags.py` `claim_job`, `finish_job`, `cancel_job`) live in memory too;
- * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request. A read
+ * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request, but for an
+ * armed one whose `agent_write` backup exists (its write has begun); arming sets `expires_at`
+ * `ARM_SECONDS` ahead. A read
  * job's result is the reading's answer, as `/tags/reads` gives it, with the tag marked seen by
  * the agent.
  */
@@ -128,10 +130,15 @@ export function seedNfcJob(job: { kind: Job['kind']; records?: S['NdefRecord'][]
   return made
 }
 
-/** `expire_jobs`: every open job whose time is up ends as `expired`. */
+/** `ARM_SECONDS`: how long an armed run has. */
+const ARM_MS = 60_000
+
+/** `expire_jobs`: every open job whose time is up ends as `expired`, but for an armed one whose write began (its backup exists). */
 function expireJobs() {
   const now = Date.now()
-  for (const job of jobs) if ((job.state === 'pending' || job.state === 'armed') && Date.parse(job.expires_at) <= now) job.state = 'expired'
+  const begun = (job: Job) =>
+    job.state === 'armed' && backups.some((one) => one.job_id === job.id && one.reason === 'agent_write' && now - Date.parse(one.at) <= BACKUP_TTL_MS)
+  for (const job of jobs) if ((job.state === 'pending' || job.state === 'armed') && Date.parse(job.expires_at) <= now && !begun(job)) job.state = 'expired'
 }
 
 const jobOf = (id: string) => {
@@ -215,7 +222,7 @@ export const handlers = [
     if (job.records === null) {
       if (sha !== null) return problem(422, 'a read job takes no records_sha256', 'records_sha256_not_taken')
     } else if (sha?.toLowerCase() !== (await recordsSha256(job.records))) return conflict('records_mismatch', 'the records are not the ones the page showed')
-    Object.assign(job, { state: 'armed', armed_by: 'owner@example.com' })
+    Object.assign(job, { state: 'armed', armed_by: 'owner@example.com', expires_at: new Date(Date.now() + ARM_MS).toISOString() })
     return HttpResponse.json(job)
   }),
   http.post(`${BASE}/nfc-jobs/:id/cancel`, ({ params }) => {

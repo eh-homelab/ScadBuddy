@@ -426,6 +426,23 @@ describe('NfcJobBanner (#7273)', () => {
     expect(screen.queryByRole('heading', { name: /Agent wants/ })).toBeNull()
   })
 
+  it('neither stops nor says Expired when the time ends after the backup (#7419 review)', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const { user, onAnnounce } = render()
+    await user.click(await armButton())
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    stub.tap({ serialNumber: UID, records: [OLD] })
+    await waitFor(() => expect(stub.writes).toHaveLength(1))
+    // The job's time ends while the tag is read back; the page reads the job's new `expires_at`.
+    job.expires_at = new Date(Date.now() - 1000).toISOString()
+    expect(await screen.findByText('Finishing the write', {}, { timeout: 3500 })).toBeInTheDocument()
+    expect(screen.queryByText('Expired')).toBeNull()
+    expect(onAnnounce).not.toHaveBeenCalledWith('Expired. Nothing was bound.')
+    stub.tap(tapOf(UID, RECORDS))
+    expect(await screen.findByText('Written and checked.')).toBeInTheDocument()
+    expect(onAnnounce).toHaveBeenLastCalledWith('Agent job done: Written and checked.')
+  }, 10_000)
+
   it('says Expired at 0:00', async () => {
     seedNfcJob({ kind: 'read', ttl_s: 1 })
     render()

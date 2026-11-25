@@ -134,9 +134,10 @@ describe('NFC job tools', () => {
   it('cancels a job still open past its expires_at and answers what the server then says', async () => {
     // #7273 M1: no page may arm the job once the agent stopped waiting for it.
     let cancelled = false
+    const expires_at = new Date(Date.now() + 100).toISOString()
     server.use(
-      http.post(JOBS, () => HttpResponse.json(job('pending', {}, 100), { status: 201 })),
-      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job(cancelled ? 'cancelled' : 'armed'))),
+      http.post(JOBS, () => HttpResponse.json(job('pending', { expires_at }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job(cancelled ? 'cancelled' : 'pending', { expires_at }))),
       http.post(`${JOBS}/${JOB}/cancel`, () => {
         cancelled = true
         return HttpResponse.json(job('cancelled'))
@@ -145,6 +146,28 @@ describe('NFC job tools', () => {
     const got = await runTool(tool('nfc_read'), { timeout_s: 1 }, { ...ctx(), pollIntervalMs: 20 })
     expect(cancelled).toBe(true)
     expect(firstText(got)).toEqual({ job_id: JOB, state: 'cancelled', result: null })
+  })
+
+  it('answers the done result of a write that finished after the first expires_at', async () => {
+    // #7419 review: arming moves expires_at, and a write that began is not expired at it.
+    const made = Date.now()
+    const first = new Date(made + 100).toISOString()
+    const armed = new Date(made + 300).toISOString()
+    const result = { uid: '04AA', records: [REC], backup_id: 'b' }
+    let cancels = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC], expires_at: first }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () =>
+        HttpResponse.json(Date.now() - made < 700 ? job('armed', { kind: 'write', expires_at: armed }) : job('done', { kind: 'write', expires_at: armed, result })),
+      ),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json(job('cancelled'))
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), pollIntervalMs: 50 })
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+    expect(cancels).toBe(0)
   })
 
   it('cancels the job when the call is aborted', async () => {
