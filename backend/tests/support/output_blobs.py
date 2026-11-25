@@ -4,6 +4,7 @@ local content store."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 from collections.abc import AsyncIterator
@@ -18,7 +19,7 @@ from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import OutputBlobs
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.jobs import Job
-from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.store.content import ContentStore
 from tests.support.arrange import finished_job
 from tests.support.row_outputs import output_store
 from tests.support.store import store_pool
@@ -32,8 +33,9 @@ async def put_folder_at_keys(
     take their objects in the row's transaction instead (`OutputRows.insert`)."""
     got = await blobs.put_folder(directory, output_id, slug)
     for item in got.staged:
-        await blobs.content.link(item.key, item.ref, scope=BlobScope(slug=slug))
-    await blobs.drop_staged(got)
+        await asyncio.to_thread(
+            blobs.content.index.put, item.key, item.ref, slug=slug, meta={}, reuse=item.reused
+        )
     return dataclasses.replace(got, staged=())
 
 

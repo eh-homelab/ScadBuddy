@@ -34,6 +34,8 @@ from scadbuddy.store.content_models import BlobRef, ReuseLostError
 from scadbuddy.store.index import BlobIndex
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from scadbuddy.library.outputs import OutputMeta
 
 logger = logging.getLogger(__name__)
@@ -57,15 +59,6 @@ def staged_thumbnail_key(output_id: str, sha256: str) -> str:
     `output_blob_key` ``thumbnail`` (`OutputRows.keep_thumbnail`). Nothing holds it, so
     the sweep removes its row after the grace."""
     return f"output-{output_id}-thumbnail-{sha256}"
-
-
-def staged_save_key(key: str, attempt: str) -> str:
-    """The key a save puts the bytes of ``key`` under before its row's transaction points
-    ``key`` at them (`OutputBlobs.staged`). ``attempt`` is the save's own, so a save that
-    fails on the id writes no key the output it lost to reads. Nothing holds it: the save
-    deletes it once its row committed or failed, else the sweep removes it after the
-    grace."""
-    return f"{key}-save-{attempt}"
 
 
 def plate_cover_prefix(output_id: str) -> str:
@@ -118,12 +111,16 @@ class OutputFileBlob:
 
 @dataclass(frozen=True)
 class StagedBlob:
-    """A save's put: the object ``ref``, put under ``staged_key`` (`staged_save_key`),
-    that the output's ``key`` takes in the row's transaction."""
+    """A save's put: the object ``ref``, uploaded with no index row
+    (`ContentStore.stage`), that the output's ``key`` takes in the row's transaction.
+    ``reused``: an existing object another row names, which that transaction holds
+    (`BlobIndex.put_in` ``reuse``). ``path`` is the file it was read from, for the save's
+    own copy when the sweep freed a reused object first (`OutputBytes.own_copies`)."""
 
     key: str
-    staged_key: str
     ref: BlobRef
+    reused: bool
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -401,9 +398,9 @@ def _set_blob(conn: Connection[DictRow], output_id: str, role: Role, key: str) -
     return True
 
 
-#: What a thumbnail step runs again after, as `BlobIndex.retrying` runs an index write
-#: again: Postgres broke a deadlock with it (`BlobIndex.put_in` can still take a hold out
-#: of key order), or a serialization failure.
+#: What a thumbnail step or a save's row runs again after, as `BlobIndex.retrying` runs an
+#: index write again: Postgres broke a deadlock with it (`BlobIndex.put_in` can still take
+#: a hold out of key order), or a serialization failure.
 _RETRIED: tuple[type[Exception], ...] = (DeadlockDetected, SerializationFailure)
 _ATTEMPTS = 3
 
@@ -424,7 +421,7 @@ def _retrying[T](
                 if attempt == _ATTEMPTS:
                     raise
                 logger.warning(
-                    "retrying a thumbnail step Postgres picked as a deadlock's victim",
+                    "retrying an output step Postgres picked as a deadlock's victim",
                     extra={"output_id": output_id, "attempt": attempt},
                 )
     raise AssertionError("unreachable")
@@ -450,14 +447,17 @@ def _insert(
         # Another row holds the id: the plain insert raises its `UniqueViolation`. (If
         # that row went meanwhile, the insert adds the save's row.)
         conn.execute(_INSERT, values)
-    # Only now, with the row the save's, do its keys take the objects it put. A key
-    # named another object before (the copy's put of the same folder) is released by the
-    # caller after the commit. `ReuseLostError`: a staged object was freed first, and the
-    # save fails.
+    # Only now, with the row the save's, do its keys take the objects it put: their index
+    # rows are written here, in this one transaction (#7477), in key order as `mark` locks
+    # them. A key named another object before (the copy's put of the same folder) is
+    # released by the caller after the commit. `ReuseLostError`: a reused object was freed
+    # first; the transaction rolls back whole and the caller puts its own copies.
     replaced: list[tuple[str, BlobRef]] = []
     index = BlobIndex(pool)
-    for staged in blobs.staged:
-        previous = index.put_in(conn, staged.key, staged.ref, slug=row.slug, meta={}, reuse=True)
+    for staged in sorted(blobs.staged, key=lambda item: item.key):
+        previous = index.put_in(
+            conn, staged.key, staged.ref, slug=row.slug, meta={}, reuse=staged.reused
+        )
         if previous is not None and previous.backend_id != staged.ref.backend_id:
             replaced.append((staged.key, previous))
     # A row the save took over from the copy keeps nothing of the copy's bytes: its
@@ -662,12 +662,20 @@ class OutputRows:
         has not committed yet; any other row with that id is a `UniqueViolation`, and
         then nothing is written and no key moves. With ``conn``, inside its transaction.
 
+        Without ``conn``, a deadlock or a serialization failure runs the transaction again
+        whole (`_retrying`): its index rows are the save's, all in it (#7477). The last
+        attempt's error propagates, and no key moved.
+
         Returns each key that named another object before and that object, which the
         caller releases after the commit (`OutputBytes.release_replaced`)."""
         if conn is not None:
             return _insert(conn, self._pool, row)
-        with self._pool.connection() as own, own.transaction():
-            return _insert(own, self._pool, row)
+
+        def step(own: Connection[DictRow]) -> list[tuple[str, BlobRef]]:
+            with own.transaction():
+                return _insert(own, self._pool, row)
+
+        return _retrying(self._pool, row.output_id, step)
 
     def drop_copied(self, output_id: str, slug: str) -> None:
         """Delete the row the copy wrote of the folder ``<slug>/<output_id>``, and its byte

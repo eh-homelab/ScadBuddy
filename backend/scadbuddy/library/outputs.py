@@ -76,7 +76,12 @@ from scadbuddy.render.job_models import (
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef
+from scadbuddy.store.content import (
+    BlobCorruptError,
+    BlobMissingError,
+    BlobRef,
+    ReuseLostError,
+)
 
 if TYPE_CHECKING:
     from scadbuddy.library.output_prints import LastPrint, OutputPrintStore
@@ -143,6 +148,23 @@ class RoleRead:
 
     path: Path | None
     sha256: str | None
+
+
+async def _to_its_end[T](call: Callable[..., T], *args: Any) -> T:
+    """``call(*args)`` in a thread, awaited to its end even when the caller is cancelled:
+    a cancel cannot stop the thread, and a save's commit there may still write rows that
+    name its objects, so the save keeps its stage hold until the thread ended (#7477
+    review I3). The cancel is raised again then."""
+    task = asyncio.ensure_future(asyncio.to_thread(call, *args))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task})
+        if not task.cancelled():
+            task.exception()  # retrieved: the cancel, not the thread's error, goes on
+        raise
 
 
 def _object_missing(error: Exception) -> bool:
@@ -762,18 +784,26 @@ class OutputStore:
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
-        """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob store
-        under keys of the save's own (`OutputBytes.put_folder`), then `commit` (#7256, spec
-        §6.6), so the row, its keys taking those objects, its ``output_files`` rows and the holds
-        of its keys are one transaction. The staged keys go after the commit; the output's keys
-        name their objects.
-        A failed put or commit removes the folder (`discard`) and the blobs it put, and raises
-        again, a `StoreFullError` and a `UniqueViolation` on an id another output holds among
-        them; that output's keys never named this save's objects, so its bytes stay its own
-        (#7478 review). A cancel during the puts stops the save at once, with no discard: the
-        folder stays with no ``meta.json``, and no code removes it (#7257, D10). The output has
-        no row, so the hold reaper releases its holds later (#1007). A cancel during `prepare`
-        or `commit` cannot stop their thread, which may still finish the output."""
+        """Save the job's output ``index``: `prepare` its folder, upload its bytes to the blob
+        store with no index row (`OutputBytes.put_folder`), then `commit` (#7256, spec §6.6), so
+        the row, its keys' index rows naming those objects, its ``output_files`` rows and the
+        holds of its keys are one transaction: one commit, however many files (#7477). When the
+        sweep freed an object the save reused before that transaction held it
+        (`ReuseLostError`), the transaction rolls back whole, the save uploads its own copy of
+        every object it reused (`OutputBytes.own_copies`) and commits once more. A deadlock runs
+        the transaction again (`OutputRows.insert`). A failed put or commit removes the folder
+        (`discard`) and the objects it uploaded, and raises again, a `StoreFullError`, a last
+        `DeadlockDetected` and a `UniqueViolation` on an id another output holds among them;
+        that output's keys never named this save's objects, so its bytes stay its own (#7478
+        review). A cancel during the puts stops the save at once, with no discard: the folder
+        stays with no ``meta.json``, and no code removes it (#7257, D10). The output has no row,
+        so the hold reaper releases its holds later (#1007); the unrecorded sweep removes the
+        objects. From the first upload until the commit or the failure the save holds each
+        object's stage lock (`OutputBytes.stage_hold`), so another save's failure never removes
+        an object this one uploaded; it waits for a free slot of the stage-lock pool before its
+        first upload (#7477 review I2). A cancel during `prepare` or `commit` cannot stop their
+        thread, which may still finish the output: during `commit` the save keeps its locks
+        until that thread ends, then the cancel stands."""
         store = self._blobs()
         prepared = await asyncio.to_thread(
             self.prepare,
@@ -790,22 +820,30 @@ class OutputStore:
             source=source,
         )
         blobs: OutputBlobs | None = None
-        try:
-            blobs = await store.put_folder(prepared.directory, prepared.meta.id, prepared.meta.slug)
-            meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
-        except Exception:
-            await asyncio.to_thread(self.discard, prepared)
-            if blobs is not None:
-                await store.drop_staged(blobs)
-            raise
+        # Entering waits for a slot of the stage-lock pool, before the first upload. The
+        # block's end closes the hold: after the commit the rows name the objects; after
+        # a failure `drop_staged` closed it already (closing is idempotent).
+        async with store.stage_hold() as hold:
+            try:
+                blobs = await store.put_folder(
+                    prepared.directory, prepared.meta.id, prepared.meta.slug, hold
+                )
+                try:
+                    meta, replaced = await _to_its_end(self._commit, prepared, blobs)
+                except ReuseLostError:
+                    blobs = await store.own_copies(blobs, prepared.meta.slug, hold)
+                    meta, replaced = await _to_its_end(self._commit, prepared, blobs)
+            except Exception:
+                await asyncio.to_thread(self.discard, prepared)
+                if blobs is not None:
+                    await store.drop_staged(blobs, hold)
+                raise
         for key, previous in replaced:
             try:
                 await store.release_replaced(key, previous)
             except Exception:
                 # The save stands; the object stays on the backend with no row.
                 logger.exception("could not release a replaced output blob", extra={"key": key})
-        # The output's keys name the objects now; the staged keys only go.
-        await store.drop_staged(blobs)
         return meta
 
     def prepare(
@@ -1002,6 +1040,19 @@ class OutputStore:
         )
         try:
             return self.rows.insert(row)
+        except ReuseLostError:
+            # Nothing was written: `save` puts its own copies and commits again. Until
+            # then the folder holds no ``meta.json``, as during the puts, so a cancel
+            # meanwhile leaves it to the hold reaper and no copy run records it
+            # (#7477 review M4); a row a copy run wrote from it meanwhile goes too.
+            (directory / META_NAME).unlink(missing_ok=True)
+            try:
+                self.rows.drop_copied(meta.id, meta.slug)
+            except Exception:
+                logger.exception(
+                    "could not drop a copied row after a lost reuse", extra={"id": meta.id}
+                )
+            raise
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             # A copy run (the start's or a sweep's) may have read this folder and written

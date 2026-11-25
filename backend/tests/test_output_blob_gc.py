@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import shutil
 from collections.abc import AsyncGenerator, Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.store.backends import UnrecordedSweeper
 from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.index import Pool
 from scadbuddy.store.refs import BlobRefs
@@ -199,29 +201,45 @@ async def test_failed_save_blobs_are_swept(
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#7477: a failed save writes no index row and removes the objects it uploaded at
+    once. When that remove fails too, the objects stay with no row, and the unrecorded
+    sweep removes them past its grace: on `local` too, whose outputs have a content store
+    of their own (#7257)."""
     store, job, files = await _with_files(tmp_path, projection, content)
+    uploaded: list[str] = []
+    upload = content.backend.upload
+
+    async def recorded(*args: Any, **kwargs: Any) -> str:
+        backend_id = await upload(*args, **kwargs)
+        uploaded.append(backend_id)
+        return backend_id
 
     def failing(*args: Any, **kwargs: Any) -> Any:
         raise OSError("the commit failed")
 
-    async def no_delete(key: str) -> None:
+    async def no_remove(backend_id: str) -> None:
         raise OSError("the store went away")
 
-    # The failed save deletes its own blobs at once; when that fails too, the sweep
-    # removes them.
+    monkeypatch.setattr(content.backend, "upload", recorded)
     monkeypatch.setattr(store, "_commit", failing)
-    monkeypatch.setattr(content, "delete", no_delete)
+    monkeypatch.setattr(content.backend, "remove", no_remove)
     output_id = "e" * 32
     with pytest.raises(OSError, match="the commit failed"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
     monkeypatch.undo()
-    keys = _keys(pool, output_id)
-    assert any(key.startswith(f"output-{output_id}-model-save-") for key in keys)
-    assert f"output-{output_id}-model" not in keys
-    assert _holds(pool, output_id) == set()
-    await sweep_content(content, BlobRefs(pool), grace=0)
+    assert uploaded
     assert _keys(pool, output_id) == {}
-    for backend_id in keys.values():
+    assert _holds(pool, output_id) == set()
+    for backend_id in uploaded:
+        assert await content.backend.exists(backend_id)
+    backend = content.backend
+    assert isinstance(backend, UnrecordedSweeper)
+    await backend.sweep_unrecorded(
+        cutoff=datetime.now(UTC) + timedelta(minutes=1),
+        recorded=partial(content.index.shares_backend_id, content.name),
+        claim=content.claim_object,
+    )
+    for backend_id in uploaded:
         assert not await content.backend.exists(backend_id)
 
 

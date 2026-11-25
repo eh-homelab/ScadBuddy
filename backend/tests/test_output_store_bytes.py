@@ -14,10 +14,16 @@ from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from psycopg import Connection
 from psycopg.errors import DeadlockDetected, UniqueViolation
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
+import scadbuddy.store.index as index_module
 from scadbuddy.api.outputs import _listed
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes
@@ -31,6 +37,7 @@ from scadbuddy.library.output_rows import (
 )
 from scadbuddy.library.outputs import (
     FILES_DIR,
+    META_NAME,
     MODEL_NAME,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
@@ -43,8 +50,16 @@ from scadbuddy.library.outputs import (
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import StoreFullError
-from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.content_models import ReuseLostError, StoreFullError
+from scadbuddy.store.index import (
+    CLAIM_LOCK_SLOTS,
+    BlobIndex,
+    Pool,
+    StageLockBusyError,
+    StageLocks,
+    object_lock_name,
+)
+from scadbuddy.store.local import LocalContentBackend
 from tests.support.arrange import finished_job
 from tests.support.output_blobs import put_folder_at_keys
 from tests.support.store import flip_first_byte, local_content, store_pool
@@ -496,6 +511,210 @@ async def test_save_puts_bytes_and_row_in_one_transaction(
     assert row is not None and row.bytes_at is not None
 
 
+async def test_a_save_writes_its_index_rows_in_the_rows_transaction(
+    tmp_path: Path, projection: JobProjection, pool: Pool
+) -> None:
+    """#7477: a save commits once, however many files it has. Its puts upload the
+    objects and write no index row; the output's keys are indexed in the row's own
+    transaction, and nothing is left to delete after it."""
+    paths, job, files = await _with_files(tmp_path)
+    index_pool = _Counted(pool)
+    content = local_content(tmp_path / "remote", index_pool)  # type: ignore[arg-type]
+    content.spool = tmp_path / "spool"
+    rows_pool = _Counted(projection.pool)
+    store = _store(paths, rows_pool, content)
+    try:
+        meta = await store.save(job, name="first", files_dir=files)
+    finally:
+        await content.aclose()
+    assert (index_pool.transactions, index_pool.writes_outside) == (0, [])
+    assert (rows_pool.transactions, rows_pool.writes_outside) == (1, [])
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{meta.id}-",)
+        ).fetchall()
+    assert {str(item["key"]) for item in found} == _holds(pool, meta.id)
+
+
+async def test_a_save_whose_reused_object_was_freed_puts_its_own_copies(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+    spans: InMemorySpanExporter,
+) -> None:
+    """#7477's rule for a lost reuse: the sweep freed an object the save reused after
+    its put found it. The row's transaction rolls back whole, the save uploads its own
+    copy of every file it reused, and writes the row once more, reusing nothing. The
+    re-uploads are one span with their count (#7756 review)."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    first = await store.save(job, name="first", files_dir=files)
+    assert store.rows is not None
+    insert = store.rows.insert
+    reused: list[list[bool]] = []
+
+    def freed_first(row: Any, conn: Any = None) -> Any:
+        reused.append([item.reused for item in row.blobs.staged])
+        if len(reused) == 1:
+            # What the sweep does to the first output's objects meanwhile.
+            with pool.connection() as own:
+                gone = own.execute(
+                    "DELETE FROM store_blobs WHERE starts_with(key, %s) RETURNING backend_id",
+                    (f"output-{first.id}-",),
+                ).fetchall()
+            for item in gone:
+                Path(content.backend.root, item["backend_id"]).unlink(missing_ok=True)  # type: ignore[attr-defined]
+        return insert(row, conn)
+
+    monkeypatch.setattr(store.rows, "insert", freed_first)
+    spans.clear()
+    meta = await store.save(job, name="second", files_dir=files)
+    assert len(reused) == 2
+    assert any(reused[0]) and not any(reused[1])
+    [copied] = [s for s in spans.get_finished_spans() if s.name == "outputs.own_copies"]
+    assert copied.attributes is not None
+    assert copied.attributes["scadbuddy.reused_files"] == sum(reused[0])
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    directory = store._folder(meta.id)
+    assert store.bytes is not None
+    assert row.blobs.model is not None and row.blobs.preview is not None
+    assert await store.bytes.read(row.blobs.model) == (directory / MODEL_NAME).read_bytes()
+    assert await store.bytes.read(row.blobs.preview) == (directory / PREVIEW_NAME).read_bytes()
+    key = output_file_key(meta.id, "a.stl")
+    assert await store.bytes.read(key) == b"a stl"
+
+
+async def test_a_save_runs_its_rows_transaction_again_after_a_deadlock(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477's rule for a deadlock: Postgres picked the row's transaction as a victim.
+    The whole transaction runs again, as `BlobIndex.retrying` runs an index write."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    put_in = BlobIndex.put_in
+    calls = 0
+
+    def deadlocks_once(self: BlobIndex, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise DeadlockDetected("deadlock detected")
+        return put_in(self, *args, **kwargs)
+
+    monkeypatch.setattr(BlobIndex, "put_in", deadlocks_once)
+    meta = await store.save(job, name="first", files_dir=files)
+    monkeypatch.undo()
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    keys = {
+        row.blobs.model,
+        row.blobs.preview,
+        *(item.blob_key for item in store.rows.files(meta.id)),
+    }
+    assert _holds(pool, meta.id) == keys
+    assert store.bytes is not None and row.blobs.model is not None
+    assert (
+        await store.bytes.read(row.blobs.model)
+        == (store._folder(meta.id) / MODEL_NAME).read_bytes()
+    )
+
+
+async def test_a_save_that_deadlocks_every_time_removes_what_it_uploaded(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477: the last attempt's deadlock fails the save; it removes its folder and every
+    object it uploaded, which no row names."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.bytes is not None
+    put_folder = store.bytes.put_folder
+    refs: list[Any] = []
+
+    async def kept(*args: Any, **kwargs: Any) -> Any:
+        got = await put_folder(*args, **kwargs)
+        refs.extend(item.ref for item in got.staged)
+        return got
+
+    def deadlocks(self: BlobIndex, *args: Any, **kwargs: Any) -> Any:
+        raise DeadlockDetected("deadlock detected")
+
+    monkeypatch.setattr(store.bytes, "put_folder", kept)
+    monkeypatch.setattr(BlobIndex, "put_in", deadlocks)
+    output_id = "9" * 32
+    with pytest.raises(DeadlockDetected):
+        await store.save(job, name="first", files_dir=files, output_id=output_id)
+    monkeypatch.undo()
+    assert not paths.output_dir(job.slug, output_id).exists()
+    assert store.rows is not None and store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
+    assert refs
+    for ref in refs:
+        assert not await content.backend.exists(ref.backend_id)
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
+        ).fetchall()
+    assert found == []
+
+
+async def test_a_failed_save_keeps_an_object_another_save_has_staged(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477: two saves upload the same bytes, so the same objects. One fails while the
+    other is between its uploads and its commit: the failed one leaves every object the
+    other holds (its stage lock), and the other's row reads them back."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None
+    insert = store.rows.insert
+    kept_id, failed_id = "7" * 32, "8" * 32
+    staged = threading.Event()
+    go_on = threading.Event()
+
+    def held_or_failed(row: Any, conn: Any = None) -> Any:
+        if row.output_id == failed_id:
+            raise RuntimeError("the insert failed")
+        staged.set()
+        assert go_on.wait(30)
+        return insert(row, conn)
+
+    monkeypatch.setattr(store.rows, "insert", held_or_failed)
+    kept = asyncio.create_task(store.save(job, name="kept", files_dir=files, output_id=kept_id))
+    try:
+        assert await asyncio.to_thread(staged.wait, 30)
+        with pytest.raises(RuntimeError, match="the insert failed"):
+            await store.save(job, name="failed", files_dir=files, output_id=failed_id)
+    finally:
+        go_on.set()
+    meta = await kept
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None and row.blobs.model is not None
+    directory = store._folder(meta.id)
+    assert store.bytes is not None
+    assert await store.bytes.read(row.blobs.model) == (directory / MODEL_NAME).read_bytes()
+    assert await store.bytes.read(output_file_key(meta.id, "b.stl")) == b"b stl"
+    assert store.rows.get(failed_id) is None
+
+
 async def test_save_row_names_every_blob_and_holds_it(
     tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
 ) -> None:
@@ -549,29 +768,80 @@ async def test_save_put_failure_removes_folder_and_row(
 ) -> None:
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
-    put = content.put
-    calls = 0
+    stage = content.stage
+    refs: list[Any] = []
 
     async def second_fails(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+        if refs:
             raise OSError("the store went away")
-        return await put(*args, **kwargs)
+        ref, reused = await stage(*args, **kwargs)
+        refs.append(ref)
+        return ref, reused
 
-    monkeypatch.setattr(content, "put", second_fails)
+    monkeypatch.setattr(content, "stage", second_fails)
     output_id = "f" * 32
     with pytest.raises(OSError, match="the store went away"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
     assert not paths.output_dir(job.slug, output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
-    # The first put went under the save's own key, and the failed save deleted it.
+    # The first put's object is removed; no index row ever named it.
+    assert len(refs) == 1
+    assert not await content.backend.exists(refs[0].backend_id)
     with pool.connection() as conn:
         found = conn.execute(
             "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
         ).fetchall()
     assert found == []
+
+
+async def test_a_save_whose_stage_lock_stays_claimed_fails_and_frees_its_slot(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7756 review: a removal's claim that never ends (a hung remove) fails the save
+    that waits for one of its objects' locks, once `STAGE_LOCK_TRIES` tries of
+    `STAGE_LOCK_TIMEOUT_MS` ran out: no row, no folder, nothing it uploaded, and its
+    stage-lock slot free for the next save."""
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TIMEOUT_MS", 50)
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TRIES", 2)
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    upload = content.backend.upload
+    uploaded: list[str] = []
+
+    async def recorded(*args: Any, **kwargs: Any) -> str:
+        backend_id = await upload(*args, **kwargs)
+        uploaded.append(backend_id)
+        return backend_id
+
+    monkeypatch.setattr(content.backend, "upload", recorded)
+    busy = hashlib.sha256(b"b stl").hexdigest()
+    claimed = psycopg.connect(pg_conninfo, autocommit=True)
+    output_id = "d" * 32
+    try:
+        claimed.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+            (object_lock_name(content.name, busy),),
+        )
+        with pytest.raises(StageLockBusyError):
+            await store.save(job, name="first", files_dir=files, output_id=output_id)
+    finally:
+        claimed.close()
+    assert uploaded
+    for backend_id in uploaded:
+        assert not await content.backend.exists(backend_id)
+    assert not paths.output_dir(job.slug, output_id).exists()
+    assert store.rows is not None and store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
+    async with asyncio.timeout(30):
+        meta = await store.save(job, name="second", files_dir=files)
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
 
 
 async def test_a_save_that_loses_on_the_id_keeps_the_outputs_bytes(
@@ -923,8 +1193,7 @@ async def test_save_commit_failure_after_puts_discards_folder_and_row(
     assert not paths.output_dir(job.slug, output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
-    # The blobs were put under the save's own keys, and the failed save deleted them;
-    # the output's keys never named them.
+    # The failed save removed the objects it uploaded; no index row named them.
     with pool.connection() as conn:
         found = conn.execute(
             "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
@@ -969,3 +1238,168 @@ async def test_a_listing_reads_its_versions_in_one_query(
     assert batched == [3]
     assert refs == []
     assert {item.id: (item.thumbnail_version, item.preview_version) for item in listed} == expected
+
+
+async def test_a_save_past_the_stage_slots_waits_and_the_index_pool_stays_usable(
+    tmp_path: Path, projection: JobProjection, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7477 review I2: a save's stage hold takes a connection of the small lock pool, not
+    of the index's (the API's shared pool), and a save waits for a slot before its first
+    upload. With every slot held by a save between its uploads and its commit, one more
+    save waits, uploads nothing, and the index's pool still serves; then all finish."""
+    paths, job, files = await _with_files(tmp_path)
+    slots = 2
+    with contextlib.ExitStack() as stack:
+        index_pool: Pool = stack.enter_context(
+            ConnectionPool(
+                pg_conninfo,
+                min_size=0,
+                max_size=slots,
+                timeout=5,
+                connection_class=Connection[DictRow],
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+        )
+        lock_pool: Pool = stack.enter_context(
+            ConnectionPool(
+                pg_conninfo,
+                min_size=0,
+                max_size=slots + CLAIM_LOCK_SLOTS,
+                timeout=1,
+                connection_class=Connection[DictRow],
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+        )
+        content = ContentStore(
+            LocalContentBackend(tmp_path / "remote"),
+            BlobIndex(index_pool, stage_locks=StageLocks(lock_pool, slots)),
+        )
+        content.spool = tmp_path / "spool"
+        store = _store(paths, projection.pool, content)
+        assert store.rows is not None
+        insert = store.rows.insert
+        upload = content.backend.upload
+        uploaded: set[str] = set()
+        entered: list[str] = []
+        all_in = threading.Event()
+        go_on = threading.Event()
+
+        async def recorded(*args: Any, name: str, **kwargs: Any) -> str:
+            uploaded.add(name.split("-")[1])
+            return await upload(*args, name=name, **kwargs)
+
+        def held(row: Any, conn: Any = None) -> Any:
+            entered.append(row.output_id)
+            if len(entered) == slots:
+                all_in.set()
+            assert go_on.wait(30)
+            return insert(row, conn)
+
+        monkeypatch.setattr(content.backend, "upload", recorded)
+        monkeypatch.setattr(store.rows, "insert", held)
+        ids = [str(n) * 32 for n in range(1, slots + 2)]
+        saves = [
+            asyncio.create_task(store.save(job, name=i, files_dir=files, output_id=i)) for i in ids
+        ]
+        try:
+            assert await asyncio.to_thread(all_in.wait, 15)
+            await asyncio.sleep(1.5)
+            # The extra save waits for a slot, longer than the lock pool would let a
+            # connection request wait: it uploaded nothing, and it holds no thread.
+            assert uploaded == set(entered)
+            with index_pool.connection(timeout=2) as conn:
+                assert conn.execute("SELECT 1 AS one").fetchone() == {"one": 1}
+        finally:
+            go_on.set()
+        try:
+            metas = await asyncio.wait_for(asyncio.gather(*saves), 30)
+            assert {meta.id for meta in metas} == set(ids)
+            for meta in metas:
+                row = store.rows.get(meta.id)
+                assert row is not None and row.bytes_at is not None
+        finally:
+            await content.aclose()
+
+
+async def test_a_save_cancelled_during_its_commit_holds_its_objects_until_the_commit_ends(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477 review I3: a cancel cannot stop the commit's thread, which may still commit
+    rows naming the save's objects. The save keeps its stage hold until that thread ends,
+    so no release removes those objects meanwhile; then the cancel stands."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None
+    insert = store.rows.insert
+    staged: list[Any] = []
+    entered = threading.Event()
+    go_on = threading.Event()
+
+    def blocked(row: Any, conn: Any = None) -> Any:
+        staged.extend(item.ref for item in row.blobs.staged)
+        entered.set()
+        assert go_on.wait(30)
+        return insert(row, conn)
+
+    monkeypatch.setattr(store.rows, "insert", blocked)
+    output_id = "c" * 32
+    task = asyncio.create_task(
+        store.save(job, name="cancelled", files_dir=files, output_id=output_id)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.5)
+        # The save waits for its commit's thread, still holding its objects.
+        assert not done
+        async with content.claim_object(staged[0].backend_id) as free:
+            assert not free
+    finally:
+        go_on.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = store.rows.get(output_id)
+    assert row is not None and row.blobs.model is not None
+    assert store.bytes is not None
+    assert (
+        await store.bytes.read(row.blobs.model)
+        == (store._folder(output_id) / MODEL_NAME).read_bytes()
+    )
+
+
+async def test_a_save_cancelled_after_a_lost_reuse_leaves_no_meta(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477 review M4: the first commit wrote ``meta.json`` before its transaction lost a
+    reuse. A cancel while the save puts its own copies skips `discard`; the folder must
+    then hold no ``meta.json``, as after a cancel during the puts, so the hold reaper
+    removes it and no copy run records it as an output."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None and store.bytes is not None
+    entered = asyncio.Event()
+
+    def lost(row: Any, conn: Any = None) -> Any:
+        raise ReuseLostError("freed meanwhile")
+
+    async def copying(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(store.rows, "insert", lost)
+    monkeypatch.setattr(store.bytes, "own_copies", copying)
+    output_id = "d" * 32
+    task = asyncio.create_task(store.save(job, name="lost", files_dir=files, output_id=output_id))
+    await asyncio.wait_for(entered.wait(), 30)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    directory = paths.output_dir(job.slug, output_id)
+    assert directory.is_dir()
+    assert not (directory / META_NAME).exists()
