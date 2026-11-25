@@ -105,6 +105,9 @@ describe('the spool label lines (#7216)', () => {
 describe("the note's first line (#7216)", () => {
   it('strips and splits as Python does', () => {
     expect(noteLine('\x1cDry first')).toBe('Dry first')
+    expect(noteLine('a\u2028b')).toBe('a')
+    expect(noteLine('\u2029x\x1fy')).toBe('x\x1fy')
+    expect(noteLine('\x1e first\x85second')).toBe('first')
     expect(noteLine(' a b ')).toBe('a b')
     expect(noteLine('﻿x')).toBe('﻿x')
     expect(noteLine('line one\r\nline two')).toBe('line one')
