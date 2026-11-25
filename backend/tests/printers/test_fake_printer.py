@@ -25,7 +25,6 @@ import hashlib
 import io
 import json
 import os
-import signal
 import socket
 import ssl
 import sys
@@ -52,6 +51,7 @@ from scadbuddy.printers.lan_commands import (
     extrusion_cali_get,
     extrusion_cali_sel,
     extrusion_cali_set,
+    extrusion_cali_set_slot,
     refusal,
     wire_slot,
 )
@@ -696,6 +696,8 @@ async def test_a_slot_configure_shows_in_the_next_report(linked: _Linked) -> Non
         seq="11",
     )
     assert await _result(linked, setting) == "success"
+    profiles = [_row(3, "0.031000"), _row(4, "0.032000"), _row(5, "0.033000")]
+    assert await _result(linked, extrusion_cali_set(profiles, "0.4", "10")) == "success"
     select = extrusion_cali_sel(
         0, 2, external_count=1, cali_idx=3, filament_id="GFL99", nozzle_diameter="0.4", seq="12"
     )
@@ -710,6 +712,7 @@ async def test_a_slot_configure_shows_in_the_next_report(linked: _Linked) -> Non
         "nozzle_temp_min": "230",
         "nozzle_temp_max": "260",
         "cali_idx": 3,
+        "k": "0.031000",
     }.items() <= tray.items()
 
     # The external holder, and an AMS-HT's one slot.
@@ -722,7 +725,7 @@ async def test_a_slot_configure_shows_in_the_next_report(linked: _Linked) -> Non
     assert await _result(linked, external) == "success"
     assert await _result(linked, ht) == "success"
     report = (await linked.printer.probe()).print
-    assert report["vt_tray"]["cali_idx"] == 4
+    assert (report["vt_tray"]["cali_idx"], report["vt_tray"]["k"]) == (4, "0.032000")
     assert _tray(report, "128", "0")["cali_idx"] == 5
 
     # Empty values reset the slot.
@@ -747,6 +750,95 @@ async def test_a_slot_the_printer_lacks_is_refused(linked: _Linked) -> None:
     )
     reply = await _ask(linked, lacking)
     assert reply is not None and refusal(reply) is not None
+
+
+async def test_a_select_of_a_missing_profile_is_refused(linked: _Linked) -> None:
+    """Index 1 exists for 0.4 only: selecting it on 0.6, or index 2 on 0.4, is refused
+    and the slot keeps its K."""
+    assert await _result(linked, extrusion_cali_set([_row(1, "0.025000")], "0.4", "17")) == (
+        "success"
+    )
+    for seq, (index, diameter) in enumerate([(2, "0.4"), (1, "0.6")], start=18):
+        select = extrusion_cali_sel(
+            0,
+            0,
+            external_count=1,
+            cali_idx=index,
+            filament_id="GFA00",
+            nozzle_diameter=diameter,
+            seq=str(seq),
+        )
+        reply = await _ask(linked, select)
+        assert reply is not None and refusal(reply) is not None
+    tray = _tray((await linked.printer.probe()).print, "0", "0")
+    assert (tray["cali_idx"], tray["k"]) == (-1, "0.020000")
+
+
+async def test_a_slot_k_set_changes_the_tray_not_the_table(linked: _Linked) -> None:
+    """``extrusion_cali_set_slot`` (``cali_idx`` -1, ``n_coef`` 1.4, an ``HS00-`` nozzle,
+    the flat tray index) sets that slot's K and lists no profile."""
+    payload = extrusion_cali_set_slot(
+        0,
+        3,
+        k_value=0.027,
+        nozzle_diameter="0.4",
+        filament_id="GFG99",
+        setting_id="GFSG99",
+        name="PETG",
+        seq="19",
+    )
+    assert await _result(linked, payload) == "success"
+    tray = _tray((await linked.printer.probe()).print, "0", "3")
+    assert (tray["cali_idx"], tray["k"]) == (-1, "0.027000")
+    assert await _profiles(linked, "0.4", "20") == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"command": "extrusion_cali_sel", "cali_idx": "x", "ams_id": 0, "tray_id": 0},
+        {"command": "extrusion_cali_sel", "nozzle_diameter": "0.4", "ams_id": 0, "slot_id": 0},
+        {"command": "ams_filament_setting", "ams_id": "zero", "tray_id": 0, "slot_id": 0},
+        {"command": "ams_filament_setting", "tray_id": 0, "slot_id": 0},
+        {"command": "ams_change_filament", "ams_id": 0, "slot_id": 0, "target": "one"},
+        {"command": "ams_change_filament", "ams_id": 0, "slot_id": 0},
+        {"command": "extrusion_cali_del", "nozzle_diameter": "0.4", "filament_id": "GFA00"},
+        {"command": "extrusion_cali_set", "nozzle_diameter": "0.4", "filaments": [{"x": 1}]},
+        {"command": "extrusion_cali_get"},
+    ],
+    ids=[
+        "sel index not a number",
+        "sel no index",
+        "setting unit not a number",
+        "setting no unit",
+        "change target not a number",
+        "change no target",
+        "del no index",
+        "set entry no index",
+        "get no diameter",
+    ],
+)
+async def test_a_malformed_command_is_refused_and_the_printer_carries_on(
+    linked: _Linked, command: dict[str, Any]
+) -> None:
+    payload = {"print": {**command, "sequence_id": "90"}}
+    reply = await _ask(linked, payload)
+    assert reply is not None and refusal(reply) is not None
+    assert await _result(linked, ams_get_rfid(0, 0, "91")) == "success"
+
+
+async def test_a_reset_restores_the_ams(linked: _Linked) -> None:
+    before = (await linked.printer.probe()).print
+    slot = wire_slot(0, 0, external_count=1)
+    assert await _result(linked, ams_reset(slot, "92")) == "success"
+    load = ams_change_filament_load(1, external_count=1, extruder_id=0, right_temp=0, seq="93")
+    assert await _result(linked, load) == "success"
+    assert (await linked.printer.probe()).print["ams"]["tray_now"] == "1"
+    linked.fake.post("/__reset")
+    after = (await linked.printer.probe()).print
+    assert after["ams"] == before["ams"]
+    assert after["vt_tray"] == before["vt_tray"]
+    assert after["ams_status"] == 0
 
 
 async def test_a_load_moves_tray_now_and_unload_returns_255(linked: _Linked) -> None:
@@ -810,10 +902,24 @@ async def test_a_reset_clears_the_refusals_and_silences(linked: _Linked) -> None
 # `lan._force_close` reaches into fails here, instead of leaving a printer's client slot held.
 
 
+def _spy_force_close(monkeypatch: pytest.MonkeyPatch) -> list[aiomqtt.Client]:
+    """The clients `lan._force_close` shuts, so a test proves the cut path ran."""
+    shut: list[aiomqtt.Client] = []
+    force_close = lan_module._force_close
+
+    def spy(client: aiomqtt.Client) -> None:
+        shut.append(client)
+        force_close(client)
+
+    monkeypatch.setattr(lan_module, "_force_close", spy)
+    return shut
+
+
 async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
     """The broker takes the connection, and the client waits for its CONNACK past
     `MQTT_TIMEOUT`: the connect is cut inside ``__aenter__`` with nothing entered, and its
     socket is closed at once, not left open until the broker's keepalive."""
+    shut = _spy_force_close(monkeypatch)
     held: list[Any] = []
 
     class HeldAtConnack(aiomqtt.Client):
@@ -827,29 +933,25 @@ async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.Monkey
     monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 1.0)
     with pytest.raises(TimeoutError):
         await _ask(linked, ams_get_rfid(0, 0, "71"))
+    assert len(shut) == 1
     assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1
 
 
 async def test_a_cut_close_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The broker stops (SIGSTOP) once the reply is in, so the client's DISCONNECT is
-    never answered: `MQTT_TIMEOUT` cuts the close, the reply stands, and the socket is
-    closed at once. ``SCADBUDDY_TEST_MQTT`` must be the broker itself, or a script that
-    ``exec``s it, for the stop to reach the broker."""
-    broker = linked.fake.printer.broker
-    assert broker is not None
+    """The reply is in, then the close never ends (``__aexit__`` hangs before it sends a
+    DISCONNECT, so paho never closes the socket itself): `MQTT_TIMEOUT` cuts the close, the
+    reply stands, and `lan._force_close` closes the socket at once."""
+    shut = _spy_force_close(monkeypatch)
     held: list[Any] = []
 
-    class StopsTheBroker(aiomqtt.Client):
+    class HangsOnClose(aiomqtt.Client):
         async def __aexit__(self, *exc: Any) -> None:
             held.append(self._client.socket())
-            os.kill(broker.pid, signal.SIGSTOP)
-            await super().__aexit__(*exc)
+            await asyncio.Event().wait()
 
-    monkeypatch.setattr(aiomqtt, "Client", StopsTheBroker)
+    monkeypatch.setattr(aiomqtt, "Client", HangsOnClose)
     monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 1.0)
-    try:
-        reply = await _ask(linked, ams_get_rfid(0, 0, "81"))
-    finally:
-        os.kill(broker.pid, signal.SIGCONT)
+    reply = await _ask(linked, ams_get_rfid(0, 0, "81"))
     assert reply is not None and reply["result"] == "success"
+    assert len(shut) == 1
     assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1

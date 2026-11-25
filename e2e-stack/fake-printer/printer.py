@@ -42,12 +42,21 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
     reads it (``_parse_kprofile_entries``, L7392-L7438). The table starts empty.
   - ``extrusion_cali_set``: each ``filaments`` entry under its diameter. ``cali_idx`` -1
     takes the next free index (the largest plus one, from 1; made up), any other replaces
-    the entry of that index.
+    the entry of that index. A slot's K set (``extrusion_cali_set_slot``'s form:
+    ``cali_idx`` -1, ``n_coef`` ``"1.400000"``, an ``HS00-`` nozzle, ``tray_id`` the flat
+    slot index) sets that slot's ``k`` and ``cali_idx`` -1 and lists no profile.
   - ``extrusion_cali_del``: removes the entry with that ``cali_idx`` and ``filament_id``.
+    The dual-nozzle form's ``extruder_id`` and ``nozzle_id`` are ignored: indexes are one
+    series per diameter across both extruders, unmeasured for the H2C.
   - ``ams_filament_setting``: the slot's ``tray_info_idx``, ``tray_type``,
     ``tray_sub_brands``, ``tray_color`` (and ``cols``) and temperatures take the values
     sent; empty values (a reset) empty it. A slot this printer lacks is refused.
-  - ``extrusion_cali_sel``: the slot's ``cali_idx``.
+  - ``extrusion_cali_sel``: the slot's ``cali_idx``, and the chosen profile's
+    ``k_value`` as its ``k``; an index with no profile for that diameter is refused.
+
+  The slot K set, the refusal of a missing index and the ``k`` a selection shows are
+  unmeasured until the live check (Task 14). A malformed command (a required id that is
+  missing or not a number) is answered ``fail`` with a reason; it never stops the fake.
   - ``ams_change_filament``: ``ams.tray_now`` (and ``tray_tar``) becomes the ``target``,
     255 on an unload; ``ams_status`` (at the top of ``print``, as the H2C reports it)
     reads ``0x0100`` in the report the change pushes, then 0.
@@ -72,7 +81,8 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   "<name>", "reason": "<text>"}`` makes the next such command answer ``fail`` with that
   reason and change nothing; ``POST /__silent`` with ``{"command": "<name>"}`` makes the
   next one answer nothing and change nothing (it is still recorded); with both set, the
-  silence goes first. ``POST /__reset`` clears the record, both and the K-profile table.
+  silence goes first. ``POST /__reset`` clears the record, both and the K-profile table,
+  and puts the AMS and the external holder back as ``report.json`` has them.
   It answers once the printer is up; ``python printer.py --health`` checks that.
 
 The certificate is made at the first start and kept in ``FAKE_PRINTER_STATE``, as a
@@ -114,6 +124,7 @@ import ssl
 import sys
 import threading
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
@@ -259,6 +270,35 @@ SLOT_FIELDS = ("tray_info_idx", "tray_type", "tray_sub_brands", "tray_color")
 
 class RefusedError(Exception):
     """A command the fake answers ``result: fail`` with this reason."""
+
+
+def _number(command: dict[str, Any], key: str) -> int:
+    """``command[key]`` as an int: a missing key, a bool or a value that is not a number
+    raises, which `FakePrinter._command` answers as a malformed command."""
+    value = command[key]
+    if isinstance(value, bool):
+        raise TypeError(f"{key} is a bool")
+    return int(value)
+
+
+def _text(command: dict[str, Any], key: str) -> str:
+    """``command[key]``, a non-empty string, else it raises as `_number` does."""
+    value = command[key]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{key} is not a non-empty string")
+    return value
+
+
+def _sets_a_slot(entry: dict[str, Any]) -> bool:
+    """Whether an ``extrusion_cali_set`` entry is a slot's K set, as
+    ``lan_commands.extrusion_cali_set_slot`` builds it (Bambuddy's ``extrusion_cali_set``
+    method, ``bambu_mqtt.py`` L8944-L9020 at ``d3be761f``): ``cali_idx`` -1, ``n_coef``
+    ``"1.400000"`` and an ``HS00-`` nozzle id."""
+    return (
+        entry.get("cali_idx") == -1
+        and entry.get("n_coef") == "1.400000"
+        and str(entry.get("nozzle_id", "")).startswith("HS00-")
+    )
 
 
 @dataclass
@@ -415,7 +455,9 @@ def _ftp_server(config: Config, cert: Path, key: Path, received: Received) -> FT
         raise
 
 
-def _control_server(config: Config, received: Received, controls: Controls) -> ThreadingHTTPServer:
+def _control_server(
+    config: Config, received: Received, controls: Controls, on_reset: Callable[[], object]
+) -> ThreadingHTTPServer:
     class Control(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path != "/__received":
@@ -440,6 +482,7 @@ def _control_server(config: Config, received: Received, controls: Controls) -> T
             if self.path == "/__reset":
                 received.reset()
                 controls.reset()
+                on_reset()
             elif not isinstance(body, dict) or not isinstance(body.get("command"), str):
                 self.send_error(400, 'a JSON body {"command": "<name>"} is needed')
                 return
@@ -492,8 +535,6 @@ class FakePrinter:
         self.controls = Controls()
         report = json.loads(REPORT.read_text())["print"]
         self.state: dict[str, Any] = report
-        #: The broker's process while it runs (a test stops it to cut a close, #7276 P31).
-        self.broker: asyncio.subprocess.Process | None = None
         self._printing: asyncio.Task[None] | None = None
         self._stopping = threading.Event()
 
@@ -567,7 +608,6 @@ class FakePrinter:
         (config.sdcard / config.upload_dir.strip("/")).mkdir(parents=True, exist_ok=True)
         conf, cert, key = self._broker_files()
         broker = await asyncio.create_subprocess_exec(config.mosquitto, "-c", str(conf))
-        self.broker = broker
         ftp = control = None
         ftp_thread: threading.Thread | None = None
         threads: list[threading.Thread] = []
@@ -586,7 +626,13 @@ class FakePrinter:
                 identifier=f"printer-{config.serial}",
             ) as client:
                 await client.subscribe(self.request_topic)
-                control = _control_server(config, self.received, self.controls)
+                loop = asyncio.get_running_loop()
+                control = _control_server(
+                    config,
+                    self.received,
+                    self.controls,
+                    lambda: loop.call_soon_threadsafe(self.restore_ams),
+                )
                 threads.append(threading.Thread(target=control.serve_forever, daemon=True))
                 for thread in threads:
                     thread.start()
@@ -680,6 +726,9 @@ class FakePrinter:
             changed = self._apply(name, command, reply)
         except RefusedError as error:
             reply.update(result="fail", reason=str(error))
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            # A malformed command is answered, never raised: that would end `run`.
+            reply.update(result="fail", reason=f"malformed {name}: {error!r}")
         else:
             reply["result"] = "success"
         await client.publish(self.report_topic, json.dumps({"print": reply}))
@@ -691,7 +740,7 @@ class FakePrinter:
         """Carry out ``command``, add what its reply says to ``reply``, and say whether the
         report changed. `RefusedError` answers ``fail``."""
         if name == "extrusion_cali_get":
-            diameter = str(command.get("nozzle_diameter") or "")
+            diameter = _text(command, "nozzle_diameter")
             wanted = str(command.get("filament_id") or "")
             with self.controls.lock:
                 entries = list(self.controls.k_table.get(diameter, []))
@@ -699,11 +748,10 @@ class FakePrinter:
             reply["filaments"] = [e for e in entries if wanted in ("", e["filament_id"])]
             return False
         if name == "extrusion_cali_set":
-            self._k_set(command)
-            return False
+            return self._k_set(command)
         if name == "extrusion_cali_del":
-            diameter = str(command.get("nozzle_diameter") or "")
-            gone = (int(command.get("cali_idx", -1)), str(command.get("filament_id") or ""))
+            diameter = _text(command, "nozzle_diameter")
+            gone = (_number(command, "cali_idx"), str(command.get("filament_id") or ""))
             with self.controls.lock:
                 table = self.controls.k_table.get(diameter, [])
                 table[:] = [e for e in table if (e["cali_idx"], e["filament_id"]) != gone]
@@ -718,45 +766,79 @@ class FakePrinter:
                 tray[key] = str(command.get(key) or 0)
             return True
         if name == "extrusion_cali_sel":
-            self._tray(command)["cali_idx"] = int(command.get("cali_idx", -1))
-            return True
+            return self._k_select(command)
         if name == "ams_change_filament":
             ams = self.state["ams"]
-            target = str(int(command.get("target", 255)))
+            target = str(_number(command, "target"))
             ams.update(tray_pre=ams.get("tray_now", "255"), tray_now=target, tray_tar=target)
             self.state["ams_status"] = AMS_CHANGING
             return True
         return False  # ams_get_rfid: the reply only
 
-    def _k_set(self, command: dict[str, Any]) -> None:
+    def _k_set(self, command: dict[str, Any]) -> bool:
         """Each ``filaments`` entry under its diameter: ``cali_idx`` -1 takes the next free
         index (the largest plus one, from 1; made up, not measured), any other replaces the
-        entry of that index."""
-        common = str(command.get("nozzle_diameter") or "")
+        entry of that index. Indexes are one series per diameter, across both extruders
+        (unmeasured for the H2C until Task 14).
+
+        A slot's K set (``lan_commands.extrusion_cali_set_slot``: ``cali_idx`` -1,
+        ``n_coef`` ``"1.400000"``, an ``HS00-`` nozzle) sets the slot's ``k`` and
+        ``cali_idx`` -1 instead, and lists no profile. Its ``tray_id`` is the flat index
+        ``cali_set_tray`` makes, read here as AMS ``tray // 4`` slot ``tray % 4``: an
+        AMS-HT's and an external holder's indexes collide with AMS slots (P4), so they
+        cannot be told apart. What a printer does with this form is unmeasured until Task
+        14."""
+        common = _text(command, "nozzle_diameter")
         entries = command.get("filaments")
-        if not isinstance(entries, list):
-            raise RefusedError("no filaments")
+        if not isinstance(entries, list) or not all(isinstance(e, dict) for e in entries):
+            raise RefusedError("filaments is not a list of objects")
+        slots = [e for e in entries if _sets_a_slot(e)]
+        if slots:
+            if len(slots) != len(entries):
+                raise RefusedError("a slot's K set and profiles in one command")
+            for entry in slots:
+                flat = _number(entry, "tray_id")
+                tray = self._tray({"ams_id": flat // 4, "tray_id": flat % 4, "slot_id": flat % 4})
+                tray.update(k=str(_text(entry, "k_value")), cali_idx=-1)
+            return True
         with self.controls.lock:
             for entry in entries:
-                if not isinstance(entry, dict):
-                    raise RefusedError("a filament entry is not an object")
                 diameter = str(entry.get("nozzle_diameter") or common)
                 table = self.controls.k_table.setdefault(diameter, [])
                 row = {key: entry.get(key, "") for key in K_FIELDS}
-                index = int(entry.get("cali_idx", -1))
+                index = _number(entry, "cali_idx")
                 if index < 0:
                     index = max((e["cali_idx"] for e in table), default=0) + 1
                 row["cali_idx"] = index
                 table[:] = [e for e in table if e["cali_idx"] != index] + [row]
                 table.sort(key=lambda e: int(e["cali_idx"]))
+        return False
+
+    def _k_select(self, command: dict[str, Any]) -> bool:
+        """The slot's ``cali_idx`` and ``k`` become the chosen profile's; an index the
+        command's diameter has no profile for is refused. -1 (no profile) leaves ``k`` as
+        it is. Unmeasured until Task 14: whether a printer refuses a missing index, and
+        whether its report then carries the profile's ``k``."""
+        index = _number(command, "cali_idx")
+        diameter = _text(command, "nozzle_diameter")
+        tray = self._tray(command)
+        if index < 0:
+            tray["cali_idx"] = -1
+            return True
+        with self.controls.lock:
+            chosen = [e for e in self.controls.k_table.get(diameter, []) if e["cali_idx"] == index]
+        if not chosen:
+            raise RefusedError(f"no K profile {index} for nozzle {diameter}")
+        tray.update(cali_idx=index, k=str(chosen[0]["k_value"]))
+        return True
 
     def _tray(self, command: dict[str, Any]) -> dict[str, Any]:
         """The report's tray a slot command names, or `RefusedError`. An AMS unit's tray is its
         ``slot_id``; an external holder is ``ams_id`` 254 (or 255 with ``tray_id`` 254, the
         one-holder form), or 255 for a second holder (``lan_commands.wire_slot``,
         ``extrusion_cali_sel``)."""
-        ams_id = int(command.get("ams_id", -1))
-        tray_id = int(command.get("tray_id", -1))
+        ams_id = _number(command, "ams_id")
+        tray_id = _number(command, "tray_id")
         if ams_id in (254, 255):
             holder = "254" if ams_id == 254 or tray_id == 254 else str(ams_id)
             holders = [self.state.get("vt_tray"), *(self.state.get("vir_slot") or [])]
@@ -764,7 +846,7 @@ class FakePrinter:
                 if isinstance(tray, dict) and str(tray.get("id")) == holder:
                     return tray
             raise RefusedError(f"no external holder {holder}")
-        slot = str(int(command.get("slot_id", 0)))
+        slot = str(_number(command, "slot_id"))
         for unit in self.state["ams"]["ams"]:
             if unit["id"] == str(ams_id):
                 for tray in unit["tray"]:
@@ -772,6 +854,15 @@ class FakePrinter:
                         found: dict[str, Any] = tray
                         return found
         raise RefusedError(f"no tray {ams_id}/{slot}")
+
+    def restore_ams(self) -> None:
+        """The AMS and external holders as ``report.json`` has them (``/__reset``)."""
+        fresh = json.loads(REPORT.read_text())["print"]
+        for key in ("ams", "vt_tray", "vir_slot", "ams_status"):
+            if key in fresh:
+                self.state[key] = fresh[key]
+            else:
+                self.state.pop(key, None)
 
     def _missing(self, path: str | None) -> str | None:
         """Why ``path`` cannot be printed, or ``None`` when it can."""

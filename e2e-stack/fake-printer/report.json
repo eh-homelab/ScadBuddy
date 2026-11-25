@@ -1,5 +1,5 @@
 {
-  "about": "The fake printer's report (e2e-stack/fake-printer/printer.py): the shape of OpenBambuAPI mqtt.md's pushing.pushall example (Doridian/OpenBambuAPI cc383a2c), with an H2C's units: AMS 0 (tray 0 tagged, tray 1 untagged, tray 2 empty, tray 3 untagged), one AMS-HT (128) and the external holder. The device block (two extruders, the mounted nozzles 0 and 1, rack slots from 16) is 3a's lan-report-h2c.json's (backend/tests/printers/fixtures on feat/printer-registry, c0e243a27), serial numbers made up. One external holder (vt_tray 254) only: whether an H2C reports a second one is not known. As in backend/tests/printers/fixtures/lan-report-h2c-idle.json, each filled AMS tray has a cali_idx (-1, no K profile selected) and ams_status is at the top of print, not in ams (#7276 P7); each tray's k (0.020000) is made up. Every other value is made up; the one non-zero tray_uuid/tag_uid is the Bambuddy recorder's tagged spool (e2e-stack/bambuddy-recorder/recorder.py).",
+  "about": "The fake printer's report (e2e-stack/fake-printer/printer.py): the shape of OpenBambuAPI mqtt.md's pushing.pushall example (Doridian/OpenBambuAPI cc383a2c), with an H2C's units: AMS 0 (tray 0 tagged, tray 1 untagged, tray 2 empty, tray 3 untagged), one AMS-HT (128) and the external holder. The device block (two extruders, the mounted nozzles 0 and 1, rack slots from 16) is 3a's lan-report-h2c.json's (backend/tests/printers/fixtures on feat/printer-registry, c0e243a27), serial numbers made up. One external holder (vt_tray 254) only: whether an H2C reports a second one is not known. As in backend/tests/printers/fixtures/lan-report-h2c-idle.json, each filled AMS tray and the external holder has a cali_idx (-1, no K profile selected) and ams_status is at the top of print, not in ams (#7276 P7); each tray's k (0.020000) is made up. Every other value is made up; the one non-zero tray_uuid/tag_uid is the Bambuddy recorder's tagged spool (e2e-stack/bambuddy-recorder/recorder.py).",
   "print": {
     "command": "push_status",
     "sequence_id": "0",
@@ -143,6 +143,8 @@
       "remain": 0,
       "nozzle_temp_min": "0",
       "nozzle_temp_max": "0",
+      "cali_idx": -1,
+      "k": "0.020000",
       "tag_uid": "0000000000000000",
       "tray_uuid": "00000000000000000000000000000000"
     },
