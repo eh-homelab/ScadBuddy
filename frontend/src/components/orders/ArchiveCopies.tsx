@@ -7,7 +7,7 @@ import { refusalText } from './refusal'
 
 /** The row reads the archives again this often while an import is still due (spec 2026-11-05 §4.4). */
 export const ARCHIVE_READ_MS = 10_000
-/** It reads again at most this many times after it mounts or a copy, then offers the copy buttons. */
+/** It reads again at most this many times after it mounts, a copy or a newly offered timelapse, then offers the copy buttons. */
 export const ARCHIVE_READS = 6
 /** Bambuddy writes the timelapse minutes after the print ends; after this long, it has none. */
 const TIMELAPSE_WAIT_MS = 60 * 60_000
@@ -65,7 +65,8 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
   const [readAt, setReadAt] = useState(0)
   // True from the start of a read until it answers or fails: the next re-read waits from then (#7455).
   const [reading, setReading] = useState(true)
-  // Bumped to read again; `reads` counts the re-reads since the mount or the last copy.
+  // Bumped to read again; `reads` counts the re-reads since the mount, the last copy or the
+  // last newly offered timelapse.
   const [asked, setAsked] = useState(0)
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)

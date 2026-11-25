@@ -314,6 +314,46 @@ describe('ArchiveCopies', () => {
     expect(await within(archives).findByRole('button', { name: 'Copy timelapse' })).toBeEnabled()
   })
 
+  it('reads again when an ordinary re-read newly offers a timelapse', async () => {
+    const attempt = printedAttempt()
+    // The print ended 5 minutes ago: the timelapse wait is far from over.
+    const completed = new Date(Date.now() - 5 * 60_000).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        const n = ++reads
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              // The fifth re-read is the first to offer the timelapse.
+              timelapse: n >= 6,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    for (let n = 1; n <= ARCHIVE_READS; n++) {
+      await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+      await waitFor(() => expect(reads).toBe(1 + n))
+    }
+    // A newly offered timelapse is a change: the sixth re-read is not the last.
+    await waitFor(() => expect(archives).toHaveTextContent('Importing timelapse'))
+    expect(within(archives).queryByRole('button', { name: 'Copy timelapse' })).toBeNull()
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await waitFor(() => expect(reads).toBe(2 + ARCHIVE_READS))
+  })
+
   it('reads again when a re-read after a failed wait-end read newly offers a timelapse', async () => {
     const attempt = printedAttempt()
     // The wait ends 55 s after the page opens, after the fifth 10 s re-read.
