@@ -84,6 +84,11 @@ sequenceDiagram
 - Customer model imports after the check are a later phase
   (`backend/scadbuddy/workflows/staged_file.py:17`;
   [#6133](https://github.com/eh-homelab/ScadBuddy/issues/6133)).
+- A published listing with no price (published before #6922, or whose price run ended with
+  none) gets its run from the housekeeping sweep `housekeeping_warm_listings`
+  (`backend/scadbuddy/orders/storefront/prepare.py` `warm_unpriced`, #7665): once per
+  version of the listing, and again only past Temporal's retention. A listing whose run
+  finds no price shows none before that.
 - Venmo's pay page is off (`backend/scadbuddy/payments/venmo.py:48`;
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
 - A pipeline template is listed only when it declares its inputs (`model.json`
