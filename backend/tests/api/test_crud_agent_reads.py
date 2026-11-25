@@ -90,7 +90,7 @@ def _grant(
         "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, revoked_at,"
         " expires_at, parent_grant_id, standing_grant_id, standing_approval_id)"
         " VALUES (%s, %s, %s, '{}', '{}', CASE WHEN %s THEN now() END,"
-        " now() + make_interval(secs => %s), %s, %s, CASE WHEN %s IS NOT NULL THEN 'a1' END)",
+        " now() + make_interval(secs => %s), %s, %s, CASE WHEN %s::text IS NOT NULL THEN 'a1' END)",
         (grant_id, run_id, status, revoked, expires_in, parent, standing, standing),
     )
 
