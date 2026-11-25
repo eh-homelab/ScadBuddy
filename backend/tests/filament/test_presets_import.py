@@ -205,13 +205,16 @@ async def test_the_start_adopts_bound_bambuddy_ids_whatever_the_direction(
 
 
 async def test_the_start_asks_bambuddy_nothing_when_nothing_is_bound(
-    pg_pool: PgPool, tmp_path: Path
+    pg_pool: PgPool, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     sb = _type(pg_pool, "PLA-O")
     _bind(pg_pool, sb, "GFA00")
+    caplog.set_level(logging.INFO, logger="scadbuddy.filament.sb_presets")
     with respx.mock() as router:
         await adopt_at_start(pg_pool, lambda: LocalBlobStore(tmp_path), lambda: SETTINGS, retry_s=0)
         assert router.calls.call_count == 0
+    # Logged, so a rollout shows the step ran (#7590).
+    assert "nothing to adopt" in caplog.text
     # No Bambuddy configured: a bound id is left and nothing is asked.
     _bind(pg_pool, sb, "9")
     await adopt_at_start(pg_pool, lambda: LocalBlobStore(tmp_path), StoredSettings, retry_s=0)
