@@ -24,8 +24,10 @@ const loads = new Map<string, Set<Load>>()
 /**
  * Stops every load of ``url`` that may still ask again, whether it waits on its timer or its
  * try is in flight: each fails at once, and a try in flight that fails asks no more. So a
- * viewer that unmounts or moves to another URL never keeps asking for the old one. True when
- * one was stopped: the loader's cache then holds that failure, which the caller clears.
+ * viewer that unmounts or moves to another URL never keeps asking for the old one. It stops
+ * another viewer's load of the same URL too: `useLoader` shares one load per URL between
+ * viewers, and the cache it fails is shared as well. True when one was stopped: the loader's
+ * cache then holds that failure, which the caller clears.
  */
 export function stopRetries(url: string): boolean {
   const running = loads.get(url)
