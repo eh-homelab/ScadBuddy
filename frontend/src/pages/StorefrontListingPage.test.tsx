@@ -498,6 +498,25 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       await waitFor(async () => expect((await stored())[0]?.params).toEqual({}))
     })
 
+    it('points only a refusal of a parameter its pipeline sets to the Design block (#7794 review)', async () => {
+      server.use(
+        http.post('/api/v1/storefront/listings/:id/publish', () =>
+          HttpResponse.json(
+            { type: 'https://scadbuddy.dev/problems/storefront/listing_default_invalid', title: 'Unprocessable Content', status: 422, detail: 'no', name: 'piece' },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const listing = await seedHouse(HOUSE)
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      const block = await design()
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      // Another code keeps its own words, by the parameter, though the parameter has no row.
+      await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change. See the note under it below.'))
+      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('Design')
+      expect(within(block).queryByRole('alert')).toBeNull()
+    })
+
     it('drops them with the template, and keeps them at another version of it', async () => {
       const listing = await seedHouse(HOUSE)
       const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
