@@ -56,7 +56,7 @@ item (`Lifecycle.add_item`). When an item becomes `fulfilled`, `StockStore.take`
 from its lots FIFO; `unfulfil_item` gives each use back at its own cost
 (`backend/scadbuddy/inventory/stock.py:513`, `:557`).
 
-Job cost has a `parts` part, `ItemCost.parts_minor` (`backend/scadbuddy/orders/costs.py:183`).
+Job cost has a `parts` part, `Margin.parts_minor`, which `ItemCost` inherits (`backend/scadbuddy/orders/costs.py:183`).
 It is read from `stock_moves`, not from cost entries: the migration deleted the `part:` cost
 entries that the moves replace (Ruling 3). A `use` of unknown cost that nothing returned
 makes the figure unknown (R-P2-19). The profit report reads the same figure (R-P2-31). The

@@ -78,7 +78,7 @@ It has a date and a source (`invoice` with its invoice line, or `manual`). Phase
 `manual` points only. The newest by date is the offer's price. The table already has the
 final shape that the filament price points move into in phase 3 (Ruling 4).
 
-Routes: `GET/POST /inventory/offers`, `PATCH /inventory/offers/{id}`, `POST
+Routes: `POST /inventory/offers`, `PATCH /inventory/offers/{id}`, `POST
 .../archive`, `GET/POST /inventory/offers/{id}/prices`, `GET /inventory/items/{id}/offers`
 and `GET /inventory/suppliers/{id}/offers` (`api/inventory.py`).
 
@@ -160,7 +160,7 @@ each use back at its own cost (`parts.returned`). No cost entry is written (see
 
 Job cost reads the moves. `PartsMoved` (`inventory/stock.py:903`) is `-sum(amount_minor)`
 of the known-cost `use` and `return` moves, and `unknown` is true for a `use` of unknown
-cost that no `return` names (R-P2-19). The figure is `ItemCost.parts_minor`
+cost that no `return` names (R-P2-19). The figure is `Margin.parts_minor` (on `ItemCost` too)
 (`backend/scadbuddy/orders/costs.py:183`). Job cost and the profit report share one reader
 (R-P2-31). The quote estimate prices parts at what a FIFO take would cost now
 (`estimate_unit_cost`, Ruling 10); it returns the cost of the known share and
