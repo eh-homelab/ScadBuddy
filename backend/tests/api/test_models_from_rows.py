@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library import catalogue as catalogue_module
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.output_copy import copy_outputs
@@ -360,6 +361,39 @@ def test_media_the_row_does_not_know_yet_is_not_missing(
     [item] = listed["plain"]["media"]
     assert (item["missing"], item["size"]) == (False, len(PNG_BYTES))
     assert listed["plain"]["thumbnail_source"] == "model"
+
+
+def test_media_really_missing_after_the_row_caught_up_costs_no_stat(
+    world: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 8 review M1: a media file that is gone when its row was refreshed is
+    `missing` with no stat; only a row older than the media rows (a lag, the test
+    above) reads the disk."""
+    _copy(world)
+    added = world.post(
+        "/api/v1/models/plain/media",
+        files={"file": ("first.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert added.status_code == 200, added.text
+    [item] = added.json()["media"]
+    (paths.model_dir("plain") / "media" / item["file"]).unlink()
+    refresh = _state(world).catalogue.refresh
+    assert refresh is not None
+    refresh.refresh_locked(["plain"], path="no_commit")
+    row = _rows(world).get("plain")
+    assert row is not None and f"media/{item['file']}" not in row.files
+
+    def stat(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("stat'ed a media file")
+
+    monkeypatch.setattr(catalogue_module, "_file_size", stat)
+
+    [item] = world.get("/api/v1/models/plain").json()["media"]
+    assert (item["missing"], item["size"]) == (True, None)
+    listed = {model["slug"]: model for model in world.get("/api/v1/models").json()}
+    [item] = listed["plain"]["media"]
+    assert (item["missing"], item["size"]) == (True, None)
 
 
 def test_a_row_whose_folder_is_gone_is_not_found(world: TestClient, paths: DataPaths) -> None:

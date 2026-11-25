@@ -1160,10 +1160,11 @@ class Catalogue:
         """A file's size as ``row.files`` records it, or None: what `_file_size`
         answers from the disk, read from the row (`template_row` keys it so).
 
-        A media file the row does not record is stat'ed: the media rows, read live,
-        commit before the template's row, so a new item is on the disk and in
-        `template_media` before its row knows it (Task 7 review I1). Only such an item,
-        or one really missing, costs a stat."""
+        A media file the row does not record is stat'ed only while the row lags its
+        media rows (`TemplateRow.media_newer`): they commit before the template's row,
+        so a new item is on the disk and in `template_media` before its row knows it
+        (Task 7 review I1). Once the row is newer, a file it lacks was gone at its
+        refresh, and is missing with no stat (Task 8 review M1)."""
         directory = self.paths.model_dir(row.template_id)
         added = self.paths.builtin_media_dir(row.template_id)
 
@@ -1176,7 +1177,7 @@ class Catalogue:
                 return None
             if key in row.files:
                 return row.files[key]
-            if key.startswith((f"{MEDIA_DIR}/", "builtin-media/")):
+            if row.media_newer and key.startswith((f"{MEDIA_DIR}/", "builtin-media/")):
                 return _file_size(path)
             return None
 
@@ -1215,13 +1216,15 @@ class Catalogue:
         none for a template that is gone."""
         if self._from_rows():
             assert self.rows is not None
+            # One stat: a row whose folder is gone has none, as `record` is 404 for
+            # it (Task 8 review M2).
+            if not self.exists(slug):
+                return self._meta(slug, {}), None
             row = self.rows.get(slug)
             if row is not None and row.meta is not None:
                 return self._meta(slug, row.meta), row
             if row is not None and not _not_storable(row):
                 raise InvalidModelMetaError(slug, row.meta_error or "not JSON")
-            if row is None and not self.exists(slug):
-                return self._meta(slug, {}), None
         return self._meta(slug, self.read_raw_meta(slug)), None
 
     def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
@@ -2026,7 +2029,9 @@ class Catalogue:
         if wanted == current.casefold():
             return
         for other, taken in self._other_names(slug):
-            if taken.casefold() == wanted:
+            # A row whose folder is gone holds no name (Task 8 review M2): one stat,
+            # for a match only.
+            if taken.casefold() == wanted and self.exists(other):
                 raise ModelNameTakenError(other, taken)
 
     def _other_names(self, slug: str) -> Iterator[tuple[str, str]]:
@@ -3284,11 +3289,11 @@ class Catalogue:
         """The templates of mine whose upstream is ``model_id``: from the rows once
         they are copied (one query, #7317 Task 8), else from each ``model.json``. A row
         whose ``model.json`` Postgres cannot store is judged by its file."""
-        found: list[str] = []
-        candidates = _templates_in(self.paths.models)
         if self._from_rows():
             assert self.rows is not None
             found, candidates = self.rows.duplicates_of(model_id)
+        else:
+            found, candidates = [], _templates_in(self.paths.models)
         for slug in candidates:
             try:
                 upstream = self.read_raw_meta(slug).get("upstream")

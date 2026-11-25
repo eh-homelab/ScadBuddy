@@ -8,17 +8,21 @@ rows). `library_users` keeps the files (spec §7.4)."""
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import Count
 from scadbuddy.activity.subject_labels import SubjectLabels
 from scadbuddy.api.activity import _subject_labels
+from scadbuddy.api.deps import announce_commits
 from scadbuddy.api.print_imports import _suggestions
+from scadbuddy.core.events import Event, UpstreamAvailable, VersionCommitted
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
 from scadbuddy.print_library.store import NativeFile
@@ -333,5 +337,64 @@ def test_duplicates_of_reads_rows(client: TestClient, monkeypatch: pytest.Monkey
     _copy(client)
     _no_meta_reads(monkeypatch)
 
+    def walked(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("walked the folders")
+
+    # Task 8 review I1: no walk of `models/` after the copy.
+    monkeypatch.setattr(Path, "iterdir", walked)
+
     assert catalogue.duplicates_of("widget") == before
     assert catalogue.duplicates_of("widget-copy") == []
+
+
+def test_a_row_whose_folder_is_gone_has_no_settings_and_holds_no_name(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """Task 8 review M2: a row left by a hand removal (or a delete whose row drop
+    failed) answers as `record` does: no print settings, and its name is free."""
+    _create(client, "widget", {"name": "Widget"})
+    _create(client, "gone", {"name": "Gone"})
+    _write_meta(
+        paths,
+        "gone",
+        {
+            "name": "Gone",
+            "print_settings": {"enable_support": "1"},
+            "part_print_settings": {"base_color": {"wall_loops": 3}},
+        },
+    )
+    paths.model_source("gone").write_text(COLOUR_SOURCE, encoding="utf-8")
+    _copy(client)
+    shutil.rmtree(paths.model_dir("gone"))
+    catalogue = _catalogue(client)
+    assert catalogue.rows is not None and catalogue.rows.get("gone") is not None
+
+    assert catalogue.print_settings("gone") == {}
+    assert catalogue.part_print_settings("gone") == {}
+    renamed = client.patch("/api/v1/models/widget", json={"name": "Gone"}, headers=press())
+    assert renamed.status_code == 200, renamed.text
+
+
+def test_a_database_error_skips_only_that_templates_duplicates() -> None:
+    """Task 8 review M4: the commit hook goes on past a template whose duplicates could
+    not be read from the rows, as it goes on past an `OSError`."""
+    published: list[Event] = []
+
+    def duplicates_of(model_id: str) -> list[str]:
+        if model_id == "broken":
+            raise psycopg.OperationalError("the server closed the connection")
+        return [f"{model_id}-copy"]
+
+    catalogue: Any = SimpleNamespace(exists=lambda _: True, duplicates_of=duplicates_of)
+    bus: Any = SimpleNamespace(publish=published.append)
+
+    announce_commits(bus, catalogue)("c0ffee", ["broken", "widget"])
+
+    assert [event.model_dump(exclude={"id", "at"}) for event in published] == [
+        event.model_dump(exclude={"id", "at"})
+        for event in (
+            VersionCommitted(slug="broken", commit="c0ffee"),
+            VersionCommitted(slug="widget", commit="c0ffee"),
+            UpstreamAvailable(slug="widget-copy", upstream="widget", commit="c0ffee"),
+        )
+    ]

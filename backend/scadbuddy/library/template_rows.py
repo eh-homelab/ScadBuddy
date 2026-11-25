@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -75,13 +75,21 @@ _UPSERT = (
     + ", refreshed_at = clock_timestamp()"
 )
 
+#: What a read selects: the columns, then whether one of the template's media rows was
+#: written after the row was refreshed (`TemplateRow.media_newer`). `template_media`
+#: rows are replaced as a whole, so ``created_at`` is when the list last changed.
+_SELECTED = (
+    ", ".join(_COLUMNS) + ", COALESCE((SELECT max(m.created_at) FROM template_media m"
+    " WHERE m.template_id = templates.template_id) > refreshed_at, false) AS media_newer"
+)
+
 #: Mine first, then the built-ins, each in byte order, as Python's `sorted` of the ids.
 _ORDER = " ORDER BY origin = 'builtin', template_id COLLATE \"C\""
 
 
 @dataclass(frozen=True)
 class TemplateRow:
-    """One ``templates`` row, every column but ``refreshed_at``."""
+    """One ``templates`` row, every column but ``refreshed_at``, and what a read adds."""
 
     template_id: str
     origin: Literal["mine", "builtin"]
@@ -98,6 +106,10 @@ class TemplateRow:
     cover: dict[str, str] | None
     files_stamp: str
     refreshed_head: str | None
+    #: Read, never written: a media row of the template is newer than this row's
+    #: refresh, so a media file ``files`` lacks may be on the disk already (Task 8
+    #: review M1). Not compared: a row built from the files and its read are equal.
+    media_newer: bool = field(default=False, compare=False)
 
 
 def _values(row: TemplateRow) -> tuple[Any, ...]:
@@ -121,7 +133,9 @@ def _values(row: TemplateRow) -> tuple[Any, ...]:
 
 
 def _row_of(found: DictRow) -> TemplateRow:
-    return TemplateRow(**{column: found[column] for column in _COLUMNS})
+    return TemplateRow(
+        **{column: found[column] for column in _COLUMNS}, media_newer=found["media_newer"]
+    )
 
 
 def template_stamp(
@@ -189,21 +203,21 @@ class TemplateRows:
     def get(self, template_id: str) -> TemplateRow | None:
         with self._pool.connection() as conn:
             found = conn.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM templates WHERE template_id = %s",
+                f"SELECT {_SELECTED} FROM templates WHERE template_id = %s",
                 (template_id,),
             ).fetchone()
         return None if found is None else _row_of(found)
 
     def all(self) -> list[TemplateRow]:
         with self._pool.connection() as conn:
-            found = conn.execute(f"SELECT {', '.join(_COLUMNS)} FROM templates{_ORDER}").fetchall()
+            found = conn.execute(f"SELECT {_SELECTED} FROM templates{_ORDER}").fetchall()
         return [_row_of(row) for row in found]
 
     def many(self, template_ids: Sequence[str]) -> list[TemplateRow]:
         """The rows of ``template_ids`` that exist, in one query, in the walk's order."""
         with self._pool.connection() as conn:
             found = conn.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM templates WHERE template_id = ANY(%s){_ORDER}",
+                f"SELECT {_SELECTED} FROM templates WHERE template_id = ANY(%s){_ORDER}",
                 (list(template_ids),),
             ).fetchall()
         return [_row_of(row) for row in found]

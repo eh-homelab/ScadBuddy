@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
+import psycopg
 from fastapi import Depends, Path, Query
 from psycopg import Connection
 from starlette.requests import HTTPConnection
@@ -303,7 +304,8 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
                 if not catalogue.exists(model_id):
                     continue  # deleted: its duplicates' upstream is gone, not updated
                 duplicates = catalogue.duplicates_of(model_id)
-            except OSError:
+            except (OSError, psycopg.Error):
+                # The rows' read failed (Task 8 review M4): skip this one, as a file's.
                 logger.exception("could not list duplicates", extra={"slug": model_id})
                 continue
             for duplicate in duplicates:
