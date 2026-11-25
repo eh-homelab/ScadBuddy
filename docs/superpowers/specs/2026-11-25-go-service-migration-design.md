@@ -96,10 +96,11 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
 - **Switch.** `SCADBUDDY_CORE_AREAS` lists what Go answers: `<area>` for all its routes, or
   `<area>:read` for its GETs. The names are those of `api/crud_areas.py`. A route not
   listed is forwarded. Python keeps answering `/areas` with every name.
-- **Front rollback.** Python's container gets back the image's own command and ports. Going back is a Deployment change that drops the Go container.
-- **Packaging.** `tools/go/core` (image `scadbuddy-core`), its own image through `build-go-image.yml`, so the
-  Go CI needs no new wiring. The pod's two images have different commits; `/healthz` names
-  both. The pod manifest is a change in eh-homelab/clusters.
+- **Front rollback.** Python's container gets back the image's own command and ports. Until an area's Python handler is deleted, going back is a Deployment change that drops the Go container. After that, the rollback is the previous images of both containers (§1.2).
+- **Packaging.** `tools/go/core` (image `scadbuddy-core`). `build-image.yml` builds it with every
+  main build and the deploy pins it beside the API image, with the same version (#7705). To
+  build: `/healthz` names both images' commits. The pod manifest is a change in
+  eh-homelab/clusters.
 - **Database.** Go uses the API's database role. A role per process is not a boundary
   (#5295). Its pool is small (proposed 4) and it joins the connection budget
   (`backend/tests/test_pg_pools.py`).
@@ -200,7 +201,7 @@ type check, and the profile-fetch and intake code until someone ports it.
 
 | Risk | Answer |
 |---|---|
-| The front breaks streaming, WebSockets or client addresses for every route, at once | Phase 0 tests each. Going back is one Deployment change (§4) |
+| The front breaks streaming, WebSockets or client addresses for every route, at once | Phase 0 tests each. Going back is one Deployment change while no Python handler is deleted; after that, the previous images (§4) |
 | The two languages disagree on a rare input | The contract suite, the difference test, and the known traps above as cases |
 | A mixed deploy runs an area on both languages | Shared invariants are in SQL. A rollout switches the setting only after every pod has the Go binary |
 | The migration stops half-way | Each phase leaves a working system, and Python stays the migrator until phase 7 |
