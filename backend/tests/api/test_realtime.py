@@ -476,10 +476,10 @@ def test_topics_of_opaque_namespaced() -> None:
     assert realtime.topics_of(event) == ["fleet:agent:a"]
 
 
-def test_a_skipped_opaque_topic_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+def test_a_skipped_opaque_topic_is_logged_by_the_tap(caplog: pytest.LogCaptureFixture) -> None:
     event = _opaque("fleet.message", ["fleet:a", "job:abc", "orders"])
     with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
-        assert realtime.topics_of(event) == ["fleet:a"]
+        realtime.warn_skipped_topics("{}", event)
     records = [r for r in caplog.records if r.name == realtime.logger.name]
     assert len(records) == 1
     assert records[0].__dict__["event_id"] == "x"
@@ -487,7 +487,16 @@ def test_a_skipped_opaque_topic_is_logged_once(caplog: pytest.LogCaptureFixture)
     assert records[0].__dict__["skipped"] == ["job:abc", "orders"]
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
-        realtime.topics_of(_opaque("fleet.message", ["fleet:a"]))
+        realtime.warn_skipped_topics("{}", _opaque("fleet.message", ["fleet:a"]))
+        realtime.warn_skipped_topics("{}", None)
+    assert caplog.records == []
+
+
+def test_topics_of_stays_silent_for_every_socket(caplog: pytest.LogCaptureFixture) -> None:
+    event = _opaque("fleet.message", ["fleet:a", "job:abc"])
+    with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
+        assert realtime.topics_of(event) == ["fleet:a"]
+        assert realtime.topics_of(event) == ["fleet:a"]
     assert caplog.records == []
 
 

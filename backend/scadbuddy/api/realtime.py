@@ -267,23 +267,29 @@ def valid_topic(topic: object) -> bool:
     return not topic.startswith("model:") or len(topic) - 6 <= MAX_MODEL_ID_LENGTH
 
 
+def opaque_topics(event: OpaqueEvent) -> tuple[list[str], list[str]]:
+    """The topics of ``event`` in its kind's own namespace, and the rest (skipped)."""
+    prefix = f"{namespace_of(event.kind)}:"
+    kept = [t for t in event.topics if t.startswith(prefix) and _opaque_namespace_topic(t)]
+    return kept, [t for t in event.topics if t not in kept]
+
+
+def warn_skipped_topics(payload: str, event: AnyEvent | None) -> None:
+    """A tap on the bus: runs once per event heard in this process, not once per socket
+    (`topics_of` is called by each one, and again on a replay, so it stays silent)."""
+    if isinstance(event, OpaqueEvent) and (skipped := opaque_topics(event)[1]):
+        logger.warning(
+            "skipped topics of an opaque event outside its namespace",
+            extra={"event_id": event.id, "kind": event.kind, "skipped": skipped},
+        )
+
+
 def topics_of(event: AnyEvent) -> list[str]:
     """Every topic ``event`` is news for."""
     match event:
         case OpaqueEvent():
             # Only its own kind's namespace, so an unknown kind cannot pose as `job:` news.
-            prefix = f"{namespace_of(event.kind)}:"
-            kept = [t for t in event.topics if t.startswith(prefix) and _opaque_namespace_topic(t)]
-            if len(kept) != len(event.topics):
-                logger.warning(
-                    "skipped topics of an opaque event outside its namespace",
-                    extra={
-                        "event_id": event.id,
-                        "kind": event.kind,
-                        "skipped": [t for t in event.topics if t not in kept],
-                    },
-                )
-            return kept
+            return opaque_topics(event)[0]
         case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
