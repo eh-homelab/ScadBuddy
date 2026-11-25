@@ -26,13 +26,26 @@ const fileOwner = z
   .min(1)
   .max(200)
   .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `insert_type:<id>` (or another filament catalog's row: `material`, `subtype`, `brand`, `category`, `effect`, `insert_material`, `colour`, `location_kind`). Not an order's: change those with order_attachment_update/order_attachment_delete")
-const attachmentId = z.string().min(1).max(100).describe("An attachment's id, as entity_attachment_list gives it")
+const attachmentId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).describe("An attachment's id, as entity_attachment_list gives it")
 const linkId = z.string().min(1).max(100).describe("A link's id, as entity_link_list gives it")
 const role = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text: `reference`, `issue`, `finished`, `packed`, `receipt`, `invoice`, `manual`, `photo`, `label`, `other`')
 const caption = z.string().max(1000)
 const linkKind = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text, `other` when left out: `support`, `datasheet`, `store`, ...')
 
 const deleted = (what: string) => json({ deleted: what })
+/** A kept file's extension by its type, so a later upload of it is named as the type it is. */
+const EXTENSIONS: Readonly<Record<string, string>> = {
+  'application/pdf': '.pdf',
+  'image/svg+xml': '.svg',
+  'text/plain': '.txt',
+  'text/csv': '.csv',
+  'application/json': '.json',
+  'video/mp4': '.mp4',
+  'video/quicktime': '.mov',
+  'application/zip': '.zip',
+  'model/3mf': '.3mf',
+  'model/stl': '.stl',
+}
 /** The most of a file entity_attachment_get reads: the workspace's default file cap. */
 const FILE_READ_MAX = 25 * 1024 * 1024
 
@@ -187,7 +200,7 @@ export const entityTools = [
     description:
       "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
       'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
-      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; any other file (a PDF ' +
+      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; an SVG, and any other file (a PDF ' +
       'manual, a receipt) kept in your workspace and answered as `workspace_file`: workspace_read reads a text ' +
       'file, and a binary one (a PDF) can be attached or uploaded from there but not read. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
       'it for a photo too large to view, or when a glance is enough.',
@@ -210,7 +223,13 @@ export const entityTools = [
       const read = await readCapped(stream, length !== null && /^\d+$/.test(length) ? Number(length) : undefined, FILE_READ_MAX)
       // Never a backend path: a model given one guessed a URL for it (#7727).
       if (!read.inline) {
-        return json({ viewable: false, media_type: mimeType, size_bytes: read.size ?? null, note: `Larger than ${FILE_READ_MAX} bytes: too large to read here.` })
+        const thumbable = !thumbnail && ['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)
+        return json({
+          viewable: false,
+          media_type: mimeType,
+          size_bytes: read.size ?? null,
+          note: `Larger than ${FILE_READ_MAX} bytes: too large to read here.` + (thumbable ? ' Call again with `thumbnail: true` for a small copy.' : ''),
+        })
       }
       const bytes = read.bytes
       if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
@@ -240,7 +259,7 @@ export const entityTools = [
         return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: 'There is no workspace to keep it in here.' })
       }
       try {
-        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${attachment_id.replace(/[^A-Za-z0-9_.-]/g, '_')}`, new Uint8Array(bytes), {
+        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${attachment_id}${EXTENSIONS[mimeType] ?? ''}`, new Uint8Array(bytes), {
           mediaType: mimeType,
           source: { tool: 'entity_attachment_get', entity: ref, attachment_id },
         })

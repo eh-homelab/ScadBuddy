@@ -8,6 +8,7 @@ import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/re
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { memoryWorkspace } from './helpers/workspace.js'
 import { IMAGE_BYTES_MAX } from '../src/sessions/images.js'
+import { WorkspaceError } from '../src/workspace/store.js'
 
 // Entity attachments and links (#6950, phase 1 Task 7): the generic `/entities/{ref}` routes.
 
@@ -88,9 +89,9 @@ describe('entity attachment and link tools', () => {
     const pdf = await get.execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
     expect(pdf.content.some((c) => c.type === 'resource' || c.type === 'resource_link')).toBe(false)
     expect(firstText(pdf)).toMatchObject({
-      workspace_file: { name: `attachments/${ID}`, mediaType: 'application/pdf', size: 8 },
+      workspace_file: { name: `attachments/${ID}.pdf`, mediaType: 'application/pdf', size: 8 },
     })
-    expect(ws.written.get(`attachments/${ID}`)?.toString()).toBe('%PDF-1.7')
+    expect(ws.written.get(`attachments/${ID}.pdf`)?.toString()).toBe('%PDF-1.7')
   })
 
   it('answers a HEIC or AVIF photo as a note, never as an image block the model would refuse', async () => {
@@ -111,6 +112,38 @@ describe('entity attachment and link tools', () => {
     const result = await tool('entity_attachment_get').execute({ entity: PRINTER, attachment_id: ID }, ctx())
     expect(firstText(result)).toMatchObject({ viewable: false, media_type: 'video/mp4', size_bytes: 26 * 1024 * 1024 })
     expect(JSON.stringify(result.content)).not.toContain('/api/v1/entities')
+  })
+
+  it('answers a non-image file as a note with no workspace, or when the workspace refuses it', async () => {
+    server.use(http.get(`${base(PRINTER)}/attachments/${ID}/content`, () => new HttpResponse(Buffer.from('%PDF-1.7'), { headers: { 'Content-Type': 'application/pdf' } })))
+    const get = tool('entity_attachment_get')
+    expect(firstText(await get.execute({ entity: PRINTER, attachment_id: ID }, ctx()))).toMatchObject({
+      media_type: 'application/pdf',
+      size_bytes: 8,
+      note: 'There is no workspace to keep it in here.',
+    })
+    const full = {
+      async write() {
+        throw new WorkspaceError('too_large', 'the workspace is full')
+      },
+    } as unknown as NonNullable<ToolContext['workspace']>
+    expect(firstText(await get.execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: full } as ToolContext))).toMatchObject({
+      note: 'Not kept: the workspace is full',
+    })
+  })
+
+  it('refuses an attachment id that is not a plain id, before anything is fetched', async () => {
+    expect((await runTool(tool('entity_attachment_get'), { entity: PRINTER, attachment_id: '..' }, ctx())).isError).toBe(true)
+  })
+
+  it('answers a photo over the read cap with the thumbnail hint', async () => {
+    server.use(
+      http.get(`${base(SPOOL)}/attachments/${ID}/content`, () =>
+        new HttpResponse(null, { headers: { 'Content-Type': 'image/jpeg', 'Content-Length': String(26 * 1024 * 1024) } }),
+      ),
+    )
+    const answer = firstText(await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())) as { note: string }
+    expect(answer.note).toContain('thumbnail: true')
   })
 
   it('answers a GIF too large to view without the thumbnail hint, which has no GIF', async () => {
