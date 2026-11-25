@@ -186,21 +186,23 @@ def test_copy_drops_a_row_whose_folder_is_gone(world: World) -> None:
 
 
 def _commit_after_the_walk(world: World, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """`Catalogue.versions` answers the walk's versions, then a save through the catalogue
+    """`ModelHistory.last_commits` answers the walk's versions, then a save through the catalogue
     commits: the commit lands after the walk and before the first batch."""
     landed: list[str] = []
-    walk = Catalogue.versions
+    walk = ModelHistory.last_commits
+    catalogue = world.catalogue
 
-    def versions(self: Catalogue) -> dict[str, str]:
+    def versions(self: ModelHistory) -> dict[str, str]:
         found = walk(self)
         if not landed:
-            self.write_source("demo", SOURCE.replace("cube(1)", "cube(7)"))
-            head = self.version("demo")
+            landed.append("")
+            catalogue.write_source("demo", SOURCE.replace("cube(1)", "cube(7)"))
+            head = catalogue.version("demo")
             assert head is not None
-            landed.append(head)
+            landed[0] = head
         return found
 
-    monkeypatch.setattr(Catalogue, "versions", versions)
+    monkeypatch.setattr(ModelHistory, "last_commits", versions)
     return landed
 
 
@@ -380,8 +382,8 @@ def test_a_write_lock_timeout_in_a_batch_is_incomplete_and_the_run_goes_on(
 def test_a_git_failure_reading_a_version_keeps_the_stored_version(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Task 5 review B-M2: the walk had no versions (`versions()` failed and answered
-    # `{}`), and each template's own `git log -1` fails too. The rows keep their stored
+    # Task 5 review B-M2: the walk named no version, and each template's own
+    # `git log -1` fails too. The rows keep their stored
     # versions, never None, and the run is incomplete.
     _copy(world)
     before = world.rows.get("demo")
@@ -389,7 +391,7 @@ def test_a_git_failure_reading_a_version_keeps_the_stored_version(
     (world.catalogue.paths.models / "demo" / "model.json").write_text(
         json.dumps({"name": "Edited by hand"}), encoding="utf-8"
     )
-    monkeypatch.setattr(Catalogue, "versions", lambda self: {})
+    monkeypatch.setattr(ModelHistory, "last_commits", lambda self: {})
     run = ModelHistory._run
 
     def failing_log(self: ModelHistory, *args: str, **kwargs: Any) -> Any:
@@ -407,6 +409,45 @@ def test_a_git_failure_reading_a_version_keeps_the_stored_version(
     assert after.name == "Edited by hand"
     assert after.version == before.version
     assert result.incomplete is True
+
+
+def test_a_failed_history_walk_is_incomplete_and_reads_no_version_per_template(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of db7ef61 (non-blocking 4): when the one walk of the history fails, the
+    run compares the stamps with the stored versions, so a git outage does not become a
+    `git log -1` per template under the write lock. A changed template is read again with
+    its stored version, and the run is incomplete."""
+    _copy(world)
+    before = world.rows.get("demo")
+    assert before is not None and before.version is not None
+    (world.catalogue.paths.models / "demo" / "model.json").write_text(
+        json.dumps({"name": "Edited by hand"}), encoding="utf-8"
+    )
+
+    def walk_fails(self: ModelHistory) -> dict[str, str]:
+        raise GitError("git log failed", "fatal: unable to read tree")
+
+    monkeypatch.setattr(ModelHistory, "last_commits", walk_fails)
+    run = ModelHistory._run
+    own: list[tuple[str, ...]] = []
+
+    def counting(self: ModelHistory, *args: str, **kwargs: Any) -> Any:
+        if args[:2] == ("log", "-1"):
+            own.append(args)
+        return run(self, *args, **kwargs)
+
+    monkeypatch.setattr(ModelHistory, "_run", counting)
+    result = _copy(world)
+
+    after = world.rows.get("demo")
+    assert after is not None
+    assert after.name == "Edited by hand"
+    assert after.version == before.version
+    assert result.incomplete is True
+    assert result.refreshed == 1
+    assert result.dropped == 0
+    assert own == []
 
 
 def test_the_copys_history_walk_has_a_span(world: World, spans: InMemorySpanExporter) -> None:

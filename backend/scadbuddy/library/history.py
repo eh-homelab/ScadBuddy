@@ -158,6 +158,29 @@ class TemplateRowsHook(Protocol):
         the write lock."""
         ...
 
+    def count_failure(self, path: str) -> None:
+        """Count one refresh under ``path`` that failed outside the hook's own calls;
+        the caller has logged it."""
+        ...
+
+
+class _RowsWrite:
+    """A commit's rows write (`TemplateRowsHook.for_commit`), and whether it raised:
+    a write that raised was counted by the hook, so a failed HEAD record does not count
+    it again (review of db7ef61)."""
+
+    def __init__(self, models: list[str], write: Callable[[Any], None]) -> None:
+        self.models = models
+        self.write = write
+        self.raised = False
+
+    def __call__(self, conn: Any) -> None:
+        try:
+            self.write(conn)
+        except Exception:
+            self.raised = True
+            raise
+
 
 class ModelHistory(GitRepo):
     """The git repository under ``data/models``.
@@ -333,7 +356,19 @@ class ModelHistory(GitRepo):
         found: Callable[[Any], None] | None = self._guarded(
             models, partial(self.template_rows.for_commit, models, change.commit)
         )
-        return found
+        return None if found is None else _RowsWrite(models, found)
+
+    def _unrecorded(self, change: HeadChange, also: Callable[[Any], None] | None) -> None:
+        """The HEAD record failed, and the rows written in its transaction rolled back
+        with it (review of db7ef61, Blocking 2): logged with the template ids and counted
+        under ``commit``. The copy run repairs them."""
+        if not isinstance(also, _RowsWrite) or also.raised or self.template_rows is None:
+            return
+        logger.error(
+            "a commit's template rows rolled back with its HEAD record",
+            extra={"commit": change.commit, "templates": also.models},
+        )
+        self._guarded(also.models, partial(self.template_rows.count_failure, "commit"))
 
     def _landed_alone(self, commit: str) -> None:
         """With no coordinator, the rows of ``commit`` in a transaction of their own,
@@ -345,6 +380,11 @@ class ModelHistory(GitRepo):
         except GitError:
             logger.exception("could not list what a commit touched", extra={"commit": commit})
             models = list(self._writing)
+            if not models:
+                # Nothing names its templates: none is refreshed, and the miss is
+                # counted (review of db7ef61); the copy run repairs them.
+                self._guarded(None, partial(self.template_rows.count_failure, "commit"))
+                return
         if models:
             self._guarded(models, partial(self.template_rows.refresh_locked, models, path="commit"))
 

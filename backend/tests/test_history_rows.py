@@ -7,6 +7,8 @@ change that commits nothing refreshes the rows of its paths under the same lock.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -19,7 +21,13 @@ import psycopg
 import pytest
 
 from scadbuddy.library.history import GitError, ModelHistory
-from scadbuddy.library.repo_lock import HEAD_CHANNEL, PgRepoCoordinator, decode_change
+from scadbuddy.library.repo_lock import (
+    HEAD_CHANNEL,
+    PgRepoCoordinator,
+    RepoLockError,
+    _PgHold,
+    decode_change,
+)
 from scadbuddy.library.template_rows import TemplateRow, write_rows
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -59,6 +67,8 @@ class FakeHook:
     refreshes: list[tuple[list[str], str, bool]] = field(default_factory=list)
     #: What the HEAD row read on the transaction's own connection, when it ran.
     seen_head: list[str | None] = field(default_factory=list)
+    #: Each failed refresh the history counted, by path.
+    failures: list[str] = field(default_factory=list)
 
     def for_commit(self, models: list[str], commit: str) -> Callable[[Any], None] | None:
         self.commits.append((list(models), commit))
@@ -95,6 +105,9 @@ class FakeHook:
         self.refreshes.append((list(models), path, held))
         if self.mode == "hook_raises":
             raise RuntimeError("the hook broke")
+
+    def count_failure(self, path: str) -> None:
+        self.failures.append(path)
 
 
 @pytest.fixture
@@ -365,6 +378,66 @@ def test_a_restore_git_cannot_list_refreshes_its_id(
     monkeypatch.setattr(history, "_changed_models", _unlisted)
     created = history.restore("other", first)
     assert hook.commits[-1] == (["other"], created)
+
+
+def _unrecorded(run_also: bool) -> Callable[..., None]:
+    """A `_PgHold.record` whose HEAD write fails, as when Postgres drops the connection:
+    the transaction rolls back, and with it the rows. With ``run_also``, the rows' write
+    runs first, and its failure is swallowed as the savepoint swallows it."""
+
+    def record(self: Any, change: Any, also: Callable[[Any], None] | None = None) -> None:
+        if run_also and also is not None:
+            with contextlib.suppress(Exception):
+                also(None)
+        raise RepoLockError(f"could not record {change.commit[:7]} as the HEAD")
+
+    return record
+
+
+def test_a_head_that_cannot_be_recorded_logs_and_counts_its_rows(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of db7ef61 (Blocking 2): a HEAD record that fails rolls back the rows
+    written with it. The miss is logged with the template ids and counted under
+    ``commit``, and the commit stands."""
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    monkeypatch.setattr(_PgHold, "record", _unrecorded(run_also=False))
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.history"):
+        created = history.commit("Add demo", "demo")
+    assert created is not None and history.head() == created
+    assert hook.failures == ["commit"]
+    assert any(getattr(r, "templates", None) == ["demo"] for r in caplog.records)
+    assert _version(conninfo, "demo") is None
+
+
+def test_a_head_that_cannot_be_recorded_after_its_rows_failed_counts_once(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rows' own write failed and the hook counted it (`TemplateRefresh.for_commit`):
+    the failed HEAD record does not count it again."""
+    hook = FakeHook(mode="raises")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    monkeypatch.setattr(_PgHold, "record", _unrecorded(run_also=True))
+    assert history.commit("Add demo", "demo") is not None
+    assert hook.failures == []
+
+
+def test_a_commit_git_cannot_list_and_named_no_template_is_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of db7ef61 (non-blocking 2): with no coordinator, a commit git cannot
+    list and whose write named no template refreshes nothing; the miss is counted."""
+    hook = FakeHook()
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root / "_builtin", "tag")
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    assert history.commit("Sync the built-in models", "_builtin") is not None
+    assert hook.refreshes == []
+    assert hook.failures == ["commit"]
 
 
 def test_a_commit_git_cannot_list_without_a_coordinator_refreshes_the_ids_it_named(

@@ -806,13 +806,15 @@ class GitRepo:
                 # The commit has landed: the other replicas refresh everything instead.
                 logger.exception("could not list what a commit touched", extra={"commit": created})
                 change = HeadChange(created)
+            also = self._also_record(change)
             try:
-                self._hold.record(change, self._also_record(change))
+                self._hold.record(change, also)
             except GitError:
                 logger.exception(
                     "a commit landed, but its HEAD could not be recorded for the other replicas",
                     extra={"commit": created},
                 )
+                self._unrecorded(change, also)
         else:
             self._landed_alone(created)
         return created
@@ -826,6 +828,10 @@ class GitRepo:
         """What else to write in the transaction that records ``change`` (#7317).
         Here, nothing."""
         return None
+
+    def _unrecorded(self, change: HeadChange, also: Callable[[Any], None] | None) -> None:
+        """After the HEAD record of ``change`` failed: what ``also`` would have written
+        rolled back with it (#7317). Here, nothing to do."""
 
     def _landed_alone(self, commit: str) -> None:
         """Told of ``commit`` under the write lock when no coordinator records HEAD

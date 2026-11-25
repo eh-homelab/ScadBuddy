@@ -591,7 +591,6 @@ import os
 import pathlib
 import shutil
 import sys
-import threading
 import time
 
 args = sys.argv[1:]
@@ -849,7 +848,6 @@ import json
 import pathlib
 import shutil
 import sys
-import threading
 
 args = sys.argv[1:]
 settings = json.loads(pathlib.Path(sys.argv[0]).with_name("fake-env.json").read_text())

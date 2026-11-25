@@ -493,14 +493,16 @@ class TemplateCopyStatus(BaseModel):
     #: ``incomplete``.
     finished_at: datetime | None
     #: The run walked to its end but may have missed templates (a listing, a stat or a
-    #: batch's read failed, ``models/`` was missing, or the walk saw no template while
-    #: rows exist). It dropped no row; the next run tries again.
+    #: batch's read failed, git failed in a batch or in the walk of the history,
+    #: ``models/`` was missing, or the walk saw no template while rows exist). It
+    #: dropped no row; the next run tries again.
     incomplete: bool
     added: int
     refreshed: int
     dropped: int
-    #: ``{template_id, error}`` for each template the run walked whose row keeps no
-    #: ``meta`` (its ``model.json`` could not be read or stored).
+    #: ``{template_id, error}`` for each template the run walked whose row has a
+    #: ``meta_error``: its ``model.json`` is not JSON, cannot be stored, or does not
+    #: validate.
     unreadable: list[dict[str, str]]
 
 
@@ -512,8 +514,8 @@ class TemplateCopyStatus(BaseModel):
 async def template_copy_status(catalogue: CatalogueDep) -> TemplateCopyStatus:
     """The last run of the copy of the templates' files to rows (#7317), at an API start
     or in a housekeeping sweep: when it started and finished, what it added, refreshed and
-    dropped, and the templates whose ``model.json`` its rows could not keep. 404 before
-    any run."""
+    dropped, and each walked template whose row has a ``meta_error`` (its ``model.json``
+    is not JSON, cannot be stored, or does not validate). 404 before any run."""
     refresh = catalogue.refresh
     last = None if refresh is None else await asyncio.to_thread(refresh.rows.last_run)
     if last is None:

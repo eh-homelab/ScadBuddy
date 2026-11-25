@@ -4,7 +4,7 @@
 
 It reconciles; it does not only fill. Outside the models write lock it walks the template
 folders as `Catalogue.slugs` does, reads every template's last commit with one
-`Catalogue.versions` walk, and stamps each template's files (`template_stamp`). A
+`ModelHistory.last_commits` walk, and stamps each template's files (`template_stamp`). A
 template needs a refresh when it has no row, its stamp differs, or its version differs.
 It refreshes those templates `BATCH` at a time, each batch under the write lock, so a save
 waits for at most one small batch. Under the lock it reads the files again, so no stale
@@ -15,8 +15,9 @@ the row keeps its stored version and the run is ``incomplete``. Then, under the 
 row whose template the walk did not see and that is not there now.
 
 A listing or stat error other than a missing entry (an NFS ``ESTALE``, ``EIO``), a
-missing ``models/``, a batch whose read or git call failed (the write lock past
-``git_timeout`` too), or a walk that saw no template while rows exist makes the run
+missing ``models/``, a failed walk of the history (each row then keeps its stored
+version), a batch whose read or git call failed (the write lock past ``git_timeout``
+too), or a walk that saw no template while rows exist makes the run
 ``incomplete``: it drops nothing and sets no ``finished_at``. A stop leaves the run with
 no ``finished_at`` too. One replica copies at a time, under a session advisory lock.
 Synchronous: a caller on the loop uses a thread.
@@ -194,9 +195,9 @@ class _Copy:
         # One walk of the history (`last_commits`) for every template's version, outside
         # the write lock; its own span `model_history.last_commits` says whether it hit
         # the walk kept as of HEAD (review of #7484).
-        with span("templates.copy.versions", attributes={"scadbuddy.templates": len(seen)}):
-            versions: dict[str, str | None] = dict(self.catalogue.versions())
         known = self.rows.stamps()
+        with span("templates.copy.versions", attributes={"scadbuddy.templates": len(seen)}):
+            versions, walked = self._versions(known)
         media = self.catalogue.media_store.items_for(seen)
         builtins = [template_id for template_id in seen if is_builtin(template_id)]
         covers = self.catalogue.media_store.covers_for(builtins) if builtins else {}
@@ -227,6 +228,9 @@ class _Copy:
         if not walk.complete:
             self.result.incomplete = True
             logger.warning("a listing of the templates failed; dropped no row this run")
+        elif not walked:
+            # Logged by `_versions`.
+            self.result.incomplete = True
         elif not seen and known:
             # A models folder that lists no template is a volume not there, not every
             # template deleted: keep the rows.
@@ -252,6 +256,23 @@ class _Copy:
             unreadable=self.result.unreadable,
         )
         return self.result
+
+    def _versions(
+        self, known: dict[str, tuple[str, str | None]]
+    ) -> tuple[dict[str, str | None], bool]:
+        """Every template's version from one walk of the history, and whether the walk
+        answered. When it fails, each row's stored version (review of db7ef61): an
+        unchanged template is then left alone, so a git outage does not become a
+        `git log -1` per template under the write lock. The run is then incomplete."""
+        if self.history is None:
+            return {}, True
+        try:
+            return dict(self.history.last_commits()), True
+        except (GitError, OSError):
+            logger.exception(
+                "could not walk the templates' versions; kept the stored ones, dropped no row"
+            )
+            return {template_id: version for template_id, (_, version) in known.items()}, False
 
     def _refresh(
         self,

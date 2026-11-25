@@ -72,7 +72,8 @@ def test_copy_status_reports_the_last_run(placed_client: TestClient) -> None:
 
 def test_copy_status_reports_an_incomplete_run_and_its_unreadable(client: TestClient) -> None:
     """What the run table holds, as it holds it: no end, ``incomplete``, the counts and
-    each template whose ``model.json`` the row could not keep."""
+    each walked template whose row has a ``meta_error``: its ``model.json`` is not JSON,
+    cannot be stored, or does not validate."""
     rows = _rows(client)
     run = rows.start_run()
     unreadable = [{"template_id": "box", "error": "not JSON"}]
