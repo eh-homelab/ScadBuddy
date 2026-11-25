@@ -175,3 +175,84 @@ async def test_a_cancelled_sweep_sets_its_stop(monkeypatch: pytest.MonkeyPatch) 
     with pytest.raises(asyncio.CancelledError):
         await run
     assert stops[0].is_set()
+
+
+MARK_FAILED = "could not write the cut-over mark; the next byte run or start retries"
+
+
+def _marking(tries: list[bool], *, fails: bool = False) -> Any:
+    """Rows whose `try_cut_over` records each call, and raises when ``fails``."""
+
+    def try_cut_over() -> bool:
+        tries.append(True)
+        if fails:
+            raise OSError("the database went")
+        return False
+
+    return SimpleNamespace(
+        last_run=lambda: FINISHED_RUN, cut_over=lambda: False, try_cut_over=try_cut_over
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "stopped"),
+    [
+        (ByteCopyResult(refused="a bambuddy store"), False),
+        (ByteCopyResult(incomplete=True), False),
+        (ByteCopyResult(copied=1), True),
+    ],
+    ids=["refused", "incomplete", "stopped"],
+)
+async def test_a_byte_run_that_did_not_end_tries_no_mark(
+    monkeypatch: pytest.MonkeyPatch, result: ByteCopyResult, stopped: bool
+) -> None:
+    """#7257 plan D2: only a byte run that ended (not refused, not incomplete, not
+    stopped) tries the mark."""
+    _recording(monkeypatch, result)
+    tries: list[bool] = []
+    stop = threading.Event()
+    if stopped:
+        stop.set()
+    await main._copy_output_bytes_once(_state(_marking(tries)), stop)
+    assert tries == []
+
+
+async def test_a_byte_run_that_ended_tries_the_mark(monkeypatch: pytest.MonkeyPatch) -> None:
+    _recording(monkeypatch, ByteCopyResult(copied=1))
+    tries: list[bool] = []
+    await main._copy_output_bytes_once(_state(_marking(tries)), threading.Event())
+    assert tries == [True]
+
+
+async def test_a_failed_mark_in_the_sweep_is_logged_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mark is best effort: a failure is logged, and the sweep's activity succeeds."""
+    _recording(monkeypatch, ByteCopyResult(copied=1))
+    tries: list[bool] = []
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        await ActivityEnvironment().run(_sweep(_state(_marking(tries, fails=True))))
+    assert tries == [True]
+    assert [r.getMessage() for r in caplog.records] == [MARK_FAILED]
+
+
+async def test_a_failed_mark_at_start_is_logged_and_the_start_copies(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The start tries the mark first and after the byte run: each failure is logged, and
+    the copies still run."""
+    calls = _recording(monkeypatch, ByteCopyResult(copied=1))
+    order: list[str] = []
+
+    async def rows(state: Any, *, stop: threading.Event) -> None:
+        order.append("rows")
+
+    monkeypatch.setattr(main, "_copy_outputs_logged", rows)
+    tries: list[bool] = []
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.main"):
+        await main._copy_outputs_and_bytes_logged(
+            _state(_marking(tries, fails=True)), stop=threading.Event()
+        )
+    assert order == ["rows"] and len(calls) == 1
+    assert tries == [True, True]
+    assert [r.getMessage() for r in caplog.records] == [MARK_FAILED, MARK_FAILED]

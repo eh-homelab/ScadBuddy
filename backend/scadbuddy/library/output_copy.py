@@ -45,6 +45,7 @@ import psycopg
 from psycopg.conninfo import make_conninfo
 
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.library.output_rows import COPY_LOCK as COPY_LOCK
 from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY, OutputRow, OutputRows
 from scadbuddy.library.outputs import (
     ARRANGED_NAME,
@@ -60,9 +61,6 @@ from scadbuddy.library.outputs import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: The advisory lock's name: ``pg_try_advisory_lock(hashtextextended(COPY_LOCK, 0))``.
-COPY_LOCK = "scadbuddy:outputs:copy"
 
 #: The lock connection's ``application_name``, as a pool's name is its connections'.
 LOCK_APPLICATION = "scadbuddy-output-copy"

@@ -21,6 +21,8 @@ from scadbuddy.library import output_rows
 from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_query import AfterNotListedError, OutputQuery, params_text
 from scadbuddy.library.output_rows import (
+    BYTES_LOCK,
+    COPY_LOCK,
     ByteWrite,
     OutputBlobs,
     OutputFileBlob,
@@ -711,6 +713,32 @@ def test_try_cut_over_needs_every_condition(rows: OutputRows, projection: JobPro
     with projection.pool.connection() as conn:
         mark = conn.execute("SELECT byte_run_id FROM output_cutover").fetchone()
     assert mark is not None and mark["byte_run_id"] == last
+
+
+@pytest.mark.parametrize("lock", [COPY_LOCK, BYTES_LOCK], ids=["row copy", "byte copy"])
+def test_try_cut_over_waits_for_a_running_copy(
+    rows: OutputRows, projection: JobProjection, pg_conninfo: str, lock: str
+) -> None:
+    """A2 review: a copy that holds its lock may still write a row with ``bytes_at``
+    NULL, so no mark is written while it runs."""
+    _finish_row_copy(rows)
+    _end_byte_run(rows)
+    with psycopg.connect(pg_conninfo, autocommit=True) as copy:
+        copy.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
+        assert rows.try_cut_over() is False
+        assert rows.cut_over_at() is None
+        copy.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
+    assert rows.try_cut_over() is True
+
+
+def test_try_cut_over_needs_the_last_row_copy_run_finished(rows: OutputRows) -> None:
+    """A2 review: an earlier finished row copy run is not enough; the last one must be."""
+    _finish_row_copy(rows)
+    rows.start_run()
+    _end_byte_run(rows)
+    assert rows.try_cut_over() is False
+    _finish_row_copy(rows)
+    assert rows.try_cut_over() is True
 
 
 def test_try_cut_over_is_written_once(rows: OutputRows, projection: JobProjection) -> None:

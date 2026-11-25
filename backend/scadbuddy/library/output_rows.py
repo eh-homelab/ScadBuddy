@@ -579,13 +579,26 @@ _COPY_REFRESH = (
 #: What a copy logs when it does nothing because the cut-over mark exists (plan D4).
 CUT_OVER_NOTHING_TO_COPY = "the outputs are cut over (#7257); nothing to copy"
 
-#: The cut-over mark, written once (plan D2). The last byte run by id is the one judged.
+#: The row copy's advisory lock (`output_copy.copy_outputs`):
+#: ``pg_try_advisory_lock(hashtextextended(COPY_LOCK, 0))``.
+COPY_LOCK = "scadbuddy:outputs:copy"
+#: The byte copy's advisory lock (`output_byte_copy.copy_output_bytes`), the same way.
+BYTES_LOCK = "scadbuddy:outputs:bytes"
+
+#: Whether neither copy runs now: both copies' locks, taken until the transaction ends.
+_COPIES_IDLE = (
+    "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))"
+    " AND pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS idle"
+)
+
+#: The cut-over mark, written once (plan D2). The last byte run and the last row copy
+#: run, by id, are the ones judged: a run in progress has no ``finished_at``.
 _TRY_CUT_OVER = (
     "INSERT INTO output_cutover (byte_run_id)"
     " SELECT r.id FROM (SELECT id, finished_at, refused, failed FROM output_byte_runs"
     " ORDER BY id DESC LIMIT 1) r"
     " WHERE r.finished_at IS NOT NULL AND r.refused IS NULL AND r.failed = '[]'::jsonb"
-    " AND EXISTS (SELECT 1 FROM output_copy_runs WHERE finished_at IS NOT NULL)"
+    " AND (SELECT finished_at FROM output_copy_runs ORDER BY id DESC LIMIT 1) IS NOT NULL"
     " AND NOT EXISTS (SELECT 1 FROM outputs WHERE bytes_at IS NULL)"
     " ON CONFLICT DO NOTHING"
 )
@@ -1208,12 +1221,20 @@ class OutputRows:
         return True
 
     def try_cut_over(self) -> bool:
-        """Write the cut-over mark (#7257, plan D2) when, in one statement: a row copy
-        run has finished; the last byte run has finished, with no refusal and no failure;
-        and no row waits for its bytes (``bytes_at`` NULL). It is written once; a later
-        call changes nothing. True only when this call wrote it (so one replica logs it);
-        `cut_over` says whether it exists."""
-        with self._pool.connection() as conn:
+        """Write the cut-over mark (#7257, plan D2) when, in one statement: the last row
+        copy run has finished; the last byte run has finished, with no refusal and no
+        failure; and no row waits for its bytes (``bytes_at`` NULL). It is written once; a
+        later call changes nothing. True only when this call wrote it (so one replica logs
+        it); `cut_over` says whether it exists.
+
+        Neither copy may run meanwhile: the transaction takes both copies' locks first and
+        writes nothing when one is held. A row copy in flight could insert a row with
+        ``bytes_at`` NULL after the mark, which no copy would fill (each copy checks the
+        mark under its lock), and release B's migration would then refuse every start."""
+        with self._pool.connection() as conn, conn.transaction():
+            idle = conn.execute(_COPIES_IDLE, (COPY_LOCK, BYTES_LOCK)).fetchone()
+            if idle is None or not idle["idle"]:
+                return False
             wrote = conn.execute(_TRY_CUT_OVER).rowcount == 1
         if wrote:
             with self._lock:

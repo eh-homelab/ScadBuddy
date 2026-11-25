@@ -76,6 +76,7 @@ from scadbuddy.library.output_bytes import (
     OutputFileNameError,
     put_names,
 )
+from scadbuddy.library.output_rows import BYTES_LOCK as BYTES_LOCK
 from scadbuddy.library.output_rows import (
     CUT_OVER_NOTHING_TO_COPY,
     ByteWrite,
@@ -92,9 +93,6 @@ from scadbuddy.library.outputs import OutputStore
 from scadbuddy.store.content import ContentStore
 
 logger = logging.getLogger(__name__)
-
-#: The advisory lock's name: ``pg_try_advisory_lock(hashtextextended(BYTES_LOCK, 0))``.
-BYTES_LOCK = "scadbuddy:outputs:bytes"
 
 #: The lock connection's ``application_name``, as a pool's name is its connections'.
 LOCK_APPLICATION = "scadbuddy-output-byte-copy"
