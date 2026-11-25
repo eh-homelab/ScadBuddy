@@ -4,6 +4,12 @@ Status: draft for the owner's review, 2026-11-21. Brainstormed in session scadbu
 coordinated with the filament epic #6260 session (`fix-sync-status-review-findings`) and the
 `bambuddy-sync-dry-bins` session.
 
+Updated 2026-11-25 for the owner's rulings on #7068 (marked "(owner, 2026-11-25)"): one model
+for spools and every other item, one kind tree, plain `locations` and `suppliers` tables, one
+invoice line model with billed kept apart from received, the Filament section moved into
+Inventory, the invoice import and the back-fill as flows, and full parity (§11). Phase 3
+splits into 3a and 3b (§9).
+
 ## 1. Intent
 
 ScadBuddy is the shop's ERP. Today it tracks the cost and stock of filament spools only, and
@@ -59,7 +65,8 @@ information for the whole shop in one place.
   may come later (owner, 2026-11-21: a true cost per order and per item is the target).
 - Lifespan telemetry and wear tracking themselves (hours on a nozzle, belt tension). Other
   epics own them. This design gives them a unit to attach to.
-- Purchase orders and reorder automation (the shopping list stays as it is, item-scoped).
+- Purchase orders and reorder automation. The shopping list serves every item (owner,
+  2026-11-25; §6.5); an auto-add puts a row on the list and orders nothing.
 - Multi-currency stock. Stock is valued in the shop currency, as invoices are today
   (confirm refuses another currency). Each `parts` row has its own `currency` today; phase 2
   opens a lot at the part's unit cost only when its currency is the shop's, and opens a
@@ -117,6 +124,14 @@ model, a supplier, an invoice, a production run, a location.
   deletes their attachments, as `print_attachments` rows do today.
 - The text form `kind:ref` (as `order_attachments.subject` uses today) is the wire form in
   routes and agent tools.
+- **One kind per thing in stock (owner, 2026-11-25).** A thing the shop holds is an `item`
+  (what it is) or a `unit` (one of it), or a `lot` (a counted batch). A spool type is
+  `item:<id>` and a spool is `unit:<id>`, with the ids they have today. `spool_type:<id>` and
+  `spool:<id>` are accepted as aliases for one release, then go (owner, 2026-11-25, ruling 5
+  on #7068). The catalog kinds `material` and `subtype` go, because those rows become item
+  kinds (§6.4). The order kinds stay. `supplier`, `invoice`, `invoice_line` and `location`
+  stay as entity kinds of plain tables (§6.4, §6.5), because files, links and line links
+  point at them; the owner is asked to check this reading (§11.4 Q6).
 
 ### 6.2 Attachments
 
@@ -134,7 +149,7 @@ model, a supplier, an invoice, a production run, a location.
   delivered_attachment_id` repoints at the new table.
 - The invoice file is held today in the blob store and referenced by columns on
   `filament_invoices` (`file_key`, `file_name`, `file_media_type`, `file_size`;
-  `filament/invoices.py` `file_key`, l.178). In phase 3 it becomes an attachment with role
+  `filament/invoices.py` `file_key`, l.178). In phase 3a it becomes an attachment with role
   `invoice` on the invoice's entity, and the invoice page's preview (#6889) reads it there.
   Phase 1 leaves it alone, because phase 1 touches no filament code.
 - One UI component (`AttachmentsPanel`) and one route family
@@ -186,8 +201,11 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
 - Where the schema lives: for an entity kind registered in code (`spool`, `spool_type`, …),
   a row of `entity_property_schemas (kind, schema)`, seeded by migration and editable by a
   person. For an item (phase 2), its item kind's `attribute_schema`, which follows the same
-  rule (a child kind inherits its parent's keys). In phase 3, when a spool type becomes an
-  item of kind `filament`, that kind's schema starts as the `spool_type` row's.
+  rule (a child kind inherits its parent's keys). In phase 3a, when a spool type becomes an
+  item of kind `filament`, that kind's schema starts as the `spool_type` row's, and the
+  `spool` row's keys move to the `filament` kind's unit keys (owner, 2026-11-25). The
+  `spool_type` and `spool` rows of `entity_property_schemas` then go with their entity
+  kinds (§6.1).
 - Well-known keys, documented in the seeded schemas and still plain properties: on a spool
   type `mpn`, `gtin` (list: spool and refill), `asin` (list of `marketplace:ASIN`),
   `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool `lot_number`.
@@ -210,6 +228,18 @@ for its units), `builtin` bool, `archived_at`. Built-in kinds seeded by migratio
 `ams_part`, `hardware`), `consumable` (`desiccant`, `packaging`, `lubricant`),
 `equipment` (`dry_bin`, `tool`), `printed_part`, `assembly`, `service`. People add more.
 
+Amendment (owner, 2026-11-25, ruling 6 on #7068): **one kind tree.** Filament material and
+subtype become child kinds of `filament`: `filament` > `PLA` > `PLA Matte`. Each
+`filament_materials` row becomes a kind under `filament`, and each `filament_subtypes` row a
+kind under its material (a subtype with no material goes under `filament`). A spool type is
+an item whose kind is its subtype, else its material. The material's and subtype's values
+(density, nozzle and bed temperatures, drying, `needs_enclosure`, `abrasive`,
+`hygroscopic`, aliases) become the kind's property defaults, inherited down the tree. A
+type's own value wins over its subtype's, and a subtype's over its material's, as today.
+How a kind holds its defaults and aliases is left to the plan (§10). The Catalog tab's
+Materials and Subtypes become the kind tree's `filament` branch. Colours, effects,
+categories and inserts stay filament catalogs (§11.4 Q7).
+
 Amendment (owner, 2026-11-23, ruling on the phase 2 plan
 `docs/superpowers/plans/2026-11-23-inventory-phase-2-item-core.md`): `tracking` has a
 fourth value, `none` ("not counted"). A `none` kind's items have offers and prices but
@@ -225,7 +255,8 @@ model codes, for example `{H2C,H3C}`), `low_stock` numeric, `life_hours` / `life
 entity properties (§6.3a), not columns. A produced item also has a **recipe** (§6.8).
 
 **Lots** (`stock_lots`), for `tracking = lot`: `id`, `item_id`, `location_id` (nullable FK
-to `filament_locations`, which becomes the shop's location tree; renaming it is left out),
+to `filament_locations`, which becomes the shop's location tree, renamed `locations` in
+phase 3a; owner, 2026-11-25),
 `received_qty`, `on_hand` (derived from moves, kept as a column for reads), `unit_cost`
 (shop currency, numeric(20,6)), `origin` (`invoice_line`, `production_run`, `opening`,
 `adjustment`) with `invoice_line_id` / `production_run_id`, `received_at`.
@@ -244,6 +275,23 @@ of it (`filament_spools.unit_id`). The gram ledger `filament_spool_events` stays
 of grams, and `filament_spools.cost_per_kg` the source of a spool's cost: moving grams into
 the generic move table would duplicate a ledger the filament epic is still changing, for no
 gain in cost accuracy. Reports read filament through a view (§6.6).
+
+Amendment (owner, 2026-11-25, ruling 1 on #7068): **spools and other items are treated the
+same; spools only have their own workflow.** The item and the unit are the shared model: a
+spool type keeps its id as its item's id, and a spool its id as its unit's id. Every
+purchasing and stock feature (offers, prices, invoice lines, receive, candidates, re-cost,
+the shopping list, the lists and pages of §6.11) works on the item and the unit, so a
+spool gets it as any unit does. The spool workflow is an extension of the unit: grams and
+the spool event ledger, trays and AMS capture, tags, labels, presets, K values, drying, the
+Bambuddy sync. The inventory calls the extension when it receives, retypes, changes the
+status of or deletes a unit of a `filament` kind, and the extension writes the spool row in
+the same transaction. A unit's cost is `stock_units.cost`; `filament_spools.cost_per_kg` is
+its per-kg form, written only with it. Weighing stays on the spool ledger (#7681).
+
+**Locations** (owner, 2026-11-25, ruling 6 on #7068): `filament_locations` becomes a plain
+`locations` table (same ids, its sensors and printer places kept), and
+`filament_location_kinds` becomes `location_kinds`. A place is not an item or a unit. A dry
+bin bought is a unit that links to its place (`location_ref_id`, above). This replaces D3.
 
 **Value over life** (G11): a unit's book value (display and stock valuation only; job cost
 gets a unit's cost through the machine rate, below) = `cost × (1 − used / life)`, floor 0, where
@@ -265,13 +313,15 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
 
 ### 6.5 Suppliers and offers
 
-- `filament_suppliers` becomes `suppliers` (renamed in phase 3; same ids). Until then, phase
+- `filament_suppliers` becomes `suppliers` (renamed in phase 3a; same ids). Until then, phase
   2's offers reference `filament_suppliers` rows directly. `parts.supplier` text maps to
-  supplier rows when `parts` migrates (phase 2).
-- **Offers are split until phase 3.** Phase 2 creates `supplier_offers` for non-filament
+  supplier rows when `parts` migrates (phase 2). A supplier is a plain table: not an item,
+  not a unit, and not a filament row (owner, 2026-11-25, ruling 6 on #7068). Its stats
+  (§11, row 18) count every item it sold; grams are the `filament` columns of them.
+- **Offers are split until phase 3a.** Phase 2 creates `supplier_offers` for non-filament
   items only: `supplier_id`, `item_id`, `sku`, `url` (the purchase link for this item at this
   supplier), `pack_size`, `pack_uom`, `archived_at`. An item has any number of offers. In
-  phase 3, when spool types get their items, the `filament_supplier_products` rows move into
+  phase 3a, when spool types get their items, the `filament_supplier_products` rows move into
   `supplier_offers` (their `type_id` mapped to the type's item) and the old table goes.
   Phase 2 changes no filament table.
 - **SKU uniqueness:** unique per (supplier, `upper(sku)`, item), not per supplier. One SKU may
@@ -289,6 +339,13 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
   `bb_supplier_id`; an offer or price point is sent only when its item is of kind
   `filament`. Bambuddy knows only filament, so a bearing offer must never be sent.
 - The shopping list (`filament_shopping_items`) gains `item_id` and works for any item.
+  Amendment (owner, 2026-11-25): it becomes `shopping_items`. A row names an item (or, as
+  today, free text), a quantity in packs and an optional offer. A filament row's text
+  (material, subtype, brand, colour) is read from its item. The filament auto-add (an empty
+  spool adds its type, `filament_shopping_auto_add_empty`) becomes the auto-add of any item
+  whose on-hand reaches its `low_stock`, a toggle per item, which orders nothing. That
+  trigger is the designer's proposal (§11.4 Q3); a spool type keeps "a spool ran out".
+  It moves to `/inventory/shopping-list` with the agent's `shopping_*` tools.
 - Spool inserts (`filament_insert_types`, `empty_weight_g`) stay a filament catalog. If an
   insert later becomes an item (to buy cardboard inserts), the insert type gains an
   `item_id` and `empty_weight_g` stays where grams-left reads it.
@@ -309,7 +366,7 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
   written. A later change to a spool's or lot's cost (an invoice confirm or amend, a person's
   edit) does not move past job cost by itself. The spool or lot page offers "Re-cost past
   uses", which re-snapshots its events or moves at the new cost and writes an activity entry
-  that names the orders whose cost changed. Phase 3 backfills `cost_per_kg_at` on existing
+  that names the orders whose cost changed. Phase 3a backfills `cost_per_kg_at` on existing
   events from today's spool cost (on prod, all 110 spools have an invoice cost as of
   2026-11-21, per the filament epic session).
 - **Filament** stays in `filament_spool_events`; view `inventory_moves` unions
@@ -326,14 +383,37 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
 ### 6.7 Invoices
 
 - `filament_invoices` / `filament_invoice_lines` become `invoices` / `invoice_lines` (phase
-  3). Tax and shipping spreading (`invoice_money.py`) are unchanged.
-- A line gets `item_id` (or `offer_id`), `kind` (`stock`, `expense`, `asset`), and keeps its
-  filament fields for filament lines. Confirming a line:
-  - filament: as today (spools at `cost_per_kg`, `invoice_line_id`);
-  - `lot` items: one lot of `quantity × pack_size` at `allocated_cost / units`;
-  - `unit` items: `quantity` units at `allocated_cost / quantity` each, `in_stock`;
+  3a). Tax and shipping spreading (`invoice_money.py`) are unchanged.
+- **One line model (owner, 2026-11-25, ruling 6 on #7068).** Every line, filament or not,
+  has the same columns and the same confirm, candidates and amend paths. There are no
+  filament line fields. A line has its description, SKU, `quantity` (packs billed),
+  `pack_size` (the offer's, else 1), unit price, subtotal, tax, `allocated_cost`, `kind`
+  (`stock`, `expense`, `asset`), `item_id` or `offer_id`, a `proposed_item` (a new item to
+  make at confirm, with the fields its kind needs; a `filament` item needs the spool type's
+  fields), `received_units` and `adopt_ids`. Today's filament fields map onto it:
+  `type_id` → `item_id`, `supplier_product_id` → `offer_id`, `proposed_type` →
+  `proposed_item`, `update_spool_ids` → `adopt_ids`. `colour_code` stays a line column,
+  since a Bambu SKU's colour code names the item for any kind. Confirming a line:
+  - `lot` items: one lot of the received units at `allocated_cost / received`;
+  - `unit` items, `filament` included: one unit per received unit at
+    `allocated_cost / received` each, `in_stock`; for a `filament` kind the spool
+    extension makes each spool (§6.4) and writes its `cost_per_kg`;
+  - adopted lots and units (`adopt_ids`: received by hand or by the interim rule of #7648
+    before the invoice) take the line's cost and are not received again;
   - expense lines (`service`, shipping-only, a repair): no stock, the cost goes to the linked
-    entities (below).
+    entities (below). Only a confirmed `expense` line's links write consumer rows; links on
+    `stock` and `asset` lines are references, because the lot or unit already carries the
+    cost (owner, 2026-11-25, ruling 3 on #7068).
+- **Billed is kept apart from received (owner, 2026-11-25, ruling 4 on #7068).** A line keeps
+  what was billed (`quantity × pack_size`) and what was received (`received_units`, as
+  billed when not given). The price paid stays fixed. It is spread over everything received,
+  so 11 units received on a bill for 10 cost `allocated_cost / 11` each, and the free unit
+  is visible on the line, its lots and units, and the item. Fewer received than billed is a
+  short delivery, and the cost per unit rises. For filament the same rule runs in grams:
+  billed grams are units × label weight, and received grams are a spool's measured net
+  grams (its first weighing in the spool ledger, which #7681 owns), else the label weight.
+  A spool's `cost_per_kg` is its unit cost over its received grams. The free part is read
+  from the line through `invoice_line_id`; no lot or unit column holds it.
 - `invoice_line_links (line_id, entity_id, share)` links a line to any entities (the printer a
   repair was for, the order a special purchase was for). `share` splits the line's cost
   between them (default equal). Who reads a share, by the linked entity's kind:
@@ -355,7 +435,7 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
 - **Amending a confirmed invoice.** The 9 confirmed invoices on prod are filament-only on
   purpose. For example, Micro Center 185-PO-519748 is $5,234.28 (an H2C, a laser module, an
   AMS 2 Pro, hotends and a protection plan), but only $171.12 of filament is on the invoice,
-  and the full totals are in its note. Phase 3 adds **Amend**:
+  and the full totals are in its note. Phase 3a adds **Amend**:
   - A person adds lines and re-enters the header's subtotal, tax and shipping to the full
     receipt. The reconcile check runs again.
   - On confirm, the new lines receive their stock or units.
@@ -372,6 +452,26 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
 - The assistant's invoice import (`scadbuddy:filament` skill, `filament_invoice_*` tools)
   becomes `invoice_*` tools that propose items for any kind, matching by supplier SKU, then
   MPN, then name.
+- **The invoice import is a flow (owner, 2026-11-25, ruling 8 on #7068).** Today the
+  invoice page's "Import" starts an assistant session with a prompt
+  (`agent/src/routes/invoiceImport.ts`, `agent/src/filament/invoiceImportPrompt.ts`). It
+  becomes a flow on the flows of epic #7361, with typed prompts (#7445: `prompt(title,
+  schema)` opens a task and the run waits for the answer). An agent step reads the file and
+  fills the draft's header and lines, with candidates for each line. Each choice that needs
+  a person is a typed prompt: which item a line is (or a new item to make), which lots or
+  units to adopt, the received count when it differs from the bill, and the confirm itself.
+  A good that is not filament is made only at the person's yes, as a spool type is (owner,
+  2026-11-25, ruling 9 on #7068). Who may answer follows the answerers design (#7471,
+  `docs/superpowers/specs/2026-11-25-flow-answerers-design.md`). The flow works for every
+  item; there is no filament-only import.
+- **The back-fill is a flow too (owner, 2026-11-25, ruling 8 on #7068).** The confirmed
+  invoices that miss their non-filament lines (filament-only on purpose, with the full
+  totals in the note, as Micro Center 185-PO-519748 above) are listed by a review query:
+  the header subtotal or tax differs from the sum of the lines by more than the reconcile
+  tolerance, or the note starts "Not filament:" (the interim rule of #7648). For each one,
+  the back-fill flow proposes an amend (the missing lines, the full header, the lots or
+  units received by hand to adopt) and asks the person, as a typed prompt, to accept, edit
+  or skip it. An accepted amend runs the amend above. Nothing changes without that yes.
 - **Renamed paths and tools keep working.** `/filament/invoices/:id` (in
   `test-fixtures/filament/ui-paths.json` and the agent's `ui_path`, #6878) redirects to
   `/inventory/invoices/:id`. The fixture and `ui_path` change to the new path. The
@@ -436,12 +536,47 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
 - One **Inventory** area: items by kind (tree), item page (properties, offers with purchase
   links, links, attachments, lots/units with cost and location, moves, recipe, production
   runs), units page (status, installed-in, value over life), production runs, suppliers,
-  invoices. Filament keeps its own pages; a spool page shows the same links and
-  attachments panels. The Parts page (`/orders/parts`) redirects to Inventory.
+  invoices. The Parts page (`/orders/parts`) redirects to Inventory.
+- **The Filament section moves into Inventory (owner, 2026-11-25, ruling 7 on #7068).** The
+  sidebar keeps one entry, Inventory. Each Filament tab becomes an Inventory page for every
+  item, and the spool workflow shows where the item or unit is a `filament` one:
+  - Types → **Item types** (`/inventory/types`): every item, with the Types tab's columns,
+    search and filters; a kind filter of `filament` is today's Types tab. The type page
+    (`/inventory/types/:id`, the item page) has the price panel, "Use as default cost", the
+    cost calculator and the stock under the type (lots and units; spools for filament).
+    The spool type's presets, K values and 3DFP panels show for a `filament` item.
+  - Spools → **Stock** (`/inventory/stock`): lots and units across items; spools are its
+    `filament` rows, with grams, trays and tags. A spool page is the unit page with the
+    spool panels.
+  - Suppliers, Invoices, Shopping list → `/inventory/suppliers`, `/inventory/invoices`,
+    `/inventory/shopping-list`, for every item (§6.5, §6.7).
+  - Locations → `/inventory/locations`: a place lists its lots, units and spools.
+  - Catalog → the kind tree (`/inventory/kinds`) for materials and subtypes (§6.4); the
+    filament catalogs that stay (§11.4 Q7) under `/inventory/catalog`.
+  - Metrics → `/inventory/metrics`: stock, use and purchasing for every item, from
+    `inventory_moves` (§6.6); the filament charts (grams, material numbers, forecast) as its
+    `filament` view.
+  - Ledger → `/inventory/moves`, spool events included through `inventory_moves`.
+  - Tags, Labels and the phone page stay spool workflow pages, under `/inventory`.
+  - Every `/filament/*` path redirects to its new path for one release; the
+    `test-fixtures/filament/ui-paths.json` vectors and the agent's `ui_path` change with
+    them. The phone intake (agreed 2026-11-25 with the intake session) adds no `/filament`
+    route.
+- **Parity (owner, 2026-11-25).** No purchasing or stock feature exists for filament only.
+  §11 lists each one and where it lands. The phase 3b exit check is a parity test that runs
+  the same invoice (upload, lines, candidates, confirm, amend) and the same price-sheet
+  flow on a `filament` item and on a `hardware` item, and gets the same pages and tools.
 - Agent tools mirror the routes: `inventory_item_*`, `inventory_kind_*`, `inventory_lot_*`,
   `inventory_unit_*`, `inventory_move_*`, `production_run_*`, `invoice_*`,
   `entity_attachment_*`, `entity_link_*`, `entity_property_*`, `inventory_import_bambu`. `part_list`,
-  `part_stock_add` and `order_item_parts_set` become aliases, then go.
+  `part_stock_add` and `order_item_parts_set` become aliases, then go. Amendment (owner,
+  2026-11-25): `supplier_*`, `offer_*` (with the price list and price sheet),
+  `shopping_*`, `purchasing_metrics` and `cost_per_unit` serve every item. The
+  `filament_supplier_*`, `filament_product_*`, `filament_price_*`, `filament_invoice_*`,
+  `filament_shopping_*`, `filament_supplier_stats`, `filament_purchasing_metrics` and
+  `filament_cost_per_kg` tools stay as aliases for one release, then go. The invoice
+  import part of the `filament` skill moves to a `purchasing` skill for every item; the
+  `filament` skill keeps the spool workflow.
 - Every entity reference in UI and tool results links to its page (the #6878 pattern).
 
 ## 7. Approaches considered
@@ -465,6 +600,8 @@ ships first.
 - D2. FIFO lot consumption by default; a caller may name the lot (§6.6). Parts' weighted
   average cost goes away; a lot keeps its own cost.
 - D3. `filament_locations` stays the location table for all stock; no rename (§6.4).
+  Replaced (owner, 2026-11-25, ruling 6 on #7068): it is renamed `locations`, a plain
+  table, in phase 3a.
 - D4. Entity rows are lazy and deleted by the owner's store, not by triggers (§6.1).
 - D5. Value over life is linear and shown only where a time or hours basis exists (§6.4).
 - D6. Bambu import reads the US store only; other regions are out of scope.
@@ -477,7 +614,7 @@ ships first.
 - D10. Recipes are owned by an item or a model slug; colour conditions stay; print-to-order
   items get no inventory item (§6.8).
 - D11. Parts in a non-shop currency open as zero-cost lots flagged "cost unknown" (§3).
-- D12. Supplier offers stay split from `filament_supplier_products` until phase 3 (§6.5).
+- D12. Supplier offers stay split from `filament_supplier_products` until phase 3a (§6.5).
 - D13. SKU is unique per (supplier, SKU, item); a bundle SKU maps to several items (§6.5).
 - D14. Move costs are snapshots. A later cost change reaches past job cost only through
   "Re-cost past uses" (§6.6).
@@ -490,6 +627,21 @@ ships first.
   wins over an import's for its key: one row per key, which an import skips once it is
   `manual` (§6.3a). Owner's rule, 2026-11-22: schemas never
   restrict keys.
+
+Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
+
+- D18. Spools and other items share one model; spools only have their own workflow, an
+  extension of the unit (§6.4).
+- D19. One kind tree: filament material and subtype are child kinds of `filament`. The
+  entity kinds of things in stock are `item` and `unit` (and phase 2's `lot`, §11.4 Q6);
+  `spool_type:` and `spool:` are aliases for one release (§6.1, §6.4).
+- D20. Locations and suppliers are plain tables, `locations` and `suppliers` (§6.4, §6.5).
+- D21. One invoice line model; billed is kept apart from received; only `expense` lines
+  write consumer rows (§6.7).
+- D22. The invoice import and the back-fill of confirmed invoices are flows with typed
+  prompts (§6.7).
+- D23. The Filament section moves into Inventory, and no purchasing or stock feature exists
+  for filament only (§6.11, §11).
 
 ## 9. Phases (each one or more PRs, each an issue under one new epic)
 
@@ -509,6 +661,51 @@ ships first.
    invoice lines receive lots/units; `invoice_line_links`; order purchases link lines;
    invoice tools generalised; spool types and spools link to items/units; job cost reads
    spool cost.
+   Amendment (owner, 2026-11-25): the rulings on #7068 and full parity (§11) make phase 3
+   too large for one plan. It splits in two. Each part ships like any other PR; the data
+   migration has no owner-run gate and no deploy window (owner, 2026-11-25, ruling 2 on
+   #7068).
+
+   **3a. The data model** (#7068). §11 rows 10, 11 (if Q2 is yes), 13, 20, 21, 26, 27, 28,
+   32 (amend) and the data of 24 and 38:
+   - the kinds: materials and subtypes become child kinds of `filament`; spool types become
+     items and spools units, with their ids kept; the spool workflow as the unit's
+     extension (§6.4);
+   - the entity kinds: `spool_type:` and `spool:` move to `item:` and `unit:`, aliases for
+     one release; the `material` and `subtype` kinds go (§6.1);
+   - the plain tables: `locations`, `location_kinds`, `suppliers` (§6.4, §6.5);
+   - one offer and price point table: `filament_supplier_products` and
+     `filament_price_points` move into `supplier_offers` and `offer_price_points` (§6.5);
+   - `invoices` and `invoice_lines` with the one line model, billed against received,
+     `adopt_ids`, `invoice_line_links` and their consumers, amend, order purchases that
+     link a line (§6.7);
+   - the invoice file as an `invoice` attachment (§6.2);
+   - `shopping_items` with `item_id` (§6.5);
+   - `cost_per_kg_at` on spool use events, the `inventory_moves` view, and job cost that
+     reads spool cost (§6.6, D7), compared before and after the deploy (owner, 2026-11-25,
+     ruling 5 on #7068);
+   - the migrations, each table an old pod reads kept as a view under its old name for one
+     release; the routes under `/inventory`, with the `/filament` purchasing routes as
+     aliases, so the filament UI and tools keep working until 3b;
+   - Bambuddy still gets only filament (D16).
+
+   **3b. The UI, the parity features and the flows** (a new issue under #6949, after 3a).
+   §11 rows 1 to 6, 8, 14, 18, 19, 22 to 25, 29 to 31, 32 (the back-fill), 34, 35, 38
+   (UI), 39, 46 and 47, plus whichever of Q1, Q3 and Q5 the owner says yes to:
+   - the Filament section moves into Inventory, `/filament/*` redirects (§6.11);
+   - Item types (list and type page), the stock list, bulk edit, copy;
+   - suppliers, supplier pages and stats, products, the price panel and price sheet,
+     purchasing and stock metrics, the moves page, locations with their stock;
+   - the invoices list and page for every line, with candidates, confirm, amend, the file
+     preview and the links to what a line made;
+   - the shopping list for every item;
+   - the invoice import flow and the back-fill flow, on #7445's typed prompts (§6.7);
+   - the generic agent tools with the filament aliases, and the `purchasing` skill;
+   - the exit check: the parity test of §6.11 on a `filament` item and a `hardware` item.
+
+   Left as follow-ups unless the owner says otherwise: the forecast for lot items (Q4), a
+   generic external catalog beyond the Bambu import of phase 7 (owner, 2026-11-25, on
+   #7068: "either planned or filed as a follow-up").
 4. **Units for equipment.** Printers as units (with `printers` and cost profiles linked),
    installed-in, value over life, dry bins linked to their locations.
 5. **Production.** Recipes, production runs, receive produced lots, shop use.
@@ -520,3 +717,127 @@ ships first.
 Route shapes and names beyond those above, index choices, the exact JSON Schema subset kinds
 may use, the kind-guessing rules for imports, UI layout (load `frontend-design`), how the
 attachments move is batched, and how the aliases are retired.
+
+## 11. Parity with filament (gap analysis, 2026-11-25)
+
+Why (owner, 2026-11-25, on #7068): "The invoice experience for filament was great, but the
+implementation for the non spool is trash. We don't see invoice line items. We don't have
+price sheets etc. We don't have Item types. We need parity." The rule that follows: no
+purchasing or stock feature exists for filament only (owner, 2026-11-25).
+
+How it was measured: read from the code on main at `4b2438ba0` (2026-11-25). The filament
+side is `frontend/src/pages/filament/`, `frontend/src/components/filament/`,
+`frontend/src/App.tsx` (routes l.127-145), `backend/scadbuddy/filament/`,
+`backend/scadbuddy/api/filament.py`, `backend/scadbuddy/api/filament_purchasing.py`,
+`agent/src/tools/filament*.ts`, `plugins/scadbuddy/skills/filament/SKILL.md` and
+`docs/features/spools-and-filament.md`. The generic side is phase 2:
+`backend/scadbuddy/inventory/`, `backend/scadbuddy/api/inventory.py`,
+`backend/scadbuddy/api/inventory_stock.py`, `frontend/src/pages/inventory/`,
+`agent/src/tools/inventory.ts` and `docs/features/inventory.md`.
+
+### 11.1 Classes
+
+- **(a) Purchasing or stock.** Every item must have it. A gap is planned work, with its
+  generic form and a size: S (one task, a few files), M (one layer: store, route, UI and
+  tool), L (more than one layer, or a data migration).
+- **(b) The spool workflow.** It stays filament: grams, the spool event ledger, AMS trays,
+  tags, presets, K values, drying, the Bambuddy sync. It hangs off the unit and the item as
+  an extension (§6.4) and never forks the shared model.
+- **(c) Unclear.** A question for the owner (§11.4).
+
+### 11.2 The table
+
+"Generic today" is what an item of any other kind has on main. "Phase" is where the gap
+closes (§9).
+
+| # | Feature | Filament today (where) | Generic today | Class | Generic form | Size | Phase |
+|---|---|---|---|---|---|---|---|
+| 1 | Types list: search, filters, columns, archive | Types tab (`pages/filament/TypesTab.tsx`; `GET /filament/types`) | Items list by kind tree, search (name, maker, property values), low stock, archived (`pages/inventory/InventoryPage.tsx`; `GET /inventory/items`) | (a) | "Item types": the items list with the Types tab's columns (stock, on hand, value, newest price) at `/inventory/types`; a spool type is a row of kind `filament` | M | 3b |
+| 2 | Type page: details, stock under it, price panel, cost calculator | `pages/filament/TypePage.tsx`; `PricePanel.tsx` (each product's price history, per pack and per kg, a sparkline, "Use as default cost") | Item page: details, offers with the newest price only, "Add price", lots, units, moves (`pages/inventory/ItemPage.tsx`, `ItemOffers.tsx`, `ItemStock.tsx`). No price history in the UI, though `GET /inventory/offers/{id}/prices` exists | (a) | One type page for every item: the price panel per offer (per pack and per unit of measure), "Use as default cost", and its stock (lots and units, or spools) under it | M | 3b |
+| 3 | Cost per kg calculator | `GET /filament/cost-per-kg` (`filament/cost_calc.py`); `components/filament/CostCalculator.tsx` | None | (a) | Cost per unit of measure: price, tax, shipping, packs, pack size (`GET /inventory/cost-per-unit`); per kg stays the filament form of it | S | 3b |
+| 4 | Spools list: filter, sort, cards, tiles, CSV export | Spools tab (`pages/filament/SpoolsTab.tsx`, `SpoolsTable.tsx`, `SpoolCards.tsx`, `spoolsCsv.ts`) | Units and lots only on their item's page | (a) | A stock list across items (`/inventory/stock`): lots and units, with place, cost, status, CSV export; spools are its `filament` rows | M | 3b |
+| 5 | Bulk create, copy | `POST /filament/spools/bulk`, `GET /filament/spools/{id}/copy` | Receive N units or one lot (`POST /inventory/items/{id}/units`, `/lots`) | (a) | "Copy" on an item and a unit | S | 3b |
+| 6 | Bulk edit, archive, restore | `POST /filament/spools/bulk-update`, `bulk-archive`, `bulk-restore`; `components/filament/BulkBar.tsx` | None | (a) | Bulk edit, archive and restore of items and units, one request, all or none | M | 3b |
+| 7 | CSV import | `POST /filament/spools/import` (`filament/csv_import.py`; `SpoolImport.tsx`) | None | (c) | Item and stock CSV import (Q5) | M | 3b or follow-up |
+| 8 | Search by property values | Spools and Types tabs, agent (`lib/filamentSearch.ts`, `agent/src/tools/filamentSearch.ts`) | Items list matches property values (`inventory/items.py` l.113) | (a) | Done for items; the stock list (row 4) takes the same search | S | 3b |
+| 9 | Search by tag UID | `filamentSearch.ts` hex match | n/a | (b) | — | — | — |
+| 10 | Catalog: materials, subtypes | Catalog tab (`filament/catalog.py` `CATALOGS`; `pages/filament/CatalogTab.tsx`) | Item kinds tree with attribute schemas (`pages/inventory/KindsPage.tsx`) | (a) | Child kinds of `filament` (owner, 2026-11-25; §6.4): the material's and subtype's values become the kind's defaults, inherited down the tree | L | 3a (data), 3b (UI) |
+| 11 | Catalog: brands | `filament_brands`, with aliases | `items.manufacturer` text | (c) | A shared manufacturers table (Q2) | M | 3a or follow-up |
+| 12 | Catalog: colours, effects, categories, inserts, colour sync | `filament_colours`, `colour-syncs`, `filament_insert_types` | n/a | (b) | — | — | — |
+| 13 | Catalog: location kinds | `filament_location_kinds` | Lots and units take a place (`pages/inventory/PlaceSelect.tsx`) | (a) | Move with the plain `locations` table (§6.4) | S | 3a |
+| 14 | Locations: tree, place page with what is there | Locations tab, `/filament/locations/:id` (`LocationPage.tsx`: spools only) | A lot or a unit names a place; no page lists them | (a) | `/inventory/locations/:id` lists the lots, units and spools at the place | S | 3b |
+| 15 | Sensors, drying, AMS places | `filament/sensors.py`, `dry_hours.py`, `locations.py` `ensure_printer_on` | n/a | (b) | — | — | — |
+| 16 | Codes and QR labels | `L-` and `S-` codes (`codes/resolve.py` `PREFIXES`), `/filament/labels`, label PDF (`filament/label_pdf.py`) | None for items, lots or units | (c) | Codes and labels for units and lots (Q1) | M | 3b or the intake epic |
+| 17 | RFID and NTAG tags, the phone page | `filament/tags.py`, `/filament/scan`, NFC jobs | n/a | (b) | The phone intake (agreed 2026-11-25 with the intake session) resolves a tag to any entity page; the tag formats stay filament | — | — |
+| 18 | Suppliers list with stats | Suppliers tab (`SuppliersTab.tsx`; `GET /filament/suppliers/stats`: spools, grams left, grams used, spend) | None; offers pick a supplier from the filament list (`ItemOffers.tsx` l.174) | (a) | `/inventory/suppliers`: products (offers) per supplier, spend, items and units received, stock value; grams stay as the `filament` columns | M | 3b |
+| 19 | Supplier page: details, products, add price | `/filament/suppliers/:id` (`SupplierPage.tsx`, `ProductsTable.tsx`, `AddProductSheet.tsx`) | A section on the filament supplier page lists the other offers (`SupplierPage.tsx` l.295) | (a) | One supplier page: every offer, any kind, with "Add product" for any item | M | 3b |
+| 20 | Supplier products (SKU, URL, pack) | `filament_supplier_products` (`filament/suppliers.py`) | `supplier_offers` (`inventory/offers.py`), non-filament only | (a) | One offer table (§6.5) | M | 3a |
+| 21 | Price points with history | `filament_price_points`; `GET /filament/types/{id}/prices` | `offer_price_points`, manual only; no history view | (a) | One price point table; source `invoice` from a confirmed line for every item | M | 3a (data), 3b (UI) |
+| 22 | Price sheet: newest, previous, change | `GET /filament/suppliers/{id}/price-sheet`; `PriceSheet.tsx` | None | (a) | Price sheet per supplier for every offer; change per pack and per unit of measure | S | 3b |
+| 23 | Invoices list: status and supplier filter, remembered view | Invoices tab (`InvoicesTab.tsx`, `invoicesQuery.ts`) | None | (a) | `/inventory/invoices`; `/filament/invoices` redirects | S | 3b |
+| 24 | Invoice from a file or photo | `InvoiceUpload.tsx`; `POST /filament/invoices/{id}/file` | None | (a) | The same upload; the file is an `invoice` attachment (§6.2) | S | 3a (data), 3b (UI) |
+| 25 | Invoice page: header, reconcile, totals | `InvoicePage.tsx`, `InvoiceHeaderForm.tsx`, `InvoiceTotals.tsx`; `filament/invoices.py` `_recompute`, `invoice_money.py` | None. Non-filament lines live only as a note on the invoice (the interim rule, #7648, #7704) | (a) | One invoice page at `/inventory/invoices/:id` | M | 3b |
+| 26 | Invoice lines editor | `InvoiceLinesTable.tsx`, `invoiceLines.ts`; a line takes a type, a product, a proposed type, spools to fill | None | (a) | One line model for every item (§6.7): item or offer, a proposed item, `kind` (`stock`, `expense`, `asset`), packs billed and units received, links to entities | L | 3a (data), 3b (UI) |
+| 27 | Line candidates | `GET /filament/invoices/{id}/candidates` (`LineCandidates`: uncosted and costed spools of the line's colour) | None | (a) | Candidates for every line: items by offer SKU, then MPN, then name; and lots or units with no invoice line that the line can adopt | M | 3a |
+| 28 | Confirm | `POST /filament/invoices/{id}/confirm`: makes or fills spools at `cost_per_kg` | None | (a) | One confirm: lots, units (spools are units) or consumer rows by line kind (§6.7) | L | 3a |
+| 29 | Links to what a line made | Confirmed lines list their spools (`InvoiceLine.spool_ids`); a spool links its line (`SpoolPurchasing.tsx`) | A lot has an `invoice_line` origin column, unused | (a) | A line lists its lots, units and linked entities; a lot or unit page shows "bought on" its line, with unit cost | S | 3b |
+| 30 | File preview | `InvoiceFile.tsx` (PDF frame, photo zoom, open and download) | None | (a) | Reads the `invoice` attachment | S | 3b |
+| 31 | Invoice import (assistant) | `POST /api/v1/ai/filament/invoice-import` (`agent/src/routes/invoiceImport.ts`, `agent/src/filament/invoiceImportPrompt.ts`); `InvoiceImport.tsx`; the `filament` skill | None | (a) | A flow with typed prompts (§6.7) for every item | L | 3b |
+| 32 | Amend a confirmed invoice; back-fill | None (spec §6.7, D15) | None | (a) | Amend (§6.7); the back-fill of the confirmed invoices as a flow (§6.7) | L | 3a (amend), 3b (flow) |
+| 33 | Bambu colour code lookup | `GET /filament/bambu-colour-codes` | n/a | (b) | — | — | — |
+| 34 | Purchasing metrics | `GET /filament/metrics/purchasing` (`metrics_store.py` l.335: price per kg per type per supplier per currency; spend by month and supplier); Metrics tab | None | (a) | Price per unit of measure per item per supplier, and spend by month, supplier and kind | M | 3b |
+| 35 | Stock metrics and summary | `GET /filament/summary`, `GET /filament/metrics` (stock, value, use, waste by material, brand, type, supplier or place) | On hand per item only | (a) | Stock value and use by kind, supplier and place from `inventory_moves` (§6.6) | M | 3b |
+| 36 | Forecast (run-out date) | `GET /filament/forecast` (burn rate per spool and type; `filament/metrics.py`) | None | (c) | Run-out date for lot items from `use` moves (Q4) | M | follow-up |
+| 37 | Material number stats | `GET /filament/metrics/material-numbers` | n/a | (b) | — | — | — |
+| 38 | Shopping list | `filament_shopping_items` (`filament/shopping.py`; `ShoppingListTab.tsx`): by type or text, spools, purchased, clear; auto-add of an empty spool's type (`filament_shopping_auto_add_empty`) | None | (a) | One list for every item (`item_id`, packs, an optional offer); `/inventory/shopping-list`; the auto-add for any item at its low-stock level (Q3) | M | 3a (data), 3b (UI) |
+| 39 | Ledger, history, timeline | `filament_spool_events`; Ledger tab, `GET /filament/spools/{id}/history`, `SpoolTimeline.tsx` | Moves table per item (`ItemStock.tsx`); `GET /inventory/moves` | (a) for moves; (b) for the spool ledger | A moves page across items (`/inventory/moves`), with spool events through `inventory_moves` | S | 3b |
+| 40 | Low stock | `filament_low_stock_pct` (grams left) | `items.low_stock`, "Low stock only" filter | (a) | Done for items; a spool type's low stock reads its spools' grams | — | — |
+| 41 | Properties, files, links | `PropertiesPanel.tsx` on spool and type pages | The same panels on the item page | (a) | Done | — | — |
+| 42 | Type proposals for untyped spools | `filament/type_proposals.py` | n/a | (b) | — | — | — |
+| 43 | Presets, K values, 3DFP, profile fetch | `filament/sb_presets.py`, `profile_fetch.py`, `tdfp.py` | n/a | (b) | — | — | — |
+| 44 | Bambuddy sync and pull | `filament/bb_sync_*.py`, `bambuddy_pull.py` | Never (D16) | (b) | Only `filament` items, their suppliers, offers and prices reach Bambuddy (D16) | — | — |
+| 45 | Weights, insert weight, consumed counter | `filament/insert_weights.py`; `POST /filament/spools/reset-consumed` | n/a | (b) | Weighing stays on the spool ledger (#7681) | — | — |
+| 46 | Agent tools, purchasing | `filament_supplier_*`, `filament_product_*`, `filament_price_*`, `filament_invoice_*`, `filament_shopping_*`, `filament_supplier_stats`, `filament_purchasing_metrics`, `filament_cost_per_kg` (`agent/src/tools/filamentPurchasing.ts`, `filament.ts`) | `inventory_offer_*`, `inventory_offer_price_add` (`agent/src/tools/inventory.ts`) | (a) | `supplier_*`, `offer_*`, `invoice_*`, `shopping_*`, `purchasing_metrics`, `cost_per_unit`; the filament names stay as aliases for one release | M | 3b |
+| 47 | The skill | `plugins/scadbuddy/skills/filament/SKILL.md` "Import an invoice" | None (the interim rule is #7704) | (a) | A `purchasing` skill for every item; the `filament` skill keeps the spool workflow | S | 3b |
+
+### 11.3 What phase 2 shipped short of this spec
+
+Phase 2 shipped what §9 phase 2 named. These parts of the spec it did not reach, read from
+the code at `4b2438ba0`:
+
+- **No price history in the UI.** G2 asks for price history per supplier per item. The
+  route exists (`GET /inventory/offers/{id}/prices`); the item page shows only the newest
+  price (`pages/inventory/ItemOffers.tsx` `priceText`).
+- **No supplier home for items.** The item page picks a supplier from the filament list
+  (`ItemOffers.tsx` l.174). A supplier is created only on the filament Suppliers tab. The
+  non-filament offers show as one section of the filament supplier page.
+- **The place tree is not the shop's yet.** §6.4 makes `filament_locations` the shop's
+  location tree. A lot or a unit names a place, but the place page lists spools only
+  (`pages/filament/LocationPage.tsx`).
+- **No `inventory_moves` view.** §6.6 unions `stock_moves` with spool events for reports.
+  It is not on main; `docs/features/inventory.md` moves it to phase 3.
+- **No codes or labels for items, lots or units.** `codes/resolve.py` `PREFIXES` knows `L`
+  and `S` only (see Q1).
+- **Invoices still make no stock for items.** That is phase 3 by design, but meanwhile
+  non-filament lines are kept as a note on the invoice and received by hand (#7648, #7704).
+
+### 11.4 Questions for the owner (class c)
+
+- **Q1. Codes and labels.** Do units and lots get codes (for example `U-<n>` for a unit) and
+  printed QR labels, as spools and places do? The designer's proposal: yes for units and
+  lots, in 3b or in the phone intake epic, so a tap or a scan opens any entity page.
+- **Q2. Brands.** Do filament brands become one manufacturers table that every item's
+  `manufacturer` names, or stay a filament catalog? The designer's proposal: one table in
+  3a, since a brand is not filament-specific (Bambu Lab sells nozzles too).
+- **Q3. The shopping list's auto-add.** Filament adds a type when a spool runs out. For an
+  item, is the trigger "on hand at or under `low_stock`", as a toggle per item? §3 keeps
+  reorder automation out; this adds a list row and orders nothing.
+- **Q4. The forecast.** Must lot items get a run-out date from their `use` moves, or is
+  that a follow-up?
+- **Q5. CSV import and export.** Do items and stock get a CSV import, as spools have?
+- **Q6. Entity kinds.** The designer reads "entity kinds become `item:` and `unit:` only"
+  as: `spool_type`, `spool`, `material` and `subtype` go; `lot`, `supplier`, `invoice`,
+  `invoice_line` and `location` stay as entity kinds, because files, links and line links
+  point at them. Is that right?
+- **Q7. The other catalogs.** Colours, effects, categories and inserts stay filament
+  catalogs (b). Is that right, or must any of them serve every item?
