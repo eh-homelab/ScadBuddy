@@ -45,6 +45,7 @@ from scadbuddy.workflows.previews import (
 )
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -726,6 +727,7 @@ def test_due_skips_a_model_it_cannot_plan(
     for slug in (SLUG, "gadget"):
         paths.model_dir(slug).mkdir(parents=True)
         paths.model_source(slug).write_text(SOURCE, encoding="utf-8")
+    sync_template_rows(client)
 
     def needs_refresh(slug: str, record: object) -> bool:
         if slug == SLUG:

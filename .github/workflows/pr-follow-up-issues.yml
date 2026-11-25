@@ -38,7 +38,7 @@ jobs:
         # the verify step below, from the result, not from this step's exit
         # status (#1020 — this step was `success` on a run that filed nothing).
         continue-on-error: true
-        uses: anthropics/claude-code-action@c84e279f859e2591391e95bd309286eb111c345f # v1
+        uses: anthropics/claude-code-action@acfe7992852970efb4fee683d63d628e3e52df67 # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:

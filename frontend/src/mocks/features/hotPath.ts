@@ -233,6 +233,7 @@ function shelfSpool(): FilamentSpool {
     created_at: '2026-11-15T07:00:00Z',
     updated_at: '2026-11-15T07:00:00Z',
     low_stock: false,
+    drift_notice: false,
   }
 }
 

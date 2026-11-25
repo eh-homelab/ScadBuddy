@@ -25,6 +25,7 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByLabelText('Pull from Bambuddy every')).toHaveValue(300)
     expect(within(filament).getByLabelText('Low stock below, percent')).toHaveValue(20)
     expect(within(filament).getByLabelText('Default cost per kg')).toHaveValue('')
+    expect(within(filament).getByLabelText('Drift notice at, grams')).toHaveValue(10)
     expect(within(filament).getByText('USD')).toBeInTheDocument()
     expect(within(filament).getByRole('link', { name: 'Change it in Orders' })).toHaveAttribute(
       'href',
@@ -444,6 +445,18 @@ describe('Filament (#6262)', () => {
       expect(dialog).toHaveTextContent('it then holds those presets twice')
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       expect(await within(filament).findByText('3 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
+    })
+
+    it('does not say the presets are copied again while the preset mirror is off (#7544)', async () => {
+      linkOtherBambuddy()
+      leaveOnlyPresetLinks()
+      await api.putSettings({ filament_preset_mirror: false })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      const items = within(within(dialog).getByRole('list', { name: 'What the reset deletes' })).getAllByRole('listitem')
+      expect(items.map((item) => item.textContent)).toEqual(['3 filament preset links'])
+      expect(dialog).not.toHaveTextContent('Each filament preset is then copied')
     })
 
     it('warns that an untagged spool can end up twice when the Bambuddy is another one', async () => {

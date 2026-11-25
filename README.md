@@ -244,7 +244,10 @@ on shutdown.
   you would Bambuddy's slicer sidecar, or switch sign-in on and set the mode to
   `enforce` ("Signing in" below) before it is reachable by anyone you do not trust.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, downloaded fonts and caches. Back up the volume. Settings and saved presets are in the
+  outputs, downloaded fonts and caches. Back up the volume. A saved output's record is
+  in the database and its bytes are in the blob store (on the `bambuddy` store they stay
+  files); on the `local` store they are in `/data/output-blobs/` (#7257). The folders under `/data/outputs/` stay as a fallback
+  until the cut-over's second release. Settings and saved presets are in the
   database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
   (it used to be a 0600 file on the volume), so it is in every database backup;
   supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
@@ -1100,6 +1103,12 @@ writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or t
 API start. A rollback to such a build makes the same window. To end it sooner, restart
 one API pod once the roll-out is done: its start runs the copy. Then check
 `GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
+Both copies stop at the cut-over mark (#7257), which `copy-status` names as
+`cut_over_at`; after the roll-out of its first release, check that `cut_over_at` is set
+and `bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
+Check too that the last row copy run (`copy-status`'s `started_at`) started after the last
+pod of a build before phase 2 (#7256) went: a start writes the mark before it runs the row
+copy, so a write such a pod made in the files only after that run is never copied.
 
 ### Render worker (#424)
 

@@ -278,7 +278,7 @@ const FIELDS = {
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
   archive: ['archived'],
   tag: ['tag_uid', 'tray_uuid', 'kind', 'override'],
-  event: ['kind', 'source', 'at', 'grams', 'temp_c', 'hours', 'note'],
+  event: ['kind', 'source', 'at', 'grams', 'reading_g', 'temp_c', 'hours', 'note'],
   locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order'],
 } as const
 const PATCH_FIELDS = { type: [...FIELDS.typeCreate, 'archived'], spool: [...FIELDS.spoolCreate.filter((field) => field !== 'grams_left'), 'archived'], location: [...FIELDS.locationCreate, 'archived'] }
@@ -350,6 +350,8 @@ function view(row: SpoolRow): FilamentSpool {
       location: state.locations.find((place) => place.id === row.location_id)?.name ?? null,
     },
     low_stock: row.grams_left != null && label != null ? row.grams_left < (label * pct) / 100 : false,
+    // #7682: the newest weighing's drift at or over the setting, either way.
+    drift_notice: row.last_drift_g != null && Math.abs(row.last_drift_g) >= (mockSettings().filament_weighing_drift_notice_g ?? 10),
     needs_drying: needsDrying(row, effective.material_id),
   }
 }
@@ -420,6 +422,7 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     presets: effectivePresets(row.id),
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
+    last_weighing: [...ledger].reverse().find((event) => event.kind === 'weighed') ?? null,
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
@@ -899,6 +902,7 @@ function newSpool(body: Record<string, unknown>): SpoolRow {
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
+    last_drift_g: null,
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
@@ -2366,7 +2370,9 @@ export const handlers = [
     const extra = extraKeys(raw, FIELDS.event)
     if (extra) return extra
     const body = normalised(raw as S['SpoolEventAdd'])
-    if (body.kind === 'weighed' && body.grams == null) return problem(422, 'body: Value error, a weighing needs grams')
+    if (body.reading_g != null && body.kind !== 'weighed') return problem(422, 'body: Value error, only a weighing has reading_g')
+    if (body.reading_g != null && body.grams != null && body.reading_g < body.grams) return problem(422, 'body: Value error, reading_g is below grams')
+    if (body.kind === 'weighed' && body.grams == null && body.reading_g == null) return problem(422, 'body: Value error, a weighing needs grams')
     if (body.kind === 'consumed_reset' && (body.grams != null || body.temp_c != null || body.hours != null)) {
       return problem(422, 'body: Value error, a consumed reset has no grams, temp_c or hours')
     }
@@ -2375,9 +2381,34 @@ export const handlers = [
     // #7149 R-7149-4: no grams; the grams left stay.
     if (body.kind === 'consumed_reset') return HttpResponse.json(addEvent(row.id, 'consumed_reset', { at: when, source: 'person' }), { status: 201 })
     if (body.kind === 'weighed') {
-      state.spools[at] = { ...row, grams_left: body.grams ?? null, last_weighed_g: body.grams ?? null, last_weighed_at: when }
+      // #7682: a weighing with its reading keeps the breakdown (`ledger.breakdown`); the grams
+      // left just before it stand in for `expected_before`.
+      let grams = body.grams ?? null
+      const data: Record<string, unknown> = {}
+      if (body.reading_g != null) {
+        const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
+        if (grams == null) {
+          if (!insert) return problem(422, 'the spool has no empty weight to take off the reading', { code: 'no_empty_weight' })
+          grams = body.reading_g - insert.empty_weight_g
+          if (grams < 0) return problem(422, "the reading is below the spool's empty weight", { code: 'reading_below_empty' })
+        }
+        const emptyG = body.reading_g - grams
+        const own = insert != null && Math.abs(emptyG - insert.empty_weight_g) < 0.05 ? insert : null
+        const expected = row.grams_left
+        Object.assign(data, {
+          reading_g: body.reading_g,
+          empty_g: emptyG,
+          empty_source: own ? 'insert' : 'person',
+          empty_basis: own ? (isPlaceholder(own.empty_weight_basis, own.note) ? 'placeholder' : own.empty_weight_basis) : null,
+          empty_name: own?.name ?? null,
+          expected_g: expected,
+          drift_g: expected == null ? null : Math.round((grams - expected) * 10) / 10,
+        })
+      }
+      const drift = typeof data.drift_g === 'number' ? data.drift_g : null
+      state.spools[at] = { ...row, grams_left: grams, last_weighed_g: grams, last_weighed_at: when, last_drift_g: drift }
       return HttpResponse.json(
-        addEvent(row.id, 'weighed', { at: when, source: body.source ?? 'person', grams_before: row.grams_left, grams_after: body.grams ?? null }),
+        addEvent(row.id, 'weighed', { at: when, source: body.source ?? 'person', grams_before: row.grams_left, grams_after: grams, data }),
         { status: 201 },
       )
     }

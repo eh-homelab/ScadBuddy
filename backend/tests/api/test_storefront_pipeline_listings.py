@@ -6,10 +6,14 @@ a slice. A render of several outputs has none yet: its line is priced by hand.""
 
 from __future__ import annotations
 
+import dataclasses
+import functools
+import hashlib
 import json
 import shutil
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -18,11 +22,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.outputs import storefront_output_id
 from scadbuddy.orders.component import ORDERS
-from scadbuddy.orders.storefront import prepare
-from scadbuddy.orders.storefront.renders import variant_of
+from scadbuddy.orders.rendering import RenderedOutput, outputs_for_reference
+from scadbuddy.orders.storefront import prepare, slice_price
+from scadbuddy.orders.storefront import renders as renders_module
+from scadbuddy.orders.storefront.renders import fetch_files, reference_of, variant_of
 from scadbuddy.render.inputs import InputsError, inputs_key
 from scadbuddy.render.job_models import Job
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.storefront.wire import STOREFRONT_PROBLEMS
 from scadbuddy.workflows.models import MigrateResult
 from tests.api.conftest import follow_operation
@@ -89,6 +97,16 @@ SCHEMA: dict[str, Any] = {
 HOUSE: dict[str, Any] = {"house": {"cols": 2, "storeys": 1}}
 #: Two outputs of one render.
 TWO_OUTPUTS = PIPELINE + "    await ctx.output(plates=await ctx.pack([part, part]))\n"
+#: Two outputs of one render, each of another colour.
+TWO_COLOURS = (
+    "INPUTS_VERSION = 1\n\n"
+    "async def run(ctx, inputs):\n"
+    "    params = inputs['params']\n"
+    "    red = await ctx.render('model.scad', **params)\n"
+    "    blue = await ctx.render('model.scad', **{**params, 'colour': '#0000FF'})\n"
+    "    await ctx.output(plates=[ctx.plate_of([red])])\n"
+    "    await ctx.output(plates=[ctx.plate_of([blue])])\n"
+)
 #: One output of two plates, each of another colour.
 TWO_PLATES = (
     "INPUTS_VERSION = 1\n\n"
@@ -496,8 +514,11 @@ def test_a_render_is_priced_by_a_slice_with_the_inputs(
     assert est["source"] == "slice" and est["price_minor"] > 0
     assert counted_rows(crud, TOKEN_A) == 1
     [row] = slices(crud)
+    # The key's digest is the one 3MF's own (§7.4: no price of one output moved).
+    stored = _state(api).render.store.read(job["id"])
+    assert row["model_sha256"] == file_sha256(crud, stored, 0)
     [(output_id, request, _subject, presets)] = sliced.started
-    assert output_id == row["output_id"]
+    assert output_id == row["output_id"] == storefront_output_id(row_render_key(crud))
     assert request.printer == "p-1" and presets is not None and set(presets) == {1}
     # The slice read the visitor's own render, with its whole inputs (#6371: hidden).
     meta = _state(api).outputs.get(output_id)
@@ -609,6 +630,155 @@ def variant_at(crud: CrudCaller, listing: dict[str, Any], job: Job) -> tuple[str
     assert crud.api.portal is not None
     digest, slots = crud.api.portal.call(variant_of, state, record, job, {}, None)
     return digest, [filament.id for filament in slots]
+
+
+def file_sha256(crud: CrudCaller, job: Job, index: int) -> str:
+    """The sha256 of the 3MF of output ``index`` of ``job``."""
+    state = _state(crud.api)
+    path = result_file(state.store.blobs, state.paths.root, job.outputs[index].result.model_3mf)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.fixture
+def two_colours(
+    crud: CrudCaller,
+    settings: Settings,
+    template: dict[str, Any],
+    dense_red: str,
+    pla_blue: str,
+) -> tuple[dict[str, Any], Job]:
+    """A published listing of a pipeline that makes a red and a blue output, and a
+    visitor's done render of it."""
+    blue_renders_blue(settings)
+    kit = {**template, "commit": committed(crud.api, template["slug"], source=TWO_COLOURS)}
+    body = kit_body(kit, dense_red, colours=[pla_blue, dense_red])
+    listing = publish(crud.api, create(crud.api, body)["id"])
+    shown = render_until_done(crud, TOKEN_A, listing, {})
+    # The page shows every slot of the kit.
+    assert [colour.upper() for colour in shown["colors"]] == ["#FF0000", "#0000FF"]
+    return listing, _state(crud.api).render.store.read(shown["id"])
+
+
+def kit_price(crud: CrudCaller, listing: dict[str, Any], job: Job) -> dict[str, Any]:
+    """The row of the kit's price, through the price path itself: no visitor's read asks
+    for one yet (`one_output`)."""
+    state = _state(crud.api)
+    record = state.components.get(ORDERS).listings.get(listing["id"])
+    portal = crud.api.portal
+    assert portal is not None and record is not None
+    digest, slots = portal.call(variant_of, state, record, job, {}, None)
+    read = functools.partial(
+        slice_price.slice_estimate,
+        state,
+        reference=reference_of(record, job),
+        model_sha256=digest,
+        filaments=slots,
+    )
+    deadline = time.monotonic() + 60
+    while portal.call(read).source == "pending":
+        assert time.monotonic() < deadline, "the price was never worked out"
+        time.sleep(0.2)
+    [row] = rows(crud, "SELECT * FROM storefront_slice_prices WHERE model_sha256 = %s", digest)
+    return row
+
+
+def row_render_key(crud: CrudCaller) -> str:
+    [row] = rows(crud, "SELECT render_key FROM storefront_renders")
+    key: str = row["render_key"]
+    return key
+
+
+def test_every_output_of_a_kit_is_sliced_and_priced_once(
+    crud: CrudCaller,
+    two_colours: tuple[dict[str, Any], Job],
+    dense_red: str,
+    pla_blue: str,
+    sliced: type[FakeSlicer],
+) -> None:
+    """Spec §7.4, over a real render of two outputs: one price of both, each saved from the
+    one job and sliced with the presets of its own slots. A visitor is still shown none of
+    it, though the price stands (until PR 5)."""
+    api = crud.api
+    listing, job = two_colours
+    state = _state(api)
+    row = kit_price(crud, listing, job)
+    assert row["status"] == "done", row["failure"]
+    digests = [file_sha256(crud, job, index) for index in (0, 1)]
+    text = json.dumps(["kit", *digests], separators=(",", ":"))
+    assert row["model_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+    assert row["slot_filaments"] == [dense_red, pla_blue]
+    assert [colour.upper() for colour in row["slot_colours"]] == ["#FF0000", "#0000FF"]
+    # Each output's one plate reads 10 g of its own first slot: the kit's 0, then its 1.
+    assert row["grams"] == {"0": "10.0", "1": "10.0"}
+    assert [plate["index"] for plate in row["plates"]] == [1, 2]
+    assert row["print_seconds"] == 7200
+    started = [(output_id, set(presets or {})) for output_id, _, _, presets in sliced.started]
+    assert [slots for _, slots in started] == [{1}, {1}]
+    metas = [state.outputs.get(output_id) for output_id, _ in started]
+    assert [meta.job_id for meta in metas] == [job.id, job.id]
+    assert [meta.colors for meta in metas] == [out.result.colors for out in job.outputs]
+    assert {meta.source for meta in metas} == {"storefront"}
+    assert row["output_id"] == metas[0].id
+    assert counted_rows(crud, TOKEN_A) == 1
+
+    assert estimate(crud, job.id)["source"] == "none"
+    assert instant(crud, listing, {})["price"]["source"] == "none"
+    draft = add(crud, listing, {})
+    assert draft["items"][0]["price"] == "by_hand"
+    assert rows(crud, SHOWN) == []
+    # The line has every slot of the kit, each with its filament.
+    [item] = api.get(f"/api/v1/orders/{draft['id']}").json()["items"]
+    assert [slot["filament_id"] for slot in item["colours"]] == [dense_red, pla_blue]
+    assert len(sliced.started) == 2
+
+
+@pytest.mark.parametrize("fault", ["left out", "two jobs"])
+def test_outputs_that_are_not_the_whole_of_one_job_have_no_price(
+    crud: CrudCaller,
+    two_colours: tuple[dict[str, Any], Job],
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    real = outputs_for_reference
+
+    async def faulty(*args: Any, **kwargs: Any) -> list[RenderedOutput]:
+        first, second = await real(*args, **kwargs)
+        if fault == "left out":
+            return [first]
+        return [first, dataclasses.replace(second, job_id="f" * 32)]
+
+    monkeypatch.setattr(slice_price, "outputs_for_reference", faulty)
+    row = kit_price(crud, *two_colours)
+    assert (row["status"], row["failure"]) == ("failed", slice_price.GEOMETRY_DIFFERS)
+    assert sliced.started == []
+
+
+def test_a_kit_whose_later_files_are_gone_is_lost(
+    crud: CrudCaller, two_colours: tuple[dict[str, Any], Job], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its first output's files are there, and it has no digest without the rest."""
+    _listing, job = two_colours
+    state = _state(crud.api)
+    portal = crud.api.portal
+    assert portal is not None
+    assert portal.call(fetch_files, state, job)
+    monkeypatch.setattr(renders_module, "_failed", OrderedDict())
+    real = materialize_result
+    later = job.outputs[1].result
+
+    async def gone(blobs: Any, result: Any) -> None:
+        # As a store with no blob of the key: nothing raises, and nothing is there.
+        if result == later:
+            result_file(blobs, state.paths.root, result.model_3mf).unlink(missing_ok=True)
+        else:
+            await real(blobs, result)
+
+    monkeypatch.setattr(renders_module, "materialize_result", gone)
+    for _ in range(renders_module.FETCH_TRIES):
+        assert not renders_module.files_lost(job.id)
+        assert not portal.call(fetch_files, state, job)
+    assert renders_module.files_lost(job.id)
 
 
 def test_the_same_3mf_has_one_price_wherever_it_was_made(
@@ -760,7 +930,9 @@ def test_a_render_of_several_outputs_has_no_price_on_any_path(
     assert len(job.outputs) == 2
     [row] = slices(crud)
     digest, filaments = variant_at(crud, listing, job)
-    assert (digest, filaments) == (row["model_sha256"], row["slot_filaments"])
+    # The kit's digest is not its first output's, whose price is the plain listing's.
+    assert (file_sha256(crud, job, 0), filaments) == (row["model_sha256"], row["slot_filaments"])
+    assert digest != row["model_sha256"]
 
     assert estimate(crud, shown["id"])["source"] == "none"
     found = instant(crud, listing, {})
@@ -775,7 +947,7 @@ def test_a_render_of_several_outputs_has_no_price_on_any_path(
         conn.execute(
             "INSERT INTO storefront_item_prices (order_item_id, listing_id, model_sha256,"
             " slot_filaments) VALUES (%s, %s, %s, %s)",
-            (line["id"], listing["id"], digest, filaments),
+            (line["id"], listing["id"], row["model_sha256"], filaments),
         )
     sent = submit(crud, draft)
     assert sent.status_code == 200, sent.text

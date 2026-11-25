@@ -333,12 +333,16 @@ class FlowGrants:
     async def decision(self, ask: DecisionAsk) -> DecisionRead:
         """What the calling run's approved call runs (#2482, plan Task B4): a narrowed
         decision's input, only when it hashes to the hash the decision approved (#2318).
-        The decision is the calling workflow's own call's, never one named here."""
+        The decision is the calling workflow's own call's, never one named here. A call
+        that no approval on record is for is refused, as the agent refuses its own (#7588):
+        the harness may have let it through on one that was replaced or undone."""
         own = _flow_request_prefix()
         if own is None:
             return DecisionRead()
         found = await self._store.get_decision(f"{own[1]}{ask.call_id}")
-        if found is None or found.outcome != "approved" or "args" not in found.response:
+        if found is None or found.outcome != "approved":
+            return DecisionRead(narrowed=True, refused="no approval is on record for this call")
+        if "args" not in found.response:
             return DecisionRead()
         args = found.response.get("args")
         by = found.response.get("narrowed_by")

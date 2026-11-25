@@ -286,7 +286,7 @@ See [features/flows.md](../features/flows.md#questions-to-a-person).
 `Housekeeping` (`scadbuddy/workflows/housekeeping.py:469`) runs on Schedules the API
 creates (`_set_up_housekeeping`, `scadbuddy/main.py:2038`) and calls the sweeps: printer watches, native
 copies, print auto-import, quote holds, payment closes and captures, bank deposits,
-storefront drafts and mail, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:142`).
+storefront drafts and mail, published listings with no price, git remote pushes, blob sweeps (the sweep names start at `scadbuddy/workflows/housekeeping.py:142`).
 
 ## Tests
 

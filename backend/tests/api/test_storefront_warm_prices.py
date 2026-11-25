@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -194,7 +195,9 @@ def started_defaults(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Each listing a default price run was started for, with no run started."""
     started: list[str] = []
 
-    async def start_default(_self: prepare.TemporalPreparer, listing_id: str) -> None:
+    async def start_default(
+        _self: prepare.TemporalPreparer, listing_id: str, *, restart: bool = True
+    ) -> None:
         started.append(listing_id)
 
     monkeypatch.setattr(prepare.TemporalPreparer, "start_default", start_default)
@@ -247,3 +250,150 @@ def test_a_publish_answers_when_temporal_does_not(
     given_up = f"gave up waiting for the default price run of listing {listing['id']} to start"
     [record] = [r for r in caplog.records if r.getMessage() == given_up]
     assert record.exc_info is not None
+
+
+def swept(client: TestClient) -> int:
+    """One pass of the sweep (#7665), on the app's own event loop."""
+    state = _state(client)
+    portal = client.portal
+    assert portal is not None
+    started: int = portal.call(prepare.warm_unpriced, state, state.components.get(ORDERS))
+    return started
+
+
+def newest_runs(
+    monkeypatch: pytest.MonkeyPatch, runs: dict[str, prepare.DefaultRun]
+) -> dict[str, prepare.DefaultRun]:
+    """What Temporal holds of each listing's default run, by listing id."""
+
+    async def last_default(
+        _self: prepare.TemporalPreparer, listing_id: str
+    ) -> prepare.DefaultRun | None:
+        return runs.get(listing_id)
+
+    monkeypatch.setattr(prepare.TemporalPreparer, "last_default", last_default)
+    return runs
+
+
+def version_of(listing: dict[str, Any]) -> datetime:
+    return datetime.fromisoformat(listing["updated_at"])
+
+
+def unwarmed(
+    client: TestClient, template: dict[str, Any], red: str, count: int = 1
+) -> list[dict[str, Any]]:
+    """Published listings that publish priced nothing of (their starts were recorded only)."""
+    body = listing_body(template, red)
+    return [publish(client, create(client, body)["id"]) for _ in range(count)]
+
+
+def test_the_sweep_prices_a_published_listing_with_no_price(
+    client: TestClient,
+    crud: CrudCaller,
+    template: dict[str, Any],
+    dense_red: str,
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7665: a listing published with no run (as before #6922) has no price until the
+    sweep starts one; once it has its price, the sweep leaves it alone."""
+    with monkeypatch.context() as patched:
+        started_defaults(patched)
+        [listing] = unwarmed(client, template, dense_red)
+    draft = create(client, listing_body(template, dense_red))
+    assert instant(crud, listing, {})["source"] == "none"
+    assert swept(client) == 1
+    assert firm(crud, listing, {})["price_minor"] > 0
+    started = started_defaults(monkeypatch)
+    newest_runs(monkeypatch, {})
+    assert swept(client) == 0
+    assert started == [] and draft["published"] is False
+    assert len(sliced.started) == 1
+
+
+def test_the_sweep_tries_a_version_of_a_listing_once(
+    client: TestClient,
+    template: dict[str, Any],
+    dense_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7665: a listing with no price to find (its run ended with none) is not started on
+    each pass: only while its newest run started before this version of it."""
+    started = started_defaults(monkeypatch)
+    [listing] = unwarmed(client, template, dense_red)
+    started.clear()
+    version = version_of(listing)
+    since = prepare.DefaultRun(running=False, started_at=version + timedelta(seconds=1))
+    runs = newest_runs(monkeypatch, {listing["id"]: since})
+    assert swept(client) == 0
+    assert started == []
+    before = prepare.DefaultRun(running=False, started_at=version - timedelta(seconds=1))
+    runs[listing["id"]] = before
+    assert swept(client) == 1
+    assert started == [listing["id"]]
+
+
+def test_the_sweep_leaves_only_a_few_runs_open(
+    client: TestClient,
+    template: dict[str, Any],
+    dense_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7665: at most `WARM_SWEEP_BATCH` default runs are open, those already open
+    counted, so visitors' renders keep their room; the next pass starts the rest."""
+    started = started_defaults(monkeypatch)
+    listings = unwarmed(client, template, dense_red, 4)
+    started.clear()
+    runs = newest_runs(monkeypatch, {})
+    ids = [listing["id"] for listing in listings]
+    now = datetime.now(UTC)
+    running = prepare.DefaultRun(running=True, started_at=now)
+    ended = prepare.DefaultRun(running=False, started_at=now)
+    assert swept(client) == prepare.WARM_SWEEP_BATCH == 2
+    first = list(started)
+    # One of them still runs: one more starts.
+    runs.update({first[0]: running, first[1]: ended})
+    assert swept(client) == 1
+    runs.update({first[0]: ended, started[-1]: ended})
+    assert swept(client) == 1
+    assert sorted(started) == sorted(ids)
+
+
+def test_the_sweep_goes_on_past_a_listing_that_fails(
+    client: TestClient,
+    template: dict[str, Any],
+    dense_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    started = started_defaults(monkeypatch)
+    first, second = unwarmed(client, template, dense_red, 2)
+    started.clear()
+
+    async def last_default(
+        _self: prepare.TemporalPreparer, listing_id: str
+    ) -> prepare.DefaultRun | None:
+        if listing_id == first["id"]:
+            raise RuntimeError("away")
+        return None
+
+    monkeypatch.setattr(prepare.TemporalPreparer, "last_default", last_default)
+    with caplog.at_level(logging.WARNING, logger=prepare.logger.name):
+        assert swept(client) == 1
+    assert started == [second["id"]]
+    assert f"could not sweep the default price of listing {first['id']}" in caplog.text
+
+
+def test_the_sweep_obeys_the_warm_prices_switch(
+    client: TestClient,
+    template: dict[str, Any],
+    dense_red: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = started_defaults(monkeypatch)
+    unwarmed(client, template, dense_red)
+    started.clear()
+    newest_runs(monkeypatch, {})
+    monkeypatch.setattr(_state(client).settings, "storefront_warm_prices", False)
+    assert swept(client) == 0
+    assert started == []

@@ -17,14 +17,17 @@ every start; each catalogue write is one commit. The API process alone reads and
 the repository. Longer writes (duplicate, mesh-model creation) run as `library`
 operations ([workflows.md](../architecture/workflows.md#operations-one-shape-for-writes)).
 
-Each template also has a derived row of `templates` in Postgres (#7317). Once a copy run
-has finished, the list, a template's record, its id list and the other readers (the pin
-index, which is the libraries the templates pin, the library associations, the print
-settings, the name check) read the rows; before that, they read the files. The list of a
+Each template also has a derived row of `templates` in Postgres (#7317). The list, a
+template's record, its id list and the other readers (the pin index, which is the
+libraries the templates pin, the library associations, the print settings, the name
+check) read only the rows. A database where no copy run has finished gets its first copy
+when the API starts, before it serves. A template with files but no row (a failed
+refresh, a folder made by hand) is in the list only after the next copy run, but its own
+record reads its files at once. The list of a
 library's users (`GET /api/v1/libraries/{name}/users`) and the check before a library
 checkout's removal always read the files (spec §7.4). The catalogue thumbnail
 (`GET /api/v1/models/{slug}/thumbnail`) is named from the row too: its `ETag` is the
-template's own cover's sha256 (the same value as before the copy), `"output-<id>"` for an
+template's own cover's sha256 (the same value as before phase 2), `"output-<id>"` for an
 output's plate cover or `"preview-<id>"` for the default-render preview, so a matching
 `If-None-Match` answers 304 with no file read (except for a row that lags its media, which
 is read from the files); a 200 carries the tag of the image it read.
@@ -44,7 +47,7 @@ sequenceDiagram
     participant Git as models git repo
     participant PG as Postgres templates
     UI->>API: GET /api/v1/models?q=…
-    API->>PG: read the rows (after a copy run; before it, model.json from Git)
+    API->>PG: read the rows
     UI->>API: POST /api/v1/models (upload / paste)
     API->>API: openscad parse check
     API->>Git: commit

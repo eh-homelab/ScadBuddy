@@ -273,6 +273,38 @@ async def test_a_publish_run_renders_and_prices_the_default_only(
         await terminate_open_workflows(client, queue)
 
 
+async def test_the_sweep_joins_an_open_default_run(client: Client, queue: str) -> None:
+    """#7665: the sweep reads the newest default run, and its start joins an open one; a
+    run that ended is started again."""
+    listing_id = uuid.uuid4().hex
+    renders = Renders(1)
+    renders.hold.clear()
+    preparer = TemporalPreparer(client, queue)
+    handle = client.get_workflow_handle(
+        default_workflow_id(listing_id), result_type=PrepareListingResult
+    )
+    try:
+        async with worker(client, queue, renders):
+            assert await preparer.last_default(listing_id) is None
+            await preparer.start_default(listing_id, restart=False)
+            first = await handle.describe()
+            while not renders.asked:
+                await asyncio.sleep(0.1)
+            await preparer.start_default(listing_id, restart=False)
+            assert (await handle.describe()).run_id == first.run_id
+            run = await preparer.last_default(listing_id)
+            assert run is not None and run.running and run.started_at == first.start_time
+            renders.hold.set()
+            await asyncio.wait_for(handle.result(), 60)
+            ended = await preparer.last_default(listing_id)
+            assert ended is not None and not ended.running
+            await preparer.start_default(listing_id, restart=False)
+            again = await preparer.last_default(listing_id)
+            assert again is not None and again.started_at > first.start_time
+    finally:
+        await terminate_open_workflows(client, queue)
+
+
 async def test_a_run_continued_as_new_keeps_its_count_of_asks(client: Client, queue: str) -> None:
     """Review of #6970: a run continued as new in the price phase carries how many times it
     asked for the index (``warm_tries``), so `WARM_TRIES` bounds the index across runs: one

@@ -11,6 +11,7 @@ import pytest
 from scadbuddy.entities.attachments import EntityAttachmentStore
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityNotFound, EntityStore
+from scadbuddy.filament.catalog import KIND_OF_TABLE
 from scadbuddy.orders.models import Actor
 from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from tests.conftest import PgPool
@@ -120,3 +121,41 @@ def test_update_changes_only_what_it_is_given(
     assert (changed.caption, changed.role) == ("on the shelf", "label")
     changed = attachments.update(added, caption="", role=None)
     assert (changed.caption, changed.role) == ("", "label")
+
+
+CATALOG_KINDS = {
+    "material": "filament_materials",
+    "subtype": "filament_subtypes",
+    "brand": "filament_brands",
+    "category": "filament_categories",
+    "effect": "filament_effects",
+    "insert_material": "filament_insert_materials",
+    "insert_type": "filament_insert_types",
+    "colour": "filament_colours",
+    "location_kind": "filament_location_kinds",
+}
+
+
+def test_every_catalog_is_an_entity_kind() -> None:
+    assert set(CATALOG_KINDS.values()) == set(KIND_OF_TABLE)
+
+
+@pytest.mark.parametrize(("kind", "table"), CATALOG_KINDS.items())
+def test_a_catalog_row_takes_a_file(
+    attachments: EntityAttachmentStore, pg_pool: PgPool, kind: str, table: str
+) -> None:
+    extra = {"insert_type": ("empty_weight_g", 250), "colour": ("rgba", "#112233FF")}.get(kind)
+    columns, values = ["name"], ["Kept with files"]
+    if extra is not None:
+        columns.append(extra[0])
+        values.append(extra[1])  # type: ignore[arg-type]
+    marks = ", ".join(["%s"] * len(values))
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({marks}) RETURNING id".encode(),
+            values,
+        ).fetchone()
+    assert row is not None
+    ref = EntityRef(kind, str(row["id"]))
+    added = _add(attachments, pg_pool, ref)
+    assert [a.id for a in attachments.list(ref)] == [added]

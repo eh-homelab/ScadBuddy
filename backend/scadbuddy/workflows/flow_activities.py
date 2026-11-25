@@ -9,7 +9,9 @@ from pydantic import ValidationError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.crud.client import CrudRefusedError
+from scadbuddy.core.input_schema import PATTERN_TIMEOUT_S, PATTERNS_BUDGET_S, PatternsTimedOutError
+from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
+from scadbuddy.crud.wire import PATTERN_TIMEOUT
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.tasks.models import Task, TaskOpen, open_problems
 from scadbuddy.tasks.store import RunEndedError, RunNotFoundError
@@ -28,6 +30,11 @@ FLOW_TASK_CLOSE = "flow_task_close"
 TASK_REFUSED = "TaskRefused"
 #: A prompt's run takes no task: it ended, or it is gone.
 TASK_RUN_OVER = "TaskRunOver"
+#: The attempt at which a default's pattern that ran out of time is refused, not tried
+#: again (#7437, #7688). With Temporal's default backoff the attempts before it span about
+#: five minutes, long enough for a busy pod; a pattern that times out on every pod is the
+#: script's.
+PATTERN_TIMEOUT_ATTEMPTS = 10
 
 
 class FlowActivities:
@@ -88,6 +95,17 @@ def _refused(type_: str, message: str) -> ApplicationError:
     return ApplicationError(message, type=type_, non_retryable=True)
 
 
+def _refuse_past_attempts() -> None:
+    """Refuse a default's pattern timeout once `PATTERN_TIMEOUT_ATTEMPTS` attempts met it."""
+    if activity.info().attempt >= PATTERN_TIMEOUT_ATTEMPTS:
+        raise _refused(
+            TASK_REFUSED,
+            "schema: a default's pattern took too long to check"
+            f" (over {PATTERN_TIMEOUT_S}s, or {PATTERNS_BUDGET_S}s together)"
+            f" on {PATTERN_TIMEOUT_ATTEMPTS} attempts",
+        ) from None
+
+
 class FlowTaskActivities:
     """What `prompt()` does to its task. Each write names the activity's own execution,
     never one from its input: a Reset gives a scheduled activity to the new execution with
@@ -101,11 +119,17 @@ class FlowTaskActivities:
         """Open the task, a `TaskOpen`'s JSON. A retry finds it there.
 
         Final: a task the model or the route refuses (422), a run that has ended, and a run
-        that is not there. Every other refusal is tried again without limit: a credential
-        refused (401, 403), any other 4xx, a 5xx, a route that is missing during a roll, an
-        API that is away. Those are ScadBuddy's to mend and not the script's, so they must
-        not fail a run that may have worked for weeks. Nothing is lost while it waits: the
-        question is not asked yet, and a cancel still ends the run."""
+        that is not there. Every other refusal is tried again without limit (but see the
+        pattern timeout below): a credential refused (401, 403), any other 4xx, a 5xx, a
+        route that is missing during a roll, an API that is away. Those are ScadBuddy's to
+        mend and not the script's, so they must not fail a run that may have worked for
+        weeks. Nothing is lost while it waits: the
+        question is not asked yet, and a cancel still ends the run.
+
+        A default's pattern that ran out of time, here (`PatternsTimedOutError`) or in the
+        API (its 503 ``pattern-timeout``), is tried again up to `PATTERN_TIMEOUT_ATTEMPTS`,
+        then refused: a busy pod passes, but a pattern that times out on every pod is the
+        script's (#7437, #7688)."""
         try:
             # Off the loop: the check of a default runs its pattern.
             checked = await asyncio.to_thread(TaskOpen.model_validate, task)
@@ -120,6 +144,13 @@ class FlowTaskActivities:
             if error.status != 422:
                 raise
             raise _refused(TASK_REFUSED, _said(error.problem)) from None
+        except PatternsTimedOutError:
+            _refuse_past_attempts()
+            raise
+        except CrudUnavailableError as error:
+            if error.problem.get("reason") == PATTERN_TIMEOUT:
+                _refuse_past_attempts()
+            raise
 
     @activity.defn(name=FLOW_TASK_ANSWERED)
     async def answered(self, task_id: str, answer: dict[str, Any]) -> None:

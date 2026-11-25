@@ -1,11 +1,14 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { act, screen, waitFor, within } from '@testing-library/react'
+import { http, HttpResponse, type JsonBodyType } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
 import { hostedPlugins } from '../../api/hostedPlugins'
+import { SEEDED_SKILL } from '../../mocks/features/hostedPlugins'
+import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { PluginPackagesPanel } from './PluginPackages'
 import { PACKAGES_HREF } from './HostedPluginEditor'
 import { SettingsDirtyProvider, useDirtySections, useLeaveHolds } from '../../pages/settings/dirty'
 import { HostedPluginsPanel } from './HostedPlugins'
@@ -217,6 +220,176 @@ describe('HostedPluginsPanel', () => {
     expect(within(assistant).queryByRole('button', { name: 'Offer version 2' })).not.toBeInTheDocument()
     const pkg = (await aiPlugins.listPackages()).find((p) => p.name === 'print-notes')
     expect(pkg).toMatchObject({ version: 1, approved: false, pending: { version: 2 } })
+  })
+
+  it('follows a publish and re-pin made outside the page, in Packages and the editor (#7460)', async () => {
+    await aiPlugins.installPackage({ kind: 'hosted', name: 'print-notes' })
+    const { user } = renderPage(
+      <>
+        <PluginPackagesPanel />
+        <HostedPluginsPanel />
+      </>,
+    )
+    const card = await screen.findByRole('listitem', { name: 'Plugin package print-notes' })
+    const editor = await openPlugin(user, 'print-notes')
+    await within(editor).findByText('The draft is the same as version 1. Edit it to publish again.')
+    expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeDisabled()
+    expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument()
+
+    // What the assistant's `hosted_plugin_publish` does: a draft edit, a publish, a re-pin offer.
+    const edited = new TextEncoder().encode(`${SEEDED_SKILL}Keep it short.\n`)
+    await hostedPlugins.writeFile('print-notes', 'skills/print-notes/SKILL.md', edited, false)
+    await hostedPlugins.publish('print-notes')
+    await aiPlugins.installPackage({ kind: 'hosted', name: 'print-notes' })
+    emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
+
+    const pending = await within(card).findByLabelText('Pending re-pin')
+    expect(pending).toHaveTextContent('Re-pin at version 2.')
+    expect(within(pending).getByRole('button', { name: 'Approve re-pin…' })).toBeInTheDocument()
+    expect(await within(editor).findByRole('button', { name: 'Publish version 3' })).toBeDisabled()
+    expect(await within(editor).findByText('The draft is the same as version 2. Edit it to publish again.')).toBeInTheDocument()
+    expect(within(within(editor).getByRole('region', { name: 'Versions' })).getByText('Version 2')).toBeInTheDocument()
+  })
+
+  it("keeps the newest draft diff when a topic read's answer lands after a save's (#7672)", async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await within(editor).findByText('The draft is the same as version 1. Edit it to publish again.')
+    // Let the subscription's confirmation and any read it starts finish first.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+
+    // The topic's read sees the draft before the save and answers only after the save's read.
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let asked: () => void = () => {}
+    const arrived = new Promise<void>((resolve) => (asked = resolve))
+    server.use(
+      http.get(
+        '/api/v1/hosted-plugins/:name/draft-diff',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as JsonBodyType
+          asked()
+          await held
+          return HttpResponse.json(seen)
+        },
+        { once: true },
+      ),
+      // The event's read also brings a version 2 published elsewhere.
+      http.get(
+        '/api/v1/hosted-plugins/:name/versions',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as { version: number }[]
+          return HttpResponse.json([...seen, { ...seen.at(-1)!, version: 2 }] as JsonBodyType)
+        },
+        { once: true },
+      ),
+    )
+    emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
+    await arrived
+
+    await user.click(within(editor).getByRole('button', { name: 'skills/print-notes/SKILL.md' }))
+    await user.type(await within(editor).findByLabelText('Edit skills/print-notes/SKILL.md'), 'Keep it short.')
+    await user.click(within(editor).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeEnabled())
+
+    release()
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+    expect(within(editor).queryByText('The draft is the same as version 1. Edit it to publish again.')).not.toBeInTheDocument()
+    // The save's draft read does not order the versions: the event's answer still lands.
+    expect(within(within(editor).getByRole('region', { name: 'Versions' })).getByText('Version 2')).toBeInTheDocument()
+  })
+
+  it("keeps a save's files when the editor's first read answers after it (#7735)", async () => {
+    // The first read of the files answers late, with a file the draft no longer holds.
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let asked: () => void = () => {}
+    const arrived = new Promise<void>((resolve) => (asked = resolve))
+    server.use(
+      http.get(
+        '/api/v1/hosted-plugins/:name/files',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as { files: { path: string; executable: boolean }[] }
+          asked()
+          await held
+          return HttpResponse.json({ ...seen, files: [...seen.files, { path: 'skills/print-notes/stale.md', executable: false }] } as JsonBodyType)
+        },
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await arrived
+
+    // Saving the details reads the files again; that read answers first.
+    await user.type(within(editor).getByLabelText('Description'), '!')
+    await user.click(within(editor).getByRole('button', { name: 'Save details' }))
+    expect(await within(editor).findByRole('button', { name: 'skills/print-notes/SKILL.md' })).toBeInTheDocument()
+
+    release()
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+    expect(within(editor).queryByRole('button', { name: 'skills/print-notes/stale.md' })).not.toBeInTheDocument()
+  })
+
+  it("shows the first read's files when a save's read fails before it answers (#7747)", async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let asked: () => void = () => {}
+    const arrived = new Promise<void>((resolve) => (asked = resolve))
+    // The first read of the files (the editor's) is held; the save's (and its retries) are refused.
+    let calls = 0
+    let released = false
+    server.use(
+      http.get('/api/v1/hosted-plugins/:name/files', async ({ request }) => {
+        // This handler's own read of the answer goes on to the mock's handler.
+        if (request.headers.get('x-test-inner')) return undefined
+        calls += 1
+        if (calls === 1) {
+          const seen = (await (await fetch(request.url, { headers: { 'x-test-inner': '1' } })).json()) as JsonBodyType
+          asked()
+          await held
+          return HttpResponse.json(seen)
+        }
+        if (!released) return HttpResponse.json({ detail: 'refused' }, { status: 400 })
+        return undefined
+      }),
+    )
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await arrived
+
+    await user.type(within(editor).getByLabelText('Description'), '!')
+    await user.click(within(editor).getByRole('button', { name: 'Save details' }))
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+
+    released = true
+    release()
+    expect(await within(editor).findByRole('button', { name: 'skills/print-notes/SKILL.md' })).toBeInTheDocument()
+  })
+
+  it("reads nothing again for another plugin's change (#7672)", async () => {
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await within(editor).findByText('The draft is the same as version 1. Edit it to publish again.')
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+
+    const reads: string[] = []
+    const listener = ({ request }: { request: Request }) => {
+      const path = new URL(request.url).pathname
+      if (/\/hosted-plugins\/print-notes\/(draft-diff|versions)$/.test(path)) reads.push(path)
+    }
+    server.events.on('request:start', listener)
+    try {
+      emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'greeter' })
+      await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+      expect(reads).toEqual([])
+
+      emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
+      await waitFor(() => expect(reads.length).toBeGreaterThan(0))
+    } finally {
+      server.events.removeListener('request:start', listener)
+    }
   })
 
   it('shows the server refusal of a name, and edits the description, category and tags', async () => {

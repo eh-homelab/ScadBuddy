@@ -286,9 +286,12 @@ volume. The first run fills every row.
 
 ### 5.4 Readers
 
-The rows are the answer once a copy run has finished (`template_copy_runs.finished_at`
-set), as `OutputRows.copied` does for outputs (#7360, not yet merged; design §6.1). Before that, each
-reader walks the files as today.
+Phase 2 read the rows once a copy run had finished (`template_copy_runs.finished_at`
+set), as `OutputRows.copied` does for outputs (#7360, design §6.1), and walked the files
+before that. Phase 3 (as built) reads the rows always: a database where no run has
+finished gets its first copy at the API's start, before the app serves
+(`scadbuddy/main.py` `_first_template_copy`), and a reader with no rows open raises
+(`scadbuddy/library/catalogue.py` `Catalogue._rows`).
 
 | Reader | Today | From rows |
 |---|---|---|
@@ -328,9 +331,11 @@ reads the output folders as today. A list is NFS-free only with both.
    still walks.
 2. **Readers** (one PR, or two: the lists, then the thumbnail). Every reader in §5.4
    and §5.5 reads rows once a copy run has finished.
-3. **Cut-over** (one PR). After phase 2 has run on prod for a week with no repair
-   (§8), remove each reader's file fallback. The walk then lives only in the copy.
-   Nothing on NFS is removed or stops being written.
+3. **Cut-over** (one PR). Remove each reader's file fallback. The walk then lives only
+   in the copy. Nothing on NFS is removed or stops being written. As built: a database
+   with no finished run gets its first copy at start, before the app serves. The gate is
+   the phase 3 plan's "Before merge" checks on prod over every copy run since the phase 1
+   deploy (§8), not a fixed week.
 
 ### 5.7 Tests
 
@@ -395,7 +400,8 @@ reads the output folders as today. A list is NFS-free only with both.
    record, per request, as today.
 6. **The fallback ends with the first finished copy run**, as for outputs (#7360).
    After that, a template with no row is not listed; the next sweep adds a row that a
-   failed refresh missed.
+   failed refresh missed. Phase 3 removes the fallback: the first copy runs at the API's
+   start, before it serves, so no list walks the files.
 7. **The thumbnail's `ETag` names the source.** Only the template's own cover keeps a
    hash of its bytes, taken once at the refresh. Output and preview images are
    immutable under their ids. Clients fetch an output or preview cover once more
@@ -413,8 +419,15 @@ reads the output folders as today. A list is NFS-free only with both.
   before phase 2.
 - Phase 2: deploy and time `GET /models`, `/model-facets` and a thumbnail 304 again
   against §1.
-- Rollback at any phase: an older build walks the files and ignores the rows. Its
-  writes do not refresh rows; the new build's first copy run at start repairs them.
+- Phase 3: one release, with no migration. Before the merge, read every copy run on prod
+  since the phase 1 deploy: match each repair to a roll-out, check that
+  `scadbuddy_template_refresh_failures_total` did not increase, and note the count of
+  rows that are not storable (the phase 3 plan, "Before merge"). There is no fixed week.
+  After the deploy, check the pods' images and the copy status as for phase 1, and time
+  the same routes again.
+- Rollback: a build before phase 1 walks the files and ignores the rows, and its writes
+  do not refresh rows; the next build's copy run at start repairs them. A phase 1 or
+  phase 2 build writes rows as phase 3 does, and phase 2 reads them.
 
 ## 9. For the owner
 

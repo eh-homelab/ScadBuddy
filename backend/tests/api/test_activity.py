@@ -8,6 +8,7 @@ import json
 from types import SimpleNamespace
 
 import psycopg
+import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import _SUBJECT_KEY, ActivityIndex, Count
@@ -21,6 +22,16 @@ from scadbuddy.printers.models import PrinterCreate
 from tests.api.conftest import AgentTables, SeedActivity, wait_for_job
 from tests.api.test_send import make_output
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
+
+
+@pytest.fixture
+def model(client: TestClient, model: str) -> str:
+    """The template written on the volume by hand, copied to its row: the activity's
+    labels read the rows only (#7317 phase 3)."""
+    sync_template_rows(client)
+    return model
+
 
 ADVANCED = {"workflow_id", "run_id", "traceparent", "source", "source_id", "facets"}
 

@@ -43,7 +43,7 @@ BIGINT_MAX = 2**63 - 1
 
 #: How a row's ``meta_error`` starts when its ``model.json`` is JSON that Postgres's
 #: jsonb refuses (NaN, Infinity, a lone surrogate, a NUL in a key): the catalogue's
-#: readers then read that file, as before the copy (#7317 Task 7 review M2).
+#: readers then read that file (#7317 Task 7 review M2).
 NOT_STORABLE = "not storable"
 
 #: A copy run older than this is deleted when the next run starts (plan decision 8).
@@ -333,8 +333,8 @@ class TemplateRows:
 
     def copied(self) -> bool:
         """Whether a copy run has finished. Once true, it stays true for this object.
-        The catalogue's readers read rows only once it is true (`Catalogue._from_rows`,
-        #7317 phase 2)."""
+        The API's start copies first while it is false (`main._first_template_copy`,
+        #7317 phase 3)."""
         if self._copied:
             return True
         with self._pool.connection() as conn:
