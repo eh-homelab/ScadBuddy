@@ -164,7 +164,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
   })
 
   it("lets a flow talk only to a session its starter owns (plan Step 6.3)", async () => {
-    expect(await check(await session())).toEqual({ session_id: expect.any(String), mode: 'durable' })
+    expect(await check(await session())).toEqual({ session_id: expect.any(String) })
     for (const sid of [await session({ owner: ['bearer', 'token:9'] }), randomUUID()]) {
       const err = await failure(check(sid))
       expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])

@@ -1568,6 +1568,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
   of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
   skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
+  Phase 2: once a copy run has finished (`Catalogue._from_rows`), the catalogue's readers
+  read the rows, not the files (the list, the record, the ids, `list_summaries`,
+  `raw_metas`, the pin index, the print settings, the name check, `duplicates_of`);
+  `library_users` and `library_pins` still read the files. The thumbnail's `ETag` names
+  its source (`Catalogue.thumbnail_ref`: the cover's sha256, `"output-<id>"`,
+  `"preview-<id>"`), so a 304 reads no file (except for a row that lags its media,
+  `TemplateRow.media_newer`, which is read from the files); a 200 tags what it read.
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
@@ -1676,6 +1683,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
+- `backend/scadbuddy/inventory/` — the item core (#7067, spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.4-6.6; page
+  `docs/features/inventory.md`): `models.py` (the Pydantic models), `kinds.py` (`KindStore`, the
+  `item_kinds` tree and its inherited `attribute_schema`), `items.py` (`ItemStore`; a `filament`
+  kind's items are refused until phase 3), `offers.py` (`OfferStore`: `supplier_offers` and
+  `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
+  `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
+  the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,
+  then `_open_lock` (the advisory lock every lot insert takes first), then the lots `FOR UPDATE` in
+  FIFO order), `part_alias.py` (`PartAliases`: the `/parts` routes over the inventory, for one
+  release), `problems.py` (the 4xx problems, `refused`) and `component.py` (`InventoryComponent`).
+  Only filament reaches Bambuddy: nothing here calls it, and `bb_sync_plan._suppliers()` keeps a
+  supplier made for offers out of it (D16, R-P2-8 to R-P2-10). Tests: `backend/tests/inventory/`.
 - `backend/scadbuddy/entities/` — files, links and key-value properties on any row
   (#6950, #7026, inventory spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan

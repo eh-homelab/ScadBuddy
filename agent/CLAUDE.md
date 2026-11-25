@@ -258,7 +258,7 @@ skips without one), and its render is checked `verify.sh`-style on the saved out
 #1924).
 `.github/scripts/lint-one-runtime.sh` (the `lint` job) fails on a second turn path: a session
 mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`, `.py`), a name of the session mode that is gone (its
-`retired` list, #7323), the SDK's `query` imported outside `harness/run.ts` and
+`retired` list, #7323; a `*.test.ts(x)` file may name one), the SDK's `query` imported outside `harness/run.ts` and
 `harness/testConnection.ts`, or `agent-durable/` importing or depending on the Claude Agent
 SDK or naming `DurableSession` (plan Step 8.1).
 
@@ -423,8 +423,7 @@ opens every one and seals it again byte for byte).
     host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
-    session's owner with its turn's tiers; `mode` is not read, since every session is an
-    AgentSession from plan Step 6.3), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
+    session's owner with its turn's tiers), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser tools)), a turn's other tools (#2320, plan Step 9.3,
     `turnTools.ts`, built by `turnServers.ts`: remote plugins
@@ -586,6 +585,13 @@ opens every one and seals it again byte for byte).
     an ended one is answered with no plugin, binding or contact; one with no outcome is sent
     again only when the binding maps `idempotency_key`, with the row's own recipients and text,
     and needs the binding (none is `no_messaging_plugin`) but no contact.
+  - The inventory (#7067, `docs/features/inventory.md`): `tools/inventory.ts`, 18 `inventory_*` tools
+    (kinds, items, offers and price points, lots, units, moves), `read` for the lists and gets and
+    `write` for the rest, `inventory_lot_recost` included (Ruling 8); each answer carries `ui_path`
+    from `tools/inventoryLinks.ts`, whose vectors `test-fixtures/inventory/ui-paths.json` the frontend's
+    `lib/inventoryLinks.ts` shares. `part_list` and `part_stock_add` (`tools/orders.ts`) are aliases of
+    `inventory_item_list` and `inventory_lot_receive`, and go after one release. Tests:
+    `test/inventory.test.ts`, `test/inventoryLinks.test.ts`.
   - The storefront (#6131, design 2026-11-13 §6): `tools/storefront.ts`
     `storefront_listing_draft` (`write`: a listing from an output or a model, unpublished,
     with the Storefront page's smart defaults in `tools/storefrontDraft.ts`, a copy of the

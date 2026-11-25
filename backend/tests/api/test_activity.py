@@ -206,7 +206,7 @@ def test_an_output_subject_that_is_no_id_or_unreadable_stays_unlabelled() -> Non
             raise ValueError("meta.json does not validate")
         raise FileNotFoundError(output_id)  # deleted between the lookup and the read
 
-    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    catalogue = SimpleNamespace(slugs=lambda: [], list_summaries=lambda slugs: [])
     subjects = [
         Count(value, 1) for value in ("output:*/../x", "output:" + "d" * 32, "output:" + "e" * 32)
     ]
@@ -226,7 +226,7 @@ def test_subjects_with_no_slug_never_read_the_catalogue() -> None:
     def gone(output_id: str) -> tuple[str | None, str]:
         raise OutputNotFoundError(output_id)
 
-    catalogue = SimpleNamespace(slugs=unused, list_models=unused)
+    catalogue = SimpleNamespace(slugs=unused, list_summaries=unused)
     subjects = [Count(v, 1) for v in ("library:12", "project:5", "output:" + "a" * 32)]
     outputs = SimpleNamespace(name_and_slug=gone)
     labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
@@ -236,7 +236,9 @@ def test_subjects_with_no_slug_never_read_the_catalogue() -> None:
 def test_a_built_in_model_alone_is_still_named() -> None:
     """A built-in's id holds a ':' (`builtin:<slug>`), yet it is a model to name."""
     record = SimpleNamespace(slug="builtin:box", name="Box")
-    catalogue = SimpleNamespace(slugs=lambda: ["builtin:box"], list_models=lambda slugs: [record])
+    catalogue = SimpleNamespace(
+        slugs=lambda: ["builtin:box"], list_summaries=lambda slugs: [record]
+    )
     outputs = SimpleNamespace(name_and_slug=lambda output_id: (None, "builtin:box"))
     subjects = [Count("builtin:box", 2), Count("output:" + "a" * 32, 1)]
     labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
@@ -250,7 +252,7 @@ def test_a_failing_catalogue_leaves_the_facets_their_output_names() -> None:
     def broken() -> list[str]:
         raise OSError("catalogue unreadable")
 
-    catalogue = SimpleNamespace(slugs=broken, list_models=lambda slugs: [])
+    catalogue = SimpleNamespace(slugs=broken, list_summaries=lambda slugs: [])
     outputs = SimpleNamespace(name_and_slug=lambda output_id: ("Mine", "demo"))
     subjects = [Count("demo", 2), Count("output:" + "a" * 32, 1)]
     labels = _subject_labels(subjects, catalogue, outputs, SubjectLabels())  # type: ignore[arg-type]
@@ -271,7 +273,7 @@ def test_a_subject_is_named_once_a_while_not_on_every_facets_read() -> None:
         reads.append(output_id)
         return None, "demo"
 
-    catalogue = SimpleNamespace(slugs=slugs, list_models=lambda slugs: [record])
+    catalogue = SimpleNamespace(slugs=slugs, list_summaries=lambda slugs: [record])
     outputs = SimpleNamespace(name_and_slug=name_and_slug)
     now = [0.0]
     kept = SubjectLabels(ttl=30, clock=lambda: now[0])
@@ -298,7 +300,7 @@ def test_a_name_a_failed_read_left_unknown_is_asked_again() -> None:
             raise OSError("catalogue unreadable")
         return ["demo"]
 
-    catalogue = SimpleNamespace(slugs=slugs, list_models=lambda slugs: [record])
+    catalogue = SimpleNamespace(slugs=slugs, list_summaries=lambda slugs: [record])
     outputs = SimpleNamespace(name_and_slug=lambda output_id: (None, "demo"))
     kept = SubjectLabels()
     subjects = [Count("demo", 2), Count("output:" + "a" * 32, 1)]
@@ -324,7 +326,7 @@ def test_an_output_whose_meta_could_not_be_read_is_asked_again() -> None:
             raise OSError("meta.json unreadable")
         return "Mine", "demo"
 
-    catalogue = SimpleNamespace(slugs=lambda: [], list_models=lambda slugs: [])
+    catalogue = SimpleNamespace(slugs=lambda: [], list_summaries=lambda slugs: [])
     outputs = SimpleNamespace(name_and_slug=name_and_slug)
     kept = SubjectLabels()
     subjects = [Count("output:" + "a" * 32, 2), Count("output:" + "b" * 32, 1)]

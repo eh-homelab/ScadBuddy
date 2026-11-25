@@ -1378,7 +1378,7 @@ def _untrusted(text: str) -> dict[str, Any]:
 
 
 async def _check_session(session_id: str) -> None:
-    """That this run may talk to `session_id`: a durable session its starter owns."""
+    """That this run may talk to `session_id`: a session its starter owns."""
     owner: StepOwner = workflow.instance()
     try:
         await workflow.execute_activity(
@@ -1489,7 +1489,7 @@ async def _start_session(
     async with step("agent", call_id, outward=False, policy=policy) as at:
         # Never retried: a lost answer would start a second session (Ruling 4's key is
         # not one a session start takes).
-        body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"}
+        body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema)}
         if browser is not None:
             body["browser"] = browser
         started = _untrusted(

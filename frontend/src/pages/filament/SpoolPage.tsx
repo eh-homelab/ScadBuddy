@@ -48,7 +48,7 @@ import { outsideDryText } from '../../components/filament/outsideDry'
 import { RgbaSwatch } from '../../components/filament/RgbaSwatch'
 import { plateTimes } from '../../components/filament/eventText'
 import { GramsChart } from '../../components/filament/GramsChart'
-import { Section, SectionIndex } from '../../components/filament/SpoolSections'
+import { Section, SectionIndex, SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
 import { SpoolTimeline } from '../../components/filament/SpoolTimeline'
 import { TagPanel } from '../../components/filament/TagPanel'
@@ -65,6 +65,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { listBack } from '../../components/filament/spoolsQuery'
 import { EntityLink } from '../../components/filament/EntityLink'
 import { DECIMAL } from '../../components/filament/spoolWeight'
+import { useAdvanced } from '../../lib/advanced'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
@@ -409,7 +410,9 @@ const grams = (value: number) => `${Number(value.toFixed(1))} g`
  * "How many spools"), is one bulk POST with its place, presets and K values, under one
  * `Idempotency-Key` per opened form, so a retry makes no more; `?copy=<id>` fills the form
  * from that spool's copy draft. Weighings and dryings are ledger events and land at once.
- * Unsaved edits hold every way out (`useLeaveGuard`).
+ * Unsaved edits hold every way out (`useLeaveGuard`). The index's Advanced toggle, off by
+ * default and remembered per viewer, shows the rarely used controls (`shown`); a hidden
+ * field with an unsaved edit stays on screen.
  */
 export function SpoolPage() {
   const { id = 'new' } = useParams()
@@ -451,6 +454,7 @@ export function SpoolPage() {
   /** The type the form holds: its own presets and K values say which keys "Reset to type" can reset. */
   const [typeDetail, setTypeDetail] = useState<SpoolTypeDetail | null>(null)
   const [typeError, setTypeError] = useState<string | null>(null)
+  const [advanced, toggleAdvanced] = useAdvanced(SPOOL_ADVANCED_KEY)
 
   useEffect(() => {
     let live = true
@@ -687,6 +691,10 @@ export function SpoolPage() {
   const typeAsPresets = typePresets.map(({ type_id: _t, ...row }) => ({ ...row, overridden: false, migrated: false }))
   const typeAsKValues = typeKValues.map(({ type_id: _t, source: _s, ...row }) => ({ ...row, overridden: false }))
   const savedPresets = saved?.presets ?? []
+  /** Whether an Advanced-only field is on screen: with Advanced on, or while it holds an unsaved edit. */
+  const shown = (key: keyof Draft) => advanced || JSON.stringify(draft[key]) !== JSON.stringify(base[key])
+  /** The presets and K values: Advanced, an unsaved row, or a first type that drops rows a person should see. */
+  const showTables = shown('presets') || shown('k_values') || firstTypeChosen
 
   const field = (key: 'colour_name' | 'diameter_mm' | 'density_g_cm3' | 'cost_per_kg' | 'label_weight_g' | 'low_stock_pct' | 'nozzle_temp_min' | 'nozzle_temp_max' | 'bed_temp_min' | 'bed_temp_max' | 'drying_temp_c' | 'drying_hours' | 'extra_colours', label: string, extra: { hint?: string; mode?: 'decimal' | 'numeric' } = {}) => (
     <OverrideField name={key} label={label} value={draft[key]} effective={eff(key)} overridden={own(key)} hasType={hasType} inputMode={extra.mode} hint={extra.hint} onChange={(next) => set(key, next)} onReset={() => void reset(key)} />
@@ -792,7 +800,7 @@ export function SpoolPage() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-[11rem_minmax(0,1fr)]">
-        <SectionIndex />
+        <SectionIndex advanced={advanced} onToggleAdvanced={toggleAdvanced} />
         <div className="flex min-w-0 flex-col gap-8">
           <Section id="identity" title="Identity">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -906,25 +914,27 @@ export function SpoolPage() {
             <div className="grid gap-3 sm:grid-cols-2">
               {field('label_weight_g', 'Label weight (g)', { mode: 'numeric', hint: 'The filament on a full spool.' })}
               {pick('insert_type_id', 'Spool', lists.insertTypes)}
-              {field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
-              {field('density_g_cm3', 'Density (g/cm³)', { mode: 'decimal' })}
-              {field('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
-              <div className="flex min-w-0 flex-col gap-1">
-                <Label htmlFor="spool-added-full" className="text-[13px]">
-                  Added full
-                </Label>
-                <Select value={draft.added_full === '' ? NONE : draft.added_full} onValueChange={(next) => set('added_full', next === NONE ? '' : (next as 'yes' | 'no'))}>
-                  <SelectTrigger id="spool-added-full" aria-label="Added full" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NONE}>Not known</SelectItem>
-                    <SelectItem value="yes">Yes</SelectItem>
-                    <SelectItem value="no">No</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-[12px] text-muted-foreground">Whether the spool was full when it was added.</p>
-              </div>
+              {shown('diameter_mm') && field('diameter_mm', 'Diameter (mm)', { mode: 'decimal' })}
+              {shown('density_g_cm3') && field('density_g_cm3', 'Density (g/cm³)', { mode: 'decimal' })}
+              {shown('low_stock_pct') && field('low_stock_pct', 'Low stock at (%)', { mode: 'numeric', hint: 'Of the label weight.' })}
+              {shown('added_full') && (
+                <div className="flex min-w-0 flex-col gap-1">
+                  <Label htmlFor="spool-added-full" className="text-[13px]">
+                    Added full
+                  </Label>
+                  <Select value={draft.added_full === '' ? NONE : draft.added_full} onValueChange={(next) => set('added_full', next === NONE ? '' : (next as 'yes' | 'no'))}>
+                    <SelectTrigger id="spool-added-full" aria-label="Added full" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE}>Not known</SelectItem>
+                      <SelectItem value="yes">Yes</SelectItem>
+                      <SelectItem value="no">No</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[12px] text-muted-foreground">Whether the spool was full when it was added.</p>
+                </div>
+              )}
             </div>
             <p className="text-[13px] text-muted-foreground">
               {empty
@@ -949,35 +959,39 @@ export function SpoolPage() {
                   </p>
                   {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} />}
                 </div>
-                <form
-                  className="flex flex-col gap-2"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    if (readingOk && !checkPending) void act(weigh, 'Weighed')
-                  }}
-                >
-                  <Label htmlFor="spool-reading" className="text-[13px]">
-                    {empty ? 'Scale reading, with the spool (g)' : 'Filament left (g)'}
-                  </Label>
-                  <Input id="spool-reading" inputMode="decimal" className="tabular-nums" value={reading} onChange={(e) => setReading(e.target.value)} />
-                  {empty && readingOk && <p className="text-[12px] text-muted-foreground tabular-nums">{grams(filament)} of filament.</p>}
-                  {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
-                  {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
-                  <div>
-                    <Button type="submit" size="sm" variant="outline" disabled={busy || !readingOk || checkPending}>
-                      Record weighing
-                    </Button>
-                  </div>
-                </form>
+                {(advanced || reading.trim() !== '') && (
+                  <form
+                    className="flex flex-col gap-2"
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      if (readingOk && !checkPending) void act(weigh, 'Weighed')
+                    }}
+                  >
+                    <Label htmlFor="spool-reading" className="text-[13px]">
+                      {empty ? 'Scale reading, with the spool (g)' : 'Filament left (g)'}
+                    </Label>
+                    <Input id="spool-reading" inputMode="decimal" className="tabular-nums" value={reading} onChange={(e) => setReading(e.target.value)} />
+                    {empty && readingOk && <p className="text-[12px] text-muted-foreground tabular-nums">{grams(filament)} of filament.</p>}
+                    {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
+                    {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
+                    <div>
+                      <Button type="submit" size="sm" variant="outline" disabled={busy || !readingOk || checkPending}>
+                        Record weighing
+                      </Button>
+                    </div>
+                  </form>
+                )}
               </div>
             )}
-            <Label className="flex items-start gap-2 text-[13px] font-normal">
-              <Checkbox className="mt-0.5" checked={draft.weight_locked} onCheckedChange={(next) => set('weight_locked', next === true)} />
-              <span>
-                Lock the weight
-                <span className="block text-[12px] text-muted-foreground">A Bambuddy sync never changes the grams left of a locked spool.</span>
-              </span>
-            </Label>
+            {shown('weight_locked') && (
+              <Label className="flex items-start gap-2 text-[13px] font-normal">
+                <Checkbox className="mt-0.5" checked={draft.weight_locked} onCheckedChange={(next) => set('weight_locked', next === true)} />
+                <span>
+                  Lock the weight
+                  <span className="block text-[12px] text-muted-foreground">A Bambuddy sync never changes the grams left of a locked spool.</span>
+                </span>
+              </Label>
+            )}
           </Section>
 
           <Section id="colour-and-cost" title="Colour and cost">
@@ -1000,25 +1014,29 @@ export function SpoolPage() {
               {field('bed_temp_min', 'Bed temperature, min (°C)', { mode: 'numeric' })}
               {field('bed_temp_max', 'Bed temperature, max (°C)', { mode: 'numeric' })}
             </div>
-            <div className="flex flex-col gap-2">
-              {typeError && (
-                <p role="alert" className="text-[13px] text-warn">
-                  The type&apos;s presets and K values could not be loaded: {typeError}
-                </p>
-              )}
-              <h3 className="text-[13px] font-medium">Slicer presets</h3>
-              <p className="text-[12px] text-muted-foreground">The Bambu Studio filament preset to slice with, for each printer model and nozzle. A row you do not set takes the type&apos;s.</p>
-              {firstTypeChosen ? (
-                <FirstTypePresets own={savedPresets} typeRows={typeAsPresets} />
-              ) : (
-                <PresetTable rows={draft.presets} onChange={(rows) => set('presets', rows)} models={models} inherited={hasType ? (sameType ? saved.presets : typeAsPresets) : undefined} typeKeys={typeDetail ? presetTypeKeys : undefined} />
-              )}
-            </div>
-            <div className="flex flex-col gap-2">
-              <h3 className="text-[13px] font-medium">K values</h3>
-              <p className="text-[12px] text-muted-foreground">Pressure advance, by printer, extruder and nozzle.</p>
-              <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} inherited={hasType ? (sameType ? saved.k_values : typeAsKValues) : undefined} typeKeys={typeDetail ? kValueTypeKeys : undefined} />
-            </div>
+            {showTables && (
+              <>
+                <div className="flex flex-col gap-2">
+                  {typeError && (
+                    <p role="alert" className="text-[13px] text-warn">
+                      The type&apos;s presets and K values could not be loaded: {typeError}
+                    </p>
+                  )}
+                  <h3 className="text-[13px] font-medium">Slicer presets</h3>
+                  <p className="text-[12px] text-muted-foreground">The Bambu Studio filament preset to slice with, for each printer model and nozzle. A row you do not set takes the type&apos;s.</p>
+                  {firstTypeChosen ? (
+                    <FirstTypePresets own={savedPresets} typeRows={typeAsPresets} />
+                  ) : (
+                    <PresetTable rows={draft.presets} onChange={(rows) => set('presets', rows)} models={models} inherited={hasType ? (sameType ? saved.presets : typeAsPresets) : undefined} typeKeys={typeDetail ? presetTypeKeys : undefined} />
+                  )}
+                </div>
+                <div className="flex flex-col gap-2">
+                  <h3 className="text-[13px] font-medium">K values</h3>
+                  <p className="text-[12px] text-muted-foreground">Pressure advance, by printer, extruder and nozzle.</p>
+                  <KValueTable rows={draft.k_values} onChange={(rows) => set('k_values', rows)} printers={lists.printers} inherited={hasType ? (sameType ? saved.k_values : typeAsKValues) : undefined} typeKeys={typeDetail ? kValueTypeKeys : undefined} />
+                </div>
+              </>
+            )}
           </Section>
 
           <Section id="storage" title="Storage">
@@ -1060,10 +1078,12 @@ export function SpoolPage() {
                   <p className={saved.needs_drying ? 'text-[13px] font-medium text-warn' : 'text-[13px] text-muted-foreground'}>{outsideDryText(saved.hours_outside_dry)}</p>
                 )}
               </div>
-              <div className="grid grid-cols-2 gap-3 sm:max-w-md">
-                {field('drying_temp_c', 'Default drying temperature (°C)', { mode: 'numeric' })}
-                {field('drying_hours', 'Default drying hours', { mode: 'decimal' })}
-              </div>
+              {(shown('drying_temp_c') || shown('drying_hours')) && (
+                <div className="grid grid-cols-2 gap-3 sm:max-w-md">
+                  {field('drying_temp_c', 'Default drying temperature (°C)', { mode: 'numeric' })}
+                  {field('drying_hours', 'Default drying hours', { mode: 'decimal' })}
+                </div>
+              )}
               {!creating && (
                 <form
                   className="flex flex-col gap-1"
@@ -1136,7 +1156,7 @@ export function SpoolPage() {
                       <GramsChart points={history.series} plates={plateTimes(history.events.map((row) => row.event))} label="Grams left" />
                     </div>
                     {saved && <SpoolMetricsPanel history={history} gramsLeft={leftNow} createdAt={saved.created_at} />}
-                    {saved && (
+                    {advanced && saved && (
                       <div>
                         <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setConfirmReset(true)}>
                           Reset the used counter
