@@ -22,6 +22,7 @@ from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
 from scadbuddy.store.s3 import (
+    KEEPALIVE_S,
     STAGED_PUT_HEADERS,
     S3ContentBackend,
     object_key,
@@ -72,6 +73,21 @@ async def test_the_client_retries_in_standard_mode_by_default(s3: S3Settings) ->
         # Config's options are set at run time, untyped: read them from its __dict__.
         assert vars(client.meta.config)["retries"] == {"mode": "standard"}
         assert vars(client.meta.config)["s3"] == {"addressing_style": "path"}
+    finally:
+        await backend.aclose()
+
+
+async def test_an_idle_connection_is_kept_past_aiobotocores_twelve_seconds(
+    s3: S3Settings,
+) -> None:
+    """A request after more than 12 s idle opened a new TLS connection on prod (#7287)."""
+    backend = S3ContentBackend(s3)
+    try:
+        client: Any = await backend.client()
+        assert not await backend.exists(MISSING)
+        # The aiohttp session aiobotocore made for the request: private, so read it here.
+        sessions: dict[str | None, Any] = client._endpoint.http_session._sessions
+        assert sessions[None].connector._keepalive_timeout == KEEPALIVE_S
     finally:
         await backend.aclose()
 

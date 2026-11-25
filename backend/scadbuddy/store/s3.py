@@ -59,6 +59,13 @@ def _load_s3_data(session: AioSession) -> None:
 
 
 _CHUNK = 1 << 20
+#: How long an idle connection is kept for the next request. aiobotocore's default, 12 s,
+#: dropped connections DO Spaces still served: on prod (Tempo, 48 h to 2026-11-24) a HEAD
+#: after more than 15 s idle took 167-212 ms at the median and up to 3.9 s, against 49 ms
+#: on a kept connection; atl1.digitaloceanspaces.com kept an idle connection 60 s and
+#: closed it by 90 s, and a new one's TCP and TLS took 80 ms, or 0.6-1.9 s in 3 of 8
+#: tries (measured from the homelab LAN on 2026-11-24, #7287). Well under the 60 s.
+KEEPALIVE_S: Final = 40
 _MISSING = frozenset({"404", "NoSuchKey", "NotFound"})
 _OBJECT = re.compile(
     "(" + "|".join(re.escape(kind) for kind in get_args(BlobKind)) + ")/[0-9a-f]{64}"
@@ -167,6 +174,7 @@ class S3ContentBackend:
             s3={"addressing_style": "path" if settings.path_style else "auto"},
             connect_timeout=5,
             retries={"mode": "standard"},
+            connector_args={"keepalive_timeout": KEEPALIVE_S},
         )
         if config is not None:
             self.config = self.config.merge(config)
@@ -240,10 +248,20 @@ class S3ContentBackend:
         self._client = None
         self._signer = None
 
-    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
-        sha256, size = await traced_thread(
-            "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
-        )
+    async def upload(
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        digest: tuple[str, int] | None = None,
+    ) -> str:
+        if digest is None:
+            digest = await traced_thread(
+                "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
+            )
+        sha256, size = digest
         key = object_key(self.settings.prefix, kind, sha256)
         if await self.exists(key):
             # Not atomic with the row the caller inserts next: a remove of the last row
