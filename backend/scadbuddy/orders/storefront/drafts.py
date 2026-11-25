@@ -476,7 +476,12 @@ async def add_listing_item(
         variant = (
             None
             if filaments is None
-            else Variant(listing.id, file.snapshot.sha256, tuple(f.id for f in filaments))
+            else Variant(
+                listing.id,
+                file.snapshot.sha256,
+                tuple(f.id for f in filaments),
+                every_output=True,
+            )
         )
         price = None if variant is None else await price_of(state, library_file(file), variant)
         entry = NewLibraryItem(
