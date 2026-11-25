@@ -573,12 +573,18 @@ def _set_print_settings(crud: CrudCaller, slug: str, settings: dict[str, Any]) -
 
 
 def test_a_templates_print_settings_move_its_price(
-    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+    crud: CrudCaller,
+    listing: dict[str, Any],
+    sliced: type[FakeSlicer],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#7633: the shop turns supports on in the template after a price was made. The old
     price is not the price any more: the key moves, and the slice takes the settings the
     key holds. With the settings gone again, the key is the one of before, which a
     template with no settings has always had."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
+
+    monkeypatch.setattr(slice_price, "TEMPLATE_TTL", 0.0)
     job = render_until_done(crud, TOKEN_A, listing, {"width": 41})
     first = priced(crud, job["id"])
     assert first["source"] == "slice"

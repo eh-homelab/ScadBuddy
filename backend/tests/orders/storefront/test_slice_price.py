@@ -470,6 +470,48 @@ def test_a_templates_settings_are_in_its_key_only_when_it_has_some() -> None:
     assert len(keys) == 4
 
 
+def test_a_refused_model_json_is_its_own_key() -> None:
+    """#7800 review: a model.json that refused its settings when the key was made is in
+    the key. Its failed row never lands on the key of a template with no settings, and
+    the key moves once the model.json is fixed."""
+    request = SliceQuoteRequest(
+        printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
+    )
+    refused = key_setup(request, TemplateSettings(refusal="print_settings.x: not a value"))
+    assert refused == {**NO_SETUP, "template_refused": True}
+    assert price_key(**{**PINNED, "setup": refused}) != price_key(**PINNED)
+
+
+async def test_the_template_settings_are_read_again_only_after_a_while(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7800 review: a page reads its price every few seconds, so the template's settings
+    are kept `TEMPLATE_TTL` per catalogue and template, as the live rate is kept."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
+
+    reads: list[str] = []
+
+    def read(_catalogue: object, slug: str) -> TemplateSettings:
+        reads.append(slug)
+        return SUPPORTED
+
+    monkeypatch.setattr(slice_price, "read_template_settings", read)
+    clock = [100.0]
+    monkeypatch.setattr("scadbuddy.orders.storefront.slice_price.time.monotonic", lambda: clock[0])
+
+    class Catalogue:
+        """A catalogue as the key of the kept reads (a weak key)."""
+
+    catalogue = Catalogue()
+    assert await slice_price.live_template_settings(catalogue, "demo") == SUPPORTED
+    assert await slice_price.live_template_settings(catalogue, "demo") == SUPPORTED
+    assert await slice_price.live_template_settings(catalogue, "other") == SUPPORTED
+    assert reads == ["demo", "other"]
+    clock[0] += slice_price.TEMPLATE_TTL
+    await slice_price.live_template_settings(catalogue, "demo")
+    assert reads == ["demo", "other", "demo"]
+
+
 def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
     shop: Shop,
 ) -> None:
