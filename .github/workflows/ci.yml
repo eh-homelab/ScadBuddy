@@ -2372,11 +2372,12 @@ jobs:
             -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
             xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
 
-  # The camera relay's and recorder's images (#7328, docs/features/printer-cameras.md):
-  # the Dockerfile's `camera-relay` and `camera-recorder` targets, checked as the cluster
-  # runs them. The build itself checks the pinned MediaMTX's version and that neither
-  # process imports Postgres code. Then: uid 10001, MediaMTX and curl (its hooks run curl)
-  # in both, TZ=UTC in the recorder, each controller's refusals (exit 2), and each MediaMTX
+  # The camera relay's, recorder's and edge's images (#7328, #7330,
+  # docs/features/printer-cameras.md): the Dockerfile's `camera-relay`, `camera-recorder` and
+  # `camera-edge` targets, checked as the cluster runs them. The build itself checks the
+  # pinned MediaMTX's version and that no process imports Postgres code. Then: uid 10001,
+  # MediaMTX and curl (its hooks run curl) in all three, TZ=UTC in the recorder, each
+  # controller's refusals (exit 2), and each MediaMTX
   # started on its own config with its control API answering on localhost. The relay's
   # read user comes from MTX_AUTHINTERNALUSERS_0_USER/_PASS, as in the Deployment: a
   # DESCRIBE with that user gets past auth (404, no stream), a wrong password gets 401.

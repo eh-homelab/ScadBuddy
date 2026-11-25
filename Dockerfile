@@ -832,13 +832,13 @@ RUN case "$TARGETARCH" in \
     && rm -f /tmp/mediamtx.tar.gz /tmp/mediamtx.sha256 \
     && test "$(mediamtx --version)" = "$MEDIAMTX_VERSION"
 
-# ── camera-relay, camera-recorder: printer camera recording (#7328) ───────────
-# Two images, one per process (README.md, "Printer cameras (#7328)"). Each pod
+# ── camera-relay, camera-recorder, camera-edge: printer camera recording and live view (#7328, #7330) ──
+# Three images, one per process (README.md, "Printer cameras (#7328)"). Each pod
 # runs two containers of its image: MediaMTX (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`)
 # and the controller (the default command). The controller drives MediaMTX's control API
 # on 127.0.0.1:9997, and MediaMTX's hooks run curl against the controller's hook server on
 # 127.0.0.1:9091, so both share the pod's network. The recorder's two containers also
-# share /segments. Neither process holds a database secret or client (#5295).
+# share /segments. No process holds a database secret or client (#5295).
 #
 # `camera-deps` builds the venv as `profile-fetch-deps` does: no dev group, no editable
 # install, and no psycopg package. It needs git for the git-pinned

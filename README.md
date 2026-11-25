@@ -2776,7 +2776,7 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   RTSP and nothing else.
 - **`scadbuddy-camera-edge` (live view, #7330).** One replica, strategy `Recreate`. It pulls
   from the relay only while someone watches, and serves WebRTC (WHEP) on 8889 and LL-HLS on
-  8888 to the API's proxy. Browsers never reach it: `GET`/`POST`/`PATCH`/`DELETE`
+  8888 to the API's proxy. Browsers never reach its HTTP ports: `GET`/`POST`/`PATCH`/`DELETE`
   `/api/v1/camera/live/{printer_id}/…` on the API's origin forwards each call
   (`api/camera.py`). ServiceAccount `scadbuddy-camera-edge` (CRUD caller `camera`,
   `auth/exchange.py` `SERVICE_ACCOUNTS`). Its controller (`python -m scadbuddy.camera.edge`)
@@ -2804,7 +2804,8 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
     (a comma list). WebRTC media does not pass the API. Without a reachable address the
     player falls back to LL-HLS after 6 s ([MediaMTX WebRTC](https://mediamtx.org/docs/features/webrtc-specific-features)).
   - The API's four variables (all needed for `camera_live`; with one unset, the live
-    routes answer 503 `camera-edge-unset` and the dialog keeps the MJPEG view):
+    routes whose own URL, or the user or password, is unset answer 503 `camera-edge-unset`, and
+    `camera_live` is false, so the dialog keeps the MJPEG view):
     `SCADBUDDY_CAMERA_EDGE_WHEP_URL` (the edge Service on 8889),
     `SCADBUDDY_CAMERA_EDGE_HLS_URL` (on 8888), `SCADBUDDY_CAMERA_EDGE_READ_USER` and
     `SCADBUDDY_CAMERA_EDGE_READ_PASS` (the edge read secret). They are bootstrap fields;
@@ -2813,7 +2814,7 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
     config sets `hlsMuxerCloseAfter: 10s`. The relay's reader of the edge is gone about
     50 s after the last HLS request (48.5 s measured; 69.2 s with the default 60 s). All
     viewers of a printer share one pull from the relay, and the printer sees no extra client.
-- **No database and no key.** Both controllers refuse to start when
+- **No database and no key.** All three controllers refuse to start when
   `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` is set (exit 2, #5295; `camera/settings.py`).
 - **Probes.** Each controller answers `/healthz` on 9090 (`camera/process.py` `healthy`). It
@@ -2866,7 +2867,9 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   queries need the scrape's `namespace` and `pod` labels.
 - **Pod security.** uid 10001, `runAsNonRoot`, `allowPrivilegeEscalation: false`, every
   capability dropped, read-only root file system. Measured 2026-11-24 in Docker
-  (`--read-only --cap-drop ALL`): both MediaMTX configs start and the control API answers 200.
+  (`--read-only --cap-drop ALL`): the relay's and the recorders' MediaMTX configs start and the
+  control API answers 200. Measured 2026-11-25 in Docker with the same flags, for the edge image:
+  uid 10001, the HLS, WebRTC and UDP listeners come up, and the control API answers 200.
 - **Network policies.** The relay: ingress on 8554 from the recorder pods only, and the
   metrics scrape on 9090; egress to
   the printers' LAN (RTSPS, port 322 on the H2C, spec §2), the API's CRUD port 8082, and DNS.

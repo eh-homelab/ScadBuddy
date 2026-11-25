@@ -188,7 +188,7 @@ its image: MediaMTX and the controller. They share the pod's network (the contro
   pods hold the bucket's camera keys.
 - **Reads.** The API URL and a service proof; the recorders and the edge also the relay read
   user, and the recorders the bucket keys. The edge's MediaMTX also reads the edge read user
-  (`MTX_AUTHINTERNALUSERS_0_*`). Both refuse a database secret and the KEK (`scadbuddy/camera/settings.py`).
+  (`MTX_AUTHINTERNALUSERS_0_*`). All three refuse a database secret and the KEK (`scadbuddy/camera/settings.py`).
   None reaches Temporal.
 - **Images.** `scadbuddy-camera-relay`, `scadbuddy-camera-recorder` and `scadbuddy-camera-edge`,
   Dockerfile stages `camera-relay`, `camera-recorder` and `camera-edge`, all off `camera`, with MediaMTX from the `mediamtx`

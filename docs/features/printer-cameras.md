@@ -152,7 +152,7 @@ Otherwise the dialog keeps the MJPEG view.
   - `GET /api/v1/printers/{id}/camera` (the feed states and `live`) and
     `POST …/camera/reconnect` (202; the relay replaces that printer's path, `camera.reconnect`
     event, `Relay.restart`).
-- **Problem types.** `camera-edge-unset` (503: a setting is missing), `camera-edge-unreachable`
+- **Problem types.** `camera-edge-unset` (503: the route's own URL, or the user or password, is unset; `camera_live` is then false), `camera-edge-unreachable`
   (502), `camera-edge-refused` (502: the edge refused the read user, or sent a redirect that
   the proxy does not pass), `camera-live-session-ended` (404: MediaMTX dropped the HLS session;
   the player starts again), `camera-not-recorded` (409 on reconnect; 404 on the live routes).
@@ -271,11 +271,11 @@ The hooks need `curl`, so the camera images take the release binary on
   proxy and a real MediaMTX are tested together with an HTTP client (TestClient, which follows
   the 302), not with a browser.
 - The Go front (`tools/go/core`, not deployed) forwards camera routes to Python. A blocking HLS
-  request takes about 20 s there (the proxy's read timeout), so a client timeout there must be
-  longer than that.
+  request takes about 20 s there: the Python proxy waits up to 20 s for a blocking playlist, so
+  the front's forward must allow that.
 - A WHEP session that the browser's 6 s timer ends while the edge still creates it is ended by
   the player when the answer comes. If the page closes first, MediaMTX's own timeout ends it.
 - A later ICE `disconnected` is covered by a 6 s timer; a `disconnected` that clears keeps
   WebRTC.
 - The proxy has no cap on live viewers per printer (the MJPEG route has 4). Each HLS request
-  runs one query of the recorded printers (about 5 to 10 a second for each viewer).
+  runs one query of the recorded printers, and LL-HLS asks for a part many times a second.
