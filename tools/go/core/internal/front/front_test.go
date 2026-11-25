@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseNetworksAsProxiesPy(t *testing.T) {
-	for _, bad := range []string{"10.0.0.0/", "x", "10.0.0.0/33", "::ffff:10.0.0.0/95", "10.0.0.1/+8"} {
+	for _, bad := range []string{"10.0.0.0/", "x", "fe80::1%eth0", "10.0.0.0/33", "::ffff:10.0.0.0/95", "10.0.0.1/+8"} {
 		if _, err := ParseNetworks(bad); err == nil {
 			t.Errorf("%q was taken", bad)
 		}

@@ -49,7 +49,9 @@ open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's va
 `pending-input-vectors.json`; no route uses it yet.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
-proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`,
+proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
+(and `SCADBUDDY_CORE_UPSTREAM` names the literal `127.0.0.1`, not `localhost`, which may connect over
+`::1`, which Python would not trust),
 listens on loopback only, and its own CRUD port moves out of the way (`SCADBUDDY_CRUD_PORT=0`).
 That CRUD listener still binds `0.0.0.0`, on a random port; the NetworkPolicy, which admits only
 8080 and 8082, is what keeps other pods off it.
