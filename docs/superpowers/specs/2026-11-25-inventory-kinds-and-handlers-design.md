@@ -52,6 +52,7 @@ Goals:
 
 Non-goals:
 
+- Selling a service on the storefront (owner, 2026-11-25). Orders sell services (§4.6).
 - Handlers that people write at run time. Handlers are Go code in the service. A kind,
   an item or a unit picks them and sets their parameters, as data.
 - New filament behaviour. The filament handlers are today's code, moved.
@@ -135,8 +136,8 @@ is refused with the step and the reason. So a broken combination never reaches s
 
 Each handler declares its parameter schema: the key, the type, whether it is required,
 allowed values. Values are set at the kind, the item or the unit (§4.2). Examples:
-`life.hours` takes `hours` and `source`; `bill.hourly` takes `rate_minor`,
-`increment_minutes`, `minimum_minutes`; `count.remaining` takes `capacity`.
+`life.hours` takes `hours` and `source`; `bill.hourly` takes `cost_rate_minor`,
+`sell_rate_minor`, `increment_minutes`, `minimum_minutes`; `count.remaining` takes `capacity`.
 
 ### 4.4 Special types
 
@@ -185,8 +186,27 @@ such a move and checks each life (`docs/inventory-model/README.md` §5.7). This 
 A service has no stock. A term service (warranty, plan) has instances: a unit with
 `starts_at` and `ends_at`, made by `receive.service_term`, ended by `retire.term_end`, its
 prepaid value falling by `life.term`. An hourly or flat service has no instances: it is
-only used (`consume.service`) against an order item or a unit, and its bill handler gives
-the charge, which job cost takes.
+only used (`consume.service`) against an order item or a unit.
+
+Owner rulings, 2026-11-25 (given to scadbuddy-53, relayed on PR #7784):
+
+1. **A bill has a cost side and a sell side.** The cost is what the service costs the
+   shop, and job cost takes it (`cost.bill`). The sell side is what the customer is
+   quoted. `bill.hourly` takes `cost_rate_minor` and `sell_rate_minor`, `bill.flat` takes
+   `cost_minor` and `sell_minor`; either side may be left out, and the rounding parameters
+   apply to both. `bill.term`'s cost is the price paid for the term (its invoice line),
+   and its optional `sell_minor` is the price when the shop sells the term on.
+2. **An order sells a service through a `custom` order item that names it.** Order items
+   are `model`, `custom`, `request` or `library_file` (`orders/models.py` `ItemKind`
+   l.81). A `custom` item gets one nullable reference to a service item (`item:<id>`); no
+   new item kind. Its quoted price defaults from the bill's sell side. Fulfilling it
+   writes `consume.service` against the order item, and job cost takes the cost side. A
+   custom item with `requires_printing: false` and no reference keeps working as today.
+3. **The quote's `labour` line and time entries stay as they are** (`rate_minor_per_hour`,
+   `orders/models.py` l.839). A `labour` service item is for work sold as a line of its
+   own (an outside repair, a fixed service). How the shop's own labour line relates to
+   labour items is left to a later phase.
+4. **Selling a service on the storefront is out of scope** (§2).
 
 ## 5. Relationships
 
@@ -288,6 +308,8 @@ layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
 - New `inventory_signals`: one row per signal raised, so the schedule never raises one
   twice.
 - New `idempotency_keys` for §6.1.
+- `order_items`: one nullable `service_item_id` (a `custom` item that sells a service,
+  §4.6 ruling 2). Orders stay Python's; fulfilling such an item calls Go's consume route.
 
 Migrations stay files in `backend/scadbuddy/migrations/`, applied by the API at start,
 until #7667 phase 7 moves them. The API and `scadbuddy-core` are the only SQL holders

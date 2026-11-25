@@ -79,12 +79,12 @@ items:
     name: Printer repair labour
     kind: labour
     steps:
-      bill: {params: {rate_minor: 6000, increment_minutes: 15, minimum_minutes: 30}}
+      bill: {params: {cost_rate_minor: 4000, sell_rate_minor: 6000, increment_minutes: 15, minimum_minutes: 30}}
   - id: nozzle_swap
     name: Nozzle swap, flat rate
     kind: flat_service
     steps:
-      bill: {params: {price_minor: 1500}}
+      bill: {params: {cost_minor: 800, sell_minor: 1500}}
 
 # What you have. A unit may override its item's parameters (`steps`).
 instances:

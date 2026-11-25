@@ -312,20 +312,33 @@ sequenceDiagram
 
 ### 5.6 Services on an order
 
+A bill has two sides: the cost to the shop, which job cost takes, and the sell price,
+which the quote defaults to. An order sells a service through a `custom` order item that
+names the service item (`item:<id>`). Fulfilling it books the use (owner, 2026-11-25).
+
 ```mermaid
 sequenceDiagram
     actor P as Person
+    participant O as Order (custom item names a service item)
     participant B as Base flow
-    participant BH as bill.hourly
-    participant BF as bill.flat
-    participant JC as Job cost (order item)
-    P->>B: use repair labour, 50 min, on order item 17
-    B->>BH: bill(50 min)
+    participant BH as bill.hourly (repair labour)
+    participant BF as bill.flat (nozzle swap)
+    participant Q as Quote
+    participant JC as Job cost
+    P->>O: add custom item "repair labour", estimate 50 min
+    O->>BH: bill(50 min)
     BH->>BH: round up to 15 min: 60 min, minimum 30
-    BH-->>JC: 1 h × 60.00 = 60.00
-    P->>B: use nozzle swap on order item 17
-    B->>BF: bill(1)
-    BF-->>JC: 15.00
+    BH-->>Q: sell 1 h × 60.00 = 60.00 (default price)
+    P->>O: add custom item "nozzle swap"
+    O->>BF: bill(1)
+    BF-->>Q: sell 15.00 (default price)
+    P->>O: fulfil both items
+    O->>B: consume.service × 2, against the order items
+    B->>BH: cost(60 min)
+    BH-->>JC: cost 1 h × 40.00 = 40.00
+    B->>BF: cost(1)
+    BF-->>JC: cost 8.00
+    Note over Q,JC: margin on the two: 75.00 sold, 48.00 cost
 ```
 
 ### 5.7 A nozzle and a plate move from printer A to printer B

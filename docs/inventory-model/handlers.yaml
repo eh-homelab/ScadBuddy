@@ -66,8 +66,8 @@ handlers:
     steps: [consume]
     applies: {nature: service}
     does: >-
-      Records one use of a service against an order item or a unit. The bill handler gives
-      its charge.
+      Records one use of a service against an order item or a unit. Fulfilling an order item
+      that names a service item writes it. The bill handler gives its cost and sell sides.
 
   # --- count ------------------------------------------------------------------------------
   - id: count.lot
@@ -114,7 +114,7 @@ handlers:
   - id: cost.bill
     steps: [cost]
     applies: {nature: service}
-    does: A use of a service costs what its bill handler charges.
+    does: A use of a service costs the cost side of its bill handler (never the sell side).
 
   # --- life -------------------------------------------------------------------------------
   - id: life.none
@@ -158,24 +158,35 @@ handlers:
       warn_days: {type: integer, required: false}
 
   # --- bill -------------------------------------------------------------------------------
+  # A bill has two sides (owner, 2026-11-25): the cost to the shop, which job cost takes,
+  # and the sell price, which a quote defaults to. Either side may be left out.
   - id: bill.hourly
     steps: [bill]
     applies: {nature: service, billing: hourly}
-    does: Charge = hours, rounded up to `increment_minutes` and at least `minimum_minutes`, × rate.
+    does: >-
+      Hours, rounded up to `increment_minutes` and at least `minimum_minutes`, times
+      `cost_rate_minor` (the cost) and times `sell_rate_minor` (the sell price). The
+      rounding is the same for both sides.
     params:
-      rate_minor: {type: integer, required: true}
+      cost_rate_minor: {type: integer, required: false}
+      sell_rate_minor: {type: integer, required: false}
       increment_minutes: {type: integer, required: false}
       minimum_minutes: {type: integer, required: false}
   - id: bill.flat
     steps: [bill]
     applies: {nature: service, billing: flat}
-    does: Charge = one flat price per use.
+    does: One use costs `cost_minor` and sells for `sell_minor`.
     params:
-      price_minor: {type: integer, required: true}
+      cost_minor: {type: integer, required: false}
+      sell_minor: {type: integer, required: false}
   - id: bill.term
     steps: [bill]
     applies: {nature: service, billing: term}
-    does: Charge = the price paid for the term. A use within the term costs nothing more.
+    does: >-
+      The cost is the price paid for the term (its invoice line); a use within the term
+      costs nothing more. `sell_minor` is the price when the shop sells the term on.
+    params:
+      sell_minor: {type: integer, required: false}
 
   # --- label ------------------------------------------------------------------------------
   - id: label.default
