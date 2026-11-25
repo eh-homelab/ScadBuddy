@@ -239,6 +239,7 @@ from scadbuddy.workflows.commands import (
 #: (`read_tag` sets `SKIP_NUDGE` otherwise); a checked write binds, so it nudges.
 NOT_NUDGED = frozenset(
     {
+        "closing_preview",
         "sync_ams_weights",
         "run_filament_sync",
         "reset_filament_sync_links",
@@ -1561,6 +1562,39 @@ async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
     if not deleted:
         raise _no_spool(spool_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get(
+    "/spools/{spool_id}/closing",
+    response_model=m.ClosingPreview,
+    summary="Preview a spool's closing numbers before it is archived",
+    description=(
+        "Reads only (#7684). What `POST …/archive` would record as the `archived` event's "
+        "`closing` with these inputs: `reason`, and the final weighing as `final_reading_g` "
+        "(the scale's reading with the spool, from which the spool's effective empty weight "
+        "is taken; `final_filament_g` is `null` with no empty weight known or a reading "
+        "under it, which the archive refuses) and `final_grams` (the filament itself; with "
+        "both, the net). With neither the closing is on the ledger's grams left and has no "
+        "scale side. `notices` says what disagrees with the reason: `filament_left` for a "
+        "finished spool with more than the setting `filament_weighing_finished_left_g` on "
+        "it, `not_finished_but_empty` for any other reason at or under it. Nothing is "
+        "refused by a notice. 404 for no such spool, 422 for a reason that is not "
+        "`finished`, `respooled`, `damaged` or `other`."
+    ),
+)
+async def closing_preview(
+    filament: FilamentDep,
+    spool_id: UUID,
+    reason: m.ArchiveReason | None = None,
+    final_reading_g: Annotated[float | None, Query(ge=0, le=1_000_000)] = None,
+    final_grams: Annotated[float | None, Query(ge=0, le=1_000_000)] = None,
+) -> m.ClosingPreview:
+    preview = await asyncio.to_thread(
+        filament.spools.closing_preview, spool_id, reason, final_reading_g, final_grams
+    )
+    if preview is None:
+        raise _no_spool(spool_id)
+    return preview
 
 
 @router.post(

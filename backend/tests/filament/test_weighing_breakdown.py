@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -372,3 +372,81 @@ def test_drift_notice_follows_the_setting(pg_pool: PgPool) -> None:
     assert _get(pg_pool, spool).drift_notice is True
     assert _get(pg_pool, spool, drift_notice_g=20).drift_notice is False
     assert _get(pg_pool, spool, drift_notice_g=12).drift_notice is True
+
+
+# -- the closing preview (#7684) -----------------------------------------------------
+
+
+def _store(pool: PgPool, **defaults: Any) -> FilamentSpoolStore:
+    reader = lambda: FilamentDefaults(low_stock_pct=20, cost_per_kg=None, **defaults)  # noqa: E731
+    return FilamentSpoolStore(pool, reader)
+
+
+@pg
+def test_the_preview_names_filament_left_on_a_finished_spool(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=230, final_grams=None
+    )
+    assert preview is not None
+    assert [n.code for n in preview.notices] == ["filament_left"]
+    assert preview.notices[0].text == "30 g of filament are still on it."
+    assert preview.final_filament_g == 30 and preview.empty_g == 200
+    assert preview.closing.started_g == 1000 and preview.closing.started_from == "reading"
+    assert preview.closing.ledger_consumed_g == 8 and preview.closing.scale_consumed_g == 970
+    assert preview.closing.drift_g == -962
+
+
+@pg
+def test_the_preview_notices_an_empty_spool_not_finished(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "damaged", final_reading_g=203, final_grams=None
+    )
+    assert preview is not None
+    assert [n.code for n in preview.notices] == ["not_finished_but_empty"]
+    assert preview.notices[0].text == "It reads empty; is it finished?"
+    assert preview.final_filament_g == 3
+
+
+@pg
+def test_the_preview_follows_the_setting(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool, finished_left_g=50).closing_preview(
+        spool, "finished", final_reading_g=230, final_grams=None
+    )
+    assert preview is not None
+    assert preview.notices == []
+
+
+@pg
+def test_the_preview_without_a_reading_closes_on_the_ledger(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=None, final_grams=None
+    )
+    assert preview is not None
+    assert preview.final_filament_g == 992 and preview.closing.scale_consumed_g is None
+    assert preview.closing.final_filament_g == 992 and preview.closing.drift_g is None
+    assert [n.code for n in preview.notices] == ["filament_left"]
+
+
+@pg
+def test_the_preview_of_a_reading_under_the_empty_weight_has_no_final(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=150, final_grams=None
+    )
+    assert preview is not None
+    assert preview.final_filament_g is None and preview.closing.final_filament_g is None
+    assert preview.notices == []
+
+
+@pg
+def test_the_preview_of_no_spool_is_none(pg_pool: PgPool) -> None:
+    assert _store(pg_pool).closing_preview(uuid4(), "finished", None, None) is None

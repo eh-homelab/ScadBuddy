@@ -30,7 +30,7 @@ from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
-from scadbuddy.filament.empty_weight import effective_on
+from scadbuddy.filament.empty_weight import EmptyWeight, effective_on
 from scadbuddy.filament.insert_weights import check_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.locations import LocationStore
@@ -257,14 +257,17 @@ class FilamentDefaults:
     under which a spool with none of its own is low (``filament_low_stock_pct``), the cost
     per kg of a spool and type that name none (``filament_default_cost_per_kg``), and the
     drying temperature and hours when nothing in the catalog sets them
-    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5), and the drift
-    at or over which a weighing is a notice (``filament_weighing_drift_notice_g``, #7682)."""
+    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5), the drift
+    at or over which a weighing is a notice (``filament_weighing_drift_notice_g``, #7682),
+    and the most filament a finished spool has on it
+    (``filament_weighing_finished_left_g``, #7684)."""
 
     low_stock_pct: int
     cost_per_kg: Decimal | None
     drying_temp_c: int | None = None
     drying_hours: Decimal | None = None
     drift_notice_g: int = int(Settings.model_fields["filament_weighing_drift_notice_g"].default)
+    finished_left_g: int = int(Settings.model_fields["filament_weighing_finished_left_g"].default)
 
 
 #: The settings' own defaults, for a read that shows neither ``low_stock`` nor a value (a
@@ -427,6 +430,46 @@ def _hours_outside_dry(
         )
         for r in rows
     }
+
+
+def _final_filament(
+    reading_g: float | None, grams: float | None, empty: EmptyWeight | None
+) -> float | None:
+    """A final weighing's filament (#7684), as `SpoolEventAdd`'s rule reads it: ``grams``
+    when given, else the reading less the effective empty weight; ``None`` with no
+    weighing, no empty weight known, or a reading under it."""
+    if grams is not None:
+        return grams
+    if reading_g is None or empty is None or reading_g < empty.grams:
+        return None
+    return reading_g - empty.grams
+
+
+def _closing_notices(
+    reason: m.ArchiveReason | None, final_filament_g: float | None, finished_left_g: int
+) -> list[m.ClosingNotice]:
+    """What the archive dialog says when the numbers disagree with the reason (#7684):
+    a finished spool with more than ``finished_left_g`` on it, or a spool archived for
+    another reason that reads empty. Nothing is refused."""
+    if final_filament_g is None or reason is None:
+        return []
+    if reason == "finished" and final_filament_g > finished_left_g:
+        return [
+            m.ClosingNotice(
+                code="filament_left",
+                text=f"{_grams_text(final_filament_g)} of filament are still on it.",
+            )
+        ]
+    if reason != "finished" and final_filament_g <= finished_left_g:
+        return [
+            m.ClosingNotice(code="not_finished_but_empty", text="It reads empty; is it finished?")
+        ]
+    return []
+
+
+def _grams_text(value: float) -> str:
+    whole = round(value, 1)
+    return f"{int(whole)} g" if whole == int(whole) else f"{whole} g"
 
 
 def _low_stock(grams_left: float | None, values: m.EffectiveValues, default_pct: int) -> bool:
@@ -1149,6 +1192,50 @@ class FilamentSpoolStore:
             )
         after = p.own_k_values(conn, spool_id)
         cls._edited(conn, spool_id, "k_values", before, after, actor)
+
+    def closing_preview(
+        self,
+        spool_id: UUID,
+        reason: m.ArchiveReason | None,
+        final_reading_g: float | None,
+        final_grams: float | None,
+    ) -> m.ClosingPreview | None:
+        """What archiving the spool with these inputs would record (#7684), reading only;
+        ``None`` for no such spool. The final filament is resolved as `archive` resolves
+        it: ``final_grams`` is the filament; ``final_reading_g`` alone takes the spool's
+        effective empty weight off, and ``None`` where that cannot be done (no empty
+        weight, or a reading under it: the archive refuses those); neither closes on the
+        spool's ``grams_left`` with no scale side. The notices follow the setting
+        ``filament_weighing_finished_left_g``."""
+        defaults = self._defaults()
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            spool = conn.execute(
+                "SELECT s.grams_left, s.added_full, coalesce(s.label_weight_g, t.label_weight_g)"
+                " AS label_weight_g FROM filament_spools s"
+                " LEFT JOIN filament_spool_types t ON t.id = s.type_id WHERE s.id = %s",
+                (spool_id,),
+            ).fetchone()
+            if spool is None:
+                return None
+            empty = effective_on(conn, spool_id)
+            history = ledger.events(conn, spool_id)
+        final = _final_filament(final_reading_g, final_grams, empty)
+        closed = ledger.closing(
+            history,
+            label_weight_g=spool["label_weight_g"],
+            added_full=spool["added_full"],
+            final_filament_g=final,
+            reason=reason,
+            grams_left=spool["grams_left"],
+        )
+        left = closed["final_filament_g"]
+        return m.ClosingPreview(
+            closing=m.Closing.model_validate(closed),
+            final_filament_g=None if final_reading_g is not None and final is None else left,
+            empty_g=None if empty is None else empty.grams,
+            notices=_closing_notices(reason, left, defaults.finished_left_g),
+        )
 
     def archive(self, spool_id: UUID, archived: bool, *, actor: str) -> m.Spool | None:
         """Take a spool off the lists (``True``) or put it back; ``None`` for no such

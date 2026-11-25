@@ -1859,6 +1859,42 @@ class SpoolsArchived(BaseModel):
     not_found: list[UUID]
 
 
+#: Why a spool was archived (#7684, spec §5.4).
+ArchiveReason = Literal["finished", "respooled", "damaged", "other"]
+
+
+class Closing(BaseModel):
+    """An ``archived`` event's reconciliation (#7684): what the spool started with and
+    where that came from, what the ledger consumed, the final filament, what the scale
+    says was consumed and the drift between the two (`ledger.closing`)."""
+
+    reason: ArchiveReason | None = None
+    started_g: float | None = None
+    started_from: Literal["reading", "label"] | None = None
+    ledger_consumed_g: float | None = None
+    final_filament_g: float | None = None
+    scale_consumed_g: float | None = None
+    drift_g: float | None = None
+
+
+class ClosingNotice(BaseModel):
+    """What the archive dialog says when the numbers disagree with the reason."""
+
+    code: Literal["filament_left", "not_finished_but_empty"]
+    text: str
+
+
+class ClosingPreview(BaseModel):
+    """What archiving a spool with these inputs would record (#7684): the closing, the
+    final filament the reading means (``None`` when it cannot be worked out: no empty
+    weight known, or a reading under it), the empty weight taken off and the notices."""
+
+    closing: Closing
+    final_filament_g: float | None
+    empty_g: int | None
+    notices: list[ClosingNotice] = Field(default_factory=list)
+
+
 class SpoolArchive(_In):
     #: ``True`` takes the spool off the lists, ``False`` puts it back.
     archived: bool = True

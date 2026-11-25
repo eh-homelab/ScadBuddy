@@ -244,6 +244,25 @@ def test_a_reading_alone_needs_an_empty_weight(client: TestClient) -> None:
     assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created"]
 
 
+def test_the_closing_preview_is_read_under_the_spool(client: TestClient) -> None:
+    """#7684: the archive dialog's preview of a spool's closing numbers and notices."""
+    made = _spool(client, label_weight_g=1000, insert_type_id=_insert(client))
+    one = f"{SPOOLS}/{made['id']}"
+    first = client.post(f"{one}/events", json={"kind": "weighed", "source": "scale", "grams": 1000})
+    assert first.status_code == 201, first.text
+    preview = client.get(f"{one}/closing", params={"reason": "finished", "final_reading_g": 230})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["final_filament_g"] == 30 and body["empty_g"] == 200
+    assert body["closing"]["started_g"] == 1000 and body["closing"]["scale_consumed_g"] == 970
+    assert [n["code"] for n in body["notices"]] == ["filament_left"]
+    assert (
+        client.get(f"{SPOOLS}/{uuid4()}/closing", params={"reason": "finished"}).status_code == 404
+    )
+    assert client.get(f"{one}/closing", params={"reason": "lost"}).status_code == 422
+    assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created", "weighed"]
+
+
 def _new_spool(client: TestClient) -> dict[str, object]:
     """New by #7280's rule: 1000 g left of a 1000 g label, nothing consumed, on a 200 g insert."""
     return _spool(
