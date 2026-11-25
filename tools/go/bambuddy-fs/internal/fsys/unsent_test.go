@@ -497,6 +497,9 @@ func TestListUnsent(t *testing.T) {
 }
 
 // The save an app makes with a temp file and a rename, over a file the library has.
+// Its EINTR retry relies on the temp file being still unsent when it is renamed (a
+// queued-save rename changes nothing when it answers EINTR); a rename of an uploaded
+// one goes to the library and may apply before it answers EINTR (#7718).
 func saveByRename(t *testing.T, dir, data string) {
 	t.Helper()
 	tmp := filepath.Join(dir, "X.3mf.tmp")
