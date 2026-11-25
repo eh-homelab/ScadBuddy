@@ -156,7 +156,12 @@ tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
 A test's result must not depend on runner speed or the date. A retry budget gets an
 injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
-on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294).
+A call from a test to a server the test runs on a thread of its own (moto, a uvicorn
+`_remote`) may take a longer timeout than the default or the production bound, because
+that thread shares the GIL with the test on a loaded runner: set it in the test or a test
+helper, cite the issue, and keep one test on the production bound where the bound is what
+it checks (the owner's decision of 2026-11-25; #7503, #7556, #7619). A
 "today" is read at each call, never at import: a shard that loads before midnight UTC
 and makes orders after it dated every fake deposit a day early (#6307). A shard builds
 in 2 to 3 minutes. With six shards it tested in 27 to 46, and slow runners hit
@@ -499,7 +504,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class; `GET /{name}/versions` lists
   the versions newest first for Settings' editor, #6937) and the agent's area
   `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
-  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. A marketplace
+  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. Each committed
+  hosted-plugin create, change, publish and delete, and each `plugin-packages` write (install,
+  re-pin, discard, approve, enable, delete), publishes `plugin_packages.changed`
+  (`core/events.py` `PluginPackagesChanged`, the name only) on the realtime topic
+  `plugin-packages`, which Settings → Tools & plugins follows (#7460). A marketplace
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
   read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
   module: each package at its current pin, whether it is approved, and a hosted one's version
@@ -1503,10 +1512,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `.lfsconfig` says (`tests/test_history_lfs.py`).
   `library/models_next.py` (`python -m scadbuddy.library.models_next build` and `check`,
   in the API's image) makes a second such repository from an older one, in
-  `data/models-next`: the versions the orders and listings pin, the current ones, and the
-  upstream revisions their `model.json` names, each with an `Imported-From` trailer. It
-  only reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
+  `data/models-next`: every version of every template, and the lost ones that an order, a
+  listing, an output or a `model.json` names, each with an `Imported-From` trailer. It only
+  reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
   the build to the git remote in Settings, and to no other branch.
+  `library/models_switch.py` (`preflight`, `run --dump <dir>`, `rollback --dump <dir>`; in
+  that image while no API runs) puts the second in the place of the first, with each row
+  and `meta.json` that holds an old commit id; never run it on prod but by
+  `docs/models-switch-runbook.md`. A new column that holds a models commit goes into its
+  `COLUMNS` and `_plan_rows`.
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
@@ -1664,12 +1678,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
+- `backend/scadbuddy/inventory/` — the item core (#7067, spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.4-6.6; page
+  `docs/features/inventory.md`): `models.py` (the Pydantic models), `kinds.py` (`KindStore`, the
+  `item_kinds` tree and its inherited `attribute_schema`), `items.py` (`ItemStore`; a `filament`
+  kind's items are refused until phase 3), `offers.py` (`OfferStore`: `supplier_offers` and
+  `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
+  `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
+  the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,
+  then `_open_lock` (the advisory lock every lot insert takes first), then the lots `FOR UPDATE` in
+  FIFO order), `part_alias.py` (`PartAliases`: the `/parts` routes over the inventory, for one
+  release), `problems.py` (the 4xx problems, `refused`) and `component.py` (`InventoryComponent`).
+  Only filament reaches Bambuddy: nothing here calls it, and `bb_sync_plan._suppliers()` keeps a
+  supplier made for offers out of it (D16, R-P2-8 to R-P2-10). Tests: `backend/tests/inventory/`.
 - `backend/scadbuddy/entities/` — files, links and key-value properties on any row
   (#6950, #7026, inventory spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
   (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table,
-  `item`, `lot` and `unit` among them since #7067; `EntityStore`: an `entities` row made by
+  `item`, `lot` and `unit` among them since #7067, and one kind per filament catalog, such
+  as `insert_type`; `EntityStore`: an `entities` row made by
   `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
   and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
   `attachments.py` (`EntityAttachmentStore` over
@@ -2273,7 +2301,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`
   in `meta.json`, `output_index.source`): `back_office`, or `storefront` for the outputs
-  the storefront slice run saves (`output_for_reference`'s `source`, which only
+  the storefront slice run saves (`outputs_for_reference`'s `source`, which only
   `slice_price.py` sets; an order's render and a quote keep the default). `GET /outputs`
   and `GET /models/{slug}/outputs` leave the storefront's out unless `include_storefront`
   is true, and so do the agent's `list_recent_outputs` and `list_outputs`; a read by id
@@ -2444,7 +2472,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
   printer's machine rate, `MachineRates.for_quote`), never a second formula
   (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
-  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  is rendered to an output by `rendering.py` `outputs_for_reference` (saved as
   `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
   template gives the support and process settings. A variant names one subject
   (`SliceVariant.reference` or `.library_file`, #6710 §7.1): a file listing's file is a
@@ -2463,8 +2491,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ones on the render worker, and `listing_reference` writes the snapshot's around the
   customer's `params`. A price, a preview and a cart line are of the listing's design while
   `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
-  render of several outputs (`renders.py` `one_output`) has no firm price on any path until
-  #5701's PR 5, and a pipeline's cart line needs its row's `every_output`. A file listing has
+  render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,
+  one slot across the outputs), `kit_digest` (every output's 3MF), each output saved under
+  `storefront_output_id(render_key, index)` and sliced whole with its own slots' presets, and
+  one `price_plates` over every plate (`slice_and_price`'s `place`). No visitor gets that
+  price until #5701's PR 5, whose order makes every output: `renders.py` `one_output` refuses
+  it on every path. A pipeline's cart line needs its row's `every_output`. A file listing has
   no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
@@ -2684,9 +2716,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `fileParts.ts` `partFilaments` with no pick, both tested on
   `test-fixtures/storefront/file-page-colours.json`, #7523). A start that fails, or takes
   more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
-  given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
+  given up on is logged as given up: it may still have reached Temporal). What publish did
+  not price (a listing published before #6922, a failed start, a run that ended with no
+  price) the housekeeping sweep does (#7665, `warm_unpriced`, `WARM_LISTINGS_SWEEP`, both
+  Schedules, behind `WARM_LISTINGS_PATCH`): a published listing, template or file, whose
+  default choices have no `done` row gets its default run (`restart=False`, which joins an
+  open one), at most `WARM_SWEEP_BATCH` (2) open at once. It keeps no table: a listing whose
+  newest default run Temporal holds started since its `updated_at` is left alone, so one
+  with no price to find is tried once per version and again only past Temporal's
+  retention. `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it
-  on) switches both.
+  on) switches all three.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

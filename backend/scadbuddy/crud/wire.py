@@ -22,6 +22,8 @@ CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}
 #: The reason of the 503 a CRUD route answers on a `psycopg.OperationalError`.
 DATABASE_UNAVAILABLE = "database-unavailable"
+#: A 503's reason when a body's schema default ran out of the pattern budget (#7437).
+PATTERN_TIMEOUT = "pattern-timeout"
 #: The reason of a 5xx an operator's setting causes (the storefront's store is not S3):
 #: no retry fixes it, so a client answers it at once (`client.py`).
 NOT_CONFIGURED = "not_configured"

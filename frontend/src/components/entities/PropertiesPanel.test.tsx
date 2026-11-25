@@ -478,4 +478,60 @@ describe('PropertiesPanel (#7026)', () => {
     // The schema came from the item, never from GET /entity-kinds/item/property-schema (409).
     expect(screen.queryByRole('alert')).toBeNull()
   })
+
+  describe("a kind's keys", () => {
+    const open = async (user: ReturnType<typeof renderPage>['user']) => {
+      await user.click(await screen.findByRole('button', { name: "Edit the kind's keys" }))
+      return screen.findByRole('form', { name: 'Keys of spool_type' })
+    }
+
+    it('adds a key for every entity of the kind and types an added property by it', async () => {
+      const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+      const before = structuredClone(entityMock.schemas.spool_type!)
+      const form = await open(user)
+      await user.click(within(form).getByRole('button', { name: 'Add key' }))
+      const at = within(form).getAllByRole('row').length - 1
+      await user.type(within(form).getByLabelText(`Key ${at}`), 'shore_hardness')
+      await choose(user, within(form).getByRole('combobox', { name: `Type of key ${at}` }), 'Number')
+      await user.type(within(form).getByLabelText(`Description of key ${at}`), 'Shore A')
+      await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+
+      await waitFor(() => expect(screen.queryByRole('form', { name: 'Keys of spool_type' })).toBeNull())
+      expect(entityMock.schemas.spool_type!.properties).toEqual({ ...(before.properties as object), shore_hardness: { type: 'number', description: 'Shore A' } })
+      await user.type(screen.getByLabelText('New property key'), 'shore_hardness')
+      await waitFor(() => expect(screen.getByRole('combobox', { name: 'New property type' })).toHaveTextContent('Number'))
+    })
+
+    it("keeps a removed key's stored values", async () => {
+      seedEntityProperties(TYPE, { mpn: 'A00' })
+      const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+      const form = await open(user)
+      await user.click(within(form).getByRole('button', { name: 'Remove key 1' }))
+      await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+      await waitFor(() => expect((entityMock.schemas.spool_type!.properties as object)).not.toHaveProperty('mpn'))
+      expect(await screen.findByRole('row', { name: /mpn/ })).toHaveTextContent('A00')
+    })
+
+    it('refuses a key named twice and shows what the server refuses', async () => {
+      const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+      const form = await open(user)
+      const first = within(form).getByLabelText('Key 1')
+      await user.clear(first)
+      await user.type(first, 'gtin')
+      await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+      expect(await within(form).findByRole('alert')).toHaveTextContent('Each key is named once.')
+      await user.clear(first)
+      await user.type(first, 'Bad Key')
+      server.use(http.put('/api/v1/entity-kinds/:kind/property-schema', () => HttpResponse.json({ type: 'x', title: 'x', status: 422, detail: "'Bad Key' is no key" }, { status: 422 })))
+      await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+      await waitFor(() => expect(within(form).getByRole('alert')).toHaveTextContent("'Bad Key' is no key"))
+      expect(first).toHaveValue('Bad Key')
+    })
+
+    it("sends an item to its kinds page, whose keys are its item kind's", async () => {
+      renderPage(<PropertiesPanel entity="item:5d1c0000-0000-4000-8000-000000000001" />)
+      expect(await screen.findByRole('link', { name: "Edit the kind's keys" })).toHaveAttribute('href', '/inventory/kinds')
+      expect(screen.queryByRole('button', { name: "Edit the kind's keys" })).toBeNull()
+    })
+  })
 })

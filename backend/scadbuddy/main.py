@@ -158,7 +158,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.archives import mirror_attempt, sweep_media
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
-from scadbuddy.orders.storefront.prepare import prepare_activities
+from scadbuddy.orders.storefront.prepare import prepare_activities, warm_unpriced
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
@@ -267,6 +267,7 @@ from scadbuddy.workflows.housekeeping import (
     SWEEPS,
     TEMPLATE_COPY_SWEEP,
     TRANSFER_PUTS_SWEEP,
+    WARM_LISTINGS_SWEEP,
     ensure_schedules,
     library_worker,
 )
@@ -1146,6 +1147,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def import_attempt_media() -> None:
         await _heartbeating(_import_attempt_media_logged(state))
 
+    @activity.defn(name=WARM_LISTINGS_SWEEP)
+    async def warm_listings() -> None:
+        await _heartbeating(_warm_listings_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -1183,6 +1188,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         auto_import_prints,
         reap_print_run_holds,
         import_attempt_media,
+        warm_listings,
     ]
 
 
@@ -1923,6 +1929,18 @@ async def _import_attempt_media_logged(state: AppState) -> None:
     state.metrics.attempt_media_sweep_starts.inc(started)
     if started:
         logger.info("started attempt media imports", extra={"count": started})
+
+
+async def _warm_listings_logged(state: AppState) -> None:
+    """#7665: the default price run of each published listing whose default choices have
+    no price (`orders.storefront.prepare.warm_unpriced`)."""
+    try:
+        started = await warm_unpriced(state, state.components.get(ORDERS))
+    except Exception:
+        logger.exception("could not sweep the published listings' prices")
+        raise
+    if started:
+        logger.info("started default price runs", extra={"count": started})
 
 
 async def _reap_run_holds_logged(state: AppState) -> None:

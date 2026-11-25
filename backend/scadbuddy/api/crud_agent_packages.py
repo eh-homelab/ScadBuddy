@@ -83,6 +83,7 @@ from scadbuddy.agent_data.package_mirrors import MAX_MIRROR_BYTES
 from scadbuddy.agent_data.packages import forget_package, prune_stale_rows
 from scadbuddy.api.deps import StateDep
 from scadbuddy.api.limits import RouteLimit
+from scadbuddy.core.events import PluginPackagesChanged, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
 from scadbuddy.hosted_plugins import store as hosted_store
@@ -308,6 +309,12 @@ def _written(conn: psycopg.Connection[Any]) -> None:
     notify_warm_evict(conn)
 
 
+def _announced(state: Any, row: PackageRow) -> PackageRow:
+    """``row``, once its write committed, told to Settings → Tools & plugins (#7460)."""
+    emit(state.events, PluginPackagesChanged(name=row.name))
+    return row
+
+
 def _locked(conn: psycopg.Connection[Any], name: str) -> Any:
     row = conn.execute(
         "SELECT * FROM ai_plugin_packages WHERE name = %s FOR UPDATE", (name,)
@@ -449,7 +456,7 @@ async def plugin_package_install(body: Install, state: StateDep) -> PackageRow:
         _written(conn)
         return _row(conn, row)
 
-    return await _in_tx(state, run)
+    return _announced(state, await _in_tx(state, run))
 
 
 class Pending(Pin):
@@ -517,7 +524,7 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
         _written(conn)
         return _row(conn, row)
 
-    return await _in_tx(state, run)
+    return _announced(state, await _in_tx(state, run))
 
 
 @router.post("/plugin-packages/{name}/discard-pending", name="crud_agent_plugin_package_discard")
@@ -537,7 +544,7 @@ async def plugin_package_discard(name: Name, state: StateDep) -> PackageRow:
         _written(conn)
         return _row(conn, row)
 
-    return await _in_tx(state, run)
+    return _announced(state, await _in_tx(state, run))
 
 
 class Approve(_Body):
@@ -638,7 +645,7 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
         _written(conn)
         return _row(conn, row)
 
-    return await _in_tx(state, run)
+    return _announced(state, await _in_tx(state, run))
 
 
 class Enabled(_Body):
@@ -665,7 +672,7 @@ async def plugin_package_enabled(name: Name, body: Enabled, state: StateDep) -> 
         _written(conn)
         return _row(conn, row)
 
-    return await _in_tx(state, run)
+    return _announced(state, await _in_tx(state, run))
 
 
 @router.post("/plugin-packages/{name}/delete", name="crud_agent_plugin_package_delete")
@@ -678,7 +685,10 @@ async def plugin_package_delete(name: Name, state: StateDep) -> Done:
         _written(conn)
         return True
 
-    return Done(done=await _in_tx(state, run))
+    done = await _in_tx(state, run)
+    if done:
+        emit(state.events, PluginPackagesChanged(name=name))
+    return Done(done=done)
 
 
 @router.post("/package-mirrors/{name}", name="crud_agent_package_mirror_post")
