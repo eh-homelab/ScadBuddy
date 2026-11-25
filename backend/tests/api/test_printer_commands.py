@@ -15,7 +15,6 @@ from scadbuddy.printers.lan_command_models import (
     LanCommandReply,
     LanCommandRun,
 )
-from scadbuddy.printers.native import LanCommands
 from tests.api.test_printers import (
     CODE,
     _probe_ok,
@@ -28,14 +27,10 @@ from tests.printers.conftest import KEK
 pytestmark = pytest.mark.requires_postgres
 
 
-def started_with_no_view(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every command was started as one command ``x``, which has no view (P37)."""
-
-    async def started(*_args: Any) -> LanCommandRun:
-        command = LanCommandInput(printer_id="p", name="x", payload={}, wait_s=1, kind="write")
-        return LanCommandRun(commands=[command])
-
-    monkeypatch.setattr(LanCommands, "started", started)
+#: Every command was started as one command ``x``, which has no view (P37).
+NO_VIEW = LanCommandRun(
+    commands=[LanCommandInput(printer_id="p", name="x", payload={}, wait_s=1, kind="write")]
+)
 
 
 def test_the_view_says_whether_the_printer_is_lan_linked(client: TestClient) -> None:
@@ -68,12 +63,11 @@ def test_a_truncated_printer_id_is_not_the_owner_of_a_command(
     mine = create(client)["id"]
     asked: list[tuple[Any, ...]] = []
 
-    async def read(*args: Any) -> LanCommandOutcome:
+    async def read(*args: Any) -> tuple[LanCommandOutcome, LanCommandRun]:
         asked.append(args[1:])
-        return LanCommandOutcome(replies=[])
+        return LanCommandOutcome(replies=[]), NO_VIEW
 
     monkeypatch.setattr(routes, "read_lan_commands", read)
-    started_with_no_view(monkeypatch)
     for printer_id in (mine[:8], "nope"):
         response = client.get(f"/api/v1/printers/{printer_id}/commands/lan-command-{mine}-x-1")
         assert response.status_code == 404, response.text
@@ -90,16 +84,15 @@ def test_a_finished_command_answers_200_and_an_open_one_202(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pid = create(client)["id"]
-    answers: list[LanCommandOutcome | LanCommandPending] = [
-        LanCommandOutcome(replies=[LanCommandReply(confirmed=False)]),
-        LanCommandPending(workflow_id="lan-command-x"),
+    answers: list[tuple[LanCommandOutcome | LanCommandPending, LanCommandRun | None]] = [
+        (LanCommandOutcome(replies=[LanCommandReply(confirmed=False)]), NO_VIEW),
+        (LanCommandPending(workflow_id="lan-command-x"), None),
     ]
 
-    async def read(*_args: Any) -> LanCommandOutcome | LanCommandPending:
+    async def read(*_args: Any) -> tuple[LanCommandOutcome | LanCommandPending, Any]:
         return answers.pop(0)
 
     monkeypatch.setattr(routes, "read_lan_commands", read)
-    started_with_no_view(monkeypatch)
     done = client.get(f"/api/v1/printers/{pid}/commands/c")
     assert done.status_code == 200
     assert done.json()["replies"][0]["confirmed"] is False

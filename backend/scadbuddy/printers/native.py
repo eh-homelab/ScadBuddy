@@ -32,7 +32,6 @@ from scadbuddy.workflows.lan_command import (
     execute_lan_commands,
     lan_command_exists,
     lan_command_keyed,
-    lan_command_run,
 )
 
 
@@ -144,7 +143,3 @@ class LanCommands:
     ) -> LanCommandRun | None:
         """The run ``key`` already started under one of ``kinds``, as started (P41)."""
         return await lan_command_keyed(self.client_getter(), printer_id, kinds, key)
-
-    async def started(self, command_id: str) -> LanCommandRun:
-        """The commands the run ``command_id`` was started with."""
-        return await lan_command_run(self.client_getter(), command_id)

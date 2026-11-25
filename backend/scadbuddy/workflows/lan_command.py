@@ -139,10 +139,14 @@ async def execute_lan_commands(
     return await _answer(client, handle, run)
 
 
-async def read_lan_commands(client: Client, printer_id: str, command_id: str) -> LanCommandAnswer:
+async def read_lan_commands(
+    client: Client, printer_id: str, command_id: str
+) -> tuple[LanCommandAnswer, LanCommandRun | None]:
     """The answer of the run ``command_id`` of ``printer_id`` (P27, the command read route
     of Task 6): `LanCommandPending` while it runs, else what `execute_lan_commands` would
-    have answered. A run of another printer, or none, is 404 ``command_not_found``."""
+    have answered, with the run it was started with (``None`` while it runs), read once
+    for both the answer and the route's view. A run of another printer, or none, is 404
+    ``command_not_found``."""
     if not command_id.startswith(f"lan-command-{printer_id}-"):
         raise command_not_found()
     handle = client.get_workflow_handle(command_id, result_type=LanCommandOutcome)
@@ -153,15 +157,9 @@ async def read_lan_commands(client: Client, printer_id: str, command_id: str) ->
             raise command_not_found() from None
         raise
     if described.status == WorkflowExecutionStatus.RUNNING:
-        return LanCommandPending(workflow_id=command_id)
-    return await _answer(client, handle, None)
-
-
-async def lan_command_run(client: Client, command_id: str) -> LanCommandRun:
-    """The commands the run ``command_id`` was started with (what its route sent)."""
-    return await _started_run(
-        client, client.get_workflow_handle(command_id, result_type=LanCommandOutcome)
-    )
+        return LanCommandPending(workflow_id=command_id), None
+    run = await _started_run(client, handle)
+    return await _answer(client, handle, run), run
 
 
 async def lan_command_exists(
