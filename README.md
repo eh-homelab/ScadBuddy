@@ -638,7 +638,9 @@ socket would give it root on the node.
 
 ### Payment webhooks (#4957)
 
-The front door (Pomerium and the LAN gateway) stays in front of every route but one. A
+The front door (Pomerium and the LAN gateway) stays in front of every route except
+this one and the agent's bearer-token paths (`/mcp`, `/mcp/workspace/` and
+`/api/v1/ai/plugin-feeds/`, eh-homelab/clusters#4017), which check their own credential. A
 payment provider must reach `POST /api/v1/payments/webhooks/<provider>` from the
 internet, so route only the path prefix `/api/v1/payments/webhooks/` from the public
 host to the API Service, and no other path. That route takes no session: the
