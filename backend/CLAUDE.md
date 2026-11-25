@@ -2272,7 +2272,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   cost) finds either. An output saved before the mark is marked by the start's sync, once:
   the migration `20261115T2118Z_output_index_source.sql` drops the rows named
   "Storefront: …", and the sync marks one only when its id is `storefront_output_id` of
-  its own render key (`output_index.py` `saved_by_storefront_run`). `POST /orders/{id}/items/batch` and
+  its own render key (`output_query.py` `saved_by_storefront_run`). `POST /orders/{id}/items/batch` and
   `…/items/after-acceptance/batch` (`ItemBatch`, at most `MAX_BATCH_ITEMS` 50) add
   `ItemCreate`s through `Lifecycle.add_items`, the one transaction every single add now
   uses (`NewModelItem`, `NewLibraryItem`, `NewCustomItem`, `NewRequestItem`); a body

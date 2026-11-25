@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import threading
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,8 +14,10 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library import output_rows
 from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_query import AfterNotListedError, OutputQuery, params_text
 from scadbuddy.library.output_rows import (
@@ -715,7 +719,10 @@ def test_try_cut_over_is_written_once(rows: OutputRows, projection: JobProjectio
     assert rows.try_cut_over() is True
     at = rows.cut_over_at()
     _end_byte_run(rows)
-    assert OutputRows(projection.pool).try_cut_over() is True
+    # The mark exists: this call wrote nothing, so it answers False; `cut_over` is the state.
+    other = OutputRows(projection.pool)
+    assert other.try_cut_over() is False
+    assert other.cut_over() is True
     assert rows.cut_over_at() == at
     with projection.pool.connection() as conn:
         marks = conn.execute("SELECT byte_run_id FROM output_cutover").fetchall()
@@ -764,9 +771,12 @@ def test_query_on_outputs_matches_index_query(
         index.record(row.meta, row.params, {})
     # A row a phase 2 pod saved has no `params_text`: it is listed, and `q` passes it
     # by, as the index's empty text does.
+    # Its index row was written before its row, so no `record` filled its text.
     old = _listed("4" * 32, "sign", age=timedelta(days=4), params={"w": 40})
-    rows.insert(dataclasses.replace(old, params_text=None))
     index.record(old.meta, {}, {})
+    rows.insert(dataclasses.replace(old, params_text=None))
+    got = rows.get("4" * 32)
+    assert got is not None and got.params_text is None
     cases: list[tuple[OutputQuery, tuple[list[str], int]]] = [
         (OutputQuery(since=NOW - timedelta(days=1)), (["3" * 32, "e" * 32, "2" * 32], 3)),
         (OutputQuery(until=NOW - timedelta(days=1)), (["1" * 32, "4" * 32], 2)),
@@ -822,6 +832,34 @@ def test_claim_refused_while_claimed_or_saved(rows: OutputRows) -> None:
     rows.insert(make_row("o2"))
     assert rows.claim("o2", "cube") is False
     rows.release_claim("missing")
+
+
+def test_claim_refused_while_a_save_commits(
+    rows: OutputRows, projection: JobProjection, pg_conninfo: str
+) -> None:
+    """A save that holds the claim of an id inserts its row and deletes its claim, and
+    then commits (1-2 s on prod). A claim of that id in this window waits on the deleted
+    claim row; after the commit it is refused, and it leaves no claim row."""
+    assert rows.claim("o1", "cube") is True
+    answers: list[bool] = []
+    with psycopg.connect(pg_conninfo, row_factory=dict_row) as save:
+        with save.transaction():
+            output_rows._insert(save, projection.pool, make_row("o1"))
+            claimer = threading.Thread(target=lambda: answers.append(rows.claim("o1", "ball")))
+            claimer.start()
+            deadline = time.monotonic() + 10
+            with projection.pool.connection() as conn:
+                while not conn.execute(
+                    "SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'"
+                ).fetchone():
+                    assert time.monotonic() < deadline, "the claim never waited on the save"
+                    time.sleep(0.02)
+        claimer.join(timeout=10)
+    assert answers == [False]
+    with projection.pool.connection() as conn:
+        left = conn.execute("SELECT count(*) AS n FROM output_claims").fetchone()
+    assert left is not None and left["n"] == 0
+    assert rows.get("o1") is not None
 
 
 def test_prune_claims_drops_only_old_claims(rows: OutputRows, projection: JobProjection) -> None:

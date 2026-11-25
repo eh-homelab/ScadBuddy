@@ -721,13 +721,14 @@ async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> Non
 
 async def _try_cut_over(rows: OutputRows) -> bool:
     """Write the cut-over mark (#7257, plan D2) when the copies are done, best effort:
-    whether it exists now. A new mark is logged; a failure is logged only, and the next
-    byte run or start tries again."""
+    whether it exists now. Only the call that wrote the mark logs it (another replica may
+    write it meanwhile); a failure is logged only, and the next byte run or start tries
+    again."""
     try:
         if await asyncio.to_thread(rows.cut_over):
             return True
         if not await asyncio.to_thread(rows.try_cut_over):
-            return False
+            return await asyncio.to_thread(rows.cut_over)
         at = await asyncio.to_thread(rows.cut_over_at)
     except Exception:
         logger.exception("could not write the cut-over mark; the next byte run or start retries")

@@ -252,3 +252,30 @@ async def test_copies_check_the_mark_again_under_their_lock(
     assert await copy_output_bytes(late_store, rows, content, projection.conninfo) is None
     assert _runs(pool) == before
     assert rows.get(metas[0].id) is not None
+
+
+async def test_mark_another_replica_wrote_is_not_logged(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two replicas both miss the mark and both try it: only the one whose call wrote it
+    logs it. The other answers that the mark exists, and logs nothing."""
+    store, _ = saved
+    await _cut_over(store, content, projection)
+    rows = OutputRows(projection.pool)
+    real = rows.cut_over
+    calls: list[bool] = []
+
+    def late() -> bool:
+        """The first check misses the mark that the other replica wrote meanwhile."""
+        calls.append(True)
+        return False if len(calls) == 1 else real()
+
+    monkeypatch.setattr(rows, "cut_over", late)
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        assert await main._try_cut_over(rows) is True
+    logged = [r for r in caplog.records if r.getMessage() == "the outputs are cut over (#7257)"]
+    assert logged == []

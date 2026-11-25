@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from psycopg import Connection
+from psycopg import Connection, Rollback
 from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
@@ -1211,10 +1211,14 @@ class OutputRows:
         """Write the cut-over mark (#7257, plan D2) when, in one statement: a row copy
         run has finished; the last byte run has finished, with no refusal and no failure;
         and no row waits for its bytes (``bytes_at`` NULL). It is written once; a later
-        call changes nothing. Whether the mark exists now."""
+        call changes nothing. True only when this call wrote it (so one replica logs it);
+        `cut_over` says whether it exists."""
         with self._pool.connection() as conn:
-            conn.execute(_TRY_CUT_OVER)
-        return self.cut_over()
+            wrote = conn.execute(_TRY_CUT_OVER).rowcount == 1
+        if wrote:
+            with self._lock:
+                self._cut_over = True
+        return wrote
 
     def cut_over(self) -> bool:
         """Whether the cut-over mark exists. Once true it stays true for this object."""
@@ -1246,15 +1250,32 @@ class OutputRows:
     def claim(self, output_id: str, slug: str) -> bool:
         """Claim ``output_id`` for a save of ``slug`` (#7257, plan D6): True when this
         call claimed it. False when a claim of it stands, or an output of that id is
-        saved. The save's row deletes the claim (`insert`)."""
-        with self._pool.connection() as conn:
-            cursor = conn.execute(
-                "INSERT INTO output_claims (output_id, slug) SELECT %s, %s"
-                " WHERE NOT EXISTS (SELECT 1 FROM outputs WHERE output_id = %s)"
-                " ON CONFLICT DO NOTHING",
-                (output_id, slug, output_id),
+        saved. The save's row deletes the claim (`insert`).
+
+        A save that holds the claim inserts its row and deletes its claim in one
+        transaction. A claim made before that commits waits on the deleted claim row and
+        then inserts, since its snapshot saw no ``outputs`` row. So a second statement in
+        the claim's transaction looks again: under READ COMMITTED it takes a new snapshot,
+        which holds the save's row, and the claim is rolled back. (An advisory lock per id
+        would need every writer of ``outputs`` to take it, and phase 2 pods do not.)"""
+        with self._pool.connection() as conn, conn.transaction() as tx:
+            inserted = (
+                conn.execute(
+                    "INSERT INTO output_claims (output_id, slug) SELECT %s, %s"
+                    " WHERE NOT EXISTS (SELECT 1 FROM outputs WHERE output_id = %s)"
+                    " ON CONFLICT DO NOTHING",
+                    (output_id, slug, output_id),
+                ).rowcount
+                == 1
             )
-        return cursor.rowcount == 1
+            if not inserted:
+                return False
+            saved = conn.execute(
+                "SELECT 1 FROM outputs WHERE output_id = %s", (output_id,)
+            ).fetchone()
+            if saved is not None:
+                raise Rollback(tx)
+        return saved is None
 
     def release_claim(self, output_id: str) -> None:
         """Free a claim whose save failed, so another attempt can claim the id."""

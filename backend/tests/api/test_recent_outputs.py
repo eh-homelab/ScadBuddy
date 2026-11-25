@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.library.output_index import OutputQuery
+from scadbuddy.library.output_query import OutputQuery
 from tests.api.conftest import wait_for_job
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
