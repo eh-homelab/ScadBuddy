@@ -319,7 +319,10 @@ class InsertType(_Catalog):
     derived_count: int = 0
 
 
-#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2).
+#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2). ``no_insert``: the
+#: spool has no insert, or its insert is archived. ``not_full``: the grams left are more
+#: than 0.5 g from the label weight; a spool with no grams left and no use counts as full.
+#: ``mean_below_1g``: the new mean rounds below 1 g, which no insert weight may be.
 NoOfferReason = Literal[
     "archived",
     "no_insert",
@@ -328,6 +331,7 @@ NoOfferReason = Literal[
     "not_full",
     "not_above_label",
     "derived_too_heavy",
+    "mean_below_1g",
 ]
 
 
@@ -369,6 +373,9 @@ class InsertWeightAccept(_In):
     """A new spool's weighing: the filament, the empty spool and its insert."""
 
     reading_g: Annotated[float, Field(gt=0, le=100_000)]
+    #: The offer's ``new_empty_weight_g``: when the mean under the locks is another, the
+    #: accept is refused (409 ``insert_weight_changed``) and nothing is written (#7450-2).
+    new_empty_weight_g: Annotated[int, Field(gt=0)] | None = None
 
 
 class InsertWeightAccepted(BaseModel):
