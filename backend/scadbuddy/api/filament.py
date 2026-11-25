@@ -1603,15 +1603,40 @@ async def closing_preview(
     summary="Archive or restore a spool",
     description=(
         "`archived: true` takes the spool off the lists, `false` puts it back; each writes "
-        "an `archived` or `restored` ledger event. 404 for no such spool."
+        "an `archived` or `restored` ledger event. An archive takes a `reason` (`finished`, "
+        "`respooled`, `damaged` or `other`; optional here, the page requires one) and the "
+        "final weighing (#7684): `final_reading_g` (the scale's reading with the spool, from "
+        "which the spool's effective empty weight is taken, as `POST …/events` takes it) or "
+        "`final_grams` (the filament), or both (the net). The weighing is booked as a "
+        "`weighed` event just before the `archived` one, whose `data` keeps the closing: "
+        "`reason`, `started_g` and `started_from`, `ledger_consumed_g`, `final_filament_g`, "
+        "`scale_consumed_g` and `drift_g` (`GET …/closing` previews them). A reading on a "
+        "spool with no empty weight known is a 422 with `code` `no_empty_weight`, one under "
+        "it `reading_below_empty`; nothing is archived then. A restore with a reason or a "
+        "reading is a 422. A spool already archived takes nothing. 404 for no such spool."
     ),
 )
 async def archive_spool(
     filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolArchive
 ) -> m.Spool:
-    changed = await asyncio.to_thread(
-        filament.spools.archive, spool_id, body.archived, actor=actor(caller)
-    )
+    try:
+        changed = await asyncio.to_thread(
+            filament.spools.archive,
+            spool_id,
+            body.archived,
+            actor=actor(caller),
+            reason=body.reason,
+            final_reading_g=body.final_reading_g,
+            final_grams=body.final_grams,
+        )
+    except NoEmptyWeightError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="no_empty_weight"
+        ) from None
+    except ReadingBelowEmptyError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="reading_below_empty"
+        ) from None
     if changed is None:
         raise _no_spool(spool_id)
     return changed

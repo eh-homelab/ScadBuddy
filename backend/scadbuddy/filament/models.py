@@ -1892,12 +1892,36 @@ class ClosingPreview(BaseModel):
     closing: Closing
     final_filament_g: float | None
     empty_g: int | None
-    notices: list[ClosingNotice] = Field(default_factory=list)
+    notices: list[ClosingNotice]
 
 
 class SpoolArchive(_In):
+    """An archive or a restore (#7684, spec §5.4). An archive names its ``reason`` (the UI
+    requires one; the API keeps it optional) and may send the final weighing, read as
+    `SpoolEventAdd`'s is: ``final_reading_g`` is the scale's reading with the spool,
+    ``final_grams`` the filament, both together the net. A restore takes neither."""
+
     #: ``True`` takes the spool off the lists, ``False`` puts it back.
     archived: bool = True
+    reason: ArchiveReason | None = None
+    final_reading_g: Grams | None = None
+    final_grams: Grams | None = None
+
+    @model_validator(mode="after")
+    def _fits(self) -> SpoolArchive:
+        if not self.archived and (
+            self.reason is not None
+            or self.final_reading_g is not None
+            or self.final_grams is not None
+        ):
+            raise ValueError("a restore takes no reason or reading")
+        if (
+            self.final_reading_g is not None
+            and self.final_grams is not None
+            and self.final_reading_g < self.final_grams
+        ):
+            raise ValueError("final_reading_g is below final_grams")
+        return self
 
 
 class TagBind(_In):

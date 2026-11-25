@@ -432,6 +432,39 @@ def _hours_outside_dry(
     }
 
 
+def _closing_inputs(conn: Conn, spool_id: UUID) -> Row | None:
+    """What `ledger.closing` needs of the spool's row: its grams left, whether it was
+    added full and its effective label weight; ``None`` for no such spool."""
+    return conn.execute(
+        "SELECT s.grams_left, s.added_full, coalesce(s.label_weight_g, t.label_weight_g)"
+        " AS label_weight_g FROM filament_spools s"
+        " LEFT JOIN filament_spool_types t ON t.id = s.type_id WHERE s.id = %s",
+        (spool_id,),
+    ).fetchone()
+
+
+def _closing_on(
+    conn: Conn,
+    spool_id: UUID,
+    reason: m.ArchiveReason | None,
+    final_filament_g: float | None,
+    *,
+    grams_left: bool = True,
+) -> dict[str, Any]:
+    """The spool's closing now (`ledger.closing`, #7684): with ``final_filament_g`` the
+    final weighing's filament, else, when ``grams_left``, on the spool's grams left."""
+    spool = _closing_inputs(conn, spool_id)
+    assert spool is not None
+    return ledger.closing(
+        ledger.events(conn, spool_id),
+        label_weight_g=spool["label_weight_g"],
+        added_full=spool["added_full"],
+        final_filament_g=final_filament_g,
+        reason=reason,
+        grams_left=spool["grams_left"] if grams_left else None,
+    )
+
+
 def _final_filament(
     reading_g: float | None, grams: float | None, empty: EmptyWeight | None
 ) -> float | None:
@@ -1080,7 +1113,11 @@ class FilamentSpoolStore:
                 data={"changes": changes},
             )
         if patch.archived is not None:
-            self._archive(conn, current, patch.archived, actor, at)
+            closing = None
+            if patch.archived and current["archived_at"] is None:
+                # The pull's archive (``at`` is Bambuddy's time) records ``other`` (#7684).
+                closing = _closing_on(conn, spool_id, "other" if at is not None else None, None)
+            self._archive(conn, current, patch.archived, actor, at, data=closing)
         return bool(changes)
 
     def presets(self, spool_id: UUID) -> _Presets | None:
@@ -1210,27 +1247,13 @@ class FilamentSpoolStore:
         defaults = self._defaults()
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            spool = conn.execute(
-                "SELECT s.grams_left, s.added_full, coalesce(s.label_weight_g, t.label_weight_g)"
-                " AS label_weight_g FROM filament_spools s"
-                " LEFT JOIN filament_spool_types t ON t.id = s.type_id WHERE s.id = %s",
-                (spool_id,),
-            ).fetchone()
-            if spool is None:
+            if _closing_inputs(conn, spool_id) is None:
                 return None
             empty = effective_on(conn, spool_id)
-            history = ledger.events(conn, spool_id)
-        final = _final_filament(final_reading_g, final_grams, empty)
-        # A reading that cannot be resolved closes on nothing, not on the ledger.
-        weighed = final_reading_g is not None or final_grams is not None
-        closed = ledger.closing(
-            history,
-            label_weight_g=spool["label_weight_g"],
-            added_full=spool["added_full"],
-            final_filament_g=final,
-            reason=reason,
-            grams_left=None if weighed else spool["grams_left"],
-        )
+            final = _final_filament(final_reading_g, final_grams, empty)
+            # A reading that cannot be resolved closes on nothing, not on the ledger.
+            weighed = final_reading_g is not None or final_grams is not None
+            closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed)
         left = closed["final_filament_g"]
         return m.ClosingPreview(
             closing=m.Closing.model_validate(closed),
@@ -1239,10 +1262,53 @@ class FilamentSpoolStore:
             notices=_closing_notices(reason, left, defaults.finished_left_g),
         )
 
-    def archive(self, spool_id: UUID, archived: bool, *, actor: str) -> m.Spool | None:
+    def archive(
+        self,
+        spool_id: UUID,
+        archived: bool,
+        *,
+        actor: str,
+        reason: m.ArchiveReason | None = None,
+        final_reading_g: float | None = None,
+        final_grams: float | None = None,
+    ) -> m.Spool | None:
         """Take a spool off the lists (``True``) or put it back; ``None`` for no such
-        spool. Nothing is written when it is already so."""
-        return self.update(spool_id, m.SpoolPatch(archived=archived), actor=actor)
+        spool. Nothing is written when it is already so. An archive (#7684) first books the
+        final weighing when one is sent, as `add_event` books one (`_weigh_on`:
+        `NoEmptyWeightError`, `ReadingBelowEmptyError`), then the ``archived`` event with
+        the closing (`ledger.closing`) as its ``data``, in one transaction."""
+        if not archived:
+            return self.update(spool_id, m.SpoolPatch(archived=False), actor=actor)
+        defaults = self._defaults()
+        with self._pool.connection() as conn, conn.transaction():
+            # The tag before the spool, as every writer of bindings takes them.
+            conn.execute(
+                "SELECT t.id FROM filament_tags t JOIN filament_tag_bindings b"
+                " ON b.tag_id = t.id WHERE b.spool_id = %s AND b.unbound_at IS NULL"
+                " ORDER BY t.id FOR UPDATE OF t",
+                (spool_id,),
+            )
+            current = conn.execute(
+                f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s FOR UPDATE",
+                (spool_id,),
+            ).fetchone()
+            if current is None:
+                return None
+            if current["archived_at"] is None:
+                final: float | None = None
+                if final_reading_g is not None or final_grams is not None:
+                    weighing = m.SpoolEventAdd(
+                        kind="weighed",
+                        source="scale" if final_reading_g is not None else "person",
+                        grams=final_grams,
+                        reading_g=final_reading_g,
+                    )
+                    weighed = self._weigh_on(conn, spool_id, weighing, actor, {})
+                    assert weighed is not None
+                    final = weighed.grams_after
+                closing = _closing_on(conn, spool_id, reason, final)
+                self._archive(conn, current, True, actor, data=closing)
+            return self._spool(conn, spool_id, defaults, self._clock())
 
     def delete(self, spool_id: UUID, *, refusing: Iterable[m.EventKind] = _USED) -> bool:
         """Remove a spool that never printed, with its events, tag bindings and Bambuddy
@@ -1578,7 +1644,6 @@ class FilamentSpoolStore:
         ``edited`` event at the weighing's time, in the same transaction; it keeps
         ``expected_g`` and records no ``drift_g``, since the person explained the gap."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
-        grams = body.grams
         # Read before the store takes its connection (`FilamentDefaults`' rule).
         settings = self._defaults() if body.kind == "dried" else _SETTING_DEFAULTS
         with self._pool.connection() as conn, conn.transaction():
@@ -1607,49 +1672,62 @@ class FilamentSpoolStore:
                 temp = body.temp_c if "temp_c" in sent else defaults.temp_c
                 hours = body.hours if "hours" in sent else defaults.hours
                 data |= {"temp_c": temp, "hours": None if hours is None else float(hours)}
-            if body.kind == "weighed" and body.reading_g is not None:
-                empty = effective_on(conn, spool_id)
-                spool = conn.execute(
-                    "SELECT s.weight_locked, s.added_full,"
-                    " s.label_weight_g AS own_label_weight_g,"
-                    " coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
-                    " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
-                    " WHERE s.id = %s",
-                    (spool_id,),
-                ).fetchone()
-                assert spool is not None
-                if body.resolution is not None:
-                    grams = self._resolve_below_label(conn, spool_id, body, spool, actor, data)
-                elif grams is None:
-                    if empty is None:
-                        raise NoEmptyWeightError()
-                    grams = body.reading_g - empty.grams
-                    if grams < 0:
-                        raise ReadingBelowEmptyError()
-                expected = ledger.expected_before(
-                    ledger.events(conn, spool_id),
-                    body.at,
-                    weight_locked=spool["weight_locked"],
-                    label_weight_g=spool["label_weight_g"],
-                )
-                data |= ledger.breakdown(
-                    reading_g=body.reading_g,
-                    grams=grams,
-                    empty=empty,
-                    expected=expected,
-                    tared=body.resolution == "tared",
-                    resolved=body.resolution is not None,
-                )
+            if body.kind == "weighed":
+                return self._weigh_on(conn, spool_id, body, actor, data)
             return ledger.record(
-                conn,
-                spool_id,
-                body.kind,
-                source=body.source if body.kind == "weighed" else "person",
-                absolute_g=grams,
-                at=body.at,
-                actor=actor,
-                data=data,
+                conn, spool_id, body.kind, source="person", at=body.at, actor=actor, data=data
             )
+
+    def _weigh_on(
+        self, conn: Conn, spool_id: UUID, body: m.SpoolEventAdd, actor: str, data: dict[str, Any]
+    ) -> m.SpoolEvent | None:
+        """`add_event`'s weighing, under the spool's row lock: the breakdown of a
+        ``reading_g`` (#7682), a ``resolution``'s side effect (#7683), then the event. An
+        archive's final weighing goes through here too (#7684)."""
+        grams = body.grams
+        if body.reading_g is not None:
+            empty = effective_on(conn, spool_id)
+            spool = conn.execute(
+                "SELECT s.weight_locked, s.added_full,"
+                " s.label_weight_g AS own_label_weight_g,"
+                " coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
+                " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+                " WHERE s.id = %s",
+                (spool_id,),
+            ).fetchone()
+            assert spool is not None
+            if body.resolution is not None:
+                grams = self._resolve_below_label(conn, spool_id, body, spool, actor, data)
+            elif grams is None:
+                if empty is None:
+                    raise NoEmptyWeightError()
+                grams = body.reading_g - empty.grams
+                if grams < 0:
+                    raise ReadingBelowEmptyError()
+            expected = ledger.expected_before(
+                ledger.events(conn, spool_id),
+                body.at,
+                weight_locked=spool["weight_locked"],
+                label_weight_g=spool["label_weight_g"],
+            )
+            data |= ledger.breakdown(
+                reading_g=body.reading_g,
+                grams=grams,
+                empty=empty,
+                expected=expected,
+                tared=body.resolution == "tared",
+                resolved=body.resolution is not None,
+            )
+        return ledger.record(
+            conn,
+            spool_id,
+            "weighed",
+            source=body.source,
+            absolute_g=grams,
+            at=body.at,
+            actor=actor,
+            data=data,
+        )
 
     @staticmethod
     def _resolve_below_label(
@@ -1849,8 +1927,16 @@ class FilamentSpoolStore:
 
     @staticmethod
     def _archive(
-        conn: Conn, current: Row, archived: bool, actor: str, at: datetime | None = None
+        conn: Conn,
+        current: Row,
+        archived: bool,
+        actor: str,
+        at: datetime | None = None,
+        *,
+        data: dict[str, Any] | None = None,
     ) -> None:
+        """Archive or restore the locked row ``current``. ``data`` is the ``archived``
+        event's closing (`ledger.closing`, #7684); a restore carries none."""
         if (current["archived_at"] is not None) == archived:
             return
         if archived:
@@ -1882,7 +1968,12 @@ class FilamentSpoolStore:
                 (current["id"],),
             )
         ledger.record(
-            conn, current["id"], "archived" if archived else "restored", actor=actor, at=at
+            conn,
+            current["id"],
+            "archived" if archived else "restored",
+            actor=actor,
+            at=at,
+            data=data if archived else None,
         )
 
     @staticmethod

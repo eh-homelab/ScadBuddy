@@ -778,7 +778,7 @@ export function SpoolPage() {
           {!creating && saved && <NeedsDrying spool={saved} />}
         </div>
         {!creating && saved?.archived_at && (
-          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, false); await reload(true) })}>
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, { archived: false }); await reload(true) })}>
             <ArchiveRestoreIcon /> Restore
           </Button>
         )}
@@ -913,7 +913,7 @@ export function SpoolPage() {
             {!creating && saved && (
               <div className="flex flex-wrap items-center gap-2 border-t pt-3">
                 {!saved.archived_at && (
-                  <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, true); await reload(true) })}>
+                  <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, { archived: true }); await reload(true) })}>
                     <ArchiveIcon /> Archive
                   </Button>
                 )}

@@ -1073,19 +1073,37 @@ const tools: Tool[] = [
     label: 'Archive or restore a spool',
     description:
       '`archived: true` takes a spool off the lists (an empty or retired reel); `false` puts it back. A spool ' +
-      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
-      'the archived spool\'s tag is then cleared in Bambuddy.',
-    input: z.object({ spool_id: z.string().uuid(), archived: z.boolean().default(true) }),
+      'that has printed cannot be deleted, only archived. An archive takes `reason` (`finished`, `respooled`, ' +
+      '`damaged` or `other`; ask when the user did not say) and the final weighing (#7684): `final_reading_g`, the ' +
+      'scale reading with the spool, from which its empty weight is taken as filament_spool_add_event takes it, or ' +
+      '`final_grams`, the filament left, or both. The weighing is booked just before the `archived` event, whose ' +
+      '`data` keeps the closing: `reason`, `started_g`, `started_from`, `ledger_consumed_g`, `final_filament_g`, ' +
+      '`scale_consumed_g` and `drift_g` (negative: the scale found less than the ledger expected). 422 ' +
+      '`no_empty_weight` or `reading_below_empty` archives nothing; a restore takes no reason or reading. ' +
+      'Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
+      "the archived spool's tag is then cleared in Bambuddy.",
+    input: z.object({
+      spool_id: z.string().uuid(),
+      archived: z.boolean().default(true),
+      reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it is archived'),
+      final_reading_g: z.number().min(0).max(1_000_000).optional().describe('The scale reading with the spool, at the end'),
+      final_grams: z.number().min(0).max(1_000_000).optional().describe('The filament left at the end'),
+    }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/archive'],
-    summarize: ({ spool_id, archived }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}`,
-    handler: async ({ spool_id, archived }, { backend }) =>
+    summarize: ({ spool_id, archived, reason }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}${reason ? ` (${reason})` : ''}`,
+    handler: async ({ spool_id, archived, reason, final_reading_g, final_grams }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/archive', {
             params: { path: { spool_id } },
-            body: { archived },
+            body: {
+              archived,
+              ...(reason !== undefined ? { reason } : {}),
+              ...(final_reading_g !== undefined ? { final_reading_g } : {}),
+              ...(final_grams !== undefined ? { final_grams } : {}),
+            },
           }),
           `archive spool ${spool_id}`,
         ),

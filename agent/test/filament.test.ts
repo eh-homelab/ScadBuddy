@@ -707,6 +707,24 @@ describe('filament spool tools', () => {
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
   })
 
+  it('archives a spool with a reason and a final weighing (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/archive`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, archived_at: '2026-11-25T12:00:00Z' })
+      }),
+    )
+    const call = { spool_id: ROW, reason: 'finished', final_reading_g: 230 }
+    expect((await runTool(tool('filament_spool_archive'), call, ctx())).isError).toBeFalsy()
+    await runTool(tool('filament_spool_archive'), { spool_id: ROW, reason: 'damaged', final_grams: 12 }, ctx())
+    expect(bodies).toEqual([
+      { archived: true, reason: 'finished', final_reading_g: 230 },
+      { archived: true, reason: 'damaged', final_grams: 12 },
+    ])
+    expect(() => tool('filament_spool_archive').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
+  })
+
   it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {
     const calls: string[] = []
     const PROPS = `${BACKEND}/api/v1/entities/${encodeURIComponent(`spool:${ROW}`)}/properties`
