@@ -20,7 +20,11 @@ export const DEFAULT_SIZE: LabelSize = { widthMm: LABEL_WIDTH_MM, heightMm: LABE
 /** A page's width and height in mm (`label_templates.py` `PAGE_MM`). */
 export const PAGE_MM = { a4: [210, 297], letter: [215.9, 279.4] } as const
 
-/** The big text's font: Helvetica Bold, as the PDF draws it (`label_pdf.py` `BOLD`), so the two measure alike. */
+/**
+ * The browser label's big text font: Helvetica Bold. The PDF draws DejaVu Sans Bold since #7216
+ * (`label_fonts.py`, R-7216-1: the browser print keeps its own fonts), which is wider, so the
+ * PDF's big text can be a little smaller than the browser's.
+ */
 export const BIG_FONT_FAMILY = 'Helvetica, Arial, sans-serif'
 
 let measuring: CanvasRenderingContext2D | null | undefined

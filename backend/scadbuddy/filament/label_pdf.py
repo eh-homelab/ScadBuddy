@@ -3,8 +3,9 @@ the browser's labels (`frontend/src/components/filament/Label.tsx`) drawn with R
 (R-7157-3), at a template's size. The QR code is 19.8 mm with 2.6 mm of quiet zone on the
 left, centred top to bottom; the text column beside it is centred too. A roll template
 prints one label a page, a sheet template on its grid, and the `sheet` layout of a roll
-template packs the labels on Letter paper (R-7157-7). Text is Helvetica, and a character
-outside Latin-1 prints as ``?`` (R-7157-8)."""
+template packs the labels on Letter paper (R-7157-7). The text is DejaVu Sans with
+a Noto fallback chain, embedded (`label_fonts.py`; #7216, R-7216-1 to R-7216-3): each line is
+drawn as runs of one font each, measured by `label_fonts.width_mm`."""
 
 from __future__ import annotations
 
@@ -18,9 +19,9 @@ from reportlab.graphics import renderPDF
 from reportlab.graphics.barcode.qr import QrCodeWidget
 from reportlab.graphics.shapes import Drawing
 from reportlab.lib.units import mm
-from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
+from scadbuddy.filament.label_fonts import Weight, runs, width_mm
 from scadbuddy.filament.label_templates import PAGE_MM, LabelSheet, LabelTemplate
 
 Layout = Literal["roll", "sheet"]
@@ -40,8 +41,8 @@ PACKED_GAP_MM: Final = 2.0
 LEADING: Final = 1.25
 ELLIPSIS: Final = "…"
 
-BOLD: Final = "Helvetica-Bold"
-PLAIN: Final = "Helvetica"
+BOLD: Final[Weight] = "bold"
+PLAIN: Final[Weight] = "regular"
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ Label = SpoolLabel | PlaceLabel
 @dataclass(frozen=True)
 class _Line:
     text: str
-    font: str
+    font: Weight
     size_mm: float
     #: Space above the line, in mm.
     gap_mm: float = 0.0
@@ -82,7 +83,13 @@ def render_pdf(labels: Sequence[Label], template: LabelTemplate, layout: Layout)
     width, height = template.width_mm, template.height_mm
     sheet = sheet_of(template, layout)
     page = PAGE_MM[sheet.page] if sheet else (width, height)
-    canvas = Canvas(buffer, pagesize=(page[0] * mm, page[1] * mm), invariant=True)
+    canvas = Canvas(
+        buffer,
+        pagesize=(page[0] * mm, page[1] * mm),
+        invariant=True,
+        # types-reportlab types it as a number; ReportLab takes a font name.
+        initialFontName=_initial_font(),  # type: ignore[arg-type]
+    )
     canvas.setTitle("ScadBuddy labels")
     canvas.setAuthor("ScadBuddy")
     per_page = sheet.cols * sheet.rows if sheet else 1
@@ -154,8 +161,11 @@ def _draw_label(
         box = line.size_mm * line.leading
         # The baseline sits about a fifth of the size above the line box's foot.
         baseline = top - box + (box - line.size_mm) / 2 + 0.2 * line.size_mm
-        canvas.setFont(line.font, line.size_mm * mm)
-        canvas.drawString(text_x * mm, baseline * mm, line.text)
+        at = text_x
+        for name, part in runs(line.text, line.font):
+            canvas.setFont(name, line.size_mm * mm)
+            canvas.drawString(at * mm, baseline * mm, part)
+            at += width_mm(part, line.font, line.size_mm)
         top -= box
 
 
@@ -165,10 +175,20 @@ def _draw_qr(canvas: Canvas, payload: str, x: float, y: float) -> None:
     left, bottom, right, top = widget.getBounds()
     side = QR_MM * mm
     drawing = Drawing(
-        side, side, transform=[side / (right - left), 0, 0, side / (top - bottom), 0, 0]
+        side,
+        side,
+        transform=[side / (right - left), 0, 0, side / (top - bottom), 0, 0],
+        initialFontName=_initial_font(),
     )
     drawing.add(widget)
     renderPDF.draw(drawing, canvas, x * mm, y * mm)
+
+
+def _initial_font() -> str:
+    """DejaVu's registered name, for the font a page and a QR drawing start in. ReportLab's
+    default is Helvetica, which the PDF would then name but not embed. A missing DejaVu
+    raises `LabelFontMissingError` here, before any page is drawn."""
+    return runs(" ", PLAIN)[0][0]
 
 
 def _big_size(text: str, cap: float, column: float) -> float:
@@ -181,34 +201,31 @@ def _big_size(text: str, cap: float, column: float) -> float:
 def _spool_lines(label: SpoolLabel, column: float) -> list[_Line]:
     number = f"#{label.number}"
     lines = [_Line(number, BOLD, _big_size(number, 9, column), leading=1.0)]
-    for text, font, size in (
+    rows: tuple[tuple[str | None, Weight, float], ...] = (
         (label.material, BOLD, 3.2),
         (label.colour, PLAIN, 3.0),
         (label.brand, PLAIN, 2.6),
-    ):
+    )
+    for text, font, size in rows:
         if text:
-            cut = _fit(_latin(text), font, size, column)
+            cut = _fit(text, font, size, column)
             lines.append(_Line(cut, font, size, gap_mm=1.0 if len(lines) == 1 else 0.0))
     return lines
 
 
 def _place_lines(label: PlaceLabel, column: float) -> list[_Line]:
-    code = _latin(label.code)
+    code = label.code
     lines = [_Line(code, BOLD, _big_size(code, 8, column), leading=1.0)]
-    for at, text in enumerate(_wrap(_latin(label.name), BOLD, 3.2, column, 2)):
+    for at, text in enumerate(_wrap(label.name, BOLD, 3.2, column, 2)):
         lines.append(_Line(text, BOLD, 3.2, gap_mm=1.0 if at == 0 else 0.0))
     return lines
 
 
-def _latin(text: str) -> str:
-    return text.encode("latin-1", "replace").decode("latin-1")
+def _width(text: str, font: Weight, size: float) -> float:
+    return width_mm(text, font, size)
 
 
-def _width(text: str, font: str, size: float) -> float:
-    return stringWidth(text, font, size * mm) / mm
-
-
-def _fit(text: str, font: str, size: float, column: float) -> str:
+def _fit(text: str, font: Weight, size: float, column: float) -> str:
     """``text``, cut with an ellipsis to fit ``column`` mm."""
     if _width(text, font, size) <= column:
         return text
@@ -217,7 +234,7 @@ def _fit(text: str, font: str, size: float, column: float) -> str:
     return text.rstrip() + ELLIPSIS
 
 
-def _wrap(text: str, font: str, size: float, column: float, most: int) -> list[str]:
+def _wrap(text: str, font: Weight, size: float, column: float, most: int) -> list[str]:
     """``text`` in at most ``most`` lines of ``column`` mm, broken at spaces, the last cut.
     A word wider than the column is broken where it overflows, and the rest goes on the
     next line, so only the last line is ever cut."""

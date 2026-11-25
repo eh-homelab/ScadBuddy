@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-import base64
 import re
-import zlib
 
+import pypdfium2
 import pytest
 from pydantic import ValidationError
 
-from scadbuddy.filament import label_pdf
+from scadbuddy.filament import label_pdf, label_png
+from scadbuddy.filament.label_fonts import width_mm
 from scadbuddy.filament.label_pdf import PlaceLabel, SpoolLabel, render_pdf
 from scadbuddy.filament.label_templates import BY_ID, LabelTemplateChoice
 
@@ -22,12 +22,41 @@ SPOOL = SpoolLabel(
 PLACE = PlaceLabel(code="L-7", name="H2C AMS 1 slot 2", qr="https://sb.example/x/L-7")
 
 
-def _streams(pdf: bytes) -> str:
-    """Every content stream's text: ReportLab writes them ASCII85, then Flate."""
+def _text(pdf: bytes) -> str:
+    """Every page's text as PDFium reads it, the pages joined by newlines."""
+    return "\n".join(text for text, _ in _pages(pdf))
+
+
+def _lines(pdf: bytes) -> list[str]:
+    """Each line of text that PDFium reads, in page order."""
+    return [line.strip() for line in _text(pdf).splitlines() if line.strip()]
+
+
+def _sizes(pdf: bytes) -> list[float]:
+    """The font size, in points, of each character PDFium reads."""
+    return [size for _, sizes in _pages(pdf) for size in sizes]
+
+
+def _pages(pdf: bytes) -> list[tuple[str, list[float]]]:
+    """Each page's text and its characters' font sizes. PDFium is not thread-safe, so the
+    read holds the labels' PDFium lock (`label_png._PDFIUM_LOCK`)."""
     out = []
-    for raw in re.findall(rb"stream\r?\n(.*?)~>", pdf, re.S):
-        out.append(zlib.decompress(base64.a85decode(raw.strip())).decode("latin-1"))
-    return "\n".join(out)
+    with label_png._PDFIUM_LOCK:
+        document = pypdfium2.PdfDocument(pdf)
+        try:
+            for at in range(len(document)):
+                page = document[at]
+                textpage = page.get_textpage()
+                sizes = [
+                    pypdfium2.raw.FPDFText_GetFontSize(textpage, index)
+                    for index in range(textpage.count_chars())
+                ]
+                out.append((textpage.get_text_range(), sizes))
+                textpage.close()
+                page.close()
+        finally:
+            document.close()
+    return out
 
 
 def _boxes(pdf: bytes) -> list[tuple[float, float]]:
@@ -45,19 +74,22 @@ def test_a_roll_label_is_one_page_of_its_own_size() -> None:
 
 
 def test_the_spool_label_carries_the_browser_labels_lines() -> None:
-    text = _streams(render_pdf([SPOOL], BY_ID["roll_50x25"], "roll"))
-    for line in ("(#12)", "(PLA Basic)", "(Jade White)", "(Bambu Lab)"):
-        assert line in text
+    lines = _lines(render_pdf([SPOOL], BY_ID["roll_50x25"], "roll"))
+    assert lines == ["#12", "PLA Basic", "Jade White", "Bambu Lab"]
 
 
 def test_the_place_label_carries_its_code_and_name_in_two_lines() -> None:
-    text = _streams(render_pdf([PLACE], BY_ID["roll_50x25"], "roll"))
-    assert "(L-7)" in text
     # 23.5 mm of text column: the name breaks at a space, as the browser's `line-clamp-2`.
-    assert "(H2C AMS 1)" in text
-    assert "(slot 2)" in text
+    assert _lines(render_pdf([PLACE], BY_ID["roll_50x25"], "roll")) == [
+        "L-7",
+        "H2C AMS 1",
+        "slot 2",
+    ]
     # A wider label keeps it on one line.
-    assert "(H2C AMS 1 slot 2)" in _streams(render_pdf([PLACE], BY_ID["ams_holder_75x55"], "roll"))
+    assert _lines(render_pdf([PLACE], BY_ID["ams_holder_75x55"], "roll")) == [
+        "L-7",
+        "H2C AMS 1 slot 2",
+    ]
 
 
 def test_each_label_draws_the_qr_code_of_its_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -93,8 +125,8 @@ def test_a_long_name_is_cut_with_an_ellipsis() -> None:
     long = SpoolLabel(
         number=3, material="PLA " + "Silk " * 20, colour=None, brand=None, qr="scadbuddy:spool:y"
     )
-    text = _streams(render_pdf([long], BY_ID["roll_50x25"], "roll"))
-    assert "\\205" in text or "\x85" in text  # WinAnsi's ellipsis
+    text = _text(render_pdf([long], BY_ID["roll_50x25"], "roll"))
+    assert label_pdf.ELLIPSIS in text
     assert "Silk " * 20 not in text
 
 
@@ -108,10 +140,10 @@ def test_a_place_name_of_one_long_word_runs_onto_the_second_line() -> None:
     assert lines[0] and not lines[0].endswith(label_pdf.ELLIPSIS)
     assert lines[1].endswith(label_pdf.ELLIPSIS)
     assert word[len(lines[0]) :].startswith(lines[1][:-1])
-    text = _streams(
+    drawn = _lines(
         render_pdf([PlaceLabel("L-1", word, "https://x/x/L-1")], BY_ID["roll_50x25"], "roll")
     )
-    assert f"({lines[0]})" in text
+    assert drawn[1] == lines[0]
 
 
 def test_a_column_narrower_than_one_character_leaves_no_empty_line() -> None:
@@ -140,20 +172,40 @@ def test_the_pdf_draws_the_big_text_at_the_size_its_label_column_allows() -> Non
     column = 40 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
     want = label_pdf._big_size("#123456", 9, column)
     assert want < 9
-    text = _streams(render_pdf([long], template, "roll"))
-    sizes = [float(m) for m in re.findall(r"/F\d+ ([\d.]+) Tf", text)]
-    # The page's initial 12 pt font is set first; the number is the first size set for a label.
-    assert any(size == pytest.approx(want * MM, abs=0.01) for size in sizes)
+    sizes = _sizes(render_pdf([long], template, "roll"))
+    # The number is the label's first line, so its first character's size is the number's.
+    assert sizes[0] == pytest.approx(want * MM, abs=0.01)
     # Not the size the 50 mm label's column would give.
     wide = label_pdf._big_size(
         "#123456", 9, 50 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
     )
-    assert wide * MM not in sizes
+    assert all(size != pytest.approx(wide * MM, abs=0.01) for size in sizes)
 
 
-def test_text_outside_latin_1_prints_as_a_question_mark() -> None:
-    odd = SpoolLabel(number=4, material="PLA", colour="翡翠", brand=None, qr="scadbuddy:spool:z")
-    assert "(??)" in _streams(render_pdf([odd], BY_ID["roll_50x25"], "roll"))
+def test_a_name_outside_latin_1_prints_as_itself() -> None:
+    odd = SpoolLabel(number=4, material="PLA", colour="Пётр", brand="Ζεύς", qr="scadbuddy:spool:z")
+    text = _text(render_pdf([odd], BY_ID["roll_50x25"], "roll"))
+    assert "Пётр" in text
+    assert "Ζεύς" in text
+    assert "?" not in text
+
+
+def test_the_fonts_are_embedded() -> None:
+    pdf = render_pdf([SPOOL, PLACE], BY_ID["roll_50x25"], "roll")
+    assert b"/FontFile2" in pdf
+    assert b"/BaseFont /Helvetica" not in pdf
+
+
+def test_a_mixed_script_name_is_cut_by_its_measured_runs() -> None:
+    odd = SpoolLabel(
+        number=5, material=None, colour="Пётр 3D ✓ 😀 " * 6, brand=None, qr="scadbuddy:spool:m"
+    )
+    lines = _lines(render_pdf([odd], BY_ID["roll_50x25"], "roll"))
+    column = 50 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
+    line = lines[1]
+    assert line.endswith(label_pdf.ELLIPSIS)
+    assert line.startswith("Пётр 3D ✓")
+    assert width_mm(line, "regular", 3.0) <= column
 
 
 def test_a_custom_choice_needs_both_sizes_in_bounds() -> None:

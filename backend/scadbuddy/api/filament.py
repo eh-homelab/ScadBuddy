@@ -64,6 +64,7 @@ from scadbuddy.crud.idempotency import (
 )
 from scadbuddy.filament import (
     capture,
+    label_fonts,
     label_pdf,
     label_png,
     label_templates,
@@ -2633,8 +2634,11 @@ async def list_label_templates() -> m.LabelTemplates:
         "`L-<n>.png` for one label a page and `sheet-<n>.png` for a sheet. It reads "
         "ScadBuddy's own rows only and writes nothing. 404 for an unknown spool or place, "
         "409 `no_label_base` for a place label with no label address and no public URL, 422 "
-        "for a bad body or a place address too long for its QR code, and 422 "
-        "`png_too_large` for PNGs of more than 400 megapixels in all."
+        "for a bad body or a place address too long for its QR code, 422 "
+        "`png_too_large` for PNGs of more than 400 megapixels in all, and 503 "
+        "`label_font_missing` when the server lacks the labels font (DejaVu Sans), which "
+        "the answer names. The text is DejaVu Sans with a Noto fallback; a character no "
+        "font holds (CJK among them) prints as U+FFFD."
     ),
 )
 async def render_labels(
@@ -2681,7 +2685,13 @@ async def render_labels(
         ) from None
     except LabelPayloadTooLongError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
-    pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, template, body.layout)
+    try:
+        pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, template, body.layout)
+    except label_fonts.LabelFontMissingError as exc:
+        # R-7216-4: never Helvetica, which would print `?` for what DejaVu holds.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), code="label_font_missing"
+        ) from None
     content, media_type, name = pdf, "application/pdf", "labels.pdf"
     if form == "png":
         pngs = await asyncio.to_thread(label_png.render_pngs, pdf, dpi)

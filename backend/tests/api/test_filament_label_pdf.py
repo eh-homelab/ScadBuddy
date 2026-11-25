@@ -8,13 +8,14 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from scadbuddy.filament import label_pdf
+from scadbuddy.filament import label_fonts, label_pdf
 from scadbuddy.filament.label_pdf import Label, Layout
 from scadbuddy.filament.label_templates import LabelTemplate
 
@@ -294,3 +295,21 @@ def test_the_output_setting_round_trips(client: TestClient) -> None:
     assert client.put(SETTINGS, json={name: {"fields": []}}).status_code == 422
     assert client.put(SETTINGS, json={name: None}).status_code == 200
     assert client.get(SETTINGS).json()[name] == default
+
+
+def test_a_missing_label_font_is_a_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # R-7216-4: no Helvetica fallback, which would bring back the `?`.
+    missing = tmp_path / "DejaVuSans.ttf"
+    monkeypatch.setitem(label_fonts.DEJAVU, "regular", missing)
+    monkeypatch.setitem(label_fonts.DEJAVU, "bold", missing)
+    label_fonts.reset_for_tests()
+    try:
+        answer = client.post(PDF, json={"spool_ids": [_spool(client)["id"]]})
+    finally:
+        monkeypatch.undo()
+        label_fonts.reset_for_tests()
+    assert answer.status_code == 503, answer.text
+    assert answer.json()["code"] == "label_font_missing"
+    assert str(missing) in answer.text

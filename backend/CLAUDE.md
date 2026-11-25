@@ -1169,7 +1169,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
   (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
-  QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
+  QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST
   /filament/labels` (route `render_labels`: the file as the body, at most 100 labels; in
   `NOT_NUDGED`). The labels as PNG (#7216, plan
   `docs/superpowers/plans/2026-11-25-label-outputs.md` R-7216-5 to R-7216-8):
@@ -1181,7 +1181,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
   entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`
   counts every page before anything is drawn: past `MAX_PNG_PIXELS` (400 megapixels) the
-  route answers 422 `png_too_large`. Agent tools: `filament_code_resolve`, `filament_location_get`,
+  route answers 422 `png_too_large`. The text (#7216 R-7216-1 to R-7216-4): `label_fonts.py`
+  draws each line as runs of one font each, DejaVu Sans (`DEJAVU`), else the first font of the
+  Noto chain `FALLBACKS` in `FALLBACK_DIR` that holds the character, else U+FFFD from DejaVu;
+  each font is loaded and registered with ReportLab once per process, when a character needs
+  it, and embedded as a subset; `label_pdf.py` measures every width through
+  `label_fonts.width_mm`. A missing DejaVu file is `LabelFontMissingError`, which the route
+  answers 503 `label_font_missing`, never Helvetica; a missing Noto file is skipped and logged
+  once. No shaping, no right-to-left order and no CJK font: #7707. The tests read the text back
+  with pypdfium2; a test that needs a Noto file skips when it is absent, and fails instead with
+  `SCADBUDDY_TEST_FONTS_REQUIRED=1`, which CI's `backend-pytest` sets (the `test` image has
+  `fonts-noto-core`). Agent tools: `filament_code_resolve`, `filament_location_get`,
   `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`

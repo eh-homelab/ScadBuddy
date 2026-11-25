@@ -83,7 +83,7 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
 - **R-7216-3 No shaping, no right-to-left order, no CJK font in this change.** Arabic prints
   unjoined, Hebrew and Arabic print in stored order, and CJK prints as U+FFFD. Task 2 files a
   follow-up issue for `uharfbuzz` with `rlbidi`, and for a CJK font, which changes the render
-  image's font set. — Each one is a new dependency or an image change with a review of its own. —
+  image's font set: #7707. — Each one is a new dependency or an image change with a review of its own. —
   If wrong: right-to-left and CJK names stay poor until that issue.
 - **R-7216-4 A missing DejaVu file is an error, never Helvetica.** `POST /filament/labels` answers
   503 `label_font_missing` and names the path. — A silent fallback brings back the `?`. — If wrong:

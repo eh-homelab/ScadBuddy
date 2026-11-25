@@ -348,6 +348,15 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
   a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
   `png_too_large`: choose PDF, a lower dpi or fewer labels.
+- What the labels file prints (#7216, R-7216-1 to R-7216-4): the text is DejaVu Sans, embedded,
+  so a name in Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic or Lao prints as
+  itself, not as `?`. A character DejaVu lacks takes the first Noto font of a fixed chain that
+  has it (Devanagari, Bengali, Tamil, Sinhala, Thai, Khmer, Myanmar and Ethiopic among them;
+  `backend/scadbuddy/filament/label_fonts.py` `FALLBACKS`). A character no font in the image
+  holds, CJK among them, prints as U+FFFD. Not done yet (#7707): Arabic prints unjoined,
+  Indic scripts print with no shaping, and Hebrew and Arabic print in stored order, not right
+  to left. When the server lacks DejaVu Sans, the route answers 503 `label_font_missing`,
+  which names the missing file. The browser print keeps the browser's own fonts.
 
 ## Tests
 
