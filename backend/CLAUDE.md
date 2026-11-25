@@ -1152,8 +1152,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   starts it answers 200 when MediaMTX answers and holds the paths and, in the recorder, the
   clock is within 2 s: the follower does not count yet. `/readyz` answers 503 until the
   follower runs, a full reconcile has put the paths and `/healthz` would pass; the recorder
-  also waits until every recorded printer has delivered a segment since start, or none for
-  `STALL_SECONDS` (120 s), so a rolling update (with `minReadySeconds: 30`) stops the other
+  also waits until every printer it recorded at its first full reconcile has delivered a
+  segment since start, or none for `STALL_SECONDS` (120 s); a printer added later does not
+  count. So a rolling update (with `minReadySeconds: 30`) stops the other
   recorder only once this one holds video. `follow.py` follows the filtered change stream,
   `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
   (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
