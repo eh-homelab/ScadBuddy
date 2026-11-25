@@ -169,6 +169,7 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
+    NoEmptyWeightError,
     OverrideKindError,
     ResetBeforeLinkError,
     SpoolBambuddyLinkedError,
@@ -1619,7 +1620,15 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
     summary="Record a weighing, a drying or a consumed reset",
     description=(
         "`weighed` with `grams` (the filament left, without the empty spool) is a new "
-        "reading: `grams_left` starts again from it. `dried` takes `temp_c` and `hours`; "
+        "reading: `grams_left` starts again from it. A weighing sent with `reading_g` (the "
+        "scale's reading with the spool) keeps its breakdown in the event's `data` (#7682): "
+        "`reading_g`, `empty_g`, `empty_source` (`insert`, or `person` when the client took "
+        "something else off), `empty_basis`, `empty_name`, `expected_g` (the grams left the "
+        "ledger gave just before it, null with no reading before) and `drift_g` "
+        "(`grams - expected_g`). With `reading_g` and no `grams`, the filament is the reading "
+        "less the spool's effective empty weight (its insert's, else its type's insert's); a "
+        "spool with none is a 422 with `code` `no_empty_weight`. "
+        "`dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
         "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
         "`filament_drying_hours`), and `null` records none. `consumed_reset` takes "
@@ -1643,6 +1652,10 @@ async def add_spool_event(
             str(exc),
             code="reset_before_link",
             linked_at=exc.linked_at.isoformat(),
+        ) from None
+    except NoEmptyWeightError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="no_empty_weight"
         ) from None
     if made is None:
         raise _no_spool(spool_id)

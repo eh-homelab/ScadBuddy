@@ -199,6 +199,42 @@ def test_a_spool_is_made_read_changed_and_weighed(client: TestClient) -> None:
     assert client.get(one).json()["grams_left"] == 420
 
 
+def _insert(client: TestClient) -> str:
+    made = client.post(f"{URL}/insert-types", json={"name": "Plastic", "empty_weight_g": 200})
+    assert made.status_code == 201, made.text
+    insert: str = made.json()["id"]
+    return insert
+
+
+def test_a_weighing_with_a_reading_answers_its_breakdown(client: TestClient) -> None:
+    """#7682: a reading alone takes the insert off, keeps the breakdown and is the detail's
+    `last_weighing`."""
+    made = _spool(client, label_weight_g=1000, insert_type_id=_insert(client))
+    one = f"{SPOOLS}/{made['id']}"
+    first = client.post(f"{one}/events", json={"kind": "weighed", "source": "scale", "grams": 1000})
+    assert first.status_code == 201, first.text
+    weighed = client.post(
+        f"{one}/events", json={"kind": "weighed", "source": "scale", "reading_g": 1180}
+    )
+    assert weighed.status_code == 201, weighed.text
+    assert weighed.json()["grams_after"] == 980
+    data = weighed.json()["data"]
+    assert data["drift_g"] == -20.0 and data["expected_g"] == 1000
+    assert (data["empty_g"], data["empty_source"], data["empty_name"]) == (200, "insert", "Plastic")
+    spool = client.get(one).json()
+    assert spool["last_weighing"]["id"] == weighed.json()["id"]
+    assert spool["last_drift_g"] == -20.0 and spool["drift_notice"] is True
+
+
+def test_a_reading_alone_needs_an_empty_weight(client: TestClient) -> None:
+    made = _spool(client, label_weight_g=1000)
+    one = f"{SPOOLS}/{made['id']}"
+    refused = client.post(f"{one}/events", json={"kind": "weighed", "reading_g": 1180})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "no_empty_weight"
+    assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created"]
+
+
 def test_patching_a_colour_to_null_returns_the_spool_to_its_types_colour(
     client: TestClient,
 ) -> None:
