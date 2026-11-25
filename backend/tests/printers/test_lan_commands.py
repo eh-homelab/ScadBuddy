@@ -14,6 +14,7 @@ from scadbuddy.printers.lan_commands import (
     RIGHT_DEFAULT,
     UNLOAD_DEFAULT,
     KProfileRow,
+    UnsupportedUnitError,
     ams_change_filament_load,
     ams_change_filament_unload,
     ams_filament_setting,
@@ -99,7 +100,6 @@ def test_wire_ids(
         (1, 2, 6),
         (2, 1, 9),
         (3, 3, 15),
-        (4, 1, 17),  # an AMS is ams*4+tray (P4)
         (128, 0, 0),  # HT-A: (ams-128)*4
         (130, 0, 8),  # HT-C
         (255, 0, 0),  # Ext-L / the single holder: the raw tray_id
@@ -140,6 +140,23 @@ def test_cali_set_slot_tray_index(ams_id: int, tray_id: int, cali_tray: int) -> 
             "sequence_id": "5",
         }
     }
+
+
+@pytest.mark.parametrize("ams_id", [4, 15])
+def test_cali_set_slot_refuses_an_ams_past_3(ams_id: int) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        cali_set_tray(ams_id, 1)
+    with pytest.raises(UnsupportedUnitError):
+        extrusion_cali_set_slot(
+            ams_id,
+            1,
+            k_value=0.02,
+            nozzle_diameter="0.4",
+            filament_id="GFL05",
+            setting_id="GFSL05_07",
+            name="PLA Basic",
+            seq="5",
+        )
 
 
 def test_cali_set_sends_tray_zero_ams_zero_and_no_n_coef() -> None:

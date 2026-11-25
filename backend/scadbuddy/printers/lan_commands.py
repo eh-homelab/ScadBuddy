@@ -39,6 +39,10 @@ RIGHT_DEFAULT = 215
 _FAILED = "printer reported failure"
 
 
+class UnsupportedUnitError(ValueError):
+    """A unit whose wire id no source gives (P22)."""
+
+
 @dataclass(frozen=True)
 class KProfileRow:
     """One ``filaments`` entry of ``extrusion_cali_set``. ``ams_id`` and ``tray_id`` are
@@ -112,19 +116,22 @@ def wire_slot(ams_id: int, tray_id: int, *, external_count: int) -> WireSlot:
 
 
 def cali_set_tray(ams_id: int, tray_id: int) -> int:
-    """The flat tray index of ``extrusion_cali_set_slot`` (P4): an AMS ``ams*4+tray``, an
+    """The flat tray index of ``extrusion_cali_set_slot`` (P4): an AMS 0-3 ``ams*4+tray``, an
     AMS-HT ``(ams-128)*4+tray``, an external holder its raw ``tray_id`` (0 or 1), as
     Bambuddy's configure route computes it:
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/api/routes/printers.py#L3280-L3287
     with ``legacy_tray_index``:
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/utils/tray_ids.py#L132-L138
 
-    Bambuddy sends an AMS past 3 its raw ``tray_id``; P4 gives every AMS ``ams*4+tray``."""
+    Any other unit, an AMS 4-15 among them, raises ``UnsupportedUnitError`` (P22): Bambuddy
+    sends it its raw ``tray_id``, which is AMS 0's index, and no source gives a right one."""
     if _is_ht(ams_id):
         return (ams_id - AMS_HT_IDS.start) * 4 + tray_id
     if ams_id == EXTERNAL:
         return tray_id
-    return ams_id * 4 + tray_id
+    if 0 <= ams_id <= 3:
+        return ams_id * 4 + tray_id
+    raise UnsupportedUnitError(f"no known K set tray index for unit {ams_id}")
 
 
 def extrusion_cali_get(nozzle_diameter: str, seq: str) -> dict[str, Any]:
