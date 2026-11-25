@@ -379,3 +379,36 @@ func TestAnEventWithATopicOutsideItsKindIsNotPublished(t *testing.T) {
 	expect(t, ok, true)
 	expect(t, event["topics"], []any{"fleet:agent:x"})
 }
+
+func TestAnInboxPageHoldsAtMostFourMiBOfText(t *testing.T) {
+	a := newFleet(t)
+	ann, bob := a.agent(), a.agent()
+	mib := strings.Repeat("x", 1<<20)
+	var sent []float64
+	for _, size := range []int{1, 2, 2, 5, 1} { // MiB
+		out := a.send(ann, handle(bob), strings.Repeat(mib, size)[:size<<20-1])
+		expect(t, out.status, 200)
+		sent = append(sent, out.body["seq"].(float64))
+	}
+	// 1 + 2 fit; the next 2 would pass 4 MiB.
+	peeked, more := a.inbox(bob, "?peek=true")
+	expect(t, seqs(peeked), sent[:2])
+	expect(t, more, true)
+	page, more := a.inbox(bob, "")
+	expect(t, seqs(page), sent[:2])
+	expect(t, more, true)
+	expect(t, len(page[1]["text"].(string)), 2<<20-1)
+	// 2 fits alone; 2 + 5 does not.
+	page, more = a.inbox(bob, "")
+	expect(t, seqs(page), sent[2:3])
+	expect(t, more, true)
+	// A message larger than the budget comes alone.
+	page, more = a.inbox(bob, "")
+	expect(t, seqs(page), sent[3:4])
+	expect(t, len(page[0]["text"].(string)), 5<<20-1)
+	expect(t, more, true)
+	// The limit still applies under the budget.
+	page, more = a.inbox(bob, "?limit=1")
+	expect(t, seqs(page), sent[4:])
+	expect(t, more, false)
+}

@@ -50,7 +50,7 @@ Every tool has a required `session_id`. Validation errors are tool errors
 |---|---|
 | `fleet_join` / `fleet_leave` | Join (and create) or leave a channel |
 | `fleet_send` | A DM (`agent`, a handle) or a channel post (`channel`), exactly one. Returns `seq` |
-| `fleet_inbox` | Messages after the cursor, paged (`limit`); moves the cursor unless `peek` |
+| `fleet_inbox` | Messages after the cursor, paged (`limit`; a host may also bound a page's bytes, as ScadBuddy's core does at 4 MiB of text); moves the cursor unless `peek` |
 | `fleet_rewind` | Sets the cursor back to a `seq` |
 | `fleet_channels` | Channels, members, this agent's unread count |
 | `fleet_agents` | Agents: handle, last seen |

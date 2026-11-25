@@ -22,7 +22,7 @@ over HTTP (`TestNoCoreImports` checks it).
   | `Join` / `Leave` | `PUT` / `DELETE /channels/{name}/members/{session_id}` |
   | `Channels` | `GET /agents/{session_id}/channels` (`{"channels"}`) |
   | `Send` | `POST /messages` `{"from", "channel" or "agent", "text"}` (`{"seq", "recipients"}`) |
-  | `Inbox` | `GET /agents/{session_id}/inbox?limit=&peek=` (`{"messages", "more"}`) |
+  | `Inbox` | `GET /agents/{session_id}/inbox?limit=&peek=` (`{"messages", "more"}`; a page holds at most 4 MiB of text, and at least one message) |
   | `Rewind` | `PUT /agents/{session_id}/cursor` `{"seq"}` |
 
   A problem's `reason` maps to an error that `errors.Is` finds: `unknown-agent` (404)

@@ -34,6 +34,9 @@ const (
 	smallBodyMax   = 1 << 10
 	pageDefault    = 50
 	pageMax        = 200
+	// pageBytes bounds the message text of one inbox page: a page stops before the
+	// message that would take it past this, but always holds at least one.
+	pageBytes = 4 << 20
 	// sendLock orders the sends, so seqs commit in order and an inbox's cursor never passes
 	// a seq that commits later.
 	sendLock        = int64(0x464c_4545_5453_4e44) // "FLEETSND"
@@ -405,7 +408,9 @@ type message struct {
 }
 
 // inbox is up to limit deliveries above the agent's cursor, oldest first, and whether more
-// wait. Unless peek, the cursor moves to the last one in the same transaction.
+// wait. A page also stops before the message that would take its text past pageBytes, but
+// always holds at least one. Unless peek, the cursor moves to the last one returned, in the
+// same transaction.
 func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 	session, err := p.UUID("session_id")
 	if err != nil {
@@ -427,27 +432,42 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT m.seq, f.handle, coalesce(m.channel, ''), coalesce(t.handle, ''),
-				m.text, m.sent_at
-			FROM fleet_deliveries d
+		// page is the next limit+1 deliveries with the running sum of their text's bytes
+		// (octet_length reads a stored text's size without reading the text). Only the rows
+		// that fit read their text.
+		rows, err := tx.Query(ctx, `WITH page AS (
+				SELECT d.seq, row_number() OVER w AS n, sum(octet_length(m.text)) OVER w AS bytes
+				FROM fleet_deliveries d JOIN fleet_messages m USING (seq)
+				WHERE d.session_id = $1 AND d.seq > $2
+				WINDOW w AS (ORDER BY d.seq)
+				ORDER BY d.seq LIMIT $3)
+			SELECT p.n = 1 OR p.bytes <= $4, m.seq, f.handle, coalesce(m.channel, ''),
+				coalesce(t.handle, ''), CASE WHEN p.n = 1 OR p.bytes <= $4 THEN m.text ELSE '' END,
+				m.sent_at
+			FROM page p
 			JOIN fleet_messages m USING (seq)
 			JOIN fleet_agents f ON f.session_id = m.from_session
 			LEFT JOIN fleet_agents t ON t.session_id = m.to_session
-			WHERE d.session_id = $1 AND d.seq > $2
-			ORDER BY d.seq LIMIT $3`, session, cursor, limit+1)
+			ORDER BY p.seq`, session, cursor, limit+1, pageBytes)
 		if err != nil {
 			return err
 		}
+		var fits []bool
 		out, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (message, error) {
 			var m message
-			return m, row.Scan(&m.Seq, &m.From, &m.Channel, &m.To, &m.Text, &m.SentAt)
+			var fit bool
+			err := row.Scan(&fit, &m.Seq, &m.From, &m.Channel, &m.To, &m.Text, &m.SentAt)
+			fits = append(fits, fit)
+			return m, err
 		})
 		if err != nil {
 			return err
 		}
-		if int64(len(out)) > limit {
-			out, more = out[:limit], true
+		n := 0
+		for n < len(out) && int64(n) < limit && fits[n] {
+			n++
 		}
+		out, more = out[:n], n < len(out)
 		if peek || len(out) == 0 {
 			return nil
 		}
