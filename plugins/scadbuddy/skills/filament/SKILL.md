@@ -206,6 +206,34 @@ uncosted one has an empty own cost too; a costed one has its own cost:
    Read it again with `filament_invoice_get` first. The person may have changed
    it on the page.
 
+### A line that is not filament (#7648)
+
+An invoice can hold goods that are not filament, for example NFC tags, nozzles,
+desiccant or tools. A filament invoice line always makes or costs spools. So
+never put such goods on a line. This rule holds until inventory phase 3 (#7068)
+gives invoices a line for any item.
+
+- **Record the goods as inventory.** Call `inventory_item_list` with `q` first
+  (diff before you create). Then call `inventory_item_upsert` with the kind that
+  fits (`inventory_kind_list`: `consumable`, `hardware`, `nozzle` and so on).
+  - For a kind that tracks lots, call `inventory_lot_receive` with `qty` and
+    `total_cost_minor`. The cost is the line subtotal + its tax + its share of
+    shipping (rule 2). Set `received_at` to the delivery date. Put the supplier
+    and the order number in `note`.
+  - For a kind that tracks units (a nozzle, a tool), call
+    `inventory_unit_receive` with `cost_minor` per unit.
+- **No filament on the invoice:** ask the person what to do with the draft:
+  leave it, delete it (`filament_invoice_delete`), or keep only the inventory
+  records. Never confirm a draft with no lines. It cannot reconcile.
+- **Filament and other goods on one invoice:** the filament lines go on the
+  invoice. Share the tax and the shipping over every line by value, so that the
+  other goods take their share. Set the header's `subtotal`, `tax`, `shipping`
+  and `total` to the filament lines' share only, so that the invoice reconciles.
+  Then start the invoice `note` with `Not filament:`, the printed totals, and
+  each other line (its description, quantity, subtotal and the inventory item it
+  went to). Phase 3 finds that note and puts those lines back on the invoice.
+  Tell the person, and ask before you confirm.
+
 ### Check at the end
 
 - The invoice's lines add up to its total, within the confirm tolerance. Confirm
