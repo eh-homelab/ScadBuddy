@@ -109,7 +109,7 @@ type Send = ReturnType<typeof usePrinterCommand>['send']
 function KProfilesBody({ row }: { row: PrinterRow }) {
   const [nozzle, setNozzle] = useState<string>('0.4')
   const commands = usePrinterCommand(row.id)
-  const table = useAsync(() => api.listKProfiles(row.id, nozzle, { signal: commands.signal() }), [row.id, nozzle])
+  const table = useAsync(() => commands.track((signal) => api.listKProfiles(row.id, nozzle, { signal })), [row.id, nozzle])
   const notes = useAsync(() => api.kProfileNotes(row.id), [row.id])
   const [editing, setEditing] = useState<Editing | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
@@ -147,7 +147,11 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
       setDeleting(null)
       refresh()
     } catch (cause) {
-      if (stopped(cause)) return
+      if (stopped(cause)) {
+        // The follow is over: leave the status empty rather than a stale "Waiting…".
+        setMessage(null)
+        return
+      }
       // A delete that may have reached the printer closes its confirm, so it is not sent again.
       if (mayHaveRun(cause)) setDeleting(null)
       setMessage({ text: problem(cause, 'Could not delete the K-profile.'), warn: true })

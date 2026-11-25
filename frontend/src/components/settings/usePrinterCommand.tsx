@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils'
  * same target, action and body sends that key, so the backend joins the first run (P38, P41)
  * and the printer gets nothing new. Another body gets a new key; a finished answer forgets it.
  *
- * Each command and read runs under a signal that `stop` aborts, and the panel's unmount too,
+ * Each command and read runs under a signal (`track`) that `stop` aborts, and the panel's unmount too,
  * so a closed panel or a changed nozzle stops its follow. The command itself is not stopped.
  */
 
@@ -33,11 +33,15 @@ export function usePrinterCommand(printer: string) {
 
   useEffect(() => stop, [stop])
 
-  /** A signal for one request, aborted by `stop` or the unmount. */
-  const signal = useCallback(() => {
+  /** Runs one request under its own signal, aborted by `stop` or the unmount; forgotten when it ends. */
+  const track = useCallback(async <T,>(run: (signal: AbortSignal) => Promise<T>): Promise<T> => {
     const controller = new AbortController()
     live.current.add(controller)
-    return controller.signal
+    try {
+      return await run(controller.signal)
+    } finally {
+      live.current.delete(controller)
+    }
   }, [])
 
   const send = useCallback(
@@ -53,7 +57,7 @@ export function usePrinterCommand(printer: string) {
         last && last.printer === printer && last.target === target && last.action === action && last.body === sent
       const key = same ? last.key : newRequestId()
       try {
-        const answer = await run({ key, signal: signal() })
+        const answer = await track((signal) => run({ key, signal }))
         held.current = null
         return answer
       } catch (cause) {
@@ -62,10 +66,10 @@ export function usePrinterCommand(printer: string) {
         throw cause
       }
     },
-    [printer, signal],
+    [printer, track],
   )
 
-  return { send, signal, stop }
+  return { send, track, stop }
 }
 
 /** Whether `cause` is the abort of a stopped follow: nothing to tell the person. */

@@ -153,7 +153,11 @@ function AmsBody({ row }: { row: PrinterRow }) {
       }
       ams.refresh()
     } catch (cause) {
-      if (stopped(cause)) return
+      if (stopped(cause)) {
+        // The follow is over: leave the status empty rather than a stale "Waiting…".
+        setMessage(null)
+        return
+      }
       // A command that may have reached the printer closes the form, so it is not sent again.
       if (mayHaveRun(cause)) setConfiguring(false)
       setMessage({ text: problem(cause, `Could not ${ASKS[pending.action].verb.toLowerCase()} ${slot.label}.`), warn: true })
