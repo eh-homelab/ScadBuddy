@@ -342,7 +342,7 @@ async def test_no_report_reads_as_offline() -> None:
 - Consumes: Task 1 `extrusion_cali_get/_set/_del`, `KProfileRow`; Task 2 `LanCommandInput`, `LanCommandRun`; Task 5 `PrinterCommandData`; Task 6 `lan_row`, `live_status`, `LanCommandsDep`.
 - Produces in `printers/kprofiles.py`:
   - `def table_of(reply: dict[str, Any], nozzle_diameter: str) -> KProfileTable`: each `filaments` entry to `KProfile` (`slot_id` = `cali_idx`), entries for another nozzle dropped (Bambuddy `_parse_kprofile_entries` L7392-L7438).
-  - `def set_rows(rows: Sequence[KProfileSet]) -> list[KProfileRow]`: `cali_idx` -1 for `slot_id` 0, else `slot_id`; a new row with no `setting_id` gets `PF` + 17 random digits (L7718-L7720); `n_coef`, `ams_id`, `tray_id` as the body sends them.
+  - `def set_rows(rows: Sequence[KProfileSet]) -> list[KProfileRow]`: `cali_idx` -1 for `slot_id` 0, else `slot_id`; a new row with no `setting_id` gets `PF` + 17 random digits, each new row of a batch its own (Bambuddy `set_kprofile` L7711-L7716 and `set_kprofiles_batch` L7790-L7792 at the pinned commit `d3be761f3bd0b6bac78045dc53599331d64c3672`, https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7790-L7792); `n_coef`, `ams_id`, `tray_id` as the body sends them.
   - `def write_result(reply: LanCommandReply) -> KProfileWriteResult`: `success=True`, `confirmed=reply.confirmed`, `message` empty or "the printer did not acknowledge it in time".
 - Routes (paths, response models and tags unchanged):
   - `GET …/kprofiles?nozzle_diameter=` → one `read` command, `LAN_REPLY_WAIT_READ`; 502 `printer_no_answer` when none.
