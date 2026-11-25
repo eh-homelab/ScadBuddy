@@ -123,7 +123,7 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   `qr` off the text column starts at the quiet zone and takes the QR's width too. — Nothing is ever
   drawn outside a label, and the browser and the PDF agree. — If wrong: a person chooses fewer
   fields or a taller template.
-- **R-7216-11 Saved sheets are a table only the API reads and writes.** `filament_label_sheets`,
+- **R-7216-11 Saved sheets are a table only the API reads and writes.** `label_sheets`,
   a new migration. A name is 1 to 100 characters after trim and NFC, and unique when casefolded
   (`name_key`, a unique index, so two saves at once cannot both pass). At most 100 saved sheets
   (409 `too_many_label_sheets`, counted under a transaction advisory lock). Bounds: page `a4` or
@@ -159,6 +159,10 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
 - **P1 (pre-flight) Task 1 makes `filament_label_output` whole.** Task 1 stores `{format, dpi,
   fields}`, with `fields` at the R-7216-9 default; Task 3 makes `fields` act. — One shape of the
   setting from its first commit. — If wrong: none.
+
+- **P2 The saved-sheet table is `label_sheets`.** Labels cover places as well as spools, and
+  inventory phase 3 (#7068) drops the `filament_` prefix from shared tables. The inventory epic's
+  owner agreed on 2026-11-25. — One name that phase 3 need not change. — If wrong: a rename migration.
 
 ## Global Constraints
 
@@ -414,10 +418,10 @@ material).
 ### Task 4: Saved sheet grids (backend)
 
 **Files:**
-- Create: `backend/scadbuddy/migrations/<UTC stamp>_filament_label_sheets.sql`, `backend/scadbuddy/filament/label_sheets.py`
+- Create: `backend/scadbuddy/migrations/<UTC stamp>_label_sheets.sql`, `backend/scadbuddy/filament/label_sheets.py`
 - Modify: `backend/scadbuddy/filament/label_templates.py` (`"saved"`, `sheet_id`), `filament/component.py` (`label_sheets`), `filament/models.py` (`LabelTemplates.saved`), `api/filament.py` (routes, `NOT_NUDGED`, 409s), `core/setting_docs.py`
 - Modify: `frontend/src/mocks/features/filament/index.ts` (`LABEL_TEMPLATES.saved: []`) and `frontend/src/mocks/fixtures.ts` (`sheet_id: null`), so the mocks still type
-- Test: `backend/tests/filament/test_label_sheets.py`, `backend/tests/api/test_filament_label_sheets.py`
+- Test: `backend/tests/filament/test_label_sheets.py`, `backend/tests/api/test_label_sheets.py`
 - Docs: `backend/CLAUDE.md`, `docs/features/spools-and-filament.md`
 
 **Interfaces:**
@@ -446,7 +450,7 @@ material).
   `replace_label_sheet`, `delete_label_sheet`. `GET /filament/label-templates` gains
   `saved: list[SavedLabelSheet]`.
 
-- [ ] **Step 1: Write the migration.** `touch "backend/scadbuddy/migrations/$(date -u +%Y%m%dT%H%MZ)_filament_label_sheets.sql"`. Table `filament_label_sheets`: `id uuid PRIMARY KEY DEFAULT gen_random_uuid()`, `name text NOT NULL`, `name_key text NOT NULL UNIQUE`, `page text NOT NULL CHECK (page IN ('a4', 'letter'))`, `width_mm`, `height_mm`, `top_mm`, `left_mm`, `col_gap_mm`, `row_gap_mm` `double precision NOT NULL`, `cols` and `rows` `integer NOT NULL CHECK (… >= 1)`, `created_at` and `updated_at` `timestamptz NOT NULL DEFAULT now()`. A header comment cites #7216 and R-7216-11.
+- [ ] **Step 1: Write the migration.** `touch "backend/scadbuddy/migrations/$(date -u +%Y%m%dT%H%MZ)_label_sheets.sql"`. Table `label_sheets`: `id uuid PRIMARY KEY DEFAULT gen_random_uuid()`, `name text NOT NULL`, `name_key text NOT NULL UNIQUE`, `page text NOT NULL CHECK (page IN ('a4', 'letter'))`, `width_mm`, `height_mm`, `top_mm`, `left_mm`, `col_gap_mm`, `row_gap_mm` `double precision NOT NULL`, `cols` and `rows` `integer NOT NULL CHECK (… >= 1)`, `created_at` and `updated_at` `timestamptz NOT NULL DEFAULT now()`. A header comment cites #7216 and R-7216-11.
 - [ ] **Step 2: Write the failing tests.** In `test_label_sheets.py` (pure models):
 
 ```python
@@ -476,7 +480,7 @@ def test_a_saved_choice_needs_its_sheet_id_and_only_it_has_one() -> None:
         LabelTemplateChoice(template="roll_50x25", sheet_id=uuid4())
 ```
 
-In `tests/api/test_filament_label_sheets.py` (`client`, Postgres):
+In `tests/api/test_label_sheets.py` (`client`, Postgres):
 `test_a_saved_sheet_is_listed_with_the_templates` (POST 201, then `GET /label-templates`
 `saved[0].layout == AVERY_5163` with defaults filled); `test_a_name_taken_in_another_case_is_a_409`
 (`"Avery 5163"` then `"avery 5163"`: 409 `label_sheet_name_taken`; also on PUT to another
@@ -489,9 +493,9 @@ layout; DELETE 204, then 404 for both); `test_a_saved_choice_prints_on_the_saved
 `label_sheet_gone`); `test_the_sheet_writes_do_not_nudge_the_sync` (the three route names are in
 `NOT_NUDGED`, and the existing nudge test's route walk passes).
 
-- [ ] **Step 3: Run them to see them fail.** `uv run --frozen pytest tests/filament/test_label_sheets.py tests/api/test_filament_label_sheets.py -v`. Expected: FAIL (`ImportError`; 404 on the routes).
+- [ ] **Step 3: Run them to see them fail.** `uv run --frozen pytest tests/filament/test_label_sheets.py tests/api/test_label_sheets.py -v`. Expected: FAIL (`ImportError`; 404 on the routes).
 - [ ] **Step 4: Implement.** The store follows `shopping.py` (a pool of autocommit dict-row connections; callers run it in a thread). `create` runs in one transaction: `pg_advisory_xact_lock(hashtext('scadbuddy:filament:label_sheets'))`, then the count, then the insert; a `UniqueViolation` on `name_key` becomes `LabelSheetNameTakenError`. `replace` sets `updated_at = now()`. The PDF route resolves the choice with `resolve` in its thread and maps `LabelSheetGoneError` to 409 `label_sheet_gone` ("The saved sheet was deleted. Choose another template."). A 404 says "no label sheet <id>".
-- [ ] **Step 5: Run them to see them pass,** then `tests/filament tests/api/test_filament_label_pdf.py tests/api/test_filament_label_sheets.py -n auto`, ruff and mypy. Expected: PASS.
+- [ ] **Step 5: Run them to see them pass,** then `tests/filament tests/api/test_filament_label_pdf.py tests/api/test_label_sheets.py -n auto`, ruff and mypy. Expected: PASS.
 - [ ] **Step 6: Docs.** `setting_docs.py` "Label template" adds saved sheets. `backend/CLAUDE.md`: `label_sheets.py`, the table, the routes, `NOT_NUDGED`. `docs/features/spools-and-filament.md`: saved sheets.
 - [ ] **Step 7: Commit.** `git commit -m "feat(filament): saved label sheet grids (#7216)"`.
 
