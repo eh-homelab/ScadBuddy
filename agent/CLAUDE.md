@@ -258,7 +258,7 @@ skips without one), and its render is checked `verify.sh`-style on the saved out
 #1924).
 `.github/scripts/lint-one-runtime.sh` (the `lint` job) fails on a second turn path: a session
 mode branch in `agent/src`, `frontend/src` or `backend/scadbuddy` (`.ts`, `.tsx`, `.py`), a name of the session mode that is gone (its
-`retired` list, #7323), the SDK's `query` imported outside `harness/run.ts` and
+`retired` list, #7323; a `*.test.ts(x)` file may name one), the SDK's `query` imported outside `harness/run.ts` and
 `harness/testConnection.ts`, or `agent-durable/` importing or depending on the Claude Agent
 SDK or naming `DurableSession` (plan Step 8.1).
 
@@ -423,8 +423,7 @@ opens every one and seals it again byte for byte).
     host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
-    session's owner with its turn's tiers; `mode` is not read, since every session is an
-    AgentSession from plan Step 6.3), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
+    session's owner with its turn's tiers), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser tools)), a turn's other tools (#2320, plan Step 9.3,
     `turnTools.ts`, built by `turnServers.ts`: remote plugins

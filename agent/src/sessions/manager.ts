@@ -49,7 +49,6 @@ import {
   publicLabel,
   sameOwner,
   type ServerEvent,
-  type SessionMode,
   type SessionStatus,
 } from './protocol.js'
 import type { SessionImages, StoredSessionBlob } from './blobs.js'
@@ -150,7 +149,6 @@ import { FlowQueue } from '../flows/queue.js'
 /** ai_settings keys (non-secret, spec §9). */
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
-export { SESSION_MODES, type SessionMode } from './protocol.js'
 export { type ListFilter } from './rows.js'
 export { BROWSER_TOOLS_GUIDE, MEMORY_TEXT_MAX, memoryText, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 
@@ -471,12 +469,6 @@ export type SessionRecord = {
   browser: SessionBrowser | null
   parentId: string | null
   /**
-   * Deprecated on the wire: always `durable`, since every session runs as an AgentSession (plan
-   * Step 6.3). The column it was read from is dropped in plan Phase 10; the field can go once
-   * the panel and the sessions_* tools stop reading it.
-   */
-  mode: SessionMode
-  /**
    * The workflow a durable session runs as (`ai_sessions.runtime`, durable.ts): AgentSession
    * (`unified`), DurableSession (`durable`), or null until its first send picks one.
    */
@@ -590,8 +582,6 @@ export type StartOptions = {
   withoutBackground?: boolean
   /** What its browser reports (#7027), kept for its life and its forks'; the API checks the bounds. */
   browser?: SessionBrowser
-  /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
-  mode?: SessionMode
 }
 
 export type SendOptions = {
@@ -888,7 +878,6 @@ function record(row: SessionRow): SessionRecord {
     scope: row.scope,
     browser: row.browser ?? null,
     parentId: row.parent_id,
-    mode: 'durable',
     runtime: row.runtime,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
@@ -1137,7 +1126,6 @@ export class SessionManager {
         updatedAt: s.updatedAt,
         costUsd: s.costUsd,
         budgetUsd: s.budgetUsd,
-        mode: s.mode,
         // #1284 — the switcher's "Offered to" badge and Cancel offer; an expired offer reads as
         // none. Its target is named only as `principal` may see it, as the session routes do.
         offer: s.offer ? { to: ownerSeenBy(principal, s.offer.to), until: s.offer.until } : null,
@@ -1246,8 +1234,8 @@ export class SessionManager {
     const prompt = options.prompt?.trim()
     const id = randomUUID()
     const title = options.title?.trim() || (prompt ? titleFrom(prompt) : '')
-    // Every session is an AgentSession (plan Step 6.3): `options.mode` is taken and ignored.
-    // One this service cannot run now is refused before anything is inserted (spec §10.1).
+    // Every session is an AgentSession (plan Step 6.3). One this service cannot run now is
+    // refused before anything is inserted (spec §10.1).
     await this.refuseUnready()
     const session = await this.insert(id, principal, {
       origin: options.origin,
@@ -1267,7 +1255,6 @@ export class SessionManager {
         owner: session.owner,
         title,
         budgetUsd: session.budgetUsd,
-        mode: session.mode,
       }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
@@ -1293,7 +1280,7 @@ export class SessionManager {
 
   /**
    * A new chat that runs one agent() of a session's Workflow (background/workflowAgents.ts):
-   * owned by `principal`, its parent recorded, in the parent's mode, and spending from the
+   * owned by `principal`, its parent recorded, and spending from the
    * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
    * It starts empty: the agent's task is its first turn.
    */
@@ -1317,7 +1304,7 @@ export class SessionManager {
       await this.rows.setAgent(id, { model: agent.model ?? null, effort: agent.effort ?? null, type: agent.type ?? null })
     }
     await this.events.append(id, [
-      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
+      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
     return session
@@ -1708,7 +1695,6 @@ export class SessionManager {
       owner: child.owner,
       title,
       budgetUsd: child.budgetUsd,
-      mode: child.mode,
     })
     const idle = event({ type: 'session.status', sessionId: childId, status: 'idle' })
     try {

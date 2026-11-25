@@ -94,7 +94,6 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     scope: {},
     browser: null,
     parentId: null,
-    mode: 'durable',
     runtime: null,
     maxTurns: 5,
     budgetUsd: 1,
