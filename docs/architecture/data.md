@@ -285,11 +285,24 @@ backend and sha256, on one pooled connection, no transaction). Any release of an
 (a failed save's, a replaced key's, the content sweep's) and the unrecorded sweep remove it
 only while they hold that lock exclusively, taken without waiting, and no row names it,
 checked under the lock (`ContentStore.claim_object`, `BlobIndex.claim_unnamed`): an object
-another save of the same bytes has uploaded and not indexed yet stays. A save that dies
-before its commit drops its connection and so its locks; the blob sweep's unrecorded step
-(`S3ContentBackend.sweep_unrecorded`, run with `claim` by `main._sweep_blobs_logged`) then
-removes its objects once they are older than `sweep_grace`. It lists the bucket, so it
-finds an object no row ever named. The save then files its 3MF in
+another save of the same bytes has uploaded and not indexed yet stays. These are the API's
+releases; the render worker's content store (over the CRUD routes) takes no lock, and its
+index never admits kind `output` (`api/crud_render.py` `READ_KINDS`), so it never removes
+an output's object. A connection whose unlock fails is closed, never given back to its
+pool with the lock. The holds take their connections from a small pool of their own
+(`scadbuddy-stage-locks`, `STAGE_LOCK_SLOTS`, 4; `store/index.py` `StageLocks`), never the
+API's shared pool: a save waits for a free one before its first upload, so at most that
+many saves per pod are between their first upload and their commit, and none waits
+mid-save for a second lock connection. A cancel cannot stop the row's transaction, which
+runs in a thread: the save keeps its locks until that thread ends, then the cancel stands.
+When a reuse is lost, the save removes the `meta.json` its first commit wrote before it
+puts its own copies, so a cancel meanwhile leaves a folder the hold reaper removes, as a
+cancel during the puts does. A save that dies before its commit drops its connection and
+so its locks; the blob sweep's unrecorded step (`main._sweep_unrecorded`, run with
+`claim`) then removes its objects once they are older than `sweep_grace`: on `s3`
+(`S3ContentBackend.sweep_unrecorded`, which lists the bucket, so it finds an object no row
+ever named) and on `local` in the outputs' own store (`LocalContentBackend.sweep_unrecorded`,
+which walks `data/output-blobs/`). The save then files its 3MF in
 the native library from the folder it wrote, the same bytes as the model blob, so it
 does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
 own put commits once more.

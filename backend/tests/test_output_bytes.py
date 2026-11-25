@@ -14,6 +14,7 @@ from pathlib import Path
 from types import AsyncGeneratorType
 from typing import Any
 
+import psycopg
 import pytest
 
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputFileNameError, usable
@@ -31,7 +32,8 @@ from scadbuddy.store.content import (
     BlobScope,
     ContentStore,
 )
-from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.index import BlobIndex, Pool, object_lock_name
+from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.s3 import S3ContentBackend
 from tests.support.store import flip_first_byte, local_content, moto_s3, record_reads, store_pool
 
@@ -466,32 +468,32 @@ async def test_the_sweep_removes_an_unindexed_object_only_past_the_grace_and_unh
     content = ContentStore(backend, BlobIndex(pool))
     content.spool = tmp_path / "spool"
     try:
-        hold = content.stage_hold()
-        assert hold is not None
-        ref, reused = await content.stage(
-            "output", b"staged", name="k", scope=BlobScope(slug="cube"), hold=hold
-        )
-        assert not reused
-
-        async def sweep(cutoff: datetime) -> int:
-            return await backend.sweep_unrecorded(
-                cutoff=cutoff,
-                recorded=partial(content.index.shares_backend_id, backend.backend),
-                claim=content.claim_object,
+        async with content.stage_hold() as hold:
+            assert hold is not None
+            ref, reused = await content.stage(
+                "output", b"staged", name="k", scope=BlobScope(slug="cube"), hold=hold
             )
+            assert not reused
 
-        past_grace = datetime.now(UTC) + timedelta(minutes=1)
-        # A live save holds it: even past the grace it stays.
-        assert await sweep(past_grace) == 0
-        assert await backend.exists(ref.backend_id)
-        # The save died: its connection, and so its lock, went.
-        await asyncio.to_thread(hold.close)
-        # Within the grace it stays.
-        assert await sweep(datetime.now(UTC) - timedelta(hours=1)) == 0
-        assert await backend.exists(ref.backend_id)
-        # Past the grace it goes.
-        assert await sweep(past_grace) == 1
-        assert not await backend.exists(ref.backend_id)
+            async def sweep(cutoff: datetime) -> int:
+                return await backend.sweep_unrecorded(
+                    cutoff=cutoff,
+                    recorded=partial(content.index.shares_backend_id, backend.backend),
+                    claim=content.claim_object,
+                )
+
+            past_grace = datetime.now(UTC) + timedelta(minutes=1)
+            # A live save holds it: even past the grace it stays.
+            assert await sweep(past_grace) == 0
+            assert await backend.exists(ref.backend_id)
+            # The save died: its connection, and so its lock, went.
+            await asyncio.to_thread(hold.close)
+            # Within the grace it stays.
+            assert await sweep(datetime.now(UTC) - timedelta(hours=1)) == 0
+            assert await backend.exists(ref.backend_id)
+            # Past the grace it goes.
+            assert await sweep(past_grace) == 1
+            assert not await backend.exists(ref.backend_id)
     finally:
         await content.aclose()
 
@@ -500,9 +502,8 @@ async def test_release_unindexed_leaves_an_object_another_stager_holds(
     content: ContentStore,
 ) -> None:
     """#7477: a failed save's release never removes an object another stager holds."""
-    other = content.stage_hold()
-    assert other is not None
-    try:
+    async with content.stage_hold() as other:
+        assert other is not None
         ref, _ = await content.stage(
             "output", b"shared", name="k", scope=BlobScope(slug="cube"), hold=other
         )
@@ -510,7 +511,121 @@ async def test_release_unindexed_leaves_an_object_another_stager_holds(
         assert mine.backend_id == ref.backend_id
         await content.release_unindexed(mine, False)
         assert await content.backend.exists(ref.backend_id)
-    finally:
-        await asyncio.to_thread(other.close)
     await content.release_unindexed(ref, False)
     assert not await content.backend.exists(ref.backend_id)
+
+
+@pytest.mark.parametrize("kind", ["local", "s3"])
+async def test_the_unrecorded_sweep_claims_only_objects_no_row_names(
+    kind: str, s3_settings: S3Settings, pool: Pool, tmp_path: Path
+) -> None:
+    """#7477 review M3: an object a row names costs one query (`recorded`); only one no
+    row names is claimed (a try-lock, a check under it, an unlock). On `local` too, whose
+    outputs have a content store of their own (#7257): a dead save's object goes."""
+    backend: LocalContentBackend | S3ContentBackend = (
+        LocalContentBackend(tmp_path / "remote")
+        if kind == "local"
+        else S3ContentBackend(s3_settings)
+    )
+    content = ContentStore(backend, BlobIndex(pool))
+    content.spool = tmp_path / "spool"
+    try:
+        kept = await content.put("output", b"kept", name="k", scope=BlobScope(slug="cube"))
+        loose, _ = await content.stage("output", b"loose", name="l", scope=BlobScope(slug="cube"))
+        claimed: list[str] = []
+
+        def claim(backend_id: str) -> Any:
+            claimed.append(backend_id)
+            return content.claim_object(backend_id)
+
+        swept = await backend.sweep_unrecorded(
+            cutoff=datetime.now(UTC) + timedelta(minutes=1),
+            recorded=partial(content.index.shares_backend_id, backend.backend),
+            claim=claim,
+        )
+        assert swept == 1
+        assert claimed == [loose.backend_id]
+        assert await backend.exists(kept.backend_id)
+        assert not await backend.exists(loose.backend_id)
+    finally:
+        await content.aclose()
+
+
+async def test_the_local_unrecorded_sweep_keeps_a_young_or_held_object(
+    pool: Pool, tmp_path: Path
+) -> None:
+    """#7477 on `local`: an object no row names stays within the grace, and past it
+    while a live save holds it (`StageHold`)."""
+    backend = LocalContentBackend(tmp_path / "remote")
+    content = ContentStore(backend, BlobIndex(pool))
+    content.spool = tmp_path / "spool"
+    try:
+
+        async def sweep(cutoff: datetime) -> int:
+            return await backend.sweep_unrecorded(
+                cutoff=cutoff,
+                recorded=partial(content.index.shares_backend_id, backend.backend),
+                claim=content.claim_object,
+            )
+
+        async with content.stage_hold() as hold:
+            ref, _ = await content.stage(
+                "output", b"staged", name="k", scope=BlobScope(slug="cube"), hold=hold
+            )
+            assert await sweep(datetime.now(UTC) + timedelta(minutes=1)) == 0
+        assert await sweep(datetime.now(UTC) - timedelta(hours=1)) == 0
+        assert await backend.exists(ref.backend_id)
+        assert await sweep(datetime.now(UTC) + timedelta(minutes=1)) == 1
+        assert not await backend.exists(ref.backend_id)
+    finally:
+        await content.aclose()
+
+
+def _lock_free(conninfo: str, name: str) -> bool:
+    """Whether no session holds the advisory lock ``name``: a fresh connection takes it
+    exclusively, then drops it as it closes."""
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (name,)
+        ).fetchone()
+    return bool(row and row[0])
+
+
+def _failing_unlocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    execute = psycopg.Connection.execute
+
+    def failing(self: psycopg.Connection[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
+        if "pg_advisory_unlock" in str(query):
+            raise psycopg.OperationalError("the unlock failed")
+        return execute(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Connection, "execute", failing)
+
+
+async def test_a_stage_hold_whose_unlock_fails_drops_its_connection(
+    pool: Pool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7477 review M2: a connection whose locks could not be dropped is closed, never
+    given back to the pool with them, where they would stall removals for its next user."""
+    sha = "a" * 64
+    name = object_lock_name("local", sha)
+    async with BlobIndex(pool).stage_hold() as hold:
+        await asyncio.to_thread(hold.take, "local", sha)
+        assert not _lock_free(pg_conninfo, name)
+        _failing_unlocks(monkeypatch)
+        await asyncio.to_thread(hold.close)
+        monkeypatch.undo()
+    assert _lock_free(pg_conninfo, name)
+
+
+def test_a_claim_whose_unlock_fails_drops_its_connection(
+    pool: Pool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7477 review M2: the same for a removal's exclusive lock (`claim_unnamed`)."""
+    sha = "b" * 64
+    name = object_lock_name("local", sha)
+    with BlobIndex(pool).claim_unnamed("local", f"output/{sha}", sha) as free:
+        assert free
+        _failing_unlocks(monkeypatch)
+    monkeypatch.undo()
+    assert _lock_free(pg_conninfo, name)

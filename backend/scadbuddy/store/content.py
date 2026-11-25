@@ -17,7 +17,7 @@ import logging
 import tempfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
@@ -231,10 +231,13 @@ class ContentStore:
             # Shielded: a cancel must not leave the lock held on a pooled connection.
             await asyncio.shield(asyncio.to_thread(claim.__exit__, None, None, None))
 
-    def stage_hold(self) -> StageHold | None:
-        """A `StageHold` for a caller that stages objects (`stage`) and indexes them later;
-        None when the index takes no locks (the render worker's)."""
-        return self.index.stage_hold() if isinstance(self.index, BlobIndex) else None
+    def stage_hold(self) -> AbstractAsyncContextManager[StageHold | None]:
+        """A `StageHold` for a caller that stages objects (`stage`) and indexes them later,
+        for the block, which waits first for a free slot of the stage-lock pool
+        (`StageLocks`); None when the index takes no locks (the render worker's)."""
+        if isinstance(self.index, BlobIndex):
+            return self.index.stage_hold()
+        return nullcontext(None)
 
     async def put(
         self,

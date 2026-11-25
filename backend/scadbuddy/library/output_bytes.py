@@ -315,9 +315,10 @@ class OutputBytes:
             path, lambda data: self.replace(key, data, slug=slug, expected=expected)
         )
 
-    def stage_hold(self) -> StageHold | None:
+    def stage_hold(self) -> AbstractAsyncContextManager[StageHold | None]:
         """The hold a save keeps from its first upload until its row commits or it fails
-        (`ContentStore.stage_hold`, #7477)."""
+        (`ContentStore.stage_hold`, #7477): entering it waits for a free slot of the
+        stage-lock pool, before any upload."""
         return self.content.stage_hold()
 
     async def _stage_file(

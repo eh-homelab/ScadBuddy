@@ -191,7 +191,10 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    then inserts the row, writes the index rows of the output's keys naming those objects,
    and writes its `output_files` rows and its `blob_refs` holds, in one transaction: one
    commit per save (`docs/architecture/data.md` has its rules for a lost reuse and a
-   deadlock). A save that fails on the row (an id
+   deadlock). Until that commit the save holds a shared advisory lock on each object it
+   uploaded, on a small pool of its own, and every removal of an object claims that lock;
+   what a save that died left with no row, the unrecorded sweep removes past its grace,
+   on `s3` and in `local`'s own output store (data.md). A save that fails on the row (an id
    another output holds) moved no key of that output, so it keeps its bytes (#7478
    review). A put into a full store is a 507 and leaves no folder, row or hold. The keys
    are `output-<id>-<role>` and `output-<id>-file-<hash>` (the first 32 hex digits of the

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -40,6 +41,22 @@ COPIED_REFS_SQL = (
 )
 
 
+#: The connections of the API's stage-lock pool (`StageLocks`, #7477 review I2), and so
+#: how many saves may be in their upload phase at once on one pod.
+STAGE_LOCK_SLOTS = 4
+
+
+def _drop_or_discard(conn: Connection[DictRow], query: str, params: tuple[str, ...]) -> None:
+    """Run ``query``, an advisory unlock. When it fails, close ``conn``: a pool discards a
+    closed connection, and a closed session holds no lock. Given back alive, it would keep
+    its locks for its next user (#7477 review M2)."""
+    try:
+        conn.execute(query, params).fetchone()
+    except Exception:
+        logger.warning("could not drop an object's advisory lock", exc_info=True)
+        conn.close()
+
+
 def object_lock_name(backend: str, sha256: str) -> str:
     """The text whose ``hashtextextended(…, 0)`` keys the session advisory lock of the
     objects of ``sha256`` on ``backend`` (#7477). A stager holds it shared from before its
@@ -52,9 +69,10 @@ def object_lock_name(backend: str, sha256: str) -> str:
 
 class StageHold:
     """The shared locks a stager holds on the objects it uploaded (#7477), on one pooled
-    connection of its own, from before each upload until `close`. A session lock, so no
-    transaction stays open and nothing commits. A process that dies drops its connection
-    and so its locks. Blocking; `close` is idempotent and thread-safe."""
+    connection of its own (`StageLocks`' pool), from before each upload until `close`. A
+    session lock, so no transaction stays open and nothing commits. A process that dies
+    drops its connection and so its locks. Blocking; `close` is idempotent and
+    thread-safe."""
 
     def __init__(self, pool: Pool) -> None:
         self._pool = pool
@@ -88,13 +106,35 @@ class StageHold:
         if conn is None:
             return
         try:
-            conn.execute("SELECT pg_advisory_unlock_all()").fetchone()
-        except Exception:
-            # The pool checks a broken connection and replaces it; a closed session
-            # holds no lock.
-            logger.warning("could not drop a stage hold's locks", exc_info=True)
+            _drop_or_discard(conn, "SELECT pg_advisory_unlock_all()", ())
         finally:
             self._pool.putconn(conn)
+
+
+class StageLocks:
+    """Where stage holds take their connection, and how many saves may hold one at once
+    (#7477 review I2). The pool is small and of its own, not the API's shared one: a save
+    holds its connection from its first upload to its commit and meanwhile needs the
+    shared pool for its index reads and its rows, so holds taken there could take every
+    connection and stall every route. ``slots`` is the pool's size: a save waits for a
+    slot before its first upload (`hold`), so its one hold connection is always free, and
+    it never waits mid-save for a second one."""
+
+    def __init__(self, pool: Pool, slots: int) -> None:
+        self.pool = pool
+        self.slots = slots
+        self._free = asyncio.Semaphore(slots)
+
+    @contextlib.asynccontextmanager
+    async def hold(self) -> AsyncIterator[StageHold]:
+        """A `StageHold`, once a slot is free; closed, and its slot freed, at the end."""
+        async with self._free:
+            stage = StageHold(self.pool)
+            try:
+                yield stage
+            finally:
+                # Shielded: a cancel must not leave the locks held on a pooled connection.
+                await asyncio.shield(asyncio.to_thread(stage.close))
 
 
 def _kept_copy(ref: BlobRef) -> tuple[str, ...]:
@@ -168,8 +208,12 @@ class BlobIndex:
     CRUD route commits its idempotency ledger row with the write (#5298, plan D5);
     `retrying` runs either form again when Postgres picks it as a deadlock's victim."""
 
-    def __init__(self, pool: Pool) -> None:
+    def __init__(self, pool: Pool, *, stage_locks: StageLocks | None = None) -> None:
+        """``stage_locks``: where `stage_hold` takes its connections. The API passes its
+        own small pool (`SettingsStore.stage_lock_pool`); without it they come from
+        ``pool``, bounded to `STAGE_LOCK_SLOTS` saves (tests, tools)."""
         self._pool = pool
+        self._stage_locks = stage_locks or StageLocks(pool, STAGE_LOCK_SLOTS)
 
     def get(self, key: str) -> BlobStat | None:
         with self._pool.connection() as conn:
@@ -464,9 +508,9 @@ class BlobIndex:
         with self._pool.connection() as conn:
             return self._names(conn, backend, backend_id)
 
-    def stage_hold(self) -> StageHold:
-        """A new `StageHold` on this index's pool."""
-        return StageHold(self._pool)
+    def stage_hold(self) -> contextlib.AbstractAsyncContextManager[StageHold]:
+        """A new `StageHold` (`StageLocks.hold`): it waits for a free slot first."""
+        return self._stage_locks.hold()
 
     @contextlib.contextmanager
     def claim_unnamed(self, backend: str, backend_id: str, sha256: str) -> Iterator[bool]:
@@ -486,7 +530,9 @@ class BlobIndex:
             try:
                 yield not self._names(conn, backend, backend_id)
             finally:
-                conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (name,))
+                _drop_or_discard(
+                    conn, "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (name,)
+                )
 
     @staticmethod
     def _names(conn: Connection[DictRow], backend: str, backend_id: str) -> bool:

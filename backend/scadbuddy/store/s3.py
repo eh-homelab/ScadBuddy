@@ -268,7 +268,9 @@ class S3ContentBackend:
             # naming this key, or `sweep_unrecorded`, could delete the object between
             # this HEAD and that insert, leaving a row that names a missing object. That
             # read is a miss, not corruption, and the piece re-renders; and the sweep
-            # only removes objects last written before its cutoff. So no lock.
+            # only removes objects last written before its cutoff. So no lock here. A save
+            # (`ContentStore.stage` with a `StageHold`) holds the object's stage lock
+            # across this HEAD, which every removal claims (#7477); other puts take none.
             return key
         client = await self._s3()
         bucket = self.settings.bucket
@@ -536,8 +538,9 @@ class S3ContentBackend:
         """Delete every object under the prefix last written before ``cutoff`` that
         ``recorded`` (given the object's key) says no `store_blobs` row names. A naive
         ``cutoff`` is UTC; an object whose key is not one this backend writes is left.
-        With ``claim`` (`ContentStore.claim_object`), it decides instead, and an object is
-        deleted only inside its block: one a save uploaded and has not indexed yet stays,
+        With ``claim`` (`ContentStore.claim_object`), such an object is then claimed, which
+        checks the rows again under its lock, and is deleted only inside the claim's block:
+        one a save uploaded and has not indexed yet stays,
         even when an older upload of the same bytes made it (#7477). A save that died
         before its commit holds no lock, so its objects go once past ``cutoff``."""
         if cutoff.tzinfo is None:
@@ -552,14 +555,18 @@ class S3ContentBackend:
                     continue
                 if item["LastModified"] >= cutoff:
                     continue
-                if claim is not None:
-                    async with claim(key) as free:
-                        if free:
-                            await self._delete_unrecorded(client, key)
-                            removed += 1
-                elif not await asyncio.to_thread(recorded, key):
+                # One query for an object a row names, the most of them; only one no row
+                # names is claimed (#7477 review M3).
+                if await asyncio.to_thread(recorded, key):
+                    continue
+                if claim is None:
                     await self._delete_unrecorded(client, key)
                     removed += 1
+                    continue
+                async with claim(key) as free:
+                    if free:
+                        await self._delete_unrecorded(client, key)
+                        removed += 1
         return removed
 
     async def _delete_unrecorded(self, client: S3Client, key: str) -> None:

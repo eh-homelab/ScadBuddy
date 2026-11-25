@@ -110,6 +110,7 @@ from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
+from scadbuddy.store.index import STAGE_LOCK_SLOTS
 
 if TYPE_CHECKING:
     from scadbuddy.core.pg_listener import PgListener
@@ -1163,6 +1164,12 @@ class SettingsStore:
             min_size=1,
             max_size=defaults.database_pool_size,
         )
+        # A save's stage holds (#7477 review I2, `store/index.py` `StageLocks`): a small
+        # pool of their own, so a save's hold never takes the shared pool's connections.
+        # Nothing connects until a save stages.
+        self._stage_lock_pool = row_pool(
+            defaults.database_url, name="scadbuddy-stage-locks", max_size=STAGE_LOCK_SLOTS
+        )
 
     @property
     def kek(self) -> Kek | None:
@@ -1172,6 +1179,7 @@ class SettingsStore:
     def open(self) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
+        self._stage_lock_pool.open()
         self.migrate_and_seal()
 
     def migrate_and_seal(self) -> None:
@@ -1191,6 +1199,7 @@ class SettingsStore:
                     logger.info("sealed plaintext API keys", extra={"settings": sealed})
 
     def close(self) -> None:
+        self._stage_lock_pool.close()
         self._pool.close()
 
     def follow(self, listener: PgListener) -> None:
@@ -1205,6 +1214,11 @@ class SettingsStore:
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
+
+    @property
+    def stage_lock_pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The stage holds' own pool, `STAGE_LOCK_SLOTS` connections (`StageLocks`)."""
+        return self._stage_lock_pool
 
     def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
         """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a

@@ -16,7 +16,10 @@ from typing import Any, BinaryIO
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
+from psycopg import Connection
 from psycopg.errors import DeadlockDetected, UniqueViolation
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 import scadbuddy.library.outputs as outputs_module
 from scadbuddy.api.outputs import _listed
@@ -32,6 +35,7 @@ from scadbuddy.library.output_rows import (
 )
 from scadbuddy.library.outputs import (
     FILES_DIR,
+    META_NAME,
     MODEL_NAME,
     PREVIEW_NAME,
     THUMBNAIL_NAME,
@@ -44,8 +48,9 @@ from scadbuddy.library.outputs import _open_regular as open_regular
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.content_models import StoreFullError
-from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.content_models import ReuseLostError, StoreFullError
+from scadbuddy.store.index import BlobIndex, Pool, StageLocks
+from scadbuddy.store.local import LocalContentBackend
 from tests.support.arrange import finished_job
 from tests.support.output_blobs import put_folder_at_keys
 from tests.support.saved_outputs import save_files
@@ -1287,3 +1292,168 @@ async def test_a_listing_reads_its_versions_in_one_query(
     assert batched == [3]
     assert refs == []
     assert {item.id: (item.thumbnail_version, item.preview_version) for item in listed} == expected
+
+
+async def test_a_save_past_the_stage_slots_waits_and_the_index_pool_stays_usable(
+    tmp_path: Path, projection: JobProjection, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7477 review I2: a save's stage hold takes a connection of the small lock pool, not
+    of the index's (the API's shared pool), and a save waits for a slot before its first
+    upload. With every slot held by a save between its uploads and its commit, one more
+    save waits, uploads nothing, and the index's pool still serves; then all finish."""
+    paths, job, files = await _with_files(tmp_path)
+    slots = 2
+    with contextlib.ExitStack() as stack:
+        index_pool: Pool = stack.enter_context(
+            ConnectionPool(
+                pg_conninfo,
+                min_size=0,
+                max_size=slots,
+                timeout=5,
+                connection_class=Connection[DictRow],
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+        )
+        lock_pool: Pool = stack.enter_context(
+            ConnectionPool(
+                pg_conninfo,
+                min_size=0,
+                max_size=slots,
+                timeout=1,
+                connection_class=Connection[DictRow],
+                kwargs={"autocommit": True, "row_factory": dict_row},
+            )
+        )
+        content = ContentStore(
+            LocalContentBackend(tmp_path / "remote"),
+            BlobIndex(index_pool, stage_locks=StageLocks(lock_pool, slots)),
+        )
+        content.spool = tmp_path / "spool"
+        store = _store(paths, projection.pool, content)
+        assert store.rows is not None
+        insert = store.rows.insert
+        upload = content.backend.upload
+        uploaded: set[str] = set()
+        entered: list[str] = []
+        all_in = threading.Event()
+        go_on = threading.Event()
+
+        async def recorded(*args: Any, name: str, **kwargs: Any) -> str:
+            uploaded.add(name.split("-")[1])
+            return await upload(*args, name=name, **kwargs)
+
+        def held(row: Any, conn: Any = None) -> Any:
+            entered.append(row.output_id)
+            if len(entered) == slots:
+                all_in.set()
+            assert go_on.wait(30)
+            return insert(row, conn)
+
+        monkeypatch.setattr(content.backend, "upload", recorded)
+        monkeypatch.setattr(store.rows, "insert", held)
+        ids = [str(n) * 32 for n in range(1, slots + 2)]
+        saves = [
+            asyncio.create_task(store.save(job, name=i, files_dir=files, output_id=i)) for i in ids
+        ]
+        try:
+            assert await asyncio.to_thread(all_in.wait, 15)
+            await asyncio.sleep(1.5)
+            # The extra save waits for a slot, longer than the lock pool would let a
+            # connection request wait: it uploaded nothing, and it holds no thread.
+            assert uploaded == set(entered)
+            with index_pool.connection(timeout=2) as conn:
+                assert conn.execute("SELECT 1 AS one").fetchone() == {"one": 1}
+        finally:
+            go_on.set()
+        try:
+            metas = await asyncio.wait_for(asyncio.gather(*saves), 30)
+            assert {meta.id for meta in metas} == set(ids)
+            for meta in metas:
+                row = store.rows.get(meta.id)
+                assert row is not None and row.bytes_at is not None
+        finally:
+            await content.aclose()
+
+
+async def test_a_save_cancelled_during_its_commit_holds_its_objects_until_the_commit_ends(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477 review I3: a cancel cannot stop the commit's thread, which may still commit
+    rows naming the save's objects. The save keeps its stage hold until that thread ends,
+    so no release removes those objects meanwhile; then the cancel stands."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None
+    insert = store.rows.insert
+    staged: list[Any] = []
+    entered = threading.Event()
+    go_on = threading.Event()
+
+    def blocked(row: Any, conn: Any = None) -> Any:
+        staged.extend(item.ref for item in row.blobs.staged)
+        entered.set()
+        assert go_on.wait(30)
+        return insert(row, conn)
+
+    monkeypatch.setattr(store.rows, "insert", blocked)
+    output_id = "c" * 32
+    task = asyncio.create_task(
+        store.save(job, name="cancelled", files_dir=files, output_id=output_id)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 30)
+        task.cancel()
+        done, _ = await asyncio.wait({task}, timeout=0.5)
+        # The save waits for its commit's thread, still holding its objects.
+        assert not done
+        async with content.claim_object(staged[0].backend_id) as free:
+            assert not free
+    finally:
+        go_on.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = store.rows.get(output_id)
+    assert row is not None and row.blobs.model is not None
+    assert store.bytes is not None
+    assert (
+        await store.bytes.read(row.blobs.model)
+        == (store.directory(output_id) / MODEL_NAME).read_bytes()
+    )
+
+
+async def test_a_save_cancelled_after_a_lost_reuse_leaves_no_meta(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477 review M4: the first commit wrote ``meta.json`` before its transaction lost a
+    reuse. A cancel while the save puts its own copies skips `discard`; the folder must
+    then hold no ``meta.json``, as after a cancel during the puts, so the hold reaper
+    removes it and no copy run records it as an output."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None and store.bytes is not None
+    entered = asyncio.Event()
+
+    def lost(row: Any, conn: Any = None) -> Any:
+        raise ReuseLostError("freed meanwhile")
+
+    async def copying(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(store.rows, "insert", lost)
+    monkeypatch.setattr(store.bytes, "own_copies", copying)
+    output_id = "d" * 32
+    task = asyncio.create_task(store.save(job, name="lost", files_dir=files, output_id=output_id))
+    await asyncio.wait_for(entered.wait(), 30)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    directory = paths.output_dir(job.slug, output_id)
+    assert directory.is_dir()
+    assert not (directory / META_NAME).exists()
