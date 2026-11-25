@@ -89,12 +89,10 @@ export class PgTurnRows implements TurnRows {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
-    // The runtime is recorded by the first send of a session that has none (a classic
-    // session's): AgentSession.
     const [claimed] = await this.#sql.unsafe<SendClaimed[]>(
       `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, turn_flow = $6, updated_at = now(), turn_started_at = now(),
-         interrupt_requested = false, runtime = coalesce(runtime, 'unified')
+         interrupt_requested = false
        FROM prior
        WHERE id = $1 AND owner_kind = $2 AND (owner_id = $3 OR owner_kind = 'browser')
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')

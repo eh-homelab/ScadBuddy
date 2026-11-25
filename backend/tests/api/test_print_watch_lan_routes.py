@@ -19,8 +19,18 @@ from scadbuddy.print_watch.lan_store import MODEL_GONE, LanImportLinkedError
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.models import PrinterCreate
 from tests.api.test_print_history import state
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
+
+
+@pytest.fixture
+def model(client: TestClient, model: str) -> str:
+    """The template written on the volume by hand, copied to its row: the routes' model
+    checks read the rows only (#7317 phase 3)."""
+    sync_template_rows(client)
+    return model
+
 
 STARTED = datetime(2026, 11, 11, 12, 0, tzinfo=UTC)
 AGENT = {"X-ScadBuddy-Agent-Author": "token:p1", "X-ScadBuddy-Agent-Author-Session": "s1"}

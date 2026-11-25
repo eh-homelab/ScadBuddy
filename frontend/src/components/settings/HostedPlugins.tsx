@@ -22,7 +22,7 @@ import { Spinner } from '../ui/spinner'
 import { LoadingLines, SettingBody, SettingCard } from './form'
 import { HostedPluginEditor } from './HostedPluginEditor'
 import { offerState } from './hostedDraft'
-import { usePackagesChanged } from './packagesChanged'
+import { PACKAGES_TOPIC, usePackagesChanged } from './packagesChanged'
 
 /** The most unsaved files the Settings leave dialog names; more are counted (#7260). */
 const NAMED_FILES_MAX = 3
@@ -37,10 +37,20 @@ export function HostedPluginsPanel() {
   const list = useAsync(() => hostedPlugins.list(), [])
   const packages = useAsync(() => aiPlugins.listPackages(), [])
   // #7460 — a publish, create or delete made elsewhere changes the list's latest versions too.
-  usePackagesChanged('hosted', () => {
-    packages.refresh()
-    list.refresh()
-  })
+  usePackagesChanged(
+    'hosted',
+    () => {
+      packages.refresh()
+      list.refresh()
+    },
+    async (confirmation) => {
+      const [listStale, packagesStale] = await Promise.all([
+        list.staleFor(PACKAGES_TOPIC, confirmation),
+        packages.staleFor(PACKAGES_TOPIC, confirmation),
+      ])
+      return listStale || packagesStale
+    },
+  )
   const [selected, setSelected] = useState<string | null>(null)
   /** The open editor's files with unsaved edits; a Close or another Edit asks first while any. */
   const [unsaved, setUnsaved] = useState<string[]>([])

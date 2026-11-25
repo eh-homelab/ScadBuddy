@@ -326,7 +326,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
-      if (body.value.mode !== undefined) console.log('sessions: a start named a session mode, which is ignored (#7323)')
+      if (body.value.mode !== undefined) console.error('sessions: a start named a session mode, which is ignored (#7323)')
       const { session, turn } = await sessions.start(browserUser(c), {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),

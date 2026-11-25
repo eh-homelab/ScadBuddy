@@ -296,7 +296,11 @@ const waitSeconds = z
 
 const approvalInput = z.object({
   approval_id: z.string().min(1).describe('The approval id (sessions_list_approvals, or approval.required in the transcript).'),
-  session_id: z.string().min(1).optional().describe('When given, the approval must belong to this session.'),
+  session_id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('When given, an approval whose id starts with `durable:` must belong to this session. An MCP prepare belongs to no session, so it is refused with one.'),
   input_hash: z
     .string()
     .regex(/^[0-9a-f]{64}$/)
@@ -310,8 +314,8 @@ function decideTool(approve: boolean): Tool {
     name: `sessions_${verb}`,
     label: approve ? 'Approve a pending action' : 'Deny a pending action',
     description:
-      `${approve ? 'Approve' : 'Deny'} another agent's pending outward action (an approval.required in a session, ` +
-      'or an outward call prepared over /mcp; any approval id pending_input_list gives, or a bare approval id). ' +
+      `${approve ? 'Approve' : 'Deny'} another agent's pending outward action (a session's parked call, or an ` +
+      'outward call prepared over /mcp; any approval id pending_input_list gives, or a bare approval id). ' +
       'Only for a token with the approval grant, minted in ScadBuddy ' +
       "Settings; never for this caller's own calls or sessions, which only the user in the ScadBuddy UI decides.",
     input: approvalInput,
@@ -541,7 +545,7 @@ export const sessionTools: Tool[] = [
     name: 'sessions_get',
     label: 'Read an agent session',
     description:
-      "A session this caller may see: its status and owner, its pending approvals, the messages queued to run after its turn, and its transcript after " +
+      "A session this caller may see: its status and owner, the messages queued to run after its turn, and its transcript after " +
       'after_seq (streamed text joined per message). Page with next_seq while more is true. The same as the ' +
       'resource scadbuddy://sessions/{session_id}, which can be subscribed to for live updates.',
     input: z.object({
@@ -556,14 +560,12 @@ export const sessionTools: Tool[] = [
       const sessions = manager(ctx)
       const owner = ownerOf(ctx.principal)
       const session = await refusals(() => sessions.get(session_id, owner))
-      const [rows, pending, queued] = await Promise.all([
+      const [rows, queued] = await Promise.all([
         sessions.events.read(session.id, after_seq, limit),
-        refusals(() => sessions.approvals.list(owner, { sessionId: session.id, pending: true })),
         refusals(() => sessions.queued(session.id, owner)),
       ])
       return json({
         session: sessionView(session, viewerOf(ctx)),
-        pending_approvals: pending.map((a) => approvalSeenBy(viewerOf(ctx), a)),
         queue: queuedSeenBy(viewerOf(ctx), queued.queue),
         transcript: condense(rows, viewerOf(ctx)),
         next_seq: rows.at(-1)?.seq ?? after_seq,
@@ -787,19 +789,15 @@ export const sessionTools: Tool[] = [
     name: 'sessions_list_approvals',
     label: 'List pending approvals',
     description:
-      'Pending approvals: those of one session this caller may see, or, for a token with the approval grant, ' +
-      'every pending one. Each has the input_hash sessions_approve and sessions_deny can check.',
-    input: z.object({ session_id: z.string().min(1).optional() }),
+      'Pending approvals of MCP prepares: this caller\'s own, or, for a token with the approval grant, every pending ' +
+      "one. Each has the input_hash sessions_approve and sessions_deny can check. A session's parked calls are " +
+      'listed by pending_input_list and sessions_pending_input.',
+    input: z.object({}),
     risk: 'read',
     routes: [],
     source: 'the approval records: their summaries quote the arguments the requesting agents chose',
-    handler: async ({ session_id }, ctx) => {
-      const approvals = await refusals(() =>
-        manager(ctx).approvals.list(ownerOf(ctx.principal), {
-          ...(session_id === undefined ? {} : { sessionId: session_id }),
-          pending: true,
-        }),
-      )
+    handler: async (_args, ctx) => {
+      const approvals = await refusals(() => manager(ctx).approvals.listVisiblePending(ownerOf(ctx.principal)))
       return json(approvals.map((a) => approvalSeenBy(viewerOf(ctx), a)))
     },
   }),

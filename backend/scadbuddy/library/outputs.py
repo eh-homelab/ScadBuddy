@@ -31,6 +31,8 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol
 
 from botocore.exceptions import ClientError
 from fastapi import status
+from psycopg import Error as PsycopgError
+from psycopg.errors import UndefinedTable
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from scadbuddy.bambuddy.models import ProcessValue
@@ -235,6 +237,16 @@ class BackfillState(BaseModel):
     error: str | None = None
 
 
+def tolerate_dropped(action: Callable[[], None], what: str) -> None:
+    """Run ``action``, a write to ``output_index`` or ``output_hold_slugs``. Release B
+    drops both tables (#7257, plan D1), and a release A pod still runs during its roll:
+    a missing table is logged and skipped. Any other error raises."""
+    try:
+        action()
+    except UndefinedTable:
+        logger.warning("%s skipped: its table is gone (#7257)", what)
+
+
 def _replace(path: Path, text: str) -> None:
     """Write ``path`` whole or not at all: a reader never sees half a file."""
     _replace_bytes(path, text.encode("utf-8"))
@@ -245,6 +257,16 @@ def _replace_bytes(path: Path, data: bytes) -> None:
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
     temporary.write_bytes(data)
     temporary.replace(path)
+
+
+def _geometry_name(plate: int) -> str:
+    """The file name of a plate's geometry analysis cache."""
+    return GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
+
+
+def _attributed_name(plate: int) -> str:
+    """The file name of a plate's attributed analysis."""
+    return "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
 
 
 def _holds_plate_cover(model: Path) -> bool:
@@ -549,7 +571,8 @@ class OutputStore:
         #: ``None`` keeps the files as the only record (tests and tools with no database).
         self.rows: OutputRows | None = None
         #: The outputs' bytes as blobs (#7256), read before the files. ``None``: the
-        #: files only, as on the `local` and `bambuddy` stores (`output_bytes.usable`).
+        #: files only, as on the `bambuddy` store (`output_bytes.usable`). On `local` the
+        #: API sets the outputs' own store (#7257, plan D7).
         self.bytes: OutputBytes | None = None
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
@@ -635,6 +658,39 @@ class OutputStore:
     def _copied(self) -> bool:
         """Whether the rows hold every output: a copy run finished (#7255)."""
         return self.rows is not None and self.rows.copied()
+
+    def _cut_over(self) -> bool:
+        """Whether the cut-over mark exists (#7257, plan D2): the rows and the blobs are
+        the record, and an output's folder may be missing (a release B pod saved it)."""
+        return self.rows is not None and self.rows.cut_over()
+
+    def _folder_write[T](
+        self,
+        output_id: str,
+        write: Callable[[Path], T],
+        *,
+        missing: T,
+        directory: Path | None = None,
+    ) -> T:
+        """Run ``write`` on the output's folder (``directory``, else `_find_dir`): a file
+        step beside the row's. After the cut-over mark a missing folder is no error
+        (#7257, plan D1): the step is logged at debug and skipped, and ``missing`` is the
+        answer; the row step runs as before. Before the mark, a missing folder raises
+        `FileNotFoundError`, as in phase 2. Blocking."""
+        if directory is None:
+            directory = self._find_dir(output_id)
+        try:
+            return write(directory)
+        except FileNotFoundError:
+            # Only a missing folder is skipped: the stat and the mark are read only here,
+            # so a write that succeeds costs nothing more.
+            if directory.is_dir() or not self._cut_over():
+                raise
+        logger.debug(
+            "an output's folder is gone after the cut-over; its file step is skipped",
+            extra={"output_id": output_id, "path": str(directory)},
+        )
+        return missing
 
     def _find_dir(self, output_id: str) -> Path:
         held, row = self._held_row(output_id)
@@ -912,12 +968,35 @@ class OutputStore:
         call made it. A caller that names an id another may also name (a quote's
         attempts, `orders/quote.py` `operation_output_id`) saves under it only once it
         holds the claim, so it never writes into, or removes on a failure, a directory
-        another save made."""
+        another save made.
+
+        With rows, the id's ``output_claims`` row comes first (#7257, plan D6), so a pod
+        that claims in the table only (release B) and this pod share one claim. A row
+        claim that fails makes no folder. A folder that is there after the row claim
+        succeeded (a phase 2 pod's claim) releases the row claim. The save's row deletes
+        the row claim (`OutputRows.insert`); a failed save releases it
+        (`output_operations.py`); the hold reaper prunes one past `ORPHAN_HOLD_GRACE`."""
+        if self.rows is not None and not self.rows.claim(output_id, slug):
+            return False
         try:
             self.paths.output_dir(slug, output_id).mkdir(parents=True, exist_ok=False)
         except FileExistsError:
+            self._release_row_claim(output_id)
             return False
+        except OSError:
+            self._release_row_claim(output_id)
+            raise
         return True
+
+    def _release_row_claim(self, output_id: str) -> None:
+        """A release that fails is logged and left to the hold reaper's prune, so the
+        claim's own answer (False, or the folder's error) stands (#7257)."""
+        if self.rows is None:
+            return
+        try:
+            self.rows.release_claim(output_id)
+        except PsycopgError:
+            logger.exception("could not release a claim", extra={"id": output_id})
 
     async def save(
         self,
@@ -937,7 +1016,7 @@ class OutputStore:
         """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob store
         under keys of the save's own (`OutputBytes.put_folder`), then `commit` (#7256, spec
         §6.6), so the row, its keys taking those objects, its ``output_files`` rows and the holds
-        of its keys are one transaction. With no blob store (`local`, `bambuddy`) or no rows, it
+        of its keys are one transaction. With no blob store (`bambuddy`) or no rows, it
         puts nothing. The staged keys go after the commit; the output's keys name their objects.
         A failed put or commit removes the folder (`discard`) and the blobs it put, and raises
         again, a `StoreFullError` and a `UniqueViolation` on an id another output holds among
@@ -1155,6 +1234,8 @@ class OutputStore:
         holds, in one transaction (spec §6.6); what `OutputRows.insert` returns. The row is
         the record: when the insert fails, the files written for the save go and the save
         fails."""
+        from scadbuddy.bambuddy.project_file import cached_defaults
+        from scadbuddy.library.output_query import params_text
         from scadbuddy.library.output_rows import OutputRow
 
         assert self.rows is not None
@@ -1185,6 +1266,8 @@ class OutputStore:
             has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
             copied_at=meta.created_at,
             blobs=blobs or OutputBlobs(),
+            # The list's text on the row (#7257), as `OutputIndex.record` writes it.
+            params_text=params_text(prepared.params, cached_defaults(self.paths, meta.slug)),
         )
         try:
             return self.rows.insert(row)
@@ -1276,7 +1359,10 @@ class OutputStore:
 
     def _write_backfill(self, output_id: str, state: BackfillState) -> None:
         """The file first, then the row (#7255)."""
-        _replace(self.directory(output_id) / BACKFILL_NAME, state.model_dump_json())
+        text = state.model_dump_json()
+        self._folder_write(
+            output_id, lambda directory: _replace(directory / BACKFILL_NAME, text), missing=None
+        )
         if self.rows is not None:
             self.rows.set_backfill(output_id, state.model_dump(mode="json"))
 
@@ -1316,11 +1402,15 @@ class OutputStore:
         """Give the output what a new one records (§7, §8.4) from its re-render, keeping
         its id, name and files. Run again, it writes the same files."""
         directory = self.directory(output_id)
-        if not (directory / RECORD_NAME).is_file():
-            _replace(directory / RECORD_NAME, chosen.record.model_dump_json())
         manifest = [m.model_dump(mode="json") for m in chosen.manifest]
-        _replace(directory / MANIFEST_NAME, json.dumps(manifest))
-        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+
+        def write(folder: Path) -> None:
+            if not (folder / RECORD_NAME).is_file():
+                _replace(folder / RECORD_NAME, chosen.record.model_dump_json())
+            _replace(folder / MANIFEST_NAME, json.dumps(manifest))
+            (folder / BACKFILL_NAME).unlink(missing_ok=True)
+
+        self._folder_write(output_id, write, missing=None, directory=directory)
         if self.rows is not None:
             # The record it has stays, as the file's does: one statement.
             self.rows.attach_backfill(output_id, chosen.record.model_dump(mode="json"), manifest)
@@ -1586,8 +1676,12 @@ class OutputStore:
         before #6371. A second writer of it needs a lock here, or one rename loses."""
         meta, directory = self._stored_meta(output_id)
         renamed = meta.model_copy(update={"name": name or None})
-        _replace(
-            directory / META_NAME, json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
+        text = json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
+        self._folder_write(
+            output_id,
+            lambda folder: _replace(folder / META_NAME, text),
+            missing=None,
+            directory=directory,
         )
         if self.rows is not None:
             self.rows.update_meta(output_id, renamed)
@@ -1602,7 +1696,13 @@ class OutputStore:
         it writes the index row."""
         meta, directory = self._stored_meta(output_id)
         marked = meta.model_copy(update={"source": STOREFRONT})
-        _replace(directory / META_NAME, json.dumps(marked.model_dump(mode="json"), indent=2) + "\n")
+        text = json.dumps(marked.model_dump(mode="json"), indent=2) + "\n"
+        self._folder_write(
+            output_id,
+            lambda folder: _replace(folder / META_NAME, text),
+            missing=None,
+            directory=directory,
+        )
         if self.rows is not None:
             self.rows.update_meta(output_id, marked)
         return marked
@@ -1945,8 +2045,7 @@ class OutputStore:
         return analysis
 
     def _geometry_path(self, output_id: str, plate: int) -> Path:
-        name = GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
-        return self._find_dir(output_id) / name
+        return self._find_dir(output_id) / _geometry_name(plate)
 
     def _cached_geometry(self, output_id: str, plate: int) -> GeometryAnalysis | None:
         """The row's analysis of this `ANALYSIS_VERSION`, else the file cache's.
@@ -1980,9 +2079,11 @@ class OutputStore:
         # Written aside and renamed, so a concurrent reader never sees half a file. A
         # failed write (no folder: the bytes are only blobs) loses only that cache; the
         # analysis is still the answer.
+        name = _geometry_name(plate)
+        text = analysis.model_dump_json(indent=2) + "\n"
         try:
-            _replace(
-                self._geometry_path(output_id, plate), analysis.model_dump_json(indent=2) + "\n"
+            self._folder_write(
+                output_id, lambda folder: _replace(folder / name, text), missing=None
             )
         except (OSError, OutputNotFoundError):
             logger.debug(
@@ -2028,20 +2129,22 @@ class OutputStore:
                 body,
                 model_sha=model_sha,
             )
-        _replace(self._attributed_path(output_id, plate), json.dumps(body, indent=2) + "\n")
+        name = _attributed_name(plate)
+        text = json.dumps(body, indent=2) + "\n"
+        self._folder_write(output_id, lambda folder: _replace(folder / name, text), missing=None)
 
     def _attributed_path(self, output_id: str, plate: int) -> Path:
-        name = (
-            "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
-        )
-        return self._find_dir(output_id) / name
+        return self._find_dir(output_id) / _attributed_name(plate)
 
     def thumbnail_path(self, output_id: str) -> Path:
         return self._find_dir(output_id) / THUMBNAIL_NAME
 
     def write_thumbnail(self, output_id: str, png: bytes) -> None:
-        """Whole, by a rename: a reader of the old file never gets half of this one."""
-        _replace_bytes(self.thumbnail_path(output_id), png)
+        """Whole, by a rename: a reader of the old file never gets half of this one.
+        After the cut-over mark, nothing when the folder is gone (`_folder_write`)."""
+        self._folder_write(
+            output_id, lambda folder: _replace_bytes(folder / THUMBNAIL_NAME, png), missing=None
+        )
 
     async def put_thumbnail(self, output_id: str, png: bytes) -> None:
         """``png`` as the thumbnail (#7256). Its blob is put first, under its own key
@@ -2051,8 +2154,10 @@ class OutputStore:
         the blob both. A failed put changes nothing and raises (`StoreFullError` among
         them). A failed file write raises too and leaves the old key and the old file,
         which still agree; the new blob is held by nothing, and the sweep removes it.
-        With no blob store or no row yet, the file only, under the same lock when there
-        is a database (`OutputRows.write_thumbnail_file`); the byte copy takes it later."""
+        After the cut-over mark a missing folder does not raise: the file step is skipped
+        and the key and the row take the blob (#7257). With no blob store or no row yet,
+        the file only, under the same lock when there is a database
+        (`OutputRows.write_thumbnail_file`); the byte copy takes it later."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is None:
             await asyncio.to_thread(self._write_thumbnail_file, output_id, png)
@@ -2114,17 +2219,23 @@ class OutputStore:
 
     def write_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
         """``png`` as the thumbnail only when the output still has none: an upload that
-        landed while the server drew stays (#4775). Written whole or not at all."""
-        path = self.thumbnail_path(output_id)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-        temporary.write_bytes(png)
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            return False
-        finally:
-            temporary.unlink()
-        return True
+        landed while the server drew stays (#4775). Written whole or not at all. After the
+        cut-over mark, True when the folder is gone: the row decides, as
+        `OutputRows.draw_thumbnail` names the key only while the row names none."""
+
+        def write(folder: Path) -> bool:
+            path = folder / THUMBNAIL_NAME
+            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+            temporary.write_bytes(png)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                return False
+            finally:
+                temporary.unlink()
+            return True
+
+        return self._folder_write(output_id, write, missing=True)
 
     async def put_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
         """``png`` as the thumbnail only while the output has none (#4775): an upload that
@@ -2135,8 +2246,10 @@ class OutputStore:
         nor the file is there; with the key there (a lost blob's), the file alone. A
         failed put is logged, and the file alone is written
         under the lock (True when it was this draw's): the row names no new blob, so
-        readers take the file, and the byte copy puts it later. With no blob store or no
-        row, the file alone, under the lock when there are rows."""
+        readers take the file, and the byte copy puts it later. After the cut-over mark
+        with no folder, a failed put writes no file, so the drawn thumbnail is lost
+        (#7257); the answer is still True. With no blob store or no row, the file alone,
+        under the lock when there are rows."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is not None:
             assert self.bytes is not None and self.rows is not None
@@ -2207,17 +2320,24 @@ def hold_parts(
 
 def release_parts(refs: BlobRefs, output_id: str) -> None:
     refs.drop_holder(OUTPUT_HOLDER, output_id)
-    with refs.pool.connection() as conn:
-        conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+    def forget() -> None:
+        with refs.pool.connection() as conn:
+            conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
+
+    tolerate_dropped(forget, "an output's hold slug delete")
 
 
 def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
-    with refs.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
-            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
-            (output_id, slug),
-        )
+    def record() -> None:
+        with refs.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
+                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
+                (output_id, slug),
+            )
+
+    tolerate_dropped(record, "an output's hold slug")
 
 
 def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
@@ -2227,14 +2347,18 @@ def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
     if not slugs:
         return
     ids = sorted(slugs)
-    with refs.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO output_hold_slugs (output_id, slug)"
-            " SELECT * FROM unnest(%s::text[], %s::text[])"
-            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
-            " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
-            (ids, [slugs[output_id] for output_id in ids]),
-        )
+
+    def record() -> None:
+        with refs.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO output_hold_slugs (output_id, slug)"
+                " SELECT * FROM unnest(%s::text[], %s::text[])"
+                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
+                " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
+                (ids, [slugs[output_id] for output_id in ids]),
+            )
+
+    tolerate_dropped(record, "the held outputs' slugs")
 
 
 def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
@@ -2266,7 +2390,9 @@ def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
 
 
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
-#: its Parts before it writes meta.json (api/outputs.py `create_output`).
+#: its Parts before it writes meta.json (api/outputs.py `create_output`). It is also the
+#: lease of an id claim: the reaper prunes an `output_claims` row older than this, so a
+#: save that runs longer than this can lose its claim (#7257).
 ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 
@@ -2317,7 +2443,8 @@ def reap_orphan_holds(
 
     An output that has an ``outputs`` row is live, whatever its folder holds (#7256): the
     reaper never releases its holds or removes its folder (one query, when the store has
-    rows).
+    rows). With rows, it first deletes the ``output_claims`` rows older than ``grace``
+    (#7257, `OutputRows.prune_claims`): a save that died between its claim and its row.
 
     It never mistakes a missing directory for deleted outputs. An output's hold is
     released only when the reaper knows the output's slug (``output_hold_slugs``) and
@@ -2329,11 +2456,59 @@ def reap_orphan_holds(
     (#5453). An unmounted or empty volume lists no slug at all, so
     releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
     and with no live output to learn it from) is never released here. The cost of all
-    this: holds orphaned by a model's whole deletion stay until a person drops them."""
+    this: holds orphaned by a model's whole deletion stay until a person drops them.
+
+    After the cut-over mark (#7257, plan A5) the rows are the record: the reaper lists no
+    folder and reads no ``output_hold_slugs`` (release B drops it while release A pods
+    run). In one statement it releases every `output` hold past ``grace`` whose output
+    has no ``outputs`` row and no claim younger than ``grace`` (`_reap_rows_only`). A
+    model's whole deletion then frees its outputs' holds too."""
     with span("outputs.reap_orphan_holds") as current:
-        released = _reap_orphan_holds(refs, store, grace)
+        if store.rows is not None:
+            # First, so a share that cannot be listed does not keep stale claims (#7257).
+            current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))
+        if store.rows is not None and store.rows.cut_over():
+            current.set_attribute("scadbuddy.rows_only", True)
+            released = _reap_rows_only(refs, grace)
+        else:
+            released = _reap_orphan_holds(refs, store, grace)
         current.set_attribute("scadbuddy.released", released)
         return released
+
+
+#: The `output` holds past the grace of every output with no row and no claim younger
+#: than the grace, released in one statement; the ids of the outputs they were.
+_RELEASE_ORPHANS = (
+    "WITH aged AS (SELECT holder_id FROM blob_refs WHERE holder_kind = %(kind)s"
+    "  GROUP BY holder_id HAVING min(created_at) < now() - %(grace)s),"
+    " orphans AS (SELECT a.holder_id FROM aged a"
+    "  WHERE NOT EXISTS (SELECT 1 FROM outputs o WHERE o.output_id = a.holder_id)"
+    "  AND NOT EXISTS (SELECT 1 FROM output_claims c WHERE c.output_id = a.holder_id"
+    "   AND c.claimed_at >= clock_timestamp() - %(grace)s)),"
+    " released AS (DELETE FROM blob_refs r USING orphans o"
+    "  WHERE r.holder_kind = %(kind)s AND r.holder_id = o.holder_id RETURNING r.holder_id)"
+    " SELECT DISTINCT holder_id FROM released ORDER BY holder_id"
+)
+
+
+def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
+    """`reap_orphan_holds` after the cut-over mark (#7257): rows only, no folder and no
+    ``output_hold_slugs``. A save that names its id (a quote's attempt, #5390) claims it
+    in ``output_claims`` before its folder, so its holds are kept while the claim is
+    younger than ``grace``: a save that runs longer than ``grace`` can lose them. Other
+    saves take a new id and no claim. As with a phase 2 pod's save, their holds are kept
+    only while they are younger than ``grace``."""
+    with refs.pool.connection() as conn:
+        found = conn.execute(_RELEASE_ORPHANS, {"kind": OUTPUT_HOLDER, "grace": grace}).fetchall()
+    orphans = [str(row["holder_id"]) for row in found]
+    if orphans:
+        # One line to spot an unexpected mass release (#1806 review).
+        logger.warning(
+            "released the Parts and byte blobs of %d orphaned outputs (rows only, #7257)",
+            len(orphans),
+            extra={"ids": orphans[:50]},
+        )
+    return len(orphans)
 
 
 def _with_rows(store: OutputStore, output_ids: Iterable[str]) -> set[str]:

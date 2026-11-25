@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.prime_tower import (
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import replate_3mf
+from tests.api.conftest import files_only
 from tests.api.test_filament_profiles import preset_values
 from tests.api.test_print_filaments import API, prepared, queue_route
 from tests.api.test_print_preview import SLICED, Job, sliced_routes, start_slice
@@ -209,6 +210,7 @@ def test_a_file_arranged_with_the_tower_off_slices_with_it_off(
     """#3770: the slicer's process preset replaces the file's own ``enable_prime_tower``,
     so a print with no choice of its own sends the file's "0" as an override, and the
     send trusts the file's tower off."""
+    files_only(client)
     output_id = prepared(client, model)
     _state_tower_off(paths, output_id)
     replated = _replated(monkeypatch)
@@ -226,6 +228,7 @@ def test_a_print_that_turns_the_tower_on_lays_out_room_over_the_files_off(
 ) -> None:
     """#3770: the print's tower on wins at the slice, so the copy is laid out with room
     for it (``replate_3mf`` ``tower_on``), rather than trusting the file's "0"."""
+    files_only(client)
     output_id = prepared(client, model)
     _state_tower_off(paths, output_id)
     replated = _replated(monkeypatch)

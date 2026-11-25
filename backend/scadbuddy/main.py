@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib
 import logging
 import pkgutil
+import signal
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+import time
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from types import FrameType
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
@@ -129,6 +141,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_byte_copy import copy_output_bytes
 from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_copy import copy_outputs
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
@@ -138,7 +151,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
-from scadbuddy.library.template_copy import copy_templates
+from scadbuddy.library.template_copy import TemplateCopyResult, copy_templates
 from scadbuddy.operations.blob_claims import sweep_upload_blobs
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
@@ -147,7 +160,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.archives import mirror_attempt, sweep_media
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
-from scadbuddy.orders.storefront.prepare import prepare_activities
+from scadbuddy.orders.storefront.prepare import prepare_activities, warm_unpriced
 from scadbuddy.orders.storefront.staged_files import staged_file_activities, sweep_staged
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.payments.component import PAYMENTS
@@ -187,11 +200,12 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
-from scadbuddy.store.content import sweep_content
+from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
-from scadbuddy.store.factory import build_store
+from scadbuddy.store.factory import blob_spool, build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import (
     MAKE_CURRENT_BACKOFF,
@@ -256,6 +270,7 @@ from scadbuddy.workflows.housekeeping import (
     SWEEPS,
     TEMPLATE_COPY_SWEEP,
     TRANSFER_PUTS_SWEEP,
+    WARM_LISTINGS_SWEEP,
     ensure_schedules,
     library_worker,
 )
@@ -527,6 +542,15 @@ async def _sweep_blobs_logged(state: AppState) -> None:
             removed = await asyncio.to_thread(
                 sweep_blobs, state.blobs, state.refs, grace=state.config.sweep_grace
             )
+            if state.outputs.bytes is not None:
+                # `local`'s output store (#7257, plan D7): a deleted output's blobs.
+                outputs_swept = await sweep_content(
+                    state.outputs.bytes.content, state.refs, grace=state.config.sweep_grace
+                )
+                if outputs_swept:
+                    logger.info(
+                        "removed unreferenced output blobs", extra={"count": len(outputs_swept)}
+                    )
         else:
             failed = False
             try:
@@ -609,16 +633,25 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.exception("could not index the saved outputs; the next start retries")
 
 
-async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
+async def _copy_templates_once(
+    state: AppState, stop: threading.Event, *, quiet: bool = False
+) -> TemplateCopyResult | None:
     """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
-    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
-    that does not get it does nothing. A failure is logged, then raised."""
+    logged, and its result. It takes the copy's advisory lock, so one replica copies at a
+    time; a run that does not get it does nothing and answers None, as it does when the
+    catalogue has no rows (``quiet``: with no log line for that). A failure is logged,
+    then raised."""
     refresh = state.catalogue.refresh
     if refresh is None:
-        return
+        return None
     try:
         result = await asyncio.to_thread(
-            copy_templates, state.catalogue, refresh.rows, refresh, state.projection.pool, stop
+            functools.partial(copy_templates, quiet=quiet),
+            state.catalogue,
+            refresh.rows,
+            refresh,
+            state.projection.pool,
+            stop,
         )
     except Exception:
         logger.exception("could not copy the templates to rows; the next sweep or start retries")
@@ -635,6 +668,133 @@ async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
                 "stopped": stop.is_set(),
             },
         )
+    return result
+
+
+#: How long the start waits for another replica's first copy of the templates (#7317
+#: phase 3, plan D4), and how often it asks whether that copy has finished, in seconds.
+#: The API's startupProbe allows about 300 s for the whole start (10 s x 30, eh-homelab/
+#: clusters `applications/scadbuddy/scadbuddy.yaml`), and the steps before the first copy
+#: (migrations, the built-in sync, the openscad probe) use part of it. A wait of 300 s let
+#: the kubelet kill a waiting replica before it served; 120 s leaves it room to serve.
+FIRST_COPY_WAIT = 120.0
+FIRST_COPY_POLL = 1.0
+
+#: The signals that stop the first copy (`_stop_on_signal`): those uvicorn handles.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+
+@contextmanager
+def _stop_on_signal(stop: threading.Event) -> Iterator[None]:
+    """``stop`` set by a SIGTERM or SIGINT while the block runs, then the handler that
+    was there runs as before. uvicorn installs its handler (`Server.handle_exit`) before
+    the lifespan starts, and that handler only marks the server to exit once the start
+    ends: without this, a pod told to stop during the first copy waits for the copy.
+    Python runs signal handlers in the main thread only, so elsewhere (a test's portal
+    thread) it does nothing. The same chain as `agent_changes/component.py`
+    `chain_signals`."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    replaced: dict[int, Any] = {}
+    for sig in STOP_SIGNALS:
+        # None: a handler set from C, which Python cannot call or put back. It is treated
+        # as SIG_DFL, for the pass-on and for the restore.
+        previous = signal.getsignal(sig)
+        if previous is None:
+            previous = signal.SIG_DFL
+
+        def handler(signum: int, frame: FrameType | None, previous: Any = previous) -> None:
+            if previous == signal.SIG_IGN:
+                return
+            stop.set()
+            if callable(previous):
+                previous(signum, frame)
+            elif previous == signal.SIG_DFL:
+                # What the signal would have done with no handler of ours.
+                signal.signal(signum, signal.SIG_DFL)
+                signal.raise_signal(signum)
+
+        signal.signal(sig, handler)
+        replaced[sig] = previous
+    ours = {sig: signal.getsignal(sig) for sig in replaced}
+    try:
+        yield
+    finally:
+        for signum, previous in replaced.items():
+            # Only our own is put back: a handler set over ours since is not ours to remove.
+            if signal.getsignal(signum) is ours[signum]:
+                signal.signal(signum, previous)
+
+
+def _first_copy_finished(result: TemplateCopyResult, stop: threading.Event) -> bool:
+    """Whether this replica's first copy finished. An incomplete one is logged at error
+    level, unless a signal stopped it."""
+    if not result.incomplete:
+        return True
+    if stop.is_set():
+        logger.info("the first copy of the templates to rows was stopped")
+    else:
+        logger.error(
+            "the first copy of the templates to rows was incomplete; the lists lack"
+            " what it missed until the next copy run"
+        )
+    return False
+
+
+async def _first_template_copy(state: AppState, stop: threading.Event) -> bool:
+    """The first copy of the templates to rows, before the app serves (#7317 phase 3,
+    plan D4): the catalogue's lists read only rows. When a copy run has finished (every
+    start after the first), it does nothing. Otherwise it runs one copy and waits for it.
+    When another replica holds the copy lock (replicas of a fresh install that start
+    together), it waits up to `FIRST_COPY_WAIT` for that replica's run to finish, and it
+    takes the lock itself when that run ends unfinished. A copy that fails or ends
+    incomplete, or a wait that ends, is logged at error level and the app serves anyway:
+    the housekeeping sweep `TEMPLATE_COPY_SWEEP` copies again. A SIGTERM or SIGINT sets
+    ``stop``, which ends the copy and the wait (`_stop_on_signal`).
+
+    It answers whether this replica finished a copy here, so that the start's background
+    copy does not read every template again at once."""
+    refresh = state.catalogue.refresh
+    if refresh is None:
+        return False
+    rows = refresh.rows
+    with _stop_on_signal(stop):
+        try:
+            if await asyncio.to_thread(rows.copied):
+                return False
+            result = await _copy_templates_once(state, stop, quiet=True)
+            if result is not None:
+                return _first_copy_finished(result, stop)
+            # Logged once here and once at the end, not at each poll.
+            logger.info(
+                "another replica copies the templates to rows; this one waits for its run",
+                extra={"wait_s": FIRST_COPY_WAIT},
+            )
+            deadline = time.monotonic() + FIRST_COPY_WAIT
+            while time.monotonic() < deadline and not stop.is_set():
+                await asyncio.sleep(FIRST_COPY_POLL)
+                if await asyncio.to_thread(rows.copied):
+                    logger.info("another replica's first copy of the templates finished")
+                    return False
+                # The other replica's run ended unfinished and released the lock.
+                result = await _copy_templates_once(state, stop, quiet=True)
+                if result is not None:
+                    return _first_copy_finished(result, stop)
+            if stop.is_set():
+                logger.info("the wait for the first copy of the templates to rows was stopped")
+                return False
+            logger.error(
+                "another replica's first copy of the templates to rows did not finish in"
+                " time; this one serves, and the lists lack what is not copied yet",
+                extra={"waited_s": FIRST_COPY_WAIT},
+            )
+        except Exception:
+            logger.exception(
+                "the first copy of the templates to rows failed; the app serves, and the"
+                " next copy run copies them"
+            )
+    return False
 
 
 async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
@@ -686,14 +846,19 @@ async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> Non
 async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> None:
     """One run of the byte copy of the saved outputs to the blob store (#7256,
     `copy_output_bytes`), logged. It takes the copy's advisory lock, so one replica copies
-    at a time; a run that does not get it does nothing. On the `local` and `bambuddy`
-    stores it records a refused run. A failure is logged, then raised."""
+    at a time; a run that does not get it does nothing. On `local` it copies to the
+    outputs' own content store (#7257, plan D7); on `bambuddy` it records a refused run.
+    A failure is logged, then raised."""
     rows = state.outputs.rows
     if rows is None:
         return
+    # On `local` the outputs' own content store (plan D7), else the shared one.
+    content = (
+        state.outputs.bytes.content if state.outputs.bytes is not None else state.store.content
+    )
     try:
         result = await copy_output_bytes(
-            state.outputs, rows, state.store.content, state.projection.conninfo, stop
+            state.outputs, rows, content, state.projection.conninfo, stop
         )
     except Exception:
         logger.exception(
@@ -714,6 +879,26 @@ async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> Non
                 "stopped": stop.is_set(),
             },
         )
+        if result.refused is None and not result.incomplete and not stop.is_set():
+            await _try_cut_over(rows)
+
+
+async def _try_cut_over(rows: OutputRows) -> bool:
+    """Write the cut-over mark (#7257, plan D2) when the copies are done, best effort:
+    whether it exists now. Only the call that wrote the mark logs it (another replica may
+    write it meanwhile); a failure is logged only, and the next byte run or start tries
+    again."""
+    try:
+        if await asyncio.to_thread(rows.cut_over):
+            return True
+        if not await asyncio.to_thread(rows.try_cut_over):
+            return await asyncio.to_thread(rows.cut_over)
+        at = await asyncio.to_thread(rows.cut_over_at)
+    except Exception:
+        logger.exception("could not write the cut-over mark; the next byte run or start retries")
+        return False
+    logger.info("the outputs are cut over (#7257)", extra={"at": at})
+    return True
 
 
 async def _copy_output_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
@@ -728,11 +913,16 @@ async def _copy_outputs_and_bytes_logged(state: AppState, *, stop: threading.Eve
     """The start's copies: the rows (#7255), then the bytes (#7256), which walk the rows
     the first copy wrote. The bytes are copied only when the last row copy run finished:
     a run that is ``incomplete`` (an outputs volume not there) or did not end leaves the
-    byte copy to the sweep `OUTPUT_BYTES_SWEEP`."""
+    byte copy to the sweep `OUTPUT_BYTES_SWEEP`.
+
+    It tries the cut-over mark first (#7257): when the copies were done before this start,
+    the mark is written now, and neither copy runs."""
+    rows = state.outputs.rows
+    if rows is not None and await _try_cut_over(rows):
+        return
     await _copy_outputs_logged(state, stop=stop)
     if stop.is_set():
         return
-    rows = state.outputs.rows
     if rows is None:
         return
     try:
@@ -1018,6 +1208,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def import_attempt_media() -> None:
         await _heartbeating(_import_attempt_media_logged(state))
 
+    @activity.defn(name=WARM_LISTINGS_SWEEP)
+    async def warm_listings() -> None:
+        await _heartbeating(_warm_listings_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -1055,6 +1249,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         auto_import_prints,
         reap_print_run_holds,
         import_attempt_media,
+        warm_listings,
     ]
 
 
@@ -1797,6 +1992,18 @@ async def _import_attempt_media_logged(state: AppState) -> None:
         logger.info("started attempt media imports", extra={"count": started})
 
 
+async def _warm_listings_logged(state: AppState) -> None:
+    """#7665: the default price run of each published listing whose default choices have
+    no price (`orders.storefront.prepare.warm_unpriced`)."""
+    try:
+        started = await warm_unpriced(state, state.components.get(ORDERS))
+    except Exception:
+        logger.exception("could not sweep the published listings' prices")
+        raise
+    if started:
+        logger.info("started default price runs", extra={"count": started})
+
+
 async def _reap_run_holds_logged(state: AppState) -> None:
     """#6122: the LAN runs' holds on their sliced files that a run's end left. First
     (#6871) the LAN runs whose sequence is gone are recorded stopped, which drops their
@@ -1948,7 +2155,8 @@ async def _start_render(state: AppState) -> None:
     # Only now is the `templates` table there (#7317, plan decision 2): the boot
     # commit `ensure_repo` made before it writes no rows; the start copy fills them.
     state.history.template_rows = state.catalogue.refresh
-    # The readers too (#7317 phase 2): they read the rows once a copy run has finished.
+    # The readers too (#7317 phase 3): they read only the rows, and a database where no
+    # copy run has finished gets its first copy before the app serves.
     if state.catalogue.refresh is not None:
         state.catalogue.rows = state.catalogue.refresh.rows
     await _prepare_catalogue(state)
@@ -2588,9 +2796,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
-    # #7256: the outputs' bytes are read from the blob store first, never on `local`
-    # (no content store) or `bambuddy`.
-    if usable(state.store.content):
+    # #7256: the outputs' bytes are read from the blob store first, never on `bambuddy`.
+    # #7257 plan D7: `local` has no content store, so outputs get one of their own under
+    # `data/output-blobs/`, with the shared index and spool. It has no caps, as the `local`
+    # store has none.
+    #: `local`'s output store, which the bundle does not close.
+    output_content: ContentStore | None = None
+    if state.store.backend == "local":
+        output_content = ContentStore(
+            LocalContentBackend(state.paths.output_blobs),
+            BlobIndex(pool),
+            spool=blob_spool(state.config, state.paths),
+        )
+        state.outputs.bytes = OutputBytes(output_content)
+    elif usable(state.store.content):
         assert state.store.content is not None
         state.outputs.bytes = OutputBytes(state.store.content)
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
@@ -2606,7 +2825,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "switched migrated blobs",
                 extra={"backend": current.store_backend, "rows": switched},
             )
-        state.paths.ensure()
+        state.paths.ensure(output_blobs=output_content is not None)
         # Before the built-in sync: an existing models directory becomes revision 1,
         # so what a newer image changes in a built-in is a commit on top of it rather
         # than an unversioned overwrite.
@@ -2616,6 +2835,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.fonts.prepare()
         state.openscad_version = await probe_openscad_version(state.config)
         await _start_render(state)
+        # #7317 phase 3: the catalogue's lists read only rows, so a database where no copy
+        # run has finished (a fresh install, a test's) gets its first copy before the app
+        # serves. A SIGTERM or SIGINT meanwhile stops it.
+        first_copied = await _first_template_copy(state, threading.Event())
         # After the projection, which migrated the database: the bus writes the event
         # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
         # was published before now (the built-in sync's commits) waited.
@@ -2691,10 +2914,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         # #7317: every template's files copied to its row, and the rows reconciled with
         # the folders, after `_start_render` made the table and synced the built-ins. The
-        # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again.
-        copy_templates_now = asyncio.create_task(
-            _copy_templates_logged(state, stop=stop_background), name="copy templates"
-        )
+        # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again. Not when this start's
+        # first copy just finished: it would read every template again at once.
+        if not first_copied:
+            copy_templates_now = asyncio.create_task(
+                _copy_templates_logged(state, stop=stop_background), name="copy templates"
+            )
         # #7255: every saved output's files copied to its row, and the rows reconciled
         # with the files; until a copy run finishes, a missing row falls back to them.
         # The housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for older pods' writes.
@@ -2773,6 +2998,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with AsyncExitStack() as closing:
             closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
             closing.push_async_callback(state.store.aclose)
+            if output_content is not None:
+                closing.push_async_callback(output_content.aclose)
             closing.push_async_callback(state.events.aclose)
             closing.push_async_callback(asyncio.to_thread, state.presets.close)
             closing.push_async_callback(asyncio.to_thread, state.projection.close)
