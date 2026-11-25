@@ -75,6 +75,7 @@ from scadbuddy.orders.storefront.inputs import (
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
 from scadbuddy.orders.storefront.listings import page_outdated, problem, published_listing
+from scadbuddy.orders.storefront.pipeline_inputs import shows_design
 from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
     PriceRow,
@@ -649,9 +650,9 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
     ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
     (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
-    colour of the render has no listing filament, the template is a pipeline (#5701), or
-    the render is of another design than the listing's now (its slug or commit moved
-    since, #6370 review): the price is never of a design the visitor does not see."""
+    colour of the render has no listing filament, the render made several outputs
+    (`one_output`), or it is of another design than the listing's now (`shows_design`,
+    #6370 review): the price is never of a design the visitor does not see."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
@@ -677,12 +678,12 @@ async def estimate_of(
     ``colours`` and ``material``, whose choices have ``variant_key``. The shop's warming of
     a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
     through the visitor's own path. ``pending`` with no ``price_key`` while its files are
-    fetched. ``none`` for a pipeline template's render, which starts no slice yet (#5701):
-    the shop prices it by hand."""
-    if listing.design[2].pipeline:
-        return NO_PRICE
-    if job.slug != listing.slug or job.model_version != listing.commit:
+    fetched. ``none``, with no slice started, for a render of another design than the
+    listing's now (`shows_design`), or of several outputs (`one_output`)."""
+    if not shows_design(listing, job.slug, job.model_version, job.inputs):
         # The shop moved the listing since this render: the page renders again.
+        return NO_PRICE
+    if not one_output(job):
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
@@ -695,6 +696,13 @@ async def estimate_of(
         variant_key=variant_key,
         listing_id=listing.id,
     )
+
+
+def one_output(job: Job) -> bool:
+    """Whether the first output of ``job`` is the whole render. A pipeline's render of
+    several has no firm price yet: an order makes the first only, so the shop prices it
+    by hand (#5701, spec 2026-11-17 §7.4)."""
+    return len(job.outputs) <= 1
 
 
 async def variant_of(
@@ -771,15 +779,19 @@ def preview_path(key: str) -> str:
 
 def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | None:
     """The output a ``done`` row's slice saved, while it is there with its preview mesh
-    and is of the design ``listing`` shows (its slug and commit). Blocking: call it in a
+    and is of the design ``listing`` shows (`shows_design`). Blocking: call it in a
     thread."""
     if row.output_id is None:
         return None
     try:
         meta = state.outputs.get(row.output_id)
+        snapshot = listing.template_snapshot
+        # Only a pipeline's design is its inputs too, so no other listing reads them.
+        pipeline = snapshot is not None and snapshot.pipeline
+        inputs = state.outputs.inputs(row.output_id) if pipeline else {}
     except OutputNotFoundError:
         return None
-    if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
+    if not shows_design(listing, meta.slug, meta.model_version, inputs):
         return None
     # A preview blob in the index, else its file (#7256).
     if not state.outputs.has_role(row.output_id, "preview"):

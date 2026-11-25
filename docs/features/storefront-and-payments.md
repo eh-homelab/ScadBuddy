@@ -88,6 +88,6 @@ sequenceDiagram
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
 - A pipeline template is listed only when it declares its inputs (`model.json`
   `pipeline.inputs`). The shop sets them through the API only, the customer never sets
-  them, and its renders have no slice price yet: the shop prices each line by hand
-  (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`;
+  them, and a render of several outputs has no slice price yet: the shop prices that line
+  by hand (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`;
   [#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).

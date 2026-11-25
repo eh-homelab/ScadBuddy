@@ -10,6 +10,8 @@ can hold (`check_shape`). Publish checks them against the commit, in the spec's 
 The API never runs template Python: `pipeline_facts` reads the declaration, the schema and
 ``INPUTS_VERSION`` as data, and an older ``inputs_v`` is migrated by the template's own
 ``migrate`` on the render worker (`RenderService.migrate_inputs`).
+
+A price or a preview is of the listing's design while `shows_design` says so (§7.2).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import inputs_version_in, revision_meta
 from scadbuddy.library.pipelines import HOST_INPUTS, inputs_schema_problems
 from scadbuddy.orders.storefront.inputs import effective_default, same_value
-from scadbuddy.orders.storefront.wire import ListingInput
+from scadbuddy.orders.storefront.wire import Listing, ListingInput
 from scadbuddy.render.inputs import InputsError, nul_at
 from scadbuddy.render.runner import with_defaults
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -197,6 +199,24 @@ async def settled_inputs(
         reason = "additional" if problem.keyword == "additionalProperties" else problem.keyword
         raise _invalid(reason, f"{name}: {problem.message}", name)
     return inputs
+
+
+def shows_design(
+    listing: Listing, slug: str | None, commit: str | None, inputs: Mapping[str, Any]
+) -> bool:
+    """Whether a render, an output or a line of ``slug`` at ``commit`` with ``inputs`` is of
+    the design the published template ``listing`` shows now (spec §7.2): its slug and
+    commit, and for a pipeline template its own inputs and their version too, which a
+    republish at the same commit may change. The values are compared, never their text:
+    ``jsonb`` reorders keys (#6302). ``params`` are the visitor's. A template with no
+    pipeline is its slug and commit alone: its UI's own state renders nothing."""
+    if (slug, commit) != (listing.slug, listing.commit):
+        return False
+    snapshot = listing.design[2]
+    if not snapshot.pipeline:
+        return True
+    own = {key: value for key, value in inputs.items() if key != "params"}
+    return own == {**snapshot.inputs, "v": snapshot.inputs_version}
 
 
 def _params(listing: ListingInput, schema: CustomizerSchema) -> dict[str, ParamValue]:

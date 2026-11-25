@@ -1267,6 +1267,8 @@ async def _publish(
             core.render, listing, listing.slug, listing.commit, pipeline, facts.schema_
         )
         check_set_params(listing, facts.schema_, pipeline.sets_params)
+        # `settled_inputs` refuses a pipeline whose version cannot be read.
+        assert pipeline.inputs_version is not None
     colours = await asyncio.to_thread(store.filament_colours)
     supports = await asyncio.to_thread(store.support_filaments)
     fixed = checked_fixed(facts.schema_, listing, colours, supports)

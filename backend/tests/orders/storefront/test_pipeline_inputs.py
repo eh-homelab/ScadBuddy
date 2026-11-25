@@ -23,8 +23,9 @@ from scadbuddy.orders.storefront.pipeline_inputs import (
     check_unexpected,
     pipeline_facts,
     settled_inputs,
+    shows_design,
 )
-from scadbuddy.orders.storefront.wire import ListingInput
+from scadbuddy.orders.storefront.wire import Listing, ListingInput, ListingSnapshot
 from scadbuddy.render.inputs import InputsError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.submit import RenderService
@@ -367,3 +368,46 @@ def test_a_schema_outside_the_template_is_not_read(tmp_path: Path) -> None:
     (directory / "pipeline" / "inputs.json").symlink_to(outside)
     facts = pipeline_facts(directory, "kit")
     assert facts is not None and facts.schema is None and "outside" in facts.fault
+
+
+# -- the design a listing shows (spec §7.2) -------------------------------------------------
+
+
+def published(*, pipeline: bool) -> Listing:
+    snapshot = ListingSnapshot(
+        schema=PARAMS,
+        pipeline=pipeline,
+        template_name="Kit",
+        libraries=[],
+        snapshot_key="k",
+        inputs=HOUSE if pipeline else {},
+        inputs_version=1 if pipeline else 0,
+    )
+    return Listing.model_construct(slug="kit", commit=HEAD, snapshot=snapshot)
+
+
+@pytest.mark.parametrize(
+    ("inputs", "shown"),
+    [
+        ({**HOUSE, "params": {"width": 40}, "v": 1}, True),
+        # The customer's parameters are theirs, and the order of the keys is no one's.
+        ({"v": 1, "house": {"storeys": 1, "cols": 2}, "params": {}}, True),
+        ({"house": {"cols": 2, "storeys": 3}, "params": {}, "v": 1}, False),
+        ({**HOUSE, "params": {}, "v": 2}, False),
+        ({**HOUSE, "params": {}}, False),
+        ({**HOUSE, "extra": 1, "params": {}, "v": 1}, False),
+        ({"params": {}, "v": 1}, False),
+    ],
+)
+def test_a_pipelines_design_is_its_inputs_too(inputs: dict[str, Any], shown: bool) -> None:
+    listing = published(pipeline=True)
+    assert shows_design(listing, "kit", HEAD, inputs) is shown
+    assert not shows_design(listing, "other", HEAD, inputs)
+    assert not shows_design(listing, "kit", "b" * 40, inputs)
+
+
+def test_a_template_with_no_pipeline_is_its_slug_and_commit() -> None:
+    """Its UI's own state renders nothing, and renders share one key whatever it is."""
+    listing = published(pipeline=False)
+    assert shows_design(listing, "kit", HEAD, {"params": {}, "note": "mine", "v": 0})
+    assert not shows_design(listing, "kit", "b" * 40, {})
