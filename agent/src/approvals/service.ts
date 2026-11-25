@@ -4,7 +4,7 @@ import type { RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
-import { type ApprovalDecisionMessage, canSee, event, type Owner, PROTOCOL_VERSION, sameOwner } from '../sessions/protocol.js'
+import { type ApprovalDecisionMessage, event, type Owner, PROTOCOL_VERSION, sameOwner } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
 import type { AuditSurface } from '../audit/log.js'
 import { type Span, SpanKind } from '@opentelemetry/api'
@@ -20,8 +20,8 @@ import type { ApprovalRoutes, NewApprovalRow } from './crudApprovals.js'
 // WHO ASKS. An outward call over /mcp (#251's prepare/confirm, below). A session's
 // turn parks on its workflow's gate instead (temporal/session/gate.ts, ai_pending_input;
 // unified runtime plan Steps 6.3 and 9.7), so no release writes a pending session row
-// here any more: a session's rows are its history, and a pending one an earlier
-// release left is decided or expires like any other, with nothing parked on it.
+// here any more. A session's rows are its history: none is shown, listed or decided
+// here (#7323; prod had none pending on 2026-11-23), and the sweep expires any left.
 //
 // BINDING. Each approval stores an HMAC-SHA256 of the tool name and the
 // canonical JSON of the FULL input (`hash()`), keyed by a server-side key:
@@ -40,13 +40,11 @@ import type { ApprovalRoutes, NewApprovalRow } from './crudApprovals.js'
 //     need a per-token grant". The grant is `grants(principal)`; it defaults
 //     to none, and #251's token table (PR #368) supplies it. Even with one, a
 //     principal never decides its OWN outward calls: not when it asked for
-//     the call, owns the session, or started it. "By another agent" is read
-//     strictly, so a grant cannot turn into self-approval. A grant holder may
-//     see (and decide) approvals in sessions it does not own, which is what
-//     the grant is for. `anonymous` (MCP auth `disabled`) is no exception:
+//     the call. "By another agent" is read strictly, so a grant cannot turn
+//     into self-approval. A grant holder may see (and decide) other
+//     principals' prepares, which is what the grant is for. `anonymous` (MCP auth `disabled`) is no exception:
 //     spec §8.3, "Outward actions still need a human approval in the UI
-//     (§8.2); that rule is independent of auth";
-//   - and otherwise only for a session the principal may see (spec §6).
+//     (§8.2); that rule is independent of auth".
 //
 // ENDING WITHOUT A DECISION: no decision by `expires_at` is EXPIRED. The
 // window is the ai_settings key `approval_expiry_seconds` (default below),
@@ -303,13 +301,6 @@ function cap(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text
 }
 
-type SessionAccess = {
-  owner: Owner
-  creator: Pick<Owner, 'kind' | 'id'>
-  /** A live handoff offer's target, who may see the session too (sessions/protocol.ts `canSee`). */
-  offer: { to: Pick<Owner, 'kind' | 'id'> } | null
-}
-
 export type CreateApproval = {
   sessionId: string | null
   turnId: string | null
@@ -390,16 +381,6 @@ export class ApprovalService {
     return row ? { ...record(row), due: row.due } : undefined
   }
 
-  private async session(id: string): Promise<SessionAccess | undefined> {
-    const row = await this.deps.routes.session(id)
-    if (!row) return undefined
-    return {
-      owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
-      creator: { kind: row.creator_kind, id: row.creator_id },
-      offer: row.offer_kind && row.offer_id ? { to: { kind: row.offer_kind, id: row.offer_id } } : null,
-    }
-  }
-
   /** Whether a non-browser principal holds the per-token approval grant (spec §6). */
   async holdsGrant(principal: Owner): Promise<boolean> {
     return this.hasGrant(principal)
@@ -407,13 +388,14 @@ export class ApprovalService {
 
   /**
    * Every pending approval `principal` may see, oldest first: all of them for the
-   * browser user and grant holders; for anyone else, those of sessions it owns or
-   * started and its own session-less ones (MCP prepares).
+   * browser user and grant holders; for anyone else, its own (MCP prepares). A
+   * session's rows are left out (see WHO ASKS).
    */
   async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
-    if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
     await this.expireDue()
-    return (await this.deps.routes.visiblePending(principal)).map(record)
+    const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
+    const rows = everything ? await this.deps.routes.pending() : await this.deps.routes.prepared(principal)
+    return rows.map(record).filter((a) => a.sessionId === null)
   }
 
   private async hasGrant(principal: Owner): Promise<boolean> {
@@ -421,46 +403,22 @@ export class ApprovalService {
   }
 
   /**
-   * Whether `principal` may see the approval: the browser user and grant
-   * holders see all; others see their sessions' (spec §6) and, outside a
-   * session, their own. `null` means visible with no session.
+   * Whether `principal` may see the approval: the browser user and grant holders
+   * see all, others their own. A session's row is no one's (see WHO ASKS).
    */
-  private async visible(principal: Owner, approval: ApprovalRecord): Promise<SessionAccess | null | false> {
-    const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
-    if (approval.sessionId === null) return everything || sameOwner(principal, approval.requestedBy) ? null : false
-    const session = await this.session(approval.sessionId)
-    if (!session) return false
-    return everything || canSee(principal, session) ? session : false
+  private async visible(principal: Owner, approval: ApprovalRecord): Promise<boolean> {
+    if (approval.sessionId !== null) return false
+    return principal.kind === 'browser' || sameOwner(principal, approval.requestedBy) || (await this.hasGrant(principal))
   }
 
   /** One approval, if the principal may see it. */
   async get(id: string, principal: Owner): Promise<ApprovalRecord> {
     const approval = await this.row(id)
-    if (!approval || (await this.visible(principal, approval)) === false) {
+    if (!approval || !(await this.visible(principal, approval))) {
       throw new ApprovalError('not_found', `no approval ${id}`)
     }
     const { due: _due, ...rest } = approval
     return rest
-  }
-
-  /**
-   * A session's approvals, oldest first (pending ones only with `pending`).
-   * Without a session: every pending approval (sessionless ones included),
-   * for the browser user and grant holders; others must name a session.
-   */
-  async list(principal: Owner, filter: { sessionId?: string; pending?: boolean } = {}): Promise<ApprovalRecord[]> {
-    await this.expireDue()
-    const { sessionId, pending } = filter
-    const everything = principal.kind === 'browser' || (await this.hasGrant(principal))
-    if (sessionId !== undefined) {
-      const session = isUuid(sessionId) ? await this.session(sessionId) : undefined
-      if (!session || !(everything || canSee(principal, session))) {
-        throw new ApprovalError('not_found', `no session ${sessionId}`)
-      }
-      return (await this.deps.routes.list(sessionId, pending === true)).map(record)
-    }
-    if (!everything) throw new ApprovalError('invalid', 'name a session to list its approvals')
-    return (await this.deps.routes.list(undefined, true)).map(record)
   }
 
   // -- writes ------------------------------------------------------------------
@@ -494,7 +452,8 @@ export class ApprovalService {
 
   /**
    * Records a pending approval (and, in a session, emits `approval.required`). Only
-   * createPrepared writes one now (an MCP prepare, sessionless); tests also seed rows.
+   * createPrepared writes one now (an MCP prepare, sessionless); tests also seed rows,
+   * a session's among them as an earlier release left one.
    */
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const summary = await this.summary(request)
@@ -540,7 +499,7 @@ export class ApprovalService {
     return record(settled.approval)
   }
 
-  private async authorize(principal: Owner, approval: ApprovalRecord, session: SessionAccess | null): Promise<void> {
+  private async authorize(principal: Owner, approval: ApprovalRecord): Promise<void> {
     if (principal.kind === 'browser') return
     if (!(await this.hasGrant(principal))) {
       throw new ApprovalError(
@@ -549,10 +508,7 @@ export class ApprovalService {
           'and another agent needs a per-token approval grant (spec §6, §8.2)',
       )
     }
-    const own =
-      sameOwner(principal, approval.requestedBy) ||
-      (session !== null && (sameOwner(principal, session.owner) || sameOwner(principal, session.creator)))
-    if (own) {
+    if (sameOwner(principal, approval.requestedBy)) {
       throw new ApprovalError(
         'forbidden',
         `${principal.label} may not decide its own outward actions: an approval grant is for approving another ` +
@@ -567,11 +523,10 @@ export class ApprovalService {
    */
   async decide(principal: Owner, id: string, approve: boolean, options: DecideOptions = {}): Promise<ApprovalRecord> {
     const approval = await this.row(id)
-    const access = approval ? await this.visible(principal, approval) : false
-    if (!approval || access === false || (options.sessionId !== undefined && options.sessionId !== approval.sessionId)) {
+    if (!approval || !(await this.visible(principal, approval)) || (options.sessionId !== undefined && options.sessionId !== approval.sessionId)) {
       throw new ApprovalError('not_found', `no approval ${id}`)
     }
-    await this.authorize(principal, approval, access)
+    await this.authorize(principal, approval)
     if (options.inputHash !== undefined && options.inputHash !== approval.inputHash) {
       throw new ApprovalError(
         'input_mismatch',

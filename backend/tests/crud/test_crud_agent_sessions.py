@@ -196,6 +196,14 @@ def test_a_session_is_inserted_and_read_whole(agent: Agent) -> None:
     assert agent.refused("POST", "/sessions", body).status_code == 409
 
 
+@pytest.mark.parametrize("named", [{}, {"runtime": None}], ids=["absent", "null"])
+def test_a_session_that_names_no_runtime_is_unified(agent: Agent, named: dict[str, None]) -> None:
+    """An agent pod of an earlier release may send null during a roll (#7323)."""
+    body = _new()
+    del body["runtime"]
+    assert agent.post("/sessions", {**body, **named})["session"]["runtime"] == "unified"
+
+
 def test_a_fork_and_a_child_spend_from_the_lineage(agent: Agent, tables: PgPool) -> None:
     parent = _start(agent)
     _sql(tables, "UPDATE ai_sessions SET cost_usd = 2 WHERE id = %s", (parent["id"],))

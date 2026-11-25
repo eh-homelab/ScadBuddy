@@ -58,9 +58,10 @@ import type { SendClaim, SendClaimed, TurnRows } from './turnRows.js'
 // - handoff: after the owner change is committed, `cancel_input`, best-effort, and the new owner
 //   told to the gate; when it goes unanswered the `interrupt` Signal ends the parked calls.
 //
-// A session's `runtime` column names its workflow type. A new one gets `unified` at insert, and
-// one with none (a classic session's) gets it at its first send: its transcript is in
-// ai_session_entries, which the turn resumes. A row still `durable` is a DurableSession that
+// A session's `runtime` column names its workflow type. A new one gets `unified` at insert; the
+// rows a classic release left with none were set `unified` by migration
+// 20261124T0215Z_session_runtime_not_null.sql (#7323), their transcripts in ai_session_entries,
+// which the turn resumes. A row still `durable` is a DurableSession that
 // closed before plan Step 7.2 moved the open ones (six in production on 2026-11-01, all
 // archived, none with a transcript): no worker runs its workflow, so a send is refused `closed`
 // and a fork of it starts an AgentSession (manager.ts `fork`). Its recovery CLI is gone (#6501):
@@ -319,10 +320,9 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
-    // The runtime is recorded by the first send of a session that has none (a classic
-    // session's): AgentSession. Every DurableSession row has its own, `unified` or `durable`
-    // (the six closed ones, refused below: such a row's conversation is in its DurableSession's
-    // history, not in `ai_session_entries`, so an AgentSession would run on with none of it).
+    // A `durable` row (the six closed ones, refused below: such a row's conversation is in its
+    // DurableSession's history, not in `ai_session_entries`, so an AgentSession would run on
+    // with none of it).
     const claimed = await this.#claim(id, {
       author: turn.author,
       turnId: turn.turnId,
@@ -731,21 +731,12 @@ export class DurableTurns {
     const state = await this.#turns.state(session.id, RUNNING_GRACE_MS)
     if (!state || !RUNNING.includes(state.status)) return false
     const row = { ...state, id: session.id }
-    if (row.runtime === 'unified') {
-      // The fast path (spec §5.6): the turn's replica reads the flag on its next tick and stops
-      // the turn there, a held call included, with no further model request. Its parked
-      // entries are not cancelled first (a cancelled one is a refusal the model would answer):
-      // the Signal below cancels them as the turn ends, and is the backstop for a missed tick.
-      await this.#turns.interrupt(session.id)
-    } else {
-      try {
-        await this.#gate.cancelInput(session.id, reason)
-      } catch (err) {
-        if (err instanceof WorkflowNotFoundError) return this.#endGone(row)
-        // Unanswered: the Signal stops the turn and its parked calls all the same.
-        if (!(err instanceof DurableUnavailable)) throw err
-      }
-    }
+    // The fast path (spec §5.6): the turn's replica reads the flag on its next tick and stops
+    // the turn there, a held call included, with no further model request. Its parked
+    // entries are not cancelled first (a cancelled one is a refusal the model would answer):
+    // the Signal below cancels them as the turn ends, and is the backstop for a missed tick.
+    // Only an AgentSession runs: a `durable` row is refused before its turn starts (#7323).
+    await this.#turns.interrupt(session.id)
     try {
       await this.#gate.interrupt(session.id, reason)
     } catch (err) {

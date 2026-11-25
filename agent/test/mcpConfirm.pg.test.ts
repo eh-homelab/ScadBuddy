@@ -99,7 +99,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
       expect(row.inputSummary).not.toContain('k-1')
       // The UI's list of pending approvals includes it.
-      expect((await approvals.list(browser, { pending: true })).map((a) => a.id)).toEqual([action.id])
+      expect((await approvals.listVisiblePending(browser)).map((a) => a.id)).toEqual([action.id])
       expect((await actions.list(principalA)).map((a) => a.id)).toEqual([action.id])
       expect(await actions.list(principalB)).toEqual([])
     })
@@ -185,7 +185,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const kept = await prepare(principalA, { output_id: '1'.repeat(32) })
       for (let i = 2; i < 4; i++) await prepare(principalA, { output_id: `${i}`.repeat(32) })
       // The UI no longer offers the evicted one, and it cannot be decided or confirmed.
-      expect((await approvals.list(browser, { pending: true })).map((a) => a.id)).not.toContain(first.id)
+      expect((await approvals.listVisiblePending(browser)).map((a) => a.id)).not.toContain(first.id)
       await expect(approvals.decide(browser, first.id, true)).rejects.toBeDefined()
       const evicted = await actions.claim(first.id, principalA, { output_id: '0'.repeat(32) })
       expect(evicted.status === 'refused' && evicted.reason).toContain('cancelled')

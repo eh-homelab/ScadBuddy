@@ -28,14 +28,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await drop()
     })
 
-    it('answers for every session, a classic one an earlier release left included (plan Step 6.3)', async () => {
+    it('answers for every session (plan Step 6.3)', async () => {
       const m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
       const owners = new PgSessionOwners(db.sql)
       expect(await owners.ownerOf(randomUUID())).toBeUndefined()
       expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null, browser: null })
-      await db.sql`UPDATE ai_sessions SET runtime = NULL WHERE id = ${session.id}`
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null, browser: null })
+      // Every row names its runtime (#7323).
+      await expect(db.sql`UPDATE ai_sessions SET runtime = NULL WHERE id = ${session.id}`).rejects.toThrow()
       // The tiers its current turn was sent with (#2320), only while the sender owns it.
       const sent = (by: { kind: string; id: string }, tiers: string[]) =>
         db.sql`UPDATE ai_sessions SET turn_tiers = ${db.sql.json({ by, tiers })} WHERE id = ${session.id}`

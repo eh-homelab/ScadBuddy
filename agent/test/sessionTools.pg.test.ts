@@ -413,12 +413,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
     })
 
     it('lets only a token with the approval grant decide, and never its own', async () => {
-      const { agent, sessions, publisher } = await setup()
+      const { agent, sessions } = await setup()
       const a = await agent('write')
-      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'needs approval' }))
-      const sentBeforeCreate = publisher.sent
+      // An MCP prepare of `a`'s (#251): every approval now has no session (#7323).
       const approval = await sessions.approvals.create({
-        sessionId: session.id,
+        sessionId: null,
         turnId: null,
         toolUseId: 'tu-1',
         tool: 'send_to_bambuddy',
@@ -426,15 +425,13 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         tier: 'outward',
         requestedBy: a.owner,
       })
-      // Its approval.required, appended inside the insert's transaction, is announced once it commits (#715 review).
-      await until(() => publisher.sent > sentBeforeCreate, 'the new approval on the bus')
 
       // Below outward: refused by tier before anything else.
       expect(errorText(await a.call('sessions_approve', { approval_id: approval.id }))).toMatch(/needs the "outward" tier/)
       // Outward without the grant: it may not even see another agent's approval.
       const plain = await agent('outward')
       expect(errorText(await plain.call('sessions_approve', { approval_id: approval.id }))).toMatch(/no approval/)
-      expect(errorText(await plain.call('sessions_list_approvals'))).toMatch(/name a session/)
+      expect(ok<unknown[]>(await plain.call('sessions_list_approvals'))).toEqual([])
 
       // With the grant: listed, and decided, with the hash it was shown.
       const reviewer = await agent('outward', { approvalGrant: true })
@@ -443,18 +440,14 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       expect(
         errorText(await reviewer.call('sessions_deny', { approval_id: approval.id, input_hash: '0'.repeat(64) })),
       ).toMatch(/different input/)
-      const sentBefore = publisher.sent
       const decided = ok<{ decision: string; decided_by: { kind: string } }>(
         await reviewer.call('sessions_deny', { approval_id: approval.id, input_hash: pending[0]!.input_hash }),
       )
       expect(decided).toMatchObject({ decision: 'denied', decided_by: { kind: 'bearer' } })
-      // The decision's approval.resolved, appended inside its transaction, is announced once it commits.
-      await until(() => publisher.sent > sentBefore, 'the decision on the bus')
 
-      // A grant never covers the holder's own sessions.
-      const own = ok<{ session: { id: string } }>(await reviewer.call('sessions_start', { title: 'mine' }))
+      // A grant never covers the holder's own requests.
       const mine = await sessions.approvals.create({
-        sessionId: own.session.id,
+        sessionId: null,
         turnId: null,
         toolUseId: 'tu-2',
         tool: 'send_to_bambuddy',
