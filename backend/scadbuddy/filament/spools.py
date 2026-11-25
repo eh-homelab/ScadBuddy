@@ -20,9 +20,12 @@ from uuid import UUID
 from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
+from pydantic import JsonValue
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import traced_transaction
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.required import checks_save, mark_incomplete, save_properties_on
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
@@ -39,6 +42,7 @@ from scadbuddy.filament.types import (
     names_preset,
     overridden,
 )
+from scadbuddy.orders.models import Actor
 from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
 
 Conn = Connection[DictRow]
@@ -75,7 +79,7 @@ def _migrated_rows(conn: Conn, spool_id: UUID) -> set[_PresetValues]:
     return _preset_values(conn.execute(_MIGRATED_ROWS, (spool_id,)).fetchall())
 
 
-#: The columns of a spool row: every field of `Spool` but the four it is given here.
+#: The columns of a spool row: every field of `Spool` but those it is given here.
 _SPOOL_FIELDS = tuple(
     f
     for f in m.Spool.model_fields
@@ -88,10 +92,11 @@ _SPOOL_FIELDS = tuple(
         "hours_outside_dry",
         "needs_drying",
         "drift_notice",
+        *m.COMPLETENESS,
     }
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
-_TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
+_TYPE_COLUMNS = ", ".join(f for f in m.SpoolType.model_fields if f not in m.COMPLETENESS)
 _TAG_COLUMNS = ", ".join(m.Tag.model_fields)
 _BINDING_COLUMNS = ", ".join(m.TagBinding.model_fields)
 _TAG_COLUMNS_T = ", ".join(f"t.{f}" for f in m.Tag.model_fields)
@@ -100,7 +105,7 @@ _BINDING_COLUMNS_B = ", ".join(f"b.{f} AS binding_{f}" for f in m.TagBinding.mod
 #: The events that keep a spool from being deleted: it printed.
 _USED: tuple[m.EventKind, ...] = ("print_started", "print_ended")
 #: What a create or a patch may write to a column of its own.
-_WRITABLE = frozenset(m.SpoolPatch.model_fields) - {"archived"}
+_WRITABLE = frozenset(m.SpoolPatch.model_fields) - {"archived", "properties"}
 
 
 class SpoolInUseError(ValueError):
@@ -263,6 +268,23 @@ def _setting_defaults() -> FilamentDefaults:
     return _SETTING_DEFAULTS
 
 
+def _properties(
+    conn: Conn,
+    spool_id: UUID,
+    properties: dict[str, JsonValue] | None,
+    by: Actor | None,
+    checked: bool,
+) -> None:
+    if properties or checked:
+        save_properties_on(
+            conn,
+            EntityRef("spool", str(spool_id)),
+            properties,
+            by or Actor(kind="browser"),
+            check=checked,
+        )
+
+
 def _hydrate(
     conn: Conn,
     rows: list[dict[str, Any]],
@@ -347,6 +369,7 @@ def _hydrate(
                 }
             )
         )
+    mark_incomplete(conn, "spool", spools)
     return spools
 
 
@@ -709,13 +732,20 @@ class FilamentSpoolStore:
                 limit=limit,
             )
 
-    def create(self, body: m.SpoolCreate, *, actor: str) -> m.Spool:
+    def create(
+        self, body: m.SpoolCreate, *, actor: str, by: Actor | None = None, checked: bool = False
+    ) -> m.Spool:
         """A new spool and its ``created`` event; ``grams_left``, when sent, is that
-        event's reading. The temperature ranges are checked on the effective values."""
+        event's reading. The temperature ranges are checked on the effective values. Its
+        ``properties`` are written with it, by ``by``; with ``checked`` (the spool routes,
+        #7703 spec 6.3b) an incomplete spool is `MissingRequiredProperties` and nothing is
+        written."""
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
-                spool_id = self.create_on(conn, body, actor=actor)
+                bare = body.model_copy(update={"properties": None})
+                spool_id = self.create_on(conn, bare, actor=actor)
+                _properties(conn, spool_id, body.properties, by, checked)
                 made = self._spool(conn, spool_id, defaults, self._clock())
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None
@@ -734,8 +764,11 @@ class FilamentSpoolStore:
         """`create` on ``conn``, in the caller's transaction (`filament/csv_import.py`):
         the new spool's id. A row it names that does not exist is the driver's
         `ForeignKeyViolation`. ``ref_kind`` and ``ref_id`` go on the ``created`` event
-        (an invoice line's, #6266); a retry of one pair books nothing twice."""
-        data = body.model_dump(exclude={"grams_left"})
+        (an invoice line's, #6266); a retry of one pair books nothing twice. It writes no
+        ``properties``: `create` and `bulk_on` do."""
+        if body.properties is not None:
+            raise ValueError("create_on writes no properties")
+        data = body.model_dump(exclude={"grams_left", "properties"})
         names = list(data)
         row = conn.execute(
             f"INSERT INTO filament_spools ({', '.join(names)})"
@@ -757,7 +790,15 @@ class FilamentSpoolStore:
         )
         return spool_id
 
-    def bulk_on(self, conn: Conn, body: m.SpoolBulkCreate, *, actor: str) -> _Ids:
+    def bulk_on(
+        self,
+        conn: Conn,
+        body: m.SpoolBulkCreate,
+        *,
+        actor: str,
+        by: Actor | None = None,
+        checked: bool = False,
+    ) -> _Ids:
         """``body.quantity`` spools of one draft, in the caller's transaction (#7150,
         R-7150-1, R-7150-2): each its own number, its ``created`` event (with
         ``grams_left`` as its reading), its move to ``location_id``, and its own presets
@@ -770,7 +811,8 @@ class FilamentSpoolStore:
         it names no spool. The source's ``migrated`` rows are read here, when the create
         runs, not when the draft was read: if the source's presets are re-set between the
         copy and the save, an unchanged copied row stops being ``migrated``. That is
-        intended."""
+        intended. Each spool gets the draft's ``properties``, by ``by``; with ``checked``
+        (#7703) an incomplete spool is `MissingRequiredProperties`."""
         carried: set[_PresetValues] = set()
         if body.copy_of is not None:
             # One read: the source, and its migrated rows (none: one row of NULLs).
@@ -791,8 +833,10 @@ class FilamentSpoolStore:
             if place is not None and place["tray_id"] is not None:
                 raise SpoolTrayPlaceError()
         made: _Ids = []
+        bare = body.spool.model_copy(update={"properties": None})
         for _ in range(body.quantity):
-            spool_id = self.create_on(conn, body.spool, actor=actor)
+            spool_id = self.create_on(conn, bare, actor=actor)
+            _properties(conn, spool_id, body.spool.properties, by, checked)
             if body.location_id is not None:
                 LocationStore.move_on(conn, spool_id, body.location_id, actor=actor)
             if body.presets:
@@ -810,7 +854,7 @@ class FilamentSpoolStore:
         (R-7150-10). ``copy_of`` names the source, so a bulk create marks the rows that
         match its ``migrated`` ones (R-7150-11, R-7150-13). ``None`` for no such spool.
         Writes nothing."""
-        left_out = {"grams_left", "weight_locked", "added_full"}
+        left_out = {"grams_left", "weight_locked", "added_full", "properties"}
         fields = [f for f in m.SpoolCreate.model_fields if f not in left_out]
         with self._pool.connection() as conn:
             row = conn.execute(
@@ -848,7 +892,15 @@ class FilamentSpoolStore:
             copy_of=spool_id,
         )
 
-    def update(self, spool_id: UUID, patch: m.SpoolPatch, *, actor: str) -> m.Spool | None:
+    def update(
+        self,
+        spool_id: UUID,
+        patch: m.SpoolPatch,
+        *,
+        actor: str,
+        by: Actor | None = None,
+        checked: bool = False,
+    ) -> m.Spool | None:
         """The fields ``patch`` sends; ``None`` for no such spool. One ``edited`` event
         holds every field that changed, as ``[before, after]``; ``archived`` writes an
         ``archived`` or ``restored`` event instead. Archiving closes the spool's open tag
@@ -857,12 +909,21 @@ class FilamentSpoolStore:
         a type nor a material is `SpoolTypelessError`, and the temperature ranges are
         checked on the effective values after it. A spool's first type drops its
         ``migrated`` presets (`presets.drop_migrated`), in the same event as
-        ``changes.presets``."""
+        ``changes.presets``. Its ``properties`` are written with it, by ``by``; with
+        ``checked`` (the spool route, #7703 spec 6.3b) a save that leaves the spool
+        incomplete is `MissingRequiredProperties`, unless it sends only ``archived``."""
         defaults = self._defaults()
         try:
             with self._pool.connection() as conn, conn.transaction():
                 if not self.update_on(conn, spool_id, patch, actor=actor):
                     return None
+                _properties(
+                    conn,
+                    spool_id,
+                    patch.properties,
+                    by,
+                    checked and checks_save(patch.model_fields_set),
+                )
                 return self._spool(conn, spool_id, defaults, self._clock())
         except errors.ForeignKeyViolation:
             raise CatalogRefError() from None

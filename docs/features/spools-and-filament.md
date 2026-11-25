@@ -225,8 +225,25 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Each kind has a schema that documents and types the keys it knows. It never refuses a
   key. The schema is an allowlisted subset of JSON Schema Draft 2020-12 (`TOP_KEYWORDS`,
   `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
-  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
-  already stored are not checked again after a schema change.
+  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. A
+  schema change rewrites and refuses no stored value; on the required kinds below, reads mark a
+  value that no longer fits and the row's next checked save refuses it.
+- Required keys (#7703, [spec §6.3b](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md)).
+  The schema of a spool, a spool type or a catalog kind may list keys under `required`
+  (`REQUIRED_KINDS`); any other kind's schema with `required` is 422 `bad_property_schema`.
+  The row's own create and save routes (`POST`/`PATCH /filament/spools`,
+  `POST /filament/spools/bulk`, `POST`/`PATCH /filament/types` and
+  `POST`/`PATCH /filament/catalog/{kind}`) take `properties` beside the row, write both in
+  one transaction, and refuse a row whose required keys have no value or whose defined keys
+  hold a value that no longer fits: 422 `missing_required_properties`, with `missing` and
+  `invalid`. An empty or blank string and an empty list are no value; `false` and `0` are.
+  Not checked: a save that sends only `archived` or `sort_order`, bulk-update, events,
+  syncs, imports, invoice confirm, a catalog row added on the way to another, and
+  `PUT /filament/types/{id}/cost-per-kg`, which sets only the cost. Reads carry
+  `missing_properties` and `invalid_properties` (keys only); an archived row is never
+  marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
+  that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
+  once the base-kind design settles; the UI follows in its own change.
 - `item` is the exception (#7067). An item's properties follow its item kind's
   `attribute_schema`, merged down the kind tree (a child kind's key wins;
   `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
