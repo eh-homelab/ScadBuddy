@@ -270,6 +270,34 @@ def test_label_wrong_sets_the_spools_own_label(pg_pool: PgPool) -> None:
 
 
 @pg
+def test_label_wrong_from_the_types_label_records_a_null_before(pg_pool: PgPool) -> None:
+    """The spool had no label of its own: the `edited` event's `before` is null, the type's
+    label stands, and the spool now overrides it."""
+    kind = SpoolTypeStore(pg_pool).create(
+        m.SpoolTypeCreate(
+            code="PLA-TYPED", material_id=_material(pg_pool), rgba="#00FF00", label_weight_g=1000
+        )
+    )
+    store = FilamentSpoolStore(pg_pool)
+    spool = store.create(
+        m.SpoolCreate(
+            type_id=kind.id, insert_type_id=_insert(pg_pool), grams_left=1000, added_full=True
+        ),
+        actor="ann",
+    ).id
+    assert store.get(spool).label_weight_g is None  # type: ignore[union-attr]
+    _weigh(pg_pool, spool, reading_g=850, resolution="label_wrong")
+    edited = store.events(spool)[-2]
+    assert edited.kind == "edited"
+    before, after = edited.data["changes"]["label_weight_g"]
+    assert before is None and after == 650
+    row = store.get(spool)
+    assert row is not None and row.label_weight_g == 650 and row.effective.label_weight_g == 650
+    assert "label_weight_g" in row.overridden
+    assert SpoolTypeStore(pg_pool).get(kind.id).label_weight_g == 1000  # type: ignore[union-attr]
+
+
+@pg
 def test_a_resolution_without_a_below_label_answer_is_refused(pg_pool: PgPool) -> None:
     spool = _new_spool(pg_pool)
     _print(pg_pool, spool, 12, T0, "r")

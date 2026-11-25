@@ -1694,7 +1694,8 @@ _INSERT_WEIGHT_RULE = (
     "filament grams (`tared`: the scale was tared on the empty spool; `short` and "
     "`label_wrong`, each the reading less the insert's empty weight, only when that is "
     "not negative; `label_wrong` also names `new_label_weight_g`), and `default` the one "
-    "to preselect (`tared` within 10 % of the label, else `short`)."
+    "to preselect (`tared` within 10 % of the label, else `short`; a reading under the "
+    "empty weight offers `tared` alone, so the default is `tared`)."
 )
 
 

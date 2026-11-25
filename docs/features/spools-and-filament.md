@@ -204,7 +204,8 @@ filament), `short` (the spool holds less than its label: the reading less the em
 and the spool stops being added full) and `label_wrong` (the same filament, and the spool's
 own label weight becomes it, rounded; the type keeps its own). `short` and `label_wrong`
 are offered only when the reading is at least the empty weight. The default is `tared`
-within 10 % of the label, else `short`. The weigh form and the phone page show the three
+within 10 % of the label, else `short`; a reading under the empty weight offers `tared`
+alone, so its default is `tared`. The weigh form and the phone page show the three
 with their numbers ("The reading is 100 g under the label weight. What is up?") with the
 default preselected, and the weighing posts `resolution` with `reading_g` alone; the
 agent's `filament_spool_add_event` answers the choices (`below_label`, nothing booked)

@@ -73,8 +73,13 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
       }
       // #7682: with an empty weight the reading goes alone and the server takes the insert off
       // it, so the event keeps its breakdown and a decimal reading stays the insert's.
-      if (below && picked) await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', reading_g: value, resolution: picked })
-      else await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', ...(empty != null ? { reading_g: value } : { grams: Math.round(filament) }) })
+      if (below && picked) {
+        await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', reading_g: value, resolution: picked })
+        // The spool is no longer new: the reading goes, so the cached question goes with it.
+        setText('')
+      } else {
+        await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', ...(empty != null ? { reading_g: value } : { grams: Math.round(filament) }) })
+      }
       setSaved(true)
       setChoice(null)
       // The card shows the grams left: the spool read again carries the new ones.

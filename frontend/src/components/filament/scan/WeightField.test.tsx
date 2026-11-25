@@ -105,6 +105,26 @@ describe('WeightField (#7273)', () => {
     expect((await getSpool(spool.id)).added_full).toBe(false)
   })
 
+  it('clears its question after a resolved weighing, so a second Save cannot post the default (#7683)', async () => {
+    const spool = await getSpool(spoolId(9))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    const field = await screen.findByLabelText('Gross weight (g)')
+    await user.type(field, '900')
+    await user.click(await screen.findByRole('radio', { name: /The label weight is wrong/ }))
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 720, data: { resolution: 'label_wrong' } })
+    expect(field).toHaveValue('')
+    expect(screen.queryByRole('group', { name: /What is up/ })).toBeNull()
+    // Past the check's 300 ms wait: no radio comes back for the cleared reading.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(screen.queryByRole('radio')).toBeNull()
+    const count = (await listSpoolEvents(spool.id)).length
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Type the weight first.')
+    expect(await listSpoolEvents(spool.id)).toHaveLength(count)
+  })
+
   it('a Save before the check answered shows the question first and books nothing (#7683)', async () => {
     const spool = await getSpool(spoolId(9))
     const before = (await listSpoolEvents(spool.id)).length
