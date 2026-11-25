@@ -29,7 +29,7 @@ import { SSE_KEEPALIVE_MS } from './sessions.js'
 // GET /api/v1/ai/pending-input (#815; durable-agents spec §6.6, PR #1070): every
 // tool call parked on a person that the browser user may answer, in one shape,
 // for the Assistant badge. One Postgres read of the union of the pending rows of
-// `ai_approvals` (kind `approval`, session-less MCP prepares included), of
+// `ai_approvals` (kind `approval`: MCP prepares, which have no session), of
 // `ai_questions` (kind `answer`: questions, #940, and attention requests, #815),
 // and of `ai_pending_input`, durable sessions' projection, never a Query per
 // workflow. A durable entry past its timer whose worker has not resolved it yet is
@@ -131,13 +131,10 @@ export async function pendingInput(
   // browser user's aggregate read, the badge's, and in no other principal's.
   const withRuns = browser && filter.runs === true && filter.sessionId === undefined
   const [approvals, { questions: answers, summariesTruncated }, durable, own] = await Promise.all([
-    // Each list is capped, so one session's read asks for that session's rows only.
-    // Both approvals lists check the principal's access (and its grant) themselves, on purpose:
-    // that is the service's own guard (its refusal is sessionPendingInput's 404), and `grant`
-    // here only shapes the projection's filter.
-    filter.sessionId === undefined
-      ? sessions.approvals.listVisiblePending(principal)
-      : sessions.approvals.list(principal, { sessionId: filter.sessionId, pending: true }),
+    // Each list is capped, so one session's read asks for that session's rows only. An approval
+    // is an MCP prepare, which no session has. Its list checks the principal's access (and its
+    // grant) itself, on purpose: `grant` here only shapes the projection's filter.
+    filter.sessionId === undefined ? sessions.approvals.listVisiblePending(principal) : Promise.resolve([]),
     sessions.questions.listPending(principal, filter.sessionId),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
@@ -162,7 +159,7 @@ export async function pendingInput(
   }))
   const inSession = (e: PendingInputEntry) => filter.sessionId === undefined || e.session_id === filter.sessionId
   const entries: PendingInputEntry[] = [
-    ...approvals.map(approvalEntry).filter(inSession),
+    ...approvals.map(approvalEntry),
     ...answers.map(questionEntry).filter(inSession),
     ...durable,
     ...runEntries,
@@ -176,7 +173,7 @@ export async function pendingInput(
  * decided entry's row is gone from the record, and a session whose workflow closed, or that
  * Temporal no longer has (archived after its retention), lists what its record holds, never
  * asking Temporal (#7311). The session's creator sees its parked calls as its owner does.
- * Undefined when there is no such session for the principal.
+ * Undefined when there is no such session for the principal, before the read or after it.
  */
 export async function sessionPendingInput(
   sessions: SessionManager,
@@ -184,18 +181,26 @@ export async function sessionPendingInput(
   sessionId: string,
 ): Promise<PendingInputPage | undefined> {
   if (!isUuid(sessionId)) return undefined
+  const access = await sessionAccess(sessions, principal, sessionId)
+  if (!access) return undefined
+  const page = await pendingInput(sessions, principal, { sessionId, ...access })
+  // Again, over what was read: the session may have been forgotten or handed off, or the grant
+  // revoked, since the first check.
+  return (await sessionAccess(sessions, principal, sessionId)) ? page : undefined
+}
+
+/** How `principal` may read one session's entries; undefined when it may not, or there is no such session. */
+async function sessionAccess(
+  sessions: SessionManager,
+  principal: Owner,
+  sessionId: string,
+): Promise<{ grant: boolean; browserAnswers: 'own' | 'all' } | undefined> {
   const session = await sessions.projection.session(sessionId)
   if (!session) return undefined
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
   if (principal.kind !== 'browser' && !grant && !own) return undefined
-  try {
-    return await pendingInput(sessions, principal, { sessionId, grant, browserAnswers: session.creator.kind === 'browser' ? 'all' : 'own' })
-  } catch (err) {
-    // The approvals' own check: the session was forgotten, or the grant revoked, since the reads above.
-    if (err instanceof ApprovalError && err.code === 'not_found') return undefined
-    throw err
-  }
+  return { grant, browserAnswers: session.creator.kind === 'browser' ? 'all' : 'own' }
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */

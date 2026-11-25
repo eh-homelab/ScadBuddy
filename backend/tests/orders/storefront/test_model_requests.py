@@ -58,7 +58,9 @@ def slots(
 
 
 def put(slot: dict[str, Any], data: bytes) -> None:
-    answer = httpx.put(slot["url"], content=data, headers=slot["headers"])
+    # moto serves on a thread that shares the GIL with the app under test; on a loaded
+    # runner its answer can take longer than httpx's 5 s default (#7556).
+    answer = httpx.put(slot["url"], content=data, headers=slot["headers"], timeout=30)
     answer.raise_for_status()
 
 

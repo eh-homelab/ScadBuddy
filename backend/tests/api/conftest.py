@@ -272,6 +272,29 @@ def app_run_holds_sweep_off(
 
 
 @pytest.fixture(autouse=True)
+def app_warm_listings_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#7737: the app's own warm-listings sweep does nothing. The prune Schedule's boot run
+    (as in `app_payment_sweep_off`) runs it at a time the test does not choose; with
+    `storefront_warm_prices` on (`test_storefront_warm_prices.py`) it starts a published
+    listing's default price run beside the test's own pass (`warm_unpriced`), so that pass
+    finds the run started already, or the test's recorded starts hold one more. A test
+    runs the sweep itself (`swept`)."""
+
+    async def off(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_warm_listings_logged", off)
+
+
+def files_only(client: TestClient) -> None:
+    """The app saves as a build before #7256 did: files and rows, no blobs. On `local` the
+    outputs have a blob store of their own (#7257, plan D7); a test that rewrites or
+    removes an output's files after its save calls this first, so reads take the files."""
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    state.outputs.bytes = None
+
+
+@pytest.fixture(autouse=True)
 def app_output_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """#7255: the app's start copy of the outputs' files to rows does nothing, unless the
     test is marked `output_copy`. A finished copy ends the files' fallback for a missing

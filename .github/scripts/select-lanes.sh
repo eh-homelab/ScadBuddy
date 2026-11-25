@@ -10,10 +10,14 @@
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
 #                  frontend and Go trees that run against it; and the
 #                  `profile-fetch-image` and `camera-image` jobs (#6625, #7328)
-#   docs_only      every changed path is a Markdown file under docs/: the lint,
-#                  frontend, agent, models, freshness and Go jobs skip, and only the
-#                  `markdown` job checks the change. False with `all` and on an
-#                  empty diff.
+#   docs_only      every changed path is a Markdown file under docs/, or a CLAUDE.md
+#                  or AGENTS.md in any directory but a vendor/ tree: the lint, frontend, agent, models,
+#                  freshness and Go jobs skip, and only the `markdown` job checks the
+#                  change. False with `all` and on an empty diff.
+#
+# Those docs paths select no lane, so `backend/CLAUDE.md` runs no backend job.
+# A path under a vendor/ directory is never docs: a vendored module's CLAUDE.md or
+# AGENTS.md is module content, and the Go job's vendor drift check must see it.
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
@@ -34,15 +38,17 @@ agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backe
 rust="^(workers/rust/|$wiring)"
 image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
+docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
 paths=$(cat)
-pick() { if grep -qE "$1" <<<"$paths"; then echo true; else echo false; fi; }
+code=$(grep -vE "$docs" <<<"$paths" || true; grep -E '(^|/)vendor/' <<<"$paths" || true)
+pick() { if grep -qE "$1" <<<"$code"; then echo true; else echo false; fi; }
 
 b=$(pick "$backend")
 echo "backend=$b"
 echo "agent_durable=$(pick "$agent_durable")"
 echo "rust=$(pick "$rust")"
 if [ "$b" = true ]; then echo "image=true"; else echo "image=$(pick "$image_extra")"; fi
-if [ -n "$paths" ] && ! grep -qvE '^docs/.+\.md$' <<<"$paths"; then
+if [ -n "$paths" ] && [ -z "$code" ]; then
   echo "docs_only=true"
 else
   echo "docs_only=false"

@@ -5,7 +5,8 @@ name: Build Image
 # agent sidecar as ghcr.io/eh-homelab/scadbuddy-agent (the `agent` job below),
 # the durable sessions sidecar as ghcr.io/eh-homelab/scadbuddy-agent-durable
 # (the `agent-durable` job, #1056), the slicer worker as
-# ghcr.io/eh-homelab/scadbuddy-slicer (the `slicer` job, #3821), the
+# ghcr.io/eh-homelab/scadbuddy-slicer (the `slicer` job, #3821), the API in
+# Go as ghcr.io/eh-homelab/scadbuddy-core (the `core` job, #7667), the
 # sessions' shell sandbox as ghcr.io/eh-homelab/scadbuddy-sandbox (the
 # `sandbox` job, #5864), the profile-fetch worker as
 # ghcr.io/eh-homelab/scadbuddy-profile-fetch (the `profile-fetch` job, #6625),
@@ -42,11 +43,18 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    # A push that changes only docs/**/*.md builds no image, so it deploys
-    # nothing either (deploy-main.yml runs on this workflow). GitHub does not
-    # apply path filters to tag pushes, so a release always builds.
-    paths-ignore:
-      - "docs/**/*.md"
+    # A push that changes only docs/**/*.md, CLAUDE.md or AGENTS.md files (outside
+    # vendor/) builds no image, so it deploys nothing either (deploy-main.yml runs
+    # on this workflow).
+    # GitHub does not apply path filters to tag pushes, so a release always builds.
+    # `paths`, not `paths-ignore`: a later pattern re-includes a vendored module's
+    # CLAUDE.md or AGENTS.md, which is code (select-lanes.sh).
+    paths:
+      - "**"
+      - "!docs/**/*.md"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      - "**/vendor/**"
   workflow_dispatch:
 
 # Never cancel a publish. Two concurrent pushes to main would otherwise race on
@@ -747,6 +755,93 @@ jobs:
           set -euo pipefail
           {
             echo "### Published \`ghcr.io/eh-homelab/scadbuddy-slicer\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # scadbuddy-core (#7667), the API in Go: tools/go/core/Dockerfile with the repo
+  # root as context, published as ghcr.io/eh-homelab/scadbuddy-core and run as the
+  # `core` container in the API's pod. This job builds it, not build-go-image.yml,
+  # so every main build has a core image with the same tags as the other images,
+  # and deploy.reusable.yml pins it beside the API. build-go-image.yml does not
+  # publish this module, so only one workflow writes each `sha-<short>` tag.
+  #
+  # `continue-on-error` for the slicer's reason: a build with no core image keeps
+  # clusters' current core pin and warns, and the rest of the deploy continues.
+  core:
+    name: Build and push core (amd64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        env:
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+        with:
+          images: ghcr.io/eh-homelab/scadbuddy-core
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=ScadBuddy core
+            org.opencontainers.image.description=ScadBuddy's API in Go
+
+      # `type=gha` because this is a hosted runner, with a scope of its own and
+      # mode=min: the repo's Actions cache is full (CLAUDE.md, "CI and caching
+      # rules").
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: tools/go/core/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,scope=core,mode=min
+
+      - name: Report the published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`ghcr.io/eh-homelab/scadbuddy-core\`"
             echo
             echo "**Digest:** \`${DIGEST}\`"
             echo

@@ -74,12 +74,26 @@ func Marshal(v any) ([]byte, error) {
 
 // WriteJSON answers 200 with v.
 func WriteJSON(w http.ResponseWriter, v any) error {
+	return WriteJSONStatus(w, http.StatusOK, v)
+}
+
+// WriteJSONStatus answers status with v; a 204 has no body.
+func WriteJSONStatus(w http.ResponseWriter, status int, v any) error {
+	if status == http.StatusNoContent {
+		w.WriteHeader(status)
+		return nil
+	}
 	body, err := Marshal(v)
 	if err != nil {
 		return err
 	}
-	write(w, http.StatusOK, "application/json", body)
+	write(w, status, "application/json", body)
 	return nil
+}
+
+// WriteBytes answers status with body as mediaType.
+func WriteBytes(w http.ResponseWriter, status int, mediaType string, body []byte) {
+	write(w, status, mediaType, body)
 }
 
 // WriteProblem answers p, its members in problems.py's order.

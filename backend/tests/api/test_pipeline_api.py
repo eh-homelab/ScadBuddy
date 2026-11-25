@@ -13,6 +13,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.workflows.models import MigrateResult
 from scadbuddy.workflows.outputs import output_key
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -299,6 +300,7 @@ def test_migrate_resolves_a_short_revision(
     full = client.get("/api/v1/models/pasted").json()["version"]
     # A pipeline, or the route answers identity without asking (below).
     with_pipeline(paths, "pasted")
+    sync_template_rows(client)
     calls = _spy_migrations(client, monkeypatch)
     response = client.post(
         "/api/v1/models/pasted/inputs/migrate",

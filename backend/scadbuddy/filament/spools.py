@@ -27,6 +27,7 @@ from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
+from scadbuddy.filament.empty_weight import effective_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
@@ -79,7 +80,15 @@ _SPOOL_FIELDS = tuple(
     f
     for f in m.Spool.model_fields
     if f
-    not in {"effective", "overridden", "names", "low_stock", "hours_outside_dry", "needs_drying"}
+    not in {
+        "effective",
+        "overridden",
+        "names",
+        "low_stock",
+        "hours_outside_dry",
+        "needs_drying",
+        "drift_notice",
+    }
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
 _TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
@@ -123,6 +132,21 @@ class SpoolBambuddyCreatingError(SpoolBambuddyLinkedError):
             "the spool is being created in Bambuddy, which may already hold it, and the"
             " next pull would bring it back; archive it instead",
         )
+
+
+class NoEmptyWeightError(ValueError):
+    """A weighing sent as a reading alone on a spool with no empty weight known (#7682)."""
+
+    def __init__(self) -> None:
+        super().__init__("the spool has no empty weight to take off the reading")
+
+
+class ReadingBelowEmptyError(ValueError):
+    """A weighing sent as a reading alone that is under the spool's empty weight (#7682):
+    the filament would be negative."""
+
+    def __init__(self) -> None:
+        super().__init__("the reading is below the spool's empty weight")
 
 
 class SpoolTypelessError(ValueError):
@@ -218,12 +242,14 @@ class FilamentDefaults:
     under which a spool with none of its own is low (``filament_low_stock_pct``), the cost
     per kg of a spool and type that name none (``filament_default_cost_per_kg``), and the
     drying temperature and hours when nothing in the catalog sets them
-    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5)."""
+    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5), and the drift
+    at or over which a weighing is a notice (``filament_weighing_drift_notice_g``, #7682)."""
 
     low_stock_pct: int
     cost_per_kg: Decimal | None
     drying_temp_c: int | None = None
     drying_hours: Decimal | None = None
+    drift_notice_g: int = int(Settings.model_fields["filament_weighing_drift_notice_g"].default)
 
 
 #: The settings' own defaults, for a read that shows neither ``low_stock`` nor a value (a
@@ -316,6 +342,8 @@ def _hydrate(
                     "overridden": overridden(row),
                     "names": names,
                     "low_stock": _low_stock(row["grams_left"], own, default_pct),
+                    "drift_notice": row["last_drift_g"] is not None
+                    and abs(row["last_drift_g"]) >= defaults.drift_notice_g,
                 }
             )
         )
@@ -528,10 +556,12 @@ class FilamentSpoolStore:
                 " ORDER BY upper(sup.name), upper(p.sku), p.id",
                 (spool_id,),
             ).fetchall()
+            weighings = [e for e in history if e.kind == "weighed"]
             return m.SpoolDetail.model_validate(
                 spool.model_dump()
                 | {
                     "drying_defaults": _drying_defaults(conn, spool_id, defaults),
+                    "last_weighing": weighings[-1] if weighings else None,
                     "invoice": None
                     if line is None
                     else m.SpoolInvoiceRef.model_validate(
@@ -1377,8 +1407,12 @@ class FilamentSpoolStore:
         no such spool. A drying's ``temp_c`` or ``hours`` left out (not sent) is the
         spool's drying default (`_drying_defaults`, #6720; the settings last, #7156). A
         reset whose ``at`` is not after the spool's Bambuddy link is
-        `ResetBeforeLinkError` (R-7149-12)."""
+        `ResetBeforeLinkError` (R-7149-12). A weighing with ``reading_g`` keeps its
+        breakdown (`ledger.breakdown`, #7682); one with no ``grams`` takes the spool's
+        effective empty weight off the reading, `NoEmptyWeightError` when there is
+        none and `ReadingBelowEmptyError` when the reading is under it."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
+        grams = body.grams
         # Read before the store takes its connection (`FilamentDefaults`' rule).
         settings = self._defaults() if body.kind == "dried" else _SETTING_DEFAULTS
         with self._pool.connection() as conn, conn.transaction():
@@ -1407,12 +1441,37 @@ class FilamentSpoolStore:
                 temp = body.temp_c if "temp_c" in sent else defaults.temp_c
                 hours = body.hours if "hours" in sent else defaults.hours
                 data |= {"temp_c": temp, "hours": None if hours is None else float(hours)}
+            if body.kind == "weighed" and body.reading_g is not None:
+                empty = effective_on(conn, spool_id)
+                if grams is None:
+                    if empty is None:
+                        raise NoEmptyWeightError()
+                    grams = body.reading_g - empty.grams
+                    if grams < 0:
+                        raise ReadingBelowEmptyError()
+                spool = conn.execute(
+                    "SELECT s.weight_locked,"
+                    " coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
+                    " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
+                    " WHERE s.id = %s",
+                    (spool_id,),
+                ).fetchone()
+                assert spool is not None
+                expected = ledger.expected_before(
+                    ledger.events(conn, spool_id),
+                    body.at,
+                    weight_locked=spool["weight_locked"],
+                    label_weight_g=spool["label_weight_g"],
+                )
+                data |= ledger.breakdown(
+                    reading_g=body.reading_g, grams=grams, empty=empty, expected=expected
+                )
             return ledger.record(
                 conn,
                 spool_id,
                 body.kind,
                 source=body.source if body.kind == "weighed" else "person",
-                absolute_g=body.grams,
+                absolute_g=grams,
                 at=body.at,
                 actor=actor,
                 data=data,

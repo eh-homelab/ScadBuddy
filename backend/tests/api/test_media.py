@@ -36,6 +36,7 @@ from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -958,6 +959,7 @@ def test_a_video_whose_file_is_gone_is_reported_missing(
 ) -> None:
     item = _upload(client, model, MP4).json()["media"][0]
     (paths.model_dir(model) / "media" / item["file"]).unlink()
+    sync_template_rows(client)
 
     [listed] = _media(client, model)
 
@@ -1156,6 +1158,7 @@ def test_a_bundled_entry_cannot_reach_outside_media(client: TestClient, paths: D
         {"id": "ok", "file": "ok.png", "kind": "image", "poster": "../../settings.json"},
     ]
     paths.model_meta(BUILTIN).write_text(json.dumps(meta), encoding="utf-8")
+    sync_template_rows(client)
 
     listed = _media(client, BUILTIN)
 

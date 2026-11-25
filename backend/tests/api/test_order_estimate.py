@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
+from tests.api.conftest import files_only
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_outputs import _finished_job
@@ -22,6 +23,7 @@ BOOK = "/api/v1/orders/price-book"
 
 def output_of(client: TestClient, model: str, paths: DataPaths, *plates: list[Any]) -> str:
     """An output whose 3MF lays ``plates`` out, each a list of meshes."""
+    files_only(client)
     created: dict[str, Any] = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},

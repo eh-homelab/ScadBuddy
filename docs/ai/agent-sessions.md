@@ -22,7 +22,7 @@ so the dot is an underscore.
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
 | `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); while a turn runs it is queued to run after it (`queued`, `position`; at most 20 wait, #6386) |
 | `sessions_queue_remove`, `sessions_queue_edit` | `write` | Removes a queued message, or gives it new words, before it starts (#6386); the owner only, as a send |
-| `sessions_get` | `read` | Status, owner, pending approvals, the queued messages (`queue`), and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
+| `sessions_get` | `read` | Status, owner, the queued messages (`queue`), and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
 | `sessions_resources` | `read` | What the session's tool calls touched, oldest first (§4.1); `GET /api/v1/ai/sessions/:id/resources` answers the same to the UI |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
 | `sessions_fork` | `write` | A copy of a session the caller may see, owned by the caller, with the conversation so far; counts against the new-session limit, as a start does. The fork has no budget of its own: it spends from the parent's, which the parent and all its forks (and forks of those) share, so a turn in any of them uses it up for all, and a raise on any of them raises it. Forking a lineage that has spent its budget is refused with `budget_exhausted` (409). Only the user's "Continue in a new chat" in the panel gives a fork a budget of its own (#823) |
@@ -30,7 +30,7 @@ so the dot is an underscore.
 | `sessions_handoff` | `write` | Gives a session the caller owns to `"browser"` (the user in the UI) at once, or **offers** it to `"token:<id>"` or `"oidc:<issuer>#<sub>"` (§2.1); with `to` the caller's own id, accepts an offer made to it |
 | `sessions_accept_handoff` | `write` | Accepts a session offered to the caller: it becomes the owner |
 | `sessions_cancel_handoff` | `write` | Ends a pending offer: the owner withdraws it, the target declines it |
-| `sessions_list_approvals` | `read` | Pending approvals of one session, or every pending one for a grant holder, with each `input_hash` |
+| `sessions_list_approvals` | `read` | Pending approvals of MCP prepares: the caller's own, or every pending one for a grant holder, with each `input_hash`. A session's parked calls are `pending_input_list`'s and `sessions_pending_input`'s (#7323) |
 | `sessions_approve`, `sessions_deny` | `outward` | Decide another agent's approval; needs the grant (§3) |
 
 `sessions_start` and `sessions_send` take `wait_seconds` (≤ 600, default 0): with 0 they
@@ -176,9 +176,10 @@ per-token grant (§6), and never for its own calls or sessions."
   `anonymous` callers never hold one.
 - **The rules** are `authorize()` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts): without the
-  grant a decision is refused; with it, never for an approval the caller requested, or
-  in a session it owns or started. A grant holder sees every pending approval
-  (`sessions_list_approvals` with no session). Passing the `input_hash` it was shown
+  grant a decision is refused; with it, never for an approval the caller requested. A
+  grant holder sees every pending approval (`sessions_list_approvals`). A session's own
+  `ai_approvals` rows, which only a release before plan Step 6.3 wrote, are not listed,
+  read or decided (#7323). Passing the `input_hash` it was shown
   makes the decision fail if the approval is for a different input.
 
 ## 4. The session resources and `session.*` events

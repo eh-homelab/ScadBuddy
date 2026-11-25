@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -43,7 +45,7 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, areas, "")
+	router, err := newRouter(pool, next, nil, areas, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +441,7 @@ func TestARunningTurnsState(t *testing.T) {
 	got := a.ok("GET", "/sessions/"+sid+"/turn?grace_ms=1000", "")
 	expect(t, got.body["turn"], map[string]any{
 		"status": "idle", "durable_turn_id": turn, "turn_attempt": "run:1",
-		"interrupt_requested": false, "owner_kind": "browser", "runtime": nil,
+		"interrupt_requested": false, "owner_kind": "browser", "runtime": "unified",
 		"event_seq": "1", "cost_usd": 0.25, "settled": true,
 	})
 	expect(t, a.ok("GET", "/sessions/"+sid+"/turn?grace_ms=60000", "").body["turn"].(map[string]any)["settled"], false)
@@ -479,8 +481,36 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, "session-evnets", ""); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", ""); err == nil {
 		t.Error("an unknown area was taken")
+	}
+}
+
+func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
+	pool := testdb.New(t)
+	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
+		"notify:read", "transcripts", "transcripts:read"} {
+		_, err := newRouter(pool, nil, nil, area, "")
+		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
+			t.Errorf("%s: %v", area, err)
+		}
+	}
+	every := "settings, access, plugin-sessions, mcp-relay, session-events, session-turns:read"
+	if _, err := newRouter(pool, nil, nil, every, ""); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(t.TempDir(), "kek")
+	if err := os.WriteFile(key, []byte(base64.StdEncoding.EncodeToString(make([]byte, 32))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := seal.LoadKeys(func(name string) string {
+		return map[string]string{seal.Variable: key}[name]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts", ""); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -495,7 +525,7 @@ func python(t *testing.T, handler http.HandlerFunc) (front string) {
 	upstream := &http.Server{Handler: handler}
 	go upstream.Serve(listener)
 	t.Cleanup(func() { upstream.Close() })
-	next, err := newUpstream("unix://" + socket)
+	next, err := newUpstream("unix://"+socket, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +547,6 @@ func TestAForwardedRequestKeepsItsHeadersAndNamesItsPeer(t *testing.T) {
 	req.Host = "scadbuddy.example"
 	req.Header.Set("X-Forwarded-For", "203.0.113.9, 198.51.100.2")
 	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set(peerHeader, "192.0.2.66")
 	req.Header.Set("Authorization", "Bearer sbpat_x")
 	res, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
@@ -529,10 +558,10 @@ func TestAForwardedRequestKeepsItsHeadersAndNamesItsPeer(t *testing.T) {
 	expect(t, got.RequestURI, "/api/v1/a%2Fb//c/../d?x=1&y=%20")
 	expect(t, got.Host, "scadbuddy.example")
 	expect(t, body, "hello")
-	expect(t, got.Header.Get("X-Forwarded-For"), "203.0.113.9, 198.51.100.2")
+	// The front is no trusted proxy of its own here: Python is told the TCP peer.
+	expect(t, got.Header.Values("X-Forwarded-For"), []string{"127.0.0.1"})
 	expect(t, got.Header.Get("X-Forwarded-Proto"), "https")
 	expect(t, got.Header.Get("Authorization"), "Bearer sbpat_x")
-	expect(t, got.Header.Values(peerHeader), []string{"127.0.0.1"})
 	if v := got.Header.Get("Accept-Encoding"); v != "gzip" && v != "" {
 		t.Fatalf("Accept-Encoding %q", v)
 	}
@@ -595,7 +624,7 @@ func TestAForwardedUpgradeIsATunnel(t *testing.T) {
 }
 
 func TestAnUpstreamThatIsDownIsABadGateway(t *testing.T) {
-	next, err := newUpstream("unix://" + filepath.Join(t.TempDir(), "none"))
+	next, err := newUpstream("unix://"+filepath.Join(t.TempDir(), "none"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,8 +637,46 @@ func TestAnUpstreamThatIsDownIsABadGateway(t *testing.T) {
 	res.Body.Close()
 	expect(t, res.StatusCode, http.StatusBadGateway)
 	for _, bad := range []string{"", "ftp://x", "8080"} {
-		if _, err := newUpstream(bad); err == nil {
+		if _, err := newUpstream(bad, nil); err == nil {
 			t.Errorf("%q was taken", bad)
 		}
 	}
+}
+
+func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
+	env := map[string]string{
+		"SCADBUDDY_CORE_UPSTREAM":    "http://127.0.0.1:1",
+		"SCADBUDDY_DATABASE_URL":     "postgres://postgres@127.0.0.1:1/postgres",
+		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
+		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:0",
+	}
+	err := run(context.Background(), func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), "needs its own") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestAFailedBindLeavesNothingListening(t *testing.T) {
+	taken, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer taken.Close()
+	free, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := free.Addr().String()
+	free.Close()
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	if err := serve(context.Background(), map[string]http.Handler{
+		address: ok, taken.Addr().String(): ok,
+	}); err == nil {
+		t.Fatal("a taken address was served")
+	}
+	again, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("the free address is still held: %v", err)
+	}
+	again.Close()
 }

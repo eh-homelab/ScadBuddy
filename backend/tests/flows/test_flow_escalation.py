@@ -307,12 +307,13 @@ async def test_a_narrowed_decision_whose_input_does_not_match_its_hash_runs_noth
     ask = DecisionAsk(call_id=call_id, fn="queue_print")
     read: DecisionRead = await env.run(grants.decision, ask)
     assert (read.narrowed, read.args) == (True, None)
-    # And for another run's workflow, nothing at all.
+    # And another run's workflow has no approval of it on record: nothing at all.
     other = ActivityEnvironment(client=outward.client)
     other.info = dataclasses.replace(
         other.info, workflow_id=f"flow-{uuid.uuid4()}", workflow_run_id="x"
     )
-    assert (await other.run(grants.decision, ask)).narrowed is False
+    read = await other.run(grants.decision, ask)
+    assert (read.narrowed, read.args, read.refused is not None) == (True, None, True)
 
 
 async def test_a_starter_session_that_is_also_the_child_has_no_parent_hop(

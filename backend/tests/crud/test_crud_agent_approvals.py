@@ -133,6 +133,16 @@ def test_a_session_approval_is_made_with_its_events(agent: Agent, tables: PgPool
     assert agent.post("/approvals/visible-pending", WHO)["approvals"] == []
 
 
+def test_the_pending_list_holds_mcp_prepares_only(agent: Agent, tables: PgPool) -> None:
+    """A session's row is no one's to decide through this list (#7323): it takes no place
+    under the cap, so leftover rows never hide an MCP prepare."""
+    agent.post("/approvals/create", _new(_session(tables)))
+    body = {"approval": _new(None), "per_principal": 5, "total": 50, "evict_reason": "full"}
+    prepare = agent.post("/approvals/create-prepared", body)["approval"]
+    listed = agent.post("/approvals/list", {"session_id": None, "pending": True})["approvals"]
+    assert [a["id"] for a in listed] == [prepare["id"]]
+
+
 def test_a_decision_is_written_once_with_its_audit_row(agent: Agent, tables: PgPool) -> None:
     session = _session(tables)
     approval = agent.post("/approvals/create", _new(session))["approval"]

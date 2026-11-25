@@ -133,10 +133,14 @@ def _agent_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
 @pytest.fixture(autouse=True)
 def app_template_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """#7317: the app's start copy of the templates' files to rows does nothing, unless
-    the test is marked `template_copy`. It walks every template and writes their rows at
-    a time the test does not choose, beside the writes the test makes itself, and holds
-    the per-database copy lock that a test calling `copy_templates` takes too."""
+    """#7317: the app's background start copy of the templates' files to rows does
+    nothing, unless the test is marked `template_copy`. It walks every template and
+    writes their rows at a time the test does not choose, beside the writes the test
+    makes itself, and holds the per-database copy lock that a test calling
+    `copy_templates` takes too. The first copy (`main._first_template_copy`) still runs,
+    before the app serves, as the database has no finished run: the lists read only rows
+    (phase 3). A test that writes template files by hand after its app started calls
+    `tests/support/template_rows.py` `sync_template_rows`."""
     if request.node.get_closest_marker("template_copy") is not None:
         return
 
