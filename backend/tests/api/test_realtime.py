@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -473,6 +474,21 @@ def _opaque(kind: str, topics: list[str]) -> OpaqueEvent:
 def test_topics_of_opaque_namespaced() -> None:
     event = _opaque("fleet.message", ["fleet:agent:a", "job:abc", "orders", "fleet:"])
     assert realtime.topics_of(event) == ["fleet:agent:a"]
+
+
+def test_a_skipped_opaque_topic_is_logged_once(caplog: pytest.LogCaptureFixture) -> None:
+    event = _opaque("fleet.message", ["fleet:a", "job:abc", "orders"])
+    with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
+        assert realtime.topics_of(event) == ["fleet:a"]
+    records = [r for r in caplog.records if r.name == realtime.logger.name]
+    assert len(records) == 1
+    assert records[0].__dict__["event_id"] == "x"
+    assert records[0].__dict__["kind"] == "fleet.message"
+    assert records[0].__dict__["skipped"] == ["job:abc", "orders"]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=realtime.logger.name):
+        realtime.topics_of(_opaque("fleet.message", ["fleet:a"]))
+    assert caplog.records == []
 
 
 def test_an_opaque_event_cannot_pose_as_a_known_namespace() -> None:

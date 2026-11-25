@@ -115,6 +115,7 @@ from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Person
 from scadbuddy.core.events import (
+    MAX_OPAQUE_TOPICS,
     TASK_PLACE_CHAR,
     TASK_PLACE_MAX,
     ActivityEvent,
@@ -166,7 +167,7 @@ router = APIRouter(tags=["realtime"])
 #: How often the server pings; a client that hears nothing for twice this reconnects.
 PING_SECONDS = 25.0
 #: Topics one connection may follow at once.
-MAX_TOPICS = 64
+MAX_TOPICS = MAX_OPAQUE_TOPICS
 #: Inbound frames: a burst of RATE_BURST, refilled at RATE_PER_SECOND.
 RATE_BURST = 40
 RATE_PER_SECOND = 20.0
@@ -272,7 +273,17 @@ def topics_of(event: AnyEvent) -> list[str]:
         case OpaqueEvent():
             # Only its own kind's namespace, so an unknown kind cannot pose as `job:` news.
             prefix = f"{namespace_of(event.kind)}:"
-            return [t for t in event.topics if t.startswith(prefix) and _opaque_namespace_topic(t)]
+            kept = [t for t in event.topics if t.startswith(prefix) and _opaque_namespace_topic(t)]
+            if len(kept) != len(event.topics):
+                logger.warning(
+                    "skipped topics of an opaque event outside its namespace",
+                    extra={
+                        "event_id": event.id,
+                        "kind": event.kind,
+                        "skipped": [t for t in event.topics if t not in kept],
+                    },
+                )
+            return kept
         case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
