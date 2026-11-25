@@ -20,6 +20,7 @@ from scadbuddy.entities.problems import (
     bad_property_schema,
     bad_property_value,
     entity_not_found,
+    missing_required,
     no_properties_kind,
     parsed,
     schema_owned_by_item_kind,
@@ -29,6 +30,7 @@ from scadbuddy.entities.properties import (
     BadPropertySchema,
     BadPropertyValue,
     EntityProperty,
+    MissingRequiredProperties,
     PropertyPatch,
     PropertyValue,
     SchemaOwnedByKind,
@@ -180,7 +182,11 @@ async def get_entity_property_schema(
     ),
     responses={
         404: {"description": "No such entity (`entity_not_found`)"},
-        422: {"description": _CODES + " or `bad_property_value`"},
+        422: {
+            "description": _CODES
+            + ", `bad_property_value`, or `missing_required_properties` for a patch that"
+            " removes or empties a required key that has a value"
+        },
     },
 )
 async def patch_entity_properties(
@@ -193,6 +199,8 @@ async def patch_entity_properties(
         raise entity_not_found(entity) from None
     except BadPropertyValue as e:
         raise bad_property_value(e.key, e.reason) from None
+    except MissingRequiredProperties as e:
+        raise missing_required(e) from None
     return EntityPropertyList(properties=found)
 
 

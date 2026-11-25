@@ -12,6 +12,8 @@ import functools
 import json
 import math
 import re
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -44,6 +46,26 @@ TOP_KEYWORDS = frozenset(
         "title",
         "description",
         "examples",
+        "required",
+    }
+)
+#: The kinds whose create and save check required keys (#7703, spec 6.3b): only their
+#: schema may hold `required`, so a mark never promises a check that does not run. An item's
+#: is its item kind's `attribute_schema`.
+REQUIRED_KINDS = frozenset(
+    {
+        "spool",
+        "spool_type",
+        "material",
+        "subtype",
+        "brand",
+        "category",
+        "effect",
+        "insert_material",
+        "insert_type",
+        "colour",
+        "location_kind",
+        "item",
     }
 )
 #: The only keywords a known key's subschema may use. `enum`, `const`, `default` and
@@ -112,6 +134,61 @@ class BadPropertyValue(ValueError):  # noqa: N818
         super().__init__(f"{key}: {reason}")
         self.key = key
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class Completeness:
+    """What a row lacks (spec 6.3b): its required keys with no value, in the schema's
+    order, and its defined keys whose stored value does not fit, by key, with why."""
+
+    missing: tuple[str, ...] = ()
+    invalid: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        return not self.missing and not self.invalid
+
+
+class MissingRequiredProperties(ValueError):  # noqa: N818
+    """A row that is not complete where it must be (422 `missing_required_properties`)."""
+
+    def __init__(self, missing: tuple[str, ...], invalid: tuple[tuple[str, str], ...] = ()) -> None:
+        super().__init__(
+            "missing required properties: " + ", ".join(missing)
+            if missing
+            else "properties that do not fit: " + ", ".join(k for k, _ in invalid)
+        )
+        self.missing = missing
+        self.invalid = invalid
+
+
+def has_value(value: Any) -> bool:
+    """Whether a stored or sent value counts as one: `false` and `0` do; None, a string
+    that is empty or only whitespace, and an empty list do not."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip() != ""
+    if isinstance(value, list):
+        return len(value) > 0
+    return True
+
+
+def completeness(schema: Mapping[str, Any], values: Mapping[str, Any]) -> Completeness:
+    """The row's `Completeness` against `schema` (spec 6.3b). A key no schema defines never
+    makes a row incomplete."""
+    missing = tuple(k for k in schema.get("required") or () if not has_value(values.get(k)))
+    known = schema.get("properties") or {}
+    invalid: list[tuple[str, str]] = []
+    for key in sorted(values):
+        if key not in known or values[key] is None:
+            continue
+        error = best_match(
+            _validator(json.dumps(known[key], sort_keys=True)).iter_errors(values[key])
+        )
+        if error is not None:
+            invalid.append((key, error.message))
+    return Completeness(missing, tuple(invalid))
 
 
 class BadPropertySchema(ValueError):  # noqa: N818
@@ -188,7 +265,12 @@ def _validator(canonical: str) -> Draft202012Validator:
     return Draft202012Validator(json.loads(canonical))
 
 
-def check_schema(schema: dict[str, Any]) -> None:
+def check_schema(
+    schema: dict[str, Any],
+    *,
+    allow_required: bool = False,
+    defined: Collection[str] | None = None,
+) -> None:
     """`BadPropertySchema` unless `schema` is a valid Draft 2020-12 object schema in the
     allowed subset, so it refuses no key and runs no regex. It also refuses a U+0000 in
     any string or object key, which Postgres jsonb cannot store. It does not prove that
@@ -200,8 +282,10 @@ def check_schema(schema: dict[str, Any]) -> None:
     takes, `const` is one, no lower bound passes its upper bound, and no minimum length or
     count passes the value caps. A property name must be a key a value can be set
     under (`KEY_PATTERN`), and the keywords are checked before the metaschema runs, so no
-    pattern a person sent is ever compiled. Other empty schemas, such as an integer between two
-    exclusive bounds, are not found. `format` is an annotation only (it checks nothing),
+    pattern a person sent is ever compiled. `required` (spec 6.3b) is taken only with
+    `allow_required`: a list of distinct keys, each in `defined` (the schema's own
+    `properties` when not given; an item kind's merged ones). Other empty schemas, such as
+    an integer between two exclusive bounds, are not found. `format` is an annotation only (it checks nothing),
     but "regex" is refused all the same. Any other keyword is refused."""
     if not isinstance(schema, dict):
         raise BadPropertySchema("a schema is a JSON object")
@@ -224,6 +308,24 @@ def check_schema(schema: dict[str, Any]) -> None:
         if KEY_PATTERN.fullmatch(key) is None:
             raise BadPropertySchema(f"property '{key}' is no key a value can be set under")
         _check_key(sub, f"in property '{key}'", item=False)
+    if "required" in schema:
+        _check_required(
+            schema["required"],
+            allow_required,
+            set(schema.get("properties", {})) if defined is None else set(defined),
+        )
+
+
+def _check_required(required: Any, allowed: bool, defined: set[str]) -> None:
+    if not allowed:
+        raise BadPropertySchema("this kind does not check required keys yet")
+    if not isinstance(required, list) or not all(isinstance(k, str) for k in required):
+        raise BadPropertySchema('"required" is a list of keys')
+    if len(set(required)) != len(required):
+        raise BadPropertySchema('"required" names each key once')
+    for key in required:
+        if key not in defined:
+            raise BadPropertySchema(f"required key '{key}' is not one of the kind's keys")
 
 
 def _keywords_only(schema: dict[str, Any]) -> None:
@@ -362,57 +464,65 @@ class EntityPropertyStore:
     def apply(
         self, ref: EntityRef, patch: PropertyPatch, by: Actor
     ) -> builtins.list[EntityProperty]:
-        """The whole patch or nothing, in one transaction: `EntityNotFound` when the owner's
-        row is not there, `BadPropertyValue` for a bad key or value, or (key ``*``) for more
-        than `MAX_KEYS` keys after it and more than before it (a printer merge may leave an
-        entity past the limit; it can still remove and change keys). The entity's
-        properties after it, by key. A patch that only removes keys makes no entity row.
-        The entity's schema (`schema_for`) is read before the transaction, so a schema
-        written meanwhile types the next patch, not this one."""
-        # Every value is checked before the entity's lock, so a check holds no lock.
-        with self.pool.connection() as conn:
-            schema = schema_for(conn, ref)
-        _checked(patch, schema)
+        """`apply_on` in a transaction of its own."""
         with self.pool.connection() as conn, conn.transaction():
-            if all(value is None for value in patch.set.values()):
-                found = self.entities.find(conn, ref)
-                if found is None:
-                    if not self.entities.exists(conn, ref):
-                        raise EntityNotFound(str(ref))
-                    return []
-                entity_id = found
-            else:
-                entity_id = self.entities.ensure(conn, ref)
-            # One writer at a time per entity, so the key count holds.
-            conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
-            # A printer merge (`repoint_entity`) may have deleted the owner while this
-            # waited; `ensure`'s insert then made a row for a gone ref, which the sweep
-            # would delete with the write.
-            if not self.entities.exists(conn, ref):
-                raise EntityNotFound(str(ref))
-            before = conn.execute(
-                "SELECT count(*) AS n FROM entity_properties WHERE entity_id = %s",
-                (entity_id,),
-            ).fetchone()
-            assert before is not None
-            actor = Jsonb(by.model_dump(mode="json"))
-            for key, value in patch.set.items():
-                if value is None:
-                    conn.execute(
-                        "DELETE FROM entity_properties WHERE entity_id = %s AND key = %s",
-                        (entity_id, key),
-                    )
-                    continue
+            return self.apply_on(conn, ref, patch, by)
+
+    def apply_on(
+        self, conn: Conn, ref: EntityRef, patch: PropertyPatch, by: Actor
+    ) -> builtins.list[EntityProperty]:
+        """The whole patch or nothing, in the caller's transaction: `EntityNotFound` when the
+        owner's row is not there, `BadPropertyValue` for a bad key or value, or (key ``*``)
+        for more than `MAX_KEYS` keys after it and more than before it (a printer merge may
+        leave an entity past the limit; it can still remove and change keys), and
+        `MissingRequiredProperties` for a patch that removes or empties a required key that
+        has a value (spec 6.3b; a key still missing refuses nothing). The entity's
+        properties after it, by key. A patch that only removes keys makes no entity row."""
+        schema = schema_for(conn, ref)
+        _checked(patch, schema)
+        if all(value is None for value in patch.set.values()):
+            found = self.entities.find(conn, ref)
+            if found is None:
+                if not self.entities.exists(conn, ref):
+                    raise EntityNotFound(str(ref))
+                return []
+            entity_id = found
+        else:
+            entity_id = self.entities.ensure(conn, ref)
+        # One writer at a time per entity, so the key count holds.
+        conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE", (entity_id,))
+        # A printer merge (`repoint_entity`) may have deleted the owner while this
+        # waited; `ensure`'s insert then made a row for a gone ref, which the sweep
+        # would delete with the write.
+        if not self.entities.exists(conn, ref):
+            raise EntityNotFound(str(ref))
+        before = conn.execute(_LIST, (entity_id,)).fetchall()
+        had = {r["key"]: r["value"] for r in before}
+        emptied = tuple(
+            key
+            for key in schema.get("required") or ()
+            if key in patch.set and has_value(had.get(key)) and not has_value(patch.set[key])
+        )
+        if emptied:
+            raise MissingRequiredProperties(emptied)
+        actor = Jsonb(by.model_dump(mode="json"))
+        for key, value in patch.set.items():
+            if value is None:
                 conn.execute(
-                    "INSERT INTO entity_properties (entity_id, key, value, source, updated_by)"
-                    " VALUES (%s, %s, %s, 'manual', %s) ON CONFLICT (entity_id, key) DO UPDATE"
-                    " SET value = EXCLUDED.value, source = 'manual',"
-                    " updated_at = clock_timestamp(), updated_by = EXCLUDED.updated_by",
-                    (entity_id, key, Jsonb(value), actor),
+                    "DELETE FROM entity_properties WHERE entity_id = %s AND key = %s",
+                    (entity_id, key),
                 )
-            rows = conn.execute(_LIST, (entity_id,)).fetchall()
-            if len(rows) > max(MAX_KEYS, before["n"]):
-                raise BadPropertyValue("*", f"an entity has at most {MAX_KEYS} keys")
+                continue
+            conn.execute(
+                "INSERT INTO entity_properties (entity_id, key, value, source, updated_by)"
+                " VALUES (%s, %s, %s, 'manual', %s) ON CONFLICT (entity_id, key) DO UPDATE"
+                " SET value = EXCLUDED.value, source = 'manual',"
+                " updated_at = clock_timestamp(), updated_by = EXCLUDED.updated_by",
+                (entity_id, key, Jsonb(value), actor),
+            )
+        rows = conn.execute(_LIST, (entity_id,)).fetchall()
+        if len(rows) > max(MAX_KEYS, len(before)):
+            raise BadPropertyValue("*", f"an entity has at most {MAX_KEYS} keys")
         return [_of(r) for r in rows]
 
     def of_kind(self, kind: str) -> dict[str, dict[str, PropertyValue]]:
@@ -445,7 +555,7 @@ class EntityPropertyStore:
             raise UnknownEntityKind(kind)
         if kind == ITEM:
             raise SchemaOwnedByKind(kind)
-        check_schema(schema)
+        check_schema(schema, allow_required=kind in REQUIRED_KINDS)
         with self.pool.connection() as conn:
             row = conn.execute(
                 "INSERT INTO entity_property_schemas (kind, schema, updated_by)"
