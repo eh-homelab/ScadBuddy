@@ -2584,7 +2584,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the instant read has a firm price before any visitor asks. A file listing's run submits no
   render and prices the colours its page opens on, with no visitor charge (`_warm_file`,
   `file_prices.py` `default_choice`, `listings.py` `page_colours`, a copy of the page's
-  `fileParts.ts` `partFilaments` with no pick: change both together, #7523). A start that fails, or takes
+  `fileParts.ts` `partFilaments` with no pick, both tested on
+  `test-fixtures/storefront/file-page-colours.json`, #7523). A start that fails, or takes
   more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
   given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it
