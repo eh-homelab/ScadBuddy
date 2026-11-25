@@ -51,7 +51,7 @@ import { cn } from '@/lib/utils'
 import { LoadingLines, SettingBody, SettingCard } from './form'
 import { Spinner } from '../ui/spinner'
 import { PackageFiles } from './PackageFiles'
-import { announcePackagesChanged, usePackagesChanged } from './packagesChanged'
+import { announcePackagesChanged, PACKAGES_TOPIC, usePackagesChanged } from './packagesChanged'
 
 /**
  * Settings → Plugin packages (#297): Claude plugins (skills, subagents, hooks,
@@ -972,10 +972,14 @@ export function PluginPackagesPanel() {
   const sourceOf = (name: string) => caps.sources.find((s) => s.id === packageSource(name))
 
   // Hosted plugins' Offer installs or re-pins a package (#6937): read them again.
-  usePackagesChanged('packages', () => {
-    state.refresh()
-    void caps.reload()
-  })
+  usePackagesChanged(
+    'packages',
+    () => {
+      state.refresh()
+      void caps.reload()
+    },
+    (confirmation) => state.staleFor(PACKAGES_TOPIC, confirmation),
+  )
   const replace = (pkg: PluginPackage) => {
     // A built-in and a package stored under its name share a name.
     const at = (p: ListedPackage) => !isBuiltIn(p) && p.name === pkg.name

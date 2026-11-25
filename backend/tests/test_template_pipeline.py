@@ -25,6 +25,7 @@ from scadbuddy.render.projection import PROJECT_POOL_TIMEOUT, workflow_id_for
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import pipelines
 from scadbuddy.workflows.activities import WorkerDeps
+from scadbuddy.workflows.commands import SHORT_TASK_TIMEOUT
 from scadbuddy.workflows.ctx import Ctx, _references
 from scadbuddy.workflows.models import (
     Layout,
@@ -1053,6 +1054,23 @@ async def test_a_lookup_failing_in_the_job_falls_back_to_the_pieces_child() -> N
     assert world.failures == 0
     assert world.final().state == "done"
     assert children == [f"piece-{world.pieces[0].piece_key}"]
+
+
+async def test_a_piece_starts_with_the_short_task_timeout() -> None:
+    """#7652: a workflow task the server loses holds the piece for that long. The job
+    keeps Temporal's default: its local activities run inside its tasks."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    async with temporal_client() as client:
+        await run_job(world, job, client=client)
+        timeouts = [
+            (
+                await client.get_workflow_handle(workflow_id).describe()
+            ).raw_description.execution_config.default_workflow_task_timeout.ToTimedelta()
+            for workflow_id in (f"piece-{world.pieces[0].piece_key}", workflow_id_for(job.id))
+        ]
+    piece, own = timeouts
+    assert piece == SHORT_TASK_TIMEOUT
+    assert own > SHORT_TASK_TIMEOUT
 
 
 async def test_a_job_with_no_revision_starts_its_child_and_records_no_lookup() -> None:

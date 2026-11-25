@@ -5,15 +5,17 @@ One pricing path (owner, 2026-11-14): the price is ``orders/quote.py``
 :func:`~scadbuddy.orders.quote.slice_and_price`, which a back-office quote runs too. A
 variant names its subject (#6710 §7.1): a template's render, or a file listing's library
 file. A render's variant is rendered to an output (``orders/rendering.py``
-``output_for_reference``); a file's is the listing's held copy of the file
+``outputs_for_reference``); a file's is the listing's held copy of the file
 (``held_file.py``), which nothing renders. Either is sliced by the print dialog's
 background slice (``orders/operations.py`` ``PreviewSlicer``, the native slicer or
 Bambuddy's, as a quote routes it; a file through ``start_library``, as a back-office
 quote of a library file item slices it) and priced at the price book's policy and the
-machine rate of the profile's printer. The template, or the file itself, gives the
-support and process settings, as for any output or library file. The shop slice profile
-(``slice_profile.py``) gives only the printer and a filament type per material. The
-rest is what the print dialog opens on for the subject on that printer
+machine rate of the profile's printer. A pipeline's render of several outputs is one
+variant (#5701, spec 2026-11-17 §7.4): every output is sliced, and their plates are priced
+together, with one colour one slot across them (:func:`kit_colours`). The template, or the
+file itself, gives the support and process settings, as for any output or library file.
+The shop slice profile (``slice_profile.py``) gives only the printer and a filament type
+per material. The rest is what the print dialog opens on for the subject on that printer
 (``bambuddy/choices.py`` :func:`~scadbuddy.bambuddy.choices.opening_choices`, #6574): the
 remembered choices of the subject's scope (the model's slug, or ``library:<file id>``),
 else the defaults from the printer's live status, read as the dialog reads it
@@ -29,10 +31,10 @@ the chosen nozzle, as a spool of that type would be, in the visitor's colour
 (`NO_TYPE_PRESET`).
 
 One price per variant (:func:`price_key`): the sha256 of the file the slice reads (the
-render's 3MF, or the file listing's pinned copy), the subject's kind, each slot's
-price-book filament, colour and preset, the profile, the choices and the remembered
-setup, and the price book and the machine rate as they stand. A change to any of them is
-another key, so an old price is never read again.
+render's 3MF, of several outputs :func:`kit_digest`, or the file listing's pinned copy),
+the subject's kind, each slot's price-book filament, colour and preset, the profile, the
+choices and the remembered setup, and the price book and the machine rate as they stand. A
+change to any of them is another key, so an old price is never read again.
 A row is kept in ``storefront_slice_prices`` (:class:`SlicePrices`) by its key and holds no
 job id and no bytes, so it outlives the render prune.
 
@@ -85,7 +87,7 @@ from scadbuddy.orders.models import (
     QuoteLine,
     Reference,
 )
-from scadbuddy.orders.pricing import Plate
+from scadbuddy.orders.pricing import Plate, PlateFilament
 from scadbuddy.orders.quote import (
     FOLLOW_EVERY,
     PolicySource,
@@ -94,6 +96,7 @@ from scadbuddy.orders.quote import (
     SlicedPrice,
     SliceQuoteRequest,
     Slicer,
+    SlotPresets,
     slice_and_price,
     sliced_plate_problem,
     sliced_slots,
@@ -102,7 +105,7 @@ from scadbuddy.orders.rendering import (
     OutputsRead,
     RenderedOutput,
     Renders,
-    output_for_reference,
+    outputs_for_reference,
 )
 from scadbuddy.orders.storefront.held_file import FILE_GONE as FILE_GONE
 from scadbuddy.orders.storefront.held_file import HeldFile, PricedFile
@@ -114,6 +117,7 @@ from scadbuddy.orders.storefront.slice_profile import (
     slot_presets,
     slot_types,
 )
+from scadbuddy.render.job_models import Job, JobResult
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -602,17 +606,18 @@ def price_key(
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-#: The sha256 of each done job's 3MF, by job id: one read of the file per job and
-#: process. Bounded; a job that falls out is only hashed again.
+#: The sha256 of each output's 3MF of a done job (:func:`kit_digest`): one read of the
+#: file per output and process. Bounded; one that falls out is only hashed again.
 _digests: OrderedDict[str, str] = OrderedDict()
 _digests_lock = threading.Lock()
 DIGESTS_KEPT: Final = 4096
 
 
-def model_digest(job_id: str, path: Path) -> str:
-    """The sha256 of the render's 3MF at ``path``. Blocking: call it in a thread."""
+def model_digest(kept_as: str, path: Path) -> str:
+    """The sha256 of the 3MF at ``path``, kept as ``kept_as``: the job's id for its first
+    output. Blocking: call it in a thread."""
     with _digests_lock:
-        found = _digests.get(job_id)
+        found = _digests.get(kept_as)
     if found is not None:
         return found
     digest = hashlib.sha256()
@@ -621,11 +626,73 @@ def model_digest(job_id: str, path: Path) -> str:
             digest.update(chunk)
     found = digest.hexdigest()
     with _digests_lock:
-        _digests[job_id] = found
-        _digests.move_to_end(job_id)
+        _digests[kept_as] = found
+        _digests.move_to_end(kept_as)
         while len(_digests) > DIGESTS_KEPT:
             _digests.popitem(last=False)
     return found
+
+
+# -- a render of several outputs (#5701, spec 2026-11-17 §7.4) ----------------------------------
+
+
+def job_results(job: Job) -> list[JobResult]:
+    """The result of each output of the done ``job``, in output order: the job's own for a
+    render of one output, and for a template with no pipeline."""
+    if len(job.outputs) > 1:
+        return [output.result for output in job.outputs]
+    assert job.result is not None
+    return [job.result]
+
+
+def kit_slots(outputs: Sequence[Sequence[str]]) -> list[str]:
+    """The colour of each slot (from 0) of outputs that are printed and priced together, of
+    each output's colours by its own slot: the first output's as they are, then each colour
+    of a later one that is not there yet, casefolded. So one colour takes one filament
+    across them, and the first output keeps its slot numbers."""
+    kit = list(outputs[0])
+    seen = {colour.casefold() for colour in kit}
+    for colours in outputs[1:]:
+        for colour in colours:
+            if colour.casefold() not in seen:
+                seen.add(colour.casefold())
+                kit.append(colour)
+    return kit
+
+
+def kit_colours(job: Job) -> list[str]:
+    """The slot colours of the whole done ``job`` (:func:`kit_slots`): the job's own for a
+    render of one output."""
+    return kit_slots([result.colors for result in job_results(job)])
+
+
+def slot_map(colours: Sequence[str], kit: Sequence[str]) -> dict[int, int]:
+    """The slot of ``kit`` (:func:`kit_slots`) that each slot of an output with ``colours``
+    is. The n-th slot of a colour is the n-th of ``kit``, or its last: the first output's
+    slots are the kit's, though two have one colour."""
+    slots: dict[int, int] = {}
+    places: dict[str, list[int]] = {}
+    for slot, colour in enumerate(kit):
+        places.setdefault(colour.casefold(), []).append(slot)
+    for slot, colour in enumerate(colours):
+        at = places[colour.casefold()]
+        slots[slot] = at.pop(0) if len(at) > 1 else at[0]
+    return slots
+
+
+def kit_digest(job: Job, file: Callable[[str], Path]) -> str:
+    """The ``model`` of the price key of the done ``job``, whose result names its files as
+    ``file`` finds them: the sha256 of its 3MF, or, of several outputs, the sha256 of every
+    output's, in their order. Blocking: call it in a thread."""
+    results = job_results(job)
+    digests = [
+        model_digest(f"{job.id}:{index}" if index else job.id, file(result.model_3mf))
+        for index, result in enumerate(results)
+    ]
+    if len(digests) == 1:
+        return digests[0]
+    text = json.dumps(["kit", *digests], sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 # -- the operation's run -----------------------------------------------------------------------
@@ -645,8 +712,8 @@ class SliceVariant(BaseModel):
     reference: Reference | None = None
     library_file: PricedFile | None = None
     slice: SliceQuoteRequest
-    #: The price-book filament of each slot, from 0: every slot of a render, or each used
-    #: slot of a file (``library_file.used``), in that order.
+    #: The price-book filament of each slot, from 0: every slot of a render
+    #: (:func:`kit_colours`), or each used slot of a file (``library_file.used``), in that order.
     slot_filaments: list[str]
     currency: str
     #: An operation started before #6574 names the profile's spools; they are not read.
@@ -714,9 +781,10 @@ class SliceRun:
     renders: Renders
     create_output: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
     slicer: Slicer
-    #: The sha256 of the 3MF of the render job a rendered output was saved from, or
-    #: None when that cannot be read (#6370 review).
-    rendered_sha256: Callable[[RenderedOutput], Awaitable[str | None]]
+    #: The sha256 (:func:`kit_digest`) of the render job the rendered outputs were saved
+    #: from, or None when that cannot be read (#6370 review), they are of more than one
+    #: job, or the job has more outputs than these (#5701).
+    rendered_sha256: Callable[[Sequence[RenderedOutput]], Awaitable[str | None]]
     follow_every: float = FOLLOW_EVERY
     #: Where a file listing's held copy is (#6710 §7.3.1); None where there is none, so a
     #: file variant has no copy to slice (`FILE_GONE`).
@@ -726,7 +794,8 @@ class SliceRun:
 async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
     """The variant sliced and priced through :func:`slice_and_price`, and the price
     written. A row that is no longer ``running`` (an earlier attempt finished it) is the
-    answer as it is. A render's variant renders the reference and slices the saved output;
+    answer as it is. A render's variant renders the reference and slices the saved output,
+    or every saved output of a render of several (:func:`_kit`), each whole, in one price;
     a file's slices the listing's held copy (#6710 §7.3), through ``start_library`` with
     the copy in place of the library's reads, so the live library file is never read and
     its state never changes the price. No price, with the reason, when a slot's filament
@@ -750,6 +819,7 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             slot: record for slot, record in zip(slots, records, strict=True) if record is not None
         }
         start: Callable[[], Awaitable[list[Any]]]
+        place: Callable[[int, Plate], Plate] | None = None
         if variant.library_file is not None:
             file = variant.library_file
             content = run.content
@@ -774,13 +844,13 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
         else:
             reference = variant.reference
             assert reference is not None
-            rendered = await output_for_reference(
+            rendered = await outputs_for_reference(
                 reference,
                 outputs=run.outputs,
                 renders=run.renders,
                 create_output=run.create_output,
                 name=f"Storefront: {reference.template_name}",
-                saved_as=storefront_output_id(reference.render_key),
+                saved_as=functools.partial(storefront_output_id, reference.render_key),
                 # #6371: kept out of the back office's Recent renders.
                 source=STOREFRONT,
                 follow_every=run.follow_every,
@@ -789,14 +859,18 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             # 3MF than the key's (the design moved under it) gets no firm price.
             if await run.rendered_sha256(rendered) != variant.model_sha256:
                 return await _failed(run, variant, GEOMETRY_DIFFERS)
+            slot_colours = kit_slots([one.colours for one in rendered])
+            output_id = rendered[0].output_id
+            if len(rendered) == 1:
 
-            def start() -> Awaitable[list[Any]]:
-                return run.slicer.start(
-                    rendered.output_id, variant.slice, subject, slot_presets=variant.slot_presets
-                )
-
-            slot_colours = rendered.colours
-            output_id = rendered.output_id
+                def start() -> Awaitable[list[Any]]:
+                    return run.slicer.start(
+                        output_id, variant.slice, subject, slot_presets=variant.slot_presets
+                    )
+            else:
+                if len(slot_colours) != len(slots):
+                    return await _failed(run, variant, GEOMETRY_DIFFERS)
+                start, place = _kit(run.slicer, variant, subject, rendered, slot_colours)
 
         async def machine_rate(
             _printer: str | None, _printer_id: int | None
@@ -816,6 +890,7 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             machine_rate=machine_rate,
             currency=variant.currency,
             priced_for=priced_for,
+            place=place,
             follow_every=run.follow_every,
         )
     except QuoteError as error:
@@ -839,6 +914,59 @@ async def price_variant(run: SliceRun, variant: SliceVariant) -> PriceRow:
             setup_key=None if variant.library_file is None else setup_key(variant),
         )
     )
+
+
+def _kit(
+    slicer: Slicer,
+    variant: SliceVariant,
+    subject: str,
+    rendered: Sequence[RenderedOutput],
+    kit: Sequence[str],
+) -> tuple[Callable[[], Awaitable[list[Any]]], Callable[[int, Plate], Plate]]:
+    """:func:`slice_and_price`'s ``start`` and ``place`` of a render of several outputs
+    (#5701), whose slots are ``kit``. Every output is started whole, output after output,
+    each with the presets of its own slot ids. Each plate takes the next number across the
+    outputs and the kit's slots. A slot its output has no colour for is a
+    :class:`QuoteError`: its number may be another output's slot of the kit."""
+    maps = [slot_map(one.colours, kit) for one in rendered]
+    #: The slots of the output each started plate is of.
+    owners: list[dict[int, int]] = []
+
+    async def start() -> list[Any]:
+        started: list[Any] = []
+        for one, slots in zip(rendered, maps, strict=True):
+            presets: SlotPresets = {
+                own + 1: variant.slot_presets[slot + 1] for own, slot in slots.items()
+            }
+            plates = await slicer.start(one.output_id, variant.slice, subject, slot_presets=presets)
+            owners.extend(slots for _ in plates)
+            started += plates
+        return started
+
+    def place(position: int, plate: Plate) -> Plate:
+        slots = owners[position]
+        grams: dict[int, Decimal] = {}
+        for used in plate.filaments:
+            if used.slot not in slots:
+                raise QuoteError(
+                    f"plate {position + 1}: slot {used.slot + 1} of the sliced file is no"
+                    " colour of its output",
+                    plate=position + 1,
+                    slot=used.slot,
+                )
+            slot = slots[used.slot]
+            grams[slot] = grams.get(slot, Decimal(0)) + used.used_g
+        return plate.model_copy(
+            update={
+                "index": position + 1,
+                "filaments": [
+                    PlateFilament(slot=slot, used_g=used_g)
+                    for slot, used_g in sorted(grams.items())
+                ],
+            }
+        )
+
+    return start, place
 
 
 async def _failed(run: SliceRun, variant: SliceVariant, failure: str) -> PriceRow:

@@ -1644,7 +1644,10 @@ const tools: Tool[] = [
       "`kind: consumed_reset` (no grams, temp_c or hours) starts the spool's used counter (`consumed_g`) again from 0 g; the " +
       'grams left stay. Only what the user says. Writes ScadBuddy only; a reset reaches Bambuddy at the next sync when weights ' +
       'sync to it. `reading_g` (a weighing only, instead of `grams`) is the scale reading with the spool: the filament ' +
-      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). With `reading_g`, the " +
+      "is the reading less the spool's empty weight, and the answer carries `insert_weight` (#7280). The event keeps the " +
+      'breakdown in its `data` (#7682): `reading_g`, `empty_g`, `empty_source`, `empty_basis`, `empty_name`, `expected_g` (what the ' +
+      'ledger expected just before it) and `drift_g` (the filament less what was expected; negative means the scale found less ' +
+      'than the prints accounted for). With `reading_g`, the ' +
       'tool first reads the offer. There is an offer when the spool is new and unused, the reading is above its label ' +
       'weight, and the derived weight (reading less label weight) is at most the label weight. `insert_weight.offer` says ' +
       "what the insert's empty weight would become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, " +
@@ -1727,7 +1730,7 @@ const tools: Tool[] = [
       const event = await ok(
         backend.POST('/api/v1/filament/spools/{spool_id}/events', {
           params: { path },
-          body: { ...body, grams: filament_g },
+          body: { ...body, reading_g, grams: filament_g },
         }),
         accepted
           ? `record on spool ${spool_id} (the insert's empty weight was already set; a retry with the same reading is safe)`

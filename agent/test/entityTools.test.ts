@@ -65,6 +65,22 @@ describe('entity attachment and link tools', () => {
     expect(links).toEqual({ links: [{ id: ID, url: 'https://e.test/' }] })
   })
 
+  it.each([
+    ['insert_type', '/filament/catalog?kind=insert-types'],
+    ['insert_material', '/filament/catalog?kind=insert-materials'],
+    ['material', '/filament/catalog'],
+    ['subtype', '/filament/catalog?kind=subtypes'],
+    ['brand', '/filament/catalog?kind=brands'],
+    ['category', '/filament/catalog?kind=categories'],
+    ['effect', '/filament/catalog?kind=effects'],
+    ['colour', '/filament/catalog?kind=colours'],
+    ['location_kind', '/filament/catalog?kind=location-kinds'],
+  ])("answers a %s's catalog as its page", async (kind, page) => {
+    const ref = `${kind}:${ID}`
+    server.use(http.get(`${base(ref)}/attachments`, () => HttpResponse.json({ attachments: [] })))
+    expect(firstText(await tool('entity_attachment_list').execute({ entity: ref }, ctx()))).toEqual({ attachments: [], entity_ui_path: page })
+  })
+
   it('sends each change to its route with only the fields given', async () => {
     const calls: string[] = []
     server.use(

@@ -157,10 +157,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
     // Every shell mount PUTs the subscription again (frontend webPush.ts enableWebPush).
     expect(await store.subscribe(YOU, `${base}/push/one`, browser.keys)).toBe(first)
     await d.pass()
-    expect(received.map((r) => browser.open(r.body))).toEqual([
-      expect.objectContaining({ request_id: 'question:1' }),
-      expect.objectContaining({ request_id: 'question:2' }),
-    ])
+    // #7725: a pass sends its pushes in parallel (PUSH_CONCURRENCY), so they arrive in either order.
+    const ids = received.map((r) => (browser.open(r.body) as { request_id: string }).request_id)
+    expect(ids.sort()).toEqual(['question:1', 'question:2'])
   })
 
   it('sends one request once though two replicas pass at the same time', async () => {

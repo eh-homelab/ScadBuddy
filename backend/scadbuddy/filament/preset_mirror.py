@@ -125,12 +125,18 @@ class _Sent:
 
 
 def _stray_note(name: str, stray: Collection[int]) -> str:
-    """The ``mirror_error`` note of a lost create's copy left in Bambuddy (#7343)."""
+    """The ``mirror_error`` note of a lost create's copy left in Bambuddy (#7343). The ids
+    are every untracked one of the name above the create floor (`_Listing.made_after`), so
+    a preset of that name made by hand in Bambuddy after the lost create is named too
+    (#7545): Bambuddy keeps no mark of who made a preset, and a narrower test (an older
+    version's document) would miss a copy of a version ScadBuddy no longer keeps. The note
+    says "most likely" and tells the person to keep a preset they made."""
     ids = ", ".join(str(i) for i in sorted(stray))
     return (
         f"Bambuddy also holds preset {ids} named {name!r}, which no ScadBuddy preset tracks:"
         " most likely a copy an earlier create made when its answer was lost, before this"
-        " version was written. Delete it in Bambuddy if it is not in use."
+        " version was written. Delete it in Bambuddy if it is not in use and you did not"
+        " make it there yourself."
     )
 
 
@@ -222,7 +228,8 @@ class _Listing:
         (`LocalPresetDetail`, `FilamentPresetStore.read`). Another type's preset of the
         same name holds another document. A version written since the lost create
         matches nothing: the preset is created again, and `_send` names the copy the lost
-        create left (#7343)."""
+        create left (#7343), with every other untracked id of the name above ``floor``, a
+        preset made by hand in Bambuddy since included (#7545, `_stray_note`)."""
         found = []
         above = []
         for preset in await self._all():

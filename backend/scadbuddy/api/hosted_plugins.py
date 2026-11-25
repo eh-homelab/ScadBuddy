@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from scadbuddy.api.deps import StateDep
 from scadbuddy.auth.component import CallerDep
 from scadbuddy.auth.models import Anonymous, Caller, Person, PersonalToken, Service
+from scadbuddy.core.events import PluginPackagesChanged, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.hosted_plugins import bundle, rules, store
 from scadbuddy.hosted_plugins.blobs import blob_bytes
@@ -169,6 +170,12 @@ async def _in_tx[T](state: Any, fn: Callable[[psycopg.Connection[Any]], T]) -> T
             return fn(conn)
 
     return await asyncio.to_thread(run)
+
+
+def _announce(state: Any, name: str) -> None:
+    """A committed change of the hosted plugin ``name``, told to Settings → Tools & plugins
+    (#7460): the editor and the Packages row read it again, wherever it was made."""
+    emit(state.events, PluginPackagesChanged(name=name))
 
 
 def _not_found(name: str) -> ApiError:
@@ -341,7 +348,9 @@ async def create_hosted_plugin(body: HostedPluginCreate, state: StateDep) -> Hos
             ) from None
         return _view(conn, row)
 
-    return await _in_tx(state, run)
+    created = await _in_tx(state, run)
+    _announce(state, created.name)
+    return created
 
 
 @router.get("", summary="List the hosted plugins")
@@ -363,7 +372,9 @@ async def update_hosted_plugin(
         row = store.update(conn, row, body.model_dump(include=body.model_fields_set))
         return _view(conn, row)
 
-    return await _in_tx(state, run)
+    updated = await _in_tx(state, run)
+    _announce(state, name)
+    return updated
 
 
 @router.delete(
@@ -376,6 +387,7 @@ async def delete_hosted_plugin(name: Name, state: StateDep) -> None:
         store.delete(conn, _plugin(conn, name, lock=True))
 
     await _in_tx(state, run)
+    _announce(state, name)
 
 
 @router.get("/{name}/files", summary="List a hosted plugin's draft")
@@ -640,4 +652,6 @@ async def publish_hosted_plugin(
         )
         return HostedPluginVersion.model_validate(dict(version))
 
-    return await _in_tx(state, write)
+    published = await _in_tx(state, write)
+    _announce(state, name)
+    return published

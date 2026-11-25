@@ -32,6 +32,9 @@ reach the database. Every other process (the render, print and projects workers,
 agent services, agent-durable) is an HTTP client of the CRUD service, with a short-lived
 service credential (PR #5211). The owner decided this on 2026-11-05.
 
+- One exception (the owner, 2026-11-25, #7667): `tools/go/core`, the API's move to Go, is a
+  second database client with the API's own role while the move lasts. It runs no untrusted
+  code. No other process may be one.
 - Never add a new database client, a read or write of another service's tables, or a
   cross grant. A role per caller in one database is not a boundary: a table owner's
   triggers, rules, defaults and builtin-shadowing functions run with the other role's
@@ -303,6 +306,10 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
+  The one exception is `tools/go/core` (#7667): `build-image.yml`'s `core` job publishes
+  `scadbuddy-core` with every main build, under the app image's tags, and
+  `deploy.reusable.yml` pins it in `scadbuddy.yaml`. `build-go-image.yml` skips it, so
+  one workflow writes each tag.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)
   regenerates the root and client `vendor/` after a gomod bump and pushes the commit with
   the `RUNNER_APP` token, which a GITHUB_TOKEN push could not do (it starts no CI); no

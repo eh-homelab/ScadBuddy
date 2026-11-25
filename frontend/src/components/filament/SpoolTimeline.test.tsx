@@ -97,6 +97,27 @@ describe('the spool timeline', () => {
     }
   })
 
+  it('says what a weighing with a breakdown read and how it compares with the ledger (#7682)', () => {
+    const breakdown = { reading_g: 1180, empty_g: 200, empty_source: 'insert', empty_basis: 'catalog', empty_name: 'Plastic' }
+    renderPage(
+      <SpoolTimeline
+        rows={[
+          row({ at: '2026-11-12T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 980, data: { ...breakdown, expected_g: 992, drift_g: -12 } }),
+          row({ at: '2026-11-11T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 992, data: { ...breakdown, expected_g: 991.6, drift_g: 0.4 } }),
+          row({ at: '2026-11-10T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 1000, data: { ...breakdown, expected_g: 992, drift_g: 8 } }),
+          row({ at: '2026-11-09T10:00:00Z', kind: 'weighed', source: 'scale', grams_after: 980, data: { ...breakdown, expected_g: null, drift_g: null } }),
+        ]}
+        catalogs={catalogs}
+        types={types}
+      />,
+    )
+    expect(items()[0]).toHaveTextContent('Weighed, 980 g, scale, reading 1180 g, spool 200 g, 12 g less than expected')
+    expect(items()[1]).toHaveTextContent('Weighed, 992 g, scale, reading 1180 g, spool 200 g, matches the ledger')
+    expect(items()[2]).toHaveTextContent('Weighed, 1000 g, scale, reading 1180 g, spool 200 g, 8 g more than expected')
+    expect(items()[3]).toHaveTextContent('Weighed, 980 g, scale, reading 1180 g, spool 200 g')
+    expect(items()[3]).not.toHaveTextContent(/expected|ledger/)
+  })
+
   it("says how a reading differs from the last value, in words", () => {
     renderPage(<SpoolTimeline rows={[row({ kind: 'weighed', source: 'scale', grams_after: 820, delta_g: -20 })]} catalogs={catalogs} types={types} />)
     expect(items()[0]).toHaveTextContent('Weighed, 820 g, scale, 20 g less than the last value')

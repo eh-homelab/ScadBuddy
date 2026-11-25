@@ -411,8 +411,12 @@ function resetProblem(cause: unknown): string {
  * dialog says so. When the server can no longer prove it (`proof_changed`, R-6845-6), nothing is deleted:
  * the dialog reads the dry run again and says why. A Bambuddy the dry run could not read
  * (`bambuddy_unreadable`) gets the delete, with a note.
+ * #7544 — the warning that each filament preset is copied to Bambuddy again shows only while the
+ * saved preset mirror (`mirror`) is on: with it off, nothing is copied after the delete.
+ * The backend also needs a Bambuddy URL (`preset_mirror.py`); this dialog shows only on
+ * `instance_changed`, which a configured URL implies, so `mirror` alone is enough here (#7738).
  */
-function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
+function ResetLinks({ mirror, onReset }: { mirror: boolean; onReset: (done: LinksResetDone) => void }) {
   const [opening, setOpening] = useState(false)
   const [preview, setPreview] = useState<LinksResetPreview | null>(null)
   const [resetting, setResetting] = useState(false)
@@ -493,7 +497,7 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
                   Bambuddy. Only the reset is offered. Reset only if it is another Bambuddy.
                 </p>
               )}
-              {preview.counts.presets > 0 && (
+              {mirror && preview.counts.presets > 0 && (
                 <p className="text-warn">
                   Each filament preset is then copied to the Bambuddy set up now again. If it is the same Bambuddy at a new
                   address, it then holds those presets twice, and its spools and AMS slots keep naming the old copies.
@@ -550,7 +554,7 @@ function ResetLinks({ onReset }: { onReset: (done: LinksResetDone) => void }) {
  * one, why no pass runs, and each item whose last write failed or was held back. "Sync now"
  * asks for a full pass, which runs in the background, then reads the status again.
  */
-function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
+function SyncStatusRow({ status, mirror }: { status: AsyncState<SyncStatus>; mirror: boolean }) {
   const [pending, setPending] = useState(false)
   const [note, setNote] = useState<string | null>(null)
   const [problem, setProblem] = useState<ReactNode>(null)
@@ -649,7 +653,7 @@ function SyncStatusRow({ status }: { status: AsyncState<SyncStatus> }) {
             {data.skipped && <p className="text-muted-foreground">{SKIPPED_TEXT[data.skipped]}</p>}
           </div>
         )}
-        {data?.instance_changed && <ResetLinks onReset={resetDone} />}
+        {data?.instance_changed && <ResetLinks mirror={mirror} onReset={resetDone} />}
         {data && data.errors.length > 0 && (
           <ul aria-label="Items not synced" className="flex flex-col gap-2">
             {data.errors.map((error) => {
@@ -1062,7 +1066,7 @@ export function Component() {
       <RuntimeRows form={form} section="filament" />
       <SyncRows form={form} />
       <PresetsImportRow />
-      <SyncStatusRow status={syncStatus} />
+      <SyncStatusRow status={syncStatus} mirror={form.settings.filament_preset_mirror} />
       <SyncPassesRow lastPassAt={syncStatus.data?.last_pass_at} form={form} />
       <SyncPassTtlRow form={form} />
       <AutoAddRfidRow form={form} />

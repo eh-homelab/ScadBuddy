@@ -68,8 +68,9 @@ class OutputFileNameError(ValueError):
 
 
 def usable(content: ContentStore | None) -> bool:
-    """Whether output blobs go to ``content``: never on the `local` backend (no content
-    store, Ruling R1) or on `bambuddy` (spec §6.4)."""
+    """Whether output blobs go to ``content``: never with no content store or on
+    `bambuddy` (spec §6.4). On `local` the API gives the outputs a content store of their
+    own (#7257, plan D7), so they go there."""
     return content is not None and content.name != "bambuddy"
 
 

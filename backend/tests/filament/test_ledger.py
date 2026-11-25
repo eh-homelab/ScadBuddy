@@ -12,7 +12,8 @@ import pytest
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.filament import ledger
 from scadbuddy.filament.catalog import CatalogStore
-from scadbuddy.filament.ledger import grams_left, job_of, record
+from scadbuddy.filament.empty_weight import EmptyWeight
+from scadbuddy.filament.ledger import breakdown, expected_before, grams_left, job_of, record
 from scadbuddy.filament.models import Material, SpoolEvent
 from tests.conftest import PgPool
 
@@ -210,6 +211,60 @@ def test_a_job_from_an_old_ref_id_pairs() -> None:
     assert job_of(_event(1, "weighed", "scale", ref_kind="bb_scale", ref_id="a/b/c")) is None
     events = [_event(0, "weighed", "scale", grams_after=800), old, _bb(2, -41)]
     assert _left(events) == 759
+
+
+def test_expected_before_takes_only_events_before_the_time() -> None:
+    events = [
+        _event(1, "weighed", "scale", grams_after=800),
+        _event(2, "print_ended", "print_actual", delta_g=-50, ref_kind="print_run", ref_id="r"),
+        _event(5, "print_ended", "print_actual", delta_g=-30, ref_kind="print_run", ref_id="s"),
+    ]
+    at = T0 + timedelta(minutes=3)
+    assert expected_before(events, at, weight_locked=False, label_weight_g=1000) == 750
+    # A delta at the same instant counts: rule 1 puts deltas before readings.
+    same = T0 + timedelta(minutes=5)
+    assert expected_before(events, same, weight_locked=False, label_weight_g=1000) == 720
+    assert expected_before(events, None, weight_locked=False, label_weight_g=1000) == 720
+    before = T0 + timedelta(minutes=1)
+    assert expected_before(events, before, weight_locked=False, label_weight_g=1000) is None
+
+
+def test_breakdown_names_the_insert_when_the_client_took_it_off() -> None:
+    empty = EmptyWeight(200, "insert", "placeholder", "Plastic", "placeholder weight")
+    assert breakdown(reading_g=1180, grams=980, empty=empty, expected=992) == {
+        "reading_g": 1180,
+        "empty_g": 200,
+        "empty_source": "insert",
+        "empty_basis": "placeholder",
+        "empty_name": "Plastic",
+        "expected_g": 992,
+        "drift_g": -12.0,
+    }
+
+
+def test_breakdown_is_a_persons_when_the_grams_disagree_with_the_insert() -> None:
+    empty = EmptyWeight(200, "insert", "catalog", "Plastic", None)
+    assert breakdown(reading_g=1180, grams=962, empty=empty, expected=None) == {
+        "reading_g": 1180,
+        "empty_g": 218,
+        "empty_source": "person",
+        "empty_basis": None,
+        "empty_name": None,
+        "expected_g": None,
+        "drift_g": None,
+    }
+
+
+def test_breakdown_with_no_empty_weight_is_a_persons() -> None:
+    assert breakdown(reading_g=1000, grams=1000, empty=None, expected=1000.04) == {
+        "reading_g": 1000,
+        "empty_g": 0,
+        "empty_source": "person",
+        "empty_basis": None,
+        "empty_name": None,
+        "expected_g": 1000.04,
+        "drift_g": -0.0,
+    }
 
 
 def _spool(pool: PgPool, label_weight_g: int | None = None) -> UUID:
