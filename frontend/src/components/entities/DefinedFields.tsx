@@ -110,9 +110,17 @@ function Field({ name, sub, required, value, problem, onChange }: { name: string
   )
 }
 
+/** The number a field's text says, or undefined for none ("" or not a number yet). */
+function parse(text: string): number | undefined {
+  const parsed = text.trim() === '' ? undefined : Number(text)
+  return parsed === undefined || Number.isNaN(parsed) ? undefined : parsed
+}
+
 /** A number field that keeps what is typed ("1.") while it is not a number yet. */
 function NumberInput({ value, onChange, aria, integer }: { value: number | undefined; onChange: (value: number | undefined) => void; aria: Record<string, unknown>; integer: boolean }) {
   const [text, setText] = useState(value === undefined ? '' : String(value))
+  // A copy, a late read or a reset sets the value from outside: show it, unless the text already says it ("1." is 1).
+  if (value !== parse(text)) setText(value === undefined ? '' : String(value))
   return (
     <Input
       type="number"
@@ -120,8 +128,7 @@ function NumberInput({ value, onChange, aria, integer }: { value: number | undef
       value={text}
       onChange={(event) => {
         setText(event.target.value)
-        const parsed = event.target.value.trim() === '' ? undefined : Number(event.target.value)
-        onChange(parsed === undefined || Number.isNaN(parsed) ? undefined : parsed)
+        onChange(parse(event.target.value))
       }}
       {...aria}
     />

@@ -70,4 +70,15 @@ describe('DefinedFields (#7703)', () => {
     expect(propertiesPatch(SCHEMA, {}, { mpn: '  ', food_safe: false })).toEqual({ food_safe: false })
     expect(propertiesPatch(SCHEMA, { mpn: 'A' }, { mpn: 'A' })).toEqual({})
   })
+
+  // #7809 review: a copy, a late read or a reset changes the values under a mounted field.
+  it('a number field follows values set from outside', () => {
+    const none = () => {}
+    const { rerender } = render(<DefinedFields schema={SCHEMA} values={{ td: 1.5 }} onChange={none} />)
+    expect(screen.getByLabelText('Transmission distance')).toHaveValue(1.5)
+    rerender(<DefinedFields schema={SCHEMA} values={{}} onChange={none} />)
+    expect(screen.getByLabelText('Transmission distance')).toHaveValue(null)
+    rerender(<DefinedFields schema={SCHEMA} values={{ td: 2 }} onChange={none} />)
+    expect(screen.getByLabelText('Transmission distance')).toHaveValue(2)
+  })
 })
