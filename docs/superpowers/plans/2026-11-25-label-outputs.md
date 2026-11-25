@@ -164,6 +164,11 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   inventory phase 3 (#7068) drops the `filament_` prefix from shared tables. The inventory epic's
   owner agreed on 2026-11-25. — One name that phase 3 need not change. — If wrong: a rename migration.
 
+- **P3 "The number line always stays" means a chosen number is never dropped.** When the lines do
+  not fit, the fit drops other lines first and never the big number. A number the person did not
+  choose does not print. — R-7216-9 lets a person leave out any field; R-7216-10 only keeps the
+  number when it is there. — If wrong: one rule in `fit_lines` and `fitLines`.
+
 ## Global Constraints
 
 - Only the API holds SQL. Add no database client, no read or write of another service's tables, no
