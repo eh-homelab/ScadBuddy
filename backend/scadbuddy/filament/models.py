@@ -1713,7 +1713,9 @@ class SpoolEventAdd(_In):
     the breakdown and the drift in the event's ``data``, #7682), a drying (its temperature
     and hours) or a reset of its consumed counter (``consumed_reset``, #7149 R-7149-4: no
     grams, the grams left stay). A drying that leaves out ``temp_c`` or ``hours`` takes
-    the spool's `DryingDefaults` for it; ``null`` records none (#6720)."""
+    the spool's `DryingDefaults` for it; ``null`` records none (#6720). A new spool's
+    weighing under its label weight sends ``resolution`` with ``reading_g`` alone (#7683):
+    what the check `GET …/insert-weight-offer` offered for it."""
 
     kind: Literal["weighed", "dried", "consumed_reset"]
     source: Literal["person", "scale"] = "person"
@@ -1722,6 +1724,8 @@ class SpoolEventAdd(_In):
     grams: Grams | None = None
     #: The scale reading with the spool, a weighing only.
     reading_g: Grams | None = None
+    #: How a reading under a new spool's label weight is read (#7683).
+    resolution: BelowLabelResolutionKind | None = None
     temp_c: Temp | None = None
     hours: Hours | None = None
     note: Note | None = None
@@ -1733,6 +1737,10 @@ class SpoolEventAdd(_In):
             raise ValueError("at is in the future")
         if self.reading_g is not None and self.kind != "weighed":
             raise ValueError("only a weighing has reading_g")
+        if self.resolution is not None and self.reading_g is None:
+            raise ValueError("a resolution needs reading_g")
+        if self.resolution is not None and self.grams is not None:
+            raise ValueError("a resolution takes reading_g alone")
         if self.reading_g is not None and self.grams is not None and self.reading_g < self.grams:
             raise ValueError("reading_g is below grams")
         if self.kind == "weighed" and self.grams is None and self.reading_g is None:

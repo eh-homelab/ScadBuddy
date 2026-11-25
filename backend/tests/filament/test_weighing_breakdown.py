@@ -15,9 +15,11 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.spools import (
     FilamentDefaults,
     FilamentSpoolStore,
+    NoBelowLabelError,
     NoEmptyWeightError,
     ReadingBelowEmptyError,
 )
+from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
 
 pg = pytest.mark.requires_postgres
@@ -43,6 +45,16 @@ def test_a_weighing_with_a_reading_alone_needs_no_grams() -> None:
     assert m.SpoolEventAdd(kind="weighed", reading_g=1180).grams is None
     with pytest.raises(ValueError, match="a weighing needs grams"):
         m.SpoolEventAdd(kind="weighed")
+
+
+def test_a_resolution_takes_the_reading_alone() -> None:
+    with pytest.raises(ValueError, match="a resolution takes reading_g alone"):
+        m.SpoolEventAdd(kind="weighed", reading_g=900, grams=900, resolution="tared")
+
+
+def test_a_resolution_needs_a_reading() -> None:
+    with pytest.raises(ValueError, match="a resolution needs reading_g"):
+        m.SpoolEventAdd(kind="weighed", grams=900, resolution="tared")
 
 
 # -- the store -----------------------------------------------------------------------
@@ -183,6 +195,83 @@ def test_detail_carries_the_newest_weighing(pg_pool: PgPool) -> None:
     detail = store.detail(spool)
     assert detail is not None and detail.last_weighing is not None
     assert detail.last_weighing.id == event.id
+
+
+# -- a new spool under its label weight (#7683) --------------------------------------
+
+
+def _new_spool(pool: PgPool, **over: Any) -> UUID:
+    """A new spool by #7280's rule: added full, 1000 g left of a 1000 g label."""
+    return _spool(pool, _insert(pool), grams_left=1000, added_full=True, **over)
+
+
+def _changes(pool: PgPool, spool: UUID) -> list[tuple[str, Any]]:
+    return [(e.kind, e.data.get("changes")) for e in FilamentSpoolStore(pool).events(spool)]
+
+
+@pg
+def test_tared_books_the_reading_as_filament(pg_pool: PgPool) -> None:
+    spool = _new_spool(pg_pool)
+    event = _weigh(pg_pool, spool, reading_g=900, resolution="tared")
+    assert event.grams_after == 900
+    assert event.data["resolution"] == "tared" and event.data["shortfall_g"] == 100
+    assert event.data["empty_source"] == "tared" and event.data["empty_g"] == 0
+    assert event.data["empty_basis"] is None and event.data["empty_name"] is None
+    assert [k for k, _ in _changes(pg_pool, spool)] == ["created", "weighed"]
+
+
+@pg
+def test_short_marks_the_spool_not_added_full(pg_pool: PgPool) -> None:
+    spool = _new_spool(pg_pool)
+    event = _weigh(pg_pool, spool, reading_g=800, resolution="short")
+    assert event.grams_after == 600
+    assert event.data["resolution"] == "short" and event.data["shortfall_g"] == 200
+    assert event.data["empty_source"] == "insert" and event.data["empty_g"] == 200
+    changes = _changes(pg_pool, spool)
+    assert changes[-2] == ("edited", {"added_full": [True, False]})
+    assert changes[-1][0] == "weighed"
+    assert FilamentSpoolStore(pg_pool).get(spool).added_full is False  # type: ignore[union-attr]
+
+
+@pg
+def test_label_wrong_sets_the_spools_own_label(pg_pool: PgPool) -> None:
+    kind = SpoolTypeStore(pg_pool).create(
+        m.SpoolTypeCreate(
+            code="PLA-LBL", material_id=_material(pg_pool), rgba="#FF0000", label_weight_g=1000
+        )
+    )
+    spool = FilamentSpoolStore(pg_pool).create(
+        m.SpoolCreate(
+            type_id=kind.id, insert_type_id=_insert(pg_pool), grams_left=1000, added_full=True
+        ),
+        actor="ann",
+    ).id
+    event = _weigh(pg_pool, spool, reading_g=900, resolution="label_wrong")
+    assert event.grams_after == 700 and event.data["resolution"] == "label_wrong"
+    row = FilamentSpoolStore(pg_pool).get(spool)
+    assert row is not None
+    assert row.label_weight_g == 700 and "label_weight_g" in row.overridden
+    assert _changes(pg_pool, spool)[-2] == ("edited", {"label_weight_g": [None, 700]})
+    assert SpoolTypeStore(pg_pool).get(kind.id).label_weight_g == 1000  # type: ignore[union-attr]
+
+
+@pg
+def test_a_resolution_without_a_below_label_answer_is_refused(pg_pool: PgPool) -> None:
+    spool = _new_spool(pg_pool)
+    _print(pg_pool, spool, 12, T0, "r")
+    with pytest.raises(NoBelowLabelError) as refused:
+        _weigh(pg_pool, spool, reading_g=900, resolution="tared")
+    assert refused.value.reason == "used"
+    assert _changes(pg_pool, spool)[-1][0] != "weighed"
+
+
+@pg
+def test_a_resolution_the_check_does_not_offer_is_refused(pg_pool: PgPool) -> None:
+    spool = _new_spool(pg_pool)
+    with pytest.raises(NoBelowLabelError) as refused:
+        _weigh(pg_pool, spool, reading_g=150, resolution="short")
+    assert refused.value.reason == "below_label"
+    assert _changes(pg_pool, spool) == [("created", None)]
 
 
 # -- the spool's last drift and the notice (Task 3) ----------------------------------

@@ -338,10 +338,16 @@ def expected_before(
 
 
 def breakdown(
-    *, reading_g: float, grams: float, empty: EmptyWeight | None, expected: float | None
+    *,
+    reading_g: float,
+    grams: float,
+    empty: EmptyWeight | None,
+    expected: float | None,
+    tared: bool = False,
 ) -> dict[str, Any]:
     """A weighing's ``data`` keys (#7682): the reading, what was taken off it for the empty
     spool and where that came from (``insert`` when it is the effective empty weight,
+    ``tared`` when the scale was tared on the empty spool so nothing was taken off (#7683),
     else ``person``: the client took something else off, or nothing was known), the grams
     the ledger expected and the drift, ``grams - expected``, to 0.1 g; both null with no
     ``expected``."""
@@ -349,7 +355,9 @@ def breakdown(
     source: str
     basis: str | None
     name: str | None
-    if empty is not None and abs(empty_g - empty.grams) < 0.05:
+    if tared:
+        source, basis, name = "tared", None, None
+    elif empty is not None and abs(empty_g - empty.grams) < 0.05:
         source, basis, name = empty.source, empty.basis, empty.name
     else:
         source, basis, name = "person", None, None

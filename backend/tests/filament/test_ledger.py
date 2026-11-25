@@ -255,6 +255,19 @@ def test_breakdown_is_a_persons_when_the_grams_disagree_with_the_insert() -> Non
     }
 
 
+def test_breakdown_of_a_tared_reading_has_no_empty_weight() -> None:
+    empty = EmptyWeight(200, "insert", "catalog", "Plastic", None)
+    assert breakdown(reading_g=900, grams=900, empty=empty, expected=None, tared=True) == {
+        "reading_g": 900,
+        "empty_g": 0,
+        "empty_source": "tared",
+        "empty_basis": None,
+        "empty_name": None,
+        "expected_g": None,
+        "drift_g": None,
+    }
+
+
 def test_breakdown_with_no_empty_weight_is_a_persons() -> None:
     assert breakdown(reading_g=1000, grams=1000, empty=None, expected=1000.04) == {
         "reading_g": 1000,
