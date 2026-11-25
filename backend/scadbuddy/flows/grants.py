@@ -20,9 +20,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     StringConstraints,
-    model_serializer,
 )
 
 from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
@@ -111,15 +109,8 @@ class GrantSpec(BaseModel):
     rules: list[GrantRule] = Field(default_factory=list, max_length=MAX_RULES)
     #: Who else may answer the run's questions (#7471). Known so that a worker reads a
     #: grant that holds it; refused by `validate_spec` until grants may admit answers (B2).
-    answers: GrantAnswers | None = None
-
-    @model_serializer(mode="wrap")
-    def _without_empty_answers(self, handler: SerializerFunctionWrapHandler) -> Any:
-        # Left out when empty: a worker from before #7471 refuses an unknown field.
-        dumped = handler(self)
-        if isinstance(dumped, dict) and dumped.get("answers") is None:
-            dumped.pop("answers", None)
-        return dumped
+    #: Left out of a dump when empty: a worker from before #7471 refuses an unknown field.
+    answers: GrantAnswers | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class Narrowing(BaseModel):
