@@ -1221,18 +1221,20 @@ class FilamentSpoolStore:
             empty = effective_on(conn, spool_id)
             history = ledger.events(conn, spool_id)
         final = _final_filament(final_reading_g, final_grams, empty)
+        # A reading that cannot be resolved closes on nothing, not on the ledger.
+        weighed = final_reading_g is not None or final_grams is not None
         closed = ledger.closing(
             history,
             label_weight_g=spool["label_weight_g"],
             added_full=spool["added_full"],
             final_filament_g=final,
             reason=reason,
-            grams_left=spool["grams_left"],
+            grams_left=None if weighed else spool["grams_left"],
         )
         left = closed["final_filament_g"]
         return m.ClosingPreview(
             closing=m.Closing.model_validate(closed),
-            final_filament_g=None if final_reading_g is not None and final is None else left,
+            final_filament_g=left,
             empty_g=None if empty is None else empty.grams,
             notices=_closing_notices(reason, left, defaults.finished_left_g),
         )
