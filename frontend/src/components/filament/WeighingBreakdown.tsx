@@ -16,10 +16,13 @@ type Breakdown = { reading_g: number; empty_g: number; empty_source: string; emp
 export function WeighingBreakdown({ event }: { event: SpoolEvent }) {
   const data = event.data as Breakdown
   const filament = event.grams_after ?? data.reading_g - data.empty_g
+  // #7683: a tared scale took nothing off, so there is no spool to add.
   const spool =
-    data.empty_source === 'person'
-      ? `spool ${grams(data.empty_g)} (taken off by hand)`
-      : `spool ${grams(data.empty_g)} (${[data.empty_name, data.empty_basis ? (BASIS[data.empty_basis] ?? data.empty_basis) : null].filter(Boolean).join(', ')})`
+    data.empty_source === 'tared'
+      ? '(the scale was tared on the spool)'
+      : data.empty_source === 'person'
+        ? `+ spool ${grams(data.empty_g)} (taken off by hand)`
+        : `+ spool ${grams(data.empty_g)} (${[data.empty_name, data.empty_basis ? (BASIS[data.empty_basis] ?? data.empty_basis) : null].filter(Boolean).join(', ')})`
   const drift = data.drift_g ?? 0
   const compared =
     data.expected_g == null
@@ -29,7 +32,7 @@ export function WeighingBreakdown({ event }: { event: SpoolEvent }) {
         }`
   return (
     <p className="text-[13px] text-muted-foreground">
-      {`Weighed ${grams(data.reading_g)} on ${when(event.at)}: filament ${grams(filament)} + ${spool}.${compared}`}
+      {`Weighed ${grams(data.reading_g)} on ${when(event.at)}: filament ${grams(filament)} ${spool}.${compared}`}
     </p>
   )
 }

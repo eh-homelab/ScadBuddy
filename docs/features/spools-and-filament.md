@@ -193,6 +193,29 @@ weight is known (the phone page sends it alone, so a decimal reading keeps the i
 name). Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md`
 §5.1, §5.2, §5.5.
 
+### A new spool's first weighing under the label weight (#7683)
+
+When a spool that is new by #7280's rule (added full, nothing consumed, grams left at the
+label) reads under its label weight, the insert weight check
+(`GET /filament/spools/{id}/insert-weight-offer`) answers `reason` `below_label` with
+`shortfall_g` (the label less the reading), `resolutions` and `default`. Each resolution
+names its filament: `tared` (the scale was tared on the empty spool, so the reading is the
+filament), `short` (the spool holds less than its label: the reading less the empty weight,
+and the spool stops being added full) and `label_wrong` (the same filament, and the spool's
+own label weight becomes it, rounded; the type keeps its own). `short` and `label_wrong`
+are offered only when the reading is at least the empty weight. The default is `tared`
+within 10 % of the label, else `short`. The weigh form and the phone page show the three
+with their numbers ("The reading is 100 g under the label weight. What is up?") with the
+default preselected, and the weighing posts `resolution` with `reading_g` alone; the
+agent's `filament_spool_add_event` answers the choices (`below_label`, nothing booked)
+until it is called again with one. The store checks the choice again under the row locks
+(a resolution the check no longer offers is 422 `no_below_label` with the check's
+`reason`), books the side effect as an `edited` event before the weighing, and keeps
+`resolution` and `shortfall_g` in the event's `data`; a `tared` weighing's `empty_source`
+is `tared`, `empty_g` 0. The timeline says "scale tared on the spool", "spool short by
+100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
+scale was tared on the spool)". Design: the same spec, §5.3.
+
 ### The phone page (#7273)
 
 `/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC

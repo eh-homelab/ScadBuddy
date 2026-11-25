@@ -240,12 +240,16 @@ def test_label_wrong_sets_the_spools_own_label(pg_pool: PgPool) -> None:
             code="PLA-LBL", material_id=_material(pg_pool), rgba="#FF0000", label_weight_g=1000
         )
     )
-    spool = FilamentSpoolStore(pg_pool).create(
-        m.SpoolCreate(
-            type_id=kind.id, insert_type_id=_insert(pg_pool), grams_left=1000, added_full=True
-        ),
-        actor="ann",
-    ).id
+    spool = (
+        FilamentSpoolStore(pg_pool)
+        .create(
+            m.SpoolCreate(
+                type_id=kind.id, insert_type_id=_insert(pg_pool), grams_left=1000, added_full=True
+            ),
+            actor="ann",
+        )
+        .id
+    )
     event = _weigh(pg_pool, spool, reading_g=900, resolution="label_wrong")
     assert event.grams_after == 700 and event.data["resolution"] == "label_wrong"
     row = FilamentSpoolStore(pg_pool).get(spool)

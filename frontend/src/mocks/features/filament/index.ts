@@ -2416,7 +2416,7 @@ export const handlers = [
             state.spools[at] = { ...row, added_full: false }
           } else if (chosen.kind === 'label_wrong') {
             addEvent(row.id, 'edited', { at: when, data: { changes: { label_weight_g: [row.label_weight_g, chosen.new_label_weight_g] } } })
-            state.spools[at] = { ...row, label_weight_g: chosen.new_label_weight_g }
+            state.spools[at] = { ...row, label_weight_g: chosen.new_label_weight_g ?? null }
           }
           Object.assign(data, { resolution: chosen.kind, shortfall_g: check.shortfall_g })
         } else if (grams == null) {

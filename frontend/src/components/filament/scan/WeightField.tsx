@@ -63,7 +63,7 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
       // A save sent before the hook's check answered reads the check itself (#7683).
       const below = pending && empty !== null ? await insertWeightOffer(spool.id, value).then((one) => (one.reason === 'below_label' ? one : null), () => null) : belowLabel
       const picked: Resolution | null = below ? (choice?.reading === value ? choice.resolution : (below.default ?? 'tared')) : null
-      const filament = below ? (below.resolutions.find((one) => one.kind === picked)?.filament_g ?? value) : empty === null ? value : value - empty
+      const filament = below ? (below.resolutions.find((one) => one.kind === picked)?.filament_g ?? value) : empty == null ? value : value - empty
       if (filament < 0) {
         setError('The weight is less than the empty spool.')
         return
@@ -71,7 +71,7 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
       // #7682: with an empty weight the reading goes alone and the server takes the insert off
       // it, so the event keeps its breakdown and a decimal reading stays the insert's.
       if (below && picked) await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', reading_g: value, resolution: picked })
-      else await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', ...(empty !== null ? { reading_g: value } : { grams: Math.round(filament) }) })
+      else await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', ...(empty != null ? { reading_g: value } : { grams: Math.round(filament) }) })
       setSaved(true)
       setChoice(null)
       // The card shows the grams left: the spool read again carries the new ones.

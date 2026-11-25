@@ -108,6 +108,9 @@ The change:
   resolution that `check_on` in `insert_weights.py` already does.
 - `person` and `scale` weighings are treated alike here; `bb` weighings (pulled from
   Bambuddy) record no breakdown, since Bambuddy gives no reading.
+- As built in #7683: `empty_source` has a third value, `tared`, for a weighing resolved as
+  §5.3's `tared`: nothing was taken off the reading, so `empty_g` is 0 and `empty_basis`
+  and `empty_name` are null.
 
 ### 5.2 What the person sees (slice A)
 
@@ -159,6 +162,19 @@ placeholder empty weight. The change:
 - With no empty weight known, only `tared` is offered.
 - #7280's offer needs a reading above the label weight, so `below_label` and the offer
   never meet on one reading.
+- As built in #7683: the check needs an insert with a weight, as #7280's does (it answers
+  `no_insert` first); with no empty weight known the client records the reading as the
+  filament, which is `tared` by nature, with no choice. `below_label` fires for a reading
+  under `label - 0.5 g` (#7280's full tolerance), after `used` and `not_full` and before
+  `not_above_label`. The resolutions come in the order `tared`, `short`, `label_wrong`;
+  the last two only when the reading is at least the empty weight, so a reading under it
+  offers `tared` alone. `label_wrong`'s new label is the filament rounded half up, at
+  least 1 g. The store checks the choice again under the row locks: a `resolution` the
+  check does not offer now is 422 `no_below_label` with the check's `reason`, and
+  nothing is booked. `short` and `label_wrong` book their side effect as an `edited`
+  event (`data.changes` `{"added_full": [before, false]}` or
+  `{"label_weight_g": [before, new]}`, `before` the spool's own value, null when it came
+  from the type) at the weighing's `at`, before the weighing, in the same transaction.
 
 ### 5.4 End of life (slice C, #7684)
 

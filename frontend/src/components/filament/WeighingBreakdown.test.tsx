@@ -48,6 +48,12 @@ describe('WeighingBreakdown (#7682)', () => {
     expect(screen.getByText(/\(Plastic, weighed empty\)\. The ledger expected 992 g\. The scale found 8 g more than the prints accounted for\./)).toBeInTheDocument()
   })
 
+  it('says the scale was tared on the spool (#7683)', () => {
+    render(<WeighingBreakdown event={weighed({ grams_after: 900, data: { reading_g: 900, empty_g: 0, empty_source: 'tared', empty_basis: null, empty_name: null, expected_g: null, drift_g: null, resolution: 'tared', shortfall_g: 100 } })} />)
+    expect(screen.getByText(/Weighed 900 g on .*: filament 900 g \(the scale was tared on the spool\)\./)).toBeInTheDocument()
+    expect(screen.queryByText(/spool 0 g/)).toBeNull()
+  })
+
   it('names a person-taken empty weight', () => {
     render(<WeighingBreakdown event={weighed({ grams_after: 962, data: { reading_g: 1180, empty_g: 218, empty_source: 'person', empty_basis: null, empty_name: null, expected_g: null, drift_g: null } })} />)
     expect(screen.getByText(/filament 962 g \+ spool 218 g \(taken off by hand\)\./)).toBeInTheDocument()
