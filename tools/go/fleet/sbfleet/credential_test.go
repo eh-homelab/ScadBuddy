@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -312,5 +313,26 @@ func TestExchangeProofFileMissing(t *testing.T) {
 	e := NewExchange("http://127.0.0.1:1", filepath.Join(t.TempDir(), "none"), ProofKubernetes)
 	if _, err := e.Token(); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("%v, want the missing proof", err)
+	}
+}
+
+func TestExchangeNotUpSetsNoBackOff(t *testing.T) {
+	proof := filepath.Join(t.TempDir(), "proof")
+	if err := os.WriteFile(proof, []byte("p"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A port just closed refuses the connection, as an API that is not up yet does.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	e := NewExchange("http://"+addr, proof, ProofKubernetes)
+	if _, err := e.Token(); err == nil || !strings.Contains(err.Error(), "not up yet") {
+		t.Fatalf("%v, want the API not up yet", err)
+	}
+	if !e.nextTry.IsZero() {
+		t.Errorf("nextTry %v, want no back-off", e.nextTry)
 	}
 }

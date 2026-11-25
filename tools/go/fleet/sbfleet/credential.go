@@ -13,12 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 // The service-token exchange (README "The service-token exchange", #5494; spec
 // 2026-11-05-service-credentials-without-db-design §6.2, §6.3). It mirrors the agent's
-// ExchangeCredential (agent/src/api/serviceCredential.ts).
+// ExchangeCredential (agent/src/api/serviceCredential.ts), with one addition: the Store
+// resends a request once after a 401 with a renewed credential, which the agent does not.
 const (
 	exchangePath = "/api/v1/auth/service-token"
 	grantType    = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -146,6 +148,12 @@ func (e *Exchange) exchange() {
 		"client_id": {"fleet"},
 	}
 	res, err := e.http.PostForm(e.url, form)
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		// The API is not up yet (core rolling): no back-off, the next call tries again,
+		// as the agent's backendNotUp (#5868).
+		e.lastErr = fmt.Errorf("could not exchange the fleet service credential: the API is not up yet")
+		return
+	}
 	if err != nil {
 		// The error names the URL and the network failure, never the form.
 		e.failed(err.Error())

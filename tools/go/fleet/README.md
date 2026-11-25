@@ -77,7 +77,9 @@ with 401 calls `f` with the refused credential and is sent once more with the ne
   projected ServiceAccount token, ServiceAccount `scadbuddy-fleet`, audience
   `scadbuddy`) or `ProofBootstrap` (a secret whose hash the API holds as the file
   `fleet` in `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`). It mirrors the agent's
-  `ExchangeCredential` (`agent/src/api/serviceCredential.ts`). It never logs the proof
+  `ExchangeCredential` (`agent/src/api/serviceCredential.ts`), and also resends a request
+  once after a 401 with a renewed credential. A refused connection (the API not up yet)
+  sets no back-off. It never logs the proof
   or the credential.
 
 ## Binary
