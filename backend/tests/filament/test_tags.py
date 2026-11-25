@@ -600,6 +600,53 @@ def test_an_armed_job_with_no_backup_past_its_time_expires(pg_pool: PgPool) -> N
         tags.finish_job(store, job, NfcJobResultIn(error="x"), actor="ann", defaults=DEFAULTS)
 
 
+def test_a_job_read_says_whether_its_write_began(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    found = tags.get_job(store, job)
+    assert found is not None and found.write_begun is False
+    tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    found = tags.get_job(store, job)
+    assert found is not None and found.write_begun is True
+
+
+def test_a_begun_write_cannot_be_cancelled(pg_pool: PgPool) -> None:
+    # #7419 round 2 (I1): its tag may hold the new records; the job ends only by its result.
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    tags.back_up(
+        store, TagBackupIn(uid="04AA", records=[], reason="agent_write", job_id=job), actor="ann"
+    )
+    with pytest.raises(tags.WriteBegunError) as refused:
+        tags.cancel_job(store, job)
+    assert refused.value.code == "write_begun"
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "armed"
+
+
+def test_a_begun_write_with_no_result_past_the_backup_ttl_fails_no_read_back(
+    pg_pool: PgPool,
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    tag = _backup(store)
+    with pg_pool.connection() as conn:
+        old = conn.execute(
+            "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor, at)"
+            " VALUES (%s, '04AA', '[]', 'agent_write', %s, 'ann', now() - interval '11 minutes')"
+            " RETURNING id",
+            (tag.tag_id, job),
+        ).fetchone()
+    assert old is not None
+    _age_job(pg_pool, job)
+    found = tags.get_job(store, job)
+    assert found is not None and found.state == "failed" and found.result is not None
+    assert found.result["code"] == "no_read_back"
+    assert found.result["backup_id"] == str(old["id"])
+
+
 def test_arming_gives_the_run_its_own_time(pg_pool: PgPool) -> None:
     store = FilamentSpoolStore(pg_pool)
     job = tags.create_job(store, NfcJobIn(kind="read", ttl_s=5), actor="agent")

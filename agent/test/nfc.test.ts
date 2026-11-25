@@ -207,6 +207,48 @@ describe('NFC job tools', () => {
     expect(cancels).toBe(0)
   })
 
+  it('never cancels a begun write past its expires_at, and answers its late done', async () => {
+    // #7419 round 2: the tag is backed up, so only the server ends the job.
+    const made = Date.now()
+    const past = new Date(made - 120_000).toISOString()
+    const result = { uid: '04AA', records: [REC], backup_id: 'b' }
+    let cancels = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC] }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () =>
+        HttpResponse.json(
+          Date.now() - made < 400
+            ? job('armed', { kind: 'write', expires_at: past, write_begun: true })
+            : job('done', { kind: 'write', expires_at: past, write_begun: true, result }),
+        ),
+      ),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json({ title: 'Conflict', status: 409, code: 'write_begun' }, { status: 409 })
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), pollIntervalMs: 50 })
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+    expect(cancels).toBe(0)
+  })
+
+  it('does not cancel a begun write when the call is aborted', async () => {
+    let cancels = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC] }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job('armed', { kind: 'write', write_begun: true }))),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json(job('cancelled'))
+      }),
+    )
+    const abort = new AbortController()
+    setTimeout(() => abort.abort(), 120)
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 600 }, { ...ctx(abort.signal), pollIntervalMs: 30 })
+    expect(cancels).toBe(0)
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'armed', result: null, write_begun: true })
+  })
+
   it('cancels the job when the call is aborted', async () => {
     let cancelled = false
     server.use(

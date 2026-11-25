@@ -443,6 +443,46 @@ describe('NfcJobBanner (#7273)', () => {
     expect(onAnnounce).toHaveBeenLastCalledWith('Agent job done: Written and checked.')
   }, 10_000)
 
+  it('does not stop at 0:00 while it backs the tag up (#7419 round 2)', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const { user, onAnnounce } = render()
+    await user.click(await armButton())
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    // The backup is kept at once but answers late; meanwhile the page reads the job's time as ended.
+    let ended: string | null = null
+    server.use(
+      http.get(`${JOBS}/${job.id}`, () => HttpResponse.json(ended ? { ...job, expires_at: ended } : job)),
+      http.post('/api/v1/filament/tags/backups', async ({ request }) => {
+        const kept = await fetch(new URL('/api/v1/filament/tags/backups', window.location.origin), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: await request.text() })
+        const body = (await kept.json()) as Record<string, string>
+        await delay(3000)
+        return HttpResponse.json(body, { status: kept.status })
+      }, { once: true }),
+    )
+    stub.tap({ serialNumber: UID, records: [OLD] })
+    expect(await screen.findByText('Backing up the tag…')).toBeInTheDocument()
+    ended = new Date(Date.now() - 1000).toISOString()
+    await act(() => new Promise((resolve) => setTimeout(resolve, 2500)))
+    expect(screen.queryByText('Expired')).toBeNull()
+    expect(onAnnounce).not.toHaveBeenCalledWith('Expired. Nothing was bound.')
+    await waitFor(() => expect(stub.writes).toHaveLength(1), { timeout: 3000 })
+    stub.tap(tapOf(UID, RECORDS))
+    expect(await screen.findByText('Written and checked.')).toBeInTheDocument()
+  }, 15_000)
+
+  it('says the tag may hold the new records when a begun write ends no_read_back', async () => {
+    const job = seedNfcJob({ kind: 'write', records: RECORDS })
+    const { user, onAnnounce } = render()
+    await user.click(await armButton())
+    expect(await screen.findByText('Hold a tag to the phone')).toBeInTheDocument()
+    stub.tap({ serialNumber: UID, records: [OLD] })
+    await waitFor(() => expect(stub.writes).toHaveLength(1))
+    Object.assign(job, { state: 'failed', result: { error: 'no read-back', code: 'no_read_back' } })
+    const text = 'No read-back came in time. The tag may hold the new records; its backup can restore it.'
+    await waitFor(() => expect(onAnnounce).toHaveBeenLastCalledWith(text), { timeout: 3500 })
+    expect(onAnnounce).not.toHaveBeenCalledWith('Expired. Nothing was bound.')
+  }, 10_000)
+
   it('says Expired at 0:00', async () => {
     seedNfcJob({ kind: 'read', ttl_s: 1 })
     render()

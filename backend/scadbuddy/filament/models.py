@@ -2063,6 +2063,10 @@ class NfcJob(BaseModel):
     created_at: datetime
     expires_at: datetime
     armed_by: str | None
+    #: Whether the job's ``agent_write`` backup exists: the write has begun, so the job
+    #: is never cancelled or expired; it ends with its result, or ``failed`` with the code
+    #: ``no_read_back`` once the backup is too old to check one (#7419 review).
+    write_begun: bool
 
 
 def records_sha256(records: Sequence[NdefRecord]) -> str:

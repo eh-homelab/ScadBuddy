@@ -26,8 +26,14 @@ const STOPPED_WAITING = 'The agent stopped waiting.'
 const EXPIRED = 'expired'
 /** The reason a run is stopped with when the server ended the job another way (R23: the agent cancelled it). */
 const ENDED = 'ended'
-/** The steps after the backup: the write has begun, so the server takes its result whenever it comes (#7419 review). */
-const WRITE_BEGUN: ReadonlySet<Phase> = new Set(['writing', 'reading_back', 'tap_again'])
+/** The reason a run is stopped with when the server ended a begun write `no_read_back` (no read-back within 10 minutes of its backup). */
+const NO_READ_BACK = 'no_read_back'
+const NO_READ_BACK_TEXT = 'No read-back came in time. The tag may hold the new records; its backup can restore it.'
+/**
+ * The steps from the backup on: the write has begun (or its backup may already be kept), so 0:00 stops
+ * nothing and the server takes the result whenever it comes (#7419 review).
+ */
+const WRITE_BEGUN: ReadonlySet<Phase> = new Set(['backing_up', 'writing', 'reading_back', 'tap_again'])
 /** How many bytes of a record the page shows as hex; it says how many more there are. */
 const HEX_PREVIEW_BYTES = 64
 
@@ -171,7 +177,7 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
       if (running?.id !== armedId) return
       getNfcJob(armedId).then(
         (now) => {
-          if (now.state !== 'armed') running.controller.abort(now.state === 'expired' ? EXPIRED : ENDED)
+          if (now.state !== 'armed') running.controller.abort(now.state === 'expired' ? EXPIRED : now.result?.code === NO_READ_BACK ? NO_READ_BACK : ENDED)
           // The page follows the job's current `expires_at`: arming moved it.
           else setRun((shown) => (shown?.job.id === now.id ? { ...shown, job: now } : shown))
         },
@@ -317,6 +323,10 @@ export function NfcJobBanner({ session, onAnnounce }: { session: NfcSession; onA
     })
     if (outcome.status === 'checked') {
       end(target.id, `Agent job done: ${headlineOf(outcome, false)}`)
+      return
+    }
+    if (signal.reason === NO_READ_BACK) {
+      end(target.id, NO_READ_BACK_TEXT)
       return
     }
     if (signal.reason === EXPIRED) {

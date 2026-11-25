@@ -201,6 +201,16 @@ def test_tag_records_of_an_unknown_spool_are_404_before_the_backup_is_checked(
     assert got.status_code == 404, got.text
 
 
+def test_tag_written_of_an_unknown_spool_is_404_before_the_backup_is_checked(
+    client: TestClient,
+) -> None:
+    got = client.post(
+        f"{SPOOLS_URL}/{uuid4()}/tag-written",
+        json={"uid": "04BB", "backup_id": str(uuid4()), "sent": [], "read_back": []},
+    )
+    assert got.status_code == 404, got.text
+
+
 def test_tag_records_refuse_a_backup_of_another_uid(client: TestClient) -> None:
     spool = _spool(client)
     got = client.post(
@@ -534,6 +544,16 @@ def test_cancel_ends_an_open_job_and_answers_an_ended_one_as_it_is(client: TestC
     failed = client.post(f"{JOBS}/{ended}/result", json={"error": "declined"}).json()
     again = client.post(f"{JOBS}/{ended}/cancel")
     assert again.status_code == 200 and again.json() == failed
+
+
+def test_cancel_refuses_a_begun_write(client: TestClient) -> None:
+    job_id = _armed(client)
+    assert client.get(f"{JOBS}/{job_id}").json()["write_begun"] is False
+    _agent_backup(client, job_id)
+    assert client.get(f"{JOBS}/{job_id}").json()["write_begun"] is True
+    got = client.post(f"{JOBS}/{job_id}/cancel")
+    assert got.status_code == 409 and got.json()["code"] == "write_begun"
+    assert client.get(f"{JOBS}/{job_id}").json()["state"] == "armed"
 
 
 def test_a_write_job_needs_its_own_agent_write_backup(client: TestClient) -> None:
