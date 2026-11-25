@@ -405,6 +405,8 @@ function resetProblem(cause: unknown): string {
  * (`bambuddy_unreadable`) gets the delete, with a note.
  * #7544 — the warning that each filament preset is copied to Bambuddy again shows only while the
  * saved preset mirror (`mirror`) is on: with it off, nothing is copied after the delete.
+ * The backend also needs a Bambuddy URL (`preset_mirror.py`); this dialog shows only on
+ * `instance_changed`, which a configured URL implies, so `mirror` alone is enough here (#7738).
  */
 function ResetLinks({ mirror, onReset }: { mirror: boolean; onReset: (done: LinksResetDone) => void }) {
   const [opening, setOpening] = useState(false)
