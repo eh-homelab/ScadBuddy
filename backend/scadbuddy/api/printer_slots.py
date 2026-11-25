@@ -3,8 +3,10 @@
 are #7153's).
 
 Each command route (configure, reset, refresh, load, unload) takes the LAN row first (409
-``not_lan_linked``), checks the printer's stored report (`ams_slots.guard`, R-7276-12)
-unless its ``Idempotency-Key`` already started the command (P38), runs its MQTT commands
+``not_lan_linked``). An ``Idempotency-Key`` that already started the route's commands
+answers that run, as it was started, and checks and does nothing else (`_resent`, P38,
+P41). Otherwise the route checks the printer's stored report (`ams_slots.guard`,
+R-7276-12), runs its MQTT commands
 (the ``LanCommand`` workflow) and answers through `command_response`: 200 with the route's
 model, or 202 with the run's workflow id when the printer is slow (P27; follow it at
 ``GET /printers/{id}/commands/{command_id}``, which answers the same model, P37). The slot
@@ -33,7 +35,6 @@ from scadbuddy.bambuddy.trays import (
     EXTERNAL,
     every_tray,
     seen_trays,
-    tray_at,
     tray_label,
     tray_rgba,
     unit_label,
@@ -82,7 +83,8 @@ PRINTER = (
     " printer refuses it, `printer_cert_changed` when it presents another certificate; 502"
     " `printer_unreachable`; 503 `lan_unavailable`. `message` is `sent`, or says the printer"
     " did not acknowledge it in time. An `Idempotency-Key` sent again joins the run it"
-    " started or reads its outcome, even when the printer has not been heard from since."
+    " started or reads its outcome, and answers what that first request sent, whatever this"
+    " one's body and the printer's state now."
 )
 OWNED = (
     " ScadBuddy keeps it, not the printer: no printer state is read. 404 for an unknown printer."
@@ -115,6 +117,31 @@ def _wired[T](make: Callable[[], T]) -> T:
         ) from None
 
 
+#: The command names each route's run may have, which name its workflow (P9).
+KINDS: dict[sc.Action, list[list[str]]] = {
+    "configure": [
+        ["ams_filament_setting", "extrusion_cali_sel"],
+        ["ams_filament_setting", "extrusion_cali_sel", "extrusion_cali_set"],
+    ],
+    "reset": [["ams_filament_setting"]],
+    "refresh": [["ams_get_rfid"]],
+    "load": [["ams_change_filament"]],
+    "unload": [["ams_change_filament"]],
+}
+
+
+async def _resent(
+    commands: LanCommands, row: PrinterRow, action: sc.Action, key: str | None
+) -> Response | None:
+    """The answer of the run ``key`` already started for the route (P38, P41): joined or
+    read, built from that run's own ``answer`` (not the resend's body), with no state
+    check and nothing sent again; ``None`` when the key started none."""
+    run = await commands.keyed(row.id, KINDS[action], key)
+    if run is None:
+        return None
+    return command_response(await commands.run(row.id, run, key=key), run)
+
+
 async def _send(
     commands: LanCommands,
     row: PrinterRow,
@@ -125,19 +152,8 @@ async def _send(
     key: str | None,
     build: Callable[[AmsTray], LanCommandRun],
 ) -> Response:
-    """Run what ``build`` makes of the slot once `guard` passes (P36). A key that already
-    started the command skips the check (P38): the resend reads that run, never sends."""
-    run = None
-    tray = tray_at(status, ams_id, tray_id)
-    if not status.connected and key and tray is not None:
-        try:
-            candidate = build(tray)
-        except ApiError:
-            candidate = None
-        if candidate is not None and await commands.exists(row.id, candidate, key):
-            run = candidate
-    if run is None:
-        run = build(sc.guard(status, action, ams_id, tray_id))
+    """Run what ``build`` makes of the slot once `guard` passes (P36)."""
+    run = build(sc.guard(status, action, ams_id, tray_id))
     return command_response(await commands.run(row.id, run, key=key), run)
 
 
@@ -177,7 +193,6 @@ async def get_printer_ams(
         asyncio.to_thread(filament.locations.ams_units, owner),
     )
     held = {(t.ams_id, t.tray_id) for t in seen_trays(status)}
-    loaded = status.tray_now if status.tray_now not in (None, sc.NOTHING_LOADED) else None
     units: dict[int, list[sc.SlotView]] = {}
     for ams_id, tray in every_tray(status):
         global_id = sc.global_tray(ams_id, tray.id)
@@ -186,7 +201,7 @@ async def get_printer_ams(
                 tray_id=tray.id,
                 label=tray_label(ams_id, tray.id),
                 filled=(ams_id, tray.id) in held,
-                loaded=loaded is not None and loaded == global_id,
+                loaded=sc.is_loaded(status, ams_id, tray.id),
                 material=(tray.tray_type or "").strip() or None,
                 colour=tray_rgba(tray.tray_color),
                 preset_id=(tray.tray_info_idx or "").strip() or None,
@@ -266,6 +281,8 @@ async def configure_printer_slot(
 ) -> Response:
     sc.known_slot(ams_id, tray_id)
     row, status = await _reach(printers, printer_id)
+    if (resent := await _resent(commands, row, "configure", idempotency_key)) is not None:
+        return resent
     spool: m.Spool | None = None
     presets: list[m.EffectivePreset] = []
     k_values: list[m.EffectiveKValue] = []
@@ -332,6 +349,9 @@ async def reset_printer_slot(
 ) -> Response:
     sc.known_slot(ams_id, tray_id)
     row, status = await _reach(printers, printer_id)
+    # A resend clears no preset again: one saved since stands (P43).
+    if (resent := await _resent(commands, row, "reset", idempotency_key)) is not None:
+        return resent
 
     def build(_tray: AmsTray) -> LanCommandRun:
         slot = _wired(lambda: wire_slot(ams_id, tray_id, external_count=len(status.vt_tray)))
@@ -366,6 +386,8 @@ async def refresh_printer_slot(
     if ams_id == EXTERNAL:
         raise sc.invalid("an external holder has no RFID reader to refresh")
     row, status = await _reach(printers, printer_id)
+    if (resent := await _resent(commands, row, "refresh", idempotency_key)) is not None:
+        return resent
 
     def build(_tray: AmsTray) -> LanCommandRun:
         payload = _wired(lambda: ams_get_rfid(ams_id, tray_id, sc.SEQ))
@@ -394,7 +416,7 @@ async def _temps(printers: PrintersDep, row: PrinterRow) -> tuple[int, int]:
     description=(
         "The printer feeds the slot's filament to its hotend. AMS 0-3, an AMS-HT or an"
         " external holder (422 for an AMS past 3). Also 409 `tray_empty` (no spool in it),"
-        " `already_loaded` (the printer feeds from it now) and `extruder_unknown` (with the"
+        " `already_loaded` (an extruder feeds from it now) and `extruder_unknown` (with the"
         " Filament Track Switch, the report does not say which hotend it feeds)."
         + STATE_FIRST
         + PRINTER
@@ -411,6 +433,8 @@ async def load_printer_slot(
     sc.known_slot(ams_id, tray_id)
     target = _global(ams_id, tray_id)
     row, status = await _reach(printers, printer_id)
+    if (resent := await _resent(commands, row, "load", idempotency_key)) is not None:
+        return resent
     _, right = await _temps(printers, row)
 
     def build(_tray: AmsTray) -> LanCommandRun:
@@ -445,7 +469,7 @@ async def load_printer_slot(
     summary="Unload filament fed from an AMS slot",
     description=(
         "The printer pulls back the filament its hotend takes from the slot. 409 `not_loaded`"
-        " when the printer is not loaded from it (Ext-R's loaded state cannot be told, so it"
+        " when no extruder is loaded from it (Ext-R's loaded state cannot be told, so it"
         " is always refused); 422 for an AMS past 3." + STATE_FIRST + PRINTER
     ),
 )
@@ -460,6 +484,8 @@ async def unload_printer_slot(
     sc.known_slot(ams_id, tray_id)
     source = _global(ams_id, tray_id)
     row, status = await _reach(printers, printer_id)
+    if (resent := await _resent(commands, row, "unload", idempotency_key)) is not None:
+        return resent
     nozzle, _ = await _temps(printers, row)
 
     def build(_tray: AmsTray) -> LanCommandRun:

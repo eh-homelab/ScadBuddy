@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from temporalio import workflow
@@ -103,8 +104,11 @@ LanCommandAnswer = LanCommandOutcome | LanCommandPending
 
 def lan_command_id(printer_id: str, run: LanCommandRun, key: str | None) -> str:
     """``lan-command-<printer>-<commands>-<key>`` (P9); a fresh id with no key."""
-    kind = "+".join(command.name for command in run.commands)
-    return f"lan-command-{printer_id}-{kind}-{key or uuid.uuid4().hex}"
+    return _command_id(printer_id, [command.name for command in run.commands], key)
+
+
+def _command_id(printer_id: str, names: Sequence[str], key: str | None) -> str:
+    return f"lan-command-{printer_id}-{'+'.join(names)}-{key or uuid.uuid4().hex}"
 
 
 async def execute_lan_commands(
@@ -173,6 +177,28 @@ async def lan_command_exists(
             return False
         raise
     return True
+
+
+async def lan_command_keyed(
+    client: Client, printer_id: str, kinds: Sequence[Sequence[str]], key: str | None
+) -> LanCommandRun | None:
+    """The run ``key`` already started for ``printer_id`` under one of ``kinds`` (each the
+    command names a route may send), as it was started; ``None`` when there is none (P41).
+    A route answers a resend from it, never from the resend's own body."""
+    if not key:
+        return None
+    for names in kinds:
+        handle = client.get_workflow_handle(
+            _command_id(printer_id, names, key), result_type=LanCommandOutcome
+        )
+        try:
+            await handle.describe()
+        except RPCError as error:
+            if error.status == RPCStatusCode.NOT_FOUND:
+                continue
+            raise
+        return await _started_run(client, handle)
+    return None
 
 
 async def _answer(

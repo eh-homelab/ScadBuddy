@@ -54,9 +54,11 @@ NozzleDiameter = Literal["0.2", "0.4", "0.6", "0.8"]
 NOTHING_LOADED = 255
 #: The global tray of the external holders: Ext-L (or the only one) and Ext-R.
 EXTERNAL_TRAY = 254
-# Limit: Ext-R's global tray is 255, which is also NOTHING_LOADED, so `tray_now` cannot say
-# Ext-R is loaded: it never shows `loaded`, `already_loaded` never fires for it, and its
-# unload is refused `not_loaded`. The report's `extruder_slots` is not read for it.
+# Limit: an external holder's loaded state is `tray_now`'s alone (`is_loaded`): no cited
+# source decodes its `snow` (`printers/status.py` `decode_snow`). Ext-R's global tray is
+# 255, which is also NOTHING_LOADED, so `tray_now` cannot say Ext-R is loaded: it never
+# shows `loaded`, `already_loaded` never fires for it, and its unload is refused
+# `not_loaded`.
 PRESET_ID = r"^[A-Za-z0-9_.+-]{0,64}$"
 COLOUR = r"^#?[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
 #: As Bambuddy's ``AmsLabelBody.label`` (``schemas/printer.py`` line 364, v1.3.1).
@@ -181,7 +183,7 @@ class SlotView(BaseModel):
     label: str
     #: A spool is in it (the AMS's own flags).
     filled: bool
-    #: The printer feeds from it now (``tray_now``).
+    #: An extruder feeds from it now (`is_loaded`).
     loaded: bool
     material: str | None
     colour: str | None
@@ -273,6 +275,24 @@ def ams_busy(status: PrinterStatus) -> bool:
     return status.ams_status_main not in (None, 0, 3)
 
 
+def is_loaded(status: PrinterStatus, ams_id: int, tray_id: int) -> bool:
+    """An extruder feeds from the slot (P40). ``tray_now`` names only the active
+    extruder's slot, so an AMS or AMS-HT slot is loaded when any extruder's decoded
+    ``snow`` names it (`PrinterStatus.extruder_loaded`); with no such report, and for an
+    external holder, when ``tray_now`` names it."""
+    if ams_id != EXTERNAL and status.extruder_loaded:
+        return (ams_id, tray_id) in status.extruder_loaded
+    now = status.tray_now
+    return now not in (None, NOTHING_LOADED) and now == global_tray(ams_id, tray_id)
+
+
+def any_loaded(status: PrinterStatus) -> bool:
+    """Some extruder holds filament: ``tray_now`` names a slot, or a decoded ``snow`` does."""
+    return status.tray_now not in (None, NOTHING_LOADED) or any(
+        slot is not None for slot in status.extruder_loaded
+    )
+
+
 def guard(status: PrinterStatus, action: Action, ams_id: int, tray_id: int) -> AmsTray:
     """The slot, once the stored report says ``action`` is safe now (R-7276-12); else a
     409 with a ``code``."""
@@ -293,8 +313,7 @@ def guard(status: PrinterStatus, action: Action, ams_id: int, tray_id: int) -> A
     tray = tray_at(status, ams_id, tray_id)
     if tray is None:
         raise refused("no_slot", f"{name} reports no {slot}")
-    loaded = status.tray_now not in (None, NOTHING_LOADED)
-    here = loaded and status.tray_now == global_tray(ams_id, tray_id)
+    here = is_loaded(status, ams_id, tray_id)
     if action == "load":
         if not filled(status, ams_id, tray_id):
             raise refused("tray_empty", f"{name}'s {slot} holds no spool to load")
@@ -302,11 +321,10 @@ def guard(status: PrinterStatus, action: Action, ams_id: int, tray_id: int) -> A
             raise refused("already_loaded", f"{name} is already loaded from {slot}")
     if action == "unload" and not here:
         raise refused("not_loaded", f"{name} is not loaded from {slot}")
-    if action == "refresh" and loaded:
+    if action == "refresh" and any_loaded(status):
         raise refused(
             "filament_loaded",
-            f"{name} has filament loaded (tray {status.tray_now}); unload it before the"
-            " AMS can read a tag again",
+            f"{name} has filament loaded; unload it before the AMS can read a tag again",
         )
     return tray
 
@@ -431,6 +449,19 @@ def filament_id_to_setting_id(filament_id: str) -> str:
     return filament_id
 
 
+def k_made_for(k: m.EffectiveKValue, slot_setting_id: str | None) -> bool:
+    """The stored K row was calibrated for the slot's filament (P42). A row keeps no
+    filament id, only its profile's ``setting_id`` (the printer's calibration table
+    entry's, `filament/profile_fill.py`), which names the filament preset it was made
+    with; it matches when that is the slot's setting id. A row with none is another
+    filament's. The printer keys its calibrations by filament id and ``cali_idx``, so a
+    profile of another filament selected on the slot is dropped (Bambuddy's configure
+    route, which realigns the slot to the profile's filament instead:
+    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/api/routes/printers.py#L3190-L3223
+    ). ScadBuddy keeps the slot's filament and sends no foreign ``cali_idx``."""
+    return bool(k.setting_id) and k.setting_id == slot_setting_id
+
+
 def configure_values(
     body: SlotConfigureBody,
     status: PrinterStatus,
@@ -464,6 +495,7 @@ def configure_values(
     low, high = body.nozzle_temp_min, body.nozzle_temp_max
     cali_idx, k_setting_id, k_value = body.cali_idx, body.setting_id, body.k_value
     preset_setting_id: str | None = None
+    k: m.EffectiveKValue | None = None
     if spool is not None:
         preset = preset_for(presets, PRINTER_MODEL, nozzle)
         material = material or spool.names.material
@@ -500,10 +532,8 @@ def configure_values(
             ),
             None,
         )
-        if k is not None and cali_idx is None and k_value is None:
-            cali_idx = k.cali_idx
-            k_setting_id = k_setting_id or k.setting_id
-            k_value = float(k.k_value)
+        if k is not None and (cali_idx is not None or k_value is not None):
+            k = None
     if low is None and tray.nozzle_temp_min:
         low = tray.nozzle_temp_min
     if high is None and tray.nozzle_temp_max:
@@ -528,6 +558,13 @@ def configure_values(
     rgba = _rgba(colour)
     name = preset_name or material
     tray_info_idx = preset_id or generic_filament_id(material)
+    slot_setting_id = preset_setting_id or filament_id_to_setting_id(tray_info_idx) or None
+    if k is not None:
+        k_value = float(k.k_value)
+        if k_made_for(k, slot_setting_id):
+            cali_idx, k_setting_id = k.cali_idx, k_setting_id or k.setting_id
+        # Else the stored profile was calibrated for another filament: selecting it under
+        # this one would not stick (P42), so the value is sent as a new K instead.
     params = SlotParams(
         tray_info_idx=tray_info_idx,
         tray_type=material,
@@ -539,7 +576,7 @@ def configure_values(
         cali_idx=-1 if cali_idx is None and k_value is not None else cali_idx,
         # #2604's back-fill (L3227-L3237): a filament id with no setting id leaves the slot
         # half configured.
-        preset_setting_id=preset_setting_id or filament_id_to_setting_id(tray_info_idx) or None,
+        preset_setting_id=slot_setting_id,
         k_setting_id=k_setting_id,
         k_value=k_value,
     )

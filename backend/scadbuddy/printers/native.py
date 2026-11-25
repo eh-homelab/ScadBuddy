@@ -5,7 +5,7 @@ P14, P27, P30). Nothing here reaches Bambuddy."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -30,6 +30,7 @@ from scadbuddy.workflows.lan_command import (
     LanCommandAnswer,
     execute_lan_commands,
     lan_command_exists,
+    lan_command_keyed,
     lan_command_run,
 )
 
@@ -134,6 +135,12 @@ class LanCommands:
     async def exists(self, printer_id: str, run: LanCommandRun, key: str | None) -> bool:
         """Whether ``key`` already started ``run``'s commands (P38)."""
         return await lan_command_exists(self.client_getter(), printer_id, run, key)
+
+    async def keyed(
+        self, printer_id: str, kinds: Sequence[Sequence[str]], key: str | None
+    ) -> LanCommandRun | None:
+        """The run ``key`` already started under one of ``kinds``, as started (P41)."""
+        return await lan_command_keyed(self.client_getter(), printer_id, kinds, key)
 
     async def started(self, command_id: str) -> LanCommandRun:
         """The commands the run ``command_id`` was started with."""

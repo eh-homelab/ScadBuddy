@@ -63,6 +63,22 @@ def idle(**values: Any) -> dict[str, Any]:
     return report
 
 
+#: ``snow`` when an extruder holds nothing; a slot is ``ams_id << 8 | slot`` (P40).
+EMPTY = 0xFFFF
+HT_A = 128 << 8
+
+
+def feeding(
+    report: dict[str, Any], right: int = EMPTY, left: int = EMPTY, *, tray_now: int = 255
+) -> dict[str, Any]:
+    """``report`` with each extruder's ``snow`` (0 the right, 1 the left) and ``tray_now``,
+    which names only the active extruder's slot."""
+    info = report["device"]["extruder"]["info"]
+    info[0]["snow"], info[1]["snow"] = right, left
+    report["ams"]["tray_now"] = str(tray_now)
+    return report
+
+
 @pytest.fixture
 def scripted(monkeypatch: pytest.MonkeyPatch) -> Scripted:
     return script_printer(monkeypatch)
@@ -107,9 +123,7 @@ def names(script: Scripted) -> list[str]:
 def test_the_view_reads_the_stored_report_and_sends_nothing(
     client: TestClient, scripted: Scripted
 ) -> None:
-    report = idle()
-    report["ams"]["tray_now"] = "1"
-    pid = lan_printer(client, report)
+    pid = lan_printer(client, feeding(idle(), 1, HT_A, tray_now=1))
     printers_of(client).command_data.set_slot_preset(
         UUID(pid),
         0,
@@ -141,6 +155,9 @@ def test_the_view_reads_the_stored_report_and_sends_nothing(
     assert (units[1]["label"], units[1]["place_name"]) == (None, "H2C AMS-B")
     tray = first["slots"][1]
     assert tray["loaded"] is True and tray["filled"] is True
+    # HT-A feeds the other extruder, which tray_now does not name (P40).
+    assert units[128]["slots"][0]["loaded"] is True
+    assert units[1]["slots"][1]["loaded"] is False
     assert tray["saved_preset"]["preset_id"] == "GFSG00"
     assert units[255]["slots"][0]["refreshable"] is False
     assert scripted.published == []
@@ -438,8 +455,8 @@ def test_configure_from_any_spool_takes_its_values(client: TestClient, scripted:
     assert scripted.sent("extrusion_cali_sel")[0]["nozzle_diameter"] == "0.6"
 
 
-def test_a_spools_k_value_is_selected(client: TestClient, scripted: Scripted) -> None:
-    pid = lan_printer(client)
+def k_spool(client: TestClient, pid: str, setting_id: str | None) -> UUID:
+    """A PLA spool with a stored K profile (slot 7) for the H2C's left extruder at 0.4."""
     store_ = filament(client)
     spool = store_.spools.create(
         SpoolCreate(
@@ -456,13 +473,44 @@ def test_a_spools_k_value_is_selected(client: TestClient, scripted: Scripted) ->
                 nozzle_diameter="0.4",
                 k_value=Decimal("0.031"),
                 cali_idx=7,
+                setting_id=setting_id,
             )
         ],
         actor="ann",
     )
-    response = client.post(f"{slot(pid)}/configure", json={"spool_id": str(spool.id)})
+    return spool.id
+
+
+@pytest.mark.parametrize("setting_id", ["GFSL99", None])
+def test_a_k_profile_of_another_filament_is_sent_as_a_new_k(
+    client: TestClient, scripted: Scripted, setting_id: str | None
+) -> None:
+    """P42: a K row made for GFL99 (or for no filament it names) on a slot configured as
+    GFA00 selects no profile (-1) and sets the slot's K instead."""
+    pid = lan_printer(client)
+    spool = k_spool(client, pid, setting_id)
+    response = client.post(
+        f"{slot(pid)}/configure", json={"spool_id": str(spool), "preset_id": "GFA00"}
+    )
     assert response.status_code == 200, response.text
-    assert (response.json()["cali_idx"], response.json()["k_value"]) == (7, 0.031)
+    assert (response.json()["cali_idx"], response.json()["k_value"]) == (-1, 0.031)
+    assert names(scripted) == ["ams_filament_setting", "extrusion_cali_sel", "extrusion_cali_set"]
+    assert scripted.sent("extrusion_cali_sel")[0]["cali_idx"] == -1
+    [entry] = scripted.sent("extrusion_cali_set")[0]["filaments"]
+    assert (entry["k_value"], entry["filament_id"]) == ("0.031000", "GFA00")
+
+
+def test_a_k_profile_of_the_slots_filament_is_selected(
+    client: TestClient, scripted: Scripted
+) -> None:
+    pid = lan_printer(client)
+    spool = k_spool(client, pid, "GFSA00")
+    response = client.post(
+        f"{slot(pid)}/configure", json={"spool_id": str(spool), "preset_id": "GFA00"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["cali_idx"] == 7
+    assert names(scripted) == ["ams_filament_setting", "extrusion_cali_sel"]
     assert scripted.sent("extrusion_cali_sel")[0]["cali_idx"] == 7
 
 
@@ -585,9 +633,7 @@ def test_a_slot_with_no_spool_is_not_loaded(client: TestClient, scripted: Script
 
 
 def test_a_loaded_slot_is_not_loaded_again(client: TestClient, scripted: Scripted) -> None:
-    report = idle()
-    report["ams"]["tray_now"] = "1"
-    pid = lan_printer(client, report)
+    pid = lan_printer(client, feeding(idle(), 1, tray_now=1))
     response = client.post(f"{slot(pid)}/load")
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "already_loaded"
@@ -603,13 +649,63 @@ def test_unload_of_a_slot_not_loaded_is_409(
 
 
 def test_unload_pulls_back_the_loaded_slot(client: TestClient, scripted: Scripted) -> None:
-    report = idle()
-    report["ams"]["tray_now"] = "128"
-    pid = lan_printer(client, report)
+    pid = lan_printer(client, feeding(idle(), HT_A, tray_now=128))
     response = client.post(f"{slot(pid, 128, 0)}/unload")
     assert response.status_code == 200, response.text
     [unload] = scripted.published
     assert (unload["ams_id"], unload["slot_id"], unload["target"]) == (128, 255, 255)
+
+
+def h2c_both_loaded() -> dict[str, Any]:
+    """Both extruders loaded, as ``lan-report-h2c.json`` reports them: ``snow`` 1 (AMS-A
+    slot 1, which ``tray_now`` names) and 32768 (HT-A, on the inactive extruder)."""
+    return feeding(idle(), 1, HT_A, tray_now=1)
+
+
+def test_an_ht_unit_on_the_inactive_extruder_is_unloaded(
+    client: TestClient, scripted: Scripted
+) -> None:
+    """P40: ``tray_now`` names only the active extruder's slot."""
+    pid = lan_printer(client, h2c_both_loaded())
+    response = client.post(f"{slot(pid, 128, 0)}/unload")
+    assert response.status_code == 200, response.text
+    [unload] = scripted.published
+    assert (unload["command"], unload["ams_id"], unload["target"]) == (
+        "ams_change_filament",
+        128,
+        255,
+    )
+
+
+def test_an_ht_unit_on_the_inactive_extruder_is_already_loaded(
+    client: TestClient, scripted: Scripted
+) -> None:
+    pid = lan_printer(client, h2c_both_loaded())
+    response = client.post(f"{slot(pid, 128, 0)}/load")
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "already_loaded"
+    assert scripted.published == []
+
+
+@pytest.mark.parametrize(("right", "left"), [(HT_A, EMPTY), (EMPTY, HT_A)])
+def test_refresh_refuses_a_slot_loaded_on_either_extruder(
+    client: TestClient, scripted: Scripted, right: int, left: int
+) -> None:
+    """``tray_now`` says nothing is loaded; an extruder's ``snow`` says HT-A is."""
+    pid = lan_printer(client, feeding(idle(), right, left))
+    response = client.post(f"{slot(pid, 1, 2)}/refresh")
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "filament_loaded"
+    assert scripted.published == []
+
+
+def test_an_external_holder_keeps_tray_now(client: TestClient, scripted: Scripted) -> None:
+    """No cited source decodes an external holder's ``snow`` (the idle H2C reports 0xFEFF
+    with nothing loaded), so Ext-L is loaded only when ``tray_now`` names it."""
+    pid = lan_printer(client, feeding(idle(), EMPTY, 0xFEFF, tray_now=254))
+    view = client.get(f"/api/v1/printers/{pid}/ams").json()
+    external = next(u for u in view["units"] if u["ams_id"] == 255)
+    assert [s["loaded"] for s in external["slots"]] == [True, False]
 
 
 def test_a_slot_the_report_does_not_show_is_refused(client: TestClient, scripted: Scripted) -> None:
@@ -717,6 +813,50 @@ def test_a_resent_key_answers_after_the_printer_drops_off(
     other = client.post(f"{slot(pid)}/configure", json=BODY, headers={"Idempotency-Key": "k2"})
     assert other.status_code == 409, other.text
     assert other.json()["code"] == "printer_offline"
+
+
+def test_a_resent_load_answers_the_first_and_sends_nothing(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    """P41: a key that started the command skips every check, the slot now being loaded
+    included, and the printer gets nothing again."""
+    first = client.post(f"{slot(pid)}/load", headers={"Idempotency-Key": "load-k"})
+    assert first.status_code == 200, first.text
+    printers_of(client).reports.put(pid, feeding(idle(), 1, tray_now=1), datetime.now(UTC))
+    again = client.post(f"{slot(pid)}/load", headers={"Idempotency-Key": "load-k"})
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert len(scripted.published) == 1
+
+
+def test_a_resent_configure_answers_the_first_bodys_values(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    """P41: the answer is the started run's, never the resend's body."""
+    first = client.post(f"{slot(pid)}/configure", json=BODY, headers={"Idempotency-Key": "cfg-k"})
+    assert first.status_code == 200, first.text
+    other = {**BODY, "colour": "#FF0000", "material": "PETG", "k_value": 0.02}
+    again = client.post(f"{slot(pid)}/configure", json=other, headers={"Idempotency-Key": "cfg-k"})
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert (again.json()["colour"], again.json()["material"]) == ("#FFFFFFFF", "PLA")
+    assert names(scripted) == ["ams_filament_setting", "extrusion_cali_sel"]
+
+
+def test_a_resent_reset_clears_no_newer_preset(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    """P43: the first reset clears the saved preset; one saved after it survives a resend."""
+    data = printers_of(client).command_data
+    first = client.post(f"{slot(pid)}/reset", headers={"Idempotency-Key": "reset-k"})
+    assert first.status_code == 200, first.text
+    newer = SlotPresetBody(preset_id="GFSG00", preset_name="PETG", tray_info_idx="GFG00")
+    data.set_slot_preset(UUID(pid), 0, 1, newer)
+    again = client.post(f"{slot(pid)}/reset", headers={"Idempotency-Key": "reset-k"})
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert data.slot_presets(UUID(pid))[0, 1].preset_id == "GFSG00"
+    assert len(scripted.published) == 1
 
 
 def test_a_slot_preset_is_saved_and_cleared(
@@ -861,9 +1001,7 @@ def test_a_printer_linked_both_ways_never_calls_bambuddy(
 ) -> None:
     """Bambuddy has a URL and the row its id, and still no route calls it."""
     configure(client)
-    report = idle()
-    report["ams"]["tray_now"] = "5"
-    pid = lan_printer(client, report)
+    pid = lan_printer(client, feeding(idle(), 1 << 8 | 1, tray_now=5))
     printers_of(client).store.link_bambuddy(pid, 3)
     preset = {"preset_id": "GFSA00", "preset_name": "Basic"}
     with forbid_bambuddy(spans, BASE):

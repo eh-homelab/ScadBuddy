@@ -158,6 +158,22 @@ def test_an_unload_of_another_slot_is_not_loaded() -> None:
     s.guard(status(tray_now=0), "unload", 0, 0)
 
 
+def test_snow_overrules_tray_now_for_an_ams_slot() -> None:
+    """P40: with each extruder's slot reported, ``tray_now`` (the active one's) is not read
+    for an AMS or AMS-HT slot."""
+    both = status(tray_now=0, extruder_loaded=[(0, 0), (128, 0)])
+    assert s.is_loaded(both, 128, 0) and s.is_loaded(both, 0, 0)
+    stale = status(tray_now=0, extruder_loaded=[None, None])
+    assert not s.is_loaded(stale, 0, 0)
+    assert s.any_loaded(stale)
+    assert s.is_loaded(status(tray_now=0), 0, 0)
+
+
+def test_an_external_holder_reads_tray_now_only() -> None:
+    assert s.is_loaded(status(tray_now=254, extruder_loaded=[None, None]), 255, 0)
+    assert not s.is_loaded(status(tray_now=255, extruder_loaded=[None, None]), 255, 1)
+
+
 @pytest.mark.parametrize(
     ("report", "temps"),
     [
