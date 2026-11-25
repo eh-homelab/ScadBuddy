@@ -163,3 +163,21 @@ async def test_a_cancel_that_never_lands_fails_the_recorder_by_name(
     monkeypatch.setattr(support, "CANCEL_RECORDED_WITHIN", 0.2)
     with pytest.raises(TimeoutError, match="no cancel request"):
         await cancel_recorded(_NeverCancelled())  # type: ignore[arg-type]
+
+
+async def test_a_failed_cancel_wait_runs_the_recorders_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7554: when the wait fails, the recorder's gate is opened and its pending start
+    is cancelled before the error propagates, so asyncio has no pending task to warn
+    about over the error."""
+    import tests.support.temporal as support
+
+    monkeypatch.setattr(support, "CANCEL_RECORDED_WITHIN", 0.2)
+    gate = asyncio.Event()
+    pending = asyncio.create_task(gate.wait())
+    with pytest.raises(TimeoutError, match="no cancel request"):
+        await cancel_recorded(_NeverCancelled(), gate=gate, pending=pending)  # type: ignore[arg-type]
+    assert gate.is_set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending

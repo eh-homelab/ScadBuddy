@@ -283,7 +283,7 @@ async def _cancelled(client: Client, name: str) -> None:
         while step not in fake.calls:
             await asyncio.sleep(0.05)
         handle = client.get_workflow_handle(f"print-{arg.key}")
-        await cancel_recorded(handle)
+        await cancel_recorded(handle, gate=gate, pending=accepting)
         if step == "check":
             await accepting  # the check is cancelled, never completed
             gate.set()
