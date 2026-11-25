@@ -2287,7 +2287,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`
   in `meta.json`, `output_index.source`): `back_office`, or `storefront` for the outputs
-  the storefront slice run saves (`output_for_reference`'s `source`, which only
+  the storefront slice run saves (`outputs_for_reference`'s `source`, which only
   `slice_price.py` sets; an order's render and a quote keep the default). `GET /outputs`
   and `GET /models/{slug}/outputs` leave the storefront's out unless `include_storefront`
   is true, and so do the agent's `list_recent_outputs` and `list_outputs`; a read by id
@@ -2458,7 +2458,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
   printer's machine rate, `MachineRates.for_quote`), never a second formula
   (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
-  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  is rendered to an output by `rendering.py` `outputs_for_reference` (saved as
   `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
   template gives the support and process settings. A variant names one subject
   (`SliceVariant.reference` or `.library_file`, #6710 §7.1): a file listing's file is a
@@ -2477,8 +2477,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   ones on the render worker, and `listing_reference` writes the snapshot's around the
   customer's `params`. A price, a preview and a cart line are of the listing's design while
   `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
-  render of several outputs (`renders.py` `one_output`) has no firm price on any path until
-  #5701's PR 5, and a pipeline's cart line needs its row's `every_output`. A file listing has
+  render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,
+  one slot across the outputs), `kit_digest` (every output's 3MF), each output saved under
+  `storefront_output_id(render_key, index)` and sliced whole with its own slots' presets, and
+  one `price_plates` over every plate (`slice_and_price`'s `place`). No visitor gets that
+  price until #5701's PR 5, whose order makes every output: `renders.py` `one_output` refuses
+  it on every path. A pipeline's cart line needs its row's `every_output`. A file listing has
   no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by

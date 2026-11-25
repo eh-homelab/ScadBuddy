@@ -47,7 +47,7 @@ the [template-pipelines spec](../superpowers/specs/2026-09-27-template-pipelines
   ([trust-boundaries.md](../security/trust-boundaries.md#where-untrusted-code-runs));
   moving it out is [#5296](https://github.com/eh-homelab/ScadBuddy/issues/5296).
 - A storefront listing of a pipeline template needs its declared inputs, and its render of
-  several outputs has no slice price yet ([storefront](storefront-and-payments.md#limits-and-known-issues);
+  several outputs has no slice price for a visitor yet ([storefront](storefront-and-payments.md#limits-and-known-issues);
   [#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).
 - Declared pages, the generalisation of template UIs, are
   [#4254](https://github.com/eh-homelab/ScadBuddy/issues/4254).
