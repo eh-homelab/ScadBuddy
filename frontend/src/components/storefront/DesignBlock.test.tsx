@@ -287,6 +287,18 @@ describe('the form drawn from the inputs’ schema (#5701 §5.2)', () => {
     expect(block()).toHaveTextContent('Storeys 3')
   })
 
+  it('keeps an input it does not draw (#7660 review)', async () => {
+    const seen: ListingDraft[] = []
+    const attic = { pitch: 30 }
+    const { user } = renderPage(<Harness start={{ inputs: { house: { ...HOUSE, attic } }, inputs_v: 1 }} schema={FORM} seen={seen} />)
+    await user.click(screen.getByRole('button', { name: 'Set up the design' }))
+    const storeys = within(await screen.findByRole('group', { name: 'House' })).getByLabelText(/^Storeys/)
+    await user.clear(storeys)
+    await user.type(storeys, '3')
+    await user.click(screen.getByRole('button', { name: 'Use this design' }))
+    expect(seen.at(-1)?.inputs).toEqual({ house: { ...HOUSE, storeys: 3, attic } })
+  })
+
   it('takes over, with the work so far, when the template’s interface does not mount', async () => {
     setUiModuleLoader(async () => ({
       mount: () => {

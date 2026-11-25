@@ -470,7 +470,7 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     const { user } = renderStorefront()
     await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
     await user.click(screen.getByRole('button', { name: 'Publish' }))
-    expect(await screen.findByText('Not published: “gone” starts at a value these choices do not allow. Set “Starts at” to one they allow.')).toBeInTheDocument()
+    expect(await screen.findByText('Not published: the listing sets “gone”, which this editor does not show, so it cannot be changed here. Choose another version of the design.')).toBeInTheDocument()
     expect(screen.queryByRole('group', { name: 'Design' })).toBeNull()
   })
 
