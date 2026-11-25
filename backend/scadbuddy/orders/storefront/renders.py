@@ -173,9 +173,9 @@ _ready: OrderedDict[str, None] = OrderedDict()
 READY_KEPT: Final = 4096
 #: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
 #: its files are taken as lost for the status and for the preview read (`preview_ready`):
-#: the status names the preview, whose read then goes on and says so at once (404), rather
-#: than the page polling a render that can never show. The
-#: estimate never takes lost files as there (`files_ready`). A count older than
+#: the status names the preview, whose read then goes on and says so within `READY_WAIT`
+#: (404), rather than the page polling a render that can never show. The estimate never
+#: takes lost files as there (`files_ready`). A count older than
 #: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
 _failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
 FETCH_TRIES: Final = 3
