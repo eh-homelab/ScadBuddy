@@ -37,7 +37,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from psycopg import errors as pg_errors
-from pydantic import AwareDatetime, BaseModel, ValidationError
+from pydantic import AwareDatetime, BaseModel, JsonValue, TypeAdapter, ValidationError
 from temporalio.service import RPCError
 
 from scadbuddy.api.components import component_dep
@@ -62,6 +62,8 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
+from scadbuddy.entities.problems import bad_property_value, missing_required
+from scadbuddy.entities.properties import BadPropertyValue, MissingRequiredProperties
 from scadbuddy.filament import (
     capture,
     label_pdf,
@@ -192,6 +194,7 @@ from scadbuddy.filament.types import (
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.kinds import waiting_on_bambuddy
+from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.store import FilamentExistsError
 from scadbuddy.printers.component import PrintersDep
 from scadbuddy.profile_fetch.wire import (
@@ -305,6 +308,29 @@ def _body(model: type[BaseModel], body: dict[str, Any]) -> BaseModel:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, problems) from None
 
 
+_PROPERTIES: TypeAdapter[dict[str, JsonValue] | None] = TypeAdapter(dict[str, JsonValue] | None)
+
+_CATALOG_REFUSED = (
+    CatalogExistsError,
+    CatalogRefError,
+    CatalogKeyEmptyError,
+    TypeTempError,
+    MissingRequiredProperties,
+    BadPropertyValue,
+)
+
+
+def _properties(body: dict[str, Any]) -> dict[str, JsonValue] | None:
+    """A catalog body's ``properties`` (#7703), taken out before the kind's model reads
+    the rest."""
+    try:
+        return _PROPERTIES.validate_python(body.pop("properties", None))
+    except ValidationError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"properties: {exc.errors()[0]['msg']}"
+        ) from None
+
+
 def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
     if row is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no {kind} row {row_id}")
@@ -312,6 +338,10 @@ def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
 
 
 def _refused(exc: ValueError) -> ApiError:
+    if isinstance(exc, MissingRequiredProperties):
+        return missing_required(exc)
+    if isinstance(exc, BadPropertyValue):
+        return bad_property_value(exc.key, exc.reason)
     if isinstance(exc, CatalogKeyClashError):
         holder: dict[str, Any] = {
             f"{exc.noun}_id": str(exc.holder_id),
@@ -377,17 +407,30 @@ async def list_catalog(
         "name and alias, archived rows too, a subtype's within its material; the 409 then "
         "names the row that holds it (`<kind>_id`, `<kind>_name`, e.g. `effect_id`); a name "
         "there with no letter or digit is a 422. `+` counts as `PLUS` (`PLA+` is `PLA Plus`, "
-        "not `PLA`)."
+        "not `PLA`). "
+        "`properties` (a key-to-value map) are written with the row in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the row's "
+        "required properties are not all filled after it; nothing is written (#7703)."
     ),
 )
 async def create_catalog_row(
     filament: FilamentDep, kind: str, body: Annotated[dict[str, Any], Body()]
 ) -> CatalogRow:
     spec = _spec(kind)
+    properties = _properties(body)
     parsed = _body(spec.create, body)
     try:
-        made = await asyncio.to_thread(filament.catalog.create, kind, parsed)
-    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
+        made = await asyncio.to_thread(
+            partial(
+                filament.catalog.create,
+                kind,
+                parsed,
+                properties=properties,
+                by=current_actor(),
+                checked=True,
+            )
+        )
+    except _CATALOG_REFUSED as exc:
         raise _refused(exc) from None
     return _row(made, kind, UUID(int=0))
 
@@ -402,17 +445,32 @@ async def create_catalog_row(
         "category or effect keeps its names and aliases, any other row frees its name. 404 "
         "for an unknown kind or row, 409 when another row has the name (by key, as on "
         "create, naming the holder), 422 for a bad field, a name with no letter or digit "
-        "(those catalogs), or a minimum temperature above its maximum."
+        "(those catalogs), or a minimum temperature above its maximum. "
+        "`properties` (a key-to-value map) are written with the row in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the row's "
+        "required properties are not all filled after the save (a patch that sends only "
+        "`sort_order` or `archived` is not checked); nothing is written (#7703)."
     ),
 )
 async def patch_catalog_row(
     filament: FilamentDep, kind: str, row_id: UUID, body: Annotated[dict[str, Any], Body()]
 ) -> CatalogRow:
     spec = _spec(kind)
+    properties = _properties(body)
     parsed = _body(spec.patch, body)
     try:
-        changed = await asyncio.to_thread(filament.catalog.update, kind, row_id, parsed)
-    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
+        changed = await asyncio.to_thread(
+            partial(
+                filament.catalog.update,
+                kind,
+                row_id,
+                parsed,
+                properties=properties,
+                by=current_actor(),
+                checked=True,
+            )
+        )
+    except _CATALOG_REFUSED as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
 
@@ -541,6 +599,8 @@ _TYPE_REFUSED = (
     TypeTempError,
     TypeRowsDuplicateError,
     PresetUnknownError,
+    MissingRequiredProperties,
+    BadPropertyValue,
 )
 
 
@@ -573,6 +633,9 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
     status_code=status.HTTP_201_CREATED,
     summary="Add a spool type",
     description=(
+        "`properties` (a key-to-value map) are written with the type in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the type's "
+        "required properties are not all filled after it; nothing is written (#7703). "
         "A type has a `code`, a material, an `rgba` (`#RRGGBB` or `#RRGGBBAA`, stored with "
         "its alpha), a `label_weight_g` and optional print values a spool inherits. With a "
         "`cost_per_kg` it also writes the price book row of its material, subtype, brand, "
@@ -586,7 +649,9 @@ async def list_types(filament: FilamentDep, include_archived: bool = False) -> l
 )
 async def create_type(filament: FilamentDep, body: m.SpoolTypeCreate) -> m.SpoolType:
     try:
-        return await asyncio.to_thread(filament.types.create, body)
+        return await asyncio.to_thread(
+            partial(filament.types.create, body, by=current_actor(), checked=True)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
 
@@ -702,6 +767,10 @@ async def get_type(filament: FilamentDep, type_id: UUID) -> m.SpoolTypeDetail:
     response_model=m.SpoolType,
     summary="Change a spool type",
     description=(
+        "`properties` (a key-to-value map) are written with the type in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the type's "
+        "required properties are not all filled after the save (a patch that sends only "
+        "`archived` is not checked); nothing is written (#7703). "
         "Only the fields sent change; `null` clears a nullable one. `archived: true` takes "
         "the type off the lists and frees its code, `false` puts it back. A priced type "
         "keeps its price book row in step. 404 for no such type, 409 when another "
@@ -712,7 +781,42 @@ async def patch_type(
     filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.SpoolTypePatch
 ) -> m.SpoolType:
     try:
-        changed = await asyncio.to_thread(filament.types.update, type_id, body, actor=actor(caller))
+        changed = await asyncio.to_thread(
+            partial(
+                filament.types.update,
+                type_id,
+                body,
+                actor=actor(caller),
+                by=current_actor(),
+                checked=True,
+            )
+        )
+    except _TYPE_REFUSED as exc:
+        raise _refused(exc) from None
+    if changed is None:
+        raise _no_type(type_id)
+    return changed
+
+
+@router.put(
+    "/types/{type_id}/cost-per-kg",
+    response_model=m.SpoolType,
+    summary="Set a spool type's cost",
+    description=(
+        "Only `cost_per_kg` (`null` clears it), written as `PATCH` writes it, price book "
+        "row included. Not checked for required properties (#7703): a one-field action, so "
+        "a type its required keys leave incomplete can still take a price. 404 for no such "
+        "type, 422 for a bad cost."
+    ),
+)
+async def put_type_cost(
+    filament: FilamentDep, caller: CallerDep, type_id: UUID, body: m.TypeCost
+) -> m.SpoolType:
+    patch = m.SpoolTypePatch(cost_per_kg=body.cost_per_kg)
+    try:
+        changed = await asyncio.to_thread(
+            filament.types.update, type_id, patch, actor=actor(caller)
+        )
     except _TYPE_REFUSED as exc:
         raise _refused(exc) from None
     if changed is None:
@@ -1072,6 +1176,8 @@ _SPOOL_REFUSED = (
     TagKeysClashError,
     TypeRowsDuplicateError,
     PresetUnknownError,
+    MissingRequiredProperties,
+    BadPropertyValue,
 )
 
 
@@ -1117,6 +1223,9 @@ async def list_spools(
     status_code=status.HTTP_201_CREATED,
     summary="Add a spool",
     description=(
+        "`properties` (a key-to-value map) are written with the spool in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the spool's "
+        "required properties are not all filled after it; nothing is written (#7703). "
         "A spool names a `type_id`, or, while it needs a type, its own `material_id`. Every "
         "other value overrides the type's. `grams_left` is the first reading on its ledger. "
         "422 for a bad field, a row it points at that does not exist, or an effective "
@@ -1125,7 +1234,15 @@ async def list_spools(
 )
 async def create_spool(filament: FilamentDep, caller: CallerDep, body: m.SpoolCreate) -> m.Spool:
     try:
-        return await asyncio.to_thread(filament.spools.create, body, actor=actor(caller))
+        return await asyncio.to_thread(
+            partial(
+                filament.spools.create,
+                body,
+                actor=actor(caller),
+                by=current_actor(),
+                checked=True,
+            )
+        )
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None
 
@@ -1139,6 +1256,9 @@ BULK_ROUTE = "POST /filament/spools/bulk"
     status_code=status.HTTP_201_CREATED,
     summary="Add several identical spools",
     description=(
+        "`properties` (a key-to-value map) are written with the spool in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the spool's "
+        "required properties are not all filled for each spool; nothing is written (#7703). "
         "`quantity` (1 to 100) spools of one `spool` body, in one transaction (#7150): each "
         "gets its own number and its own `created` event (`grams_left` is each one's first "
         "reading), its move to `location_id`, and its own `presets` and `k_values`. "
@@ -1160,7 +1280,7 @@ async def bulk_create_spools(
     body: m.SpoolBulkCreate,
     idempotency_key: MaybeIdempotencyKey = None,
 ) -> JSONResponse:
-    who = actor(caller)
+    who, by = actor(caller), current_actor()
     # A person's key, under their own name, as the CSV import keys it.
     key = f"{who}\x1f{required_key(idempotency_key)}"
     asked = body.model_dump(mode="json")
@@ -1172,7 +1292,7 @@ async def bulk_create_spools(
             def run() -> Replay:
                 try:
                     with conn.transaction():
-                        ids = filament.spools.bulk_on(conn, body, actor=who)
+                        ids = filament.spools.bulk_on(conn, body, actor=who, by=by, checked=True)
                 except pg_errors.ForeignKeyViolation as error:
                     # As `PUT …/presets` maps it: an unknown `sb-<id>` preset is its own 422.
                     if names_preset(error):
@@ -1372,6 +1492,10 @@ async def get_spool(filament: FilamentDep, spool_id: UUID) -> m.SpoolDetail:
     response_model=m.Spool,
     summary="Change a spool",
     description=(
+        "`properties` (a key-to-value map) are written with the spool in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the spool's "
+        "required properties are not all filled after the save (a patch that sends only "
+        "`archived` is not checked); nothing is written (#7703). "
         "Only the fields sent change; `null` on an override clears it, and the spool takes "
         "its type's value again. One `edited` ledger event records each change as `[before, "
         "after]`. `archived` takes the spool off the lists or puts it back. 404 for no such "
@@ -1384,7 +1508,14 @@ async def patch_spool(
 ) -> m.Spool:
     try:
         changed = await asyncio.to_thread(
-            filament.spools.update, spool_id, body, actor=actor(caller)
+            partial(
+                filament.spools.update,
+                spool_id,
+                body,
+                actor=actor(caller),
+                by=current_actor(),
+                checked=True,
+            )
         )
     except _SPOOL_REFUSED as exc:
         raise _refused(exc) from None

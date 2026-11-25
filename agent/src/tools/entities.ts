@@ -492,6 +492,7 @@ export const entityTools = [
     description:
       "Replace a kind's property schema whole (read it with entity_property_schema_get first and send it back changed). " +
       'A JSON Schema (Draft 2020-12) object of plain keywords only: at the top ' + SCHEMA_TOP_KEYWORDS.map(code).join(', ') +
+      '; and, on a spool, a spool type or a filament catalog kind only, `required` (distinct keys of `properties`; their own create and save then refuse a row without them)' +
       '; per key a `type` (a scalar or `array`, or a list of them with `"null"`) with ' + SCHEMA_KEY_KEYWORDS.map(code).join(', ') +
       '; `format` is never `regex`; `items` (string-typed only, with the same keywords but `items`). An `enum` or `const` must fit its key, and no bound may cross its pair or a cap. ' +
       'Any other keyword is 422 `bad_property_schema`, naming it. An inventory item kind\'s schema is its ' +

@@ -17,6 +17,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
   })),
   {
+    operation: 'PUT /api/v1/filament/types/{type_id}/cost-per-kg',
+    reason:
+      "The UI's one-field cost action (#7703, spec 6.3b): it sets only the cost and skips the required-properties check, so linking a type to the price book still works on an incomplete type. The assistant sets a type's cost with filament_type_upsert, whose required-property handling is #7703's agent-tools step.",
+  },
+  {
     operation: 'GET /api/v1/print-imports/library-files/{file_id}',
     reason:
       "The Import print dialog's check, on focus, that its chosen library file still stands (#7335). The assistant imports with import_print, which gets the same refusals and the replacement from the import itself.",
