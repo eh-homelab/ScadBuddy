@@ -448,7 +448,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
               </tr>
             </thead>
             <tbody>
-              {(searched ? rows.slice(0, SHOWN_MAX) : rows.filter((row) => !onlyIncomplete || isIncomplete(row))).flatMap((row, at) => {
+              {(searched ? rows.filter((row) => !onlyIncomplete || isIncomplete(row)).slice(0, SHOWN_MAX) : rows.filter((row) => !onlyIncomplete || isIncomplete(row))).flatMap((row, at) => {
                 const gone = row.archived_at != null
                 const from = provenance(row)
                 return [

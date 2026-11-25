@@ -271,4 +271,19 @@ describe('the Catalog tab', () => {
     await waitFor(() => expect(within(screen.getByRole('table', { name: 'Brands' })).queryByText('Polymaker')).toBeNull())
     expect(within(screen.getByRole('table', { name: 'Brands' })).getByText('Sunlu')).toBeInTheDocument()
   })
+
+  // #7809 review: the Colours list is searched, and its filter must still apply.
+  it('filters the Colours list to incomplete rows too (#7703)', async () => {
+    entityMock.schemas.colour = { type: 'object', properties: { site: { type: 'string' } }, required: ['site'] }
+    const colours = await listCatalog('colours')
+    const lacking = colours[0]!
+    for (const row of colours.filter((one) => one.id !== lacking.id)) seedEntityProperties(`colour:${row.id}`, { site: 'x' })
+    const other = colours.find((one) => one.id !== lacking.id)!
+    const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=colours' })
+    const table = await list('Colours')
+    await within(table).findByText(other.name)
+    await user.click(screen.getByRole('checkbox', { name: 'Only incomplete' }))
+    await waitFor(() => expect(within(screen.getByRole('table', { name: 'Colours' })).queryByText(other.name)).toBeNull())
+    expect(within(screen.getByRole('table', { name: 'Colours' })).getByText(lacking.name)).toBeInTheDocument()
+  })
 })
