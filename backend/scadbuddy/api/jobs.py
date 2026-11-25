@@ -89,7 +89,7 @@ from scadbuddy.render.thumbnail import (
     render_colour_breakdown,
     render_view,
 )
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.workflows.commands import (
     FAST_ACCEPT,
@@ -759,7 +759,7 @@ async def get_job_preview(
         key = (job.result.model_3mf, plate)
         data = _PLATE_GLBS.get(key)
         if data is None:
-            model = paths.root / job.result.model_3mf
+            model = result_file(state.store.blobs, paths.root, job.result.model_3mf)
             try:
                 payload = await asyncio.to_thread(model.read_bytes)
             except FileNotFoundError:
@@ -780,7 +780,7 @@ async def get_job_preview(
         return Response(
             data, media_type=GLB_MEDIA_TYPE, headers={"Cache-Control": PLATE_GLB_CACHE_CONTROL}
         )
-    preview = paths.root / job.result.preview_glb
+    preview = result_file(state.store.blobs, paths.root, job.result.preview_glb)
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
     return FileResponse(preview, media_type=GLB_MEDIA_TYPE)
@@ -881,7 +881,7 @@ async def get_job_view(
         )
     await materialize_result(state.store.blobs, job.result)
     return await preview_view(
-        paths.root / job.result.preview_glb,
+        result_file(state.store.blobs, paths.root, job.result.preview_glb),
         view,
         size,
         config=config,
@@ -999,7 +999,7 @@ async def get_job_colours(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
     await materialize_result(state.store.blobs, job.result)
-    glb = paths.root / job.result.preview_glb
+    glb = result_file(state.store.blobs, paths.root, job.result.preview_glb)
     if not glb.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
     # Off the loop and bounded, as `preview_view`: one raster per colour. The wait

@@ -139,9 +139,10 @@ describe('registry projections', () => {
       expect(tool.annotations.readOnlyHint, tool.name).toBe(tool.risk === 'read')
       expect(tool.annotations.destructiveHint, tool.name).toBe(tool.risk === 'outward')
       // Every outward tool is gated, except the approval path itself: the
-      // gate's own confirm, and deciding another agent's approval (#300).
-      const approvalPath = ['confirm_action', 'sessions_approve', 'sessions_deny'].includes(tool.name)
-      expect(tool.gated, tool.name).toBe(tool.risk === 'outward' && !approvalPath)
+      // gate's own confirm, and deciding another agent's approval (#300); and
+      // nfc_write, which a person approves by arming its job and tapping a tag (#7273).
+      const approved = ['confirm_action', 'sessions_approve', 'sessions_deny', 'nfc_write'].includes(tool.name)
+      expect(tool.gated, tool.name).toBe(tool.risk === 'outward' && !approved)
     }
   })
 

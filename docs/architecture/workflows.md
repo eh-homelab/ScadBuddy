@@ -248,14 +248,18 @@ The order operation kinds are `order_item_quote`, `order_item_render`,
 An attempt that names a Bambuddy archive imports the archive's latest finish photo and its
 timelapse through `AttemptMedia` (`scadbuddy/workflows/attempt_media.py`, `library`, one run
 per attempt, id `attempt-media:<fulfilment id>`, #7233). A hand attempt, a heard
-`print.outcome` and a read of the attempt's archives start it; its one activity,
+`print.outcome`, a read of the attempt's archives and the housekeeping sweep
+`housekeeping_import_attempt_media` (#7234, one step, no retries) start it; its one activity,
 `attempt_media_step`, runs `orders/archives.py` `mirror_attempt`. A start with retries
 (the hand attempt's and the outcome's) is a signal-with-start of `with_retries`, so a
 one-step run that it joins steps again at +2 and +15 min. A medium refused as too large is
 kept in `order_attempt_media_refusals`, and no step, read or sweep downloads it again while
 the upload limit is no higher. The housekeeping sweep `housekeeping_import_attempt_media`
 (on the prune Schedule, #7234) starts one step for each attempt of the last 14 days that
-still lacks a medium and was not checked in the last hour. The copy route
+still lacks a medium and was not checked in the last hour, at most `SWEEP_BATCH` (40) a
+pass, least lately checked first (#7453). It leaves out a medium that the last step found an
+archive past `FRESH` (an hour after it completed) not offering, which the step records in
+`order_attempt_media_not_offered` (#7453). The copy route
 (`order_attempt_copy`) stays, for a chosen finish photo and as the fallback.
 
 ## Flows
@@ -267,7 +271,15 @@ on `projects`, id `flow-<run_id>` (`scadbuddy/flows/launch.py:54-94`). Its host 
 output, queue a print, arrange. `tool(...)` and `agent_session(...)` go to the agent's
 `agent-tools` queue. Triggers start `FlowTriggerFire` (`scadbuddy/workflows/flow_triggers.py:55`)
 from a Temporal Schedule or a bus event (`scadbuddy/flow_triggers/events.py:166-196`).
-See [features/flows.md](../features/flows.md).
+
+A script's question to a person is a harness callback tool. `wait_for_human` waits on
+`human_answer_open` and `prompt` on `task_answer` (`flow_tools.py`), both with no default
+limit. A prompt also has a row in `tasks`, which the activities `flow_task_open`,
+`flow_task_answered` and `flow_task_close` write through the API
+(`scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). The answers are the
+operation kinds `flow_answer` and `task_answer` on `projects`
+(`scadbuddy/flows/operations.py` `flow_kinds`).
+See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping
 

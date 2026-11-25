@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import uuid
 import zipfile
-from collections.abc import Container, Iterator
+from collections.abc import Callable, Container, Coroutine, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -138,7 +139,7 @@ def settings(
     fake_openscad: str,
 ) -> Iterator[Settings]:
     """The app renders on the session's Temporal with its own in-process worker, on a
-    task queue of its own: each test has its own data directory and database schema,
+    task queue of its own: each test has its own data directory and database,
     so a worker is per app, not per session. The fake openscad exports a red 10x10x5
     box, and fails a render with ``width: 999`` (FAIL_WIDTH).
 
@@ -249,6 +250,40 @@ def app_payment_sweep_off(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(main_module, "_retry_payment_closes_logged", off)
     monkeypatch.setattr(main_module, "_settle_payment_captures_logged", off)
+
+
+@pytest.fixture(autouse=True)
+def app_run_holds_sweep_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[AppState], Coroutine[Any, Any, None]]:
+    """#7535: the app's own run-holds sweep does nothing. The prune Schedule's boot run
+    (as in `app_payment_sweep_off`) runs it near its end, still open while the test runs; on a
+    loaded runner it lands after the test inserted its runs: it records a LAN run whose
+    sequence is gone as stopped (`end_gone_sequences`) and drops the holds of the runs no
+    longer in use (`reap_run_holds`), before the test's own read. The real sweep is
+    returned for a test that runs it itself."""
+    real = main_module._reap_run_holds_logged
+
+    async def off(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_reap_run_holds_logged", off)
+    return real
+
+
+@pytest.fixture(autouse=True)
+def app_output_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#7255: the app's start copy of the outputs' files to rows does nothing, unless the
+    test is marked `output_copy`. A finished copy ends the files' fallback for a missing
+    row, at a time the test does not choose, and many tests make an output with no row
+    to stand for one saved before the rows (`OutputStore._row_of`)."""
+    if request.node.get_closest_marker("output_copy") is not None:
+        return
+
+    async def off(state: AppState, *, stop: threading.Event) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_copy_outputs_logged", off)
 
 
 @pytest.fixture(autouse=True)

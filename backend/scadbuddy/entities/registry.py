@@ -47,8 +47,10 @@ KINDS: dict[str, EntityKind] = {
         _kind("invoice", "filament_invoices", "uuid"),
         _kind("location", "filament_locations", "uuid"),
         _kind("printer", "printers", "uuid"),
-        _kind("part", "parts"),
         _kind("customer", "customers"),
+        _kind("item", "items", "uuid"),
+        _kind("lot", "stock_lots", "uuid"),
+        _kind("unit", "stock_units", "uuid"),
     )
 }
 
@@ -85,7 +87,7 @@ def _ref_as_id(kind: EntityKind) -> str:
 
 def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
     """Make `kind:kept` own what `kind:gone` owned: its files, links and properties (a key
-    both have keeps `kept`'s value). For a merge that
+    both have keeps `kept`'s value), and the stock moves that name it. For a merge that
     deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
     transaction; without it the sweep would take them as an orphan's."""
     # Locked in id order, as `apply` locks an entity, so a property write on `gone` cannot
@@ -110,6 +112,10 @@ def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
     )
     conn.execute(
         "UPDATE entity_links SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
+    )
+    # A stock move's foreign key would refuse the delete below (R-P2-4, #7067).
+    conn.execute(
+        "UPDATE stock_moves SET entity_id = %s WHERE entity_id = %s", (ids[kept], ids[gone])
     )
     conn.execute(
         "INSERT INTO entity_properties (entity_id, key, value, source, updated_at, updated_by)"
@@ -164,8 +170,9 @@ class EntityStore:
     def orphans(
         self, conn: Conn, limit: int, *, guarded: Collection[str] = ()
     ) -> list[tuple[UUID, EntityRef]]:
-        """Up to `limit` entities whose owner's row is gone. One of a kind in `guarded` is
-        taken only once no `entity_attachments` row names it."""
+        """Up to `limit` entities whose owner's row is gone and that no stock move names
+        (a move keeps its entity, R-P2-4, #7067). One of a kind in `guarded` is taken only
+        once no `entity_attachments` row names it."""
         found: list[tuple[UUID, EntityRef]] = []
         for kind in KINDS.values():
             if len(found) >= limit:
@@ -179,6 +186,7 @@ class EntityStore:
                 "SELECT e.id, e.ref FROM entities e WHERE e.kind = %s AND NOT EXISTS"
                 f" (SELECT 1 FROM {kind.table} t"
                 f"  WHERE t.{kind.id_column} = {_ref_as_id(kind)}){guard}"
+                " AND NOT EXISTS (SELECT 1 FROM stock_moves m WHERE m.entity_id = e.id)"
                 " ORDER BY e.created_at, e.id LIMIT %s".encode(),
                 (kind.name, limit - len(found)),
             ).fetchall()

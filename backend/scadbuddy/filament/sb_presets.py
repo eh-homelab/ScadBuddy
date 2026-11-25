@@ -57,7 +57,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.rfid_push import acquire_lock
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.orders.attachments import blob_path, keep_file
+from scadbuddy.orders.attachments import keep_file, read_blob
 from scadbuddy.slicing.own_presets import OwnRow, facts, sb_id, sb_ref
 from scadbuddy.store import BlobStore
 
@@ -136,8 +136,15 @@ class FilamentPreset(BaseModel):
     #: The Bambuddy ``bb_preset_id`` belongs to (`bb_sync_nudge.instance_for`); ``None``
     #: for a row from before it was kept, taken for the configured one's.
     bb_instance: str | None
+    #: Bambuddy's ``updated_at`` of ``bb_preset_id``, as it sent it: for a ``bambuddy``
+    #: preset when its document was last taken (`refresh_bambuddy`); for a ``3dfp`` or
+    #: ``manual`` one, of the mirror's last write (`preset_mirror._mirrored`; ``None`` for a
+    #: preset sent before the mirror kept it, until its next mirror write), which the links'
+    #: reset compares to prove the same Bambuddy (#7343).
     bb_updated_at: str | None
     mirrored_sha256: str | None
+    #: Why the mirror's last send failed, or, after a successful send, a note that is no
+    #: failure: the untracked copy a lost create left in Bambuddy (`preset_mirror._mirrored`).
     mirror_error: str | None
     mirror_error_at: datetime | None
     created_at: datetime
@@ -399,11 +406,11 @@ class FilamentPresetStore:
     async def read(self, key: str) -> dict[str, Any] | None:
         """The document kept as blob ``key``, without print-host credential keys;
         ``None`` when the store lost it (logged)."""
-        path = await blob_path(self._blobs(), key)
-        if path is None:
+        data = await read_blob(self._blobs(), key)
+        if data is None:
             logger.warning("a filament preset's blob is missing", extra={"key": key})
             return None
-        doc = json.loads(await asyncio.to_thread(path.read_bytes))
+        doc = json.loads(data)
         return strip_credentials(doc) if isinstance(doc, dict) else {}
 
 

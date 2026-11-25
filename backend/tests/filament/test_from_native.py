@@ -23,6 +23,7 @@ def _index(slug: str) -> int:
     return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(f"_{slug}"))
 
 
+@pytest.mark.pg_empty
 @pg
 def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
     with psycopg.connect(pg_conninfo) as conn:
@@ -162,6 +163,7 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
         assert left == {"grams_left": 597}
 
 
+@pytest.mark.pg_empty
 @pg
 def test_a_linked_native_record_keeps_its_cache_and_link_under_its_new_id(
     pg_conninfo: str,

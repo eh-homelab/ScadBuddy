@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     Literal,
@@ -48,6 +49,7 @@ from typing import (
     Protocol,
     Self,
     Union,
+    cast,
     get_args,
     get_origin,
 )
@@ -100,6 +102,7 @@ from scadbuddy.core.settings import (
     check_value,
     env_var,
 )
+from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
@@ -107,6 +110,9 @@ from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
+
+if TYPE_CHECKING:
+    from scadbuddy.core.pg_listener import PgListener
 
 logger = logging.getLogger(__name__)
 
@@ -915,6 +921,7 @@ class SettingsPatch(BaseModel):
     filament_burn_window_days: int | None = Field(default=None, ge=1, le=365)
     filament_lead_time_days: int | None = Field(default=None, ge=0, le=365)
     filament_safety_margin_days: int | None = Field(default=None, ge=0, le=365)
+    filament_tag_format: Literal["openspool", "opentag3d"] | None = None
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -1074,6 +1081,45 @@ class SettingsSnapshot:
     sources: dict[str, SettingSource]
 
 
+@dataclass(frozen=True)
+class Setting[T]:
+    """One plain setting for :meth:`SettingsStore.get` (#7384), typed as its field: the
+    `StoredSettings` field of that name, else the env-seeded `Settings` one. Never a
+    secret, a field kept in another table, or one read from the registry."""
+
+    name: str
+
+    def __post_init__(self) -> None:
+        if self.name in SECRET_FIELDS or self.name in OWN_TABLES or self.name in DERIVED:
+            raise ValueError(f"{self.name} is not a plain setting")
+        if self.name not in StoredSettings.model_fields and self.name not in ENV_SEEDED:
+            raise ValueError(f"there is no setting {self.name}")
+
+
+#: The keys :meth:`SettingsStore.get` is called with. Each is typed as its field
+#: (`tests/test_settings_cache.py` checks it).
+OPERATION_RETENTION_SECONDS: Setting[float | None] = Setting("operation_retention_seconds")
+PRINT_RUN_RETENTION_SECONDS: Setting[float | None] = Setting("print_run_retention_seconds")
+PUBLIC_URL: Setting[str | None] = Setting("public_url")
+DEFAULT_PLATE: Setting[str | None] = Setting("default_plate")
+LAN_REQUIRE_PLATE_CLEAR: Setting[bool] = Setting("lan_require_plate_clear")
+LAN_QUEUE_WHEN_BUSY: Setting[bool] = Setting("lan_queue_when_busy")
+
+
+@dataclass(frozen=True)
+class _Plain:
+    """The settings rows less the secrets, resolved as `snapshot` resolves them: what
+    :meth:`SettingsStore.get` answers from, and what its cache keeps."""
+
+    stored: StoredSettings
+    runtime: Settings
+
+    def value(self, name: str) -> Any:
+        if name in StoredSettings.model_fields:
+            return getattr(self.stored, name)
+        return getattr(self.runtime, name)
+
+
 class SettingsStore:
     """The settings, one row each, in Postgres.
 
@@ -1095,10 +1141,15 @@ class SettingsStore:
         events: EventBus | None = None,
         connect_timeout: float = 30.0,
         pool_name: str = "scadbuddy-settings",
+        cache_ttl: float = SETTINGS_CACHE_TTL,
     ) -> None:
         """``pool_name`` names its pool. The API's is also its render projection's and
-        its presets' (`api/deps.py`, #5226)."""
+        its presets' (`api/deps.py`, #5226). ``cache_ttl`` bounds how long :meth:`get`
+        trusts its cache with no word from the listener (:meth:`follow`)."""
         self.defaults = defaults
+        #: The plain settings :meth:`get` answers from, kept only while :meth:`follow`'s
+        #: listener listens (`core/settings_cache.py`, #7384).
+        self.cache: SettingsCache[_Plain] = SettingsCache(cache_ttl)
         #: Told of every write, as ``settings.changed`` with the section it touched.
         self.events = events
         self.connect_timeout = connect_timeout
@@ -1141,6 +1192,12 @@ class SettingsStore:
     def close(self) -> None:
         self._pool.close()
 
+    def follow(self, listener: PgListener) -> None:
+        """Cache the plain settings while ``listener`` (the process's one) listens,
+        dropped at each write's notification. Before the listener runs. A process that
+        never calls it caches nothing."""
+        self.cache.follow(listener)
+
     def _source(self, name: str) -> SettingSource:
         return "env" if name in self.defaults.model_fields_set else "default"
 
@@ -1161,6 +1218,8 @@ class SettingsStore:
         read only: a pool-wide statement timeout would also cut short the saves'
         deliberate lock waits and the migration."""
         deadline = None if timeout is None else time.monotonic() + timeout
+        cached, generation = self.cache.fresh()
+        at = self.cache.clock()
         # One snapshot across the three tables, so a load never pairs a model's new
         # choices with a plate from before the same print.
         with self._pool.connection(timeout=timeout) as conn, conn.transaction():
@@ -1178,8 +1237,35 @@ class SettingsStore:
             choices = read("SELECT model_id, choices FROM model_print_choices")
             beds = read(_PLATES)
             links = read(_LINKS)
-        stored_rows = _opened(self._kek, {row["name"]: row["value"] for row in rows})
-        runtime = self.defaults.model_copy()
+        named = {row["name"]: row["value"] for row in rows}
+        if cached is None and generation is not None:
+            # Read anyway: fill the cache :meth:`get` answers from.
+            self.cache.keep(generation, at, self._plain(named))
+        return self._resolve(_opened(self._kek, named), choices, beds, links)
+
+    def _plain(self, rows: Mapping[str, Any]) -> _Plain:
+        """``rows`` less the secrets, resolved as a snapshot: no secret is read, and
+        none from the environment either."""
+        plain = {name: value for name, value in rows.items() if name not in SECRET_FIELDS}
+        resolved = self._resolve(plain, [], [], [], secrets=False)
+        return _Plain(stored=resolved.stored, runtime=resolved.runtime)
+
+    def _resolve(
+        self,
+        stored_rows: dict[str, Any],
+        choices: list[DictRow],
+        beds: list[DictRow],
+        links: list[DictRow],
+        *,
+        secrets: bool = True,
+    ) -> SettingsSnapshot:
+        """The snapshot of rows already read (the secrets opened). Without ``secrets``,
+        every secret field is ``None``, the environment's value too."""
+        runtime = (
+            self.defaults.model_copy()
+            if secrets
+            else self.defaults.model_copy(update=dict.fromkeys(SECRET_FIELDS))
+        )
         sources: dict[str, SettingSource] = {}
         for name in ENV_SEEDED:
             if name not in stored_rows:
@@ -1233,6 +1319,34 @@ class SettingsStore:
     def load(self, timeout: float | None = None) -> StoredSettings:
         return self.snapshot(timeout).stored
 
+    def get[T](self, setting: Setting[T]) -> T:
+        """One plain setting as :meth:`load` (or, for an env-seeded field `StoredSettings`
+        does not hold, ``snapshot().runtime``) gives it (#7384): the stored value, else
+        the environment's, else the default. From the cache while :meth:`follow`'s
+        listener listens, so a warm read runs no query; else from that one row. Never a
+        secret (`Setting` refuses one), so nothing is unsealed.
+
+        Not for a caller that pairs it with a secret (a URL with its key): :meth:`load`
+        reads both in one snapshot, while another replica's write reaches this cache
+        only with its notification."""
+        plain, generation = self.cache.fresh()
+        if plain is None:
+            at = self.cache.clock()
+            with self._pool.connection() as conn:
+                if generation is None:
+                    rows = conn.execute(
+                        "SELECT name, value FROM settings WHERE name = %s", [setting.name]
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT name, value FROM settings WHERE NOT (name = ANY(%s))",
+                        [sorted(SECRET_FIELDS)],
+                    ).fetchall()
+            plain = self._plain({row["name"]: row["value"] for row in rows})
+            if generation is not None:
+                self.cache.keep(generation, at, plain)
+        return cast(T, plain.value(setting.name))
+
     def read(self, names: Collection[str]) -> dict[str, Any]:
         """``names`` as ``snapshot`` gives them, from one query on just their rows (#5281:
         the order rules, read in item, quote and charge transactions). An env-seeded name
@@ -1274,16 +1388,22 @@ class SettingsStore:
     def plate_clear_required(self) -> bool:
         """``lan_require_plate_clear`` as it is now (#4939): an env-seeded field that
         `StoredSettings` does not hold."""
-        return self.snapshot().runtime.lan_require_plate_clear
+        return self.get(LAN_REQUIRE_PLATE_CLEAR)
 
     def queue_when_busy(self) -> bool:
         """``lan_queue_when_busy`` as it is now (#6871): an env-seeded field that
         `StoredSettings` does not hold."""
-        return self.snapshot().runtime.lan_queue_when_busy
+        return self.get(LAN_QUEUE_WHEN_BUSY)
+
+    def _changed(self, section: SettingsSection) -> None:
+        """After a committed write: drop this process's cache, so its next read is
+        exact, then announce it. Other replicas drop theirs at the trigger's NOTIFY."""
+        self.cache.drop()
+        emit(self.events, SettingsChanged(section=section))
 
     def _written(self, section: SettingsSection) -> StoredSettings:
         """Announce a committed write and read the settings back."""
-        emit(self.events, SettingsChanged(section=section))
+        self._changed(section)
         return self.load()
 
     def save(self, patch: SettingsPatch) -> StoredSettings:
@@ -1488,7 +1608,7 @@ class SettingsStore:
                         f"a newer rack-algorithm save is stored for printer {printer}"
                     )
             _put_entry(conn, "printer_rack_algorithms", key, algorithm)
-        emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
+        self._changed("printer_rack_algorithm")
         return algorithm or DEFAULT_ALGORITHM
 
     def library_choices(self, file_id: int) -> ModelPrintChoices:
@@ -1519,7 +1639,7 @@ class SettingsStore:
         """Remember one library file's choices; an empty ``choices`` forgets them."""
         self._put_choices(library_options_scope(file_id), choices)
         # The dialog's remembered choices, as for a model: no new section is needed.
-        emit(self.events, SettingsChanged(section="model_choices"))
+        self._changed("model_choices")
         return self.library_choices(file_id)
 
     def copy_library_choices(self, from_id: int, to_id: int) -> bool:
@@ -1534,7 +1654,7 @@ class SettingsStore:
                 (library_options_scope(to_id), library_options_scope(from_id)),
             ).rowcount
         if written:
-            emit(self.events, SettingsChanged(section="model_choices"))
+            self._changed("model_choices")
         return bool(written)
 
     def set_model_project(
@@ -1566,7 +1686,7 @@ class SettingsStore:
                     " updated_at = now() WHERE name = 'model_projects'",
                     (model_id, prefix, prefix),
                 )
-        emit(self.events, SettingsChanged(section="model_project"))
+        self._changed("model_project")
 
     def save_print_options(
         self,

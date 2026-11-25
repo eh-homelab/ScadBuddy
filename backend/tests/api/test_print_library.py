@@ -2614,6 +2614,53 @@ def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
 
 
 @respx.mock
+def test_a_cached_library_files_copy_is_spooled_under_the_spool_dir(
+    client: TestClient, app: FastAPI, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7316: with ``SCADBUDDY_SPOOL_DIR`` set (a node-local emptyDir), a hit's private
+    copy is made there, not under the data volume's cache (an NFS share in prod)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    node = tmp_path / "node"
+    downloads = state.store.downloads
+    assert downloads is not None
+    # The root `build_store` resolves from SCADBUDDY_SPOOL_DIR (test_spool_dir.py).
+    downloads.spool = node
+    real = downloads.private_copy
+    into: list[Path] = []
+
+    def private_copy(sha256: str | None, directory: Path, *, what: str) -> Any:
+        into.append(directory)
+        return real(sha256, directory, what=what)
+
+    monkeypatch.setattr(downloads, "private_copy", private_copy)
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert into == [node / "library-spool"]
+
+
+@respx.mock
+def test_a_library_views_spool_is_under_the_spool_dir(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#7316: a library view's read spools the downloaded 3MF under
+    ``SCADBUDDY_SPOOL_DIR`` too, so none of a read's temporary copies lands on the data
+    volume's cache (an NFS share in prod)."""
+    configure(client)
+    library_file(89, content=scadbuddy_3mf(tmp_path))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    node = tmp_path / "node"
+    assert state.store.downloads is not None
+    state.store.downloads.spool = node
+
+    assert client.get("/api/v1/print/library/89/preview.glb").status_code == 200
+    assert (node / "library-spool").is_dir()
+    assert not (state.paths.cache / "library-spool").exists()
+
+
+@respx.mock
 def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
     client: TestClient, app: FastAPI
 ) -> None:
@@ -2732,11 +2779,13 @@ def test_a_library_file_bambuddy_sends_encoded_is_never_kept(
 
 
 @respx.mock
+@pytest.mark.parametrize("private", [False, True], ids=["shared", "private"])
 def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
-    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch, private: bool
 ) -> None:
-    """A hit is copied whole before its first byte (#2821 review): past
-    CACHED_COPY_MAX_BYTES the file streams from Bambuddy instead, and is not kept again."""
+    """A hit is checked whole before its first byte (#2821 review): copied, or with a
+    private cache (#7316) hashed in place. Past CACHED_COPY_MAX_BYTES the file streams
+    from Bambuddy instead, is never checked, and is not kept again."""
     configure(client)
     content = library_3mf()
     sha = hashlib.sha256(content).hexdigest()
@@ -2744,6 +2793,7 @@ def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
     state: AppState = getattr(app.state, STATE_ATTR)
     downloads = state.store.downloads
     assert downloads is not None
+    downloads.private = private
     downloads.put(sha, content)
     assert downloads.has(sha)
     monkeypatch.setattr(library_print, "CACHED_COPY_MAX_BYTES", len(content) - 1)
@@ -2755,12 +2805,21 @@ def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
         return real_fill(sha256)
 
     monkeypatch.setattr(downloads, "fill", fill)
+    checked: list[str | None] = []
+    real_read_checked = downloads.read_checked
+
+    def read_checked(sha256: str | None, directory: Path, *, what: str) -> Any:
+        checked.append(sha256)
+        return real_read_checked(sha256, directory, what=what)
+
+    monkeypatch.setattr(downloads, "read_checked", read_checked)
 
     served = client.get("/api/v1/print/library/89/file")
 
     assert served.content == content
     assert download.call_count == 1
     assert fills == []
+    assert checked == []
 
 
 @respx.mock

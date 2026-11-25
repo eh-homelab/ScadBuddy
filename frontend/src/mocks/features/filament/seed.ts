@@ -410,7 +410,7 @@ function spools(): SpoolRow[] {
     spool(6, { material_id: M.PLA, colour_name: 'Teal', rgba: '#1B9AAAFF', label_weight_g: 1000, grams_left: 500 }),
     // Pulled from Bambuddy with no material, and no label weight: no grams arc.
     spool(7, { material_id: M.UNKNOWN, rgba: '#808080FF', grams_left: 300, note: 'Pulled from Bambuddy spool 41.' }),
-    // Its NTAG was written through SpoolBuddy (#7149).
+    // Its tag is an OpenTag3D tag, written at a known time (#7149).
     spool(8, { type_id: T.INSIGNIA_CLEAR, grams_left: 400, location_id: L.AMS_A4, data_origin: 'opentag3d', tag_encoded_at: '2026-11-10T15:30:00Z' }),
     spool(9, { type_id: T.GOLD, grams_left: 1000 }),
     spool(10, { type_id: T.TPU_RED, grams_left: 250, low_stock_pct: 30 }),

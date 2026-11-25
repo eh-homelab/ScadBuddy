@@ -66,7 +66,6 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives, mirror_archives
 from scadbuddy.orders.attempt_media import start_media
-from scadbuddy.orders.bambuddy import ServedLibrary
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
     CostRates,
@@ -160,6 +159,7 @@ from scadbuddy.orders.report import (
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
+from scadbuddy.orders.served_library import ServedLibrary
 from scadbuddy.orders.spool_import import density_for, inventory_groups
 from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
@@ -1145,15 +1145,21 @@ async def estimate(
         "default), the newest 10 whose last accepted attempt is within 365 days. "
         "`unit_cost_minor` is their real cost (as `GET /orders/{id}/costs` gives each "
         "item) over their units. `main_reason` is the cost part that most exceeded what "
-        "their accepted quotes priced for it; failed prints, test prints and cost entries "
-        "count in full. `suggested_unit_price_minor` is the unit cost marked up by "
-        "`pricing_markup_percent`, or with no markup the lowest price that is not thin. "
+        "their accepted quotes priced for it; failed prints, test prints, cost entries "
+        "and parts (`parts_minor`) count in full. `suggested_unit_price_minor` is the "
+        "unit cost marked up by `pricing_markup_percent`, or with no markup the lowest "
+        "price that is not thin. "
         "With `unit_price_minor`, `warning` says that price leaves a margin below "
         "`orders_thin_margin_percent`, and `below_cost` that it is below the unit cost "
         "itself (a price above the cost can still warn with a thin margin). Advice only. "
         "With no history, `jobs` is 0 and nothing warns. With `item_id` (the item being "
-        "quoted), its parts at today's unit costs (`parts_unit_minor`, #5543) replace the "
-        "past jobs' own parts entries in the unit cost and the suggestion."
+        "quoted), its parts at what a FIFO take of its quantity from the inventory lots "
+        "would cost now (`parts_unit_minor`, #5543, #7067; the share of unknown cost adds "
+        "nothing and sets `parts_unknown`, the known share is kept; in a currency other "
+        "than the shop's the parts are 0 and, when the item has any, `parts_unknown`) "
+        "replace the past jobs' own parts cost "
+        "(`parts_minor`) in the unit cost and the suggestion. 422 (on `item_id`) when that "
+        "take is past what a stock move's amount holds."
     ),
 )
 async def unit_cost(
@@ -1167,13 +1173,24 @@ async def unit_cost(
     check_path(slug, *([item_id] if item_id is not None else []))
     runtime = settings.snapshot().runtime
     parts_unit: Decimal | None = None
+    parts_unknown = False
     if item_id is not None:
-        parts_unit = await asyncio.to_thread(
-            orders.lifecycle.parts.unit_cost_of_item,
-            item_id,
-            currency or runtime.orders_currency,
-        )
-    return await asyncio.to_thread(
+        quoted: str = item_id
+        try:
+            parts_unit, parts_unknown = await asyncio.to_thread(
+                orders.lifecycle.parts_unit_cost,
+                quoted,
+                currency or runtime.orders_currency,
+                runtime.orders_currency,
+            )
+        except LifecycleError as error:
+            # R-P2-30: the take the query's item would make is past what an amount holds.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                str(error),
+                errors=[{"loc": ["query", "item_id"], "msg": str(error)}],
+            ) from None
+    answer = await asyncio.to_thread(
         unit_cost_history,
         orders.store,
         slug,
@@ -1184,6 +1201,8 @@ async def unit_cost(
         unit_price_minor=unit_price_minor,
         parts_unit_minor=parts_unit,
     )
+    answer.parts_unknown = parts_unknown
+    return answer
 
 
 @router.get(
@@ -1333,8 +1352,12 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
         "(`estimated` names which), at the quote's own rates, else at the price book and "
         "today's machine rate (also `estimated`); a figure with no source is left out and "
         "the attempt is `unknown`. Each item adds its labour (its time entries, else a "
-        "default from its quote or `pricing_labour_per_item`, `labour_default`) and its "
-        "cost entries; the order adds its own entries and its shipments' cost. "
+        "default from its quote or `pricing_labour_per_item`, `labour_default`), its "
+        "cost entries and its parts taken from stock (`parts_minor`: its `use` and "
+        "`return` moves at their lots' costs, #7067; `parts` is unknown while a use of "
+        "unknown cost is not given back, and in an order in a currency other than the "
+        "shop's, 0 and unknown while any use is not given back); "
+        "the order adds its own entries and its shipments' cost. "
         "`revenue_minor` is what was charged (an item's accepted quote, 0 once cancelled; "
         "the order's items plus every charge but tax), and `margin_state` is `loss`, "
         "`unknown`, `thin` (below `orders_thin_margin_percent`) or `ok`. With Bambuddy "
@@ -3240,6 +3263,13 @@ async def copy_archive_media(
     return operation_answer(result, Attachment)
 
 
+_PARTS_TOO_LARGE = (
+    "`bad_quantity` when the item's parts (from the inventory lots, #7067) are more than "
+    "one stock move holds: a count past 2,147,483,647, or a count times its lot's cost "
+    "past what `numeric(20,6)` holds"
+)
+
+
 @router.post(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/accept",
     response_model=Fulfilment,
@@ -3249,8 +3279,10 @@ async def copy_archive_media(
         "attempts reach its quantity. 409 `fulfilment_accepted`, `fulfilment_failed`, "
         "`item_not_open`, and `fulfilment_stale` for an attempt that printed a revision "
         "earlier than the one the accepted quote prices (an item revised after acceptance, "
-        "#5350): it printed an earlier design."
+        "#5350): it printed an earlier design. A fulfilled item takes its parts from the "
+        "inventory lots: 409 " + _PARTS_TOO_LARGE + "."
     ),
+    responses={409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."}},
 )
 async def accept_fulfilment(
     order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
@@ -3282,8 +3314,10 @@ class FulfilBody(BaseModel):
         "writes nothing: 409 `order_not_accepted`, `order_on_hold`, `item_not_open` (settled) "
         "or `item_not_approved` (not `approved` or `failed`; a printed item's print attempt "
         "is accepted on its own), naming the item in `items`; 422 `items` for an item named "
-        "twice; 404 for an item not the order's. The attempts, in the body's order."
+        "twice; 404 for an item not the order's. A fulfilled item takes its parts from the "
+        "inventory lots: 409 " + _PARTS_TOO_LARGE + ". The attempts, in the body's order."
     ),
+    responses={409: {"description": "A refusal; among them " + _PARTS_TOO_LARGE + "."}},
 )
 async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> list[Fulfilment]:
     check_path(order_id)
@@ -3301,8 +3335,11 @@ async def fulfil_items(order_id: str, body: FulfilBody, orders: OrdersDep) -> li
         "`failed`); the order's status follows. 409 `item_not_fulfilled`, "
         "`order_item_shipped` (a shipment carries it: its `shipments` name them), "
         "`order_on_hold`, `order_closed`/`order_cancelled`, and "
-        "`unfulfil_disabled` while the stored setting `orders_allow_unfulfil` is off."
+        "`unfulfil_disabled` while the stored setting `orders_allow_unfulfil` is off. The "
+        "item's parts go back to the lots they came from at their use's cost; 409 "
+        "`bad_quantity` when a lot cannot hold them."
     ),
+    responses={409: {"description": "A refusal; among them `bad_quantity` (a give-back)."}},
 )
 async def unfulfil_item(
     order_id: str, item_id: str, orders: OrdersDep, settings: SettingsStoreDep

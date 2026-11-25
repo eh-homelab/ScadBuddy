@@ -55,8 +55,18 @@ class ContentBackend(Protocol):
     backend: str
 
     async def upload(
-        self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope
-    ) -> str: ...
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        digest: tuple[str, int] | None = None,
+    ) -> str:
+        """``digest`` is ``data``'s sha256 and size when the caller has hashed it
+        already, so the backend need not read the whole file again (#7287)."""
+        ...
+
     def download(self, backend_id: str) -> AsyncGenerator[bytes]: ...
     async def exists(self, backend_id: str) -> bool: ...
     async def remove(self, backend_id: str) -> None: ...
@@ -87,11 +97,15 @@ class ContentStore:
         self.index = index
         #: `_keep` tasks still running after the call that started them was cancelled.
         self._keeping: set[asyncio.Task[None]] = set()
-        #: #2788: whole blobs by sha256, shared by the API's replicas. What one
-        #: process put or got is read back from it, not downloaded again.
+        #: #2788: whole blobs by sha256, shared by the API's replicas unless it is a
+        #: node-local one (#7316). What one process put or got is read back from it,
+        #: not downloaded again.
         self.downloads = downloads
-        #: Where a read's private copy of a cached blob is made: this process's own
-        #: disk, never the shared directory, which holds only entries and fills.
+        #: Where a read's private copy of a cached blob is made, never the shared
+        #: directory, which holds only entries and fills; callers spool their request
+        #: bodies here too (internal PUTs, slice bodies, thumbnail and archive copies).
+        #: The data volume's ``cache/blob-spool`` unless ``SCADBUDDY_SPOOL_DIR`` names
+        #: another (#7316).
         self.spool = spool if spool is not None else Path(tempfile.gettempdir())
         #: Copies into `downloads` still being written after the put that made them.
         self._filling: set[asyncio.Task[None]] = set()
@@ -162,7 +176,9 @@ class ContentStore:
             except StoreFullError:
                 self._count("put", "full")
                 raise
-        backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
+        backend_id = await self.backend.upload(
+            kind, data, name=name, scope=scope, digest=(sha, size)
+        )
         self._count("put", "ok")
         await self._keep_download(sha, data)
         ref = BlobRef(sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=size)
@@ -329,8 +345,9 @@ class ContentStore:
         a fault in the cache never makes a caller forget or delete good content."""
         downloads = self.downloads
         if downloads is not None:
+            # A private directory's hit is read in place: no copy under the spool (#7316).
             copy = await asyncio.to_thread(
-                downloads.private_copy, ref.sha256, self.spool, what="blob"
+                downloads.read_checked, ref.sha256, self.spool, what="blob"
             )
             if copy is not None:
                 async with aclosing(self._read_copy(copy)) as chunks:

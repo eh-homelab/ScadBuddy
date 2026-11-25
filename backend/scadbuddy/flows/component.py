@@ -31,7 +31,8 @@ from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.repo_lock import flows_coordinator
-from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.tasks.component import TASKS
+from scadbuddy.workflows.flow_activities import FlowActivities, FlowTaskActivities, RunTasks
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
@@ -54,6 +55,8 @@ class Flows:
     keys: PgPayloadKeys | None
     #: The agent's tools and their tiers now, from the agent beside this API (#2704).
     agent_tools: AgentTools
+    #: The runs' tasks (#7364), which the in-process worker writes.
+    tasks: RunTasks
     #: A connection to the database holding the keys (forgetting a run takes its lock).
     connect: Connect | None = None
     #: Connected when the app runs; None without a KEK (or before then).
@@ -106,6 +109,7 @@ def _build(core: Core, components: Components) -> Flows:
         ),
         keys=keys[0] if keys is not None else None,
         agent_tools=AgentTools(core.settings.agent_internal_url),
+        tasks=components.get(TASKS),
         connect=keys[1] if keys is not None else None,
         operation_activities=projects_operations,
         run_key=run_key(core.settings),
@@ -147,6 +151,7 @@ async def _run(flows: Flows) -> AsyncIterator[None]:
         flows.queue,
         [
             *FlowActivities(flows.store).all(),
+            *FlowTaskActivities(flows.tasks).all(),
             *routes.all(),
             *grants.all(),
             *flows.operation_activities(),

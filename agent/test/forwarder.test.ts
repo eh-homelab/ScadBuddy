@@ -1,7 +1,7 @@
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { PluginForwarder, type SessionLedger } from '../src/plugins/forwarder.js'
+import { BROWSER_HEADER, forwardForRun, PluginForwarder, type SessionLedger } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 
 // The session DELETE the forwarder sends for a process that ended (spec 2026-10-13 §5.3 E7).
@@ -182,5 +182,67 @@ describe('the response cap (#2171 review M6)', () => {
       .catch(() => 'cut off')
     expect(text).not.toContain('data:')
     expect(text).not.toContain('e'.repeat(100))
+  })
+})
+
+describe("a session's browser options (#7027)", () => {
+  const options = { user_agent: 'Mozilla/5.0 (Test)', viewport: { width: 1280, height: 800 }, locale: 'en-GB' }
+  const forged = JSON.stringify({ user_agent: 'forged' })
+
+  /** A POST, a GET and a DELETE through the route, each carrying a client's own header. */
+  async function through(url: string) {
+    await post(url, { [BROWSER_HEADER]: forged })
+    await fetch(url, { headers: { accept: 'application/json', 'mcp-session-id': 's-1', [BROWSER_HEADER]: forged } })
+    await fetch(url, { method: 'DELETE', headers: { 'mcp-session-id': 's-1', [BROWSER_HEADER]: forged } })
+  }
+
+  it("a route registered with them sends their JSON on every request, never the client's", async () => {
+    const { seen, plugin } = await upstream()
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    await through(forwarder.register(plugin, '127.0.0.1', { browser: options }).url)
+    expect(seen.map((s) => [s.method, s.headers[BROWSER_HEADER]])).toEqual([
+      ['POST', JSON.stringify(options)],
+      ['GET', JSON.stringify(options)],
+      ['DELETE', JSON.stringify(options)],
+    ])
+  })
+
+  it.each([
+    ['without them', undefined],
+    ['with none set', {}],
+  ])('a route %s sends none, even when the client sends one', async (_, browser) => {
+    const { seen, plugin } = await upstream()
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    await through(forwarder.register(plugin, '127.0.0.1', browser ? { browser } : {}).url)
+    expect(seen.map((s) => [s.method, s.headers[BROWSER_HEADER]])).toEqual([
+      ['POST', undefined],
+      ['GET', undefined],
+      ['DELETE', undefined],
+    ])
+  })
+
+  it("forwardForRun gives them to the run's routes and a kept client's, and the kept fingerprint moves with them", async () => {
+    const { seen, plugin } = await upstream()
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    const loaded = { plugins: [{ plugin, address: '127.0.0.1' }], problems: [] }
+    const run = forwardForRun(loaded, forwarder, { browser: options })
+    await post(run.plugins[0]!.url)
+    const kept = run.keep!('memory')!
+    const route = kept.register()
+    await post(route.url)
+    route.release()
+    run.release()
+    expect(seen.map((s) => s.headers[BROWSER_HEADER])).toEqual([JSON.stringify(options), JSON.stringify(options)])
+
+    const plain = forwardForRun(loaded, forwarder)
+    const other = forwardForRun(loaded, forwarder, { browser: { locale: 'de-DE' } })
+    const again = forwardForRun(loaded, forwarder, { browser: { ...options } })
+    expect(plain.keep!('memory')!.fingerprint).not.toBe(kept.fingerprint)
+    expect(other.keep!('memory')!.fingerprint).not.toBe(kept.fingerprint)
+    expect(again.keep!('memory')!.fingerprint).toBe(kept.fingerprint)
+    for (const r of [plain, other, again]) r.release()
   })
 })

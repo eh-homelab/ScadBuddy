@@ -13,13 +13,13 @@ const entity = z
   .string()
   .min(1)
   .max(200)
-  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `part:<id>`, `customer:<id>`, `order:<id>`')
+  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `customer:<id>`, `order:<id>`')
 /** An order's files change only on its order page (order_attachment_update/_delete). */
 const fileOwner = z
   .string()
   .min(1)
   .max(200)
-  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `part:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
+  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
 const attachmentId = z.string().min(1).max(100).describe("An attachment's id, as entity_attachment_list gives it")
 const linkId = z.string().min(1).max(100).describe("A link's id, as entity_link_list gives it")
 const role = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text: `reference`, `issue`, `finished`, `packed`, `receipt`, `invoice`, `manual`, `photo`, `label`, `other`')
@@ -53,7 +53,7 @@ export const PROPERTY_RULES =
   'boolean or a list of up to 50 strings (each up to 500), and `null` removes the key; an entity has up to 200 ' +
   'keys. The whole set applies or none of it (422 `bad_property_value` names the key). A rename is one set: the ' +
   'old key `null` and the new key its value. Suggested keys, which the kind\'s schema documents and checks: on a ' +
-  'spool type `mpn`, `gtin` and `asin` (lists), `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
+  'spool type `mpn`, `gtin` and `asin` (the last two lists), `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
   '`lot_number` (entity_property_schema_get lists them). Any other key is kept as given.'
 
 const code = (k: string) => `\`${k}\``
@@ -291,7 +291,8 @@ export const entityTools = [
     description:
       "A kind's property schema: a JSON Schema (Draft 2020-12) object whose `properties` document and type the keys the " +
       'kind knows (their titles and help), and `keys_in_use`, each key its entities have with a count. The schema never ' +
-      'refuses a key it does not know.',
+      "refuses a key it does not know. An item's schema is its item kind's `attribute_schema`, not a schema of the kind " +
+      '`item` (409 `schema_owned_by_item_kind`).',
     input: z.object({ kind: propertyKind }),
     risk: 'read',
     routes: ['GET /api/v1/entity-kinds/{kind}/property-schema'],

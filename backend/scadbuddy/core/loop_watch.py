@@ -1,7 +1,9 @@
 """A watch on a process's event loop: each worker's (#3788) and the API's (#7245).
 
 Every Temporal workflow task and every async activity a worker runs starts on its
-event loop. A loop held by a blocking call times workflow tasks out at 10 s while the
+event loop. A loop held by a blocking call times workflow tasks out (at 3 s for the
+short workflows that start with ``commands.SHORT_TASK_TIMEOUT``, #7288: ``Operation``,
+``SliceWorkflow``, ``SensorNotifyPass``; at Temporal's 10 s default for the rest) while the
 SDK's deadlock detector, which runs on that same loop, says nothing; CPU can read idle
 throughout. The watch is a thread that posts a no-op to the loop every ``interval``.
 How late each one runs is ``scadbuddy_event_loop_lag_seconds``. One that has not run
@@ -33,8 +35,9 @@ from scadbuddy.core.metrics import Metrics
 logger = logging.getLogger(__name__)
 
 #: How often a no-op is posted, and how late one runs before it is a stall. The
-#: threshold sits under the SDK's 2 s deadlock bound and far under the 10 s
-#: workflow-task timeout, so a stall is logged before either fires.
+#: threshold sits under the SDK's 2 s deadlock bound and under the workflow task
+#: timeout (``commands.SHORT_TASK_TIMEOUT``, 3 s, for the short workflows; Temporal's
+#: 10 s default for the rest), so a stall is logged before either fires.
 INTERVAL = 0.5
 THRESHOLD = 1.0
 

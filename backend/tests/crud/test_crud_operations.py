@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -22,7 +21,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.crud.operations import OTHER_CALLERS_KIND, RemoteOperationStore
 from scadbuddy.flows.store import FlowStore
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import OPERATION_RETENTION_SECONDS, Setting, SettingsStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.render.projection import JobProjection
@@ -55,9 +54,10 @@ class _Settings:
         self.retention: float | None = None
         self.loads = 0
 
-    def load(self) -> SimpleNamespace:
+    def get(self, setting: Setting[Any]) -> Any:
+        assert setting == OPERATION_RETENTION_SECONDS
         self.loads += 1
-        return SimpleNamespace(operation_retention_seconds=self.retention)
+        return self.retention
 
 
 @pytest.fixture

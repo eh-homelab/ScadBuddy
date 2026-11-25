@@ -31,11 +31,11 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `flows_repo_head`, `git_remote_pushes`, `output_index` | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
-| Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires` | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
+| Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires`, `tasks` (`20261124T0449Z_tasks`, #7364) | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
 | Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts*`, `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
 | Entities (files, links and properties on any row, #6950, #7026) | `entities`, `entity_links` (`20261122T0426Z_entities`), `entity_properties` (one row per entity and key) and `entity_property_schemas` (one row per kind, seeded for `spool_type` and `spool`; `20261123T0017Z_entity_properties`), `entity_attachments` (the old `order_attachments`, renamed there; an order's files are its rows with an `order_id`) | the API |
 | Agent (`ai_*`) | `ai_credentials`, `ai_settings` (`20260927T2349Z_credentials_settings`), `ai_sessions`, `ai_session_entries`, `ai_session_events` (`20260928T0107Z_sessions`), `ai_approvals`, `ai_mcp_tokens`, `ai_plugins`, `ai_audit`, `ai_payload_keys`, `ai_forgotten_subjects`, `ai_session_files`, `ai_flow_blobs`, `ai_push_*`, `ai_notify_channels`, the hosted plugins and feeds (`ai_hosted_plugins`, `ai_hosted_plugin_files`, `ai_hosted_plugin_versions`, `ai_plugin_feeds`, `ai_plugin_feed_packages`) and more | the API, which serves the agent every area through `crud.agent` routes (`scadbuddy/api/crud_agent*.py`, areas listed at `scadbuddy/api/crud_areas.py:202-248`, #5299); the agent's own SQL to these tables remains only as the fallback while an area is unlisted |
@@ -118,6 +118,16 @@ Processes without store credentials (the slicer) get short-lived transfer URLs i
 a presigned S3 GET, or the API's `/api/v1/internal/blobs/{key}` with an HMAC transfer
 token (`scadbuddy/slicing/transfer.py:52-57`, `scadbuddy/slicing/transfer_token.py`).
 
+On `bambuddy` and `s3`, each process that renders or reads pieces (the API and each render
+worker) keeps a bounded cache of them in front of the store (`scadbuddy/store/cache.py`
+`CachedBlobStore`, capped by `SCADBUDDY_WORKER_CACHE_MAX_BYTES`). It is the data volume's
+`blobs/` unless `SCADBUDDY_BLOB_CACHE_DIR` puts it on a node-local volume (#7318,
+`scadbuddy/store/factory.py` `build_store`); on `local` that `blobs/` is the store itself.
+The cache is never shared: each replica fetches what it lacks. A job's files are named
+`blobs/<key>/<file>` wherever the cache is (`scadbuddy/core/paths.py` `result_path`). A
+fetch and a whole-file read are spans `blob_cache.fetch` and `blob_cache.read_file` with
+`scadbuddy.cache.hit`.
+
 ## Files on the data volume
 
 Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
@@ -125,6 +135,59 @@ Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
 start (`scadbuddy/library/catalogue.py:2940-2956`, called from `scadbuddy/main.py:1561-1565`).
 Every model edit is a commit, which is what versions and history read
 ([features/versions-and-history.md](../features/versions-and-history.md)).
+
+### Saved outputs
+
+A saved output's record is a row of `outputs` (#7255, phase 1 of the
+[outputs-in-Postgres spec](../superpowers/specs/2026-11-23-outputs-in-postgres-design.md)):
+what its `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.json`,
+`bom.json`, `arranged_from.json` and `backfill.json` hold (`scadbuddy/library/output_rows.py`
+`OutputRows`). Its bytes (`model.3mf`, `preview.glb`, `thumbnail.png`, `files/`) stay in
+`data/outputs/<slug>/<id>/` until #7256 moves them to the blob store. A save writes the
+files, then the row in one transaction; when the row fails, the save fails and its folder
+is removed (`OutputStore._insert_row`). Its last print stays in `output_last_prints`.
+
+Each API start copies the folders to rows once (`scadbuddy/library/output_copy.py`
+`copy_outputs`, one replica at a time under an advisory lock, held on a connection of its
+own; a run that does not get the lock does nothing). The housekeeping sweep `housekeeping_copy_outputs` copies them again
+on each run of the sweeps' Schedule (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`, every
+`asset_sweep_interval`; with the sweeps off, `asset_sweep_interval` 0, only the start
+copies). Each run is a row of `output_copy_runs`.
+`GET /api/v1/outputs/copy-status` answers the last run. Until a run finishes, a lookup
+that finds no row falls back to the files; after one, a missing row is a missing output.
+A run whose walk may have missed folders does not finish: it records its counts with
+`incomplete` true and no `finished_at`. Each run stats about ten record files in each
+output folder (`files_stamp`) and reads a folder only when its stamp changed. The copy
+reconciles:
+
+- A folder with no row gets one. A row is read again when the folder's `files_stamp`
+  differs from the row's: a sha256 of the sorted name, size and `mtime_ns` of the record
+  files, so no NFS clock is compared with the database's. A save writes no stamp, so the
+  next run reads its folder once.
+- Live writers (a save, a rename, a backfill change) set `copied_at` to the database's
+  clock. The copy takes a mark from that clock before it reads a batch. A refresh is
+  `UPDATE … WHERE copied_at < mark`, and a new row is `INSERT … ON CONFLICT DO NOTHING`
+  (`OutputRows.write_copy`), so a live write wins.
+- After each batch, `undo_copy` deletes each row the batch wrote whose `meta.json` is
+  gone, only while its `copied_at` is still the mark. The run's end checks the rows it
+  inserted once more.
+- A row whose folder the walk did not see is dropped, only when its `copied_at` is before
+  the run's start. When a listing or a stat fails (ESTALE, EIO), or the outputs folder
+  lists nothing while rows exist, the run drops no row and is `incomplete`.
+- A folder with no readable `meta.json` gets no row and goes on the run's `not_copied`
+  list; a side file that cannot be read is left out of its row and named on `damaged`.
+- Pods on an older build save and delete outputs in the files only, during a roll-out
+  and after a rollback. The next housekeeping sweep gives their saves rows and drops the
+  rows of their deletes. Until then, such a save is a 404 on the newer pods once a copy
+  run has finished (`OutputRows.copied` stays true in each process); README, "Saved
+  outputs during a roll-out".
+
+After a roll-out, confirm that every pod runs the new image (`kubectl -n bambuddy get
+pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. Check that
+its run has a `finished_at`, is not `incomplete`, and started after the last pod on the
+older build went. Until then, writes of the older pods may have no row yet.
+
+`output_index` stays as it is in this phase; #7257 drops it.
 
 ## Generated API files
 

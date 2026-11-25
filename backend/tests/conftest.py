@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import functools
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ from psycopg import Connection, sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
+from temporalio.worker import _workflow as temporal_workflow_worker
 
 from scadbuddy import main as scadbuddy_main
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
@@ -54,12 +56,15 @@ from scadbuddy.render.jobs import render_job
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.workflows.commands import start_command
+from tests.support import shared_routes
 from tests.support.rack_guard import foreign_rack_errors
 from tests.support.temporal import (
     TEST_TEMPORAL_ADDRESS_ENV,
     TEST_TEMPORAL_DEV_SERVER_ENV,
     temporal_available,
 )
+
+shared_routes.install()
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
@@ -74,6 +79,44 @@ trace.set_tracer_provider(_provider)
 #: Every app a test starts binds its CRUD listener to a free port (#5298): on the fixed
 #: default, two xdist workers' apps (or a developer's own API) would collide.
 settings_module.DEFAULT_CRUD_PORT = 0
+
+#: The SDK fails a workflow task whose activation runs past 2 s as a deadlock
+#: (`temporalio.worker._workflow`, `_deadlock_timeout_seconds`). On a CI runner starved by
+#: a shard's other xdist workers, a plain activation paused that long and failed a test
+#: (#7443). Every test worker gets this larger bound: a pause passes, a real deadlock still
+#: fails the task. Not `debug_mode`, which also turns the bound off entirely.
+TEST_DEADLOCK_SECONDS = 30
+#: The SDK's own bound, for a test that needs the detector to fire as it does in production.
+SDK_DEADLOCK_SECONDS = 2
+
+_sdk_workflow_worker_init = temporal_workflow_worker._WorkflowWorker.__init__
+# The patch leans on a private class and attribute: a temporalio release that renames
+# either fails the session here, not every Worker or, worse, no test at all.
+assert "_deadlock_timeout_seconds = None if self._debug_mode else 2" in inspect.getsource(
+    _sdk_workflow_worker_init
+), "temporalio's deadlock bound moved: re-check tests/conftest.py's patch (#7443)"
+
+
+@functools.wraps(_sdk_workflow_worker_init)
+def _patient_workflow_worker_init(self: Any, *args: Any, **kwargs: Any) -> None:
+    _sdk_workflow_worker_init(self, *args, **kwargs)
+    if self._deadlock_timeout_seconds is not None:
+        self._deadlock_timeout_seconds = TEST_DEADLOCK_SECONDS
+
+
+temporal_workflow_worker._WorkflowWorker.__init__ = _patient_workflow_worker_init  # type: ignore[method-assign]
+
+
+@pytest.fixture
+def sdk_deadlock_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every worker the test builds keeps the SDK's 2 s bound, its own or one a helper
+    builds (`verify_pipeline.verify`): a test whose activation never yields needs the
+    detector to fire as in production. With the session's 30 s, the worker's shutdown
+    waited for the stuck activation until the detector fired (#7522). The bound is read
+    when a worker is built, so a worker built in a fixture that pytest sets up before
+    this one keeps the 30 s bound: build it in the test, or in a fixture that takes this
+    one (#7539)."""
+    monkeypatch.setitem(globals(), "TEST_DEADLOCK_SECONDS", SDK_DEADLOCK_SECONDS)
 
 
 @pytest.fixture(autouse=True)
@@ -403,6 +446,7 @@ def _answer_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
 #: For a `Settings` whose app never starts: the database URL is required (#401), but
 #: nothing is dialled until the lifespan opens the stores.
 UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
+
 #: The same for the Temporal address (#546). Nothing listens on port 1, and the API's
 #: client is lazy, so an app built with it boots and its renders wait, unstarted.
 UNUSED_TEMPORAL_ADDRESS = "127.0.0.1:1"
@@ -410,77 +454,87 @@ UNUSED_TEMPORAL_ADDRESS = "127.0.0.1:1"
 
 @pytest.fixture(scope="session")
 def _pg_database_url() -> Iterator[str | None]:
-    """The database this process's tests make their schemas in: the test database
-    itself, or under pytest-xdist one of its own per worker, dropped afterwards.
-
-    A schema per test is not isolation enough once tests run at once: advisory locks
-    (`migrate`'s fixed MIGRATION_LOCK among them) and LISTEN/NOTIFY channels (the
-    event bus's `scadbuddy_events`) are per DATABASE, so two workers sharing one
-    would serialise every migration and hear each other's events."""
+    """The database this process's tests make their own databases from: the test database
+    itself, or under pytest-xdist one of its own per worker, dropped afterwards. It and
+    every database named after it (`_pg_template`, `pg_conninfo`) left by a killed run
+    are dropped first."""
     url = postgres_url()
     worker = os.environ.get("PYTEST_XDIST_WORKER")
     if url is None or worker is None:
         yield url
         return
     database = f"{conninfo_to_dict(url).get('dbname') or 'postgres'}_{worker}"
-    create = sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database))
-    drop = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(database))
     with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute(drop)  # a killed run's
-        conn.execute(create)
+        left = conn.execute(
+            "SELECT datname FROM pg_database WHERE datname = %s OR starts_with(datname, %s)",
+            (database, f"{database}_"),
+        ).fetchall()
+        for (name,) in left:
+            _drop_database(conn, name)
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     try:
         yield make_conninfo(url, dbname=database)
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
-            conn.execute(drop)
+            _drop_database(conn, database)
+
+
+def _drop_database(conn: Connection[Any], name: str) -> None:
+    conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
+def _named_after(url: str) -> str:
+    """A new database's name, from the one ``url`` names."""
+    return f"{conninfo_to_dict(url).get('dbname') or 'postgres'}_{uuid.uuid4().hex[:12]}"
+
+
+@pytest.fixture(scope="session")
+def _pg_template(_pg_database_url: str | None) -> Iterator[str | None]:
+    """The database `pg_conninfo` clones: the backend's migrations applied, and the agent's
+    not, as a test's app skips them (`_agent_migrations`)."""
+    url = _pg_database_url
+    if url is None:
+        yield None
+        return
+    name = _named_after(url)
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    try:
+        with psycopg.connect(make_conninfo(url, dbname=name), autocommit=True) as conn:
+            migrate(conn)
+        yield name
+    finally:
+        with psycopg.connect(url, autocommit=True) as conn:
+            _drop_database(conn, name)
 
 
 @pytest.fixture
-def pg_conninfo(_pg_database_url: str | None) -> Iterator[str]:
-    """A throwaway schema on the test Postgres, dropped afterwards.
+def pg_conninfo(
+    request: pytest.FixtureRequest, _pg_database_url: str | None, _pg_template: str | None
+) -> Iterator[str]:
+    """A throwaway database on the test Postgres, dropped afterwards: a clone of the
+    migrated `_pg_template`, or empty for a test marked `pg_empty`. Its own database, as
+    advisory locks (`migrate`'s fixed MIGRATION_LOCK among them) and LISTEN/NOTIFY
+    channels (the event bus's `scadbuddy_events`) are per DATABASE.
 
-    Skips the test without one: every test that starts the app needs it, since the
+    Skips the test without a Postgres: every test that starts the app needs it, since the
     settings live in Postgres (#401).
     """
     url = _pg_database_url
-    if url is None:
+    if url is None or _pg_template is None:
         pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
-    schema = f"test_{uuid.uuid4().hex[:12]}"
+    name = _named_after(url)
+    empty = request.node.get_closest_marker("pg_empty") is not None
+    create = sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+        sql.Identifier(name), sql.Identifier("template1" if empty else _pg_template)
+    )
     with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute(f'CREATE SCHEMA "{schema}"'.encode())
+        conn.execute(create)
     try:
-        yield make_conninfo(url, options=f"-c search_path={schema}")
+        yield make_conninfo(url, dbname=name)
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
-            drop_schema(conn, schema)
-
-
-#: Tables dropped per transaction by `drop_schema`.
-DROP_BATCH = 20
-
-
-def drop_schema(conn: Connection[Any], schema: str) -> None:
-    """Drop ``schema`` on an autocommit connection, its tables first in batches.
-
-    One ``DROP SCHEMA … CASCADE`` locks every relation in one transaction: 4,643 locks for a
-    schema with the backend's and the agent's tables (209 tables, 505 indexes, measured
-    2026-11-15 on Postgres 18). The shared lock table holds ``max_locks_per_transaction``
-    (64) times ``max_connections`` (100 on CI's ``postgres:18``), 6,400, so two xdist
-    workers' teardowns at once ran it out ("out of shared memory"). A batch of
-    `DROP_BATCH` tables held at most 532, and the last ``DROP SCHEMA`` 8 (same schema).
-    """
-    tables = [
-        name
-        for (name,) in conn.execute(
-            "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-            " WHERE n.nspname = %s AND c.relkind IN ('r', 'p') AND NOT c.relispartition",
-            (schema,),
-        )
-    ]
-    for start in range(0, len(tables), DROP_BATCH):
-        names = ", ".join(f'"{schema}"."{name}"' for name in tables[start : start + DROP_BATCH])
-        conn.execute(f"DROP TABLE IF EXISTS {names} CASCADE".encode())
-    conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+            _drop_database(conn, name)
 
 
 PgPool = ConnectionPool[Connection[DictRow]]
@@ -505,7 +559,7 @@ def open_pg_pool(conninfo: str, *, size: int = 4) -> PgPool:
 
 @pytest.fixture
 def pg_pool(pg_conninfo: str) -> Iterator[PgPool]:
-    """`open_pg_pool` on the test's throwaway schema, closed afterwards."""
+    """`open_pg_pool` on the test's throwaway database, closed afterwards."""
     pool = open_pg_pool(pg_conninfo)
     try:
         yield pool
@@ -680,7 +734,7 @@ def seed_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
-    """The app's settings, on a throwaway Postgres schema: it will not start without one."""
+    """The app's settings, on a throwaway Postgres database: it will not start without one."""
     return Settings(
         openscad=fake_openscad,
         data_dir=data_dir,

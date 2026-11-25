@@ -129,12 +129,16 @@ filament sync's are: the write that stores it records its Bambuddy as the links'
 none is recorded, so a site whose only links are presets has one too. After the Bambuddy
 URL changes the mirror waits, as the filament sync does, until the links are reset
 (`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy (proved by the
-spool links, so never when presets are the only links) moves the ids to the new URL, and
+spool links, or, with no spool linked, by the presets: each linked id listed by the new
+URL's Bambuddy, none older than Bambuddy's `updated_at` as ScadBuddy last took it: the mirror's last
+write, or for a preset imported from Bambuddy, its last import, #7343) moves the ids to the new URL, and
 one that deletes the links drops them (the dry run's and the answer's `presets` count), so
-each preset is created on the new Bambuddy;
+each preset is created on the new Bambuddy (on the same Bambuddy, a second copy, which the
+reset dialog says);
 meanwhile no path hands Bambuddy an id of the old one. A create whose answer was lost is
 found above the highest id listed before it, by its name and its document, not made
-twice; one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
+twice; when a newer version was written since, it is created again and its `mirror_error`
+names the copy the lost create left (#7343); one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
 own `mirror_error` and never stops the rest.
 
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
@@ -163,6 +167,24 @@ spool (its values and its type's preset and K value for the slot's nozzle) or th
 hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
 names ScadBuddy's place of the unit. The page asks before every printer write.
 
+### The phone page (#7273)
+
+`/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
+(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`). It works only in Chrome on
+Android, in its own tab: Web NFC refuses a frame, so inside Bambuddy the page shows its address
+to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens the
+spool that holds the tag, or offers to bind it or make a spool from what the tag says
+(OpenSpool or OpenTag3D). "Write tag" on a spool backs the tag up first, writes the spool's
+records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
+and binds it only when the read-back equals what was sent. Every write keeps a backup, which
+the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
+`nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
+and holds a tag. A job waits `timeout_s` for a person to arm it; arming gives the run 60 seconds
+(`ARM_SECONDS`) for the tap. Once the page has backed the tag up for a write (`write_begun`), the
+job is never cancelled or expired: it ends with the write's read-back, or, when none comes within
+10 minutes of the backup, `failed` with `result.code` `no_read_back` (the tag may hold the new
+records, and its backup can restore it). The agent waits for either.
+
 ### Properties (#7026)
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
@@ -178,13 +200,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
   key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
   already stored are not checked again after a schema change.
+- `item` is the exception (#7067). An item's properties follow its item kind's
+  `attribute_schema`, merged down the kind tree (a child kind's key wins;
+  `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
+  kind, so `GET` and `PUT /entity-kinds/item/property-schema` both answer 409
+  `schema_owned_by_item_kind` (`backend/scadbuddy/api/entity_properties.py`).
 - The migration seeds the keys `mpn`, `gtin`, `asin`, `manufacturer_url`,
   `empty_spool_weight_g` and `td` for `spool_type`, and `lot_number` for `spool`
   (`backend/scadbuddy/migrations/20261123T0017Z_entity_properties.sql`).
 - Routes: `GET`/`PATCH /entities/{ref}/properties` (a key set to `null` is removed; a
   patch applies whole or not at all), `GET /entity-kinds/{kind}/properties` and
-  `GET`/`PUT /entity-kinds/{kind}/property-schema`
-  (`backend/scadbuddy/api/entity_properties.py`).
+  `GET`/`PUT /entity-kinds/{kind}/property-schema`, which answer 409
+  `schema_owned_by_item_kind` for `item` (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
   `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
@@ -204,7 +231,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 ## Code
 
 - Routes:
-  - `backend/scadbuddy/api/filament.py:239` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
+  - `backend/scadbuddy/api/filament.py:265` and `backend/scadbuddy/api/filament_purchasing.py:46` (both under `/filament`);
   - `backend/scadbuddy/api/tray_spools.py:44` (a tray's spool link, and create from slot);
   - `backend/scadbuddy/api/filament_profiles.py:26`;
   - `backend/scadbuddy/api/printer_kprofiles.py:42` (a printer's K-profiles, under `/printers/{id}/kprofiles`);
@@ -259,12 +286,14 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
   - `data_origin` says how the spool's data came in, in Bambuddy's words (`rfid_auto`,
-    `rfid_linked`, `nfc_link`, `opentag3d`). It is read only. The pull takes Bambuddy's
+    `rfid_linked`, `nfc_link`, `opentag3d`), or `openspool`, ScadBuddy's own value for a tag
+    the phone page wrote in OpenSpool (Bambuddy has none for that format). It is read only. The pull takes Bambuddy's
     value; a person's tag bind sets `rfid_linked` when the tag's stored kind is a Bambu
-    tag, else `nfc_link`; a confirmed NTAG write sets `opentag3d`.
+    tag, else `nfc_link`; a tag written from the phone page (#7273) sets `openspool` or
+    `opentag3d`, the format it wrote.
     The push sends it when SB has one, and the tag push sends it to `link-tag`.
   - `added_full` (a person edits it) and `tag_encoded_at` (Bambuddy's `encode_time`, set
-    by a confirmed NTAG write) come from Bambuddy on the pull. Bambuddy takes no write of
+    by a tag written from the phone page) come from Bambuddy on the pull. Bambuddy takes no write of
     either, so they are never pushed. With the baseline below they are kept in the link's
     `bb_seen` (`PULL_SEEN_FIELDS`), and after a push the pull judges them against it, never
     against the push's echo (R-7149-8).

@@ -40,6 +40,7 @@ from scadbuddy.library.outputs import (
     release_parts,
     require_output,
 )
+from scadbuddy.library.settings_store import PUBLIC_URL
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -49,7 +50,7 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.render.runner import OpenSCADError, with_defaults
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.store.content import template_title
 from scadbuddy.workflows.models import ArrangeInputs
 from scadbuddy.workflows.operation_models import PRELUDE_REQUESTED
@@ -167,7 +168,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # A piece the store no longer has (aged out, or the Bambuddy store unreachable)
         # is not fetched, and the copy would fail with a server path in its message.
         files = (result.model_3mf, result.preview_glb)
-        if not all((state.outputs.paths.root / name).is_file() for name in files):
+        root = state.outputs.paths.root
+        if not all(result_file(blobs, root, name).is_file() for name in files):
             raise _gone(job)
         files_dir = None
         if chosen is not None and chosen.files_key is not None:
@@ -178,7 +180,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     "the job's extra files are no longer in the store; render again",
                 )
             files_dir = blobs.dir_for(chosen.files_key) / "files"
-        public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
+        public_url = await asyncio.to_thread(state.settings_store.get, PUBLIC_URL)
         # Written into the saved 3MF, which a download then serves as it is (#2652). A
         # model.json made invalid since the render fails the save on purpose (#2868):
         # saved without them, the file would open in Bambu Studio missing the template's
@@ -215,6 +217,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     inputs={} if arranged else inputs,
                     index=index,
                     files_dir=files_dir,
+                    blobs_root=blobs.root,
                     arranged_from=sources,
                     output_id=output_id,
                     print_settings=print_settings,

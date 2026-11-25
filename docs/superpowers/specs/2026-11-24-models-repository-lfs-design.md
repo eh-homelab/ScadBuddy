@@ -55,7 +55,9 @@ configuration (`GIT_CONFIG_GLOBAL=/dev/null`, hooks off) and the filter passed w
 
 - A 136.6 MB mesh is a 134 byte blob. `git archive` and `git cat-file --filters` give the
   real bytes. `git checkout <rev> -- <path>` does too (3 MB file).
-- `git show` gives the pointer. So `upstream.plan_merge` must read with `--filters`.
+- `git show` and `git cat-file blob` give the pointer. So `GitRepo.show` (which
+  `upstream.plan_merge` reads) and `ModelHistory.read_blob` must read a mesh with
+  `git cat-file --filters <rev>:<path>`.
 - `git push --no-verify` sends no LFS object. `git lfs push <url> <commit>` must run first.
   After both, a clone gives the real bytes (2 MB file, `file://` remote).
 - A `.lfsconfig` in the repository redirects the endpoint. `-c lfs.url=` overrides it.
@@ -68,8 +70,8 @@ The app image is Debian 13; `apt-cache policy git-lfs` there gives 3.6.1. The AP
 [2 GB per LFS file on Free](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-git-large-file-storage)
 and includes [10 GiB of storage](https://docs.github.com/en/billing/concepts/product-billing/git-lfs).
 
-Not measured: GitHub as the LFS remote, and LFS over the NFS share. Step 3 measures both
-before the switch.
+Not measured: GitHub as the LFS remote, and LFS over the NFS share. The plan's step 4
+measures both before the switch.
 
 ## 5. Design
 
@@ -80,22 +82,28 @@ as it is. A push of a repository that uses LFS runs `git lfs push` first, with `
 derived from the remote's own URL.
 
 **Builder.** A command in the API's image. It makes `data/models-next`. It is idempotent
-and reads the old repository only. It commits, oldest first, each pinned (slug, commit), and
-then the current version of every template, with the original author and date. Each
-commit has an `Imported-From: <old id>` trailer, so git itself holds the id map. It also
-copies ignored files that are data (videos in `media/`), and not `.renders/` or wrappers.
-It points each `model.json` upstream at the new id.
+and reads the old repository only. It commits each pinned (slug, commit) and the current
+version of every template and built-in, in the order of the old history, with the original
+author and date. (As built: one order for all of them, not the pins first. An upstream is
+older than the `model.json` that names it, so its new id is known when that file is
+written.) Each commit has an `Imported-From: <old id>` trailer, so git itself holds the id
+map. It also copies ignored files that are data (videos in `media/`), and not `.renders/`
+or wrappers. It points each `model.json` upstream at the new id. An id that the new history
+does not have stays as it was.
 
 **Check.** Every file's sha256, current and pinned, old against new. Every mesh model
 renders. Push to a branch of the remote, clone, pull, compare again.
 
-**Switch.** All API replicas at 0. Run the builder again for the last changes. In one
+**Switch.** All API replicas at 0. Run the builder again for the last changes. The
 transaction: set `models_repo_head`, delete the `models` row of `git_remote_pushes`, and
 set `commit` in `order_items`, `order_item_revisions` and `storefront_listings`. A published
 listing keeps its stored snapshot blob and its hold. Rename `models` to `models-old` and
 `models-next` to `models`. Start. The SQL runs only in the API's image with the API's
-credential (root `CLAUDE.md`, "Database access"). Roll back: rename back, restore the rows
-from a dump taken first.
+credential (root `CLAUDE.md`, "Database access"). The order is: dump the rows, then the
+renames, then the transaction, then start. A crash after the renames leaves the rows as
+they were: run the transaction again, or rename back. A crash in the transaction leaves
+no change in the rows. So the transaction is the point of no return, and after it a roll
+back is: stop, rename back, restore the rows from the dump.
 
 **After.** An output of a revision that is gone must open with a clear message, and not
 a 500. `models-old` stays until the owner says to delete it.

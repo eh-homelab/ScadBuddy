@@ -35,7 +35,7 @@ run's grant. Still a label, not a credential: a forged one can at most deny a ca
 narrow it into the grant the person approved, pass it up, or revoke the grant, each of
 which only removes authority. Nothing that approves, creates or widens anything is
 reachable with the header, or by a service credential or a delegated session; those
-routes need a person (:func:`by_a_person`, `api/flows.py` `_browser_only`).
+routes need a person (:func:`by_a_person`, `api/flows.py` `browser_only`).
 
 A context variable, not a parameter threaded through every catalogue write: the
 commits happen several calls below the routes, in threads (``asyncio.to_thread`` and

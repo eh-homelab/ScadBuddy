@@ -101,6 +101,7 @@ def test_orphans_lists_an_entity_whose_owner_row_is_gone(
         assert store.orphans(conn, 0) == []
 
 
+@pytest.mark.pg_empty
 def test_the_migration_backfills_an_entity_for_each_attachment_subject(pg_conninfo: str) -> None:
     # Applies every file before the entities one, writes attachments as the order-only
     # table held them, then applies the rest: the real backfill runs.

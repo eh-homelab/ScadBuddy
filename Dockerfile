@@ -87,6 +87,7 @@ RUN apt-get update \
         fonts-lobstertwo \
         fonts-noto-core \
         git \
+        git-lfs \
         libpq5 \
         python3 \
         python3-venv \
@@ -368,6 +369,52 @@ USER 10001:10001
 EXPOSE 8090 3128
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/sandbox/main.js"]
+
+# ── playwright-mcp: the agent's browser, one context per MCP session (#7027) ───
+# Microsoft's @playwright/mcp image, with our server (workers/playwright-mcp/server.mjs)
+# in place of its cli.js: each MCP session's context takes its user agent, viewport and
+# locale from the X-ScadBuddy-Browser header. The base image has Chromium
+# (/ms-playwright) and the CLI, but no index.js, so the package is installed here at
+# the same version. The tag, its digest and package.json's `@playwright/mcp` move
+# together: the check below fails the build when the base image's /app/package.json
+# version is not the installed package's, or its Chromium is not the installed
+# playwright-core's revision. Dependabot's docker update moves this FROM alone, so that
+# check fails its PR on purpose: whoever finishes the PR bumps
+# workers/playwright-mcp/package.json's `@playwright/mcp` to the same version and
+# regenerates its package-lock.json (`npm install --package-lock-only --ignore-scripts`)
+# in the same PR. Same args as the CLI's Deployment (parseArgs in options.mjs);
+# options.test.mjs is copied so CI runs it in the image.
+# DL3026: Microsoft publishes this image on mcr.microsoft.com, not Docker Hub or GHCR;
+# it is pinned here by digest, and CI's hosted runners pull it directly.
+# hadolint ignore=DL3026
+FROM mcr.microsoft.com/playwright/mcp:v0.0.86@sha256:2dfc17e08e8db54678ec965ce9ffb4100be0aa68135774d761bac9035ceb6668 AS playwright-mcp
+
+# Root while installing, so node (1000) cannot change the server's files.
+USER 0
+WORKDIR /opt/scadbuddy-playwright-mcp
+COPY workers/playwright-mcp/package.json workers/playwright-mcp/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    && npm cache clean --force \
+    && node -e " \
+      const fs = require('fs'); \
+      const base = require('/app/package.json').version; \
+      const ours = require('@playwright/mcp/package.json').version; \
+      if (base !== ours) throw new Error('base image @playwright/mcp ' + base + ' != installed ' + ours); \
+      const browsers = require(require.resolve('playwright-core/package.json').replace('package.json', 'browsers.json')).browsers; \
+      const dir = '/ms-playwright/chromium-' + browsers.find((b) => b.name === 'chromium').revision; \
+      if (!fs.existsSync(dir)) throw new Error(dir + ' is not in the base image'); \
+      console.log('@playwright/mcp ' + ours + ', ' + dir); \
+    "
+COPY workers/playwright-mcp/options.mjs workers/playwright-mcp/server.mjs workers/playwright-mcp/options.test.mjs workers/playwright-mcp/browser-vectors.json ./
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+# The base image's user `node`, by number so runAsNonRoot can check it.
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/tini", "-s", "--", "node", "/opt/scadbuddy-playwright-mcp/server.mjs"]
 
 # ── agent-durable: ScadBuddy's Python agent parts (spec 2026-10-13 §14.4) ─────
 # Its Deployment of its own, trusted like `agent` (#1030). The Python turn is retired
@@ -750,6 +797,132 @@ COPY backend/tests ./tests
 ENV PYTEST_ADDOPTS="-p no:cacheprovider"
 CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.py"]
 
+# ── mediamtx: the pinned MediaMTX release binary ──────────────────────────────
+# Printer camera recording (#7328, docs/features/printer-cameras.md). One place for the
+# version and the per-arch digests: the camera images and the `test` stage copy the
+# binary from here. The official image (bluenviron/mediamtx:1.21.4) is one layer with no
+# shell and no curl (measured 2026-11-24, camera spec §2), and MediaMTX's hooks run curl; so
+# the camera stages take the static release binary instead. The digests are the release's own checksums.sha256
+# (https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4), equal to `sha256sum` of
+# each tarball on 2026-11-23, and the same pins as tests/camera/conftest.py
+# `MEDIAMTX_VERSION` and `MEDIAMTX_SHA256`. Move the three ARGs and those two together,
+# and re-measure the MediaMTX facts in the camera spec §2
+# (docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md).
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS mediamtx
+
+ARG TARGETARCH
+ARG MEDIAMTX_VERSION=v1.21.4
+ARG MEDIAMTX_SHA256_AMD64=be0c05d9c8af8338116977e7f1c3fcb409fbf882075e5ab075cf8baad76a59d2
+ARG MEDIAMTX_SHA256_ARM64=47784081da54c0608ea4dc359f5cfb19880209434769c532b3ed3a67ea99c29d
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN case "$TARGETARCH" in \
+      amd64) sha="$MEDIAMTX_SHA256_AMD64" ;; \
+      arm64) sha="$MEDIAMTX_SHA256_ARM64" ;; \
+      *) echo "ERROR: no pinned MediaMTX for '${TARGETARCH}'." >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+         --output /tmp/mediamtx.tar.gz \
+         "https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_${TARGETARCH}.tar.gz" \
+    && printf '%s  /tmp/mediamtx.tar.gz\n' "$sha" > /tmp/mediamtx.sha256 \
+    && sha256sum --check --strict /tmp/mediamtx.sha256 \
+    && tar -xzf /tmp/mediamtx.tar.gz -C /usr/local/bin mediamtx \
+    && rm -f /tmp/mediamtx.tar.gz /tmp/mediamtx.sha256 \
+    && test "$(mediamtx --version)" = "$MEDIAMTX_VERSION"
+
+# ── camera-relay, camera-recorder: printer camera recording (#7328) ───────────
+# Two images, one per process (README.md, "Printer cameras (#7328)"). Each pod
+# runs two containers of its image: MediaMTX (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`)
+# and the controller (the default command). The controller drives MediaMTX's control API
+# on 127.0.0.1:9997, and MediaMTX's hooks run curl against the controller's hook server on
+# 127.0.0.1:9091, so both share the pod's network. The recorder's two containers also
+# share /segments. Neither process holds a database secret or client (#5295).
+#
+# `camera-deps` builds the venv as `profile-fetch-deps` does: no dev group, no editable
+# install, and no psycopg package. It needs git for the git-pinned
+# temporal-agent-harness. `camera` is the common runtime.
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS camera-deps
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=uv /uv /usr/local/bin/
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+WORKDIR /app/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
+COPY backend/scadbuddy ./scadbuddy
+RUN uv sync --frozen --no-dev --no-editable \
+    --no-install-package psycopg --no-install-package psycopg-binary --no-install-package psycopg-pool
+
+FROM python:3.12-slim-bookworm@sha256:935c3c5b12357a7e10caa9c1e6ca5692344d97cf229832ef584be2cec9fc03df AS camera
+
+# CI builds and publishes amd64 only. Nothing here is arch-specific beyond the `mediamtx`
+# stage's per-arch pin, so arm64 builds too (both targets built and run on an arm64 host,
+# 2026-11-24, `docker build --target camera-relay` and `--target camera-recorder`).
+# curl for MediaMTX's hook commands, tini to reap them, as in the other stages.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --version
+
+COPY --from=camera-deps /opt/venv /opt/venv
+COPY --from=mediamtx /usr/local/bin/mediamtx /usr/local/bin/mediamtx
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Fails the build when a psycopg package is installed, or when either process's start
+# imports Postgres code (#5295: neither has a database). `-B`, so it writes no bytecode.
+RUN python -B - <<'CHECK'
+import importlib.util, sys
+for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
+    if importlib.util.find_spec(name) is not None:
+        sys.exit(f"ERROR: {name} is installed in the camera image")
+import scadbuddy.camera.relay, scadbuddy.camera.recorder
+if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
+    sys.exit("ERROR: importing scadbuddy.camera.relay or .recorder imported psycopg")
+CHECK
+
+RUN groupadd --gid 10001 camera \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin camera
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV HOME=/tmp \
+    SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+WORKDIR /tmp
+# Numeric, as the other stages: Kubernetes' runAsNonRoot cannot check a name (DL3066).
+USER 10001:10001
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+FROM camera AS camera-relay
+COPY deploy/camera/mediamtx-relay.yml /etc/mediamtx/mediamtx.yml
+# MediaMTX's RTSP for the recorders; the controller's /healthz and /metrics
+# (`camera.process.HEALTH_PORT`).
+EXPOSE 8554 9090
+CMD ["python", "-m", "scadbuddy.camera.relay"]
+
+FROM camera AS camera-recorder
+COPY deploy/camera/mediamtx-recorder.yml /etc/mediamtx/mediamtx.yml
+# MediaMTX names segment files in local time, and the recorder reads them as UTC: it
+# refuses any other TZ (`RecorderSettings.check_environment`). Both containers of the pod
+# run this image, so both get it.
+ENV TZ=UTC
+# The controller's /healthz and /metrics (`camera.process.HEALTH_PORT`).
+EXPOSE 9090
+CMD ["python", "-m", "scadbuddy.camera.recorder"]
+
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
 # the browser by backend/scadbuddy/library/lsp.py. Upstream publishes prebuilt
@@ -903,6 +1076,8 @@ ENV OPENSCAD_VERSION=${OPENSCAD_VERSION}
 # pipe in a RUN trips hadolint's DL4006, and `SHELL -o pipefail` for one command
 # is the worse trade. `sort -V` reads and writes files here instead.
 ARG MIN_GIT_VERSION=2.37
+# The models repository's meshes (#7314): without it every mesh commit and export fails.
+RUN git lfs version
 RUN git --version > /tmp/git-version \
     && actual="$(sed -n 's/^git version //p' /tmp/git-version)" \
     && actual="${actual%% *}" \
@@ -1068,9 +1243,27 @@ RUN apt-get update \
 ENV SCADBUDDY_TEST_MQTT=/usr/sbin/mosquitto \
     SCADBUDDY_TEST_FAKES_REQUIRED=1
 
+# The camera e2e (tests/camera/test_e2e_mediamtx.py): ffmpeg publishes a test stream, and
+# MediaMTX stands in for the printer, the relay and both recorders. ffmpeg is unpinned
+# like the packages above. MediaMTX is the `mediamtx` stage's pinned binary, the one the
+# camera images ship. With both here, the test fails instead of skipping
+# (SCADBUDDY_TEST_MEDIA_REQUIRED).
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -hide_banner -version
+COPY --from=mediamtx /usr/local/bin/mediamtx /usr/local/bin/mediamtx
+ENV SCADBUDDY_TEST_MEDIA_REQUIRED=1
+# The MediaMTX configs the camera e2e runs (tests/camera/test_e2e_mediamtx.py `DEPLOY`).
+COPY deploy/camera /app/deploy/camera
+
 # The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
 # #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
 COPY workers/rust/vectors /app/workers/rust/vectors
+# The session browser options' vectors (#7027), which the playwright-mcp wrapper tests
+# against too: tests/crud reads them from the repo layout.
+COPY workers/playwright-mcp/browser-vectors.json /app/workers/playwright-mcp/browser-vectors.json
 
 # The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
 # test_bambuddy_recorder.py's RECORDER_PY), beside the backend. Last, so a change to a

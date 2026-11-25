@@ -115,11 +115,14 @@ from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Person
 from scadbuddy.core.events import (
+    TASK_PLACE_CHAR,
+    TASK_PLACE_MAX,
     ActivityEvent,
     AgentOperationEvent,
     AnalyzerDecisionEvent,
     AuthSessionRevoked,
     BusResync,
+    CameraFeedEvent,
     Event,
     FlowChanged,
     FlowRunEvent,
@@ -144,11 +147,13 @@ from scadbuddy.core.events import (
     SettingsChanged,
     SourceChanged,
     Subscription,
+    TaskChanged,
     UpstreamAvailable,
     VersionCommitted,
 )
 from scadbuddy.core.origins import origin_allowed as origin_allowed
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
+from scadbuddy.library.settings_store import PUBLIC_URL
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 
 logger = logging.getLogger(__name__)
@@ -193,6 +198,8 @@ COLLECTION_TOPICS = frozenset(
         "printers",
         # Orders (#4249, spec 2026-10-18 §4): the list re-reads on any order's change.
         "orders",
+        # Tasks (#7364): the list of every task a flow asks.
+        "tasks",
     }
 )
 #: A flow run's id (#1057): a UUID, as ``api/flows.py`` makes them.
@@ -219,12 +226,16 @@ _TOPIC = re.compile(
             f"printer:{FLOW_RUN_ID_PATTERN}",
             # An order (#4249): its id is a text uuid, as `orders/store.py` makes it.
             f"order:{FLOW_RUN_ID_PATTERN}",
+            # A task (#7364): its id is the harness call id, a UUID; ``tasks:<place>`` is
+            # the tasks shown in one place.
+            f"task:{FLOW_RUN_ID_PATTERN}",
+            f"tasks:{TASK_PLACE_CHAR}{{1,{TASK_PLACE_MAX}}}",
             # An activity row (spec 2026-10-09): ``activity:<source>:<source id>``.
             r"activity:(?:render|operation|print_run|agent_operation):[A-Za-z0-9_-]{1,64}",
             *sorted(COLLECTION_TOPICS),
         ]
     )
-    + ")$"
+    + r")\Z"  # not `$`, which also matches before a trailing newline
 )
 
 
@@ -251,9 +262,12 @@ def topics_of(event: Event) -> list[str]:
             return ["workflow-runs", f"workflow-run:{event.run_id}"]
         case FlowChanged():
             return ["flows"]
+        case TaskChanged():
+            topics = ["tasks", f"task:{event.task_id}"]
+            return [*topics, f"tasks:{event.place}"] if event.place else topics
         case PreviewSliceEvent():
             return [f"preview-slice:{event.slicer}:{event.job_id}"]
-        case PrinterEvent():
+        case PrinterEvent() | CameraFeedEvent():
             return ["printers", f"printer:{event.printer_id}"]
         case LibraryChanged():
             return ["libraries", f"model:{event.slug}"]
@@ -554,7 +568,7 @@ async def refuse_foreign_origin(websocket: WebSocket, state: AppState, what: str
     sockets, so this is all that keeps another site's page off every socket (the
     realtime one, #266; the language servers', #1317). Call it before taking a permit."""
     origin = websocket.headers.get("origin")
-    public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
+    public_url = await asyncio.to_thread(state.settings_store.get, PUBLIC_URL)
     if origin_allowed(origin, public_url, state.settings.allowed_origin_list):
         return False
     logger.warning(

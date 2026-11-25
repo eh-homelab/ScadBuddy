@@ -75,7 +75,7 @@ from scadbuddy.orders.storefront.inputs import (
     slot_filaments,
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
-from scadbuddy.orders.storefront.listings import problem, published_listing
+from scadbuddy.orders.storefront.listings import page_outdated, problem, published_listing
 from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
     PriceRow,
@@ -90,7 +90,7 @@ from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobNotFoundError, PlateInfo, QueueFullError
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 from scadbuddy.storefront.wire import JOB_ID
@@ -363,7 +363,8 @@ async def checked_choice(
     the reference renders those values. With ``render_colours``, each slot
     ``body.colours`` lacks takes that material's filament of the slot's colour in that
     render (`slot_filaments`). Refusals: 404 ``listing_not_found``, 409
-    ``listing_changed`` (the listing moved since the page read it), 422
+    ``listing_changed`` (the listing moved or was switched to a file since the page
+    read it), 422
     ``input_outside_listing`` (with ``name`` and ``reason``), 422
     ``listing_colours_clash`` (colours no one allowed material offers together, with
     ``parts``, `ColoursClashError`; only the visitor's colours and slots, never a locked
@@ -374,11 +375,7 @@ async def checked_choice(
     visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "listing_changed",
-            "This listing has changed. Load it again.",
-        )
+        raise page_outdated()
     filaments = await asyncio.to_thread(price_book, orders)
     materials = effective_materials(listing, shop_materials)
     with listing_refusals():
@@ -713,7 +710,8 @@ async def variant_of(
     filaments = await asyncio.to_thread(price_book, _orders(state))
     by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
     slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
-    digest = await asyncio.to_thread(model_digest, job.id, state.paths.root / job.result.model_3mf)
+    model = result_file(state.store.blobs, state.paths.root, job.result.model_3mf)
+    digest = await asyncio.to_thread(model_digest, job.id, model)
     return digest, None if None in slots else [slot for slot in slots if slot is not None]
 
 

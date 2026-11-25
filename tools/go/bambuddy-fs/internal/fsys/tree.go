@@ -705,8 +705,10 @@ func (n *file) attr(out *fuse.Attr) {
 	if p != nil {
 		out.Size = uint64(p.size.Load())
 	} else if e != nil {
-		if rec, ok := n.tree.unsent.record(e); ok {
-			out.Size = uint64(rec.Size)
+		// Also after the upload finished: until the node becomes the sent file, n.file of
+		// a file created here has size 0 (#7563).
+		if size, ok := n.tree.unsent.size(e); ok {
+			out.Size = uint64(size)
 		}
 	}
 	out.SetTimes(&f.Created, &f.Created, &f.Created)

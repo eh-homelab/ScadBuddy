@@ -428,7 +428,8 @@ on shutdown.
   replaced by a newer one is cancelled, waiting or running, and identical waiting requests share
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
-  (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
+  (`/data/blobs/` on the `local` store; on a remote store that is each process's
+  cache, which `SCADBUDDY_BLOB_CACHE_DIR` can move), so a later job that needs it reuses it; a piece no job
   references is removed after `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever).
   - `SCADBUDDY_JOB_TTL` (seconds, `86400` by default): how long a settled render job
     and its files are kept. `0` keeps settled renders and their files forever (#6236).
@@ -466,7 +467,10 @@ on shutdown.
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
     `orders/storefront/listings.py`, in the gauges as `scadbuddy-storefront-publish`), a library copy's target locks (`print_library/copy_store.py`),
     the Bambuddy catalogue refresh and upload claims, the store's folder lock, the
-    output backfill's claim, the service credential rotation and the flow keys. So
+    output backfill's claim, the service credential rotation and the flow keys. The copy
+    of the saved outputs to rows (#7255) holds its advisory lock for the whole run (up to
+    15 minutes) on a connection of its own (`scadbuddy-output-copy`), not on a pool's;
+    each of its statements takes a connection of the main pool. So
     leave headroom above the pools' sum. Every pool keeps only what it uses (the main
     pool one more) and closes a connection left idle for a minute, one a minute
     (psycopg_pool's `max_idle`). The `LISTEN` connection and `scadbuddy-preview-follows`
@@ -1087,6 +1091,14 @@ hook (`temporal-promote-workers.yaml`) would also try to make the old revision c
 and fail that sync: take `scadbuddy-library` out of its list for such a rollback. Rolling back to any build
 from #4090 on needs nothing: its pods make their own build current.
 
+**Saved outputs during a roll-out (#7255).** An API pod of a build before #7255 saves
+an output in the files only. Once a copy run has finished, the newer pods look outputs
+up in the `outputs` rows only, so such an output is a 404 on them until the next copy
+writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or the next
+API start. A rollback to such a build makes the same window. To end it sooner, restart
+one API pod once the roll-out is done: its start runs the copy. Then check
+`GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
+
 ### Render worker (#424)
 
 Renders run on a separate worker. It is the
@@ -1099,7 +1111,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   local store runs only in-process (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), on the API's
   own volume and git. The worker's `/data` is its own (an `emptyDir` is enough). It
   renders from the template snapshots that the API stores, writes each piece to the
-  store, and keeps a cache of pieces under `/data/blobs/`.
+  store, and keeps a cache of pieces under `/data/blobs/` (or
+  `SCADBUDDY_BLOB_CACHE_DIR`, where it is set).
 - **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
@@ -1358,9 +1371,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   nothing and spends no attempt. Temporal retries the task, and an auto-upgrade run's
   retry goes to the current build, which the new build becomes as it starts.
   Measured on the dev server (Temporal CLI 1.8.2, server 1.31.2;
-  `tests/test_operation_deferral.py`): the first failure is retried at once, then
-  about every 10 s (attempt 4 after 25 s), because the SDK lets a repeated failure time
-  out at the 10 s workflow task timeout rather than report it; the server logs it once.
+  `tests/test_operation_deferral.py`), at Temporal's default workflow task timeout of
+  10 s: the first failure is retried at once, then about every 10 s (attempt 4 after
+  25 s), because the SDK lets a repeated failure time out at the workflow task timeout
+  rather than report it; the server logs it once. A deployed `Operation` starts with
+  `SHORT_TASK_TIMEOUT` (3 s, `workflows/commands.py`, #7288), so it retries after each
+  3 s timeout: on Temporal CLI 1.10.1 (server 1.32.2) attempts began at 0, 0.25, 3.1 and
+  6.1 s, and from the fifth (14 s, 26 s) the server adds a growing backoff to the timeout.
   While the task fails, Temporal refuses an Update on that execution ("Workflow Task in
   failed state"); `start_command` answers that as still accepting (the route's 202 to
   follow, or 503 to send again), not as a refusal, and the re-send attaches to the
@@ -1453,9 +1470,9 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 `python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
 `applications/scadbuddy/scadbuddy-projects.yaml`, same image.
 
-- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations
-  and payload keys go through the API's CRUD routes, and it starts only once the API
-  lists the `flows`, `operations` and `payload-keys` areas. A `SCADBUDDY_DATABASE_URL`
+- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations,
+  tasks and payload keys go through the API's CRUD routes, and it starts only once the API
+  lists the `flows`, `operations`, `payload-keys` and `tasks` areas. A `SCADBUDDY_DATABASE_URL`
   that is still set is logged once and ignored. It needs the KEK
   (`SCADBUDDY_SECRET_KEY_FILE`: a flow's payloads are sealed per run, and the worker
   refuses to start without it), `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and
@@ -1599,9 +1616,10 @@ workers restart.
     set) onto its volume, as the API does. A library a template pins outside the
     image is cloned on **each worker pod**, the first time it renders that template,
     so the workers need network access (egress) to those libraries' Git remotes.
+  - A worker trims its cache to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently
+    used first) after each write that grows it (#689).
   - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
-    interval, and **only** then, a worker trims its cache to
-    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
+    interval a worker trims the cache again (a backstop), removes the
     revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default, and
     a day while it is 0, which keeps renders forever), and
     removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
@@ -1754,9 +1772,16 @@ workers restart.
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render worker API key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
-| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
-| `SCADBUDDY_DOWNLOAD_CACHE_DIR` | API: `<data>/cache/downloads`; worker: none | Whole files downloaded from Bambuddy, named by their SHA-256 (#2788). A blob this process stored or fetched, and a library 3MF Bambuddy states a hash for, is read from here rather than downloaded again. An entry is renamed in only after its bytes match its name, and every read uses a private copy whose digest was checked, so a bad entry is a miss. **Never give a render worker write access to the API's directory**: workers run template code, which could then fill the volume. A worker with none downloads as before. |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` or `s3` store. It is trimmed to this after each fetch or publish (#689), and again every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`). |
+| `SCADBUDDY_DOWNLOAD_CACHE_DIR` | API: `<data>/cache/downloads`; worker: none | Whole files downloaded from Bambuddy, named by their SHA-256 (#2788). A blob this process stored or fetched, and a library 3MF Bambuddy states a hash for, is read from here rather than downloaded again. An entry is renamed in only after its bytes match its name, and every read uses a private copy whose digest was checked (or, with `SCADBUDDY_DOWNLOAD_CACHE_PRIVATE`, the entry itself, checked first), so a bad entry is a miss. **Never give a render worker write access to the API's directory**: workers run template code, which could then fill the volume. A worker with none downloads as before. |
 | `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` | 4 GiB | Its cap, least recently used first, trimmed on each write. An entry used within the activity timeout is kept even past it, so a read under way keeps its file. `0` keeps nothing. |
+| `SCADBUDDY_DOWNLOAD_CACHE_PRIVATE` | `false` | API only, and only with `SCADBUDDY_DOWNLOAD_CACHE_DIR` set (#7316). `true` says that directory is this container's alone (an `emptyDir` mounted in no other container): a hit is then checked and read in place, with no private copy. Never on a shared directory, and never on a render worker, which runs template code in its container. Each replica then keeps its own cache. |
+| `SCADBUDDY_SPOOL_DIR` | `<data>/cache` | #7316. Where this process spools whole files while it works on them. `blob-spool/` holds the store's request-body spool: a cached download's private copy while it is read, the slicer worker's sliced 3MF (`PUT /api/v1/internal/blobs/…`), the print worker's per-print library copy (`PUT /api/v1/internal/library/files`), a background slice's 3MF while it is read, a Bambuddy library file downloaded for a slice, a sliced 3MF on its way to the library, a native library file copied for its thumbnail, and an order item's copy of a past print's archive. `library-spool/` holds every read of a Bambuddy library file (the file route, previews, choices, analyses, Arrange, and library prints from the dialog, a batch or an order). All are this process's own: unnamed files, except the archive copy, a named file removed when its upload ends. So a node-local `emptyDir` is right. The API reads it, and so does a render worker where it is set there (`build_store`). It is set once on the download cache, so with `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES=0` a library read spools under `<data>/cache` instead. A browser upload's body still streams to `<data>/cache`, since its claim is linked there for a run that may be another replica's. |
+| `SCADBUDDY_BLOB_CACHE_DIR` | `<data>/blobs` | #7318. Where this process keeps its piece cache on the `bambuddy` or `s3` store: each rendered piece (and each kept file it serves by path, such as an order's attachment) it fetched or published, unpacked under `<key>/`, capped by `SCADBUDDY_WORKER_CACHE_MAX_BYTES`. The store is the record, and each process fetches what it lacks, so a node-local `emptyDir` is right: on the shared `/data` NFS volume every hit read a marker file over NFS and every miss unpacked a piece onto it. A job's files keep their stored names (`blobs/<key>/<file>`), wherever the cache is. A small file read whole (a filament preset document, a hosted plugin's zip) is read from the store in memory on a miss, with nothing unpacked. Each replica keeps its own cache, so each fetches a piece once. On the `local` store `<data>/blobs` is the store itself, so the setting is ignored there. After a move the old `<data>/blobs` is read by nothing; remove it by hand once every replica runs with the setting. The API reads it, and so does a render worker where it is set there (`build_store`). |
+
+On a node-local `emptyDir`, the download cache's free-space reserve (1 GiB) is read from the node's disk, not from the volume's `sizeLimit`, and the kubelet evicts a pod whose `emptyDir` passes its `sizeLimit` ([Kubernetes: emptyDir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)). So size the `emptyDir` for the download cache and for every body spooled at the same time. The cache: its cap, with room for its overshoot: entries read within the activity timeout are kept past the cap, each fill under way holds up to a quarter of the cap, and each spooled copy as much again. Twice `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` covers that (8 GiB for the default 4 GiB). The request bodies add their own sizes, one for each under way: up to 128 MiB for a sliced 3MF, a slicer PUT or a background slice read (`bambuddy/preview.py` `MAX_SLICED_BYTES`); up to 272 MiB for a per-print library copy (`bambuddy/print_source.py` `MAX_DOWNLOAD_BYTES`, 256 MiB, plus `api/internal_library.py` `LAYOUT_HEADROOM`, 16 MiB); up to 1 GiB for an order's archive copy (`orders/past_prints.py` `MAX_COPY_BYTES`). A library read of a Bambuddy library file that is not kept spools the whole file, whatever its size, and a thumbnail copy spools a whole native library file: each adds its largest file. A slice of a Bambuddy library file spools up to 272 MiB (`workflows/slicing_activities.py` `MAX_INPUT_BYTES`, #7499). So start from twice the cache's cap plus 2 GiB (10 GiB for the default 4 GiB), and add more for a large library or for many prints and slices at once.
+
+Size the piece cache's `emptyDir` (`SCADBUDDY_BLOB_CACHE_DIR`) for its cap and its overshoot. A write trims it to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (10 GiB by default), but a piece used within the activity timeout (`SCADBUDDY_RENDER_TIMEOUT` plus a margin) is kept past the cap, and each unpack under way writes the new copy before the old one is removed, so it holds a piece twice for a moment. A trim may also leave crash-left staging directories (follow-up #8). So set the `sizeLimit` to the cap plus the pieces read within one activity timeout plus slack: for the API, 12 GiB for the default 10 GiB cap, or set a smaller cap with a smaller volume. A miss holds the piece in memory while it unpacks, as before. Watch `scadbuddy_worker_cache_bytes` against the cap; the kubelet evicts a pod whose `emptyDir` passes its `sizeLimit` ([Kubernetes: emptyDir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)).
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
 each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →
@@ -2656,12 +2681,144 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the image, with one image line. The browser service's Deployment has no image line of its
   own: clusters copies the worker's with a kustomize replacement, as for the intake sandbox,
   so one pin moves both. A build whose `profile-fetch` job published nothing keeps
-  the pin and warns (plan Decision 74). `ci.yml`'s `profile-fetch-image` job runs the driver
+  the pin and warns (plan Decision 74). The agent's Playwright MCP browser is pinned the same
+  way (#7546): `applications/scadbuddy/playwright-mcp.yaml` (`MANIFEST_PLAYWRIGHT_MCP`,
+  eh-homelab/clusters#4237) gets `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` at the
+  build's digest ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md#adding-it)).
+  `ci.yml`'s `profile-fetch-image` job runs the driver
   tests in the never-published `profile-fetch-test` stage against a local replica of the
   site, with `--network none`, under the pod's own seccomp file and AppArmor profile.
 - **First fetch.** The first real fetch is the owner's, at the next invoice import or with
   the button. Afterwards read `GET /api/v1/filament/types/{id}/profile-fetch` (GET only):
   expect `status: imported` and `gaps: []`.
+
+### Printer cameras (#7328)
+
+ScadBuddy records each qualifying printer's camera all the time, as fMP4 segments of about
+4 s in a bucket with an index in Postgres (phase 1 of #7334). What it does, and the code, are
+in [docs/features/printer-cameras.md](docs/features/printer-cameras.md); the design is
+`docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md`. eh-homelab/clusters
+holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 3.
+
+- **Two images.** `ghcr.io/eh-homelab/scadbuddy-camera-relay` and
+  `ghcr.io/eh-homelab/scadbuddy-camera-recorder` are the Dockerfile targets `camera-relay` and
+  `camera-recorder` (python:3.12-slim-bookworm, uid 10001, `tini`, `curl`, the controller's
+  venv with no database client library, and MediaMTX v1.21.4 from the `mediamtx` stage, pinned
+  by sha256). Each holds its MediaMTX config at `/etc/mediamtx/mediamtx.yml`, from
+  `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
+  time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
+  `build-image.yml` job `camera` publishes both (amd64); `ci.yml` job `camera-image` builds and
+  checks both. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
+  relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
+  (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
+  (the spec's estimate, §6.9).
+- **Two containers per pod.** Each pod runs its image twice: MediaMTX
+  (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
+  `python -m scadbuddy.camera.relay` or `python -m scadbuddy.camera.recorder`). The controller
+  drives MediaMTX's control API on `127.0.0.1:9997`, and MediaMTX's hooks run `curl` against
+  the controller on `127.0.0.1:9091`, so the two must share the pod. The control API and the
+  metrics (`127.0.0.1:9998`) listen on localhost only (`deploy/camera/*.yml`).
+- **`scadbuddy-camera-relay`.** One replica, strategy `Recreate`, on the node pool that
+  reaches the printer LAN (spec §6.8). ServiceAccount `scadbuddy-camera-relay` (CRUD caller
+  `camera-relay`, `auth/exchange.py` `SERVICE_ACCOUNTS`). A Service on port 8554 (RTSP)
+  for the recorders. It is the only part that holds printers' access codes, in memory only;
+  it gives them to MediaMTX through the control API, never through a file.
+- **`scadbuddy-camera-recorder`.** Two replicas with pod anti-affinity, so one node's loss
+  leaves the standby. Roll one pod at a time (`maxSurge: 0`, `maxUnavailable: 1`), with the
+  readiness probe below and `minReadySeconds: 30`, and keep a PodDisruptionBudget with
+  `minAvailable: 1`: the standby holds what the index has not reached, so one pod down leaves
+  no gap. Without the readiness probe, Kubernetes counts a new recorder available at once and
+  stops the other one before the new one holds any video. ServiceAccount `scadbuddy-camera` (CRUD caller
+  `camera`). Both containers mount one `emptyDir` at `/segments` with `sizeLimit` =
+  `SCADBUDDY_CAMERA_DISK_MAX_BYTES` + 25% (2.5 GiB for the default 2 GiB): the recorder's cap
+  counts finished segments only, and MediaMTX writes one open segment per printer beside
+  them. `terminationGracePeriodSeconds` at least 35: on SIGTERM the recorder flushes and
+  releases its printers within `SHUTDOWN_SECONDS` (25 s, `camera/recorder.py`).
+- **The three environment sets.**
+  - Relay controller: `SCADBUDDY_API_INTERNAL_URL`, `SCADBUDDY_SERVICE_TOKEN_FILE` (a projected
+    ServiceAccount token, audience `scadbuddy`; or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`
+    outside Kubernetes), `SCADBUDDY_LOG_LEVEL`, and `SCADBUDDY_CAMERA_MEDIAMTX_API_URL`
+    (default `http://127.0.0.1:9997`) (`camera/settings.py` `RelaySettings`).
+  - Recorder controller: the same, plus `SCADBUDDY_CAMERA_S3_ENDPOINT`,
+    `SCADBUDDY_CAMERA_S3_BUCKET`, `SCADBUDDY_CAMERA_S3_PREFIX`,
+    `SCADBUDDY_CAMERA_S3_ACCESS_KEY`, `SCADBUDDY_CAMERA_S3_SECRET_KEY` (the bucket's camera
+    keys: in the recorder pods only), `SCADBUDDY_CAMERA_DISK_MAX_BYTES` (default 2 GiB),
+    `SCADBUDDY_CAMERA_RELAY_RTSP_URL` (e.g. `rtsp://scadbuddy-camera-relay:8554`),
+    `SCADBUDDY_CAMERA_RELAY_READ_USER`, `SCADBUDDY_CAMERA_RELAY_READ_PASS`, and
+    `SCADBUDDY_CAMERA_RECORDER_NAME` (default: the pod's hostname) (`RecorderSettings`).
+  - The relay's MediaMTX container: `MTX_AUTHINTERNALUSERS_0_USER` and
+    `MTX_AUTHINTERNALUSERS_0_PASS`, from the relay read secret. MediaMTX reads no `$VAR` in
+    its yml; it overrides a key from `MTX_<KEY>`, and a list entry by its index
+    ([MediaMTX configuration](https://mediamtx.org/docs/features/configuration)). Entry 0 of
+    `deploy/camera/mediamtx-relay.yml` is the read user; without the two variables it keeps a
+    placeholder that no client can use. Measured 2026-11-24 on the `camera-relay` image
+    (v1.21.4, arm64, Docker): with the variables set, an RTSP `DESCRIBE` with that user and
+    password got past auth (404, no stream), and a wrong password or none got 401. Never set
+    them on the recorder's MediaMTX: there entry 0 is the localhost control-API user, and the
+    same variables replaced it, so the control API answered 401 (same date and image). The
+    recorders' MediaMTX gets the read user inside each path's source URL, which the
+    controller puts through the control API.
+- **The relay read secret.** One user and password, in two pods: the relay's MediaMTX
+  (`MTX_AUTHINTERNALUSERS_0_*`) and the recorder controllers
+  (`SCADBUDDY_CAMERA_RELAY_READ_USER`/`_PASS`). It allows reading the relay's paths over
+  RTSP and nothing else.
+- **No database and no key.** Both controllers refuse to start when
+  `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` is set (exit 2, #5295; `camera/settings.py`).
+- **Probes.** Each controller answers `/healthz` on 9090 (`camera/process.py` `healthy`). It
+  answers 503 when MediaMTX's control API does not answer within 3 s (`CHECK_BUDGET`), when
+  MediaMTX's runtime list lacks a path the controller has put, when the change follower has
+  stopped, or (recorder) when its clock is more than 2 s off the API's. Before the follower
+  starts (the controller waits for the CRUD service, or reads its first list), the follower
+  does not count. A restart of MediaMTX's container alone loses every path; the missing-path
+  rule makes the probe restart the controller, which puts them all again at its start. A
+  path whose pull cannot connect still shows in the runtime list, with `ready: false`
+  (measured 2026-11-24 on v1.21.4, spec §2), so a printer that is off does not fail the probe.
+  Use it as the controller's liveness probe with `periodSeconds: 10`, `timeoutSeconds: 4`
+  (above the 3 s check) and `failureThreshold: 3`: it restarts the controller after 30 s of
+  failures. A path joins the controller's list only after MediaMTX's control API took it, so
+  a put that is still in flight never counts as missing; a path MediaMTX took a moment before
+  a probe could miss that one probe, and one failure restarts nothing. The probe restarts the
+  controller's container only, so give the MediaMTX container an `exec` probe of its own, with
+  the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
+  Each controller also answers `/readyz` on 9090: 503 until the change follower runs, a full
+  reconcile has put the API's paths in MediaMTX, and `/healthz` would answer 200. The
+  recorder adds one rule: every recorded printer has delivered a segment since the process
+  started, or has delivered none for 120 s (`STALL_SECONDS`; a printer that is off sends no
+  video to any recorder, and must not stop a rollout). The relay does not wait for its pulls:
+  a printer that is off must not take the relay out of its Service. Use it as the
+  controller's readiness probe with the same numbers (`periodSeconds: 10`,
+  `timeoutSeconds: 4`, `failureThreshold: 3`). On the recorder Deployment, set
+  `minReadySeconds: 30`: Kubernetes then waits 30 s after the new pod is ready before it stops
+  the other one. In that time an old leader whose upload lag is under 30 s indexes past the new
+  pod's first segment, so the new pod's buffer holds the segment that contains the index's
+  end, even when the old leader cannot flush at SIGTERM.
+- **Clock.** Segment times come from the recorders' clocks and print times from the API's
+  (spec §6.9), so every node runs NTP. The recorder compares its clock with the API's `Date`
+  header. The CRUD listener is uvicorn (`crud/listener.py`), which writes `Date` in whole
+  seconds and refreshes it once a second ([uvicorn 0.53.0 `server.py` `on_tick`](https://github.com/encode/uvicorn/blob/0.53.0/uvicorn/server.py#L251-L256); uvicorn 0.53.0 is the locked version). So the
+  API's time at an answer lies in [Date, Date + 2 s): the recorder takes Date + 1 s against
+  the middle of its own send and receive, which is right within ±1 s plus the call's
+  latency. The limit stays 2 s, and the recorder decides on the smallest offset of its last
+  three samples. At start it takes three samples; more than 2 s off: it logs the offset and
+  exits 2. Later, each lease call adds a sample: while the offset is more than 2 s,
+  `/healthz` answers 503 and every feed report carries an `error` that names it.
+- **Metrics.** `/metrics` on each controller's 9090: the relay's
+  `scadbuddy_camera_relay_pulling` and `scadbuddy_camera_relay_reconnects_total`, the
+  recorders' `scadbuddy_camera_segments_indexed_total`, `_upload_lag_seconds`,
+  `_backlog_bytes`, `_leader` and `_last_segment_age_seconds` (the "Cameras" row of the
+  printing dashboard). Scrape them as the workers are: a Service per Deployment
+  (`scadbuddy-camera-relay`, `scadbuddy-camera-recorder`) with a ServiceMonitor, as the
+  render worker's `servicemonitor-render.yaml` in eh-homelab/clusters. The dashboard's
+  queries need the scrape's `namespace` and `pod` labels.
+- **Pod security.** uid 10001, `runAsNonRoot`, `allowPrivilegeEscalation: false`, every
+  capability dropped, read-only root file system. Measured 2026-11-24 in Docker
+  (`--read-only --cap-drop ALL`): both MediaMTX configs start and the control API answers 200.
+- **Network policies.** The relay: ingress on 8554 from the recorder pods only, and the
+  metrics scrape on 9090; egress to
+  the printers' LAN (RTSPS, port 322 on the H2C, spec §2), the API's CRUD port 8082, and DNS.
+  The recorders: egress to the relay's 8554, the API's 8082, the bucket and DNS; no ingress
+  but the metrics scrape on 9090. Temporal egress is phase 4's.
 
 ### Switching continuous deploy off
 

@@ -227,6 +227,69 @@ async def test_a_my_spools_404_for_a_known_filament_adds_it(
     assert replica.site.adds == [30173]
 
 
+async def test_a_404_record_check_logs_no_record_not_a_timeout(
+    browser: ThreeDfpSite, replica: ReplicaServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7547: a 404 is a plain "no record"; the log does not call it a timeout."""
+    replica.site.no_record_status = 404
+    caplog.set_level(logging.INFO, logger=site.__name__)
+    await browser.login()
+    await browser.ensure_in_my_spools(30173)
+    assert "has no My Spools record (404)" in caplog.text
+    assert "timed out" not in caplog.text
+
+
+async def test_a_slow_record_check_logs_the_timeout_on_the_add(
+    browser: ThreeDfpSite, replica: ReplicaServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7547: an export button slower than `RECORD_WAIT_MS` reads as no record, so the
+    step adds a duplicate. The add path logs that the check timed out, so the duplicate
+    is easy to trace."""
+    replica.site.in_spools.add(30173)
+
+    async def slow_button(route: Any) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=(
+                "<!doctype html><title>My spool</title><script>setTimeout(() => {"
+                "const b = document.createElement('button');"
+                "b.textContent = 'Export slicer profile';"
+                "document.body.append(b);}, 5000)</script>"
+            ),
+        )
+
+    caplog.set_level(logging.INFO, logger=site.__name__)
+    await browser.login()
+    await browser.page.route("**/my/spools/details/*", slow_button)
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.adds == [30173]
+    assert "the My Spools record check for 3DFP filament 30173 timed out" in caplog.text
+    assert "is already in My Spools" not in caplog.text
+
+
+async def test_a_filament_page_with_no_add_button_logs_that_nothing_was_added(
+    browser: ThreeDfpSite, replica: ReplicaServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7567: when the filament's page shows no "Add to My Spools" button, the step adds
+    nothing and a log line says so, so the trail claims no add."""
+
+    async def no_button(route: Any) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="<!doctype html><title>Filament</title><p>No button here</p>",
+        )
+
+    caplog.set_level(logging.INFO, logger=site.__name__)
+    await browser.login()
+    await browser.page.route("**/filament/details/*", no_button)
+    await browser.ensure_in_my_spools(30173)
+    assert replica.site.adds == []
+    assert '3DFP filament 30173\'s page offered no "Add to My Spools" button' in caplog.text
+    assert "added 3DFP filament 30173 to My Spools" not in caplog.text
+
+
 async def test_an_unknown_id_is_tdfp_not_found(browser: ThreeDfpSite) -> None:
     await browser.login()
     with pytest.raises(SiteError) as caught:

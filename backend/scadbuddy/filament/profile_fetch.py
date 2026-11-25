@@ -66,7 +66,7 @@ from scadbuddy.filament.sb_presets import (
     version_on,
 )
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
-from scadbuddy.orders.attachments import blob_path, keep_file
+from scadbuddy.orders.attachments import keep_file, read_blob
 from scadbuddy.profile_fetch.wire import (
     FETCH_WORKFLOW,
     MAX_FILE_BYTES,
@@ -100,8 +100,21 @@ HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
 #: How long an import waits for the mirror of what it wrote (#7176); the Schedule's next
-#: pull sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
-#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
+#: pull sends what is left. The mirror's calls (`preset_mirror._send`), each up to the
+#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`), per preset the run wrote (one
+#: per printer model and nozzle): a rewrite is one ``PUT`` and reads no listing; a create
+#: is one ``POST``, after the listing (`_Listing`, read at most once per run, only before a
+#: create or a lost create's match); a rewrite that answers 404 is that ``PUT``, then a
+#: create; a preset whose last create's answer was lost first reads the listing and one
+#: ``GET /local-presets/{id}`` per preset of its name above that create's floor
+#: (`_Listing.made_after`, usually one), then a rewrite of the match, or a create when none
+#: holds its document. So 120 s holds four calls at their limit, for example: four
+#: rewrites; three creates (listing + three ``POST``); a rewrite that answers 404 then
+#: creates (``PUT`` + listing + ``POST``) and one more rewrite; a lost create's match
+#: (listing + ``GET`` + ``PUT``) and one more rewrite; or a lost create's match whose
+#: rewrite answers 404 (listing + ``GET`` + ``PUT`` + ``POST``). At the speed Bambuddy
+#: answers it holds many more. It is a cut-off, not a sum of the worst case: a run past it
+#: stops and the Schedule's next pull sends the rest, so it is not raised. It leaves 7 of
 #: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
 #: of them at 30 s each.
 IMPORT_MIRROR_TIMEOUT: Final = 120.0
@@ -383,8 +396,9 @@ POLLERS: Final = PollerCache()
 
 class TemporalQueueProbe:
     """Temporal's DescribeTaskQueue for the queue's workflow and its activity task
-    queues: a poller on either is a worker that will take the run. The answer is kept
-    in ``cache`` (the app's `POLLERS` by default); a failed read is not kept."""
+    queues: a poller on either is a worker that will take the run, even when the other
+    type's read failed. The answer is kept in ``cache`` (the app's `POLLERS` by
+    default); a failed read with no poller found is raised and not kept."""
 
     def __init__(self, client: Client, task_queue: str, cache: PollerCache = POLLERS) -> None:
         self.client = client
@@ -407,11 +421,19 @@ class TemporalQueueProbe:
     async def _read(self) -> bool:
         # Every partition's pollers: a live worker can be absent from the root's (#7350).
         # Both types at once, so a miss waits for one round of reads, not two (#7425).
+        # A poller on one type is the answer even if the other's read failed; with none
+        # found, a failed read may have hidden one, so it is raised (#7513).
         answers = await asyncio.gather(
             queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW),
             queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY),
+            return_exceptions=True,
         )
-        return any(answers)
+        if any(isinstance(answer, list) and answer for answer in answers):
+            return True
+        for answer in answers:
+            if isinstance(answer, BaseException):
+                raise answer
+        return False
 
 
 def starter(state: AppState) -> Starter:
@@ -1169,10 +1191,10 @@ def _failed(error: str, missing: dict[tuple[str, str], str]) -> _Ending:
 
 
 async def _read_blob(state: AppState, key: str) -> bytes:
-    path = await blob_path(state.store.blobs, key)
-    if path is None:
+    data = await read_blob(state.store.blobs, key)
+    if data is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, f"the blob store lost {key}")
-    return await asyncio.to_thread(path.read_bytes)
+    return data
 
 
 async def _k_values(

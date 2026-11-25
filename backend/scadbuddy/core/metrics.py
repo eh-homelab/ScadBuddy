@@ -345,7 +345,8 @@ class Metrics:
         self.printer_watch_write_failed = Counter(
             "scadbuddy_printer_watch_write_failed",
             "LAN reports the printer watch could not write, or touches it could not make "
-            "(#5298), and owed reports given up after their resends. The watch goes on: an "
+            "(#5298), owed reports given up after their resends, and stored reports it could "
+            "not read at the start of an attempt (the camera URL). The watch goes on: an "
             "unwritten report is written at the next quiet tick, a refused one (a 4xx other "
             "than 429) is dropped, and the row's seen_at ages until a write succeeds.",
             registry=r,
@@ -545,6 +546,14 @@ class Metrics:
         self.assets_swept = Counter(
             "scadbuddy_assets_swept",
             "Stored files removed by the sweep because nothing referenced or used them.",
+            registry=r,
+        )
+        # #7491 (spec 2026-11-05 §4.6): the attempt media sweep's steady-state cost.
+        self.attempt_media_sweep_starts = Counter(
+            "scadbuddy_attempt_media_sweep_starts",
+            "AttemptMedia steps the housekeeping sweep housekeeping_import_attempt_media"
+            " asked to start, one per order attempt still missing a medium (each a"
+            " Bambuddy read); at most SWEEP_BATCH a pass.",
             registry=r,
         )
         # The filament inventory (#6269 plan Decisions 2-5), the API's only: set from a

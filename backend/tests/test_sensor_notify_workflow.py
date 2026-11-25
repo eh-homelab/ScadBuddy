@@ -15,6 +15,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.filament import sensors
 from scadbuddy.filament.sensor_notify import SENSOR_NOTIFY_ACTIVITY, DeliveryReport
+from scadbuddy.workflows.commands import SHORT_TASK_TIMEOUT
 from scadbuddy.workflows.sensor_notify import (
     INTERVAL,
     RUN_TIMEOUT,
@@ -92,6 +93,8 @@ async def test_the_schedule_runs_a_pass_every_minute(client: Client) -> None:
     assert action.workflow == SENSOR_NOTIFY_WORKFLOW
     assert action.task_queue == queue
     assert action.execution_timeout == RUN_TIMEOUT
+    # #7288: a task the server loses is tried again after 3 s, not 10 s.
+    assert action.task_timeout == SHORT_TASK_TIMEOUT
     assert described.schedule.policy.overlap == ScheduleOverlapPolicy.SKIP
     (spec,) = described.schedule.spec.intervals
     assert spec.every == INTERVAL == timedelta(minutes=1)

@@ -32,6 +32,12 @@ describe('PartsPage (#5543)', () => {
     await user.type(within(form).getByLabelText('Name'), 'Magnet')
     await user.type(within(form).getByLabelText('Pack size'), '50')
     await user.type(within(form).getByLabelText(/Pack price/), '4.00')
+    await user.click(within(form).getByRole('button', { name: 'Save part' }))
+    // R-P2-34: with no supplier there is no pack.
+    expect(await within(form).findByRole('alert')).toHaveTextContent('A part with no supplier has no pack')
+    await user.clear(within(form).getByLabelText(/Pack price/))
+    await user.type(within(form).getByLabelText('Supplier'), 'Bolt Depot')
+    await user.type(within(form).getByLabelText(/Pack price/), '4.00')
     await user.type(within(form).getByLabelText('On hand now'), '20')
     await user.click(within(form).getByRole('button', { name: 'Save part' }))
 
@@ -69,6 +75,25 @@ describe('PartsPage (#5543)', () => {
     expect(hook.id).toBeTruthy()
   })
 
+  it('a part with no supplier reads as of unknown cost, and Add stock needs a price', async () => {
+    const user = userEvent.setup()
+    const ring = seedPart({ name: 'Ring', supplier: '', pack_size: 1, pack_price_minor: 0, on_hand: 4 })
+    renderPage(<PartsPage />)
+
+    const row = await screen.findByTestId(`part-row-${ring.id}`)
+    expect(within(row).getByText('unknown')).toBeInTheDocument()
+    expect(within(row).getByText('no pack')).toBeInTheDocument()
+    expect(within(row).queryByText(/\$0\.00/)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Add stock of Ring' }))
+    const add = await screen.findByRole('region', { name: 'Ring: add stock' })
+    await user.click(within(add).getByRole('button', { name: 'Add stock' }))
+    expect(await within(add).findByRole('alert')).toHaveTextContent('A part with no supplier has no pack price')
+    await user.type(within(add).getByLabelText('Price of one'), '0.50')
+    await user.click(within(add).getByRole('button', { name: 'Add stock' }))
+    await waitFor(async () => expect((await api.parts())[0]).toMatchObject({ on_hand: 5, cost_unknown: false, unit_cost_minor: '50' }))
+  })
+
   it('saves a model rule', async () => {
     const user = userEvent.setup()
     const hook = seedPart({ name: 'Silver hook', pack_size: 100, pack_price_minor: 599 })
@@ -83,7 +108,7 @@ describe('PartsPage (#5543)', () => {
     await user.click(within(rules).getByRole('button', { name: 'Save rule' }))
 
     expect(await within(rules).findByText('Saved.')).toBeInTheDocument()
-    expect((await api.partRule('keychain')).lines).toEqual([{ per_unit: 1, part_id: hook.id, when: [] }])
+    expect((await api.partRule('keychain')).lines).toEqual([{ per_unit: 1, item_id: hook.id, when: [] }])
 
     // #5549 review: a line added or removed after the save is not saved yet.
     await user.click(within(rules).getByRole('button', { name: 'Add line' }))
@@ -126,7 +151,7 @@ describe('PartsPage (#5543)', () => {
     await user.type(within(panel).getByLabelText('Link address'), 'https://example.com/hook')
     await user.click(within(panel).getByRole('button', { name: 'Add link' }))
     expect(await within(panel).findByRole('link', { name: 'example.com' })).toBeInTheDocument()
-    expect(entityMock.links.get(`part:${hook.id}`)).toHaveLength(1)
+    expect(entityMock.links.get(`item:${hook.id}`)).toHaveLength(1)
 
     await user.click(within(panel).getByRole('button', { name: 'Close' }))
     expect(screen.queryByRole('region', { name: 'Silver hook: files and links' })).not.toBeInTheDocument()

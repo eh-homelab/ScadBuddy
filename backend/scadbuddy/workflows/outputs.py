@@ -17,7 +17,7 @@ import numpy as np
 import trimesh
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.core.paths import BUILTIN_PREFIX, SOURCE_NAME
+from scadbuddy.core.paths import BUILTIN_PREFIX, SOURCE_NAME, result_name
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
 from scadbuddy.render.job_models import FILE_NAME_PATTERN, JobResult, ManifestObject, PipelineOutput
@@ -440,10 +440,10 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         no_sparse_layers=req.prime_tower.no_sparse_layers if req.prime_tower is not None else None,
     )
     await asyncio.to_thread(write_glb, list(plates[0].parts), work / PREVIEW_NAME)
-    root = deps.paths.root
+    root, cache = deps.paths.root, blobs.root
     return JobResult(
-        model_3mf=str((work / MODEL_NAME).relative_to(root)),
-        preview_glb=str((work / PREVIEW_NAME).relative_to(root)),
+        model_3mf=result_name(work / MODEL_NAME, blobs_root=cache, data_root=root),
+        preview_glb=result_name(work / PREVIEW_NAME, blobs_root=cache, data_root=root),
         source_version=req.record.revision or "",
         parts=result_parts(layout),
         bbox_mm=layout.bbox,

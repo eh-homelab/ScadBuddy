@@ -16,11 +16,13 @@ import httpx
 import pytest
 from aiobotocore.config import AioConfig
 from botocore.exceptions import EndpointConnectionError
+from botocore.loaders import JSONFileLoader
 
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.content_models import BlobMissingError, BlobScope
 from scadbuddy.store.s3 import (
+    KEEPALIVE_S,
     STAGED_PUT_HEADERS,
     S3ContentBackend,
     object_key,
@@ -75,11 +77,72 @@ async def test_the_client_retries_in_standard_mode_by_default(s3: S3Settings) ->
         await backend.aclose()
 
 
+async def test_an_idle_connection_is_kept_past_aiobotocores_twelve_seconds(
+    s3: S3Settings,
+) -> None:
+    """A request after more than 12 s idle opened a new TLS connection on prod (#7287)."""
+    backend = S3ContentBackend(s3)
+    try:
+        client: Any = await backend.client()
+        assert not await backend.exists(MISSING)
+        # The aiohttp session aiobotocore made for the request: private, so read it here.
+        sessions: dict[str | None, Any] = client._endpoint.http_session._sessions
+        assert sessions[None].connector._keepalive_timeout == KEEPALIVE_S
+    finally:
+        await backend.aclose()
+
+
 async def test_a_given_config_replaces_the_retries(s3: S3Settings) -> None:
     backend = S3ContentBackend(s3, config=AioConfig(retries={"max_attempts": 1}))
     assert vars(backend.config)["retries"] == {"max_attempts": 1}
     assert vars(backend.config)["s3"] == {"addressing_style": "path"}
     await backend.aclose()
+
+
+async def test_the_clients_read_botocores_data_files_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7359: a new client lists every service botocore knows and reads its JSON models.
+    On a pod that had just started, that held the API's loop for 1.3 s; it runs in a
+    thread now, and both clients take it from one loader."""
+    loop_thread = threading.get_ident()
+    on_loop: list[str] = []
+    read: list[str] = []
+    exists, load_file = JSONFileLoader.exists, JSONFileLoader.load_file
+
+    def watched_exists(self: JSONFileLoader, file_path: str) -> bool:
+        if threading.get_ident() == loop_thread:
+            on_loop.append(file_path)
+        return exists(self, file_path)
+
+    def watched_load_file(self: JSONFileLoader, file_path: str) -> Any:
+        read.append(file_path)
+        if threading.get_ident() == loop_thread:
+            on_loop.append(file_path)
+        return load_file(self, file_path)
+
+    monkeypatch.setattr(JSONFileLoader, "exists", watched_exists)
+    monkeypatch.setattr(JSONFileLoader, "load_file", watched_load_file)
+    backend = S3ContentBackend(
+        S3Settings(
+            endpoint="http://127.0.0.1:9",
+            bucket="sb",
+            prefix="t",
+            access_key_id="testing",
+            secret_access_key="testing",
+        )
+    )
+    try:
+        await backend.client()
+        once = len(read)
+        await backend.presign_put(
+            staging_key("t", STAGED), size=5, media_type="model/stl", expires=timedelta(minutes=1)
+        )
+    finally:
+        await backend.aclose()
+    assert any(path.endswith("service-2") for path in read)
+    assert on_loop == []
+    assert len(read) == once  # the signing client loaded nothing again
 
 
 async def test_upload_returns_the_prefixed_kind_sha_key(s3: S3Settings) -> None:

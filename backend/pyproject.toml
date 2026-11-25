@@ -43,8 +43,6 @@ dependencies = [
     "joserfc>=1.7,<2",
     # Bambuddy's version against the first one with a page per archive (#3743).
     "packaging>=24",
-    # SpoolBuddy's tag scan listens on Bambuddy's WebSocket (#6264, `BambuddyClient.next_tag_scan`).
-    "websockets>=15",
     # The labels PDF (#7157, R-7157-3): pages, text and a vector QR code in one library,
     # as Bambuddy's own `/inventory/labels` uses.
     "reportlab>=5.1,<6",
@@ -136,5 +134,7 @@ markers = [
     "requires_chromium: needs Playwright's Chromium (`uv run playwright install chromium`); skips without it, fails when SCADBUDDY_TEST_CHROMIUM_REQUIRED=1",
     "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS, SCADBUDDY_TEST_TEMPORAL_DEV_SERVER (a temporal CLI) or a temporal CLI on PATH",
     "sb_offset(n): `recorded_sb_spools` numbers each SB spool as its Bambuddy id plus n, so a route that passes an SB number to Bambuddy unmapped fails (#6262 Task 7 review I5)",
+    "pg_empty: `pg_conninfo` gives an empty database, not a clone of the migrated one, for a test that migrates by hand or makes its own tables",
     "agent_migrations: the app applies the agent's migrations at start, as in production (#5299); without it the tests' apps skip them (tests/conftest.py)",
+    "output_copy: the app copies the saved outputs' files to rows at start, as in production (#7255); without it the tests' apps skip the copy (tests/api/conftest.py)",
 ]

@@ -533,7 +533,7 @@ def test_only_a_template_listing_takes_a_render(
     listing = publish(client, create(client, body(keychain, [pla_red]))["id"])
     listings = _state(client).components.get(ORDERS).listings
     assert [found.id for found in listings.published(limit=10)] == [listing["id"]]
-    with pytest.raises(ApiError, match="no such listing"):
+    with pytest.raises(ApiError, match="has changed"):
         published_listing(listings, listing["id"])
     assert published_listing(listings, listing["id"], source="library_file").id == listing["id"]
     assert published_listing(listings, listing["id"], source=None).id == listing["id"]
