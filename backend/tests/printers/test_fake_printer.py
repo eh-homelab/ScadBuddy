@@ -1176,6 +1176,8 @@ async def test_a_cut_after_add_reader_reads_the_fd_closes_after_it(
 
     def at_fileno() -> None:
         loop.call_soon_threadsafe(tasks[0].cancel)
+        # On code without the lock, the loop's close waits on paho's `_in_callback_mutex`, which
+        # this thread holds here, so this guard runs out and a red run takes about 30 s more.
         handled.wait(30.0)
 
     class CutAtFileno(aiomqtt.Client):
