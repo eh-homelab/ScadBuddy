@@ -39,8 +39,9 @@ watch puts one about every second while a printer reports, most of them only a n
 temperature or ``sequence_id``, and each written one cost a commit (1-2 s on prod). Such a
 report is answered from the stored row, which it would leave as it is, and its
 transaction writes no row, so its commit flushes nothing. It is written whole once
-`REFRESH_EVERY` has passed since the stored ``seen_at``, so ``seen_at`` and the fields no
-reader reads lag the printer by at most that."""
+`REFRESH_EVERY` has passed since the last written report (``report_seen_at``, which a
+`touch` leaves alone), so the fields no reader reads lag the printer by at most that
+while reports arrive."""
 
 from __future__ import annotations
 
@@ -102,8 +103,10 @@ FUTURE_TOLERANCE = timedelta(seconds=30)
 #: ``unseen_seconds``; an AMS reading of the same value is stored after
 #: `sensors.SAME_VALUE_EVERY` (15 min). A third of 90 s keeps a printer that reports on
 #: fresh with 60 s to spare for a slow write, keeps every gap the counter sees well under
-#: its limit, and makes a same-value reading at most 30 s late. The watch's quiet touch
-#: (`watch.HEARD_EVERY`, 10 s) moves ``seen_at`` on its own when reports stop.
+#: its limit, and makes a same-value reading at most 30 s late. It is timed from the last
+#: written report (``report_seen_at``), never from ``seen_at``: the watch's quiet touch
+#: (`watch.HEARD_EVERY`, 10 s) moves ``seen_at`` on its own when reports stop, and a
+#: touch between reports would otherwise put the refresh off for good.
 REFRESH_EVERY = timedelta(seconds=30)
 
 #: The report's top-level fields some reader reads as stored: the state, the subtask and
@@ -196,7 +199,8 @@ def _unchanged(
     return (
         ended is None
         and running == old["running_subtask"]
-        and old["seen_at"] <= seen_at < old["seen_at"] + REFRESH_EVERY
+        and old["report_seen_at"] is not None
+        and old["report_seen_at"] <= seen_at < old["report_seen_at"] + REFRESH_EVERY
         and read_view(old["report"]) == read_view(report)
     )
 
@@ -361,22 +365,32 @@ class PrinterReportStore:
         row unchanged, which costs one read.
 
         A report with the stored one's `read_view`, that ends and starts nothing, within
-        `REFRESH_EVERY` of the stored ``seen_at``, whose state and subtask the hour counter
-        already holds (`run_hours.unchanged_by`), writes nothing either (`_unchanged`):
-        its answer is that of a written one, and the row, the counter (the next write
-        counts the whole stretch) and the ledger read alike. It takes no row lock, so its
-        transaction writes nothing at all. The printer's advisory lock
-        (`REPORT_LOCK_CLASS`), which every write takes first, makes it wait for a write
-        still in flight and read that one. A `touch` takes no advisory lock, so the
-        stale check is made again on the row read ``FOR UPDATE``: a touch that commits
-        between the two reads makes the report stale, and it writes nothing."""
+        `REFRESH_EVERY` of the last written report's ``report_seen_at`` (a `touch` moves
+        ``seen_at`` but not it, so touches never put the refresh off), whose state and
+        subtask the hour counter already holds (`run_hours.unchanged_by`), writes nothing
+        either (`_unchanged`): its answer is that of a written one, and the row, the
+        counter (the next write counts the whole stretch) and the ledger read alike. It
+        takes no row lock, so its transaction writes nothing at all. The printer's
+        advisory lock (`REPORT_LOCK_CLASS`), which every write takes first, makes it wait
+        for a write still in flight and read that one. A `touch` takes no advisory lock,
+        so the stale check is made again on the row read ``FOR UPDATE``: a touch that commits
+        between the two reads makes the report stale, and it writes nothing.
+
+        A skipped report leaves ``seen_at`` as it was, so a late write seen between the
+        stored ``seen_at`` and a skipped newer report is not stale. When it shows an older
+        state than the skipped one, the row shows that state until the next report that
+        differs puts it right. That needs a worker's request still running after its
+        answer was given up, so it is rare."""
         if printer_uuid(printer_id) is None:
             return Advance()
         conn.execute(
             "SELECT pg_advisory_xact_lock(%s::integer, hashtext(%s))",
             (REPORT_LOCK_CLASS, printer_id),
         )
-        read = "SELECT running_subtask, report, seen_at, now() AS now FROM printer_reports"
+        read = (
+            "SELECT running_subtask, report, seen_at, report_seen_at, now() AS now"
+            " FROM printer_reports"
+        )
         old = conn.execute(f"{read} WHERE printer_id = %s", (printer_id,)).fetchone()
         if old is not None and stale(old["seen_at"], seen_at, old["now"]):
             return Advance()
@@ -396,11 +410,13 @@ class PrinterReportStore:
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
         written = conn.execute(
-            "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
-            " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
+            "INSERT INTO printer_reports"
+            " (printer_id, report, seen_at, report_seen_at, running_subtask)"
+            " SELECT id, %s, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
             " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
-            " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
-            (Jsonb(report), seen_at, running, printer_id),
+            " seen_at = EXCLUDED.seen_at, report_seen_at = EXCLUDED.report_seen_at,"
+            " running_subtask = EXCLUDED.running_subtask",
+            (Jsonb(report), seen_at, seen_at, running, printer_id),
         ).rowcount
         if not written:
             return Advance()

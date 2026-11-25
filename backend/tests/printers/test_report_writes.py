@@ -1,7 +1,8 @@
 """A report that changes nothing a reader reads writes nothing (#7389): `PrinterReportStore.
 advance_in` answers it from the stored row, with no row written and so no commit to wait
-for, until `REFRESH_EVERY` has passed since the stored ``seen_at``; then the report is
-written whole. The commit of a CRUD write is a span of its own (`traced_transaction`)."""
+for, until `REFRESH_EVERY` has passed since the last written report (``report_seen_at``,
+which a touch leaves alone); then the report is written whole. The commit of a CRUD
+write is a span of its own (`traced_transaction`)."""
 
 from __future__ import annotations
 
@@ -110,6 +111,32 @@ def test_an_unchanged_report_writes_nothing_until_the_refresh(
     assert reports.advance(pid, _report(nozzle=223.0), _at(refresh)) == Advance()
     assert reports.get(pid) == (_report(nozzle=223.0), _at(refresh))
     assert _versions(pg_pool, pid)[0] != written[0]
+
+
+def test_quiet_link_touches_never_put_off_the_refresh(
+    printers_with_kek: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A touch moves ``seen_at`` and ``counted_to`` but writes no report, so the refresh is
+    timed from the last written report: an unchanged report repeated every 25 s, with the
+    watch's touches (stamped 20 s back) landing between, is written once per refresh."""
+    pid = _linked(printers_with_kek)
+    reports = PrinterReportStore(pg_pool)
+    reports.advance(pid, _report(nozzle=200.0), _at(0))
+    refresh = REFRESH_EVERY.total_seconds()
+    written_at = 0.0
+    for step in range(1, 9):
+        heard = step * 25.0
+        reports.touch(pid, _at(heard - 15))
+        reports.touch(pid, _at(heard - 5))
+        reports.advance(pid, _report(nozzle=200.0 + step), _at(heard))
+        stored = reports.get(pid)
+        assert stored is not None
+        if heard - written_at >= refresh:
+            assert stored[0] == _report(nozzle=200.0 + step), f"report at {heard} s not written"
+            written_at = heard
+        else:
+            assert stored[0]["nozzle_temper"] != 200.0 + step
+    assert written_at >= 8 * 25.0 - refresh
 
 
 def test_a_change_a_reader_reads_is_written_at_once(

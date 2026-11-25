@@ -367,7 +367,9 @@ def traced_transaction(conn: Connection[Any]) -> Iterator[None]:
     """``conn.transaction()``, its COMMIT inside the span `COMMIT_SPAN`, which records no
     value. A block that raises rolls back outside the span, and the error goes on. On a
     connection already in a transaction it is a savepoint, whose release commits nothing,
-    so it gets no span."""
+    so it gets no span. That includes a connection out of autocommit that has already run
+    a statement (implicitly ``INTRANS``): the commit of that outer transaction, made by
+    its owner, is not traced here either."""
     if conn.info.transaction_status != TransactionStatus.IDLE:
         with conn.transaction():
             yield

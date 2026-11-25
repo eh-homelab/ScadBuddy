@@ -39,9 +39,10 @@ COUNTED_STATE = "RUNNING"
 
 #: The longest gap between two writes that counts on the row's state alone. While its
 #: link is up, the watch writes the row at least every `reports.REFRESH_EVERY` (30 s)
-#: while reports arrive (a report with nothing new is skipped only within that of
-#: ``counted_to``, `unchanged_by`), and touches it every `watch.HEARD_EVERY` (10 s) when
-#: the link is quiet.
+#: while reports arrive (a report with nothing new is skipped only within that of the
+#: last written report, which a touch does not move, and of ``counted_to``,
+#: `unchanged_by`), and touches it every `watch.HEARD_EVERY` (10 s) when the link is
+#: quiet.
 GAP_LIMIT = STALE_AFTER
 
 _TENTH = Decimal("0.1")
