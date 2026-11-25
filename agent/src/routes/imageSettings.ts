@@ -5,14 +5,27 @@ import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from '../credentials.js'
 import { ready, type RouteModule } from './module.js'
+import {
+  MAX_TOOL_IMAGE_INLINE_MAX,
+  MIN_TOOL_IMAGE_INLINE_MAX,
+  SETTING_TOOL_IMAGE_INLINE_MAX,
+  ToolImageInlineMax,
+  toolImageInlineMax,
+} from '../tools/imageLimits.js'
 
 // /api/v1/ai/settings/images: the long edge, in pixels, the assistant panel
 // scales an attached image down to before sending it (frontend
 // src/agent/chat/images.ts `prepareImage`). Stored in `ai_settings` under
 // `image_long_edge` (D4: AI settings live in the database).
 //
-//   GET /api/v1/ai/settings/images   { long_edge, min, max }  (the default when unset)
-//   PUT /api/v1/ai/settings/images   body { long_edge: MIN..MAX, an integer }
+//   GET /api/v1/ai/settings/images   { long_edge, min, max, tool_inline_max_bytes,
+//                                      tool_inline_min, tool_inline_max }  (defaults when unset)
+//   PUT /api/v1/ai/settings/images   body { long_edge?: MIN..MAX, tool_inline_max_bytes?:
+//                                      tool_inline_min..tool_inline_max }, integers, at least one
+//
+// `tool_inline_max_bytes` (#7745, `ai_settings` key `tool_image_inline_max_bytes`) is the
+// largest image a tool shows the model inline; a larger one goes to the session's
+// workspace as a pointer (tools/imageResult.ts, limits in tools/imageLimits.ts).
 //
 // The default, 1568 px, is the Messages API's standard-tier long edge: a larger
 // image is downscaled to it anyway on every model before Claude 4.7. Claude 4.7
@@ -43,10 +56,19 @@ export type ImageSettingsRouteDeps = {
   origins: OriginPolicy
 }
 
-export type ImageSettingsView = { long_edge: number; min: number; max: number }
+export type ImageSettingsView = {
+  long_edge: number
+  min: number
+  max: number
+  tool_inline_max_bytes: number
+  tool_inline_min: number
+  tool_inline_max: number
+}
 
 const LongEdge = z.number().int().min(MIN_IMAGE_LONG_EDGE).max(MAX_IMAGE_LONG_EDGE)
-const PutBody = z.strictObject({ long_edge: LongEdge })
+const PutBody = z
+  .strictObject({ long_edge: LongEdge.optional(), tool_inline_max_bytes: ToolImageInlineMax.optional() })
+  .refine((b) => b.long_edge !== undefined || b.tool_inline_max_bytes !== undefined, 'give long_edge or tool_inline_max_bytes')
 
 const NOT_CONFIGURED = 'AI features are not set up in this process'
 const NOT_READY = "AI unavailable: the API does not serve the agent's CRUD areas yet"
@@ -58,8 +80,23 @@ export function imageLongEdge(stored: unknown): number {
   return parsed.success ? parsed.data : DEFAULT_IMAGE_LONG_EDGE
 }
 
-function view(longEdge: number): ImageSettingsView {
-  return { long_edge: longEdge, min: MIN_IMAGE_LONG_EDGE, max: MAX_IMAGE_LONG_EDGE }
+function view(longEdge: number, inlineMax: number): ImageSettingsView {
+  return {
+    long_edge: longEdge,
+    min: MIN_IMAGE_LONG_EDGE,
+    max: MAX_IMAGE_LONG_EDGE,
+    tool_inline_max_bytes: inlineMax,
+    tool_inline_min: MIN_TOOL_IMAGE_INLINE_MAX,
+    tool_inline_max: MAX_TOOL_IMAGE_INLINE_MAX,
+  }
+}
+
+async function stored(settings: SettingsRepo): Promise<ImageSettingsView> {
+  const [longEdge, inlineMax] = await Promise.all([
+    settings.get<unknown>(SETTING_IMAGE_LONG_EDGE),
+    settings.get<unknown>(SETTING_TOOL_IMAGE_INLINE_MAX),
+  ])
+  return view(imageLongEdge(longEdge), toolImageInlineMax(inlineMax))
 }
 
 export function registerImageSettingsRoutes(app: Hono, deps: ImageSettingsRouteDeps): void {
@@ -73,7 +110,7 @@ export function registerImageSettingsRoutes(app: Hono, deps: ImageSettingsRouteD
     if (problem) return c.json({ detail: problem }, 403)
     const settings = await repo()
     if (typeof settings === 'string') return c.json({ detail: settings }, 503)
-    return c.json(view(imageLongEdge(await settings.get<unknown>(SETTING_IMAGE_LONG_EDGE))))
+    return c.json(await stored(settings))
   })
 
   app.put(IMAGE_SETTINGS_PATH, async (c) => {
@@ -91,12 +128,10 @@ export function registerImageSettingsRoutes(app: Hono, deps: ImageSettingsRouteD
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    await settings.set(SETTING_IMAGE_LONG_EDGE, body.long_edge, {
-      actor: UI_ACTOR,
-      surface: 'http',
-      clientIp: deps.remoteAddress(c),
-    })
-    return c.json(view(body.long_edge))
+    const by = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
+    if (body.long_edge !== undefined) await settings.set(SETTING_IMAGE_LONG_EDGE, body.long_edge, by)
+    if (body.tool_inline_max_bytes !== undefined) await settings.set(SETTING_TOOL_IMAGE_INLINE_MAX, body.tool_inline_max_bytes, by)
+    return c.json(await stored(settings))
   })
 }
 

@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ACCEPTING_MS, command, reattach, reattachFollowing, RESPOND_ASYNC } from './command.js'
-import { binary } from './binary.js'
+import { binaryImage } from './binary.js'
 import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { type ApprovalNeeds, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
+import { type ApprovalNeeds, defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { backendPage, page, PAGED, pageInput, totalCount } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { errorName } from '../telemetry/scrub.js'
@@ -897,7 +897,7 @@ export const printTools: Tool[] = [
     bambuddyScope: ['Read Status'],
     routes: ['GET /api/v1/print/printers/{printer_id}/camera'],
     handler: async ({ printer_id }, ctx) =>
-      binary(
+      binaryImage(
         ctx.backend.GET('/api/v1/print/printers/{printer_id}/camera', {
           params: { path: { printer_id } },
           parseAs: 'stream',
@@ -905,7 +905,6 @@ export const printTools: Tool[] = [
         `capture the camera of printer ${printer_id}`,
         ctx,
         { path: `/api/v1/print/printers/${printer_id}/camera`, name: `printer-${printer_id}-camera.jpg`, fallbackType: 'image/jpeg' },
-        image,
       ),
   }),
 

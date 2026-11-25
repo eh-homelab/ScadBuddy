@@ -1,6 +1,8 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { ok } from './call.js'
-import type { ToolServices } from './registry.js'
+import { IMAGE_READ_MAX } from './imageLimits.js'
+import { imageOrRef } from './imageResult.js'
+import { json, type ToolContext, type ToolServices } from './registry.js'
 
 // Binary tool results (3MF, GLB, PNG/SVG): inline when small, a LINK when not.
 //
@@ -127,7 +129,7 @@ export async function binary(
   what: string,
   services: Pick<ToolServices, 'publicBaseUrl' | 'maxInlineBytes'>,
   ref: BinaryRef,
-  render: (bytes: ArrayBuffer, mimeType: string) => CallToolResult,
+  render: (bytes: ArrayBuffer, mimeType: string) => CallToolResult | Promise<CallToolResult>,
 ): Promise<CallToolResult> {
   const result = await pending
   const stream = (await ok(Promise.resolve(result), what)) as ReadableStream<Uint8Array> | null
@@ -136,4 +138,25 @@ export async function binary(
   const declared = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : undefined
   const read = await readCapped(stream, declared, services.maxInlineBytes ?? DEFAULT_MAX_INLINE_BYTES)
   return read.inline ? render(read.bytes, mimeType) : linkResult(ref, mimeType, read.size, services)
+}
+
+/**
+ * Fetches an image and shows it with `imageOrRef` (#7745): read up to IMAGE_READ_MAX,
+ * never a backend path; over that, a note that it is too large to keep.
+ */
+export async function binaryImage(pending: Pending, what: string, ctx: ToolContext, ref: BinaryRef): Promise<CallToolResult> {
+  const result = await pending
+  const stream = (await ok(Promise.resolve(result), what)) as ReadableStream<Uint8Array> | null
+  const mimeType = result.response.headers.get('content-type')?.split(';')[0]?.trim() || ref.fallbackType
+  const lengthHeader = result.response.headers.get('content-length')
+  const declared = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : undefined
+  const read = await readCapped(stream, declared, IMAGE_READ_MAX)
+  if (read.inline) return imageOrRef(new Uint8Array(read.bytes), mimeType, ctx, ref)
+  return json({
+    inline: false,
+    reason: `larger than ${IMAGE_READ_MAX} bytes, too large to keep`,
+    media_type: mimeType,
+    size_bytes: read.size ?? null,
+    note: 'Ask for a smaller copy, such as a thumbnail.',
+  })
 }

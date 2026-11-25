@@ -5,9 +5,10 @@ import { ok } from './call.js'
 import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
-import { defineTool, image, json, ToolError } from './registry.js'
+import { imageOrRef } from './imageResult.js'
+import { defineTool, json, ToolError } from './registry.js'
 import { WorkspaceError, workspaceOf } from '../workspace/store.js'
-import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
+import { IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
@@ -245,16 +246,9 @@ export const entityTools = [
       }
       const bytes = read.bytes
       if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
-        // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
-        if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
-        return json({
-          viewable: false,
-          media_type: mimeType,
-          size_bytes: bytes.byteLength,
-          note:
-            'A photo too large for you to view (over 5 MB as base64).' +
-            (mimeType === 'image/gif' ? '' : ' Call again with `thumbnail: true` for a small copy.'),
-        })
+        // Inline up to the configurable limit, else a workspace pointer (#7745, tools/imageResult.ts).
+        const route = `/api/v1/entities/${ref}/attachments/${attachment_id}/${thumbnail ? 'thumbnail' : 'content'}`
+        return imageOrRef(new Uint8Array(bytes), mimeType, ctx, { name: `${attachment_id}-${record.filename}`, path: route })
       }
       // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
       if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
