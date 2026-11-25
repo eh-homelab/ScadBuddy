@@ -101,7 +101,15 @@ class _Catalog(_Row):
     archived_at: datetime | None
 
 
-class _Aliased(_Catalog):
+class _Checked(_Catalog):
+    """A catalog row a read marks (#7703, spec 6.3b): the keys its required properties
+    leave missing, and those whose stored value no longer fits."""
+
+    missing_properties: list[str] = Field(default_factory=list)
+    invalid_properties: list[str] = Field(default_factory=list)
+
+
+class _Aliased(_Checked):
     """A row of a catalog with aliases (#6706): its other names, canonical name aside,
     each a key no other name or alias of the catalog has (`filament/catalog.py`)."""
 
@@ -162,7 +170,7 @@ class InsertMaterialCreate(_NamedCreate): ...
 class InsertMaterialPatch(_NamedPatch): ...
 
 
-class InsertMaterial(_Catalog): ...
+class InsertMaterial(_Checked): ...
 
 
 # -- material and subtype -------------------------------------------------------------
@@ -310,7 +318,7 @@ class InsertTypePatch(_Patch):
     archived: bool | None = None
 
 
-class InsertType(_Catalog):
+class InsertType(_Checked):
     empty_weight_g: int
     insert_material_id: UUID | None
     note: str | None
@@ -413,7 +421,7 @@ class ColourPatch(_Patch):
 ColourSource = Literal["bambuddy", "filamentcolors", "bambu"]
 
 
-class Colour(_Catalog):
+class Colour(_Checked):
     manufacturer: str | None
     rgba: Rgba
     material_id: UUID | None
@@ -452,7 +460,7 @@ class LocationKindPatch(_Patch):
     archived: bool | None = None
 
 
-class LocationKind(_Catalog):
+class LocationKind(_Checked):
     dry_storage: bool
     ams: bool
     printer: bool

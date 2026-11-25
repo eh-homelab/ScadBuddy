@@ -167,3 +167,35 @@ def test_an_invoice_confirm_is_not_checked(client: TestClient) -> None:
     assert done.status_code == 200, done.text
     spool_id = done.json()["lines"][0]["spool_ids"][0]
     assert client.get(f"{SPOOLS}/{spool_id}").json()["missing_properties"] == ["lot_number"]
+
+
+CATALOG = "/api/v1/filament/catalog"
+
+
+def test_a_catalog_row_create_is_checked_and_takes_its_properties(client: TestClient) -> None:
+    _require(client, "insert_type", "part_number")
+    hub = {"name": "Hub", "empty_weight_g": 200}
+    _refused(client.post(f"{CATALOG}/insert-types", json=hub), ["part_number"])
+    names = [r["name"] for r in client.get(f"{CATALOG}/insert-types").json()]
+    assert "Hub" not in names
+    made = client.post(f"{CATALOG}/insert-types", json=hub | {"properties": {"part_number": "P1"}})
+    assert made.status_code == 201, made.text
+    assert made.json()["missing_properties"] == []
+    assert _props(client, f"insert_type:{made.json()['id']}") == {"part_number": "P1"}
+
+
+def test_a_catalog_save_is_checked_but_a_re_order_and_an_archive_are_not(
+    client: TestClient,
+) -> None:
+    made = client.post(f"{CATALOG}/brands", json={"name": "Acme"}).json()
+    _require(client, "brand", "site")
+    path = f"{CATALOG}/brands/{made['id']}"
+    listed = {r["id"]: r for r in client.get(f"{CATALOG}/brands").json()}
+    assert listed[made["id"]]["missing_properties"] == ["site"]
+    _refused(client.patch(path, json={"name": "Acme 2"}), ["site"])
+    assert client.patch(path, json={"sort_order": 3}).status_code == 200
+    assert client.patch(path, json={"archived": True}).status_code == 200
+    assert client.patch(path, json={"sort_order": 4, "archived": False}).status_code == 200
+    saved = client.patch(path, json={"name": "Acme 2", "properties": {"site": "acme.test"}})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["missing_properties"] == []

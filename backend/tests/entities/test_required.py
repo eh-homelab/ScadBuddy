@@ -16,6 +16,7 @@ from scadbuddy.entities.properties import (
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.entities.required import check_row, completeness_of_kind
+from scadbuddy.filament.catalog import resolve_or_add
 from scadbuddy.orders.models import Actor
 from tests.conftest import PgPool
 
@@ -122,3 +123,13 @@ def test_completeness_of_kind_batches(pg_pool: PgPool) -> None:
         found = completeness_of_kind(conn, "spool_type", [done.ref, bare.ref])
     assert found[done.ref].complete
     assert found[bare.ref].missing == ("a",)
+
+
+@pytest.mark.requires_postgres
+def test_a_catalog_row_added_on_the_way_is_not_checked(pg_pool: PgPool) -> None:
+    props = EntityPropertyStore(pg_pool, EntityStore(pg_pool))
+    props.set_schema("material", _schema("family", family={"type": "string"}), BY)
+    with pg_pool.connection() as conn, conn.transaction():
+        added = resolve_or_add(conn, "materials", "Zytel", sort_order=0)
+        found = completeness_of_kind(conn, "material", [str(added)])
+    assert found[str(added)].missing == ("family",)

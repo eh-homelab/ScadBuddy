@@ -37,7 +37,7 @@ from uuid import UUID
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from psycopg import errors as pg_errors
-from pydantic import AwareDatetime, BaseModel, ValidationError
+from pydantic import AwareDatetime, BaseModel, JsonValue, TypeAdapter, ValidationError
 from temporalio.service import RPCError
 
 from scadbuddy.api.components import component_dep
@@ -308,6 +308,29 @@ def _body(model: type[BaseModel], body: dict[str, Any]) -> BaseModel:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, problems) from None
 
 
+_PROPERTIES: TypeAdapter[dict[str, JsonValue] | None] = TypeAdapter(dict[str, JsonValue] | None)
+
+_CATALOG_REFUSED = (
+    CatalogExistsError,
+    CatalogRefError,
+    CatalogKeyEmptyError,
+    TypeTempError,
+    MissingRequiredProperties,
+    BadPropertyValue,
+)
+
+
+def _properties(body: dict[str, Any]) -> dict[str, JsonValue] | None:
+    """A catalog body's ``properties`` (#7703), taken out before the kind's model reads
+    the rest."""
+    try:
+        return _PROPERTIES.validate_python(body.pop("properties", None))
+    except ValidationError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"properties: {exc.errors()[0]['msg']}"
+        ) from None
+
+
 def _row(row: BaseModel | None, kind: str, row_id: UUID) -> CatalogRow:
     if row is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no {kind} row {row_id}")
@@ -384,17 +407,30 @@ async def list_catalog(
         "name and alias, archived rows too, a subtype's within its material; the 409 then "
         "names the row that holds it (`<kind>_id`, `<kind>_name`, e.g. `effect_id`); a name "
         "there with no letter or digit is a 422. `+` counts as `PLUS` (`PLA+` is `PLA Plus`, "
-        "not `PLA`)."
+        "not `PLA`). "
+        "`properties` (a key-to-value map) are written with the row in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the row's "
+        "required properties are not all filled after it; nothing is written (#7703)."
     ),
 )
 async def create_catalog_row(
     filament: FilamentDep, kind: str, body: Annotated[dict[str, Any], Body()]
 ) -> CatalogRow:
     spec = _spec(kind)
+    properties = _properties(body)
     parsed = _body(spec.create, body)
     try:
-        made = await asyncio.to_thread(filament.catalog.create, kind, parsed)
-    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
+        made = await asyncio.to_thread(
+            partial(
+                filament.catalog.create,
+                kind,
+                parsed,
+                properties=properties,
+                by=current_actor(),
+                checked=True,
+            )
+        )
+    except _CATALOG_REFUSED as exc:
         raise _refused(exc) from None
     return _row(made, kind, UUID(int=0))
 
@@ -409,17 +445,32 @@ async def create_catalog_row(
         "category or effect keeps its names and aliases, any other row frees its name. 404 "
         "for an unknown kind or row, 409 when another row has the name (by key, as on "
         "create, naming the holder), 422 for a bad field, a name with no letter or digit "
-        "(those catalogs), or a minimum temperature above its maximum."
+        "(those catalogs), or a minimum temperature above its maximum. "
+        "`properties` (a key-to-value map) are written with the row in one transaction. 422 "
+        "`missing_required_properties` (with `missing` and `invalid` keys) when the row's "
+        "required properties are not all filled after the save (a patch that sends only "
+        "`sort_order` or `archived` is not checked); nothing is written (#7703)."
     ),
 )
 async def patch_catalog_row(
     filament: FilamentDep, kind: str, row_id: UUID, body: Annotated[dict[str, Any], Body()]
 ) -> CatalogRow:
     spec = _spec(kind)
+    properties = _properties(body)
     parsed = _body(spec.patch, body)
     try:
-        changed = await asyncio.to_thread(filament.catalog.update, kind, row_id, parsed)
-    except (CatalogExistsError, CatalogRefError, CatalogKeyEmptyError, TypeTempError) as exc:
+        changed = await asyncio.to_thread(
+            partial(
+                filament.catalog.update,
+                kind,
+                row_id,
+                parsed,
+                properties=properties,
+                by=current_actor(),
+                checked=True,
+            )
+        )
+    except _CATALOG_REFUSED as exc:
         raise _refused(exc) from None
     return _row(changed, kind, row_id)
 
