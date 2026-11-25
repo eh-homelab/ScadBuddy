@@ -58,10 +58,14 @@ on:
     branches: [main]
     # A docs-only push to main runs nothing: its PR already ran `markdown`, the
     # one job a docs-only change needs (select-lanes.sh `docs_only`).
-    paths-ignore:
-      - "docs/**/*.md"
-      - "**/CLAUDE.md"
-      - "**/AGENTS.md"
+    # `paths`, not `paths-ignore`: a later pattern re-includes a vendored module's
+    # CLAUDE.md or AGENTS.md, which is code (select-lanes.sh).
+    paths:
+      - "**"
+      - "!docs/**/*.md"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      - "**/vendor/**"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same
@@ -190,7 +194,7 @@ jobs:
       # lane. `CI Summary` re-derives the same answer from its own checkout, so a
       # skipped lane job is accepted only where this change really does not need it.
       # `docs_only`: every changed path is docs/**/*.md, or a CLAUDE.md or AGENTS.md
-      # in any directory. Then the lint, frontend, agent, models, freshness and Go
+      # in any directory but a vendor/ tree. Then the lint, frontend, agent, models, freshness and Go
       # jobs skip too; only `markdown` checks it.
       - name: Select the lanes this change needs
         id: lanes

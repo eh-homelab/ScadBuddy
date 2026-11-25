@@ -1,6 +1,7 @@
 {
-  // Markdown lint for docs/, CLAUDE.md and AGENTS.md (the `markdown` job in ci.yml). The style rules are
-  // off: the docs wrap lines freely, and 217 files predate this check. What is
+  // Markdown lint for docs/, CLAUDE.md and AGENTS.md (the `markdown` job in
+  // ci.yml). The style rules are off: the docs wrap lines freely, and 217 files
+  // predate this check. What is
   // left catches broken structure: heading levels, list and emphasis markup,
   // table column counts, the trailing newline.
   "config": {

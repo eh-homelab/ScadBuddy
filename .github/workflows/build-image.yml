@@ -42,13 +42,18 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    # A push that changes only docs/**/*.md, CLAUDE.md or AGENTS.md files builds
-    # no image, so it deploys nothing either (deploy-main.yml runs on this workflow).
+    # A push that changes only docs/**/*.md, CLAUDE.md or AGENTS.md files (outside
+    # vendor/) builds no image, so it deploys nothing either (deploy-main.yml runs
+    # on this workflow).
     # GitHub does not apply path filters to tag pushes, so a release always builds.
-    paths-ignore:
-      - "docs/**/*.md"
-      - "**/CLAUDE.md"
-      - "**/AGENTS.md"
+    # `paths`, not `paths-ignore`: a later pattern re-includes a vendored module's
+    # CLAUDE.md or AGENTS.md, which is code (select-lanes.sh).
+    paths:
+      - "**"
+      - "!docs/**/*.md"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
+      - "**/vendor/**"
   workflow_dispatch:
 
 # Never cancel a publish. Two concurrent pushes to main would otherwise race on

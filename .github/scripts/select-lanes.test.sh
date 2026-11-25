@@ -73,6 +73,10 @@ expect "true false false true false" backend/NOTCLAUDE.md
 expect "true false false true false" backend/CLAUDE.md.bak
 expect "true false false true false" backend/CLAUDE.md/x.py
 expect "true false false true false" backend/CLAUDExmd
+# A vendored module's CLAUDE.md or AGENTS.md is code: the Go vendor drift check runs.
+expect "false false false true false" vendor/go.opentelemetry.io/otel/AGENTS.md
+expect "false false false true false" tools/go/scadbuddy-client/vendor/go.opentelemetry.io/otel/CLAUDE.md
+expect "false false false true false" CLAUDE.md tools/go/scadbuddy-client/vendor/go.opentelemetry.io/otel/AGENTS.md
 got=$(printf '' | "$here/select-lanes.sh" | paste -sd' ')
 [[ "$got" == "backend=false agent_durable=false rust=false image=false docs_only=false" ]] || { echo "FAIL: empty -> $got"; fail=1; }
 got=$("$here/select-lanes.sh" all | paste -sd' ')

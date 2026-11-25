@@ -11,11 +11,13 @@
 #                  frontend and Go trees that run against it; and the
 #                  `profile-fetch-image` and `camera-image` jobs (#6625, #7328)
 #   docs_only      every changed path is a Markdown file under docs/, or a CLAUDE.md
-#                  or AGENTS.md in any directory: the lint, frontend, agent, models,
+#                  or AGENTS.md in any directory but a vendor/ tree: the lint, frontend, agent, models,
 #                  freshness and Go jobs skip, and only the `markdown` job checks the
 #                  change. False with `all` and on an empty diff.
 #
 # Those docs paths select no lane, so `backend/CLAUDE.md` runs no backend job.
+# A path under a vendor/ directory is never docs: a vendored module's CLAUDE.md or
+# AGENTS.md is module content, and the Go job's vendor drift check must see it.
 #
 # Each lane also selects on the shared build inputs (Dockerfile, .dockerignore) and
 # on its own wiring (ci.yml, this script, changed-paths.sh), as select-go.sh does.
@@ -38,7 +40,7 @@ image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.wo
 
 docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
 paths=$(cat)
-code=$(grep -vE "$docs" <<<"$paths" || true)
+code=$(grep -vE "$docs" <<<"$paths" || true; grep -E '(^|/)vendor/' <<<"$paths" || true)
 pick() { if grep -qE "$1" <<<"$code"; then echo true; else echo false; fi; }
 
 b=$(pick "$backend")
