@@ -852,6 +852,31 @@ async def test_the_slots_runs_are_sent_together(pg_pool: PgPool) -> None:
     assert w.sender.most == 4  # one after another would never have more than one open
 
 
+async def test_a_run_that_raises_ends_the_others_before_the_pass_ends(pg_pool: PgPool) -> None:
+    """A run that raises cancels the other runs before the pass gives up its lock, so no
+    run is left open, or its row unwritten, while a next pass reads the rows."""
+    w = World(pg_pool)
+    _four_slots(w)
+    w.sender.delay = 30
+    answer = w.sender.run
+    first = True
+
+    async def run(
+        printer_id: str, run: LanCommandRun, *, key: str | None = None
+    ) -> LanCommandAnswer:
+        nonlocal first
+        if first:
+            first = False
+            await asyncio.sleep(0)
+            raise RuntimeError("the RPC broke")
+        return await answer(printer_id, run, key=key)
+
+    w.sender.run = run  # type: ignore[method-assign]
+    with pytest.raises(ExceptionGroup):
+        await asyncio.wait_for(w.run(), timeout=10)
+    assert w.sender.open == 0
+
+
 async def test_at_most_so_many_runs_are_open_at_once(
     pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:

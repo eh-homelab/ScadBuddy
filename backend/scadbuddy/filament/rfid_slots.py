@@ -256,9 +256,9 @@ async def reconcile_slots(
     hash is an attempt guard: what ScadBuddy sent), and the report's tray already shows the
     params' ``tray_info_idx``, material and colour. The AMS re-reads a Bambu tag when it
     reloads and resets the slot, so the hash is never trusted alone. Any difference is
-    configured: `guard` checks the stored report first (R-7276-12), and a printer that is
-    offline, prints, or whose AMS is busy is sent nothing and counts ``waiting``, so a later
-    pass configures it.
+    configured: `guard` checks the stored report first (R-7276-12), and a printer that
+    prints, or whose AMS is busy, is sent nothing and counts ``waiting``, so a later pass
+    configures it. A printer with no fresh report is skipped before that and counted nowhere.
 
     The runs (`configure_commands`) are sent concurrently, at most `MAX_CONCURRENT_RUNS` at
     once (P46), each under its slot's key (`_run_key`, P47), so a pass waits about one
@@ -444,7 +444,11 @@ async def reconcile_slots(
                 return
             await _send(store, commands, job, report)
 
-    await asyncio.gather(*(send(job) for job in sends))
+    # A TaskGroup, not gather: a run that raises cancels the others and waits for them,
+    # so none is left open, or its row unwritten, once the caller releases SLOTS_LOCK.
+    async with asyncio.TaskGroup() as group:
+        for job in sends:
+            group.create_task(send(job))
     return report
 
 
