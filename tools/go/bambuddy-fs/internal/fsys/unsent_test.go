@@ -497,14 +497,32 @@ func TestListUnsent(t *testing.T) {
 }
 
 // The save an app makes with a temp file and a rename, over a file the library has.
+// Its EINTR retry relies on the temp file being still unsent when it is renamed (a
+// queued-save rename changes nothing when it answers EINTR); a rename of an uploaded
+// one goes to the library and may apply before it answers EINTR (#7718).
 func saveByRename(t *testing.T, dir, data string) {
 	t.Helper()
 	tmp := filepath.Join(dir, "X.3mf.tmp")
 	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := syscall.Rename(tmp, filepath.Join(dir, "X.3mf")); err != nil {
+	if err := retryEINTR(func() error { return syscall.Rename(tmp, filepath.Join(dir, "X.3mf")) }); err != nil {
 		t.Fatalf("rename: %v", err)
+	}
+}
+
+// retryEINTR calls a raw syscall through the mount again while it answers EINTR, as Go's
+// os package does. A FUSE request that a signal interrupts (Go's preemption signal under
+// -race) is cancelled and answers EINTR (api.Errno, #7718). Retry only calls that have
+// changed nothing when they answer it: the wait in tree.list before Rename changes
+// anything, a rename of a queued save or one refused before a library call, and the
+// xattr and statfs handlers. A stored-file or folder rename whose library call was cancelled in
+// flight may already have been applied, so a test of one must not retry it blindly.
+func retryEINTR(call func() error) error {
+	for {
+		if err := call(); !errors.Is(err, syscall.EINTR) {
+			return err
+		}
 	}
 }
 
