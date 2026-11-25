@@ -181,7 +181,7 @@ and its backend module:
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;
-  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed is LAN-only like /mcp, with no public prefix on the SSO host (clusters#4017). #6936: a commit pin of any source
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed and /mcp are reached on the LAN host and, through public Pomerium routes, on the SSO host (clusters#4017, 2026-11-25). #6936: a commit pin of any source
   (a bare `marketplace.json` URL's git entry too) is listed with its `sha`; a bytes pin (archive,
   npm) as an `archive` at `…/plugins/{name}/archives/{sha256}.zip` (the served zip's sha256),
   served from its mirror (`package-mirrors`): a zip pin as its exact bytes, a tarball as a
