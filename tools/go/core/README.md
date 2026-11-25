@@ -27,6 +27,26 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
 | `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
 | `mcp-relay` | `POST /mcp-relay/*` |
+| `sessions:read` | `GET /session-starts`, `GET /sessions/{id}`, `POST /sessions/list` |
+| `sessions` | those, and `POST /sessions`, `…/{id}/agent`, `…/offer`, `…/offer/cancel`, `…/owner`, `…/budget`, `…/discard` |
+| `session-resources:read` | `GET /sessions/{id}/resources` |
+| `session-resources` | that, and `POST /sessions/{id}/resources` |
+| `session-order-costs` | `POST /sessions/{id}/order-costs`, its `…/report`, `…/attempt`, `…/settle`, and `/order-costs/sweep` |
+| `publish` | `POST /publish/session-event`, `/publish/warm-evict` |
+| `session-reads` | `GET /sessions/{id}/open-calls`, `…/reasoning` |
+| `session-sweeps` | `POST /sessions/live` |
+| `forget-rows` | `POST /sessions/{id}/forget-rows` |
+| `session-edits` | `POST /sessions/{id}/edit` |
+| `migrations` | `POST /migrations/ledger` |
+| `auth-sessions` | `POST /auth-sessions/lookup` |
+| `forget:read` | `GET /flow-blobs/{subject}/{name}` |
+| `forget` | that, and `POST /payload-keys/{subject}/drop`, `/payload-key-sweeps`, `/flow-blobs/{subject}`; `POST /forgotten-subjects/{subject}` stays Python's (it opens transcripts under the KEK) |
+| `workspace-blob-refs:read` | `GET /workspace-blob-refs` |
+| `workspace-blob-refs` | that, and `POST /workspace-blob-refs`, `…/release` |
+| `events` | `GET /events/head`, `GET /events` |
+| `flows` | `GET /flow-runs/{id}/starter`, `…/queue`, `…/steps`, `/flow-runs/waiting`, `/flow-runs/parent-hop-approvals`, `/flow-decisions`, `/flow-grants/in-force`, `POST /flow-runs/parent-hop/waiting` |
+
+An area Go answers in part leaves its other routes to Python: name it only where Python still runs.
 
 `internal/seal` is the agent's sealed format (`backend/scadbuddy/core/secrets.py`), the payload
 codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
@@ -54,6 +74,11 @@ A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always o
 - The approvals' input hash refuses JSON past 512 levels; Python's parser goes to about 1000.
 - A gate response with a lone surrogate (`\ud800`) reads as U+FFFD; Python's validator refuses
   it.
+- `POST /flow-blobs/{subject}`: a malformed multipart body's 422 has other words, and an image's
+  `size` is a JSON number (Python also took a numeric string).
+- `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
+  spelling of it (`1e3` as `1000.0`).
+- `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
 
 ## Tests
 

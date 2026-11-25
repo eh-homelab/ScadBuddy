@@ -20,13 +20,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/access"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
 )
@@ -116,7 +124,36 @@ type areaRoutes func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Rout
 
 // areaPackages are the packages whose areas the switch below does not name.
 var areaPackages = []areaRoutes{
-	access.Areas, mcprelay.Areas, notify.Areas, secrets.Areas, transcripts.Areas,
+	access.Areas, mcprelay.Areas, notify.Areas, secrets.Areas, transcripts.Areas, agentSessionAreas,
+}
+
+// agentSessionAreas are the sessions' rows, order costs, publish, sweeps, edits, forget and the
+// agent's reads.
+func agentSessionAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route {
+	rows := &sessions.Sessions{Pool: pool}
+	costs, sends := &ordercosts.Costs{Pool: pool}, &publish.Publish{Pool: pool}
+	sweep, start := &sweeps.Sweeps{Pool: pool}, &agentstart.Start{Pool: pool}
+	edit, drop, reads := &edits.Edits{Pool: pool}, &forget.Forget{Pool: pool}, &agentreads.Reads{Pool: pool}
+	return map[string][]crud.Route{
+		"sessions:read":            rows.Reads(),
+		"sessions":                 append(rows.Reads(), rows.Writes()...),
+		"session-resources:read":   rows.ResourceReads(),
+		"session-resources":        append(rows.ResourceReads(), rows.ResourceWrites()...),
+		"session-order-costs":      costs.Routes(),
+		"publish":                  sends.Sends(),
+		"session-reads":            sends.Reads(),
+		"session-sweeps":           sweep.Live(),
+		"forget-rows":              sweep.ForgetRows(),
+		"migrations":               start.Ledger(),
+		"auth-sessions":            start.Lookup(),
+		"session-edits":            edit.Routes(),
+		"forget:read":              drop.Reads(),
+		"forget":                   append(drop.Reads(), drop.Writes()...),
+		"workspace-blob-refs:read": reads.HoldReads(),
+		"workspace-blob-refs":      append(reads.HoldReads(), reads.HoldWrites()...),
+		"events":                   reads.EventLog(),
+		"flows":                    reads.Flows(),
+	}
 }
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.

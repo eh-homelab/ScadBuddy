@@ -91,6 +91,10 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-ScadBuddy-Crud", "1")
 	w.Header().Set("Cache-Control", "no-store")
 	answer, err := rt.answer(route, r, params)
+	if bytes, ok := answer.(*Bytes); ok && err == nil {
+		bytes.write(w)
+		return
+	}
 	if err == nil {
 		status := route.Status
 		if status == 0 {
@@ -283,6 +287,7 @@ type Body struct {
 	fields map[string]json.RawMessage
 	issues []httpx.Issue
 	at     []string
+	parent *Body
 }
 
 // ReadBody is the request's body as an object whose members are all among names.
