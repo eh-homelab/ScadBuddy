@@ -35,9 +35,9 @@ export class AccessResolver {
   }
 
   /**
-   * The registry's overrides as a tool sees them: each call reads its tool's one row (`item`,
-   * the same rules as `registry`; a browser tool's with `builtin:browser`'s switch,
-   * `switchedItem`), and `disabled` the whole registry.
+   * The registry's overrides as a tool sees them: each call reads its tool's one row (`rowOf`;
+   * a browser tool's with `builtin:browser`'s rows, for its switch) and applies `overrideFrom`,
+   * the rule `snapshot` uses too; `disabled` reads the whole registry.
    */
   registryOverrides(): ToolOverrides {
     return {
@@ -53,7 +53,7 @@ export class AccessResolver {
         const rows = this.reader ? await this.reader.rows([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser]) : []
         // Each tool from the one read's rows: no read per tool (#7731).
         const disabled = new Set(registryOverrides(this.tools, rows).disabled_tools)
-        return { of: async (tool) => this.overrideFrom(tool, rows), disabled: async () => disabled }
+        return { of: async (tool) => (this.reader ? this.overrideFrom(tool, rows) : { disabled: false }), disabled: async () => disabled }
       },
     }
   }
@@ -61,11 +61,12 @@ export class AccessResolver {
   /**
    * A registry tool's override from rows read for it (#7750, one rule for `of` and `snapshot`):
    * `off` when its source is `builtin:browser` and that is switched off, else its row's access
-   * (or its own tier) by the registry rule; none for a tool outside the set or with no reader.
+   * (or its own tier) by the registry rule; none for a tool outside the set. Its callers answer
+   * a resolver with no reader themselves.
    */
   private overrideFrom(tool: string, rows: readonly AccessRow[]): ToolOverride {
     const own = this.risk.get(tool)
-    if (own === undefined || !this.reader) return { disabled: false }
+    if (own === undefined) return { disabled: false }
     const source = registrySource(tool)
     const row = rows.find((r) => r.source === source && r.item === tool)
     const access = source === BUILTIN_SOURCES.browser && !sourceEnabled(source, rows) ? 'off' : toolAccess(own, row, isRegistrySource(source))
