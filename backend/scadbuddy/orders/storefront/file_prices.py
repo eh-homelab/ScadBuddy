@@ -15,6 +15,7 @@ price is read by the same key (`line_prices.py` `price_of`).
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -30,13 +31,21 @@ from scadbuddy.orders.storefront.inputs import (
     material_key,
 )
 from scadbuddy.orders.storefront.limits import RenderLimited, RenderLimits
-from scadbuddy.orders.storefront.listings import page_outdated, published_listing
+from scadbuddy.orders.storefront.listings import page_colours, page_outdated, published_listing
 from scadbuddy.orders.storefront.renders import (
     limited,
     listing_refusals,
     price_book,
 )
-from scadbuddy.orders.storefront.slice_price import NO_PRICE, last_answer, slice_estimate
+from scadbuddy.orders.storefront.slice_price import (
+    NO_PRICE,
+    Planned,
+    last_answer,
+    pending,
+    planned_estimate,
+    planned_variant,
+    setup_key,
+)
 from scadbuddy.orders.storefront.visitors import VisitorStore
 from scadbuddy.orders.storefront.wire import FileSlot, FileSnapshot, Listing
 
@@ -56,6 +65,9 @@ class FileChoice:
 
     snapshot: FileSnapshot
     slots: tuple[tuple[FileSlot, Filament | None], ...]
+    #: The filaments a print of the chosen material may take (#7523): the price book's of
+    #: that material, and the shop's locks of the support slots.
+    alike: frozenset[str] = frozenset()
 
     @property
     def filaments(self) -> list[Filament] | None:
@@ -116,7 +128,12 @@ def file_choice(
             slots.append((each, chosen[each.slot]))
         else:
             slots.append((each, filaments.get(snapshot.support.get(each.slot, ""))))
-    return FileChoice(snapshot=snapshot, slots=tuple(slots))
+    alike = {f.id for f in filaments.values() if material_key(f.material) == material}
+    return FileChoice(
+        snapshot=snapshot,
+        slots=tuple(slots),
+        alike=frozenset(alike | set(snapshot.support.values())),
+    )
 
 
 async def checked_file_choice(
@@ -169,13 +186,13 @@ async def listing_price(
     colours: Mapping[int, str],
 ) -> StoreEstimate:
     """The price of the visitor's colours on a file listing (#6710 §7.5): the slice price
-    of its held copy (`slice_estimate`), or none. While it is worked out, the listing's
-    last firm price of its file, of any colours (`SlicePrices.listing_last`), as ``last``
-    with the pending ``retry_after``, so the page always shows a price and reads again;
-    ``pending`` when the listing has none. A read
-    that claims a new slice counts as one render of the visitor's and the client's limits
-    (429 ``render_limited`` over them, and no slice starts); one that finds the price, or
-    a slice that stands, costs nothing. Refusals as `checked_file_choice`."""
+    of its held copy (`planned_estimate`), or none. While it is worked out, the listing's
+    last firm price of its file (`SlicePrices.listing_last`) as ``last`` with the pending
+    ``retry_after``, so the page always shows a price and reads again; ``pending`` when
+    there is none. A read that claims a new slice counts as one render of the visitor's and
+    the client's limits; one that finds the price, or a slice that stands, costs nothing.
+    Over the limits no slice starts: the last price, with the limit's ``retry_after``, else
+    429 ``render_limited`` (#7523). Refusals as `checked_file_choice`."""
     from scadbuddy.orders.component import ORDERS
 
     orders: OrdersComponent = state.components.get(ORDERS)
@@ -183,43 +200,69 @@ async def listing_price(
     listing, choice = await checked_file_choice(
         orders, listing_id, listing_updated_at, colours, runtime.storefront_materials
     )
-    filaments = choice.filaments
-    if filaments is None:
+    planned = await plan_file(state, listing, choice)
+    if planned is None:
         return NO_PRICE
     visitor = await asyncio.to_thread(VisitorStore(state.projection.pool).ensure, visitor_id)
     limits = RenderLimits(state.projection.pool)
 
     async def charge(price_key: str) -> Callable[[], Awaitable[None]]:
-        try:
-            row = await asyncio.to_thread(
-                lambda: limits.admit_slice(
-                    visitor.id,
-                    client,
-                    listing_id=listing.id,
-                    price_key=price_key,
-                    settings=runtime,
-                )
+        row = await asyncio.to_thread(
+            lambda: limits.admit_slice(
+                visitor.id,
+                client,
+                listing_id=listing.id,
+                price_key=price_key,
+                settings=runtime,
             )
-        except RenderLimited as error:
-            raise limited(error) from None
+        )
 
         async def refund() -> None:
             await asyncio.to_thread(limits.refund_slice, row)
 
         return refund
 
-    answer = await slice_estimate(
-        state,
-        filaments=filaments,
-        library_file=priced_file(choice.snapshot),
-        listing_id=listing.id,
-        charge=charge,
-    )
+    over: RenderLimited | None = None
+    try:
+        answer = await planned_estimate(state, planned, charge=charge)
+    except RenderLimited as error:
+        over, answer = error, pending(planned.key)
     if answer.source != "pending":
         return answer
     last = await asyncio.to_thread(
-        orders.slice_prices.listing_last, listing.id, choice.snapshot.sha256
+        functools.partial(
+            orders.slice_prices.listing_last,
+            listing.id,
+            choice.snapshot.sha256,
+            filaments=choice.alike,
+            setup_key=setup_key(planned.variant),
+        )
     )
-    if last is None:
-        return answer
-    return last_answer(last).model_copy(update={"retry_after": answer.retry_after})
+    if last is not None:
+        wait = answer.retry_after if over is None else over.retry_after
+        return last_answer(last).model_copy(update={"retry_after": wait})
+    if over is not None:
+        raise limited(over)
+    return answer
+
+
+async def plan_file(state: AppState, listing: Listing, choice: FileChoice) -> Planned | None:
+    """The slice of ``choice`` on the file ``listing``, as the shop's settings stand now
+    (`planned_variant`); None when it has no slice price."""
+    return await planned_variant(
+        state,
+        filaments=choice.filaments,
+        library_file=priced_file(choice.snapshot),
+        listing_id=listing.id,
+    )
+
+
+def default_choice(
+    listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
+) -> FileChoice | None:
+    """The colours a visitor's page of the published file ``listing`` opens on (#7523,
+    `page_colours`), or None when it cannot be ordered."""
+    colours = page_colours(listing, filaments, shop_materials)
+    if colours is None:
+        return None
+    return file_choice(listing, colours, filaments, effective_materials(listing, shop_materials))

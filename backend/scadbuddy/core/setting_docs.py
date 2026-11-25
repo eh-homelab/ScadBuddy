@@ -330,8 +330,9 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "storefront_warm_prices": SettingDoc(
             "Warm storefront prices",
-            "On, publish renders a listing's default variant and slices its price, and"
-            " Prepare colours slices each prepared variant's, before a visitor asks.",
+            "On, publish slices the price of a listing's default choices (a design's are"
+            " rendered first), and Prepare colours slices each prepared variant's, before a"
+            " visitor asks.",
         ),
         # -- Fonts ---------------------------------------------------------------------
         "google_fonts_api_key": SettingDoc(
@@ -505,6 +506,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "filament_safety_margin_days": SettingDoc(
             "Safety margin, days",
             "Days of stock kept on top of the lead time, when the type sets none. 0 to 365.",
+        ),
+        "filament_tag_format": SettingDoc(
+            "Tag format for new tags",
+            "The format ScadBuddy writes to a blank tag, or to a tag that holds neither"
+            " format: OpenSpool (JSON, for NTAG215 or NTAG216) or OpenTag3D. A tag that"
+            " already holds OpenSpool or OpenTag3D keeps its format.",
         ),
         # -- Diagnostics ---------------------------------------------------------------
         "log_level": SettingDoc(
@@ -912,6 +919,13 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " files: copies of cached downloads and of the library files it reads, the"
             " slicer's and print worker's uploads, slice files, thumbnail copies and"
             " order archive copies. Unset, they go under the data volume's cache folder.",
+        ),
+        "blob_cache_dir": SettingDoc(
+            "Piece cache folder",
+            "Where the API, and a render worker where it is set, keeps its copies of"
+            " rendered pieces and other blobs on the S3 or Bambuddy store. Unset, the data"
+            " volume's blobs folder. A node-local folder, such as an emptyDir, keeps them off"
+            " a shared volume. Ignored on the local store, where that folder is the store.",
         ),
         "storefront_public_url": SettingDoc(
             "Storefront URL",

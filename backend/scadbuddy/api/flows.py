@@ -112,6 +112,8 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.models import PrinterRow
+from scadbuddy.tasks.component import TasksComponent, TasksDep
+from scadbuddy.tasks.models import TaskQuestion
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
@@ -137,6 +139,8 @@ FLOW_UNMIGRATED = "https://scadbuddy.dev/problems/flow-unmigrated"
 FLOW_INPUTS = "https://scadbuddy.dev/problems/flow-inputs"
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
+#: The call is a prompt's: its typed answer goes to its task's route (#7364).
+ANSWER_IS_A_TASK = "https://scadbuddy.dev/problems/flow-answer-is-a-task"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 GRANT_INVALID = "https://scadbuddy.dev/problems/flow-grant-invalid"
 GRANT_STATE = "https://scadbuddy.dev/problems/flow-grant-state"
@@ -245,7 +249,11 @@ class RunAnswer(BaseModel):
 
 class PendingEntry(BaseModel):
     """A host call parked for a person. Never an approval's input (§6.6), nor a
-    parent's narrowing of it (#2482): only that one was proposed."""
+    parent's narrowing of it (#2482): only that one was proposed.
+
+    A prompt's entry holds its question: at most `MAX_SCHEMA_BYTES` of schema,
+    `MAX_JSON_BYTES` of context and a few short texts. How many wait at once is up to the
+    script. It never holds an answer."""
 
     call_id: str
     kind: Literal["approval", "answer"]
@@ -267,6 +275,9 @@ class PendingEntry(BaseModel):
     #: With `summary`: the input hash the approval binds (the printer the summary names),
     #: which an approval sends back as `bound_hash` (#4445).
     bound_hash: str | None = None
+    #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
+    #: for a `wait_for_human`, whose answer is a text. Its own route has the answer.
+    task: TaskQuestion | None = None
 
 
 class GrantUseView(BaseModel):
@@ -408,7 +419,7 @@ def _started_by() -> dict[str, Any]:
     return requester_record()
 
 
-def _unavailable() -> ApiError:
+def unavailable() -> ApiError:
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         "Flows need ScadBuddy's secret key file (SCADBUDDY_SECRET_KEY_FILE) and the"
@@ -419,7 +430,7 @@ def _unavailable() -> ApiError:
 
 def _client(flows: Flows) -> Client:
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     return flows.client
 
 
@@ -842,7 +853,7 @@ async def start_flow_run(
         raise ApiError(status.HTTP_409_CONFLICT, "This run could not be started.") from err
     except (psycopg.errors.UndefinedTable, SubjectForgottenError) as err:
         logger.warning("flows are unavailable: %s", type(err).__name__)
-        raise _unavailable() from None
+        raise unavailable() from None
     except RPCError as err:
         logger.warning("could not reach Temporal to start a flow run", exc_info=True)
         raise ApiError(
@@ -959,8 +970,9 @@ async def get_flow_run(
     printers: PrintersDep,
     settings: SettingsStoreDep,
     state: StateDep,
+    tasks: TasksDep,
 ) -> RunView:
-    view = await _run_view(run_id, flows, printers, settings, _drafts(state))
+    view = await _run_view(run_id, flows, printers, settings, tasks, _drafts(state))
     if (fired := await triggers.store.fire_of_run(run_id)) is not None:
         fire, trigger = fired
         view.trigger = RunTrigger(
@@ -978,6 +990,7 @@ async def _run_view(
     flows: Flows,
     printers: Printers,
     settings: SettingsStore,
+    tasks: TasksComponent,
     drafts: DraftLookup | None = None,
 ) -> RunView:
     run = await flows.store.get_run(run_id)
@@ -1008,15 +1021,19 @@ async def _run_view(
         return view
     if flows.client is None:
         view.pending = [PendingEntry.model_validate(w.model_dump()) for w in run.waiting_on]
-        return view
-    view.pending, view.live = await _pending(
-        flows.client,
-        run,
-        _registry(printers),
-        approval_key(flows.settings),
-        _native(printers, settings),
-        drafts,
-    )
+    else:
+        view.pending, view.live = await _pending(
+            flows.client,
+            run,
+            _registry(printers),
+            approval_key(flows.settings),
+            _native(printers, settings),
+            drafts,
+        )
+    if asked := [entry for entry in view.pending if entry.kind == "answer"]:
+        found = await asyncio.to_thread(tasks.store.of_run, run.id, [e.call_id for e in asked])
+        for entry in asked:
+            entry.task = found.get(entry.call_id)
     return view
 
 
@@ -1121,7 +1138,7 @@ async def delete_flow_run(run_id: str, flows: FlowsDep) -> Response:
     except ValueError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
     if flows.client is None or flows.connect is None:
-        raise _unavailable()
+        raise unavailable()
     if (
         await flows.store.get_run(run_id) is None
         and await execution_status(flows.client, run_id) is None
@@ -1217,7 +1234,7 @@ class Decided(BaseModel):
     outcome: Literal["approved", "denied", "answered"]
 
 
-def _browser_only(
+def browser_only(
     detail: str = "Only a person answers a flow's questions and approvals.",
     type_: str = ENTRY_BROWSER_ONLY,
 ) -> None:
@@ -1230,7 +1247,16 @@ def _browser_only(
 
 def _grant_browser_only() -> None:
     # Spec 2026-10-11 §3.2: an agent proposes a grant; only a person approves or declines it.
-    _browser_only("Only a person approves or declines a run's grant.", GRANT_BROWSER_ONLY)
+    browser_only("Only a person approves or declines a run's grant.", GRANT_BROWSER_ONLY)
+
+
+async def _asks_a_task(tasks: TasksComponent, call_id: str) -> bool:
+    """Whether the call is a prompt's: its task, opened before it parks, has its id."""
+    try:
+        uuid.UUID(call_id)
+    except ValueError:
+        return False
+    return await asyncio.to_thread(tasks.store.get, call_id) is not None
 
 
 @router.post(
@@ -1245,11 +1271,21 @@ async def answer_flow_run(
     response: Response,
     ops: OperationsDep,
     flows: FlowsDep,
+    tasks: TasksDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
-    _browser_only()
+    browser_only()
+    if await _asks_a_task(tasks, body.call_id):
+        # Its answer is checked against the task's schema there, and never reaches the run
+        # from here.
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "That question takes a typed answer. Answer its task instead.",
+            type_=ANSWER_IS_A_TASK,
+            task_id=body.call_id,
+        )
     if flows.keys is None:
-        raise _unavailable()
+        raise unavailable()
     try:
         # Sealed under the run's key: the text never reaches the operation's history or
         # its record in the clear (#2221).
@@ -1257,7 +1293,7 @@ async def answer_flow_run(
     except SubjectForgottenError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
     except psycopg.errors.UndefinedTable:
-        raise _unavailable() from None
+        raise unavailable() from None
     result = await run_operation(
         ops,
         response,
@@ -1282,7 +1318,7 @@ async def decide_flow_run(
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
-    _browser_only()
+    browser_only()
     result = await run_operation(
         ops,
         response,
@@ -1305,9 +1341,9 @@ async def get_flow_run_proposal(
     """Browser only: the proposal is the person's to judge, so no agent reads it. The
     original is read from the run's parked call, never from anything stored with the
     proposal."""
-    _browser_only("Only a person reads a proposal it may approve.")
+    browser_only("Only a person reads a proposal it may approve.")
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     run = await flows.store.get_run(run_id)
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
@@ -1596,7 +1632,7 @@ async def preview_flow_reset(
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     return await outward_since(flows.client, run, event_id)
 
 
@@ -1613,7 +1649,7 @@ async def flow_reset_points(run_id: str, flows: FlowsDep) -> ResetPoints:
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     if flows.client is None:
-        raise _unavailable()
+        raise unavailable()
     return await reset_points(flows.client, run, floor=await flows.store.reset_floor(run.id))
 
 

@@ -156,6 +156,9 @@ type entry struct {
 	rec  record
 	held int
 	gone bool
+	// sent is set with gone when the upload finished and the entry was not removed
+	// meanwhile: its node shows the record's size until it becomes the stored file.
+	sent bool
 	due  time.Time
 	// node is the mount's node for the entry, if it has one.
 	node *file
@@ -581,6 +584,15 @@ func (q *queue) record(e *entry) (record, bool) {
 	return e.rec, !e.gone
 }
 
+// size is the size a node bound to the entry shows: the record's while it is queued,
+// and after its upload finished until the node becomes the stored file (#7563). It is
+// false once the entry was refused, superseded or removed: the node then shows its own.
+func (q *queue) size(e *entry) (int64, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return e.rec.Size, !e.gone || e.sent
+}
+
 // hold keeps the retrier off an entry while a writer uses it, after any upload of it
 // has finished. It is false if the entry was sent or removed meanwhile.
 func (q *queue) hold(e *entry) bool {
@@ -758,7 +770,7 @@ func (q *queue) finish(e *entry) (record, *file, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	removed := e.gone
-	e.gone = true
+	e.gone, e.sent = true, !removed
 	delete(q.entries, e.seq)
 	return e.rec, e.node, removed
 }
@@ -1145,6 +1157,16 @@ func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, 
 		}
 		t.forget(got.FolderID)
 	}
+	// The node becomes the stored file before its local copy moves. A reader that still
+	// finds the entry then opens the local copy, and one that does not reads got (#7563).
+	// So a read that opens before the copy reaches the cache, while deleteBases waits on
+	// the library, downloads got though its bytes are on disk: an extra fetch, never
+	// wrong bytes.
+	if n != nil {
+		n.mu.Lock()
+		n.file, n.queued = got, nil
+		n.mu.Unlock()
+	}
 	if !conflict {
 		t.deleteBases(ctx, rec.Bases, got.ID)
 	}
@@ -1156,11 +1178,6 @@ func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, 
 	}
 	t.remember(got)
 	slog.Info("unsent write sent", "path", e.dir, "folder", got.FolderID, "name", got.Name, "file", got.ID)
-	if n != nil {
-		n.mu.Lock()
-		n.file, n.queued = got, nil
-		n.mu.Unlock()
-	}
 	return n
 }
 

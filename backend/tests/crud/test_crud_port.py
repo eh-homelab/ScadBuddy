@@ -169,7 +169,8 @@ def test_the_crud_port_serves_only_its_routes(settings: Settings) -> None:
     with TestClient(app) as main_port:
         port = crud_listener_port(app)
         assert port is not None and port > 0
-        with httpx.Client(base_url=f"http://127.0.0.1:{port}") as crud:
+        # httpx's default 5 s read timeout failed this on a loaded CI runner (#7503).
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=30) as crud:
             models = crud.get("/api/v1/models")
             assert models.status_code == 404
             assert models.text == "Not Found"

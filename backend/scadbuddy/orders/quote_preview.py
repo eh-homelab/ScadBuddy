@@ -17,10 +17,13 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.print_library.reads import NativeCopies, reads_for
 
 if TYPE_CHECKING:
+    from scadbuddy.orders.bambuddy import SliceClient
     from scadbuddy.orders.storefront.held_file import HeldFile
 
 
-def _client(settings: StoredSettings, *, lan: bool) -> AbstractAsyncContextManager[Any]:
+def _client(
+    settings: StoredSettings, *, lan: bool
+) -> AbstractAsyncContextManager[SliceClient | None]:
     """The client a slice on Bambuddy's path needs, or none for a printer the LAN reaches."""
     if lan:
         return nullcontext()

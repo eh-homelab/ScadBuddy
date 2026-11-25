@@ -4,16 +4,24 @@ changes ``filament_sync``. ``filament_nudges`` (`tests/api/conftest.py`) records
 
 from __future__ import annotations
 
-from typing import Any
-
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.filament import ntag
-from scadbuddy.filament.models import ScanResult
+from scadbuddy.api.filament import NOT_NUDGED, router
+from scadbuddy.api.printer_slots import router as printer_slots_router
 from tests.api.test_filament import SPOOLS, _spool
+from tests.api.test_filament_tags import (
+    _REC,
+    JOBS,
+    READS,
+    SPOOLS_URL,
+    TAGS,
+    _armed,
+    _fresh,
+    _sha256,
+)
 from tests.api.test_send import API, configure
 from tests.api.test_tray_spools import _path, _sb_spool, lan_printer  # noqa: F401
 
@@ -54,11 +62,10 @@ def test_the_ams_weights_sync_does_not_nudge(
 
 
 @respx.mock
-def test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge(
+def test_the_bambuddy_import_does_not_nudge(
     client: TestClient, filament_nudges: list[bool], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Decision 163: the import pulls and the scan writes nothing, so neither nudges a
-    push pass."""
+    """Decision 163: the import pulls and writes nothing, so it does not nudge a push pass."""
     configure(client)
     filament_nudges.clear()
     respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=[]))
@@ -66,14 +73,56 @@ def test_the_bambuddy_import_and_the_rfid_scan_do_not_nudge(
     imported = client.post("/api/v1/filament/bambuddy/import")
     assert imported.status_code == 200, imported.text
 
-    async def scan(*args: Any, **kwargs: Any) -> ScanResult:
-        return ScanResult(status="timeout")
-
-    monkeypatch.setattr(ntag, "scan", scan)
-    scanned = client.post("/api/v1/filament/rfid/scan", json={"timeout_s": 1})
-    assert scanned.status_code == 200, scanned.text
-    assert scanned.json()["status"] == "timeout"
     assert filament_nudges == []
+
+
+def test_every_route_not_nudged_exists() -> None:
+    # A removed route's name left here would hide nothing and mislead the next reader.
+    # The #7153 slot routes share this dependency from `api/printer_slots.py`.
+    routes = [*router.routes, *printer_slots_router.routes]
+    names = {getattr(route, "name", None) for route in routes}
+    assert names >= NOT_NUDGED, sorted(NOT_NUDGED - names)
+
+
+def test_the_tag_routes_that_bind_nothing_do_not_nudge(
+    client: TestClient, filament_nudges: list[bool]
+) -> None:
+    """#7273: a tag reading, a backup, the records to write, a restore's records and the
+    agent's NFC jobs change nothing the sync pushes, so none nudges; the scan they replaced
+    did not either (Decision 163)."""
+    spool = _spool(client)
+    filament_nudges.clear()
+    assert client.post(READS, json={"uid": "04AA", "records": []}).status_code == 200
+    old = _fresh(client, records=[_REC])
+    tag_id = client.post(READS, json={"uid": "04AA", "records": []}).json()["tag"]["id"]
+    got = client.post(
+        f"{SPOOLS_URL}/{spool['id']}/tag-records",
+        json={"uid": "04AA", "records": [], "backup_id": _fresh(client)},
+    )
+    assert got.status_code == 200, got.text
+    restored = client.post(
+        f"{TAGS}/{tag_id}/backups/{old}/restore",
+        json={"uid": "04AA", "records": [], "backup_id": _fresh(client, reason="restore")},
+    )
+    assert restored.status_code == 200, restored.text
+    made = client.post(JOBS, json={"kind": "write", "records": [_REC]})
+    assert made.status_code == 201, made.text
+    job = made.json()["id"]
+    claim = {"records_sha256": _sha256(made.json()["records"])}
+    assert client.post(f"{JOBS}/{job}/claim", json=claim).status_code == 200
+    assert client.post(f"{JOBS}/{job}/result", json={"error": "declined"}).status_code == 200
+    assert client.post(f"{JOBS}/{_armed(client, 'read')}/cancel").status_code == 200
+    assert filament_nudges == []
+
+
+def test_a_tag_reading_that_binds_nudges(client: TestClient, filament_nudges: list[bool]) -> None:
+    """#7273: a reading with `bind_spool_id` binds the tag, as `POST /spools/{id}/tags` does,
+    so it nudges as that route does."""
+    spool = _spool(client)
+    filament_nudges.clear()
+    got = client.post(READS, json={"uid": "04AA", "records": [], "bind_spool_id": spool["id"]})
+    assert got.status_code == 200, got.text
+    assert filament_nudges == [False]
 
 
 def test_a_purchasing_write_nudges(client: TestClient, filament_nudges: list[bool]) -> None:

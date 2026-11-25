@@ -322,6 +322,7 @@ class SettingsView(BaseModel):
     filament_burn_window_days: int = 30
     filament_lead_time_days: int = 7
     filament_safety_margin_days: int = 3
+    filament_tag_format: Literal["openspool", "opentag3d"] = "openspool"
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None

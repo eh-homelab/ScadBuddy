@@ -67,7 +67,7 @@ from scadbuddy.filament.sb_presets import (
     version_on,
 )
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
-from scadbuddy.orders.attachments import blob_path, keep_file
+from scadbuddy.orders.attachments import keep_file, read_blob
 from scadbuddy.profile_fetch.wire import (
     FETCH_WORKFLOW,
     MAX_FILE_BYTES,
@@ -397,8 +397,9 @@ POLLERS: Final = PollerCache()
 
 class TemporalQueueProbe:
     """Temporal's DescribeTaskQueue for the queue's workflow and its activity task
-    queues: a poller on either is a worker that will take the run. The answer is kept
-    in ``cache`` (the app's `POLLERS` by default); a failed read is not kept."""
+    queues: a poller on either is a worker that will take the run, even when the other
+    type's read failed. The answer is kept in ``cache`` (the app's `POLLERS` by
+    default); a failed read with no poller found is raised and not kept."""
 
     def __init__(self, client: Client, task_queue: str, cache: PollerCache = POLLERS) -> None:
         self.client = client
@@ -421,11 +422,19 @@ class TemporalQueueProbe:
     async def _read(self) -> bool:
         # Every partition's pollers: a live worker can be absent from the root's (#7350).
         # Both types at once, so a miss waits for one round of reads, not two (#7425).
+        # A poller on one type is the answer even if the other's read failed; with none
+        # found, a failed read may have hidden one, so it is raised (#7513).
         answers = await asyncio.gather(
             queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW),
             queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY),
+            return_exceptions=True,
         )
-        return any(answers)
+        if any(isinstance(answer, list) and answer for answer in answers):
+            return True
+        for answer in answers:
+            if isinstance(answer, BaseException):
+                raise answer
+        return False
 
 
 def starter(state: AppState) -> Starter:
@@ -1183,10 +1192,10 @@ def _failed(error: str, missing: dict[tuple[str, str], str]) -> _Ending:
 
 
 async def _read_blob(state: AppState, key: str) -> bytes:
-    path = await blob_path(state.store.blobs, key)
-    if path is None:
+    data = await read_blob(state.store.blobs, key)
+    if data is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, f"the blob store lost {key}")
-    return await asyncio.to_thread(path.read_bytes)
+    return data
 
 
 async def _k_values(

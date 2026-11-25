@@ -16,6 +16,18 @@ otherwise does it open `/filament/details/<id>` and click "Add to My Spools" onc
   `2026-11-18-profile-fetch-worker.md` reads its absence as "not in My Spools".
 - R-7228-2: A 404, or no export button, on the My Spools page means no record. The step
   then adds one. An unknown filament is still `tdfp_not_found`, from the filament page.
+  The real site's answer to `/my/spools/details/<id>` for a filament with no record was
+  not measured (#7547): the driver has no access to the live site outside the owner's
+  login, and a test may not write to it. The replica answers `<h1>No spools</h1>` with
+  status 200 (`no_record_status` 404 for the 404 case). What the code does for each
+  answer: a 404 adds a record at once and logs "has no My Spools record (404)". A page
+  with no export button waits `RECORD_WAIT_MS` (5 s), adds a record, and logs that the
+  record check timed out. A page slower than 5 s is the same case: the step adds a
+  duplicate record and logs the same timeout line, so a later duplicate is easy to trace.
+  Why this is safe: each answer ends in at most one added record, never a lost one. A
+  duplicate costs one extra 1000 g record that the owner deletes by hand (R-7228-3), and
+  `export` still works with several records. Any other answer (a redirect to `/login`,
+  Vercel's check) is handled before the check, as on every other page.
 - R-7228-3: The fetch removes no record. Records made by earlier fetches were deleted by
   hand on 2026-11-23. When several records exist, `export` keeps using the per-filament
   page, so 3DFP picks the record.

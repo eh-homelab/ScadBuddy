@@ -1309,8 +1309,9 @@ class Spool(BambuddyModel):
     #: v1.3.1): the pull leaves a row made after an open create intent to the push
     #: (#6265 Decision 10).
     created_at: datetime | None = None
-    #: #7149: whether it was added full, when its tag was written (set only by a SpoolBuddy
-    #: write), and ``weight_used`` when its consumed counter was last reset: BB's "Total
+    #: #7149: whether it was added full, when its tag was written (Bambuddy's field;
+    #: ScadBuddy's phone page sets its own ``tag_encoded_at``),
+    #: and ``weight_used`` when its consumed counter was last reset: BB's "Total
     #: consumed" is ``weight_used - weight_used_baseline``
     #: (``SpoolResponse`` in ``sync-routes.json``; ``models/spool.py`` lines 37-50 and 85
     #: at https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/models/spool.py).
@@ -1695,40 +1696,6 @@ class QueueItemCreate(BambuddyModel):
     #: extruder index. Bambuddy re-checks it against the live rack at dispatch.
     nozzle_rack_choice: dict[str, int] | None = None
     cleanup_library_after_dispatch: bool = False
-
-
-class TagScan(BambuddyModel):
-    """One tag a SpoolBuddy reader read, from Bambuddy's WebSocket frame
-    ``spoolbuddy_tag_matched`` (``bb_spool_id`` is ``spool.id``) or
-    ``spoolbuddy_unknown_tag`` (``bb_spool_id`` is ``None``; it alone carries ``tag_type``).
-    The frames are in ``ws_events`` of ``tests/bambuddy/recordings/openapi/rfid-routes.json``
-    (``routes/spoolbuddy.py`` lines 667-690 and 788-797, v1.3.1)."""
-
-    device_id: str
-    tag_uid: str
-    tray_uuid: str | None = None
-    tag_type: str | None = None
-    bb_spool_id: int | None = None
-
-
-class SpoolBuddyDevice(BambuddyModel):
-    """A row of ``GET /api/v1/spoolbuddy/devices`` (``DeviceResponse`` in
-    ``tests/bambuddy/recordings/openapi/rfid-routes.json``, v1.3.1): the fields ScadBuddy
-    shows. ``device_id`` is the string the write and cancel routes take."""
-
-    id: int
-    device_id: str
-    hostname: str
-    has_nfc: bool = False
-    nfc_ok: bool = False
-    online: bool = False
-    last_seen: datetime | None = None
-    pending_command: str | None = None
-
-    @field_validator("last_seen")
-    @classmethod
-    def _seen_utc(cls, value: datetime | None) -> datetime | None:
-        return as_utc(value)
 
 
 class SlotPreset(BambuddyModel):

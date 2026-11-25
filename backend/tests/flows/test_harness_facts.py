@@ -11,6 +11,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -488,3 +489,22 @@ async def test_an_unawaited_call_runs_with_the_next_awaited_batch(
     await client.provide_callback_result(waiting.tool_id, result={"answer": "yes"})
     assert await probe.reply(wf_id) == "result: 1"
     assert _effects(effects) == [{"tool": "step", "n": 1}]
+
+
+# 15: the harness declares a callback's wait as one timer, and Temporal takes ten years of
+# it (#7364, `flow_tools.OPEN_WAIT`), so a question with no limit of its own parks.
+async def test_a_callback_declared_with_a_ten_year_timeout_parks_and_answers(
+    probe: Probe,
+) -> None:
+    wf_id, _ = await probe.start(_script("a = await wait_open('anyone?')", "return a['answer']"))
+    client = AgentClient(probe.client, wf_id)
+    [pending] = await _until(client.get_pending_callbacks, bool)
+    assert pending.tool_name == "open_answer"
+    started = [
+        e.timer_started_event_attributes.start_to_fire_timeout.ToTimedelta()
+        for e in await probe.history(wf_id)
+        if e.event_type == EventType.EVENT_TYPE_TIMER_STARTED
+    ]
+    assert started == [timedelta(days=3650)]
+    await client.provide_callback_result(pending.tool_id, result={"answer": "yes"})
+    assert await probe.reply(wf_id) == "result: 'yes'"

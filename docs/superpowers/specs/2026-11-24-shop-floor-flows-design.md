@@ -275,7 +275,8 @@ shows its steps before anything runs. A step whose key is computed shows as "dyn
 module path), `place` (a station name, nullable), `assignee` (nullable principal, A2),
 `expires_at`, `state` (`open`, `answered`, `cancelled`, `expired`), `answer` (jsonb),
 `answered_by`, `progress` (jsonb, for batch tasks, A3). Entity kind `task`. A1's table leaves out
-`assignee` and `progress`: each comes with the phase that reads it.
+`project_id`, `assignee` and `progress`: each comes with the phase that reads it, `project_id`
+with epic B (#7362) and its foreign key.
 
 **The life of a prompt:**
 

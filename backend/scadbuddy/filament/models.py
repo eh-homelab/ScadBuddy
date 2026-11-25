@@ -10,10 +10,12 @@ are typed so. Every colour is an `Rgba`: ``#rrggbb`` is stored as ``#RRGGBBFF``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Annotated, Any, ClassVar, Final, Literal
+from typing import Annotated, Any, ClassVar, Final, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -23,10 +25,10 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
-from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
@@ -1290,8 +1292,9 @@ class Spool(_Row):
     #: with none, costed or not; one with a line is refused (#6700).
     invoice_line_id: UUID | None = None
     #: How the spool's data came in, in Bambuddy's words (``rfid_auto``, ``nfc_link``,
-    #: ``opentag3d`` ...), whether the pull or ScadBuddy wrote it (#7149 R-7149-1). Read
-    #: only: the pull, a person's tag bind and a confirmed NTAG write set it.
+    #: ``opentag3d`` ...) or ScadBuddy's ``openspool``, whether the pull or ScadBuddy wrote
+    #: it (#7149 R-7149-1). Read only: the pull, a person's tag bind and a checked tag write
+    #: from the phone page (#7273) set it.
     data_origin: str | None = None
     #: Whether the spool was added full; ``None`` is not known (R-7149-2).
     added_full: bool | None = None
@@ -1604,6 +1607,8 @@ class Tag(BaseModel):
     raw_blob: str | None
     note: str | None
     created_at: datetime
+    last_seen_at: datetime | None = None
+    last_seen_source: str | None = None
 
 
 class TagBindingCreate(_In):
@@ -1903,6 +1908,265 @@ class TagDetail(TagRow):
     history: list[TagBinding] = Field(default_factory=list)
 
 
+#: NTAG216's usable memory, the most one tag's records can hold.
+MAX_RECORD_BYTES: Final = 888
+MAX_RECORDS: Final = 16
+TagSource = Literal["phone", "agent", "ams"]
+
+
+class NdefRecord(_In):
+    """One NDEF record as a reader gives it: its type and its payload in hex."""
+
+    record_type: Annotated[
+        str, Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9:._/+-]+$")
+    ]
+    media_type: Annotated[str, Field(max_length=127)] | None = None
+    id: Annotated[str, Field(max_length=255)] | None = None
+    encoding: Annotated[str, Field(max_length=32)] | None = None
+    lang: Annotated[str, Field(max_length=35)] | None = None
+    data_hex: Annotated[str, Field(max_length=2 * MAX_RECORD_BYTES, pattern=r"^([0-9a-fA-F]{2})*$")]
+
+    @field_validator("data_hex")
+    @classmethod
+    def _lower(cls, value: str) -> str:
+        return value.lower()
+
+    @field_validator("media_type", "id", "encoding", "lang")
+    @classmethod
+    def _utf8(cls, value: str | None) -> str | None:
+        return _utf8(value)
+
+
+def _utf8(value: str | None) -> str | None:
+    """``value`` when UTF-8 can hold it. JSON can carry a lone UTF-16 surrogate
+    (``"\\ud800"``), which no UTF-8 holds, so storing or hashing it would fail later."""
+    if value is not None:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("the text holds a lone UTF-16 surrogate") from None
+    return value
+
+
+def _check_fits(records: Sequence[NdefRecord]) -> None:
+    if sum(len(r.data_hex) // 2 for r in records) > MAX_RECORD_BYTES:
+        raise ValueError(f"the records hold more than {MAX_RECORD_BYTES} bytes")
+
+
+class _FitsOneTag(_In):
+    """A body whose NDEF ``records`` must fit one tag."""
+
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+
+    @model_validator(mode="after")
+    def _fits(self) -> Self:
+        _check_fits(self.records)
+        return self
+
+
+class TagReadIn(_FitsOneTag):
+    """What a phone reads from a tag: its UID and its NDEF records."""
+
+    uid: Annotated[str, Field(max_length=64)] | None = None
+    tag_type: Annotated[str, Field(max_length=32)] | None = None
+    #: Bind the tag to this spool as part of the read.
+    bind_spool_id: UUID | None = None
+
+
+BackupReason = Literal["spool_write", "agent_write", "restore"]
+
+
+class TagBackupIn(_FitsOneTag):
+    """What a tag held just before a write (#7273 G7). An empty ``uid`` is allowed here so
+    that it reaches the store and answers 422 ``no_uid``, as ``"::"`` does."""
+
+    uid: Annotated[str, Field(max_length=64)]
+    reason: BackupReason
+    job_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _job(self) -> TagBackupIn:
+        if (self.reason == "agent_write") != (self.job_id is not None):
+            raise ValueError("`job_id` goes with the reason `agent_write`, and only with it")
+        return self
+
+
+class TagBackup(BaseModel):
+    id: UUID
+    tag_id: UUID
+    uid: str
+    records: list[NdefRecord]
+    reason: BackupReason
+    job_id: UUID | None
+    actor: str
+    at: datetime
+
+
+class TagBackupMade(BaseModel):
+    backup_id: UUID
+
+
+class TagRecordsIn(_FitsOneTag):
+    """The tag as a phone just read it, and the backup it took of it (#7273 G2, G7)."""
+
+    uid: Annotated[str, Field(max_length=64)]
+    backup_id: UUID
+
+
+class TagRecords(BaseModel):
+    """The records to write. ``format`` is ``None`` for a restore of records that are in
+    neither format."""
+
+    format: Literal["openspool", "opentag3d"] | None
+    records: list[NdefRecord]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TagWrittenIn(_In):
+    """A write the phone made: what it sent and what the tag held after (#7273 R4)."""
+
+    uid: Annotated[str, Field(max_length=64)]
+    backup_id: UUID
+    sent: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+    read_back: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)]
+
+
+NfcJobKind = Literal["read", "write"]
+#: ``cancelled``: the agent stopped waiting for it (#7273 M1).
+NfcJobState = Literal["pending", "armed", "done", "failed", "expired", "cancelled"]
+
+
+class NfcJobIn(_In):
+    """A tag read or write an agent asks for (#7273 G4). The phone page runs it when a person
+    arms it. A ``write`` needs the ``records`` to write; a ``read`` takes none."""
+
+    kind: NfcJobKind
+    records: Annotated[list[NdefRecord], Field(min_length=1, max_length=MAX_RECORDS)] | None = None
+    #: How long the job waits for a person, in seconds (#7273 R7).
+    ttl_s: Annotated[int, Field(ge=1, le=600)] = 600
+
+    @model_validator(mode="after")
+    def _records(self) -> Self:
+        if (self.kind == "write") != (self.records is not None):
+            raise ValueError("a `write` job needs `records`, and a `read` job takes none")
+        _check_fits(self.records or [])
+        return self
+
+
+class NfcJob(BaseModel):
+    id: UUID
+    kind: NfcJobKind
+    records: list[NdefRecord] | None
+    created_by: str
+    state: NfcJobState
+    result: dict[str, Any] | None
+    created_at: datetime
+    expires_at: datetime
+    armed_by: str | None
+    #: Whether the job's ``agent_write`` backup exists: the write has begun, so the job
+    #: is never cancelled or expired; it ends with its result, or ``failed`` with the code
+    #: ``no_read_back`` once the backup is too old to check one (#7419 review).
+    write_begun: bool
+
+
+def records_sha256(records: Sequence[NdefRecord]) -> str:
+    """The SHA-256, as lower-case hex, of the canonical JSON of ``records`` (`NfcJobClaimIn`)."""
+    canonical = json.dumps(
+        [r.model_dump(mode="json") for r in records],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class NfcJobClaimIn(_In):
+    """The phone page arms a job (#7273 R22). For a ``write`` job, ``records_sha256`` is
+    required: the SHA-256 (hex) of the records the page showed the person, so that the
+    person's tap approves exactly those records. A ``read`` job takes none.
+
+    The hashed bytes are the UTF-8 of the job's ``records`` array exactly as
+    ``GET /nfc-jobs/{job_id}`` returns it, written as canonical JSON: the array in its own
+    order; in each record object, every key it has (``data_hex``, ``encoding``, ``id``,
+    ``lang``, ``media_type``, ``record_type``, with ``null`` for an absent value) in sorted
+    order; no spaces or newlines (separators ``,`` and ``:``); strings as ``JSON.stringify``
+    writes them (non-ASCII characters as themselves, not ``\\u`` escapes). One record
+    ``{"record_type": "mime", "data_hex": "7b7d"}`` is hashed as
+    ``[{"data_hex":"7b7d","encoding":null,"id":null,"lang":null,"media_type":null,"record_type":"mime"}]``.
+    In a browser: ``JSON.stringify`` of the records with each object's keys sorted, then
+    ``crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))``. The server's side
+    is `records_sha256`."""
+
+    records_sha256: Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")] | None = None
+
+    @field_validator("records_sha256")
+    @classmethod
+    def _lower(cls, value: str | None) -> str | None:
+        return None if value is None else value.lower()
+
+
+class NfcJobResultIn(_In):
+    """What the phone page got from the tag for an armed job. For a write, ``records`` is the
+    read-back and ``backup_id`` the `agent_write` backup it took first. An ``error`` fails the
+    job, and nothing else is read."""
+
+    uid: Annotated[str, Field(max_length=64)] | None = None
+    records: Annotated[list[NdefRecord], Field(max_length=MAX_RECORDS)] = Field(
+        default_factory=list
+    )
+    backup_id: UUID | None = None
+    error: Annotated[str, Field(max_length=500)] | None = None
+
+    @field_validator("error")
+    @classmethod
+    def _utf8(cls, value: str | None) -> str | None:
+        return _utf8(value)
+
+    @model_validator(mode="after")
+    def _fits(self) -> Self:
+        _check_fits(self.records)
+        return self
+
+
+class DecodedSpool(BaseModel):
+    """A spool as a tag's records describe it."""
+
+    format: Literal["openspool", "opentag3d"]
+    version: str
+    material: str | None = None
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    rgba: Rgba | None = None
+    extra_colours: list[Rgba] | None = None
+    diameter_mm: Decimal | None = None
+    density_g_cm3: Decimal | None = None
+    nozzle_temp_min: int | None = None
+    nozzle_temp_max: int | None = None
+    bed_temp_min: int | None = None
+    bed_temp_max: int | None = None
+    drying_temp_c: int | None = None
+    drying_hours: Decimal | None = None
+    label_weight_g: int | None = None
+    empty_weight_g: int | None = None
+    serial: str | None = None
+    warnings: list[str] = Field(
+        default_factory=list,
+        description=(
+            "A field the tag holds that could not be read (`min_temp`), a field read and "
+            "then cut (`brand cut to 128 characters`), or a note (`newer minor version`)."
+        ),
+    )
+
+
+class TagReadResult(BaseModel):
+    tag: TagRow | None
+    spool: Spool | None
+    decoded: DecodedSpool | None
+    draft: SpoolCreate | None
+    next: Literal["open_spool", "bind_or_create", "none"]
+
+
 class LedgerRow(SpoolEvent):
     spool_number: int
 
@@ -2023,7 +2287,6 @@ class RfidStatus(BaseModel):
     bambuddy_auto_add: bool | None = None
     saved_auto_add: bool | None = None
     detail: str | None = None
-    devices: list[SpoolBuddyDevice] = Field(default_factory=list)
 
 
 class RfidModeSet(BaseModel):
@@ -2041,66 +2304,8 @@ class RfidReconcileReport(BaseModel):
     slots: SlotReport | None = None
 
 
-#: A SpoolBuddy device id as Bambuddy mints them (``sb-`` and the MAC, in ``DeviceResponse``
-#: of ``rfid-routes.json``; its write and scan bodies cap it at 50 characters). It becomes
-#: a path segment of a Bambuddy call, so nothing outside this set may pass.
-DeviceId = Annotated[str, Field(pattern=r"^[A-Za-z0-9._:-]{1,50}$")]
-
-
 class SpoolRef(BaseModel):
     """An SB spool by its id and the number a person reads."""
 
     id: UUID
     number: int
-
-
-class ScanRequest(_In):
-    """The body of ``POST /filament/rfid/scan``: how long to wait for a tag (at most 50
-    seconds, below the ingress's 60), and the SpoolBuddy device to listen to (any device
-    when unset)."""
-
-    timeout_s: Annotated[int, Field(ge=1, le=50)] = 30
-    device_id: DeviceId | None = None
-
-
-class ScanResult(BaseModel):
-    """What a SpoolBuddy reader read: ``tag`` with the tag's keys, its ``kind`` and the SB
-    spool that holds it (the one whose open binding names the keys, else the one linked
-    to ``bambuddy_spool_id``), or ``timeout`` with nothing else set."""
-
-    status: Literal["tag", "timeout"]
-    tag_uid: str | None = None
-    tray_uuid: str | None = None
-    tag_type: str | None = None
-    kind: TagKind | None = None
-    bambuddy_spool_id: int | None = None
-    sb_spool: SpoolRef | None = None
-
-
-class NtagWrite(_In):
-    """The body of ``POST /filament/spools/{id}/ntag/write``. ``replace`` lets the write
-    go over a spool whose open tag was bound with ``override``."""
-
-    device_id: DeviceId
-    replace: bool = False
-
-
-class NtagCancel(_In):
-    """The body of ``POST /filament/spools/{id}/ntag/cancel``."""
-
-    device_id: DeviceId
-
-
-class NtagQueued(BaseModel):
-    """A write SpoolBuddy has queued; ``warnings`` are what Bambuddy says is missing from
-    the spool's record."""
-
-    status: Literal["queued"] = "queued"
-    warnings: list[str] = Field(default_factory=list)
-
-
-class NtagConfirm(BaseModel):
-    """Whether the written tag is now the spool's: ``bound`` with the new ``tag_uid``."""
-
-    bound: bool
-    tag_uid: str | None = None

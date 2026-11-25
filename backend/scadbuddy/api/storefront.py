@@ -229,8 +229,8 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process
     runs as many publishes as it allows. Once published, the shop renders the default
-    variant and starts its storefront slice price (#6922, `prepare.py` `warm_default`),
-    so its price is there before a visitor asks."""
+    variant (a file listing has no render, #7523) and starts its storefront slice price
+    (#6922, `prepare.py` `warm_default`), so its price is there before a visitor asks."""
     listing = await publish(state, orders.listings, listing_id)
     await warm_default(state, listing)
     return listing

@@ -83,7 +83,8 @@ class StoreEstimate(BaseModel):
     ``retry_after`` seconds. With no firm price it is ``none``, and the shop prices the
     line by hand. With ``last`` (#6921, the instant read) it is the variant's last firm
     price, not today's; from a file listing's price read (#6710) it is the listing's last
-    firm price of other colours, with ``retry_after``. No cart line takes it. A volume
+    firm price of other colours, with ``retry_after`` (of the slice that runs, or of the
+    visitor's limit, #7523). No cart line takes it. A volume
     estimate is never sent. The edge sends a visitor only `storefront/routes.py`
     ``ESTIMATE_FIELDS``: never `SHOP_ONLY_FIELDS`, a line, a cost or a rate."""
 

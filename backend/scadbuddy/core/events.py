@@ -242,6 +242,24 @@ class FlowChanged(BaseEvent):
     name: str
 
 
+#: One character of a task's ``place``, which becomes part of a realtime topic: no
+#: control character. `tasks.models` and `api.realtime` share it.
+TASK_PLACE_CHAR = r"[^\x00-\x1f\x7f-\x9f]"
+#: The most characters a task's ``place`` holds.
+TASK_PLACE_MAX = 100
+
+
+class TaskChanged(BaseEvent):
+    """A task (a typed question a flow asks a person, #7364) was opened or moved to
+    another state: re-read it. ``place`` is where it is shown, if anywhere."""
+
+    kind: Literal["task.changed"] = "task.changed"
+    task_id: str
+    run_id: str
+    state: Literal["open", "answered", "cancelled", "expired"]
+    place: str | None = None
+
+
 class PreviewSliceEvent(BaseEvent):
     """The print dialog's background slice moved on (``preview_slice.progress``) or ended
     (``preview_slice.settled``) (#265). Re-read its ``preview-slices/{job_id}`` route.
@@ -436,6 +454,7 @@ Event = Annotated[
     | OperationEvent
     | FlowRunEvent
     | FlowChanged
+    | TaskChanged
     | PreviewSliceEvent
     | ActivityEvent
     | OrderChanged

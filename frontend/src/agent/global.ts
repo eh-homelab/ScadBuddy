@@ -22,6 +22,9 @@ const USER_ONLY_MESSAGE =
   'Only the user can press this: it confirms an action that leaves ScadBuddy or cannot be ' +
   'undone (send, print, delete, save settings). Ask the user to review it and press it.'
 
+/** What `fill` says of a field inside a user-only control: a flow's question, a pairing code. */
+const USER_ONLY_FIELD_MESSAGE = 'This is for the user to fill in.'
+
 /** What `fill` says when the control asked first (a preset pick over edits, #359). */
 const CONFIRM_FIRST = (dialog: Element) =>
   `"${nameOf(dialog)}" opened instead: the value takes only once it is answered. Take a ` +
@@ -194,7 +197,8 @@ export function useGlobalAgentTools() {
         throw new AgentToolError('invalid_args', `${matches.length} visible fields are labelled "${label}".`)
       }
       const element = matches[0] as Element
-      if (isUserOnly(element) || (element instanceof HTMLInputElement && element.type === 'password')) {
+      if (isUserOnly(element)) throw new AgentToolError('refused', USER_ONLY_FIELD_MESSAGE)
+      if (element instanceof HTMLInputElement && element.type === 'password') {
         throw new AgentToolError('refused', 'Credentials are for the user to type; an agent never fills them.')
       }
       if (element.closest('.monaco-editor')) {

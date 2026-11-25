@@ -13,7 +13,7 @@ The owner wants to read and write spool tags now, from an Android phone, with no
 - G7. Every write is backed up first (owner, 2026-11-23). One tap does read → back up → write → read back:
   1. The page reads the tag's UID and records.
   2. It posts them to ScadBuddy.
-  3. ScadBuddy stores them as a new row in `filament_tag_backups`, keyed by the physical tag (the `filament_tags` row for that UID, created if new).
+  3. ScadBuddy stores them as a new row in `filament_tag_backups`, keyed by the physical tag (the `filament_tags` row for that UID). A tag seen for the first time is created with the kind its records decode to (`ntag_openspool`, `ntag_opentag`, else `other`), and a later read or the write's read-back corrects the kind when the format changes (plan R13).
   4. Only after ScadBuddy confirms the backup does the page write.
   If the backup fails, nothing is written. If the tag gives no UID, the write is refused, because the backup could not be tied to a physical tag. Backups are append-only, with one row per write, so every earlier version of a tag is kept. The tag's page lists them and offers "Restore", which is itself a write and so is backed up first. Agent writes (G4) use the same path.
 - G3. **One input path.** Every tag reading, from the phone, an agent job or an AMS tray report, becomes one `TagRead` and goes through one ScadBuddy function. That function finds the holder, binds and books the ledger event. No source has its own matching or binding.
@@ -38,7 +38,7 @@ The owner wants to read and write spool tags now, from an Android phone, with no
 ## Constraints
 
 - Web NFC is `NDEFReader` (https://w3c.github.io/web-nfc/, https://developer.mozilla.org/en-US/docs/Web/API/Web_NFC_API). It works only in Chrome on Android, in a secure context, in a top-level frame (not inside Bambuddy's iframe), and only after the person grants permission. `scan()` gives `serialNumber` (the UID) and the NDEF records. `write()` writes records.
-- The page reaches ScadBuddy at its own LAN host (memory: UI URLs come from the Host header). It calls the API as the signed-in user. There is no device credential and no device state.
+- The page reaches ScadBuddy at its own LAN host (the browser builds its own links from `window.location.origin`, as `frontend/src/lib/signIn.ts` does; the place labels in `filament/labels.py` are the exception, because they leave the browser). It calls the API as the signed-in user. There is no device credential and no device state.
 - An agent's tag write is outward. The person's arm-and-tap on the page is its approval, so no pending action is needed. An agent's read needs no approval, because the tap is the person's own act.
 - Only the CRUD service touches the database (repo CLAUDE.md, "Database access"). The agent reaches jobs through CRUD routes.
 
@@ -52,17 +52,17 @@ The owner wants to read and write spool tags now, from an Android phone, with no
 
 - **`TagRead`** (`filament/tags.py`) holds: `source` (`phone`, `agent`, `ams`), `uid`, `tray_uuid` (AMS only), `tag_type`, `records` (NDEF: record type, media type and the data as hex), the decoded spool fields (OpenSpool JSON, OpenTag3D), and the printer, AMS and tray for an AMS reading. `read(store, TagRead, actor)` finds the holder by tag (`FilamentInventory.holder_on`'s tag half), records `tag_seen` data, and returns `{tag, spool | null, decoded, next}`. The AMS capture path (`filament/capture.py`) uses the same lookup through this function, so it has no copy of its own.
 - **Encoders** live in `filament/tag_formats.py`. They turn a spool into OpenSpool or OpenTag3D records, decode both formats, and pick the format to write from the tag's current records (G2). Their sources are https://github.com/spuder/OpenSpool and https://github.com/queengooborg/OpenTag3D. Each is tested against a published sample.
-- **Routes** (`/api/v1/filament/tags/…`):
-  - `POST reads` takes one phone or agent reading.
+- **Routes** (under `/api/v1/filament/`, as the other filament routes are; the SpoolBuddy `/spools/{id}/ntag/*` routes are gone, see "Retire"):
+  - `POST /tags/reads` takes one phone or agent reading.
   - `POST /tags/backups` takes `{uid, records}` read just before a write. It stores the backup and answers `{backup_id}`. A write without a `backup_id` from this route is refused.
   - `POST /spools/{id}/tag-records` takes `{uid, records, backup_id}` (the tag as just read) and answers the records to write, in the format G2 picks.
   - `GET /tags/{tag_id}/backups` lists the backups. `POST /tags/{tag_id}/backups/{id}/restore` answers that backup's records, to write the same way.
-  - `POST /spools/{id}/tag-written` takes the read-back after a write, with its `backup_id`. It checks that the read-back records equal the records sent, then binds the tag.
-  - `nfc-jobs` handles create, list pending, claim, result and get.
-- **Jobs** live in a new `filament_nfc_jobs` table: `id`, `kind` (`read` or `write`), `records` (for a write), `created_by`, `state` (`pending`, `armed`, `done`, `failed` or `expired`), `result`, `created_at`, and `expires_at` (10 minutes). An open phone page polls for pending jobs every 2 s, and only while the page is visible. A write job takes a backup first, as G7 says.
+  - `POST /spools/{id}/tag-written` takes `{uid, backup_id, sent, read_back}` after a write. It checks that `read_back` equals `sent` and that `sent` equals what `tag-records` would answer for that spool, then binds the tag. The page carries `sent`, because backup rows are append-only and no row keeps what was sent (plan R4).
+  - `nfc-jobs` handles create, list pending, claim, result, cancel and get. A job is `pending`, `armed`, `done`, `failed`, `expired` or `cancelled`. The agent cancels a job it stops waiting on. Arming a write job sends the SHA-256 of the records the page showed, and the API refuses a mismatch (plan ruling R22).
+- **Jobs** live in a new `filament_nfc_jobs` table: `id`, `kind` (`read` or `write`), `records` (for a write), `created_by`, `state` (`pending`, `armed`, `done`, `failed`, `expired` or `cancelled`), `result`, `created_at`, and `expires_at` (10 minutes). A write job's `result` names the `backup_id` it took, and that backup row names the job (`job_id`). An open phone page polls for pending jobs every 2 s, and only while the page is visible. A write job takes a backup first, as G7 says.
 - **Backups** live in a new `filament_tag_backups` table: `id`, `tag_id` (`filament_tags`, NOT NULL), `uid`, `records` (jsonb, as read: record type, media type and data as hex), `reason` (`spool_write`, `agent_write` or `restore`), `job_id` (null unless an agent write), `actor`, and `at`. Rows are never updated or deleted, and deleting a spool or unbinding the tag keeps them.
 - **Page** `/filament/scan`. It has one big "Scan" button that starts `NDEFReader.scan()` after the person taps it. After a reading it shows the spool card or the bind and unknown-spool choices, the two photo buttons (G6) and a weight field. The screens are in the UX canvas https://claude.ai/artifact/Wj6S6C8Cuvi3sRsMgjeBEV. It also has a "Write tag" action on a spool, and a job banner ("Agent wants to write 2 records. Arm, then hold a tag."). Where Web NFC is missing, it says "Open this page in Chrome on Android" with the page's own URL. Load frontend-design.
-- **Agent tools** `nfc_read(timeout_s)` and `nfc_write(records, timeout_s)` create a job and poll its result. They return the result, or `expired`.
+- **Agent tools** `nfc_read(timeout_s)` and `nfc_write(records, timeout_s)` create a job and poll its result until the job ends or its time is up. A job still open then, or when the call is aborted, is cancelled. They return the job's state (`done`, `failed`, `expired` or `cancelled`) and its result; a failed write's result holds what the tag holds.
 - **Retire** the SpoolBuddy path:
   - `filament/ntag.py`, and the `/spools/{id}/ntag/*` and `/rfid/scan` routes, with their tools and UI;
   - the Bambuddy client's tag-scan and tag-write calls;

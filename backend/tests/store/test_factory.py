@@ -193,6 +193,33 @@ async def test_a_download_cache_is_shared_unless_the_caller_says_it_is_private(
     await private.aclose()
 
 
+async def test_the_piece_cache_is_on_the_data_volume_unless_a_blob_cache_dir_is_set(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """#7318: on a remote store, ``<data>/blobs`` is only a cache (S3 is the record), so
+    ``SCADBUDDY_BLOB_CACHE_DIR`` can move it onto a node-local emptyDir."""
+    _, default = _build(tmp_path, pool, "s3", S3_READY)
+    assert isinstance(default.blobs, CachedBlobStore)
+    assert default.blobs.root == tmp_path / "blobs"
+    await default.aclose()
+    node = tmp_path / "node"
+    _, moved = _build(
+        tmp_path, pool, "s3", S3_READY, Config(data_dir=tmp_path, blob_cache_dir=node)
+    )
+    assert isinstance(moved.blobs, CachedBlobStore) and moved.blobs.root == node
+    await moved.aclose()
+
+
+def test_the_local_store_keeps_its_pieces_on_the_data_volume_whatever_the_cache_dir(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """On ``local``, ``<data>/blobs`` is the record, not a cache: the setting is ignored."""
+    config = Config(data_dir=tmp_path, blob_cache_dir=tmp_path / "node")
+    _, bundle = _build(tmp_path, pool, "local", RenderStoreSettings(), config)
+    assert isinstance(bundle.blobs, LocalBlobStore)
+    assert bundle.blobs.root == tmp_path / "blobs"
+
+
 def test_s3_without_its_settings_refuses_to_start(tmp_path: Path, pool: Pool) -> None:
     with pytest.raises(StoreNotReadyError, match=re.escape(RECOVER_LOCAL_SQL)):
         _build(tmp_path, pool, "s3", RenderStoreSettings(store_backend="s3"))
