@@ -669,8 +669,11 @@ export async function syncIn(
 
 /**
  * Brings back what changed in the pod since its base, without sending anything (a background
- * slot's end, #5916, #7310): pullChanges, then the base moved on for each path it settled. A pod
- * with no base has had no slot, so there is nothing to bring back.
+ * slot's end, #5916, #7310): pullChanges into this worker's session directory. The base stays
+ * as it was: the change has reached only this directory, not the record, so a sync in from
+ * another worker's directory must still see it as the pod's and bring it back, never push its
+ * older copy over it. Here the next sync in finds the directory and the pod alike and does
+ * nothing. A pod with no base has had no slot, so there is nothing to bring back.
  */
 export async function catchUp(client: SandboxClient, dir: string, limits: SyncLimits, kept: Kept): Promise<SyncBack | undefined> {
   const base = await client.base()
@@ -680,12 +683,6 @@ export async function catchUp(client: SandboxClient, dir: string, limits: SyncLi
   const there = new Map(remote.files.map((f) => [f.path, f.sha256]))
   const stays = keptStays(kept, local, there)
   const pull = await pullChanges(client, dir, limits, kept, base, { files: there, truncated: remote.truncated }, local, stays)
-  const next = new Map(base)
-  for (const [rel, sha] of pull.settled) {
-    if (sha === undefined) next.delete(rel)
-    else next.set(rel, sha)
-  }
-  await client.setBase(next)
   return pull.back
 }
 

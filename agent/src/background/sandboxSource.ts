@@ -3,7 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { catchUpInSandbox, findSandbox, SandboxClient, type Sandboxes, type SyncBack, type SyncLimits } from '../sandbox/client.js'
 import type { SlotStatus } from '../sandbox/protocol.js'
 import { EVENT_CHARS, eventBatcher, type EventSink, type MonitorEnd } from './monitor.js'
-import type { BackgroundTask } from './store.js'
+import { type BackgroundTask, NOTICE_MAX_CHARS } from './store.js'
 
 // A background command in the session's sandbox pod (#5916, #7310): a Monitor's `command`, or a
 // Bash or PowerShell call with `run_in_background`. The command runs in a background slot of the
@@ -26,8 +26,11 @@ export function sandboxSpec(t: Pick<BackgroundTask, 'spec'>): SandboxSpec | unde
 /** Whether the task is a Bash or PowerShell call's `run_in_background` (else a Monitor's command). */
 export const isBackgroundShell = (t: Pick<BackgroundTask, 'spec'>): boolean => t.spec.background === 'shell'
 
-/** How much of a background shell's output its end notice shows (its last characters). */
+/** How much of a background shell's output its end notice shows at most (its last characters); less when its file lists need the room. */
 export const SHELL_TAIL_CHARS = EVENT_CHARS
+/** How many paths each file list of the end notice names; it says how many more there are. */
+export const NOTICE_PATHS_MAX = 50
+const PATH_CHARS = 200
 /** How often a broken watch is opened again before the source fails. */
 const WATCH_RETRIES = 3
 
@@ -66,7 +69,20 @@ function tailKeeper(max: number): { push(text: string): void; text(): string; cu
   }
 }
 
-/** What a background shell's end says (Claude Code's notice of a background command, with its output's tail and its files). */
+/** A file list of the end notice: at most NOTICE_PATHS_MAX entries of at most PATH_CHARS each, and how many more. */
+function pathList(tag: string, items: string[]): string {
+  if (!items.length) return ''
+  const shown = items.slice(0, NOTICE_PATHS_MAX).map((p) => p.slice(0, PATH_CHARS))
+  const more = items.length - shown.length
+  return `<${tag}>${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}</${tag}>\n`
+}
+
+/**
+ * What a background shell's end says: Claude Code's notice of a background command, with the
+ * end of its output and the files it changed. It is never longer than NOTICE_MAX_CHARS: the
+ * file lists are capped, and the output's tail is cut from its start to the room they leave,
+ * so the notice keeps its newest output, its lists and its closing tags.
+ */
 export function shellNotice(
   t: Pick<BackgroundTask, 'id' | 'description' | 'spec'>,
   end: MonitorEnd,
@@ -99,16 +115,22 @@ export function shellNotice(
       status = 'killed'
       summary = `${name} ended (${end.outcome})`
   }
-  const out = output?.tail
-    ? `<output>${output.cut > 0 ? `[the first ${output.cut} characters are not shown]\n` : ''}${output.tail}</output>\n`
-    : ''
-  const changed = files?.written.length ? `<files-changed>${files.written.join(', ')}</files-changed>\n` : ''
-  const removed = files?.removed.length ? `<files-removed>${files.removed.join(', ')}</files-removed>\n` : ''
-  const left = files?.left.length ? `<files-left-in-sandbox>${files.left.map((l) => `${l.path}: ${l.reason}`).join('; ')}</files-left-in-sandbox>\n` : ''
-  return (
+  const changed = pathList('files-changed', files?.written ?? [])
+  const removed = pathList('files-removed', files?.removed ?? [])
+  const left = pathList('files-left-in-sandbox', (files?.left ?? []).map((l) => `${l.path.slice(0, PATH_CHARS)}: ${l.reason}`))
+  const head =
     `<task-notification>\n<task-id>${t.id}</task-id>\n<output-file>${outputFile} (in the session's sandbox pod, while it lasts)</output-file>\n` +
-    `<status>${status}</status>\n<summary>${summary}</summary>\n${out}${changed}${removed}${left}</task-notification>`
-  )
+    `<status>${status}</status>\n<summary>${summary.slice(0, 1000)}</summary>\n`
+  const foot = `${changed}${removed}${left}</task-notification>`
+  let out = ''
+  if (output?.tail) {
+    // What is left for the output once the rest is in: its newest characters, and a note of how many came before.
+    const note = (cut: number) => (cut > 0 ? `[the first ${cut} characters are not shown]\n` : '')
+    const room = Math.max(0, Math.min(SHELL_TAIL_CHARS, NOTICE_MAX_CHARS - head.length - foot.length - '<output></output>\n'.length - note(Number.MAX_SAFE_INTEGER).length))
+    const tail = output.tail.length > room ? output.tail.slice(output.tail.length - room) : output.tail
+    out = `<output>${note(output.cut + output.tail.length - tail.length)}${tail}</output>\n`
+  }
+  return `${head}${out}${foot}`
 }
 
 /**
@@ -121,7 +143,15 @@ export function shellNotice(
 export async function followSlot(
   deps: SandboxSourceDeps,
   t: BackgroundTask,
-  options: { dir: string; timeoutMs: number; signal: AbortSignal; onEvent: EventSink; retryMs?: number },
+  options: {
+    dir: string
+    timeoutMs: number
+    signal: AbortSignal
+    onEvent: EventSink
+    /** Records a background shell's end notice as it is, as a monitor's end is (never cut as an event). */
+    onNotice: (text: string) => Promise<void>
+    retryMs?: number
+  },
 ): Promise<MonitorEnd> {
   const spec = sandboxSpec(t)
   if (!spec) return { outcome: 'failed', reason: 'the task names no sandbox slot' }
@@ -210,6 +240,6 @@ export async function followSlot(
   } catch (err) {
     console.warn(`session ${t.sessionId}: background command ${t.id}'s files could not be brought back: ${err instanceof Error ? err.message : String(err)}`)
   }
-  if (shell) await options.onEvent(shellNotice(t, end, { tail: tail.text(), cut: tail.cut() }, files)).catch(() => false)
+  if (shell) await options.onNotice(shellNotice(t, end, { tail: tail.text(), cut: tail.cut() }, files)).catch(() => {})
   return end
 }

@@ -337,7 +337,9 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
           console.error(`session ${t.sessionId}: its working directory could not be placed for a background command: ${err instanceof Error ? err.message : String(err)}`)
         })
         const dir = await ensureSessionDir(deps.paths, t.sessionId)
-        return await watched(t, deps.store, (signal, onEvent) => followSlot(sandbox, t, { dir, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }))
+        return await watched(t, deps.store, (signal, onEvent) =>
+          followSlot(sandbox, t, { dir, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent, onNotice: (text) => deps.store.appendNotice(t.id, text) }),
+        )
       } finally {
         release?.()
       }

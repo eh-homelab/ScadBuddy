@@ -204,7 +204,8 @@ export class SlotManager {
   async #openFile(file: string): Promise<FileHandle | undefined> {
     const dir = path.dirname(file)
     try {
-      // A command may have put something else at the directory's path: a real directory replaces it.
+      // HOME is the commands' own directory in the pod (main.ts: /tmp/home), never /work: a command
+      // may have put something else at this path, and a real directory replaces it.
       const st = await lstat(dir).catch(() => undefined)
       if (st && !st.isDirectory()) await rm(dir, { recursive: true, force: true })
       await mkdir(dir, { recursive: true, mode: 0o700 })

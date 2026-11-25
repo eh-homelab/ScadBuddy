@@ -5,8 +5,8 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { followSlot, shellNotice } from '../src/background/sandboxSource.js'
-import type { BackgroundTask } from '../src/background/store.js'
+import { followSlot, NOTICE_PATHS_MAX, shellNotice } from '../src/background/sandboxSource.js'
+import { type BackgroundTask, NOTICE_MAX_CHARS } from '../src/background/store.js'
 import type { BackgroundContext } from '../src/builtins/background.js'
 import { runShell, type ShellContext } from '../src/builtins/sandboxShell.js'
 import { catchUpInSandbox, runInSandbox, SandboxClient, startInSandbox, WATCH_LINE_MAX_BYTES } from '../src/sandbox/client.js'
@@ -324,6 +324,25 @@ describe("a slot's files come back to the session", () => {
     expect(run.overwritten).toEqual(['both.txt'])
   })
 
+  it("reaches a sync from another worker's directory too, never overwritten by its older copy", async () => {
+    await writeFile(path.join(dir, 'out.txt'), 'old')
+    const { slot } = await startInSandbox(call(), 'bash', 'echo new > out.txt', 10_000)
+    await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
+    // The worker that followed the slot brings it back into its own directory.
+    expect((await catchUpInSandbox(call()))?.written).toEqual(['out.txt'])
+    // Another worker's directory still holds the record's older copy: its sync brings the slot's back.
+    const other = await mkdtemp(path.join(tmpdir(), 'session-b-'))
+    try {
+      await writeFile(path.join(other, 'out.txt'), 'old')
+      const run = await runInSandbox({ ...call(), dir: other }, 'bash', 'cat out.txt', 10_000)
+      expect(run.result.stdout).toBe('new\n')
+      expect(run.pulled?.written).toEqual(['out.txt'])
+      expect(await readFile(path.join(other, 'out.txt'), 'utf8')).toBe('new\n')
+    } finally {
+      await rm(other, { recursive: true, force: true })
+    }
+  })
+
   it('under the same caps as a foreground command', async () => {
     const { slot } = await startInSandbox({ ...call(), limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 } }, 'bash', 'head -c 100 /dev/zero > big.bin', 10_000)
     await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
@@ -359,6 +378,7 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       timeoutMs: 10_000,
       signal: new AbortController().signal,
       onEvent: async (text) => (events.push(text), true),
+      onNotice: async () => {},
     })
     expect(end).toEqual({ outcome: 'exited', code: 0 })
     expect(events).toEqual(['a\nb', 'c'])
@@ -372,6 +392,7 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       timeoutMs: 60_000,
       signal: new AbortController().signal,
       onEvent: async () => ++n < 2,
+      onNotice: async () => {},
     })
     expect(end).toEqual({ outcome: 'too_many' })
     const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, AbortSignal.timeout(10_000))
@@ -387,6 +408,7 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       timeoutMs: 60_000,
       signal: cancel.signal,
       onEvent: async () => true,
+      onNotice: async () => {},
     })
     expect(end).toEqual({ outcome: 'cancelled' })
     const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, AbortSignal.timeout(10_000))
@@ -404,23 +426,54 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       timeoutMs: 60_000,
       signal: new AbortController().signal,
       onEvent: async () => true,
+      onNotice: async () => {},
     })
     expect(end).toMatchObject({ outcome: 'failed', reason: expect.stringContaining('sandbox pod ended') })
   })
 
-  it("reports a background shell's end once, with its output's tail and the files it changed", async () => {
+  it("reports a background shell's end once, as a notice, with its output's tail and the files it changed", async () => {
     const { slot } = await startInSandbox(call(), 'bash', 'echo working; echo oops >&2; echo r > result.txt; exit 1', 10_000)
     const events: string[] = []
+    const notices: string[] = []
     const t = task({ background: 'shell', description: 'build', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } })
-    const end = await followSlot(deps(), t, { dir, timeoutMs: 10_000, signal: new AbortController().signal, onEvent: async (text) => (events.push(text), true) })
+    const end = await followSlot(deps(), t, {
+      dir,
+      timeoutMs: 10_000,
+      signal: new AbortController().signal,
+      onEvent: async (text) => (events.push(text), true),
+      onNotice: async (text) => void notices.push(text),
+    })
     expect(end).toEqual({ outcome: 'exited', code: 1 })
-    expect(events).toHaveLength(1)
-    expect(events[0]).toContain('<status>failed</status>')
-    expect(events[0]).toContain('Background command "build" failed with exit code 1')
-    expect(events[0]).toContain('working\noops\n')
-    expect(events[0]).toContain('<files-changed>result.txt</files-changed>')
+    expect(events).toEqual([])
+    expect(notices).toHaveLength(1)
+    // Claude Code's notice as it is, not wrapped as a Monitor event.
+    expect(notices[0]).toMatch(/^<task-notification>\n<task-id>abcd1234<\/task-id>/)
+    expect(notices[0]).toContain('<status>failed</status>')
+    expect(notices[0]).toContain('Background command "build" failed with exit code 1')
+    expect(notices[0]).toContain('working\noops\n')
+    expect(notices[0]).toContain('<files-changed>result.txt</files-changed>')
     expect(await readFile(path.join(dir, 'result.txt'), 'utf8')).toBe('r\n')
     expect(shellNotice(t, { outcome: 'cancelled' })).toContain('was stopped')
+  })
+
+  it("keeps the end of a long output, the file lists and the closing tags within a notice's cap", async () => {
+    const lines = 'for i in $(seq 1 3000); do echo "line $i of the build"; done'
+    const { slot } = await startInSandbox(call(), 'bash', `${lines}; echo built > out.js; echo LAST`, 30_000)
+    const notices: string[] = []
+    const t = task({ background: 'shell', description: 'build', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } })
+    await followSlot(deps(), t, { dir, timeoutMs: 30_000, signal: new AbortController().signal, onEvent: async () => true, onNotice: async (text) => void notices.push(text) })
+    const notice = notices[0]!
+    expect(notice.length).toBeLessThanOrEqual(NOTICE_MAX_CHARS)
+    expect(notice).toContain('LAST\n</output>')
+    expect(notice).toMatch(/\[the first \d+ characters are not shown\]/)
+    expect(notice).toContain('<files-changed>out.js</files-changed>')
+    expect(notice.endsWith('</task-notification>')).toBe(true)
+    // So many changed files that their list alone would not fit: it is capped, and still closes.
+    const many = { written: Array.from({ length: 500 }, (_, i) => `dir/file-${i}-${'x'.repeat(150)}.txt`), removed: [], left: [] }
+    const capped = shellNotice(t, { outcome: 'exited', code: 0 }, { tail: 'y'.repeat(50_000), cut: 0 }, many)
+    expect(capped.length).toBeLessThanOrEqual(NOTICE_MAX_CHARS)
+    expect(capped).toContain(`and ${500 - NOTICE_PATHS_MAX} more</files-changed>`)
+    expect(capped.endsWith('</task-notification>')).toBe(true)
   })
 })
 
