@@ -551,7 +551,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     const a = await replica()
     const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'hi' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
-    expect(session.mode).toBe('durable')
     expect(await runtimeOf(session.id)).toBe('unified')
     expect(await sessionWorkflow(session.id)).toEqual(AGENT_SESSION)
   }, 60_000)
@@ -585,7 +584,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     // An AgentSession that ran, and a classic session that never did: each child is an AgentSession.
     for (const from of [parent.id, classic]) {
       const child = await a.fork(from, agentA)
-      expect(child).toMatchObject({ parentId: from, mode: 'durable' })
+      expect(child).toMatchObject({ parentId: from })
       expect(await runtimeOf(child.id)).toBe('unified')
       expect(await (await a.send(child.id, agentA, 'go left')).done).toMatchObject({ kind: 'result', subtype: 'success' })
       const sent = conversation(fake.messageCalls().at(-1))

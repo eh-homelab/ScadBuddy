@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.api.test_settings_runtime import _state
@@ -47,6 +48,51 @@ def test_a_support_link_is_added_and_listed(client: TestClient) -> None:
     )
     listed = client.get(f"/api/v1/entities/{entity}/links").json()["links"]
     assert [x["id"] for x in listed] == [body["id"]]
+
+
+@pytest.mark.parametrize(
+    ("catalog", "kind", "values"),
+    [
+        ("materials", "material", {}),
+        ("subtypes", "subtype", {}),
+        ("brands", "brand", {}),
+        ("categories", "category", {}),
+        ("effects", "effect", {}),
+        ("insert-materials", "insert_material", {}),
+        ("insert-types", "insert_type", {"empty_weight_g": 250}),
+        ("colours", "colour", {"rgba": "#112233FF"}),
+        ("location-kinds", "location_kind", {}),
+    ],
+)
+def test_a_catalog_row_takes_a_link_and_properties(
+    client: TestClient, catalog: str, kind: str, values: dict[str, Any]
+) -> None:
+    made = client.post(
+        f"/api/v1/filament/catalog/{catalog}",
+        json={"name": f"Linked {uuid.uuid4()}", **values},
+        headers=press(),
+    )
+    assert made.status_code in (200, 201), made.text
+    entity = f"{kind}:{made.json()['id']}"
+    added = _add(client, entity, "https://example.com/datasheet", kind="datasheet")
+    assert added.status_code == 200, added.text
+    listed = client.get(f"/api/v1/entities/{entity}/links").json()["links"]
+    assert [x["id"] for x in listed] == [added.json()["id"]]
+    assert client.get(f"/api/v1/entities/{entity}/attachments").json() == {"attachments": []}
+    # A kind with no seeded schema takes any key, and its schema reads empty.
+    set_ = client.patch(
+        f"/api/v1/entities/{entity}/properties",
+        json={"set": {"part_number": "SB-250"}},
+        headers=press(),
+    )
+    assert set_.status_code == 200, set_.text
+    assert [(p["key"], p["value"]) for p in set_.json()["properties"]] == [
+        ("part_number", "SB-250")
+    ]
+    found = client.get(f"/api/v1/entity-kinds/{kind}/properties").json()["properties"]
+    assert found[made.json()["id"]] == {"part_number": "SB-250"}
+    schema = client.get(f"/api/v1/entity-kinds/{kind}/property-schema").json()
+    assert schema["schema"].get("properties", {}) == {}
 
 
 def test_a_url_that_is_not_a_web_page_is_refused(client: TestClient) -> None:

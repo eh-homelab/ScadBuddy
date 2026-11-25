@@ -12,7 +12,7 @@ import hashlib
 import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -40,6 +40,11 @@ META_TEXT_MAX = 64 * 1024
 #: The range of the ``inputs_version`` column, a Postgres ``bigint`` (review A-I1).
 BIGINT_MIN = -(2**63)
 BIGINT_MAX = 2**63 - 1
+
+#: How a row's ``meta_error`` starts when its ``model.json`` is JSON that Postgres's
+#: jsonb refuses (NaN, Infinity, a lone surrogate, a NUL in a key): the catalogue's
+#: readers then read that file, as before the copy (#7317 Task 7 review M2).
+NOT_STORABLE = "not storable"
 
 #: A copy run older than this is deleted when the next run starts (plan decision 8).
 RUN_KEPT = "30 days"
@@ -70,13 +75,21 @@ _UPSERT = (
     + ", refreshed_at = clock_timestamp()"
 )
 
+#: What a read selects: the columns, then whether the template's media changed after
+#: the row was refreshed (`TemplateRow.media_newer`). Every media write sets
+#: ``media_changed_at`` in its own transaction (`media_store.py` ``_MARK``), a
+#: removal and a built-in's cover choice included; a refresh never writes it.
+_SELECTED = (
+    ", ".join(_COLUMNS) + ", COALESCE(media_changed_at > refreshed_at, false) AS media_newer"
+)
+
 #: Mine first, then the built-ins, each in byte order, as Python's `sorted` of the ids.
 _ORDER = " ORDER BY origin = 'builtin', template_id COLLATE \"C\""
 
 
 @dataclass(frozen=True)
 class TemplateRow:
-    """One ``templates`` row, every column but ``refreshed_at``."""
+    """One ``templates`` row, every column but ``refreshed_at``, and what a read adds."""
 
     template_id: str
     origin: Literal["mine", "builtin"]
@@ -93,6 +106,11 @@ class TemplateRow:
     cover: dict[str, str] | None
     files_stamp: str
     refreshed_head: str | None
+    #: Read, never written: the template's media changed after this row's refresh
+    #: (an add, a removal, a reorder or a built-in's cover choice), so ``files`` and
+    #: ``cover`` may be old (Task 8 review M1, final review M3). Not compared: a row
+    #: built from the files and its read are equal.
+    media_newer: bool = field(default=False, compare=False)
 
 
 def _values(row: TemplateRow) -> tuple[Any, ...]:
@@ -116,7 +134,9 @@ def _values(row: TemplateRow) -> tuple[Any, ...]:
 
 
 def _row_of(found: DictRow) -> TemplateRow:
-    return TemplateRow(**{column: found[column] for column in _COLUMNS})
+    return TemplateRow(
+        **{column: found[column] for column in _COLUMNS}, media_newer=found["media_newer"]
+    )
 
 
 def template_stamp(
@@ -184,15 +204,47 @@ class TemplateRows:
     def get(self, template_id: str) -> TemplateRow | None:
         with self._pool.connection() as conn:
             found = conn.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM templates WHERE template_id = %s",
+                f"SELECT {_SELECTED} FROM templates WHERE template_id = %s",
                 (template_id,),
             ).fetchone()
         return None if found is None else _row_of(found)
 
     def all(self) -> list[TemplateRow]:
         with self._pool.connection() as conn:
-            found = conn.execute(f"SELECT {', '.join(_COLUMNS)} FROM templates{_ORDER}").fetchall()
+            found = conn.execute(f"SELECT {_SELECTED} FROM templates{_ORDER}").fetchall()
         return [_row_of(row) for row in found]
+
+    def many(self, template_ids: Sequence[str]) -> list[TemplateRow]:
+        """The rows of ``template_ids`` that exist, in one query, in the walk's order."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                f"SELECT {_SELECTED} FROM templates WHERE template_id = ANY(%s){_ORDER}",
+                (list(template_ids),),
+            ).fetchall()
+        return [_row_of(row) for row in found]
+
+    def names(self) -> list[tuple[str, str, str | None]]:
+        """Each row's id, ``name`` and ``meta_error``, in the walk's order."""
+        with self._pool.connection() as conn:
+            found = conn.execute(f"SELECT template_id, name, meta_error FROM templates{_ORDER}")
+            return [(row["template_id"], row["name"], row["meta_error"]) for row in found]
+
+    def duplicates_of(self, template_id: str) -> tuple[list[str], list[str]]:
+        """The ids of mine whose ``meta`` names ``template_id`` as their upstream, and
+        the ids of mine whose ``model.json`` Postgres could not store (their file
+        decides), each in the walk's order."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT template_id, meta IS NULL AS unstored FROM templates"
+                " WHERE origin = 'mine' AND ((meta->'upstream'->>'id' = %s"
+                " AND jsonb_typeof(meta->'upstream'->'id') = 'string')"
+                " OR (meta IS NULL AND starts_with(meta_error, %s)))"
+                f"{_ORDER}",
+                (template_id, NOT_STORABLE),
+            ).fetchall()
+        named = [row["template_id"] for row in found if not row["unstored"]]
+        unstored = [row["template_id"] for row in found if row["unstored"]]
+        return named, unstored
 
     def ids(self) -> list[str]:
         with self._pool.connection() as conn:
@@ -281,8 +333,8 @@ class TemplateRows:
 
     def copied(self) -> bool:
         """Whether a copy run has finished. Once true, it stays true for this object.
-        No reader calls it yet: phase 2's readers read rows only once it is true (plan
-        2026-11-25 Task 7, `Catalogue._from_rows`)."""
+        The catalogue's readers read rows only once it is true (`Catalogue._from_rows`,
+        #7317 phase 2)."""
         if self._copied:
             return True
         with self._pool.connection() as conn:

@@ -75,6 +75,7 @@ from scadbuddy.orders.storefront.model_requests import (
     insert_links,
 )
 from scadbuddy.orders.storefront.renders import checked_choice, variant_colours, variant_key
+from scadbuddy.orders.storefront.slice_price import kit_colours
 from scadbuddy.orders.storefront.staged_files import poke, uploads_of
 from scadbuddy.orders.storefront.visitors import VisitorStore, token_sha256, visitor_actor
 from scadbuddy.orders.storefront.wire import (
@@ -395,10 +396,11 @@ async def get_draft(state: AppState, visitor_id: str) -> DraftView | None:
 async def _render_colours(
     state: AppState, visitor_id: str, render_key: str, variant: str
 ) -> list[str] | None:
-    """The slot colours of the visitor's own done render of ``render_key``, else those a
-    priced slice of the choices' variant ``variant`` recorded (#6921: the page showed its
-    preview with no render), or None when there are none (#6152): the add fills each slot
-    the page left out with the filament of its colour in the resolved material (#6258)."""
+    """The slot colours (`kit_colours`) of the visitor's own done render of ``render_key``,
+    else those a priced slice of the choices' variant ``variant`` recorded (#6921: the page
+    showed its preview with no render), or None when there are none (#6152): the add fills
+    each slot the page left out with the filament of its colour in the resolved material
+    (#6258)."""
 
     def read() -> list[str] | None:
         visitor = VisitorStore(state.projection.pool).find(visitor_id)
@@ -413,7 +415,7 @@ async def _render_colours(
             return None
         if job.state != "done" or job.result is None:
             return None
-        return list(job.result.colors)
+        return kit_colours(job)
 
     found = await asyncio.to_thread(read)
     return found if found is not None else await variant_colours(state, variant)
@@ -476,7 +478,12 @@ async def add_listing_item(
         variant = (
             None
             if filaments is None
-            else Variant(listing.id, file.snapshot.sha256, tuple(f.id for f in filaments))
+            else Variant(
+                listing.id,
+                file.snapshot.sha256,
+                tuple(f.id for f in filaments),
+                every_output=True,
+            )
         )
         price = None if variant is None else await price_of(state, library_file(file), variant)
         entry = NewLibraryItem(

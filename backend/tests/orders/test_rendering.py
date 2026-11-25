@@ -11,11 +11,16 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.outputs import OutputMeta, storefront_output_id
 from scadbuddy.orders.lifecycle import ManualQuoteInput
-from scadbuddy.orders.rendering import AttachTo, output_for_reference
+from scadbuddy.orders.rendering import (
+    AttachTo,
+    RenderedOutput,
+    output_for_reference,
+    outputs_for_reference,
+)
 from scadbuddy.orders.store import OrderStore
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobNotFoundError, PipelineOutput
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_quote import BY, NOW, FakeRenders, SavedOutputs, Shop
@@ -235,3 +240,83 @@ async def test_a_refusing_check_writes_nothing_on_a_retry_that_finds_its_output(
         )
     assert renders.submitted == []
     assert shop.get_item().output_id is None
+
+
+# -- every output of a render (#5701, spec 2026-11-17 §7.4) --------------------------------
+
+
+class SeveralRenders(FakeRenders):
+    """A render that makes ``count`` outputs, until it is pruned."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+        self.pruned = False
+
+    def read(self, job_id: str) -> Job:
+        if self.pruned:
+            raise JobNotFoundError(job_id)
+        outputs = [PipelineOutput.model_construct()] * self.count
+        return super().read(job_id).model_copy(update={"outputs": outputs})
+
+
+async def every_output(
+    shop: Shop, outputs: SavedOutputs, renders: SeveralRenders
+) -> list[RenderedOutput]:
+    reference = reference_of(shop)
+    return await outputs_for_reference(
+        reference,
+        outputs=outputs,
+        renders=renders,
+        create_output=outputs.create,
+        name="Storefront: Demo",
+        saved_as=lambda index: storefront_output_id(reference.render_key, index),
+        source="storefront",
+        follow_every=0.0,
+    )
+
+
+async def test_every_output_of_a_render_is_saved_once(shop: Shop) -> None:
+    outputs = SavedOutputs()
+    renders = SeveralRenders(3)
+    made = await every_output(shop, outputs, renders)
+    key = reference_of(shop).render_key
+    ids = [storefront_output_id(key, index) for index in range(3)]
+    # The first output's id is the one it always had, pinned.
+    assert ids[0] == storefront_output_id("c" * 64) == "006aa087f2c45e6eab7910206b45b336"
+    assert len(set(ids)) == 3
+    assert [one.output_id for one in made] == outputs.created == ids
+    assert {one.job_id for one in made} == {"job-1"}
+    assert len(renders.submitted) == 1
+    # A second call finds each one, with no new render and no new save.
+    assert await every_output(shop, outputs, renders) == made
+    assert outputs.created == ids and len(renders.submitted) == 1
+
+
+@pytest.mark.parametrize("count", [0, 1])
+async def test_a_render_of_one_output_is_the_one_output(shop: Shop, count: int) -> None:
+    outputs = SavedOutputs()
+    [made] = await every_output(shop, outputs, SeveralRenders(count))
+    key = reference_of(shop).render_key
+    assert (made.output_id, made.job_id) == (storefront_output_id(key), "job-1")
+    assert outputs.created == [made.output_id]
+
+
+async def test_an_attempt_that_stopped_part_way_saves_only_what_is_missing(shop: Shop) -> None:
+    outputs = SavedOutputs()
+    renders = SeveralRenders(3)
+    made = await every_output(shop, outputs, renders)
+    del outputs.metas[made[2].output_id]
+    outputs.created.clear()
+    assert await every_output(shop, outputs, renders) == made
+    assert outputs.created == [made[2].output_id] and len(renders.submitted) == 1
+
+
+async def test_the_outputs_of_a_pruned_job_are_not_known(shop: Shop) -> None:
+    """The first is the answer, and the caller's check of the job (`SliceRun`
+    ``rendered_sha256``) finds that it is not known to be the whole render."""
+    outputs = SavedOutputs()
+    renders = SeveralRenders(2)
+    made = await every_output(shop, outputs, renders)
+    renders.pruned = True
+    assert await every_output(shop, outputs, renders) == made[:1]

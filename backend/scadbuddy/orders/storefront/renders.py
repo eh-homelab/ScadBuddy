@@ -39,6 +39,7 @@ of them while the shop holds it.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import json
 import logging
@@ -75,11 +76,14 @@ from scadbuddy.orders.storefront.inputs import (
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
 from scadbuddy.orders.storefront.listings import page_outdated, problem, published_listing
+from scadbuddy.orders.storefront.pipeline_inputs import shows_design
 from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
     PriceRow,
     instant_price,
-    model_digest,
+    job_results,
+    kit_colours,
+    kit_digest,
     pending,
     slice_estimate,
 )
@@ -145,7 +149,7 @@ def store_render(job: Job, *, ready: bool = True) -> StoreRender:
         stage=stage if job.state == "running" else None,
         plates=list(result.plates) if result else [],
         bbox_mm=result.bbox_mm if result else None,
-        colors=list(result.colors) if result else None,
+        colors=kit_colours(job) if result else None,
         preview_url=(
             f"{STOREFRONT_PREFIX}/renders/{job.id}/preview.glb"
             if result is not None and job.state == "done" and ready
@@ -211,13 +215,24 @@ def files_lost(job_id: str) -> bool:
     return _failures(job_id)[0] >= FETCH_TRIES
 
 
+async def _materialize(state: AppState, job: Job) -> None:
+    """The files of every output of ``job`` (#5701) in this process's cache. A store that
+    no longer has one fails it, as a fetch that raises does: a kit with a file short has
+    no digest and no price."""
+    for result in job_results(job):
+        await materialize_result(state.store.blobs, result)
+        model = result_file(state.store.blobs, state.paths.root, result.model_3mf)
+        if not await asyncio.to_thread(model.is_file):
+            raise FileNotFoundError(result.model_3mf)
+
+
 async def _fetch(state: AppState, job: Job) -> bool:
-    """Starts the fetch of the done ``job``'s files (`materialize_result`) when none
-    runs, shared by every request, and waits on it at most `READY_WAIT` seconds: whether
-    it succeeded. It runs on when the wait ends, so the next request finds it done."""
+    """Starts the fetch of the done ``job``'s files (`_materialize`) when none runs, shared
+    by every request, and waits on it at most `READY_WAIT` seconds: whether it succeeded.
+    It runs on when the wait ends, so the next request finds it done."""
     task = _fetches.get(job.id)
     if task is None:
-        task = asyncio.create_task(materialize_result(state.store.blobs, job.result))
+        task = asyncio.create_task(_materialize(state, job))
         _fetches[job.id] = task
         task.add_done_callback(lambda done: _fetched(job.id, done))
     done, _ = await asyncio.wait({task}, timeout=READY_WAIT)
@@ -324,8 +339,8 @@ def _shared(state: AppState, conn: Any, render_key: str) -> bool:
     return row is not None or state.projection.reuse_done(render_key) is not None
 
 
-#: The slot colours (``job.result.colors``) of the visitor's render of a render key, or
-#: None when there is none to read. The second argument is the choices' variant key
+#: The slot colours (`kit_colours`) of the visitor's render of a render key, or None
+#: when there is none to read. The second argument is the choices' variant key
 #: (#6921): with no render, the slot colours a priced slice of the variant recorded.
 RenderColours = Callable[[str, str], Awaitable[Sequence[str] | None]]
 
@@ -649,9 +664,9 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
     ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
     (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
-    colour of the render has no listing filament, the template is a pipeline (#5701), or
-    the render is of another design than the listing's now (its slug or commit moved
-    since, #6370 review): the price is never of a design the visitor does not see."""
+    colour of the render has no listing filament, the render made several outputs
+    (`one_output`), or it is of another design than the listing's now (`shows_design`,
+    #6370 review): the price is never of a design the visitor does not see."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
@@ -677,12 +692,12 @@ async def estimate_of(
     ``colours`` and ``material``, whose choices have ``variant_key``. The shop's warming of
     a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
     through the visitor's own path. ``pending`` with no ``price_key`` while its files are
-    fetched. ``none`` for a pipeline template's render, which starts no slice yet (#5701):
-    the shop prices it by hand."""
-    if listing.design[2].pipeline:
-        return NO_PRICE
-    if job.slug != listing.slug or job.model_version != listing.commit:
+    fetched. ``none``, with no slice started, for a render of another design than the
+    listing's now (`shows_design`), or of several outputs (`one_output`)."""
+    if not shows_design(listing, job.slug, job.model_version, job.inputs):
         # The shop moved the listing since this render: the page renders again.
+        return NO_PRICE
+    if not one_output(job):
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
@@ -697,6 +712,14 @@ async def estimate_of(
     )
 
 
+def one_output(job: Job) -> bool:
+    """Whether the first output of ``job`` is the whole render. The price of a pipeline's
+    render of several is built (`kit_digest`, `price_variant`) and no visitor gets it yet:
+    an order makes the first only, so the shop prices it by hand (#5701, spec 2026-11-17
+    §7.4)."""
+    return len(job.outputs) <= 1
+
+
 async def variant_of(
     state: AppState,
     listing: Listing,
@@ -705,15 +728,16 @@ async def variant_of(
     material: str | None,
 ) -> tuple[str, list[Filament] | None]:
     """What the price of the done ``job`` (its files fetched, `_fetch`) rests on
-    (#6153): the sha256 of its 3MF, and the price-book filament of each slot of the
-    render (`_filament_for`, from ``colours`` and ``material``), or None when a slot's
-    colour has no listing filament. The estimate and a cart line's add both read it."""
-    assert job.result is not None
+    (#6153): the sha256 of its 3MF (of every output's, #5701 `kit_digest`), and the
+    price-book filament of each slot of the render (`kit_colours`; `_filament_for`, from
+    ``colours`` and ``material``), or None when a slot's colour has no listing filament.
+    The estimate and a cart line's add both read it."""
     filaments = await asyncio.to_thread(price_book, _orders(state))
-    by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
-    slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
-    model = result_file(state.store.blobs, state.paths.root, job.result.model_3mf)
-    digest = await asyncio.to_thread(model_digest, job.id, model)
+    kit = kit_colours(job)
+    by_colour = _filament_for(listing, filaments, colours, kit, material)
+    slots = [by_colour.get(colour.casefold()) for colour in kit]
+    file = functools.partial(result_file, state.store.blobs, state.paths.root)
+    digest = await asyncio.to_thread(kit_digest, job, file)
     return digest, None if None in slots else [slot for slot in slots if slot is not None]
 
 
@@ -771,15 +795,19 @@ def preview_path(key: str) -> str:
 
 def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | None:
     """The output a ``done`` row's slice saved, while it is there with its preview mesh
-    and is of the design ``listing`` shows (its slug and commit). Blocking: call it in a
+    and is of the design ``listing`` shows (`shows_design`). Blocking: call it in a
     thread."""
     if row.output_id is None:
         return None
     try:
         meta = state.outputs.get(row.output_id)
+        snapshot = listing.template_snapshot
+        # Only a pipeline's design is its inputs too, so no other listing reads them.
+        pipeline = snapshot is not None and snapshot.pipeline
+        inputs = state.outputs.inputs(row.output_id) if pipeline else {}
     except OutputNotFoundError:
         return None
-    if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
+    if not shows_design(listing, meta.slug, meta.model_version, inputs):
         return None
     # A preview blob in the index, else its file (#7256).
     if not state.outputs.has_role(row.output_id, "preview"):
@@ -817,10 +845,11 @@ async def instant_variant(state: AppState, visitor_id: str, body: RenderBody) ->
     price = await instant_price(state, reference=resolved.reference, newest=row)
     preview = None
     meta = None if row is None else await asyncio.to_thread(output_of, state, row, listing)
-    if meta is not None:
+    if row is not None and meta is not None:
         preview = VariantPreview(
             url=preview_path(key),
-            colors=list(meta.colors),
+            # The slots of every output, as the render's own (#5701).
+            colors=list(row.slot_colours or meta.colors),
             bbox_mm=meta.bbox_mm,
             plates=list(meta.layout_plates),
         )

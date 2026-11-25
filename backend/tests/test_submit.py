@@ -244,12 +244,36 @@ async def projection(pg_conninfo: str) -> AsyncIterator[JobProjection]:
         await asyncio.to_thread(store.close)
 
 
+class _Clock:
+    """The CRUD client's clock: the real one, moved on by `end_budget`."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def __call__(self) -> float:
+        return time.monotonic() + self.offset
+
+    def end_budget(self) -> None:
+        """Spend the current call's retry budget, so the try in flight is its last.
+
+        Every CRUD call through `deps` shares this clock: a call that is retrying at the
+        same time loses its budget too. Use it only where no other call overlaps."""
+        self.offset += 3600
+
+
 @pytest.fixture
-async def deps(projection: JobProjection, paths: DataPaths) -> AsyncIterator[WorkerDeps]:
+def clock() -> _Clock:
+    return _Clock()
+
+
+@pytest.fixture
+async def deps(
+    projection: JobProjection, paths: DataPaths, clock: _Clock
+) -> AsyncIterator[WorkerDeps]:
     """The render worker's: its job rows through the API's CRUD routes on ``projection``
     (#5298), whose outage it gives up on after a second."""
     config = replace(load_config({}), data_dir=paths.root)
-    async with served_render_jobs(projection, unavailable_budget=1.0) as jobs:
+    async with served_render_jobs(projection, unavailable_budget=1.0, clock=clock) as jobs:
         yield WorkerDeps(
             config=config,
             paths=paths,
@@ -2029,12 +2053,17 @@ async def test_a_500_from_the_accept_route_is_answered_unstartable(
     make_service: ServiceFactory,
     deps: WorkerDeps,
     projection: JobProjection,
+    clock: _Clock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An error the API's accept does not expect is a failure no retry fixes, as it was
-    over SQL: past the accept's retries the request is answered render-unstartable."""
+    over SQL: past the accept's retries the request is answered render-unstartable. The
+    route's answer ends the client's budget, so each attempt is one try: a retry inside
+    the budget that a loaded runner stalls past `ACCEPT_TIMEOUT` would hold the workflow
+    task past its timeout and outlive `SUBMIT_DEADLINE` (#7561, as #7525)."""
 
     def broken(*_: object, **__: object) -> Job:
+        clock.end_budget()
         raise psycopg.errors.UndefinedColumn("column x does not exist")
 
     monkeypatch.setattr(projection, "accept", broken)

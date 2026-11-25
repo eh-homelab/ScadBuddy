@@ -37,7 +37,8 @@ from scadbuddy.orders.models import Filament, LibraryFileRef, OrderItem, Referen
 from scadbuddy.orders.pricing import Plate, PlateFilament
 from scadbuddy.orders.storefront.held_file import priced_file
 from scadbuddy.orders.storefront.limits import RenderLimits
-from scadbuddy.orders.storefront.renders import fetch_files, output_of, variant_of
+from scadbuddy.orders.storefront.pipeline_inputs import shows_design
+from scadbuddy.orders.storefront.renders import fetch_files, one_output, output_of, variant_of
 from scadbuddy.orders.storefront.slice_price import PriceRow, firm_price
 from scadbuddy.orders.storefront.wire import Listing
 from scadbuddy.render.job_models import JobNotFoundError
@@ -47,7 +48,8 @@ if TYPE_CHECKING:
     from scadbuddy.orders.component import OrdersComponent
 
 _COLUMNS: Final = (
-    "order_item_id, listing_id, model_sha256, slot_filaments, price_key, unit_price_minor, currency"
+    "order_item_id, listing_id, model_sha256, slot_filaments, every_output, price_key,"
+    " unit_price_minor, currency"
 )
 
 
@@ -61,6 +63,11 @@ class Variant:
     listing_id: str
     model_sha256: str
     slot_filaments: tuple[str, ...]
+    #: Whether ``model_sha256`` is known to be of the whole render (#5701). Each caller says
+    #: it. False is only a line whose row does not: one added before the column, or by a pod
+    #: of the old build during a rollout, which takes the column's default. Such a pipeline's
+    #: line stays priced by hand.
+    every_output: bool
 
 
 class LinePrice(BaseModel):
@@ -71,13 +78,16 @@ class LinePrice(BaseModel):
     listing_id: str
     model_sha256: str
     slot_filaments: list[str]
+    every_output: bool
     price_key: str | None = None
     unit_price_minor: int | None = None
     currency: str | None = None
 
     @property
     def variant(self) -> Variant:
-        return Variant(self.listing_id, self.model_sha256, tuple(self.slot_filaments))
+        return Variant(
+            self.listing_id, self.model_sha256, tuple(self.slot_filaments), self.every_output
+        )
 
 
 class LinePrices:
@@ -91,13 +101,14 @@ class LinePrices:
         """The added line's variant and price, in the add's transaction (``conn``)."""
         conn.execute(
             "INSERT INTO storefront_item_prices (order_item_id, listing_id, model_sha256,"
-            " slot_filaments, price_key, unit_price_minor, currency)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            " slot_filaments, every_output, price_key, unit_price_minor, currency)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 item_id,
                 variant.listing_id,
                 variant.model_sha256,
                 list(variant.slot_filaments),
+                variant.every_output,
                 *_shown(price),
             ),
         )
@@ -152,7 +163,8 @@ async def variant_at_add(
     output is of the listing's design (#6921: the page showed that preview and price
     with no render): its 3MF's sha256 and slot filaments, as the server recorded them.
     The price is still read by the key (`price_of`), never from the browser. None when
-    there is neither, or a slot has no listing filament: the line has no firm price."""
+    there is neither, a slot has no listing filament, or its render made several outputs
+    (`one_output`): the line has no firm price."""
 
     def job() -> Any:
         job_id = RenderLimits(state.projection.pool).job_of(visitor_id, render_key)
@@ -166,14 +178,16 @@ async def variant_at_add(
     found = await asyncio.to_thread(job)
     if found is None or found.state != "done" or found.result is None:
         return await _priced_variant(state, listing, variant_key)
-    if found.slug != listing.slug or found.model_version != listing.commit:
+    if not shows_design(listing, found.slug, found.model_version, found.inputs):
+        return None
+    if not one_output(found):
         return None
     if not await fetch_files(state, found):
         return None
     digest, slots = await variant_of(state, listing, found, colours, material)
     if slots is None:
         return None
-    return Variant(listing.id, digest, tuple(f.id for f in slots))
+    return Variant(listing.id, digest, tuple(f.id for f in slots), every_output=True)
 
 
 async def _priced_variant(
@@ -190,7 +204,8 @@ async def _priced_variant(
         return None
     if await asyncio.to_thread(output_of, state, row, listing) is None:
         return None
-    return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments))
+    # Only `estimate_of` records a variant key, with `variant_of`'s digest of every output.
+    return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments), every_output=True)
 
 
 async def price_of(
@@ -198,10 +213,11 @@ async def price_of(
 ) -> PriceRow | None:
     """The firm price of the variant of a line whose design is ``subject``, now
     (`firm_price`), or None. None too when the listing it was added from is gone or
-    unpublished, or now shows another design (its slug or commit moved, so the line's
-    design is not the listing's), its template is a pipeline (#5701: no render of one is
-    priced yet, and the key, which holds no slug and no inputs, may find the price of the
-    same 3MF from elsewhere), or a slot's filament is gone or archived. A line of a
+    unpublished, or now shows another design (`shows_design`, so the line's design is not
+    the listing's), or a slot's filament is gone or archived. The key holds no slug and no
+    inputs: the same 3MF in the same filaments, sliced alike, has one price wherever it was
+    made. So None too for a pipeline's line whose row does not say that its 3MF is the whole
+    render (``every_output``, #5701): it could find the price of one output of a kit. A line of a
     file listing (#6710 §7.6, ``subject`` its library file) is priced while its listing is
     still a file listing of that file pinned at the line's sha256, by the listing's own
     snapshot (`priced_file`), as its price read keys it."""
@@ -221,9 +237,9 @@ async def price_of(
             return None
         file = priced_file(snapshot)
     else:
-        if (listing.slug, listing.commit) != (subject.slug, subject.commit):
+        if not shows_design(listing, subject.slug, subject.commit, subject.inputs):
             return None
-        if listing.design[2].pipeline:
+        if listing.design[2].pipeline and not variant.every_output:
             return None
     records = [
         await asyncio.to_thread(orders.store.filament, filament_id)

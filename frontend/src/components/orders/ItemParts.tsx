@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { ItemPart, ItemPartRow, OrderItem, OrderParts } from '../../api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { useAsync } from '../../lib/useAsync'
+import { inventoryPaths } from '../../lib/inventoryLinks'
+import { usePartItems } from './partItems'
 import { PartSelect } from './PartRules'
 import { refusalText } from './refusal'
 
@@ -15,7 +17,15 @@ export function PartsShort({ parts }: { parts: OrderParts }) {
   if (parts.short.length === 0) return null
   return (
     <p role="alert" data-testid="parts-short" className="rounded-md border border-warn/40 p-2 text-[13px] text-warn">
-      {parts.short.map((n) => `short: ${n.short} ${n.name}`).join('; ')}
+      {parts.short.map((n, at) => (
+        <span key={n.item_id}>
+          {at > 0 && '; '}
+          short: {n.short}{' '}
+          <Link to={inventoryPaths.item(n.item_id)} className="underline underline-offset-4">
+            {n.name}
+          </Link>
+        </span>
+      ))}
     </p>
   )
 }
@@ -27,12 +37,13 @@ export function PartsShort({ parts }: { parts: OrderParts }) {
  * change them).
  */
 export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { orderId: string; item: Pick<OrderItem, 'id' | 'quantity' | 'status'>; rows: ItemPartRow[]; editable: boolean; onChanged: () => void }) {
-  const inventory = useAsync(() => api.parts(), [])
-  const parts = inventory.data ?? []
+  const partItems = usePartItems()
+  const all = partItems.data ?? []
+  const parts = all.filter((p) => !p.archived)
   const [draft, setDraft] = useState<ItemPart[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const name = (id: string) => parts.find((p) => p.id === id)?.name ?? id
+  const name = (id: string) => all.find((p) => p.id === id)?.name ?? id
 
   async function save() {
     if (!draft) return
@@ -60,7 +71,11 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
             <ul className="flex flex-col gap-1" aria-label="The item's parts">
               {rows.map((r) => (
                 <li key={r.item_id}>
-                  {r.per_unit} × {name(r.item_id)} a unit
+                  {r.per_unit} ×{' '}
+                  <Link to={inventoryPaths.item(r.item_id)} className="underline-offset-4 hover:underline">
+                    {name(r.item_id)}
+                  </Link>{' '}
+                  a unit
                   {r.used > 0 ? <span className="text-muted-foreground"> ({r.used} taken from stock)</span> : <span className="text-muted-foreground"> ({r.per_unit * item.quantity} for this item)</span>}
                 </li>
               ))}
@@ -87,7 +102,7 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
                 value={String(row.per_unit)}
                 onChange={(e) => setDraft(draft.map((r, i) => (i === index ? { ...r, per_unit: Math.max(1, Number(e.target.value) || 1) } : r)))}
               />
-              <PartSelect parts={parts} value={row.item_id || null} onChange={(id) => id && setDraft(draft.map((r, i) => (i === index ? { ...r, item_id: id } : r)))} label={`Part ${index + 1}`} />
+              <PartSelect parts={all} value={row.item_id || null} onChange={(id) => id && setDraft(draft.map((r, i) => (i === index ? { ...r, item_id: id } : r)))} label={`Part ${index + 1}`} />
               <Button size="xs" variant="ghost" aria-label={`Remove part ${index + 1}`} onClick={() => setDraft(draft.filter((_, i) => i !== index))}>
                 Remove
               </Button>
@@ -117,6 +132,11 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
       {error && (
         <p role="alert" className="text-warn">
           {error}
+        </p>
+      )}
+      {partItems.error && (
+        <p role="alert" className="text-warn">
+          The parts could not be loaded: {partItems.error.message}
         </p>
       )}
     </section>

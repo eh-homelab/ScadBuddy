@@ -19,6 +19,9 @@ describe('useMoney', () => {
     const { result } = renderHook(() => useMoney())
     await waitFor(() => expect(book).toHaveBeenCalled())
     expect(result.current.format('5')).not.toMatch(/[$€£]|USD/)
+    // R-P2-41: the failure is kept, for the page to say why no cost can be typed.
+    await waitFor(() => expect(result.current.error).toBe('down'))
+    expect(result.current.currency).toBeNull()
   })
 
   it('uses the shop currency once it is read', async () => {

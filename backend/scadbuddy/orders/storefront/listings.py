@@ -1099,7 +1099,7 @@ async def with_inputs_version(core: Core, body: ListingInput) -> ListingInput:
         )
         return body
     facts = await asyncio.to_thread(pipeline_facts, directory, slug)
-    if facts is None:
+    if facts is None or facts.inputs_version is None:
         return body
     return body.model_copy(update={"inputs_v": facts.inputs_version})
 
@@ -1267,6 +1267,8 @@ async def _publish(
             core.render, listing, listing.slug, listing.commit, pipeline, facts.schema_
         )
         check_set_params(listing, facts.schema_, pipeline.sets_params)
+        # `settled_inputs` refuses a pipeline whose version cannot be read.
+        assert pipeline.inputs_version is not None
     colours = await asyncio.to_thread(store.filament_colours)
     supports = await asyncio.to_thread(store.support_filaments)
     fixed = checked_fixed(facts.schema_, listing, colours, supports)

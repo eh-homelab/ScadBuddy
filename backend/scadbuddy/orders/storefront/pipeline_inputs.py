@@ -10,6 +10,8 @@ can hold (`check_shape`). Publish checks them against the commit, in the spec's 
 The API never runs template Python: `pipeline_facts` reads the declaration, the schema and
 ``INPUTS_VERSION`` as data, and an older ``inputs_v`` is migrated by the template's own
 ``migrate`` on the render worker (`RenderService.migrate_inputs`).
+
+A price or a preview is of the listing's design while `shows_design` says so (§7.2).
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import inputs_version_in, revision_meta
 from scadbuddy.library.pipelines import HOST_INPUTS, inputs_schema_problems
 from scadbuddy.orders.storefront.inputs import effective_default, same_value
-from scadbuddy.orders.storefront.wire import ListingInput
+from scadbuddy.orders.storefront.wire import Listing, ListingInput
 from scadbuddy.render.inputs import InputsError, nul_at
 from scadbuddy.render.runner import with_defaults
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -106,7 +108,8 @@ def check_unexpected(listing: ListingInput) -> None:
 class PipelineFacts:
     """What a commit declares of its pipeline, read without running it."""
 
-    inputs_version: int
+    #: None when the declaration or its module cannot be read (``schema`` is then None).
+    inputs_version: int | None
     #: The declared inputs schema, or None with why it cannot be used in ``fault``.
     schema: dict[str, Any] | None
     fault: str
@@ -123,9 +126,13 @@ def pipeline_facts(directory: Path, slug: str) -> PipelineFacts | None:
     declared = meta.pipeline
     if declared is None:
         # The catalogue keeps a declaration it cannot read (`pipeline_raw`).
-        return PipelineFacts(0, None, f"the pipeline {slug!r} declares cannot be read")
+        return PipelineFacts(None, None, f"the pipeline {slug!r} declares cannot be read")
     version = inputs_version_in(directory, declared)
     sets_params = tuple(declared.sets_params)
+    if version is None:
+        # A render of it would fail.
+        fault = f"the pipeline module {declared.module} of {slug!r} cannot be read"
+        return PipelineFacts(None, None, fault, sets_params)
     if declared.inputs is None:
         fault = f"{slug!r} declares no shape for its inputs (model.json pipeline.inputs)"
         return PipelineFacts(version, None, fault, sets_params)
@@ -168,7 +175,7 @@ async def settled_inputs(
     ``listing_inputs_migration_failed``, in that order; a migration's 413, 503 or 504
     passes through. The row keeps what the shop saved, so a republish migrates from it
     again (spec §8): the result does not depend on how many times it ran."""
-    if facts.schema is None:
+    if facts.schema is None or facts.inputs_version is None:
         raise _refused("listing_inputs_undeclared", facts.fault, "inputs")
     check_shape(listing.inputs)
     inputs, made_at = listing.inputs, listing.inputs_v
@@ -192,6 +199,24 @@ async def settled_inputs(
         reason = "additional" if problem.keyword == "additionalProperties" else problem.keyword
         raise _invalid(reason, f"{name}: {problem.message}", name)
     return inputs
+
+
+def shows_design(
+    listing: Listing, slug: str | None, commit: str | None, inputs: Mapping[str, Any]
+) -> bool:
+    """Whether a render, an output or a line of ``slug`` at ``commit`` with ``inputs`` is of
+    the design the published template ``listing`` shows now (spec §7.2): its slug and
+    commit, and for a pipeline template its own inputs and their version too, which a
+    republish at the same commit may change. The values are compared, never their text:
+    ``jsonb`` reorders keys (#6302). ``params`` are the visitor's. A template with no
+    pipeline is its slug and commit alone: its UI's own state renders nothing."""
+    if (slug, commit) != (listing.slug, listing.commit):
+        return False
+    snapshot = listing.design[2]
+    if not snapshot.pipeline:
+        return True
+    own = {key: value for key, value in inputs.items() if key != "params"}
+    return own == {**snapshot.inputs, "v": snapshot.inputs_version}
 
 
 def _params(listing: ListingInput, schema: CustomizerSchema) -> dict[str, ParamValue]:

@@ -3,34 +3,37 @@
 
 ``python -m scadbuddy.library.models_next build`` makes ``data/models-next`` from
 ``data/models``; ``… check`` compares the two. Both run in the API's image with its own
-database credential, and only read the old repository and the database. Nothing here
-serves the new repository, or changes a row.
+database credential, and only read the old repository and the database. ``… push`` sends
+the new one to a trial branch of the git remote that Settings names. Nothing here serves
+the new repository, or changes a row.
 
 What the new history holds
 --------------------------
 A first commit of ``.gitignore`` and ``.gitattributes`` (what `ModelHistory.ensure_repo`
-writes), then one commit per version that is kept: each (slug, commit) an order item, an
-order revision or a listing pins, and the current version of each template and built-in.
-A commit changes its own template only. It has the old commit's author, committer, dates
+writes), then one commit per version of each template and built-in, deleted ones included:
+each commit of the old history that changed it. With them, the revisions HEAD does not
+reach that an order item, an order revision, a listing, an output or a ``model.json``'s
+upstream names. A commit changes its own template only: an old one that changed several is
+several here. It has the old commit's author, committer, dates
 and message, and an ``Imported-From: <old id>`` trailer. So the map of old ids to new ones
 is in git; `derived_map` reads it, and ``.git/scadbuddy-models-next.json`` is a copy.
 
 Versions of one template with the same tree, one after the other, are one commit with a
 trailer each: a commit that changed nothing would not be a revision of the template
-(`ModelHistory.touched`). A template that is pinned and gone since is committed, and then
-removed as its delete removed it.
+(`ModelHistory.touched`). A delete is a commit that removes the template. It is not in the
+map: its old id names nothing of the template.
 
-The order is the old history's, pins, current versions and built-ins together. A
+The order is the old history's, of all templates and built-ins together. A
 ``model.json`` can only name an upstream commit that is older than itself, so that commit
 is already in the new history when the file is written, and its new id is known: `base`
-and `dismissed` are pointed at it, in the pinned versions too. An id the new history does
-not have (a revision that nothing pins) is left as it is: it resolves to nothing, which
+and `dismissed` are pointed at it, in the older versions too. An id the new history does
+not have (the old one has lost the revision) is left as it is: it resolves to nothing, which
 `upstream.plan_merge` takes as no base (#7534). Nothing else in a ``model.json`` is a
 commit of this repository; a library's pin is of the library's own.
 
 A run always builds from nothing, beside the destination, and then takes its place. So a
 second run, with the old repository further on, gives what a first run would. It replaces
-only what it made itself and nothing has committed to since.
+only what it made itself, with nothing committed, changed or left in it since.
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import IO, Any, NamedTuple, Self
+from typing import IO, TYPE_CHECKING, Any, Final, NamedTuple, Self, TypeGuard
 
 from scadbuddy.core.gitrepo import (
     _FIELD,
@@ -72,6 +75,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
+from scadbuddy.git_remote.push import RemoteTarget, scrub
 from scadbuddy.library.history import (
     LFS_POINTER,
     LFS_SIZE,
@@ -82,9 +86,14 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
+if TYPE_CHECKING:
+    from scadbuddy.core.settings import Settings
+
 #: The map, kept in the new repository's ``.git``. It also marks what a run may replace.
 MAP_NAME = "scadbuddy-models-next.json"
 TRAILER = "Imported-From"
+#: What a trial push's branch starts with. The app pushes to `git_remote.push.BRANCHES`.
+TRIAL_BRANCH = "models-trial"
 #: GitHub warns of a file over this size, and refuses one over 100 MB:
 #: https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github
 MAX_BLOB_BYTES = 50 * 1024 * 1024
@@ -100,10 +109,17 @@ GITLINK_MODE = "160000"
 #: The tables whose rows pin a version: what an order, a quote, a test print or a listing
 #: renders from. A quote and a print attempt name a row of `order_item_revisions`.
 PLACES = ("order_items", "order_item_revisions", "storefront_listings")
+#: An output's revision is a pin too: an order item's output must be of its commit. An
+#: arranged output has a content hash there, and an old one may have nothing.
+OUTPUTS: Final = (
+    "SELECT slug, meta->>'model_version' AS commit, 'outputs' AS place FROM outputs"
+    " WHERE meta->>'model_version' ~ '^[0-9a-f]{40}$'"
+)
 #: The fields of ``upstream`` in a ``model.json`` that hold a commit of this repository.
 UPSTREAM_FIELDS = ("base", "dismissed")
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+_TRIAL = re.compile(rf"{TRIAL_BRANCH}(-[a-z0-9]+)*")
 _OID = re.compile(rb"^oid sha256:([0-9a-f]{64})$", re.MULTILINE)
 _TRAILER_LINE = re.compile(rb"[A-Za-z0-9][A-Za-z0-9-]*: .+")
 _UPSTREAM_ID = re.compile(rb'("(?:base|dismissed)"\s*:\s*")[0-9a-f]{40}(?=")')
@@ -453,9 +469,12 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
     order = repo._out("rev-list", "--topo-order", "--reverse", head).split()
     index = {commit: at for at, commit in enumerate(order)}
     last: dict[str, str] = {}
+    #: Each template's versions: an old commit, and its tree (None where it was deleted).
+    kept: dict[str, dict[str, str | None]] = {}
     for commit, _, names in _walk(repo, head):
         for slug in _slugs(names):
             last.setdefault(slug, commit)
+            kept.setdefault(slug, {})[commit] = objects.tree(commit, slug)
     trees = _templates(objects, head)
 
     def position(commit: str) -> tuple[int, int]:
@@ -465,27 +484,27 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
         return 0, int(objects.commit(commit).committer.split()[-2])
 
     unresolved: list[Pin] = []
-    pinned: dict[str, dict[str, str]] = {}
     for pin in pins:
         commit_id = objects.commit_id(pin.commit)
         tree = None if commit_id is None else objects.tree(commit_id, pin.slug)
         if commit_id is None or tree is None:
             unresolved.append(pin)
         else:
-            pinned.setdefault(pin.slug, {})[commit_id] = tree
+            kept.setdefault(pin.slug, {})[commit_id] = tree
 
+    _keep_upstreams(objects, [*trees.values()], kept)
     versions: list[_Version] = []
-    for slug in sorted({*trees, *pinned}):
+    for slug in sorted({*trees, *kept}):
         line: list[_Version] = []
-        held = pinned.get(slug, {})
+        held = kept.get(slug, {})
         for commit in sorted(held, key=position):
-            _add(line, slug, commit, held[commit], position(commit))
+            version = held[commit]
+            if version is not None or (line and line[-1].tree is not None):
+                _add(line, slug, commit, version, position(commit))
         if slug in trees:
             newest = last.get(slug, head)
             _add(line, slug, newest, trees[slug], position(newest))
-        elif slug in last:
-            _add(line, slug, last[slug], None, position(last[slug]))
-        else:
+        elif line and line[-1].tree is not None:
             gone = line[-1]
             subject = f"Delete {slug}\n".encode()
             line.append(_Version(slug, None, [], gone.source, gone.position, subject))
@@ -494,10 +513,38 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
     versions.sort(key=lambda version: version.position)
     current = {slug: last.get(slug, head) for slug in trees}
     wanted = {
-        (slug, commit): tree for slug, held in pinned.items() for commit, tree in held.items()
+        (slug, commit): tree
+        for slug, held in kept.items()
+        for commit, tree in held.items()
+        if tree is not None
     }
     wanted.update({(slug, commit): trees[slug] for slug, commit in current.items()})
     return _Plan(head, versions, unresolved, current, wanted)
+
+
+def _keep_upstreams(
+    objects: _Objects, trees: list[str], kept: dict[str, dict[str, str | None]]
+) -> None:
+    """Keep what each version's ``model.json`` names as its upstream's revision: without
+    its base, a duplicate merges as one that has none, and all that differs conflicts."""
+    left: list[str | None] = [*trees]
+    left += [tree for held in kept.values() for tree in held.values()]
+    seen: set[str] = set()
+    while left:
+        tree = left.pop()
+        if tree is None or tree in seen:
+            continue
+        seen.add(tree)
+        entry = objects.files(tree).get(MODEL_META_NAME)
+        if entry is None or entry.mode == SYMLINK_MODE:
+            continue
+        for slug, commit in _upstream_refs(objects.blob(entry.oid)).values():
+            found = objects.commit_id(commit)
+            below = None if found is None else objects.tree(found, slug)
+            # One that is gone is reported when the version that names it is written.
+            if found is not None and below is not None:
+                kept.setdefault(slug, {})[found] = below
+                left.append(below)
 
 
 def _add(
@@ -543,9 +590,14 @@ def _json(raw: bytes) -> Any:
         return None
 
 
-def _upstream_ids(raw: bytes, ids: Mapping[tuple[str, str], str]) -> dict[str, tuple[str, str]]:
-    """Each upstream field of ``model.json`` that holds an id: the id, and the new one
-    ("" where the new history has none)."""
+def _is_template(owner: object) -> TypeGuard[str]:
+    """A template's id, and not a path inside one."""
+    return isinstance(owner, str) and _model_id(f"{model_path(owner)}/{MODEL_META_NAME}") == owner
+
+
+def _upstream_refs(raw: bytes) -> dict[str, tuple[str, str]]:
+    """Each upstream field of ``model.json`` that holds an id: the template it is a
+    revision of, and the id."""
     body = _json(raw)
     upstream = body.get("upstream") if isinstance(body, dict) else None
     if not isinstance(upstream, dict):
@@ -559,9 +611,16 @@ def _upstream_ids(raw: bytes, ids: Mapping[tuple[str, str], str]) -> dict[str, t
     found: dict[str, tuple[str, str]] = {}
     for name in UPSTREAM_FIELDS:
         value, owner = upstream.get(name), owners[name]
-        if isinstance(value, str) and _COMMIT.fullmatch(value) and isinstance(owner, str):
-            found[name] = (value, ids.get((owner, value), ""))
+        if isinstance(value, str) and _COMMIT.fullmatch(value) and _is_template(owner):
+            found[name] = (owner, value)
     return found
+
+
+def _upstream_ids(raw: bytes, ids: Mapping[tuple[str, str], str]) -> dict[str, tuple[str, str]]:
+    """Each upstream field of ``model.json`` that holds an id: the id, and the new one
+    ("" where the new history has none)."""
+    refs = _upstream_refs(raw)
+    return {name: (value, ids.get((owner, value), "")) for name, (owner, value) in refs.items()}
 
 
 def _expected(raw: bytes, ids: Mapping[tuple[str, str], str]) -> Any:
@@ -818,16 +877,25 @@ def _destination(source: _Repo, dest: Path, live: Path) -> Path:
 
 def _may_replace(target: Path) -> None:
     """Only an empty directory, or what a run made, with nothing committed, changed or
-    left in it since. An ignored file there is a copy or a render's."""
+    left in it since. An ignored file that no run copied is a render's."""
     if not target.is_dir():
         raise RefusedError(f"{target} is not a directory")
     if not any(target.iterdir()):
         return
     repo = _Repo(target)
-    head = _held(repo).get("head")
+    held = _held(repo)
+    head = held.get("head")
     if not isinstance(head, str) or not repo.available or repo.head() != head:
         raise RefusedError(f"{target} is not empty, and not as this command left it")
-    left = repo._out("status", "--porcelain", "--untracked-files=all").splitlines()
+    copied: dict[str, str] = held.get("copied", {})
+    # One that is gone is made again by the next build, and no push sends it.
+    for name, digest in copied.items():
+        path = target / name
+        if os.path.lexists(path) and _copy_digest(path) != digest:
+            raise RefusedError(f"{target} holds changes this command did not make: {name}")
+    status = os.fsdecode(repo.bytes_out("status", "--porcelain", "-z", "--untracked-files=all"))
+    # A copied file that only the old repository ignores is untracked here.
+    left = [line for line in status.split("\0") if line and line[3:] not in copied]
     if left:
         raise RefusedError(f"{target} holds changes this command did not make: {left[0]}")
 
@@ -854,6 +922,7 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
                 builder.add(version)
     shutil.rmtree(repo.root / ".git" / "lfs" / "tmp", ignore_errors=True)
     repo._run("reset", "--quiet", "--hard")
+    _copy_times(source, repo)
     report.copied = _copy_data(source, repo)
     head = repo.head()
     assert head is not None
@@ -861,6 +930,7 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
     held = {
         "head": head,
         "old_head": plan.head,
+        "copied": {name: _copy_digest(repo.root / name) for name in report.copied},
         "map": [
             {"slug": slug, "old": old, "new": new}
             for (slug, old), new in sorted(report.ids.items())
@@ -874,6 +944,19 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
     return report
 
 
+def _copy_times(source: _Repo, repo: _Repo) -> None:
+    """Each file's time from the old repository's: a template's "Updated" is the newer of
+    its source's and its ``model.json``'s."""
+    for name in os.fsdecode(repo.bytes_out("ls-files", "-z")).split("\0"):
+        was = source.root / name
+        if name and os.path.lexists(was):
+            at = was.lstat()
+            os.utime(repo.root / name, ns=(at.st_atime_ns, at.st_mtime_ns), follow_symlinks=False)
+    # The index has the times of the checkout: without this, the first `git status` of the
+    # app would read every mesh.
+    repo._run("update-index", "-q", "--refresh")
+
+
 def _copy_data(source: _Repo, repo: _Repo) -> list[str]:
     """Copy the ignored files that are data (videos), not what a render leaves."""
     listed = os.fsdecode(
@@ -885,6 +968,10 @@ def _copy_data(source: _Repo, repo: _Repo) -> list[str]:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source.root / name, target, follow_symlinks=False)
     return copied
+
+
+def _copy_digest(path: Path) -> str:
+    return f"link {os.readlink(path)}" if path.is_symlink() else _file_digest(path)
 
 
 def _is_derived(path: str) -> bool:
@@ -912,6 +999,27 @@ def _put(staged: Path, target: Path) -> None:
         os.rename(retired, target)
         raise
     shutil.rmtree(retired)
+
+
+# ── the trial push ────────────────────────────────────────────────────────────
+
+
+def push_trial(dest: Path, branch: str, target: RemoteTarget, *, live: Path) -> str:
+    """Push what a build made, meshes first, to a trial branch at ``target``; its HEAD.
+    Never a force, and never a branch that ScadBuddy itself pushes to. Under the app's own
+    time limits, so that it shows whether the switch's first push fits them."""
+    if not _TRIAL.fullmatch(branch):
+        raise RefusedError(f"{branch} is not a trial branch ({TRIAL_BRANCH}…)")
+    if dest.resolve() == live.resolve():
+        raise RefusedError(f"{dest} is the models directory")
+    repo = _Repo(dest)
+    head = repo.head() if repo.available else None
+    if head is None:
+        raise RefusedError(f"{dest} is not a repository with a commit")
+    _may_replace(dest)
+    ref = f"refs/heads/{branch}"
+    repo.push(target.url, head, ref, username=target.username, password=target.token)
+    return head
 
 
 # ── the check ─────────────────────────────────────────────────────────────────
@@ -1154,7 +1262,7 @@ def _meta_fault(was: bytes, now: bytes, ids: Ids) -> str | None:
 
 
 def read_pins(conninfo: str) -> list[Pin]:
-    """Every (slug, commit) an order item, an order revision or a listing names."""
+    """Every (slug, commit) an order item, an order revision, a listing or an output names."""
     import psycopg
     from psycopg import sql
 
@@ -1165,6 +1273,7 @@ def read_pins(conninfo: str) -> list[Pin]:
         )
         for place in PLACES
     )
+    each = sql.SQL(" UNION ").join([each, sql.SQL(OUTPUTS)])
     query = sql.SQL(
         "SELECT slug, commit, array_agg(place ORDER BY place) FROM ({}) AS pins"
         " GROUP BY slug, commit ORDER BY slug, commit"
@@ -1186,12 +1295,17 @@ def main(argv: Sequence[str]) -> int:
         command = commands.add_parser(name, help=text)
         command.add_argument("--old", type=Path, help="default: the data directory's models")
         command.add_argument("--dest", type=Path, help="default: models-next beside it")
+    trial = commands.add_parser("push", help="push it to a trial branch of the git remote")
+    trial.add_argument("--dest", type=Path, help="default: models-next beside the models")
+    trial.add_argument("--branch", required=True, help=f"{TRIAL_BRANCH}, or {TRIAL_BRANCH}-<name>")
     options = parser.parse_args(argv)
 
     settings = Settings()
     live = DataPaths(settings.data_dir).models
-    old: Path = options.old or live
     dest: Path = options.dest or live.with_name("models-next")
+    if options.command == "push":
+        return _push(settings, dest, options.branch, live)
+    old: Path = options.old or live
     pins = read_pins(settings.database_url)
     try:
         if options.command == "build":
@@ -1201,6 +1315,35 @@ def main(argv: Sequence[str]) -> int:
         print(f"refused: {error}", file=sys.stderr)
     except (BuildError, GitError) as error:
         print(f"failed: {error}", file=sys.stderr)
+    return 2
+
+
+def _push(settings: Settings, dest: Path, branch: str, live: Path) -> int:
+    from scadbuddy.library.settings_store import SettingsStore
+
+    store = SettingsStore(settings)
+    # Not `store.open`, which migrates: this only reads. The URL and its token are of one
+    # snapshot, as the app reads them.
+    store.pool.open(wait=True, timeout=store.connect_timeout)
+    try:
+        remote = store.snapshot().runtime
+    finally:
+        store.close()
+    if not remote.git_remote_url:
+        print("refused: no git remote is set", file=sys.stderr)
+        return 2
+    target = RemoteTarget(
+        remote.git_remote_url, remote.git_remote_username, remote.git_remote_token
+    )
+    try:
+        head = push_trial(dest, branch, target, live=live)
+    except RefusedError as error:
+        print(f"refused: {error}", file=sys.stderr)
+    except GitError as error:
+        print(f"failed: {scrub(str(error), target.token)}", file=sys.stderr)
+    else:
+        print(f"pushed {head} to {branch}")
+        return 0
     return 2
 
 

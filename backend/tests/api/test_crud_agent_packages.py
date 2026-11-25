@@ -191,6 +191,43 @@ def test_approve_only_what_the_review_showed_then_enable(
     assert missing.json()["detail"] == 'no plugin package named "nope"'
 
 
+def test_every_package_write_tells_tools_and_plugins(
+    client: TestClient, agent: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7460: an install, a re-pin, its discard, an approval, a switch and a remove each
+    publish ``plugin_packages.changed`` once committed, so Settings → Tools & plugins reads
+    the packages again wherever the write came from; a refused write publishes nothing."""
+    seen: list[Any] = []
+    monkeypatch.setattr(
+        "scadbuddy.api.crud_agent_packages.emit", lambda _bus, event: seen.append(event)
+    )
+
+    def told() -> list[tuple[str, str]]:
+        found = [(e.kind, e.name) for e in seen]
+        seen.clear()
+        return found
+
+    changed = [("plugin_packages.changed", "greeter")]
+    assert client.post(BASE, json=_install(), headers=agent).status_code == 201
+    assert told() == changed
+    assert client.post(BASE, json=_install(), headers=agent).status_code == 409
+    assert told() == []
+    assert client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent).status_code == 200
+    assert told() == changed
+    assert client.post(f"{BASE}/greeter/discard-pending", headers=agent).status_code == 200
+    assert told() == changed
+    pin = {"commit_sha": C1, "content_hash": H1}
+    assert client.post(f"{BASE}/greeter/approve", json=pin, headers=agent).status_code == 200
+    assert told() == changed
+    on = client.post(f"{BASE}/greeter/enabled", json={"enabled": True}, headers=agent)
+    assert on.status_code == 200
+    assert told() == changed
+    assert client.post(f"{BASE}/greeter/delete", headers=agent).json() == {"done": True}
+    assert told() == changed
+    assert client.post(f"{BASE}/greeter/delete", headers=agent).json() == {"done": False}
+    assert told() == []
+
+
 def test_a_review_with_refusals_needs_allow_refused(
     client: TestClient, agent: dict[str, str]
 ) -> None:

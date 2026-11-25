@@ -321,6 +321,8 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "copy_output_bytes", _broken_async)
     # #7234: the order attempts' missed media, one read and a start per attempt.
     monkeypatch.setattr(main, "sweep_media", _broken_async)
+    # #7665: the published listings with no price, one read and a start of each.
+    monkeypatch.setattr(main, "warm_unpriced", _broken_async)
     # #7317: the copy of the templates' files to rows.
     monkeypatch.setattr(main, "copy_templates", _broken(OSError("the volume is gone")))
     monkeypatch.setattr(
@@ -500,6 +502,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return 0
 
     monkeypatch.setattr(main, "sweep_media", slow_media)
+    # #7665: the published listings with no price, one read and a start of each.
+    monkeypatch.setattr(main, "warm_unpriced", slow_media)
     state.settings = SimpleNamespace(media_upload_max_bytes=1 << 20)
     # #7491: the sweep counts the starts it asked for.
     state.metrics = SimpleNamespace(attempt_media_sweep_starts=SimpleNamespace(inc=lambda n: None))

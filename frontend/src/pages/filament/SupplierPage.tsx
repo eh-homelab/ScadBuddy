@@ -20,6 +20,11 @@ import { ProductsTable } from '../../components/filament/purchasing/ProductsTabl
 import { BLANK_SUPPLIER, draftOfSupplier, supplierBody, supplierError } from '../../components/filament/purchasing/supplierDraft'
 import { SupplierFields } from '../../components/filament/purchasing/SupplierFields'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
+import { SafeLink } from '../../components/filament/purchasing/SafeLink'
+import { DataTable, type Column } from '../../components/records/DataTable'
+import { inventoryPaths } from '../../lib/inventoryLinks'
+import { useAsync } from '../../lib/useAsync'
+import { inventoryApi, type Offer } from '../inventory/api'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -246,6 +251,8 @@ export function SupplierPage() {
         <PriceSheet rows={data.sheet} types={typeMap} money={money} />
       </section>
 
+      <OtherOffers supplierId={supplier.id} />
+
       <section aria-label="Files and links" className="mt-8 flex flex-col gap-2">
         <h2 className="text-sm font-semibold tracking-tight">Files and links</h2>
         <div className="grid gap-6 lg:grid-cols-2">
@@ -282,6 +289,47 @@ export function SupplierPage() {
         </AlertDialogContent>
       </AlertDialog>
     </Shell>
+  )
+}
+
+/**
+ * #7067 — the items the supplier offers besides filament (parts, consumables, tools), from
+ * `GET /inventory/suppliers/{id}/offers`: each links to its row on its item's page, and to the
+ * supplier's own page in a new tab. Shown only when there are some.
+ */
+function OtherOffers({ supplierId }: { supplierId: string }) {
+  const money = useMoney()
+  const offers = useAsync(() => inventoryApi.supplierOffers(supplierId), [supplierId])
+  if (offers.error) {
+    return (
+      <p role="alert" className="mt-8 text-[13px] text-warn">
+        The other offers could not be loaded: {offers.error.message}
+      </p>
+    )
+  }
+  if (!offers.data?.length) return null
+  const columns: Column<Offer>[] = [
+    {
+      key: 'item',
+      header: 'Item',
+      className: 'break-words',
+      cell: (offer) => (
+        <Link to={inventoryPaths.offer(offer.item_id, offer.id)} className="underline-offset-4 hover:underline">
+          {offer.item_name}
+        </Link>
+      ),
+    },
+    { key: 'sku', header: 'SKU', className: 'break-all', cell: (offer) => offer.sku },
+    { key: 'pack', header: 'Pack', className: 'sb-num', cell: (offer) => `${offer.pack_size} ${offer.pack_uom}` },
+    { key: 'price', header: 'Newest price', className: 'sb-num', cell: (offer) => (offer.latest_price ? money.format(offer.latest_price.price, offer.latest_price.currency) : '—') },
+    { key: 'url', header: 'Link', cell: (offer) => <SafeLink url={offer.url} /> },
+  ]
+  return (
+    <section aria-label="Other offers" className="mt-8 flex flex-col gap-2">
+      <h2 className="text-sm font-semibold tracking-tight">Other offers</h2>
+      <p className="text-[12px] text-muted-foreground">What else you buy here, kept in Inventory.</p>
+      <DataTable label="Other offers" columns={columns} rows={offers.data} rowKey={(offer) => offer.id} />
+    </section>
   )
 }
 

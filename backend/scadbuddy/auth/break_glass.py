@@ -65,7 +65,13 @@ def main() -> int:
     from scadbuddy.library.settings_store import SettingsStore
 
     settings = Settings()
-    public_url = SettingsStore(settings).load().public_url
+    store = SettingsStore(settings)
+    # Only the pool, for one read: the running API migrates and seals (#7592).
+    store.pool.open(wait=True, timeout=store.connect_timeout)
+    try:
+        public_url = store.load().public_url
+    finally:
+        store.close()
     with psycopg.connect(settings.database_url, autocommit=True) as conn:
         code = mint(conn)
     url = url_for(public_url, code)

@@ -5,7 +5,7 @@ the quote tests' fakes; the rows are Postgres."""
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import aclosing
 from dataclasses import replace
 from pathlib import Path
@@ -21,12 +21,20 @@ from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
 from scadbuddy.bambuddy.part_settings import PartSettings
+from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.models import EffectivePreset
+from scadbuddy.library.outputs import storefront_output_id
 from scadbuddy.library.settings_store import ModelPrintChoices, PrinterPlate, StoredSettings
 from scadbuddy.orders.models import Filament, MachineRateBreakdown, PricingPolicy
-from scadbuddy.orders.quote import QuoteRun, SlicedPlate, SliceQuoteRequest, quote_run
+from scadbuddy.orders.quote import (
+    QuoteRun,
+    SlicedPlate,
+    SliceQuoteRequest,
+    SlotPresets,
+    quote_run,
+)
 from scadbuddy.orders.rendering import RenderedOutput
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.held_file import PricedFile
@@ -41,13 +49,18 @@ from scadbuddy.orders.storefront.slice_price import (
     SliceUnavailableError,
     SliceVariant,
     _start,
+    kit_colours,
+    kit_digest,
     live_rate,
     plan_variant,
     price_key,
     price_variant,
     setup_key,
+    slot_map,
 )
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import Job, JobResult, OutputRecord, PipelineOutput
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
@@ -62,6 +75,7 @@ from tests.orders.test_quote import (
     FakeOutputs,
     FakeRenders,
     FakeSlicer,
+    SavedOutputs,
     Shop,
     run_of,
     sliced_plate,
@@ -133,7 +147,7 @@ def slice_run(
     book: Book | None = None,
     rendered: str | None = SHA,
 ) -> SliceRun:
-    async def rendered_sha256(_rendered: RenderedOutput) -> str | None:
+    async def rendered_sha256(_rendered: Sequence[RenderedOutput]) -> str | None:
         return rendered
 
     async def create_output(body: dict[str, object]) -> dict[str, object]:
@@ -879,7 +893,7 @@ OTHER_SHA = "d" * 64
 def last_row(
     pool: PgPool,
     key: str,
-    listing: str,
+    listing: str | None,
     filaments: list[str],
     *,
     setup: str | None = None,
@@ -978,6 +992,15 @@ def test_another_listings_last_price_needs_the_material_and_the_setup(
     assert last(prices) == own
 
 
+def test_a_row_of_no_listing_is_no_listings_last_price(prices: SlicePrices, pool: PgPool) -> None:
+    """#7530: a done row from before #6710 PR 3 names no listing. It is never a listing's
+    last price, of the chosen material and setup or not."""
+    last_listings(pool, "mine", "other")
+    last_row(pool, "a", None, ["red", "red"], setup="s-1")
+    last_row(pool, "b", None, ["red", "blue"])
+    assert last(prices) is None
+
+
 async def test_a_files_row_records_its_setup_and_a_templates_none(
     shop: Shop, prices: SlicePrices, content: ContentStore
 ) -> None:
@@ -1030,3 +1053,310 @@ async def test_a_held_copy_missing_from_the_store_is_file_gone_and_never_slices(
     row = await price_variant(run, file_variant(shop, "d" * 64))
     assert (row.status, row.failure) == ("failed", FILE_GONE)
     assert slicer.subjects == []
+
+
+# -- a render of several outputs (#5701, spec 2026-11-17 §7.4) -----------------------------
+
+
+def result_of(model: str, colours: list[str]) -> JobResult:
+    return JobResult(
+        model_3mf=model,
+        preview_glb="p.glb",
+        parts=[],
+        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        colors=colours,
+    )
+
+
+def output_of(model: str, colours: list[str]) -> PipelineOutput:
+    return PipelineOutput(
+        name=None,
+        result=result_of(model, colours),
+        blob_keys=[],
+        record=OutputRecord(
+            revision=None,
+            ui_api=None,
+            pipeline_api=1,
+            pipeline_version="v",
+            inputs_v=0,
+            plate_key="k",
+            parts=[],
+        ),
+    )
+
+
+def job_of(*outputs: PipelineOutput, result: JobResult | None = None, id: str = "kit") -> Job:
+    return Job(
+        id=id,
+        slug="demo",
+        state="done",
+        created_at=NOW,
+        result=result or outputs[0].result,
+        outputs=list(outputs),
+    )
+
+
+def test_the_slots_of_a_kit_are_the_first_outputs_then_each_new_colour() -> None:
+    one = ["#FF0000", "#00FF00"]
+    two = ["#00ff00", "#0000FF"]
+    # A template with no pipeline, and a pipeline of one output: the job's own colours.
+    assert kit_colours(job_of(result=result_of("a", one))) == one
+    assert kit_colours(job_of(output_of("a", one))) == one
+    kit = kit_colours(job_of(output_of("a", one), output_of("b", two), output_of("c", one)))
+    assert kit == ["#FF0000", "#00FF00", "#0000FF"]
+    assert slot_map(one, kit) == {0: 0, 1: 1}
+    assert slot_map(two, kit) == {0: 1, 1: 2}
+
+
+def test_an_output_with_one_colour_on_two_slots() -> None:
+    """The first output's slots are the kit's, whatever its colours; a later output's two
+    slots of a colour of its own are one slot of the kit."""
+    twice = ["#FF0000", "#ff0000"]
+    own = ["#0000FF", "#0000ff"]
+    kit = kit_colours(job_of(output_of("a", twice), output_of("b", own)))
+    assert kit == ["#FF0000", "#ff0000", "#0000FF"]
+    assert slot_map(twice, kit) == {0: 0, 1: 1}
+    assert slot_map(own, kit) == {0: 2, 1: 2}
+
+
+def test_the_digest_of_a_kit_is_of_every_output(tmp_path: Path) -> None:
+    for name in ("a", "b", "c"):
+        (tmp_path / name).write_bytes(name.encode())
+    a, b, c = (hashlib.sha256(name.encode()).hexdigest() for name in ("a", "b", "c"))
+
+    def digest(job: Job) -> str:
+        return kit_digest(job, lambda name: tmp_path / name)
+
+    # One output, or none: the sha256 of the job's 3MF, so no price stored before moves.
+    assert digest(job_of(result=result_of("a", []), id="plain")) == a
+    assert digest(job_of(output_of("a", []), id="one")) == a
+
+    def kit(*digests: str) -> str:
+        text = "[" + ",".join(f'"{part}"' for part in ("kit", *digests)) + "]"
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    two = job_of(output_of("a", []), output_of("b", []), id="two")
+    assert digest(two) == kit(a, b) != kit(a, a)
+    # Kept per output: read again without its files, and no output reads another's.
+    assert kit_digest(two, lambda _name: tmp_path / "gone") == kit(a, b)
+    assert digest(job_of(output_of("a", []), output_of("c", []), id="ac")) == kit(a, c)
+    assert digest(job_of(output_of("b", []), output_of("a", []), id="ba")) == kit(b, a)
+    assert digest(job_of(output_of("a", []), output_of("a", []), id="aa")) == kit(a, a)
+
+
+def test_a_kits_digest_reads_every_outputs_file(tmp_path: Path) -> None:
+    (tmp_path / "a").write_bytes(b"a")
+    job = job_of(output_of("a", []), output_of("gone", []), id="partial")
+    with pytest.raises(FileNotFoundError):
+        kit_digest(job, lambda name: tmp_path / name)
+
+
+#: The colours of a kit's two outputs: the kit's slots are red, green and blue.
+KIT_COLOURS = (["#ff0000", "#00ff00"], ["#00FF00", "#0000ff"])
+#: Two plates of the first output and one of the second, whose slots are the kit's 1 and 2.
+KIT_FILES: tuple[dict[int, bytes], ...] = (
+    {1: sliced_plate(1, 5400, [12.5, 3.0]), 2: sliced_plate(2, 1800, [10.0, 2.0])},
+    {1: sliced_plate(1, 3600, [4.0, 6.0])},
+)
+KIT_POLICY = PricingPolicy(
+    machine_rate_per_hour="1.5", setup_fee="0.5", labour_per_item="2", rounding="to_major"
+)
+KIT_PRESETS = {1: TYPE_PRESETS[PLA_TYPE], 2: TYPE_PRESETS[PETG_TYPE], 3: [_preset("0.4", "Third")]}
+
+
+class KitOutputs(SavedOutputs):
+    """The outputs a kit's render saves, each with its own colours."""
+
+    def __init__(self, colours: Sequence[list[str]] = KIT_COLOURS) -> None:
+        super().__init__()
+        self.colours = colours
+        self.bodies: list[dict[str, Any]] = []
+
+    async def create(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.bodies.append(body)
+        saved = await super().create(body)
+        colours = self.colours[body["index"]]
+        self.metas[saved["id"]].colors = colours
+        return {**saved, "colors": colours}
+
+
+class KitRenders(FakeRenders):
+    """A render of two outputs."""
+
+    def read(self, job_id: str) -> Job:
+        return job_of(output_of("0", []), output_of("1", []), id=job_id)
+
+
+class KitSlicer(FakeSlicer):
+    """Each output's plates, sliced from its own files, in the order they are started."""
+
+    def __init__(self, files: Sequence[Mapping[int, bytes]] = KIT_FILES) -> None:
+        super().__init__({})
+        self.outputs = list(files)
+        self.started: list[str] = []
+
+    async def start(
+        self,
+        output_id: str,
+        request: SliceQuoteRequest,
+        subject: str,
+        *,
+        slot_presets: SlotPresets | None = None,
+    ) -> list[PreviewStarted]:
+        output = len(self.started)
+        self.started.append(output_id)
+        self.subjects.append(subject)
+        self.slot_presets.append(slot_presets)
+        plates = sorted(self.outputs[output])
+        return [PreviewStarted(job_id=output, plate_id=plate) for plate in plates]
+
+    async def fetch(self, sliced: SlicedPlate) -> bytes:
+        assert sliced.file_id is not None
+        return self.outputs[sliced.file_id][sliced.plate_id]
+
+
+def kit_run(
+    shop: Shop,
+    prices: SlicePrices,
+    slicer: FakeSlicer,
+    outputs: KitOutputs | None = None,
+    *,
+    rendered: str | None = SHA,
+) -> SliceRun:
+    outputs = outputs or KitOutputs()
+    return replace(
+        slice_run(shop, prices, slicer, book=Book(KIT_POLICY), rendered=rendered),
+        outputs=outputs,
+        renders=KitRenders(),
+        create_output=outputs.create,
+    )
+
+
+def kit_variant(shop: Shop, key: str = "a" * 64, **update: Any) -> SliceVariant:
+    fields = {
+        "slot_filaments": [shop.pla, shop.petg, shop.pla],
+        "slot_presets": KIT_PRESETS,
+        "variant_key": "d" * 64,
+        "listing_id": "listing-1",
+    }
+    return variant_of(shop, key).model_copy(update={**fields, **update})
+
+
+async def test_a_kit_is_one_price_of_every_outputs_plates(shop: Shop, prices: SlicePrices) -> None:
+    outputs = KitOutputs()
+    slicer = KitSlicer()
+    variant = kit_variant(shop)
+    row = await price_variant(kit_run(shop, prices, slicer, outputs), variant)
+    assert row.status == "done", row.failure
+    # One render, each output saved under its own id, and each sliced once, whole.
+    assert variant.reference is not None
+    ids = [storefront_output_id(variant.reference.render_key, index) for index in (0, 1)]
+    assert slicer.started == ids
+    assert [(body["index"], body["output_id"]) for body in outputs.bodies] == [
+        (0, ids[0]),
+        (1, ids[1]),
+    ]
+    assert {body["source"] for body in outputs.bodies} == {"storefront"}
+    assert {body["job_id"] for body in outputs.bodies} == {"job-1"}
+    assert slicer.subjects == ["storefront_price:" + "a" * 64] * 2
+    # Each output's slots by its own slot ids, each with the kit slot's presets.
+    assert slicer.slot_presets == [
+        {1: KIT_PRESETS[1], 2: KIT_PRESETS[2]},
+        {1: KIT_PRESETS[2], 2: KIT_PRESETS[3]},
+    ]
+    assert row.plates is not None
+    assert [plate.index for plate in row.plates] == [1, 2, 3]
+    assert [(f.slot, str(f.used_g)) for f in row.plates[2].filaments] == [(1, "4.0"), (2, "6.0")]
+    assert row.grams == {"0": "22.5", "1": "9.0", "2": "6.0"}
+    assert row.print_seconds == 10800
+    assert row.lines is not None
+    kinds = [line.kind for line in row.lines]
+    assert (kinds.count("filament"), kinds.count("setup")) == (3, 3)
+    assert (kinds.count("labour"), kinds.count("rounding")) == (1, 1)
+    assert sum(line.amount_minor for line in row.lines) == row.total_minor
+    # The instant read's preview is the first output's; its slots are the kit's.
+    assert row.output_id == ids[0]
+    assert row.slot_colours == ["#ff0000", "#00ff00", "#0000ff"]
+    assert row.slot_filaments == [shop.pla, shop.petg, shop.pla]
+    assert (row.variant_key, row.listing_id) == ("d" * 64, "listing-1")
+
+
+async def test_two_outputs_of_one_colour_are_one_slot(shop: Shop, prices: SlicePrices) -> None:
+    """And a later output's own two slots of that colour are one line of its plate."""
+    slicer = KitSlicer([{1: sliced_plate(1, 3600, [10.0])}, {1: sliced_plate(1, 3600, [2.5, 1.5])}])
+    outputs = KitOutputs((["#ff0000"], ["#FF0000", "#ff0000"]))
+    variant = kit_variant(shop, slot_filaments=[shop.pla], slot_presets={1: KIT_PRESETS[1]})
+    row = await price_variant(kit_run(shop, prices, slicer, outputs), variant)
+    assert (row.status, row.grams) == ("done", {"0": "14.0"})
+    assert row.lines is not None and row.plates is not None
+    assert [line.kind for line in row.lines].count("filament") == 1
+    assert [(f.slot, str(f.used_g)) for f in row.plates[1].filaments] == [(0, "4.0")]
+    assert slicer.slot_presets == [{1: KIT_PRESETS[1]}, {1: KIT_PRESETS[1], 2: KIT_PRESETS[1]}]
+
+
+@pytest.mark.parametrize(
+    ("files", "reason"),
+    [
+        # A slot of the second output alone, at 0 g or not sliced.
+        ([KIT_FILES[0], {1: sliced_plate(1, 3600, [4.0, 0.0])}], "0 g"),
+        ([KIT_FILES[0], {1: sliced_plate(1, 3600, [4.0])}], "0 g on every plate"),
+        ([KIT_FILES[0], {1: b"not a 3MF"}], "could not be read"),
+        # A slot an output has no colour for is never the kit's slot of that number.
+        ([KIT_FILES[0], {1: sliced_plate(1, 3600, [4.0, 6.0, 1.0])}], "plate 3: slot 3"),
+        ([{1: sliced_plate(1, 3600, [12.5, 3.0, 9.0])}, KIT_FILES[1]], "plate 1: slot 3"),
+    ],
+)
+async def test_a_plate_of_any_output_that_fails_gives_no_price(
+    shop: Shop, prices: SlicePrices, files: list[dict[int, bytes]], reason: str
+) -> None:
+    row = await price_variant(kit_run(shop, prices, KitSlicer(files)), kit_variant(shop))
+    assert row.status == "failed"
+    assert row.failure is not None and reason in row.failure, row.failure
+    assert (row.unit_price_minor, row.plates, row.grams) == (None, None, None)
+
+
+async def test_a_later_outputs_slice_that_may_pass_is_tried_again_whole(
+    shop: Shop, prices: SlicePrices
+) -> None:
+    """No part of the kit is priced, and the retry renders and saves nothing again."""
+
+    class Away(KitSlicer):
+        async def start(self, output_id: str, *args: Any, **kwargs: Any) -> list[PreviewStarted]:
+            if self.started:
+                raise ApiError(503, "the slicer is away")
+            return await super().start(output_id, *args, **kwargs)
+
+    outputs = KitOutputs()
+    variant = kit_variant(shop)
+    prices.claim(variant.price_key, SHA, limit=1)
+    with pytest.raises(SliceUnavailableError):
+        await price_variant(kit_run(shop, prices, Away(), outputs), variant)
+    stood = prices.get(variant.price_key)
+    assert stood is not None and stood.status == "running"
+    run = kit_run(shop, prices, KitSlicer(), outputs)
+    row = await price_variant(run, variant)
+    assert (row.status, row.grams) == ("done", {"0": "22.5", "1": "9.0", "2": "6.0"})
+    assert isinstance(run.renders, KitRenders) and run.renders.submitted == []
+    assert len(outputs.bodies) == 2
+
+
+async def test_a_kit_of_another_geometry_has_no_price(shop: Shop, prices: SlicePrices) -> None:
+    """`rendered_sha256` answers None for outputs of two jobs, and for fewer outputs than
+    the job has; either way nothing is sliced."""
+    slicer = KitSlicer()
+    run = kit_run(shop, prices, slicer, rendered=None)
+    row = await price_variant(run, kit_variant(shop))
+    assert (row.status, row.failure) == ("failed", GEOMETRY_DIFFERS)
+    # So is a kit of other slots than the filaments the variant names.
+    fewer = kit_variant(shop, "b" * 64, slot_filaments=[shop.pla, shop.petg])
+    row = await price_variant(kit_run(shop, prices, slicer), fewer)
+    assert (row.status, row.failure) == ("failed", GEOMETRY_DIFFERS)
+    assert slicer.started == []
+
+
+def test_a_kit_takes_one_place_of_the_capacity(shop: Shop, prices: SlicePrices) -> None:
+    """The claim is the variant's key, whatever its outputs (spec §12, decision 3)."""
+    variant = kit_variant(shop)
+    assert prices.claim(variant.price_key, variant.model_sha256, limit=1).claimed
+    assert prices.claim("2" * 64, SHA, limit=1).row is None
+    assert prices.claim("2" * 64, SHA, limit=2).claimed

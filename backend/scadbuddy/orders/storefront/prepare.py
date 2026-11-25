@@ -36,7 +36,9 @@ the done render's 3MF and slots, with the combination's variant key, through
 the default combination only (`warm_default`, `default_combination`), so the default
 variant has a price before a visitor asks. A file listing (#7523) has no render: its run
 submits none, and prices the colours its page opens on (`file_prices.py` `default_choice`)
-with no visitor charge. All are off with `storefront_warm_prices`.
+with no visitor charge. A listing that publish never priced (published before #6922, a
+start that failed, a run that ended with no price) is started by the housekeeping sweep
+(#7665, `warm_unpriced`). All are off with `storefront_warm_prices`.
 """
 
 from __future__ import annotations
@@ -49,6 +51,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
@@ -103,6 +106,14 @@ logger = logging.getLogger(__name__)
 
 #: How long a publish waits for its default price run to start (#6922).
 WARM_START_TIMEOUT: Final = 5.0
+
+#: The most default price runs the sweep (#7665) leaves open at once, so visitors' renders
+#: and slices keep their room. The rest wait for the next pass.
+WARM_SWEEP_BATCH: Final = 2
+#: How long the sweep waits for one Temporal read or start.
+WARM_SWEEP_TIMEOUT: Final = 10.0
+#: The listings the sweep reads per query.
+WARM_SWEEP_PAGE: Final = 100
 
 #: A job state that is not settled yet.
 OPEN_STATES: Final = ("pending", "running")
@@ -475,6 +486,14 @@ def _unavailable() -> ApiError:
     )
 
 
+@dataclass(frozen=True)
+class DefaultRun:
+    """The newest run of a listing's default combination."""
+
+    running: bool
+    started_at: datetime
+
+
 class TemporalPreparer:
     """Starts and reads a listing's ``PrepareListing`` run."""
 
@@ -528,16 +547,36 @@ class TemporalPreparer:
         )
         return not (same_run or same_chain)
 
-    async def start_default(self, listing_id: str) -> None:
-        """Start a publish's run of the listing's default combination (#6922). A run of it
-        still open is ended and started again: the listing it read may have moved (a new
-        commit is a new render key, and a new version a new variant key)."""
+    async def last_default(self, listing_id: str) -> DefaultRun | None:
+        """The newest run of the listing's default combination that Temporal still holds,
+        or None. Raises `RPCError` when Temporal does not answer."""
+        handle = self.client.get_workflow_handle(default_workflow_id(listing_id))
+        try:
+            described = await handle.describe()
+        except RPCError as error:
+            if execution_gone(error):
+                return None
+            raise
+        return DefaultRun(
+            running=described.status == WorkflowExecutionStatus.RUNNING,
+            started_at=described.start_time,
+        )
+
+    async def start_default(self, listing_id: str, *, restart: bool = True) -> None:
+        """Start the run of the listing's default combination (#6922). With ``restart`` (a
+        publish's) a run of it still open is ended and started again: the listing it read
+        may have moved (a new commit is a new render key, and a new version a new variant
+        key). Without it (the sweep's, #7665) an open run is joined."""
         await self.client.start_workflow(
             PREPARE_LISTING_WORKFLOW,
             PrepareListingStart(listing_id=listing_id, default_only=True),
             id=default_workflow_id(listing_id),
             task_queue=self.task_queue,
-            id_conflict_policy=WorkflowIDConflictPolicy.TERMINATE_EXISTING,
+            id_conflict_policy=(
+                WorkflowIDConflictPolicy.TERMINATE_EXISTING
+                if restart
+                else WorkflowIDConflictPolicy.USE_EXISTING
+            ),
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
         )
 
@@ -575,6 +614,78 @@ async def warm_default(state: AppState, listing: Listing) -> None:
         logger.warning(
             "could not start the default price run of listing %s", listing.id, exc_info=True
         )
+
+
+async def _default_priced(state: AppState, orders: OrdersComponent, listing: Listing) -> bool:
+    """Whether the published ``listing``'s default choices have a price (or can have none):
+    a ``done`` row of the variant a visitor's page opens on, which the instant read answers
+    from (`renders.py` `instant_variant`), or of a file listing's opening colours."""
+
+    def read() -> tuple[FileChoice | None, bool]:
+        filaments = {f.id: f for f in orders.store.filaments()}
+        shop = state.settings_store.snapshot().runtime.storefront_materials
+        if listing.file_snapshot is not None:
+            choice = default_choice(listing, filaments, shop)
+            return choice, choice is None
+        default = default_combination(listing, filaments, effective_materials(listing, shop))
+        return None, (
+            default is None or orders.slice_prices.variant_row(default.variant_key) is not None
+        )
+
+    choice, settled = await asyncio.to_thread(read)
+    if choice is None:
+        return settled
+    planned = await plan_file(state, listing, choice)
+    if planned is None:
+        return True
+    row = await asyncio.to_thread(orders.slice_prices.get, planned.key)
+    return row is not None and row.status == "done"
+
+
+async def warm_unpriced(state: AppState, orders: OrdersComponent) -> int:
+    """The housekeeping sweep ``housekeeping_warm_listings`` (#7665): start the default
+    price run (`warm_default`) of each published listing whose default choices have no
+    price, so the shop shows one before a visitor asks. It repairs what publish did not
+    price: a listing published before #6922, a start that failed, a run that ended with no
+    price.
+
+    Temporal's own record bounds the retries: a listing whose newest run started since its
+    version (``updated_at``, which its variant key holds) is left alone, so one that has no
+    price to find is tried once per version, and again only when Temporal's retention
+    drops that run. At most `WARM_SWEEP_BATCH` runs are open; the rest wait for the next
+    pass. An open run is never ended. A listing that fails is logged, and the next one is
+    read. The number of runs started."""
+    if not state.settings.storefront_warm_prices:
+        return 0
+    starter = preparer(state)
+    started = open_runs = 0
+    after: tuple[int, str] | None = None
+    while True:
+        page = await asyncio.to_thread(
+            orders.listings.published, limit=WARM_SWEEP_PAGE, after=after
+        )
+        for listing in page:
+            try:
+                if await _default_priced(state, orders, listing):
+                    continue
+                run = await asyncio.wait_for(starter.last_default(listing.id), WARM_SWEEP_TIMEOUT)
+                if run is not None and (run.running or run.started_at >= listing.updated_at):
+                    open_runs += run.running
+                else:
+                    await asyncio.wait_for(
+                        starter.start_default(listing.id, restart=False), WARM_SWEEP_TIMEOUT
+                    )
+                    started += 1
+                    open_runs += 1
+            except Exception:
+                logger.warning(
+                    "could not sweep the default price of listing %s", listing.id, exc_info=True
+                )
+            if open_runs >= WARM_SWEEP_BATCH:
+                return started
+        if len(page) < WARM_SWEEP_PAGE:
+            return started
+        after = (page[-1].position, page[-1].id)
 
 
 async def progress(state: AppState, orders: OrdersComponent, listing_id: str) -> PrepareProgress:

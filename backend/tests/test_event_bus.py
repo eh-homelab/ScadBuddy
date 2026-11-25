@@ -264,6 +264,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "font.installed",
         "presets.changed",
         "settings.changed",
+        # A plugin package's pin or a hosted plugin changed (#7460).
+        "plugin_packages.changed",
         "analyzer.decision",
         "activity.changed",
         "printer.report",

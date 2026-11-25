@@ -1712,12 +1712,14 @@ jobs:
           ) &
           sampler=$!
           rc=0
+          # RUST_BACKTRACE: a Temporal core panic keeps its backtrace in the log (#7519).
           docker run --rm --cidfile "$cid" --network host --shm-size=1g \
             --memory=13g --memory-swap=13g \
             -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -v "$PWD/results:/results" \
             -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test \
             -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures \
+            -e RUST_BACKTRACE=1 \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto \
             --splits 8 --group ${{ matrix.group }} --splitting-algorithm least_duration \
             --store-durations --clean-durations --durations-path=/results/durations.json \

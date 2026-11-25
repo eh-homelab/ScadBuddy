@@ -1,15 +1,19 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { getSpool, listCatalog, upsertCatalog } from '../../api/filament'
+import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { IT, spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
+import { rememberAdvanced } from '../../test/advanced'
 import { renderPage } from '../../test/utils'
 import { SpoolPage } from './SpoolPage'
 
 // #7280 — a new spool's weighing offers its insert an empty weight. Spool #9 is new: a
 // 1000 g label, 1000 g left, no use, on a cardboard spool of 180 g from the catalog.
-// Spool #1 has been used.
+// Spool #1 has been used. The weigh form is behind the page's Advanced toggle.
+
+beforeEach(() => rememberAdvanced(SPOOL_ADVANCED_KEY))
 
 function open(number: number) {
   return renderPage(

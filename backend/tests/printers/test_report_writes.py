@@ -142,7 +142,7 @@ def test_two_reports_with_one_view_read_alike() -> None:
     assert tray_projection(first) == tray_projection(second)
     units = ams_units(first)
     assert units and units == ams_units(second)
-    trays = [(unit.id, int(tray.id)) for unit in units for tray in unit.tray]
+    trays = [(unit.id, tray.id) for unit in units for tray in unit.tray]
     assert trays
     for ams_id, tray_id in trays:
         assert _tray_temps(first, ams_id, tray_id) == _tray_temps(second, ams_id, tray_id)

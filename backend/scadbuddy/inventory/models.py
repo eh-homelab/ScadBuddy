@@ -127,6 +127,8 @@ class Item(_Decimals):
     #: Some lot with stock on hand, or some unit in stock, has no known cost.
     cost_unknown: bool
     low: bool
+    #: Its unarchived supplier offers (R-P2-37).
+    offer_count: int
 
     @field_serializer("low_stock", "life_hours", "on_hand", "stock_value_minor")
     def _decimals(self, value: Decimal | None) -> str | None:
@@ -182,6 +184,11 @@ def _blank_none(text: str | None) -> str | None:
     return None if text is None or not text.strip() else text
 
 
+def _plain(value: Decimal) -> str:
+    """A decimal with no trailing zeros, as `_Decimals` writes one (R-P2-40): `"5.99"`."""
+    return format(value.normalize(), "f")
+
+
 class OfferPricePoint(BaseModel):
     id: UUID
     #: The price of one pack, in `currency`.
@@ -190,6 +197,10 @@ class OfferPricePoint(BaseModel):
     on_date: date
     source: Literal["invoice", "manual"]
     invoice_line_id: UUID | None
+
+    @field_serializer("price")
+    def _price(self, value: Decimal) -> str:
+        return _plain(value)
 
 
 class Offer(BaseModel):
@@ -206,6 +217,10 @@ class Offer(BaseModel):
     archived_at: datetime | None
     #: The newest price point by date.
     latest_price: OfferPricePoint | None
+
+    @field_serializer("pack_size")
+    def _pack_size(self, value: Decimal) -> str:
+        return _plain(value)
 
 
 class OfferInput(BaseModel):

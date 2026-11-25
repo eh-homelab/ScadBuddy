@@ -76,6 +76,11 @@ export const entityApi = {
       (body) => body.properties,
     ),
   propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
+  /** Replaces the kind's whole schema; a bad one is 422 `bad_property_schema`, and `item`'s is its item kinds' (409). */
+  setPropertySchema: (kind: string, schema: Record<string, unknown>) =>
+    request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`, { method: 'PUT', body: JSON.stringify({ schema }) }),
+  /** #7067 — the schema that types one entity's properties: an item's is its item kind's, merged down the kind tree. */
+  entityPropertySchema: (entity: string) => request<KindPropertySchema>(`${base(entity)}/property-schema`),
 }
 
 /** #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A failed read throws. */

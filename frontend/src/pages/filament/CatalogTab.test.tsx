@@ -3,8 +3,10 @@ import { http, HttpResponse } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { listCatalog, upsertCatalog } from '../../api/filament'
 import { server } from '../../mocks/server'
+import { entityMock } from '../../mocks/features/entities'
 import { M } from '../../mocks/features/filament/seed'
 import { renderPage } from '../../test/utils'
+import { CATALOGS } from '../../components/filament/catalogs'
 import { CatalogTab } from './CatalogTab'
 
 const list = (name: string) => screen.findByRole('table', { name })
@@ -166,5 +168,50 @@ describe('the Catalog tab', () => {
     await user.type(hex, '#112233')
     await user.click(screen.getByRole('button', { name: 'Save' }))
     await waitFor(async () => expect((await listCatalog('colours')).find((row) => row.name === 'Hot Pink')?.rgba).toBe('#112233FF'))
+  })
+
+  it.each(CATALOGS.map((one) => [one.kind, one.title, one.entity] as const))('keeps files, links and properties on a row of %s', async (kind, title, entity) => {
+    const given = kind === 'insert-types' ? { empty_weight_g: 250 } : kind === 'colours' ? { rgba: '#112233FF' } : {}
+    const row = await upsertCatalog(kind, { name: 'Kept with files', ...given } as Parameters<typeof upsertCatalog>[1])
+    const { user } = renderPage(<CatalogTab />, { route: `/filament/catalog?kind=${kind}` })
+    await user.click(await screen.findByRole('button', { name: 'Edit Kept with files' }))
+
+    await user.upload(await screen.findByLabelText('Attach files'), new File(['a datasheet'], 'datasheet.txt', { type: 'text/plain' }))
+    expect(await screen.findByRole('listitem', { name: 'datasheet.txt' })).toBeInTheDocument()
+    expect(entityMock.uploads.map((upload) => upload.entity)).toEqual([`${entity}:${row.id}`])
+
+    await user.type(screen.getByLabelText('Link address'), 'https://example.com/datasheet')
+    await user.type(screen.getByLabelText('Link title'), 'Datasheet page')
+    await user.click(screen.getByRole('button', { name: 'Add link' }))
+    expect(await screen.findByRole('link', { name: 'Datasheet page' })).toHaveAttribute('href', 'https://example.com/datasheet')
+    expect(entityMock.links.get(`${entity}:${row.id}`)).toHaveLength(1)
+
+    await user.type(screen.getByLabelText('New property key'), 'part_number')
+    await user.type(screen.getByLabelText('New property value'), 'SB-250')
+    await user.click(screen.getByRole('button', { name: 'Add property' }))
+    expect(await screen.findByRole('row', { name: /part_number/ })).toHaveTextContent('SB-250')
+    expect(entityMock.propertyPatches).toEqual([{ entity: `${entity}:${row.id}`, set: { part_number: 'SB-250' } }])
+    // Each is kept on its own: the row's form stays open, unsaved.
+    expect(within(screen.getByRole('table', { name: title })).getByRole('form', { name: 'Edit Kept with files' })).toBeInTheDocument()
+  })
+
+  it('offers no files, links or properties on a row that is not saved yet', async () => {
+    const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=insert-types' })
+    await list('Insert types')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    expect(await screen.findByLabelText('Name')).toBeInTheDocument()
+    for (const label of ['Attach files', 'Link address', 'New property key']) expect(screen.queryByLabelText(label)).toBeNull()
+  })
+
+  it("sets a catalog's property keys before it has a saved row to open", async () => {
+    const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=insert-types' })
+    await list('Insert types')
+    await user.click(screen.getByRole('button', { name: 'Property keys' }))
+    const form = await screen.findByRole('form', { name: 'Keys of insert_type' })
+    await user.click(within(form).getByRole('button', { name: 'Add key' }))
+    await user.type(within(form).getByLabelText('Key 1'), 'bore_mm')
+    await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+    await waitFor(() => expect(entityMock.schemas.insert_type?.properties).toEqual({ bore_mm: { type: 'string' } }))
+    expect(screen.queryByRole('form', { name: 'Keys of insert_type' })).toBeNull()
   })
 })
