@@ -34,7 +34,7 @@ from temporalio.worker import Replayer, Worker
 
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.print_models import FAILED
-from tests.support.temporal import temporal_client
+from tests.support.temporal import cancel_recorded, temporal_client
 from tests.test_operation_workflow import BAMBUDDY_502, Fake, ended, op_input, start
 
 HISTORIES = Path(__file__).parent / "fixtures" / "operation_histories"
@@ -100,17 +100,14 @@ async def test_record_operation_cancel_histories() -> None:
                 accepting = asyncio.create_task(start(client, queue, arg))
                 while step not in fake.calls:
                     await asyncio.sleep(0.05)
-                await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+                await cancel_recorded(client.get_workflow_handle(f"op-{arg.kind}-{arg.key}"))
                 if step == "check":
                     await accepting  # the check is cancelled, never completed
                     gate.set()
-                else:
-                    await asyncio.sleep(0.5)
-                    gate.set()
-                    await accepting
-                if step == "check":
                     with pytest.raises(WorkflowFailureError):
                         await ended(client, arg)
                 else:
+                    gate.set()
+                    await accepting
                     await ended(client, arg)
             await _record(client, name, f"op-{arg.kind}-{arg.key}")

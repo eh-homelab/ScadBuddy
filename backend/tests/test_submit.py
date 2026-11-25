@@ -2713,6 +2713,7 @@ class _ProjectingWorld(FakeWorld):
         return [*super().activities(), self.render_accept, self.render_claims]
 
 
+@pytest.mark.usefixtures("sdk_deadlock_bound")
 async def test_a_timed_out_pipeline_is_failed_by_the_settle_pass(
     make_service: ServiceFactory,
     deps: WorkerDeps,

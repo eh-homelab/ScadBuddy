@@ -49,6 +49,7 @@ export function FileCustomize({
   wait,
   now,
   debounceMs,
+  onSourceChange,
 }: {
   initial: Listing
   timing: PollTiming
@@ -56,6 +57,8 @@ export function FileCustomize({
   now: () => number
   /** How long the page waits after the last change before it reads the price. */
   debounceMs: number
+  /** The listing read again is a design: its page is the template's. */
+  onSourceChange: () => void
 }) {
   const [listing, setListing] = useState(initial)
   const view = useMemo(() => partsView(listing), [listing])
@@ -221,6 +224,10 @@ export function FileCustomize({
     try {
       const fresh = await store.listing(listing.id)
       if (!alive.current) return
+      if (fresh.source !== 'library_file') {
+        onSourceChange()
+        return
+      }
       setListing(fresh)
       setValues(keepOffered(partsView(fresh), values))
       setStale(false)

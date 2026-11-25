@@ -10,6 +10,7 @@ runtime (``api/components.py``).
 
 import asyncio
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Path
 from pydantic import BaseModel, ConfigDict, Field
@@ -21,16 +22,21 @@ from scadbuddy.entities.problems import (
     entity_not_found,
     no_properties_kind,
     parsed,
+    schema_owned_by_item_kind,
 )
 from scadbuddy.entities.properties import (
+    ITEM,
     BadPropertySchema,
     BadPropertyValue,
     EntityProperty,
     PropertyPatch,
     PropertyValue,
+    SchemaOwnedByKind,
+    schema_for,
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import KINDS, EntityNotFound
+from scadbuddy.inventory.component import InventoryDep
 from scadbuddy.orders.actor import current_actor
 
 router = APIRouter(tags=["entities"])
@@ -42,7 +48,8 @@ KindPath = Annotated[str, Path(description="An entity kind: `spool_type`, `print
 _CODES = "`bad_entity_ref` or `unknown_entity_kind`"
 _RULES = (
     "A key is `^[a-z][a-z0-9_]{0,63}$`. A value is a string (up to 2000 characters), a "
-    "finite number, a boolean or a list of up to 50 strings. An entity has up to 200 keys. "
+    "finite number, a boolean or a list of up to 50 strings of up to 500 characters each. "
+    "An entity has up to 200 keys. "
     "A key the kind's schema knows is checked against its subschema; any other is stored "
     "as given."
 )
@@ -120,6 +127,45 @@ async def list_entity_properties(ref: RefPath, entities: EntitiesDep) -> EntityP
     return EntityPropertyList(properties=await asyncio.to_thread(entities.properties.list, entity))
 
 
+@router.get(
+    "/entities/{ref}/property-schema",
+    response_model=KindPropertySchema,
+    summary="The property schema of one entity",
+    description=(
+        "The schema that types this entity's properties, for every kind: an item's is its "
+        "item kind's `attribute_schema` merged down the kind tree (each ancestor's keys, the "
+        "kind's own last); any other entity's is its kind's schema. `kind` is the entity's "
+        "kind. `keys_in_use` lists each key entities typed by the same schema have, with "
+        "how many: for an item, the items of its item kind and of its descendants."
+    ),
+    responses={
+        404: {"description": "No such entity (`entity_not_found`)"},
+        422: {"description": _CODES},
+    },
+)
+async def get_entity_property_schema(
+    ref: RefPath, entities: EntitiesDep, inventory: InventoryDep
+) -> KindPropertySchema:
+    entity = _entity(ref)
+    await _exists(entities, entity)
+
+    def schema() -> dict[str, Any]:
+        with entities.opened().connection() as conn:
+            return schema_for(conn, entity)
+
+    found = await asyncio.to_thread(schema)
+    if entity.kind == ITEM:
+        item = await asyncio.to_thread(inventory.items.get, UUID(entity.ref))
+        if item is None:
+            raise entity_not_found(entity)
+        keys = await asyncio.to_thread(inventory.kinds.keys_in_use, item.kind_id)
+    else:
+        keys = await asyncio.to_thread(entities.properties.keys_in_use, entity.kind)
+    return KindPropertySchema(
+        kind=entity.kind, schema=found, keys_in_use=[KeyInUse(key=k, count=n) for k, n in keys]
+    )
+
+
 @router.patch(
     "/entities/{ref}/properties",
     response_model=EntityPropertyList,
@@ -173,12 +219,19 @@ async def list_kind_properties(kind: KindPath, entities: EntitiesDep) -> KindPro
     description=(
         "A Draft 2020-12 object schema that documents and types the keys the kind knows. "
         "It never refuses a key. `keys_in_use` lists each key entities of the kind have, "
-        "with how many."
+        "with how many. An item's schema is its item kind's `attribute_schema`, so `item` "
+        "is 409 `schema_owned_by_item_kind`."
     ),
-    responses={422: {"description": "`unknown_entity_kind`"}},
+    responses={
+        409: {"description": "`schema_owned_by_item_kind`"},
+        422: {"description": "`unknown_entity_kind`"},
+    },
 )
 async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindPropertySchema:
-    return await _schema_view(entities, _kind(kind))
+    try:
+        return await _schema_view(entities, _kind(kind))
+    except SchemaOwnedByKind:
+        raise schema_owned_by_item_kind() from None
 
 
 @router.put(
@@ -195,9 +248,13 @@ async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindProp
         "`maxItems`, `uniqueItems`; an `enum` or `const` must fit its key, and no bound may "
         "cross its pair or a cap. Anything else is 422 "
         "`bad_property_schema`, naming the keyword, and the old schema stays. Values already "
-        "stored are not checked again."
+        "stored are not checked again. An item's schema is its item kind's "
+        "`attribute_schema`, so `item` is 409 `schema_owned_by_item_kind`."
     ),
-    responses={422: {"description": "`unknown_entity_kind` or `bad_property_schema`"}},
+    responses={
+        409: {"description": "`schema_owned_by_item_kind`"},
+        422: {"description": "`unknown_entity_kind` or `bad_property_schema`"},
+    },
 )
 async def put_property_schema(
     kind: KindPath, body: SchemaBody, entities: EntitiesDep
@@ -207,4 +264,6 @@ async def put_property_schema(
         await asyncio.to_thread(entities.properties.set_schema, name, body.schema_, current_actor())
     except BadPropertySchema as e:
         raise bad_property_schema(e.reason) from None
+    except SchemaOwnedByKind:
+        raise schema_owned_by_item_kind() from None
     return await _schema_view(entities, name)

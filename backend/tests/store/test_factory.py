@@ -45,9 +45,14 @@ S3_READY = RenderStoreSettings(
 
 
 def _build(  # type: ignore[no-untyped-def]
-    tmp_path: Path, pool: Pool, backend: str, current: RenderStoreSettings = READY
+    tmp_path: Path,
+    pool: Pool,
+    backend: str,
+    current: RenderStoreSettings = READY,
+    config: Config | None = None,
+    **extra,
 ):
-    config = Config(data_dir=tmp_path)
+    config = config or Config(data_dir=tmp_path)
     source = RenderSettingsSource(
         pool,
         Settings(
@@ -67,6 +72,7 @@ def _build(  # type: ignore[no-untyped-def]
         history=None,
         fonts=FontService(tmp_path),
         metrics=None,
+        **extra,
     )
 
 
@@ -141,6 +147,50 @@ async def test_s3_builds_the_content_bundle(tmp_path: Path, pool: Pool) -> None:
     assert bundle.content is not None and bundle.content.name == "s3"
     assert (await store_health(bundle)).multi_worker is True
     await bundle.aclose()
+
+
+async def test_the_blob_spool_is_on_the_data_volume_unless_a_spool_dir_is_set(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """#7316: a hit's private copy is spooled under the data volume's cache (an NFS
+    share in prod) by default, and under ``SCADBUDDY_SPOOL_DIR`` (an emptyDir) when set."""
+    _, default = _build(tmp_path, pool, "s3", S3_READY)
+    assert default.content is not None
+    assert default.content.spool == tmp_path / "cache" / "blob-spool"
+    await default.aclose()
+    node = tmp_path / "node"
+    _, moved = _build(tmp_path, pool, "s3", S3_READY, Config(data_dir=tmp_path, spool_dir=node))
+    assert moved.content is not None and moved.content.spool == node / "blob-spool"
+    await moved.aclose()
+
+
+async def test_the_download_cache_carries_the_spool_root_every_library_read_uses(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """#7316 review: the spool root is resolved once, here, so no library-read caller
+    passes it (or forgets to)."""
+    downloads_dir = tmp_path / "d"
+    _, default = _build(tmp_path, pool, "s3", S3_READY, downloads_dir=downloads_dir)
+    assert default.downloads is not None and default.downloads.spool == tmp_path / "cache"
+    await default.aclose()
+    node = tmp_path / "node"
+    config = Config(data_dir=tmp_path, spool_dir=node)
+    _, moved = _build(tmp_path, pool, "s3", S3_READY, config, downloads_dir=downloads_dir)
+    assert moved.downloads is not None and moved.downloads.spool == node
+    await moved.aclose()
+
+
+async def test_a_download_cache_is_shared_unless_the_caller_says_it_is_private(
+    tmp_path: Path, pool: Pool
+) -> None:
+    _, shared = _build(tmp_path, pool, "s3", S3_READY, downloads_dir=tmp_path / "d")
+    assert shared.downloads is not None and not shared.downloads.private
+    await shared.aclose()
+    _, private = _build(
+        tmp_path, pool, "s3", S3_READY, downloads_dir=tmp_path / "d", downloads_private=True
+    )
+    assert private.downloads is not None and private.downloads.private
+    await private.aclose()
 
 
 def test_s3_without_its_settings_refuses_to_start(tmp_path: Path, pool: Pool) -> None:

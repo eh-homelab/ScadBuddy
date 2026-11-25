@@ -68,6 +68,7 @@ export const HOT_PRINTER: PrinterRow = {
   has_access_code: true,
   preferred_path: 'native',
   lan_move_pending: false,
+  camera_recording: true,
   created_at: '2026-10-18T12:00:00Z',
   updated_at: '2026-10-18T12:00:00Z',
 }

@@ -22,12 +22,15 @@ not depend on wall time."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
+import json
 import threading
 import time
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +42,8 @@ import uvicorn
 from fastapi import Depends, FastAPI
 from temporalio.client import Client
 
+from scadbuddy.agent_changes.component import CHANGES
+from scadbuddy.agent_changes.hub import ChangeHub
 from scadbuddy.api import (
     crud_areas,
     crud_print,
@@ -64,6 +69,8 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import INSTALL_CONCURRENCY
 from scadbuddy.core.events import EventBus
 from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.secrets import kek_from_base64, seal_bytes
 from scadbuddy.core.settings import Settings
@@ -109,6 +116,7 @@ from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.usage import RackUsageStore
+from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.slicing.component import SLICING
 from scadbuddy.slicing.store import NativeSliceStore
@@ -121,6 +129,7 @@ from scadbuddy.tasks.store import TaskStore
 from scadbuddy.worker import PRINT_CRUD_AREAS
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import Connect, PgPayloadKeys, payload_key_context
+from tests.conftest import open_pg_pool
 from tests.support.agent_tables import AGENT_KEY_MIGRATIONS
 
 #: The KEK of the API and the worker in a test.
@@ -811,3 +820,90 @@ async def served_projects(
     async with served_crud(store, client=client, keys=keys) as crud:
         worker = await connect_flows(temporal_address, "default", RemotePayloadKeys(crud, TEST_KEK))
         yield client, RemoteFlowStore(crud), worker
+
+
+#: How long a test waits for a stream's next frame.
+PROMPTLY = 10.0
+
+
+@dataclass
+class Served:
+    url: str
+    bus: PgNotifyEventBus
+    hub: ChangeHub
+    token: Callable[[ServiceCaller], dict[str, str]]
+    conninfo: str
+
+
+@asynccontextmanager
+async def served_changes(
+    pg_conninfo: str, *routers: Any, per_credential: int = 2, **hub_args: Any
+) -> AsyncIterator[Served]:
+    """The given routers (with the areas route) behind the real guard on a local port, over
+    the bus, listener and hub the API runs, so a NOTIFY goes through Postgres."""
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        migrate(conn)
+    pool = open_pg_pool(pg_conninfo)
+    credentials = ServiceCredentialStore(pool)
+    pg_listener = PgListener(pg_conninfo, check_interval=1.0, backoff=0.05, max_backoff=0.2)
+    bus = PgNotifyEventBus(pg_conninfo, listener=pg_listener)
+    hub = ChangeHub(per_credential=per_credential, **hub_args)
+    hub.attach(pg_listener, bus)
+    await bus.start()
+    parts: dict[Any, Any] = {
+        AUTH: SimpleNamespace(
+            would_refuse=_Noted(),
+            verifiers={},
+            credentials=credentials,
+            core=SimpleNamespace(metrics=Metrics()),
+        ),
+        CHANGES: hub,
+    }
+    app = FastAPI(dependencies=[Depends(auth_check)])
+    app.state.scadbuddy = SimpleNamespace(
+        settings=SimpleNamespace(auth_mode="enforce"),
+        components=SimpleNamespace(get=lambda key: parts[key]),
+        events=bus,
+    )
+    for router in routers:
+        app.include_router(router, prefix="/api/v1")
+    app.include_router(crud_areas.router, prefix="/api/v1")
+    install_problem_handlers(app)
+    app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
+    await listener.start(app, 0)
+    port = listener.crud_listener_port(app)
+
+    def token(caller: ServiceCaller = "agent") -> dict[str, str]:
+        minted = InProcessProvider(caller, lambda: credentials).token()
+        assert minted is not None
+        return {"authorization": f"Bearer {minted}"}
+
+    try:
+        yield Served(f"http://127.0.0.1:{port}", bus, hub, token, pg_conninfo)
+    finally:
+        hub.shutdown()
+        await listener.stop(app)
+        await bus.aclose()
+        pool.close()
+
+
+class Sse:
+    """One open stream, read a frame at a time."""
+
+    def __init__(self, response: httpx.Response) -> None:
+        self.response = response
+        self._lines = response.aiter_lines()
+
+    async def next(self, timeout: float = PROMPTLY) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        deadline = time.monotonic() + timeout
+        while True:
+            line = await asyncio.wait_for(
+                anext(self._lines), max(0.01, deadline - time.monotonic())
+            )
+            if line == "" and fields:
+                return fields
+            if not line or line.startswith(":"):
+                continue
+            name, _, value = line.partition(": ")
+            fields[name] = json.loads(value) if name == "data" else value

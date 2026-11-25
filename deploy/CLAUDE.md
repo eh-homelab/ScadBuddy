@@ -14,9 +14,17 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   replaces that copy with the deployed commit's files in the image's deploy PR. Only
   `kustomization.yaml` and `[a-z0-9-]+.json` files may live here (no subdirectory):
   the deploy rejects anything else.
-  A query may read only series `core/metrics.py` declares and span names the
+  A query may read only series `core/metrics.py` or a camera module
+  (`backend/scadbuddy/camera/*.py`, #7328) declares and span names the
   service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
   time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
+
+- `deploy/camera/` — MediaMTX's configs for the printer camera relay and recorders (#7328):
+  `mediamtx-relay.yml` and `mediamtx-recorder.yml`, copied into the `camera-relay` and
+  `camera-recorder` images at `/etc/mediamtx/mediamtx.yml`. The real-MediaMTX e2e
+  (`backend/tests/camera/test_e2e_mediamtx.py`) runs them too. Their comments cite
+  MediaMTX's docs and the measurements they rest on; a MediaMTX bump re-measures them (the
+  camera spec §2).
 
 - `deploy/security/` — the browser and parser pods' Localhost profiles (#6779):
   `seccomp/intake-sandbox.json`, `seccomp/profile-fetch.json` (containerd v2.2.7's default
@@ -38,6 +46,13 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   `.status.operationState.phase` `Succeeded` with `.syncResult.revision` at or after the
   merge. While another sync is running (an API rollout), the change is applied on the next
   one (2026-11-14, clusters#3578).
+- Temporal's `matching.numTaskqueueReadPartitions` must equal `TASK_QUEUE_PARTITIONS` in
+  `backend/scadbuddy/workflows/pollers.py` and `agent/src/temporal/pollers.ts` (4,
+  Temporal's default). Both read a queue's pollers partition by partition (#7306, #7350); a
+  worker that polls only a higher partition is not seen, and nothing reports it. Prod's
+  dynamic config (`kubectl -n bambuddy get configmap scadbuddy-temporal-v2-dynamicconfig -o yaml`,
+  in eh-homelab/clusters) does not set it (read 2026-11-24). Set it there only together with
+  both constants.
 
 ## See also
 

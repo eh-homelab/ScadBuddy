@@ -12,8 +12,8 @@ import { listProducts, listSuppliers } from '../api/filamentPurchasing'
  *   (brand, material, colour name, SKU, place…), or, from 3 characters, a colour whose hex
  *   contains it, with or without its `#` (`#FF6A13`, `ff6a13`).
  * - #7151: from 4 hex digits (`:` and `-` left out), a tag UID or tray UUID that holds it (`04:A1:B2`).
- * - In this search only, for now: a spool's or type's property values (#7026) are text fields
- *   too (a GTIN, an MPN, a lot). The agent's copy does not match them yet; a later layer adds them.
+ * - A spool's or type's property values (#7026) are text fields too (a GTIN, an MPN, a lot),
+ *   here and in the agent's copy; a key's name is not.
  */
 export interface SearchToken {
   /** The token in lower case, without a leading `#`. */
@@ -78,9 +78,12 @@ export interface TypeExtras {
   properties?: readonly string[]
 }
 
-/** An entity's property values as search text: a string as it is, each list item, a number or boolean as text. */
+/**
+ * An entity's property values as search text: a string as it is, each list item, a number as text.
+ * A boolean is left out: "true" would match every entity with any yes/no property.
+ */
 export function propertyTexts(values: Readonly<Record<string, string | number | boolean | readonly string[]>> | undefined): string[] {
-  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : [String(value)]))
+  return Object.values(values ?? {}).flatMap((value) => (Array.isArray(value) ? value : typeof value === 'boolean' ? [] : [String(value)]))
 }
 
 export function spoolSearchDoc(spool: Spool, extras: SpoolExtras = {}): SearchDoc {

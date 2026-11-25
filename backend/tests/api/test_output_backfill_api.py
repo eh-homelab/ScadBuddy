@@ -59,7 +59,8 @@ def held(pool: Pool, output_id: str) -> set[str]:
 
 def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str:
     """A saved output of a pasted template, made to look like one saved before phase 5:
-    no manifest.json and no Parts held."""
+    no manifest.json, no Parts held and no row (#7255: an output saved before the rows
+    has none until the copy runs, so its files answer)."""
     if client.get(f"/api/v1/models/{slug}").status_code == 404:
         created = client.post(
             "/api/v1/models", json={"name": slug, "source": "cube(10);\n"}, headers=press()
@@ -75,6 +76,8 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
     output_id: str = saved.json()["id"]
     state = _state(app)
     (state.outputs.directory(output_id) / "manifest.json").unlink()
+    assert state.outputs.rows is not None
+    state.outputs.rows.delete(output_id)
     release_parts(state.refs, output_id)
     return output_id
 

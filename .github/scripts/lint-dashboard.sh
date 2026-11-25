@@ -21,7 +21,9 @@
 #     anything else, a Tempo `traceqlSearch` target included, is rejected as an
 #     unsupported target kind, since the checks below would not see it
 #   - every `scadbuddy_*` series a query reads is one backend/scadbuddy/core/
-#     metrics.py exposes, by its constructor: a Gauge as its name, a Counter as
+#     metrics.py exposes, or a camera process module (backend/scadbuddy/camera/
+#     *.py, #7328: those processes register on prometheus_client's own registry,
+#     not core/metrics.py's), by its constructor: a Gauge as its name, a Counter as
 #     `<name>_total`, a Histogram as `<name>_bucket`/`_sum`/`_count`, an Info as
 #     `<name>_info` (prometheus_client's exposition names), so a `_total` on a
 #     gauge or a bare counter is an error, not an empty panel
@@ -81,6 +83,8 @@ fi
 kustomize="${KUSTOMIZE:-kustomize}"
 
 metrics_py="$root/backend/scadbuddy/core/metrics.py"
+# The camera processes declare their series beside their code (#7328).
+mapfile -t camera_py < <(find "$root/backend/scadbuddy/camera" -maxdepth 1 -name '*.py' 2>/dev/null | sort)
 problems=0
 problem() {
   printf '%s: %s\n' "$1" "$2"
@@ -116,12 +120,13 @@ $invalid && exit 1
 # Every panel, a row's collapsed children included.
 panels='def panels: .panels[]? | (., .panels[]?);'
 
-# Prometheus series against the registry in core/metrics.py: the names each
+# Prometheus series against the registry in core/metrics.py and the camera
+# modules' declarations: the names each
 # declaration exposes, by its constructor, one `<series> <label>...` line each
 # (the labels it declares, a list or tuple, positional or `labelnames=`). Read
 # as Python rather than split on text, so how a declaration passes its registry
 # cannot merge it with the next one (#1190, #1233).
-exposed=$(python3 - "$metrics_py" <<'PY'
+exposed=$(python3 - "$metrics_py" "${camera_py[@]}" <<'PY'
 import ast, sys
 
 suffixes = {
@@ -131,52 +136,60 @@ suffixes = {
     "Summary": lambda n: [n + "_sum", n + "_count"],
     "Info": lambda n: [n.removesuffix("_info") + "_info"],
 }
-tree = ast.parse(open(sys.argv[1]).read())
-# FILAMENT_SERIES: a table of (name, help, labels), each a Gauge family (#6785).
-for node in ast.walk(tree):
-    target = node.target if isinstance(node, ast.AnnAssign) else (
-        node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
-    )
-    if not (isinstance(target, ast.Name) and target.id == "FILAMENT_SERIES"):
-        continue
-    if not isinstance(node.value, (ast.Tuple, ast.List)):
-        continue
-    for row in node.value.elts:
-        if not (
-            isinstance(row, (ast.Tuple, ast.List))
-            and len(row.elts) == 3
-            and isinstance(row.elts[0], ast.Constant)
-            and str(row.elts[0].value).startswith("scadbuddy_")
-        ):
-            print("MALFORMED_ROW line %d" % row.lineno)
+def declarations(tree):
+    # FILAMENT_SERIES: a table of (name, help, labels), each a Gauge family (#6785).
+    for node in ast.walk(tree):
+        target = node.target if isinstance(node, ast.AnnAssign) else (
+            node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
+        )
+        if not (isinstance(target, ast.Name) and target.id == "FILAMENT_SERIES"):
             continue
-        name, _, labels = row.elts
-        if not (
-            isinstance(labels, (ast.Tuple, ast.List))
-            and all(
-                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in labels.elts
-            )
-        ):
-            print("MALFORMED_ROW line %d" % row.lineno)
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
             continue
-        print(" ".join([name.value, *(e.value for e in labels.elts)]))
-for call in ast.walk(tree):
-    if not isinstance(call, ast.Call):
-        continue
-    kind = getattr(call.func, "id", getattr(call.func, "attr", None))
-    if kind not in suffixes or not call.args:
-        continue
-    name = call.args[0]
-    if not (isinstance(name, ast.Constant) and str(name.value).startswith("scadbuddy_")):
-        continue
-    labels = call.args[2] if len(call.args) > 2 else None
-    labels = next((k.value for k in call.keywords if k.arg == "labelnames"), labels)
-    names = []
-    if isinstance(labels, (ast.List, ast.Tuple)):
-        names = [e.value for e in labels.elts if isinstance(e, ast.Constant)]
-    for series in suffixes[kind](name.value):
-        series, *extra = series.split()
-        print(" ".join([series, *names, *extra]))
+        for row in node.value.elts:
+            if not (
+                isinstance(row, (ast.Tuple, ast.List))
+                and len(row.elts) == 3
+                and isinstance(row.elts[0], ast.Constant)
+                and str(row.elts[0].value).startswith("scadbuddy_")
+            ):
+                yield "MALFORMED_ROW line %d" % row.lineno
+                continue
+            name, _, labels = row.elts
+            if not (
+                isinstance(labels, (ast.Tuple, ast.List))
+                and all(
+                    isinstance(e, ast.Constant) and isinstance(e.value, str) for e in labels.elts
+                )
+            ):
+                yield "MALFORMED_ROW line %d" % row.lineno
+                continue
+            yield " ".join([name.value, *(e.value for e in labels.elts)])
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        kind = getattr(call.func, "id", getattr(call.func, "attr", None))
+        if kind not in suffixes or not call.args:
+            continue
+        name = call.args[0]
+        if not (isinstance(name, ast.Constant) and str(name.value).startswith("scadbuddy_")):
+            continue
+        labels = call.args[2] if len(call.args) > 2 else None
+        labels = next((k.value for k in call.keywords if k.arg == "labelnames"), labels)
+        names = []
+        if isinstance(labels, (ast.List, ast.Tuple)):
+            names = [e.value for e in labels.elts if isinstance(e, ast.Constant)]
+        for series in suffixes[kind](name.value):
+            series, *extra = series.split()
+            yield " ".join([series, *names, *extra])
+# core/metrics.py first, then each camera module. core/metrics.py with no
+# declaration is a problem of its own (#1211), whatever the camera modules declare.
+for i, path in enumerate(sys.argv[1:]):
+    found = list(declarations(ast.parse(open(path).read())))
+    if i == 0 and not any(not line.startswith("MALFORMED_ROW ") for line in found):
+        print("NO_CORE_DECLARATIONS")
+    if found:
+        print("\n".join(found))
 PY
 ) || exposed=""
 # A FILAMENT_SERIES row the parse above could not read is an error, never skipped.
@@ -184,9 +197,10 @@ while IFS= read -r bad; do
   problem "backend/scadbuddy/core/metrics.py" \
     "FILAMENT_SERIES row at ${bad#MALFORMED_ROW } is not a (\"scadbuddy_...\", help, (\"label\", ...)) tuple"
 done < <(grep '^MALFORMED_ROW ' <<< "$exposed" || true)
-exposed=$(grep -v '^MALFORMED_ROW ' <<< "$exposed" || true)
-[ -n "$exposed" ] \
-  || problem "backend/scadbuddy/core/metrics.py" "no scadbuddy_* metric declarations found"
+if [ -z "$exposed" ] || grep -qx 'NO_CORE_DECLARATIONS' <<< "$exposed"; then
+  problem "backend/scadbuddy/core/metrics.py" "no scadbuddy_* metric declarations found"
+fi
+exposed=$(grep -v -e '^MALFORMED_ROW ' -e '^NO_CORE_DECLARATIONS$' <<< "$exposed" || true)
 
 # The Temporal SDK's own series, which each worker's /metrics appends (#3788,
 # workflows/sdk_metrics.py). The SDK declares them in its Rust core, out of this
@@ -328,7 +342,7 @@ lint_dashboard() { # repo-relative path of one dashboard
   while read -r series; do
     [ -n "$series" ] || continue
     series_labels "$series" > /dev/null \
-      || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists"
+      || problem "$rel" "$series is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists"
   done < <(jq -r "$panels"' [panels | .targets[]? | .expr // empty] + [.templating.list[]? | .query | objects | .query // empty] | .[]' "$dash" \
     | grep -oE '(scadbuddy|temporal)_[a-z0-9_]+' | sort -u)
 

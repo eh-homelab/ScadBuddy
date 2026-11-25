@@ -130,31 +130,37 @@ check 'a Tempo default other than uid tempo fails' \
 good
 edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "max(scadbuddy_render_queue_lenght)"'
 check 'a series the backend does not declare fails' \
-  "1:$f: scadbuddy_render_queue_lenght is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:$f: scadbuddy_render_queue_lenght is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run)"
 
 good
 edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "max(scadbuddy_render_queue_depth_total)"'
 check 'a _total suffix on a gauge fails' \
-  "1:$f: scadbuddy_render_queue_depth_total is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:$f: scadbuddy_render_queue_depth_total is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run)"
 
 good
 edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum(rate(scadbuddy_render_jobs_finished_bucket[5m]))"'
 check 'a _bucket suffix on a counter fails' \
-  "1:$f: scadbuddy_render_jobs_finished_bucket is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:$f: scadbuddy_render_jobs_finished_bucket is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run)"
 
 good
 edit '(.panels[] | select(.id == 2) | .targets[0].expr) = "sum(rate(scadbuddy_render_jobs_finished[5m]))"'
 check 'a counter read without _total fails' \
-  "1:$f: scadbuddy_render_jobs_finished is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:$f: scadbuddy_render_jobs_finished is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run)"
+
+good
+sed -i 's/"scadbuddy_camera_backlog_bytes"/"scadbuddy_camera_backlog_bytez"/' "$r/backend/scadbuddy/camera/recorder.py"
+check 'a camera series renamed in its module fails the dashboard that reads it (#7328)' \
+  "1:deploy/grafana/scadbuddy-printing.json: scadbuddy_camera_backlog_bytes is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
+  "$(run | cut -d'|' -f1)"
 
 good
 sed -i 's/"scadbuddy_filament_stock_grams",/"scadbuddy_filament_stock_gramz",/' "$r/backend/scadbuddy/core/metrics.py"
 check 'a series renamed in the FILAMENT_SERIES table fails the dashboard that reads it (#6785)' \
-  "1:deploy/grafana/scadbuddy-filament.json: scadbuddy_filament_stock_grams is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:deploy/grafana/scadbuddy-filament.json: scadbuddy_filament_stock_grams is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run | cut -d'|' -f1)"
 
 good
@@ -401,13 +407,13 @@ check 'a dashboard whose uid is not its file name fails' \
 good
 jq '(.panels[] | select(.type == "stat") | .targets[0].expr) |= sub("scadbuddy_http_requests_total"; "scadbuddy_http_requests")' "$r/$a" > "$r/$a.new" && mv "$r/$a.new" "$r/$a"
 check 'an undeclared series in another dashboard is named under its file' \
-  "1:$a: scadbuddy_http_requests is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:$a: scadbuddy_http_requests is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run)"
 
 good
 jq '(.panels[] | select(.type == "stat") | .targets[0].expr) |= sub("scadbuddy_http_requests_total"; "temporal_workflow_task_latency_count")' "$r/$a" > "$r/$a.new" && mv "$r/$a.new" "$r/$a"
 check 'a Temporal SDK series this lint does not list fails' \
-  "1:$a: temporal_workflow_task_latency_count is not a metric backend/scadbuddy/core/metrics.py declares, nor a Temporal SDK series this lint lists" \
+  "1:$a: temporal_workflow_task_latency_count is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
   "$(run)"
 
 good

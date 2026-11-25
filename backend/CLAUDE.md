@@ -76,9 +76,10 @@ uv run --frozen pytest -n auto  # pytest-xdist; drop -n to run serially
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
 PATH. The backend will not start without `SCADBUDDY_DATABASE_URL` (#401: the settings
 live only in Postgres), so every test that builds the app takes the `pg_conninfo`
-fixture (a throwaway schema), and it and the `requires_postgres` tests (the render
+fixture (a throwaway database, cloned from one migrated per pytest process; empty for a
+test marked `pg_empty`), and it and the `requires_postgres` tests (the render
 queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_URL`
-points at a Postgres they can create schemas in, e.g.
+points at a Postgres they can create databases in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
 postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without Docker, a native Postgres 18 works:
@@ -177,6 +178,10 @@ renders never start); a server named by `SCADBUDDY_TEST_TEMPORAL_ADDRESS` needs 
 The fixture terminates the workflows a test leaves open, since an abandoned piece
 would be joined by the next test that renders it. The dev server's store is a SQLite
 file (on `/dev/shm` when it has room): in memory it was lost mid-session under load.
+Each dev server runs with one partition per task queue, a 10 s task-queue idle time and
+`GOGC=25` (`tests/support/temporal.py` `DEV_SERVER_DYNAMIC_CONFIG`, #7527): with the defaults it
+kept about 3 MiB per test's queue and reached 2 GiB per xdist worker, which took a CI shard to its
+13 GiB container cap.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. A one-off fix of named rows belongs in a migration only when
@@ -285,7 +290,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   AUTO_UPGRADE through a `Versioned*` subclass (`main.LIBRARY_WORKFLOWS`; an unversioned
   worker cannot complete a workflow that declares a behavior), so each stays
   replay-compatible behind `patched`; a new one needs its own behavior or the worker
-  refuses to build. Sweeps off (`asset_sweep_interval` 0) deletes the
+  refuses to build. The output copy (#7255, `OUTPUT_COPY_SWEEP`, after `REAP_SWEEP`,
+  behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
+  `copy_outputs`, as the API's start does once, so the writes of pods on an older build
+  reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
+  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -875,7 +884,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
-  steps back), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  steps back), `insert_weights.py` (#7280: an insert's empty weight from new spools'
+  weighings, one row per spool in `filament_insert_weight_readings`, the mean of them with
+  `filament_insert_types.empty_weight_basis` `derived`; routes `…/insert-weight-offer` and
+  `…/insert-weight`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
   the BB to SB side only: it writes nothing to Bambuddy (the push is `bb_sync_*.py` below, tags go through `rfid_push.py`); each `filament_sync` data type gates what the pull takes, through `Pulls.of(sync)` (#6265 Decision 3; `weights` since #6268), and BB's suppliers and locations are read only under `pulls(suppliers)` and `pulls(locations)`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); the Schedule's pull skips when none of the six `filament_sync` data types pulls, read per run (#6262 Task 13, widened by #6265 plan Decision 3, F1; `bb_pull_apply.pull_start`); after a pull it runs `reconcile_trays`, #6713. Since #6772 (plan Decisions 172-186) the CRUD service reads no Bambuddy for the pull: `bb_pull_models.py` is the wire (`PullStart`, the bodies, `BbPullApi`, and `Pulls` and `PullReport`, which `bambuddy_pull` re-exports), `bb_pull_run.py` the print worker's reads in the old order (`run_pull`, `read_and_pull`, `read_catalog`, `read_ha_sensors`, `reconcile_trays`), and `bb_pull_apply.py` the API's apply (`LocalBbPull`, `pull_start`, `execute_pull`); `workflows/filament_pull.py` is `FilamentBbPull` on the `bambuddy` queue (AUTO_UPGRADE; one activity `filament_bb_pull_read`, run once; replays `tests/fixtures/filament_pull_histories/`, so a change to its commands goes behind `workflow.patched`). The spool refresh's `filament_bambuddy_pull` activity (`spools/activities.py`; its commands in `SpoolRefresh` unchanged) and `POST /filament/bambuddy/import` start it and wait; the worker sends what it read to the CRUD area `filament-pull` (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, `…/pull/colours`; client `crud/print.py` `RemoteBbPull`), whose bodies the app's `BodySizeGate` caps at 8 MiB (`api/limits.py` `MAX_TEXT_BODY_BYTES`, 413 on the headers; Decision 182): the five routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`), so the cap holds whatever the content type, header left out included (#6861) and name the Bambuddy instance read (409 `instance_changed` for another than the configured one) and the run's id, never an actor: the import route keeps the person under that id in `filament_pull_actors` (`remember_actor`), the routes read it there, else `bambuddy` (Decision 181); the route drops the row only once the read answered (a report or a problem); a row left behind is deleted by a later `remember_actor` once it is an hour old (`ACTOR_KEPT`, Decision 183). Tests: `tests/filament/pull_support.py` runs both halves in one process for the old pull tests, `test_bb_pull_run.py` the reads, `tests/crud/test_crud_filament_pull.py` the routes), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
@@ -918,7 +930,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   missing from a complete listing gets one `probe`, `GET` only (a supplier, location or
   insert type has no `GET` by id, so its listing is read again); only a definite 404 drops
   the link, and the next round makes the row again under its direction, while a spool that
-  names such a row waits (#6688, plan Decisions 187-192 and 200-205). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
+  names such a row waits (#6688, plan Decisions 187-192 and 200-205). A supplier is the
+  exception: it is made again only when it has a filament product, a filament invoice or an
+  open create intent; one with none of these stays unlinked (`bb_sync_plan.py`
+  `_suppliers`; inventory spec §6.5, D16, #7067). `workflows/filament_sync.py` is the workflow `FilamentBbSync`, one per
   Bambuddy instance, on the `bambuddy` queue (AUTO_UPGRADE; a change to its commands goes
   behind `workflow.patched`, and `tests/test_filament_sync_replay.py` replays
   `tests/fixtures/filament_sync_histories/`). The API nudges after a write on
@@ -956,10 +971,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   reads the configured Bambuddy's spools (a failed read is `bambuddy_unreadable: true`);
   when it is the links' own Bambuddy at a new URL (`bb_sync_results.same_bambuddy`: every
   linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
-  least half the links timed on both sides), a reset with `expect_kept: true` reads them
+  least half the links timed on both sides; with no spool linked, the presets' links by the
+  same rule over Bambuddy's local presets and each preset's `bb_updated_at` (Bambuddy's `updated_at`
+  as ScadBuddy last took it: the mirror's last write, or for a preset imported from Bambuddy,
+  its last import), `wants_preset_listing`, #7343), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
-  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
+  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered; with no spool linked, the same over the linked filament presets (#7343). A mirrored preset sent before the mirror kept Bambuddy's time has none until its next mirror write (R-7343-5). `expect_kept: false` deletes
   without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
   Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
   `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
@@ -1068,6 +1086,38 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
   `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
   Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
+- `backend/scadbuddy/camera/` — printer camera recording, phase 1 (#7328, plan
+  `docs/superpowers/plans/2026-11-23-printer-camera-recording.md`, feature page
+  `docs/features/printer-cameras.md`). Two processes, each beside its own MediaMTX in one pod,
+  neither with a database secret (`settings.py` refuses `FORBIDDEN_ENV` and
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`; the recorder also refuses a `TZ` other than `UTC`):
+  `python -m scadbuddy.camera.relay` (`relay.py`, CRUD caller `camera-relay`, the only part that
+  holds access codes; it gives MediaMTX one RTSPS pull per printer through the control API) and
+  `python -m scadbuddy.camera.recorder` (`recorder.py`, CRUD caller `camera`, two pods: leases,
+  upload before index, handover from the standby's buffer, the disk cap, the clock check
+  against the API's `Date` header: uvicorn refreshes it once a second, so a sample is Date + 1 s
+  against the middle of the call, ±1 s plus latency; the smallest of the last three samples more
+  than 2 s off refuses the start with exit 2 (three samples at start), and later fails
+  `/healthz` and puts an `error` on its feed reports). Both register `scadbuddy_camera_*`
+  metrics on prometheus_client's own registry, which `lint-dashboard.sh` reads.
+  `process.py` holds the hook server MediaMTX's `curl` hooks call (127.0.0.1:9091), `/healthz`,
+  `/readyz` and `/metrics` on 9090, and `main_with` (a `CameraRefusal` from `run` exits 2). `/healthz`
+  (`healthy`) answers 503 when MediaMTX's control API does not answer within 3 s, when its
+  runtime list lacks a path the controller put (`wanted()`: a MediaMTX-only restart), when the
+  change follower has stopped, or (recorder) when the clock is off. Before the follower
+  starts it answers 200 when MediaMTX answers and holds the paths and, in the recorder, the
+  clock is within 2 s: the follower does not count yet. `/readyz` answers 503 until the
+  follower runs, a full reconcile has put the paths and `/healthz` would pass; the recorder
+  also waits until every recorded printer has delivered a segment since start, or none for
+  `STALL_SECONDS` (120 s), so a rolling update (with `minReadySeconds: 30`) stops the other
+  recorder only once this one holds video. `follow.py` follows the filtered change stream,
+  `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
+  (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
+  digest). The API side is `store.py` (`CameraStore`: sources, leases, the index, feeds),
+  `models.py`, `api/crud_camera.py` and `api/crud_camera_relay.py`. MediaMTX's configs are
+  `deploy/camera/`; the images are the Dockerfile's `camera-relay` and `camera-recorder`.
+  Tests: `tests/camera/` (the real-MediaMTX e2e `test_e2e_mediamtx.py` needs MediaMTX and
+  ffmpeg, which the `test` stage has; locally it fetches the pinned MediaMTX itself).
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
@@ -1424,6 +1474,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
+  A models repository made from #7314 on keeps its meshes (`*/meshes/*.3mf`) in Git LFS:
+  `ModelHistory` passes the filter on every call (required, so a mesh it cannot read is an
+  error and never its pointer), writes `.gitattributes` only in a repository with no commit,
+  and its push sends the LFS objects first, to the remote's own endpoint whatever a
+  `.lfsconfig` says (`tests/test_history_lfs.py`).
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
@@ -1503,6 +1558,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   During a roll, a `plugin-oauth:` acquire whose grant row an SQL-path agent pod holds keeps
   one of its connections for up to the request's `wait_s` (at most `MAX_WAIT`, 25 s). At
   most `MAX_ROW_WAITS` (2) acquires of a process wait so; the rest poll without waiting.
+- One plain setting (#7384): `SettingsStore.get(KEY)` with a typed key of
+  `library/settings_store.py` (`Setting[T]`, e.g. `OPERATION_RETENTION_SECONDS`; never a
+  secret, an own-table or a registry field) answers as `load` does, from the API's cache of
+  the plain rows (`core/settings_cache.py`): no query while warm. The cache is kept only
+  while the process's one `PgListener` listens on `scadbuddy_settings`, which a trigger on
+  `settings` NOTIFYs at every write's commit (`20261124T1216Z_settings_changed_notify.sql`);
+  a TTL (10 s) backs a lost notification, and a writer in the process drops it itself
+  (`SettingsStore._changed`, `settings_written` for the printer registry). `load` and
+  `snapshot` never read the cache: they read the secrets and the other tables in one
+  snapshot. A hot path that needs one plain value calls `get`, not `load()`.
 - A dict read from a `jsonb` column (e.g. `storefront_listings.params`) has no key order:
   Postgres stores the keys shortest first. Never show or answer its keys in that order;
   order them by the template schema's parameters (#6302).
@@ -1541,21 +1606,29 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
-- `backend/scadbuddy/entities/` — files and links on any row (#6950, inventory spec
-  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3, plan
+- `backend/scadbuddy/entities/` — files, links and key-value properties on any row
+  (#6950, #7026, inventory spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
-  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table;
-  `EntityStore`: an `entities` row made by `ensure` only for an owner row that exists, and
-  `orphans`, the rows whose owner is gone), `attachments.py` (`EntityAttachmentStore` over
+  (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table,
+  `item`, `lot` and `unit` among them since #7067; `EntityStore`: an `entities` row made by
+  `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
+  and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
+  `attachments.py` (`EntityAttachmentStore` over
   `entity_attachments`, the old `order_attachments`: an order's files are its rows with an
   `order_id`, written only through the order routes, `ORDER_KINDS`; a print archive's files
   are Bambuddy's `print_attachments`, read in the same shape), `links.py` (`EntityLinkStore`
   over `entity_links`, http(s) URLs only), `sweep.py` (`sweep_orphan_entities`, the
   housekeeping step `ENTITY_ORPHANS_SWEEP`: an orphan's files and holds, then its row and
-  links; an order's kinds only once they hold no file), `operations.py` (the
+  links; an order's kinds only once they hold no file; an orphan that a
+  `stock_moves.entity_id` names stays in place, since that foreign key keeps it as the
+  move's history, R-P2-4), `properties.py` (#7026,
+  `entity_properties` and `entity_property_schemas`; the rules are in
+  `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
   `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
-  under `/entities/{kind}:{ref}`; the file and thumbnail GETs are scriptless
+  under `/entities/{kind}:{ref}`, and `api/entity_properties.py`
+  (`/entities/{ref}/properties`, `/entity-kinds/{kind}/properties`, `…/property-schema`); the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
   build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).
@@ -1723,7 +1796,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the attempt lacks; and the housekeeping sweep `housekeeping_import_attempt_media` (#7234,
   `ATTEMPT_MEDIA_SWEEP` in `SWEEPS` and `PRUNE_SWEEPS`, behind `ATTEMPT_MEDIA_PATCH`;
   `sweep_media` over `OrderStore.attempts_missing_media`) starts one step for each attempt of
-  the last 14 days that still lacks a medium and was not checked in the last hour. A step's
+  the last 14 days that still lacks a medium and was not checked in the last hour, at most
+  `SWEEP_BATCH` (40) a pass, least lately checked first, so a pass of slow starts
+  (`START_TIMEOUT` each) fits `ATTEMPT_MEDIA_TIMEOUT` (#7453); the partial index
+  `order_item_fulfilments_media_sweep` serves its read, whose WHERE repeats the index's
+  predicate. Each step rewrites the attempt's rows of `order_attempt_media_not_offered`
+  (`record_media_not_offered`, from `_not_offered`): the media an archive past `FRESH` does
+  not offer, which the sweep leaves out and nothing else reads (#7453). Each pass adds the
+  starts it asked for to the counter `scadbuddy_attempt_media_sweep_starts` (#7491;
+  `main._import_attempt_media_logged`). A step's
   `missing` (`_missing`) is true when no archive was read, or an archive lacks a medium
   that is neither present nor refused, and the archive offers it or may still offer it (its
   `completed_at` is null or under an hour old, `FRESH`). Refusals: a medium the import refused as larger than the
@@ -2095,7 +2176,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `library_filename`, `library_source`, check `order_items_library_file`); no reference,
   output or revisions (`lifecycle.py` `NO_REVISIONS`, `has_design`). `POST …/items` and
   `…/items/after-acceptance` take `library_file_id` (any other source or kind is 422), read
-  the file from the library that serves as the library print route does (`orders/bambuddy.py`
+  the file from the library that serves as the library print route does (`orders/served_library.py`
   `ServedLibrary`: 422 on `library_file_id` for one it lacks or does not print), then
   `Lifecycle.add_library_item`. The slice quote is `quote.py` `_library_quote`
   (`Slicer.start_library`; the first quote gives the item its slots, `library_colours`; the
@@ -2114,8 +2195,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
   `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
-  when its outputs directory does (`Catalogue._forget_cover` → `OutputStore.forget_indexed`:
-  a model's delete, the orphan sweep and a reused slug); the API's start runs
+  with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
+  before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
+  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`
@@ -2198,8 +2281,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
   that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
   `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
-  the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
-  live there too. The orders read ScadBuddy's own spools, never Bambuddy's (#6262 Task 9):
+  the running `bambuddy_url`; `NotLinked` without one). It is an adapter (#7467): a library
+  file's reads and the held copy's shelf go through `orders/served_library.py`
+  (`ServedLibrary`, `served_shelf`, `NativeShelf`, which load no Bambuddy client), and a
+  quote's slice through `orders/quote_preview.py`; each loads `orders/bambuddy.py` only
+  where Bambuddy's library serves or the slice is on Bambuddy's path
+  (`tests/test_orders_library_seam.py`). Never import it at a module's top. The orders read ScadBuddy's own spools, never Bambuddy's (#6262 Task 9):
   `OrdersComponent.inventory` is the filament component's `FilamentInventory`, and of
   spools `OrderIntegrations` keeps only `local_densities` (Bambuddy's local presets, `{}`
   when Bambuddy refuses) and `spool_assignments` (Bambuddy's tray assignments,
@@ -2308,8 +2395,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   colour of, `listings.py` `_offered_file`) and `previews` (edge paths
   `/api/store/v1/listings/{id}/preview/{plate}.glb`); `GET …/listings/{id}/preview/{plate}.glb`
   (`file_listings.py` `held_preview`) streams the plate's held GLB, and the edge relays it. A
-  render, a variant and the prepare run still take a template listing only
-  (`published_listing`'s `source`). Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
+  render, a variant and the prepare run still take a template listing only. A visitor's
+  call of a published listing that sells the other source (the shop switched it since the
+  page read it) is 409 `listing_changed` (`published_listing`'s `source`), so the page
+  offers "Load the latest version"; an unpublished or unknown one is 404
+  `listing_not_found`, and the held preview of a template listing too. Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
   `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers

@@ -92,6 +92,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     title: 'test',
     tags: [],
     scope: {},
+    browser: null,
     parentId: null,
     mode: 'durable',
     runtime: null,
@@ -121,6 +122,10 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const appended: unknown[] = []
   /** What each assembly gave the in-process servers. */
   const serverExtras: unknown[] = []
+  /** The browser options each assembly gave `remotePlugins`. */
+  const remoteBrowsers: unknown[] = []
+  /** The browser options each turn tools' listing was given in its context. */
+  const listedBrowsers: unknown[] = []
   const runner = new TurnRunner({
     httpBodies: () => unusedBodies,
     browserOrigins: new BrowserOrigins(undefined, new MemorySessionOrigins()),
@@ -157,8 +162,9 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     ownPlugin: options.ownPlugin ?? '/plugins/own',
     // The real forwardForRun over a forwarder that, like the real one, gives
     // every registration a loopback URL of its own.
-    remotePlugins: () =>
-      Promise.resolve(
+    remotePlugins: (browser) => {
+      remoteBrowsers.push(browser)
+      return Promise.resolve(
         forwardForRun(
           {
             plugins: [
@@ -177,7 +183,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
           },
           { register: () => ({ url: `http://127.0.0.1:1/p/${randomUUID()}`, release: () => {} }) } as unknown as PluginForwarder,
         ),
-      ),
+      )
+    },
     packagePlugins: () =>
       Promise.resolve(options.packages ? { ...options.packages, release: () => {} } : {
         paths: ['/plugins/a'],
@@ -195,8 +202,9 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     ...(options.turnTools
       ? {
           toolCalls: () => () => Promise.reject(new Error('turnRunnerForTest runs no tool call')),
-          turnTools: () =>
+          turnTools: (context: { browser?: unknown }) =>
             Promise.resolve({
+              ...(void listedBrowsers.push(context.browser), {}),
               tools: options.turnTools!.map((name) => ({ name, description: name, input_schema: { type: 'object' }, may_park: true })),
             }),
         }
@@ -239,5 +247,5 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       }
     },
   }
-  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras }
+  return { runner, session, principal, gateCalls, paths, access: store.access, appended, serverExtras, remoteBrowsers, listedBrowsers }
 }

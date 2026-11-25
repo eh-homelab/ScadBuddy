@@ -222,6 +222,8 @@ describe('the spool page', () => {
     expect(screen.getByText(/Empty spool/)).toHaveTextContent('250 g')
     const posts = recorded('POST', /\/events$/)
     await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '900')
+    // #7280: the button waits for the reading's insert weight check.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
     await waitFor(() => expect(posts).toEqual([{ kind: 'weighed', grams: 650, source: 'scale' }]))
     await waitFor(async () => expect((await getSpool(spoolId(1))).grams_left).toBe(650))

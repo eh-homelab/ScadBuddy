@@ -42,8 +42,11 @@ slot setup and NTAG writes write BB whatever `filament_sync` says.
   the same Bambuddy. Only then call it with `expect_kept: false`, which reads no Bambuddy and
   deletes the links, intents and error rows of that old instance (`kept: false`). ScadBuddy's
   filament presets' Bambuddy ids are links too (`presets` in the counts, #7176): when they are
-  the only links nothing can prove the same Bambuddy, so the reset deletes them, and the
-  preset mirror then creates each preset on the new Bambuddy. Either
+  the only spool-free links, the presets prove the same Bambuddy by the same rule (each linked
+  preset id listed, none older than Bambuddy's `updated_at` as ScadBuddy last took it: the
+  mirror's last write, or for a preset imported from Bambuddy, its last import, #7343), and
+  a keep moves their ids. A delete drops them, and the preset mirror then creates each preset on
+  the configured Bambuddy: say that on the same Bambuddy this holds every preset twice. Either
   way it asks for a full pass, and it never deletes an SB spool, type, supplier or
   location. It writes, so it needs approval. Pass `confirm_instance` as the status's
   `instance`; a 409 `confirm_mismatch`, `same_instance`, `nothing_to_reset` or
@@ -90,6 +93,23 @@ Sources, relative to the root of
 - An **invoice** has lines. A line names a supplier product and a type. It
   creates spools, or costs spools that already exist (`update_spool_ids`).
   Confirming an invoice does that in one transaction (filament spec §5.8).
+
+### Weigh a new spool (#7280)
+
+To weigh a spool with its scale reading, call `filament_spool_add_event` with `kind: weighed`
+and `reading_g`, not `grams`. The tool subtracts the empty weight of the spool's insert.
+With `reading_g`, the tool first reads the offer. There is an offer only when the spool is new
+and unused, the reading is above its label weight, and the derived weight (the reading less the
+label weight) is at most the label weight. `insert_weight.offer` shows what the insert's empty
+weight would become (`derived_g`, `new_empty_weight_g`, the current weight and its basis,
+`sample_count`). When there is an offer, the tool books nothing (`event: null`). Tell the person
+the numbers. Tell them that makers overfill by about 10 to 30 g, so the estimate is slightly
+heavy, and that a later weighing of an empty spool replaces it. Then call again with the same
+`reading_g` and `accept_insert_weight` true or false. `checked_by_default` is only advice. Pass
+`true` only when the person says to take it; `false` books the weighing with the current empty
+weight. With no offer, the tool books the weighing at once, and `accept_insert_weight: true` is
+refused with nothing booked. The tool writes ScadBuddy only. Without `reading_g`, pass `grams` as
+before.
 
 ## Import an invoice
 

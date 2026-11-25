@@ -358,7 +358,8 @@ export class TurnRunner {
       const builtInTools = this.deps.builtInTools
       builtIn = builtInTools ? await phase('built_in_tools', () => builtInTools()) : undefined
       const remote = this.deps.remotePlugins
-      forwarded = remote ? await phase('remote_plugins', () => remote()) : undefined
+      // The session's browser options go to its plugins' routes (#7027), never from the model.
+      forwarded = remote ? await phase('remote_plugins', () => remote(session.browser ?? undefined)) : undefined
       const remotePlugins = [...(forwarded?.plugins ?? [])]
       // Plugin header values (and their bare tokens) are redacted from the
       // event log like the credential. Claude Code never holds them (the
@@ -650,7 +651,16 @@ export class TurnRunner {
         try {
           const wanted = new Set([...remotePlugins.map((p) => p.name), ...(http ? [HTTP_SERVER] : [])])
           const listed = await phase('turn tools', () =>
-            this.deps.turnTools!({ session: id, owner: session.owner, signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS) }, wanted),
+            this.deps.turnTools!(
+              {
+                session: id,
+                owner: session.owner,
+                // Its browser options (#7027) from the session this turn already holds: no second read.
+                ...(session.browser ? { browser: session.browser } : {}),
+                signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS),
+              },
+              wanted,
+            ),
           )
           // A server that listed nothing is said so, as one the assembly left out is (its own problems are said above).
           for (const problem of listed.unlisted ?? []) {

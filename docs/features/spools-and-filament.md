@@ -12,7 +12,8 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - a printer's K-profiles (pressure advance) through Bambuddy: list, set, batch set, delete and notes;
 - a printer's AMS slots through Bambuddy: configure a slot by hand, its saved slicer preset, refresh
   and reset, load and unload, and the AMS units' labels;
-- a ledger of spool events, with history, metrics and a forecast.
+- a ledger of spool events, with history, metrics and a forecast;
+- key-value properties on spools and spool types (#7026).
 
 The print dialog picks from these spools (ScadBuddy's own, "SB" spools). Tray changes and
 finished prints are recorded against them. The inventory can sync with Bambuddy's in
@@ -128,12 +129,16 @@ filament sync's are: the write that stores it records its Bambuddy as the links'
 none is recorded, so a site whose only links are presets has one too. After the Bambuddy
 URL changes the mirror waits, as the filament sync does, until the links are reset
 (`POST /filament/sync/reset-links`): a reset that finds the same Bambuddy (proved by the
-spool links, so never when presets are the only links) moves the ids to the new URL, and
+spool links, or, with no spool linked, by the presets: each linked id listed by the new
+URL's Bambuddy, none older than Bambuddy's `updated_at` as ScadBuddy last took it: the mirror's last
+write, or for a preset imported from Bambuddy, its last import, #7343) moves the ids to the new URL, and
 one that deletes the links drops them (the dry run's and the answer's `presets` count), so
-each preset is created on the new Bambuddy;
+each preset is created on the new Bambuddy (on the same Bambuddy, a second copy, which the
+reset dialog says);
 meanwhile no path hands Bambuddy an id of the old one. A create whose answer was lost is
 found above the highest id listed before it, by its name and its document, not made
-twice; one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
+twice; when a newer version was written since, it is created again and its `mirror_error`
+names the copy the lost create left (#7343); one preset's failure, a Bambuddy id another ScadBuddy preset holds included, is its
 own `mirror_error` and never stops the rest.
 
 A fetch writes ScadBuddy only: each file is the type's `3dfp` preset of its key, a changed
@@ -161,6 +166,49 @@ one already feeding, and refresh refuses while filament is loaded. Configure tak
 spool (its values and its type's preset and K value for the slot's nozzle) or the values by
 hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
 names ScadBuddy's place of the unit. The page asks before every printer write.
+
+### Properties (#7026)
+
+Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
+
+A spool and a spool type can hold properties: free key-value pairs, such as a part number,
+barcodes or a lot number. The store is generic and works for any entity, so it is not
+specific to filament. A value is a string, a number, a boolean or a list of strings. A key
+matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per string,
+50 items per list, 500 characters per item (`backend/scadbuddy/entities/properties.py`).
+
+- Each kind has a schema that documents and types the keys it knows. It never refuses a
+  key. The schema is an allowlisted subset of JSON Schema Draft 2020-12 (`TOP_KEYWORDS`,
+  `KEY_KEYWORDS`, `ITEM_KEYWORDS`; list items are strings). An `enum` or `const` must fit its
+  key, and no bound may cross its pair or a cap. Anything else is 422 `bad_property_schema`, naming the keyword. Values
+  already stored are not checked again after a schema change.
+- `item` is the exception (#7067). An item's properties follow its item kind's
+  `attribute_schema`, merged down the kind tree (a child kind's key wins;
+  `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
+  kind, so `GET` and `PUT /entity-kinds/item/property-schema` both answer 409
+  `schema_owned_by_item_kind` (`backend/scadbuddy/api/entity_properties.py`).
+- The migration seeds the keys `mpn`, `gtin`, `asin`, `manufacturer_url`,
+  `empty_spool_weight_g` and `td` for `spool_type`, and `lot_number` for `spool`
+  (`backend/scadbuddy/migrations/20261123T0017Z_entity_properties.sql`).
+- Routes: `GET`/`PATCH /entities/{ref}/properties` (a key set to `null` is removed; a
+  patch applies whole or not at all), `GET /entity-kinds/{kind}/properties` and
+  `GET`/`PUT /entity-kinds/{kind}/property-schema`, which answer 409
+  `schema_owned_by_item_kind` for `item` (`backend/scadbuddy/api/entity_properties.py`).
+- UI: the section "Files, links and properties" of the spool and type pages
+  (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
+  `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
+  already has asks first, since it replaces that key's value.
+- Search: the Spools and Types tabs' search also matches property values, beside the hex
+  match on a spool's tag UID and tray UUID (#7151)
+  (`frontend/src/lib/filamentSearch.ts` `propertyTexts`, loaded by
+  `frontend/src/components/entities/api.ts`). The agent's search matches them too
+  (`agent/src/tools/filament.ts` loads them, `agent/src/tools/filamentSearch.ts` matches); both use the shared vectors
+  `test-fixtures/filament/search-vectors.json`.
+- Agent: `entity_property_list`, `entity_property_set`, `entity_property_schema_get` and
+  `entity_property_schema_set` (`agent/src/tools/entities.ts`), and a `properties` field on
+  `filament_type_upsert` and `filament_spool_upsert` (`agent/src/tools/filament.ts`). An
+  upsert that changes only properties skips the row PATCH, so `updated_at` and the
+  Bambuddy sync do not change.
 
 ## Code
 

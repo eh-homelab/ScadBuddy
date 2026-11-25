@@ -13,8 +13,8 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import library_print
 from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.component import ORDERS
-from scadbuddy.orders.held_print import STOREFRONT_FOLDER
 from scadbuddy.orders.models import Actor, LibraryFileRef
+from scadbuddy.orders.served_library import STOREFRONT_FOLDER
 from scadbuddy.print_library.store import NativeFile
 from scadbuddy.store.content_models import BlobScope
 from tests.api.conftest import follow_operation

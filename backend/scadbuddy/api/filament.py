@@ -95,10 +95,12 @@ from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.bb_sync_passes import PAGE_MAX, BadPassCursorError
 from scadbuddy.filament.bb_sync_results import (
     Listing,
+    PresetListing,
     ResetRefusedError,
     reset_links,
     reset_preview,
     sync_status,
+    wants_preset_listing,
 )
 from scadbuddy.filament.catalog import (
     CATALOGS,
@@ -118,6 +120,7 @@ from scadbuddy.filament.csv_import import (
     import_on,
     import_rows,
 )
+from scadbuddy.filament.insert_weights import NoInsertWeightOfferError
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.labels import (
     LabelNotFoundError,
@@ -1628,6 +1631,78 @@ async def add_spool_event(
     return made
 
 
+_INSERT_WEIGHT_RULE = (
+    "A reading is from a new, unused spool when the spool's ledger shows no use (no print, "
+    "no print's grams, no delta down, no reading below the label weight) and its grams left "
+    "still equal the label weight (the spool's own, else its type's). Only then is an offer "
+    "made, and only when the reading is above the label weight and the derived weight "
+    "(`reading_g - label_weight_g`) is at most the label weight."
+)
+
+
+@router.get(
+    "/spools/{spool_id}/insert-weight-offer",
+    response_model=m.InsertWeightCheck,
+    summary="Check a new spool's weighing for its insert's empty weight",
+    description=(
+        "Reads only. `reading_g` is the scale's reading of the whole spool: filament, empty "
+        "spool and insert. `filament_g` is the reading less the insert's empty weight now "
+        "(`null` without an insert). Read it before the weighing is recorded, as the "
+        "weighing changes the grams left (#7280).\n\n"
+        f"{_INSERT_WEIGHT_RULE} Otherwise `offer` is `null` and `reason` says why.\n\n"
+        "The offer's `new_empty_weight_g` is the mean of the insert's readings with this one, "
+        "rounded half up. `checked_by_default` is true only for a placeholder weight or an "
+        "earlier derived one; nothing changes the insert until "
+        "`POST /filament/spools/{spool_id}/insert-weight` accepts it.\n\n"
+        "The weighing itself is still `POST /filament/spools/{spool_id}/events`, unchanged. "
+        "404 for no such spool; 422 when `reading_g` is missing, not above 0, or above 100000."
+    ),
+)
+async def insert_weight_offer(
+    filament: FilamentDep,
+    spool_id: UUID,
+    reading_g: Annotated[float, Query(gt=0, le=100_000)],
+) -> m.InsertWeightCheck:
+    check = await asyncio.to_thread(filament.insert_weights.check, spool_id, reading_g)
+    if check is None:
+        raise _no_spool(spool_id)
+    return check
+
+
+@router.post(
+    "/spools/{spool_id}/insert-weight",
+    response_model=m.InsertWeightAccepted,
+    summary="Accept a new spool's weighing as its insert's empty weight",
+    description=(
+        "Keeps the reading as this spool's one row for its insert (a second accept "
+        "replaces it) and sets the insert's `empty_weight_g` to the mean of its rows, "
+        "basis `derived`. It books no ledger event and calls no Bambuddy; the insert "
+        "reaches Bambuddy only by the usual sync (#7280).\n\n"
+        f"{_INSERT_WEIGHT_RULE} Every condition is checked again under the spool's and the "
+        "insert's row locks.\n\n"
+        "Accept before the weighing, then record the weighing with "
+        "`POST /filament/spools/{spool_id}/events` and the answer's `filament_g` as its "
+        "`grams`; that route is unchanged. 404 for no such spool; 409 with `code` "
+        "`no_insert_weight_offer` and the `reason` when no offer holds now."
+    ),
+)
+async def accept_insert_weight(
+    filament: FilamentDep, spool_id: UUID, body: m.InsertWeightAccept
+) -> m.InsertWeightAccepted:
+    try:
+        accepted = await asyncio.to_thread(filament.insert_weights.accept, spool_id, body.reading_g)
+    except NoInsertWeightOfferError as exc:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"no insert weight offer for spool {spool_id}: {exc.reason}",
+            code="no_insert_weight_offer",
+            reason=exc.reason,
+        ) from None
+    if accepted is None:
+        raise _no_spool(spool_id)
+    return accepted
+
+
 @router.post(
     "/spools/reset-consumed",
     response_model=m.ConsumedResetDone,
@@ -2690,24 +2765,30 @@ def _configured(url: str | None) -> str | None:
     return instance_for(url) if url else None
 
 
-async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
+async def _listing(
+    settings: StoredSettings, filament: Filament
+) -> tuple[Listing, PresetListing, bool]:
     """The configured Bambuddy's spools, archived ones too, parsed one by one, for the
-    proof that it is the links' own Bambuddy (#6845 R-6845-4), and whether it could not
-    be read. ``None`` with no Bambuddy configured, or when the read failed: then the
-    preview offers the delete only and a reset that expects the links kept is refused
-    (Decision 198)."""
+    proof that it is the links' own Bambuddy (#6845 R-6845-4), its filament local presets
+    when no spool is linked but a preset is (`wants_preset_listing`, #7343: the presets
+    then prove it), and whether it could not be read. ``None`` with no Bambuddy
+    configured, or when a read failed: then the preview offers the delete only and a
+    reset that expects the links kept is refused (Decision 198). Both reads are ``GET``s,
+    and the presets read only decides whether the linked ids are this Bambuddy's."""
     if not settings.bambuddy_url:
-        return None, False
+        return None, None, False
+    presets_too = await asyncio.to_thread(wants_preset_listing, filament)
     try:
         async with client_for(settings) as client:
             rows = await client.spool_rows(include_archived=True)
+            presets = (await client.local_presets()).filament if presets_too else None
     except ApiError as failed:
         logger.warning(
-            "the configured Bambuddy's spools could not be read for the links' proof",
+            "the configured Bambuddy could not be read for the links' proof",
             extra={"status": failed.status},
         )
-        return None, True
-    return parse_rows(rows), False
+        return None, None, True
+    return parse_rows(rows), presets, False
 
 
 @router.get(
@@ -2725,12 +2806,17 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "Bambuddy spools the pull `ignored`. `same_bambuddy` (#6845) is true when the "
         "configured Bambuddy is the one the links were made against: it holds every linked "
         "spool, none older than ScadBuddy last saw it, at least one exactly as then, and at "
-        "least half the links have a time on both sides. A reset with `expect_kept` true "
+        "least half the links have a time on both sides. When no spool is linked, "
+        "ScadBuddy's filament presets prove it by the same rule (#7343): the configured "
+        "Bambuddy lists each linked preset id, none older than Bambuddy's `updated_at` as "
+        "ScadBuddy last took it (the mirror's last write, or for a preset imported from "
+        "Bambuddy, its last import). A reset with `expect_kept` true "
         "then deletes nothing and keeps every link; when it is false a reset deletes the "
         "counts, and the next passes link again only what the pull matches (a spool by its "
         "RFID tag, a supplier, location or insert type by its name), so every untagged "
         "spool is made again on the side its direction sends it to. Reads ScadBuddy and "
-        "the configured Bambuddy's spools (`GET`). When Bambuddy cannot be read the answer "
+        "the configured Bambuddy's spools (`GET`), and its local presets (`GET`) only when "
+        "presets are linked and no spool is. When Bambuddy cannot be read the answer "
         "is still 200, with `same_bambuddy` false and `bambuddy_unreadable` true. "
         "`changed_since_pull` is true when `same_bambuddy` is false although the "
         "configured Bambuddy holds every linked spool and none is older than its link, and "
@@ -2738,7 +2824,8 @@ async def _listing(settings: StoredSettings) -> tuple[Listing, bool]:
         "spool ScadBuddy could compare (a time on both sides) was edited in "
         "Bambuddy since the last pull, so none matches exactly and ScadBuddy cannot prove "
         "it is the same Bambuddy; only the delete is "
-        "then offered. The "
+        "then offered. With no spool linked it says the same of the linked filament "
+        "presets, each timed by Bambuddy's `updated_at` as ScadBuddy last took it (#7343). The "
         "counts are approximate: they are read without a lock, so a pass that runs "
         "meanwhile can change them. The answer of the `POST` gives the counts it deleted."
     ),
@@ -2747,13 +2834,14 @@ async def preview_filament_sync_reset(
     filament: FilamentDep, store: SettingsStoreDep
 ) -> LinksResetPreview:
     settings = await asyncio.to_thread(store.load)
-    listing, unreadable = await _listing(settings)
+    listing, presets, unreadable = await _listing(settings, filament)
     return await asyncio.to_thread(
         partial(
             reset_preview,
             filament,
             _configured(settings.bambuddy_url),
             listing,
+            presets=presets,
             unreadable=unreadable,
         )
     )
@@ -2765,7 +2853,8 @@ async def preview_filament_sync_reset(
     summary="Reset the Bambuddy links after the Bambuddy URL changed",
     description=(
         "`expect_kept` is the dry run's `same_bambuddy` (#6845). When it is true, it first "
-        "reads the configured Bambuddy's spools (`GET`) and checks again that it is the "
+        "reads the configured Bambuddy's spools (`GET`; its local presets too when they are "
+        "the proof, #7343) and checks again that it is the "
         "one the links were made against; then it deletes nothing: the links, intents and "
         "error rows stay, they now belong to the configured Bambuddy, and the answer has "
         "`kept` true and zero counts. When that read fails or no longer proves it, the "
@@ -2793,7 +2882,9 @@ async def reset_filament_sync_links(
     filament: FilamentDep, store: SettingsStoreDep, state: StateDep, body: LinksResetRequest
 ) -> LinksResetDone:
     settings = await asyncio.to_thread(store.load)
-    listing = (await _listing(settings))[0] if body.expect_kept else None
+    listing, presets, _ = (
+        await _listing(settings, filament) if body.expect_kept else (None, None, False)
+    )
     try:
         done = await asyncio.to_thread(
             partial(
@@ -2802,6 +2893,7 @@ async def reset_filament_sync_links(
                 body.confirm_instance,
                 _configured(settings.bambuddy_url),
                 listing,
+                presets=presets,
                 expect_kept=body.expect_kept,
             )
         )

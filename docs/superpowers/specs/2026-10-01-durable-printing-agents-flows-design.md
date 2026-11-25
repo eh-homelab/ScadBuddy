@@ -1074,9 +1074,12 @@ happens, and there is no separate request system.
     (§6.3a). The workflow pair is the
     one `workflow_runs` records too. The sweep reads it, and nothing but the route's
     prefix dispatch parses `request_id`.
-- **Two reads, two sources.**
-  - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session. For a durable
-    one it sends the Query, which is the source of truth. It writes nothing. The
+- **Two reads, one source.**
+  - `GET /api/v1/ai/sessions/{id}/pending-input` answers for one session: the aggregate
+    read below, narrowed to it, with the same filters. It sends no Query (as built since
+    [#7311](https://github.com/eh-homelab/ScadBuddy/issues/7311); before, it sent one and
+    the Query was the source of truth): `ai_pending_input` is the record (R5), and a
+    closed workflow cannot be queried once Temporal's retention ends. It writes nothing. The
     projection below is written by `open_input` and `resolve_input`, each in one
     transaction with its event and before the plugin is told, and swept for orphans as
     described above.

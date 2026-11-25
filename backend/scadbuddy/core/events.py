@@ -204,6 +204,15 @@ class PrinterEvent(BaseEvent):
     printer_id: str
 
 
+class CameraFeedEvent(BaseEvent):
+    """A printer's camera feed changed state (camera recording, phase 1): the relay's or the
+    recorder's report moved to a new state. Re-read the feed state. Published on
+    ``printers`` and ``printer:<printer id>``."""
+
+    kind: Literal["camera.feed"] = "camera.feed"
+    printer_id: str
+
+
 class OperationEvent(BaseEvent):
     """An operation (#1053, spec 2026-10-01 §4.2) was accepted or ended: re-read
     ``GET /operations/{operation_id}``."""
@@ -441,6 +450,7 @@ Event = Annotated[
     | PrintRunEvent
     | PrintOutcome
     | PrinterEvent
+    | CameraFeedEvent
     | OperationEvent
     | FlowRunEvent
     | FlowChanged

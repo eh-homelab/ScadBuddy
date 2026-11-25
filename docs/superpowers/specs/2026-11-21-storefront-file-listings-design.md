@@ -799,7 +799,9 @@ A file listing has no render, so its price is read by the listing and the colour
   limits (`storefront_renders_per_minute`, `…_per_day`, spec 2026-11-02 §5.4). A read that
   finds a price, or joins a running slice, costs nothing, as a reused render does. So a
   visitor cannot keep the slicer busy by changing colours.
-- 409 `listing_changed` when `listing_updated_at` is not the listing's, as for a render.
+- 409 `listing_changed` when `listing_updated_at` is not the listing's, as for a render, or
+  when the published listing sells a template now (a render of a file listing answers the
+  same).
 
 As built (PR 6): "always show a price". While the visitor's colours have no price yet
 (`slice_estimate` answers `pending`), the route answers `last`: the listing's last firm
@@ -1032,9 +1034,10 @@ a failed project ensure is. The find skips a run's per-print copy (`per_print`),
 sweep trashes. A retry of the same claim finds the item moved and keeps that file while it
 stands (`Shelf.stands`: live, with the pinned sha256, or a Bambuddy row that states no hash,
 whose bytes the next print's check reads); when it is gone since, the held copy is
-put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The Bambuddy side of the restore
-(`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
-reaches the Bambuddy client. The check reads a Bambuddy file that states no hash only when its
+put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The shelf of the library that
+serves (`served_shelf`, `NativeShelf`) is in `orders/served_library.py`, which needs no Bambuddy
+(#7467); Bambuddy's (`BambuddyShelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
+reaches the Bambuddy client, loaded only when Bambuddy's library serves. The check reads a Bambuddy file that states no hash only when its
 stated size is the held copy's; another size is other bytes. The restore runs before the
 print claims the item, so a claim refused after it (on hold, claimed by another print) leaves
 the item on the restored file; that is intended, and the next print restores nothing.

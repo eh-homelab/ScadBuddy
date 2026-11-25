@@ -122,9 +122,17 @@ class LocalContentBackend:
             raise ValueError(f"not a local object id: {backend_id!r}")
         return self.root / backend_id
 
-    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
+    async def upload(
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        digest: tuple[str, int] | None = None,
+    ) -> str:
         def write() -> str:
-            backend_id = f"{kind}/{blob_digest(data)[0]}"
+            backend_id = f"{kind}/{(digest or blob_digest(data))[0]}"
             path = self._path(backend_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}")

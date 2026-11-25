@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.routing import iter_route_contexts
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
@@ -125,10 +126,12 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
     NATIVE_LIBRARY_NOT_READY,
+    PUBLIC_URL,
     RECOVER_BAMBUDDY_LIBRARY_SQL,
     StoreNotReadyError,
     load_render_store_settings,
@@ -233,6 +236,7 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_SWEEP,
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
+    OUTPUT_COPY_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
     PREVIEWS_SWEEP,
@@ -295,11 +299,11 @@ ROOT_ROUTE_MODULES = frozenset({"health", "metrics", "telemetry"})
 
 
 def _api_router() -> APIRouter:
-    """Every other module in `scadbuddy.api` that defines a ``router``, under
+    """Every other module in `scadbuddy.api` that defines a ``router``, included under
     :data:`API_PREFIX`: a new route module is mounted without an edit here. The order
     is by name and does not matter, because no two routes match the same request
     (`tests/api/test_routes.py`)."""
-    router = APIRouter(prefix=API_PREFIX)
+    router = APIRouter()
     for info in sorted(pkgutil.iter_modules(scadbuddy.api.__path__), key=lambda i: i.name):
         if info.name in ROOT_ROUTE_MODULES:
             continue
@@ -586,6 +590,45 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.exception("could not index the saved outputs; the next start retries")
 
 
+async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
+    """One run of the copy of the saved outputs' files to rows (#7255, `copy_outputs`),
+    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
+    that does not get it does nothing. A failure is logged, then raised."""
+    rows = state.outputs.rows
+    if rows is None:
+        return
+    try:
+        result = await asyncio.to_thread(
+            copy_outputs, state.outputs, rows, state.projection.conninfo, stop
+        )
+    except Exception:
+        logger.exception(
+            "could not copy the saved outputs to rows; the next sweep or start retries"
+        )
+        raise
+    if result is not None:
+        logger.info(
+            "copied the saved outputs to rows",
+            extra={
+                "copied": result.copied,
+                "refreshed": result.refreshed,
+                "dropped": result.dropped,
+                "not_copied": len(result.not_copied),
+                "damaged": len(result.damaged),
+                "incomplete": result.incomplete,
+                "stopped": stop.is_set(),
+            },
+        )
+
+
+async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's copy (#7255), once and best effort: a failure is logged only. The
+    housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for the writes of pods on an
+    older build."""
+    with suppress(Exception):
+        await _copy_outputs_once(state, stop)
+
+
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
@@ -719,6 +762,18 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A scan of every output's directory can be slow on a network volume: heartbeat.
         await _heartbeating(_reap_output_holds_logged(state))
 
+    @activity.defn(name=OUTPUT_COPY_SWEEP)
+    async def copy_outputs_to_rows() -> None:
+        # #7255: its own stop, as `sweep_assets`': the worker's shutdown ends the walk
+        # between folders. Any cancel sets it too, as a timeout's: the thread then ends and
+        # frees the advisory lock.
+        stop = threading.Event()
+        try:
+            await _heartbeating(_copy_outputs_once(state, stop), stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:
         await _heartbeating(_sweep_flow_runs_logged(state))
@@ -831,6 +886,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
+        copy_outputs_to_rows,
         sweep_flow_runs,
         sweep_preview_slices,
         sweep_lost_slice_starts,
@@ -1574,7 +1630,8 @@ async def _import_maintenance_logged(state: AppState) -> None:
 
 async def _import_attempt_media_logged(state: AppState) -> None:
     """#7234: one ``AttemptMedia`` step for each order attempt still missing a medium
-    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6)."""
+    (`orders.archives.sweep_media`, spec 2026-11-05 §4.6), counted in
+    ``scadbuddy_attempt_media_sweep_starts`` (#7491)."""
     orders = state.components.get(ORDERS)
     try:
         started = await sweep_media(
@@ -1586,6 +1643,7 @@ async def _import_attempt_media_logged(state: AppState) -> None:
     except Exception:
         logger.exception("could not sweep the order attempts' media")
         raise
+    state.metrics.attempt_media_sweep_starts.inc(started)
     if started:
         logger.info("started attempt media imports", extra={"count": started})
 
@@ -2015,6 +2073,19 @@ async def _import_presets(state: AppState) -> PresetImport:
     return await import_from_bambuddy(state.settings_store.pool, state.store.blobs, loaded)
 
 
+async def _built_off_loop[T](build: Callable[[], T]) -> T:
+    """``build()`` in a thread (#7359). A Temporal ``Worker`` runs each workflow once in
+    the sandbox to check it, which imports the workflow's modules: on an API pod that
+    had just started that held the loop 2 s. The check's workflow instance asks for the
+    running loop, so the thread runs one of its own for the build; nothing the build
+    makes stays bound to it."""
+
+    async def built() -> T:
+        return build()
+
+    return await asyncio.to_thread(asyncio.run, built())
+
+
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
     sweeps and the preview backfill need the data volume this process holds. Once
@@ -2115,14 +2186,17 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     ]
     try:
         while not stop.is_set():
-            worker = library_worker(
-                client,
-                queue,
-                activities,
-                workflows=LIBRARY_WORKFLOWS,
-                workflow_runner=sandboxed_runner(),
-                graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
-                deployment_config=library_deployment(build_id),
+            worker = await _built_off_loop(
+                partial(
+                    library_worker,
+                    client,
+                    queue,
+                    activities,
+                    workflows=LIBRARY_WORKFLOWS,
+                    workflow_runner=sandboxed_runner(),
+                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                    deployment_config=library_deployment(build_id),
+                )
             )
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
@@ -2279,6 +2353,17 @@ LIBRARY_GRACEFUL_SHUTDOWN = timedelta(seconds=30)
 LIBRARY_WORKER_STOP_TIMEOUT = LIBRARY_GRACEFUL_SHUTDOWN.total_seconds() + SWEEP_SHUTDOWN_JOIN + 10.0
 
 
+def _build_route_contexts(app: FastAPI) -> None:
+    """Build what FastAPI builds on the first walk of the routes: each route's
+    dependencies, signatures read with their annotations evaluated (#7359). The server
+    span's name (`FastAPIInstrumentor`) comes from a walk of every route, so the first
+    traced request made it, on the loop: 1.1 to 9.7 s on a new API pod, measured from
+    `core/loop_watch.py`'s stacks on prod, 2026-11-24. FastAPI keeps it until the routes
+    change, and nothing adds one after `create_app`. Blocking: run it off the loop."""
+    for _ in iter_route_contexts(app.routes):
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
@@ -2326,8 +2411,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
-            # #2788: on the API's /data, so every replica shares it.
+            # #2788: on the API's /data, so every replica shares it, unless set
+            # elsewhere: a node-local one (#7316) may be marked this container's alone.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
+            downloads_private=state.config.download_cache_dir is not None
+            and state.config.download_cache_private,
         )
         # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
         # (a save never checks a seeded value), `native` needs a content store.
@@ -2389,6 +2477,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None
+    index_now: asyncio.Task[None] | None = None
+    copy_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -2438,6 +2528,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         index_now = asyncio.create_task(
             _index_outputs_logged(state, stop=stop_background), name="index outputs"
         )
+        # #7255: every saved output's files copied to its row, and the rows reconciled
+        # with the files; until a copy run finishes, a missing row falls back to them.
+        # The housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for older pods' writes.
+        copy_now = asyncio.create_task(
+            _copy_outputs_logged(state, stop=stop_background), name="copy outputs"
+        )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
         adopt_now = asyncio.create_task(
@@ -2465,6 +2561,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # backfill's Schedule (#1054), triggered once the library worker connects.
         if state.previews is not None:
             state.previews.start()
+        # #7359: every route's dependencies, before either port takes a request.
+        await asyncio.to_thread(_build_route_contexts, app)
         # #5298 (plan D3): the workers' CRUD port, once the app can answer.
         await crud_listener.start(app, state.settings.crud_port)
         logger.info(
@@ -2489,7 +2587,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now, adopt_now, index_now)
+        await _join_background(
+            stop_background, backfill, attach_now, adopt_now, index_now, copy_now
+        )
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
@@ -2638,7 +2738,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,
-        public_url=lambda: state.settings_store.load().public_url,
+        public_url=lambda: state.settings_store.get(PUBLIC_URL),
         allowed_origins=lambda: state.settings.allowed_origin_list,
     )
     # Outside every route and gate, so their answers go out gzipped too (#1033).
@@ -2652,7 +2752,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(metrics.router)
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
-    app.include_router(_api_router())
+    # The prefix is given here, not to the router: with none, FastAPI (0.165) builds every
+    # route's context to check for an empty path, and drops them.
+    app.include_router(_api_router(), prefix=API_PREFIX)
     _name_in_openapi(
         app,
         models.PastedSource,

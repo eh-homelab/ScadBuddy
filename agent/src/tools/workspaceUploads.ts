@@ -81,7 +81,7 @@ export function inlineOrWorkspace<T>(
 }
 
 function storeOf(ctx: ToolContext) {
-  if (!ctx.workspace) throw new ToolError('the workspace is not available here: it needs the agent database')
+  if (!ctx.workspace) throw new ToolError('the workspace is not available here: this process was started without the workspace store')
   return { files: ctx.workspace, ws: workspaceOf(ctx) }
 }
 
