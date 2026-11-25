@@ -47,7 +47,8 @@ import {
   type OfferState,
   type TreeNode,
 } from './hostedDraft'
-import { announcePackagesChanged, usePackagesTopic } from './packagesChanged'
+import { readAgain, recordRead, type ReadRecord } from '../../lib/realtime'
+import { announcePackagesChanged, PACKAGES_TOPIC, usePackagesTopic } from './packagesChanged'
 
 const HostedFileEditor = lazy(() => import('./HostedFileEditor'))
 
@@ -117,20 +118,38 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   const [publishError, setPublishError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[]>([])
 
+  /** Bumped by each read of the draft diff: only the newest read's answer is shown (#7672). */
+  const diffReads = useRef(0)
+  // The versions' own order: only the mount and topic reads read them, so a save's draft read
+  // (`reloadDraft`) never stops a newer list of versions from landing (#7672).
+  const versionReads = useRef(0)
+
   const reloadDraft = useCallback(async () => {
+    const mine = ++diffReads.current
     const [nextFiles, nextDiff] = await Promise.all([hostedPlugins.files(name), hostedPlugins.draftDiff(name)])
     setFiles(nextFiles)
-    setDiff(nextDiff)
+    if (mine === diffReads.current) setDiff(nextDiff)
   }, [name])
+
+  /** What the last read of the draft diff and versions saw, for the topic's confirmation (#7672). */
+  const lastRead = useRef<ReadRecord | undefined>(undefined)
 
   useEffect(() => {
     let live = true
-    Promise.all([hostedPlugins.files(name), hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]).then(
+    const mine = ++diffReads.current
+    const mineVersions = ++versionReads.current
+    const { record, result } = recordRead(
+      () => Promise.all([hostedPlugins.files(name), hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]),
+      // A read whose diff a newer one replaced vouches for nothing.
+      () => live && mine === diffReads.current,
+    )
+    lastRead.current = record
+    result.then(
       ([f, d, v]) => {
         if (!live) return
         setFiles(f)
-        setDiff(d)
-        setVersions(v)
+        if (mineVersions === versionReads.current) setVersions(v)
+        if (mine === diffReads.current) setDiff(d)
       },
       (caught: unknown) => live && setLoadError(message(caught)),
     )
@@ -141,17 +160,27 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
 
   // #7460 — a publish made elsewhere (the assistant, another tab) moves the latest version: read
   // the draft against it and the versions again, so Publish and the draft's state follow.
-  usePackagesTopic(() => {
-    Promise.all([hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]).then(
-      ([d, v]) => {
-        setDiff(d)
-        setVersions(v)
-      },
-      // As a list's background read: a failed one keeps what is shown (a plugin deleted
-      // elsewhere closes the editor when the list is read again).
-      () => {},
-    )
-  })
+  // Another plugin's change (the event names it; a hosted plugin and its package share the name)
+  // leaves this one as it is.
+  usePackagesTopic(
+    (signal) => {
+      if (signal !== 'resync' && signal.data.name !== name) return
+      const mine = ++diffReads.current
+      const mineVersions = ++versionReads.current
+      Promise.all([hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]).then(
+        ([d, v]) => {
+          // A newer read answers for each: a save's or a later event's for the draft, only a
+          // later event's for the versions.
+          if (mineVersions === versionReads.current) setVersions(v)
+          if (mine === diffReads.current) setDiff(d)
+        },
+        // As a list's background read: a failed one keeps what is shown (a plugin deleted
+        // elsewhere closes the editor when the list is read again).
+        () => {},
+      )
+    },
+    (confirmation) => readAgain(lastRead.current, PACKAGES_TOPIC, confirmation),
+  )
 
   async function act(what: string, run: () => Promise<void>) {
     setBusy(what)

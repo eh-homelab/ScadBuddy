@@ -444,6 +444,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "A spool is low when it has less than this percent of its label weight left,"
             " unless the spool sets its own. 0 to 100.",
         ),
+        "filament_weighing_drift_notice_g": SettingDoc(
+            "Drift notice at, grams",
+            "A weighing whose filament is this many grams or more off what the ledger"
+            " expected, either way, is a notice on the spool and in the list. 0 notices every"
+            " weighing.",
+        ),
         "filament_default_cost_per_kg": SettingDoc(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"

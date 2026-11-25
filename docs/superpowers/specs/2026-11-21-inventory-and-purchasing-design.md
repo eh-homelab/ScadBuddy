@@ -162,10 +162,12 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   units (phase 2) use the same table with no migration.
 - A key is `^[a-z][a-z0-9_]{0,63}$`; there is no list of allowed keys in code. A value is a
   string, a number, a boolean or a list of strings.
-- **Schemas document, never restrict.** A kind's property schema (a JSON Schema object) types
-  and describes the keys it knows; any other key is stored as given. A known key's value is
-  checked against its subschema. A schema uses only an allowed subset of Draft 2020-12, so it
-  can refuse no key and run no regex. At the top level: `type` (`"object"`), `properties`,
+- **A schema may require a key, and never refuses one** (amended by the owner on 2026-11-25;
+  the rule was "schemas document, never restrict"). A kind's property schema (a JSON Schema
+  object) types and describes the keys it knows and may mark them required (§6.3b); any
+  other key is stored as given. A known key's value is checked against its subschema. A
+  schema uses only an allowed subset of Draft 2020-12, so it can refuse no key and run no
+  regex. At the top level (and `required`, §6.3b): `type` (`"object"`), `properties`,
   `additionalProperties` (only `true`), `$schema`, `$comment`, `title`, `description`,
   `examples`. In each key's subschema (an object): `type` (`string`, `number`, `integer`,
   `boolean`, `array`, or a list of them with `null`), the annotations (`title`,
@@ -198,13 +200,129 @@ ASINs, manufacturer part number and product page, an empty spool's weight, a fil
   properties (invoice import, label photos, the 3DFP fetch, #7025) come after the first PR.
 - Search: the filament lists and the agent's type and spool search match property values,
   so a scanned GTIN or a lot number finds its type or spool.
+- Two changes in progress on 2026-11-25 that §6.3b builds on: catalog rows (materials, insert
+  types, …) become entity kinds, one per filament catalog (#7646), and a person edits any
+  kind's keys in the UI (#7656).
+
+### 6.3b Defined and required properties
+
+The owner decided on 2026-11-25: the keys a kind defines show on every row of the kind as
+fields to fill in, a key can be marked required, and properties are validated when a row is
+created and when it is saved. Keys no one defined stay allowed on any row.
+
+**Today** (2026-11-25): a defined key is a suggestion that types a value; `check_schema`
+refuses `required`; a row is created first and its properties follow in a second call; a
+row's own save never reads them. `merged_schema` (`backend/scadbuddy/inventory/kinds.py`)
+carries only `properties` down the kind tree.
+
+**The schema.** `required` joins the top-level keywords: a list of distinct keys, each one in
+the schema's `properties`, else 422 `bad_property_schema`. The key table of a kind gets a
+Required box per key. Down the item kind tree the required keys add up: a child kind keeps
+its ancestors' and adds its own, and cannot make one of theirs optional. A child kind may
+require a key it only inherits, so a kind's `required` is checked against its merged schema. A
+change that would leave a kind requiring a key no longer in its merged schema (an ancestor
+drops the key, the kind moves) is refused and names that kind.
+
+**A row is complete** when each required key has a value and every defined key's stored value
+fits its subschema. `false` and `0` are values. A string that is empty or only spaces, and an
+empty list, are none. A key no schema defines never makes a row incomplete.
+
+**Where a row must be complete.** The rule goes by route, not by who calls it, so a person's
+form, the assistant and an API caller get the same answer:
+
+| Write | Rule |
+|---|---|
+| Create one row, or several copies, through its own route (`POST /filament/spools`, `/spools/bulk`, `/types`, `/catalog/{kind}`, `/inventory/items`, …) | Refused unless complete |
+| Save one row through its own route (`PATCH` of the row) | Refused unless the row is complete after it |
+| A row's `PATCH` that sends only `archived`, `sort_order` or both, of any kind | Not checked |
+| `PATCH /entities/{ref}/properties` (the panel, `entity_property_set`) | Each value is checked as today, and a required key that has a value cannot be removed or emptied. Keys still missing do not refuse it, so a row can be filled one key at a time |
+| Every other write: move, weigh, print usage, archive, restore, tags, presets, K values, `/spools/bulk-update`, stock moves | Not checked |
+| Writers with no form: Bambuddy pull and sync, color sync, a spool made from an AMS tray, location sync, CSV import, invoice confirm (with the types and spools it makes), type proposals, Bambu import, storefront sign-up, merges, the `/parts` aliases until they go | Not checked. The row is written and reads incomplete |
+
+A kind without `required` behaves as it does today. Where a kind has it:
+
+- A one-click create through a checked route ("Create type from this spool", "Make a type" from
+  a price-book row) opens a small form with the required fields, and a new spool from a scanned
+  tag shows them in its form. A catalog row added on the way to another row (a missing brand)
+  is added by the server in that request, unchecked, and reads incomplete.
+- A one-field action that uses a row's `PATCH` today ("Set type", "Reset to type", linking a
+  type to the price book, the last step of "Create type from this spool") moves to a route of
+  its own or to the bulk one, so it still works on an incomplete row.
+- The Bambu import writes through its own CRUD route with a service credential, never the
+  item create route, and its properties keep the import's `source`. A property sent on a
+  checked create or save is `manual`.
+- A copy of a spool starts with no properties, since a lot number belongs to one spool, and its
+  form asks for the required ones. Several copies made at once share the one patch sent.
+
+**Create and save are atomic.** The create and save routes take an optional `properties` (a
+patch, as in `PATCH …/properties`). The row and its properties are written in one transaction,
+or neither is. A save that omits `properties` is checked against the stored ones. A refusal is
+422 `missing_required_properties`, with every missing key in `missing` and every ill-fitting
+one in `invalid` (key and reason), so a form can mark each field at once. A value the caller
+sends that does not fit stays 422 `bad_property_value`.
+
+**Incomplete rows.** Marking a key required changes no row and refuses nothing: rows without it
+read incomplete from then on. Completeness is computed on read, never stored, so a schema
+change needs no backfill. A row's read and its list carry `missing_properties` and
+`invalid_properties` (keys). Lists show "Missing required: mpn" on the row and have an
+Incomplete filter; the kind's key table says how many rows lack a key before it is saved as
+required. An archived row is never shown as incomplete.
+
+**The form.** A kind's defined keys are fields of the row's own create and edit form, saved by
+its Save, required ones first and then by key (Postgres `jsonb` keeps no key order). Each has
+its type's control (a list of choices for an `enum`), its `title` or key, its description and
+a required mark. An empty optional field stores nothing; clearing one removes its key. Ad hoc
+keys stay in the Properties panel, which saves each change on its own and lists only the keys
+the form does not.
+
+```text
+Edit insert type: Bambu reusable
+  Name  [Bambu reusable   ]   Empty weight (g)  [216]
+  Properties
+    Part number *   [              ]  Required
+    Bore (mm)       [ 55           ]
+  [Save] [Cancel]
+  Other properties
+    shelf_note      "top rack"        [Edit] [Remove]
+    [key] [type] [value] [Add property]
+```
+
+**The assistant.** `filament_type_upsert` and `filament_spool_upsert` send `properties` with the
+row instead of after it, except an edit with only `properties`, which stays the property patch, so
+an incomplete row can be filled one key at a time; `filament_catalog_upsert` and the item upsert take `properties` too.
+A refusal names each key. `entity_property_schema_set` and `inventory_kind_upsert` take
+`required`.
+
+**Which kinds.** First: spools, spool types, the nine catalogs and items. Then lots, units,
+suppliers, locations, customers, invoices and printers, each when its create and save check it. A
+schema of a kind that does not check yet refuses `required` (422 `bad_property_schema`), so a
+mark never promises a check that does not run. The order kinds never take `required`: an
+order's own rules decide what it needs.
+
+**Non-goals.** Rules across keys (one key required when another is set), a pattern per key,
+unique values, defaults filled in on create, and approval flows.
+
+**Anti-goals.** A sync, a storefront sign-up or a stock change that stops because someone marked
+a key required. A row saved without the properties sent with it.
+
+**Approaches.**
+
+- **A. Check in the create and save routes, in the row's transaction (chosen).** One rule for
+  the UI, the assistant and the API; writers with no form pass. Each kind's create and save
+  has to call it.
+- **B. A database constraint or trigger.** It cannot be missed, but it stops every sync and
+  import, and an entity's row does not exist until something attaches to it.
+- **C. Check in the forms only.** Least work; the assistant and the API get around it.
+- **D. An incomplete row is a draft until it is filled.** Safe, but a synced spool could not be
+  printed from, and every list and report would have to know about drafts.
 
 ### 6.4 Kinds, items, lots and units
 
 **Kinds** (`item_kinds`): `id` slug, `name`, `parent_id` (a tree: `part` > `nozzle`),
 `tracking` (`lot` = counted stock, `unit` = one by one, `filament` = spools with a gram
 ledger), `uom` (`each`, `g`, `m`, `ml`…), `attribute_schema` jsonb (a JSON Schema that documents and types the
-item's properties and never restricts them, §6.3a; a child kind inherits its parent's keys), `life_basis` (`none`, `hours`, `months`; default
+item's properties and may require them, but refuses no other key, §6.3a and §6.3b; a child kind
+inherits its parent's keys and required keys), `life_basis` (`none`, `hours`, `months`; default
 for its units), `builtin` bool, `archived_at`. Built-in kinds seeded by migration:
 `filament`, `printer`, `part` (with children `nozzle`, `hotend`, `belt`, `build_plate`,
 `ams_part`, `hardware`), `consumable` (`desiccant`, `packaging`, `lubricant`),
@@ -489,7 +607,16 @@ ships first.
   table, so one route family, panel and search serve every kind, and a person's value
   wins over an import's for its key: one row per key, which an import skips once it is
   `manual` (§6.3a). Owner's rule, 2026-11-22: schemas never
-  restrict keys.
+  restrict keys. Amended by the owner, 2026-11-25: a schema may require a key; it still
+  refuses none.
+- D18. Required properties (§6.3b). The owner decided that defined keys show as fields on every
+  row, that a key can be required, and that properties are validated at create and save. The
+  owner accepted on 2026-11-25 the proposal that writers with no form are not stopped and that
+  existing rows are marked, not locked. The designer's calls: the rule goes by route (approach
+  A); completeness is computed on read; bulk update, CSV import and invoice confirm are not
+  checked; what counts as no value; the order of the fields; required keys add up down the
+  kind tree, and a child may require an inherited key; a copy takes no properties; one-click
+  creates ask and one-field actions do not; the order kinds take none.
 
 ## 9. Phases (each one or more PRs, each an issue under one new epic)
 
@@ -499,6 +626,9 @@ ships first.
 1b. **Properties** (#7026). `entity_properties`, `entity_property_schemas` seeded for
    `spool_type` and `spool`, routes, panel on the spool and type pages, search, agent
    tools, `properties` on the filament upsert tools. Independent of the filament PRs.
+1c. **Required properties** (§6.3b). The check and the atomic create and save; the fields in
+   the forms; the mark and the filter; the assistant's tools. Spools, spool types, the
+   catalogs and items first, then each other kind. After #7646 and #7656.
 2. **Item core.** Kinds, items, offers on new tables, lots, units, moves, Inventory UI and
    tools; `parts` migrates to items + lots (opening lots at today's unit cost), order parts
    and `model_part_rules` repoint; job cost reads part cost from moves. Starts after the

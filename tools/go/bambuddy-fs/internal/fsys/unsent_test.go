@@ -1027,6 +1027,9 @@ func TestASaveByRenameWhileScadBuddyIsDownIsQueuedAndSentLater(t *testing.T) {
 	if rec, err := readRecord(q[0].Path); err != nil || len(rec.Bases) != 1 || rec.Bases[0].ID != 10 {
 		t.Fatalf("bases: %+v %v", rec.Bases, err)
 	}
+	// The refresh logs the outage after it releases the tree's lock: wait for the line,
+	// then count it (#7589).
+	eventually(t, "the outage logged", func() bool { return strings.Contains(log.String(), "ScadBuddy is not answering") })
 	if n := strings.Count(log.String(), "ScadBuddy is not answering"); n != 1 {
 		t.Fatalf("outage logged %d times: %s", n, log.String())
 	}
@@ -1041,9 +1044,7 @@ func TestASaveByRenameWhileScadBuddyIsDownIsQueuedAndSentLater(t *testing.T) {
 	if got := names(t, top); !slices.Equal(got, []string{"X.3mf", "Y.3mf"}) {
 		t.Fatalf("listed after: %v", got)
 	}
-	if !strings.Contains(log.String(), "ScadBuddy answers again") {
-		t.Fatalf("recovery not logged: %s", log.String())
-	}
+	eventually(t, "the recovery logged", func() bool { return strings.Contains(log.String(), "ScadBuddy answers again") })
 }
 
 // At a start with ScadBuddy down there is no listing to serve: the top level is EIO.

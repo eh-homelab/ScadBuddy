@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
 )
 
@@ -43,7 +45,7 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, areas, "")
+	router, err := newRouter(pool, next, nil, areas, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,8 +481,36 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, "session-evnets", ""); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", ""); err == nil {
 		t.Error("an unknown area was taken")
+	}
+}
+
+func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
+	pool := testdb.New(t)
+	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
+		"notify:read", "transcripts", "transcripts:read"} {
+		_, err := newRouter(pool, nil, nil, area, "")
+		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
+			t.Errorf("%s: %v", area, err)
+		}
+	}
+	every := "settings, access, plugin-sessions, mcp-relay, session-events, session-turns:read"
+	if _, err := newRouter(pool, nil, nil, every, ""); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(t.TempDir(), "kek")
+	if err := os.WriteFile(key, []byte(base64.StdEncoding.EncodeToString(make([]byte, 32))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := seal.LoadKeys(func(name string) string {
+		return map[string]string{seal.Variable: key}[name]
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts", ""); err != nil {
+		t.Fatal(err)
 	}
 }
 
