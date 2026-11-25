@@ -8,7 +8,8 @@ its docstring; the field names are OpenBambuAPI's ``mqtt.md``
 Bambuddy on purpose: every payload takes the caller's fresh ``sequence_id``, where Bambuddy
 sends ``"0"`` for ``ams_filament_setting`` and ``extrusion_cali_sel`` (R-7276-10), and only
 the regular AMS (0-3, and 4-15 as Bambuddy treats them), the AMS-HT (128-135) and the
-external holders (255) are addressed: ScadBuddy knows no A2L AMS-Lite or AMS 3H layout.
+external holders (255) are addressed: ScadBuddy knows no A2L AMS-Lite or AMS 3H layout, so
+any other unit is refused with ``UnsupportedUnitError`` (P24).
 
 The H2C specifics (its two external holders, an HT unit's ids, whether it echoes the
 ``sequence_id`` of ``ams_filament_setting`` and ``extrusion_cali_sel``) are unverified until
@@ -40,18 +41,46 @@ _FAILED = "printer reported failure"
 
 
 class UnsupportedUnitError(ValueError):
-    """A unit whose wire id no source gives (P22)."""
+    """A unit whose wire ids no source gives, or a slot its unit does not have (P22, P24)."""
+
+
+def _slots(ams_id: int, *, holders: int) -> range:
+    """The slots unit ``ams_id`` has: an AMS 0-3 four, an AMS 4-15 and an AMS-HT one
+    (Bambuddy's one-slot branch), the external unit its ``holders`` (two at most). Any other
+    unit (the A2L AMS-Lite's 16, the AMS 3H's 32, and the rest) is ``UnsupportedUnitError``
+    (P24): Bambuddy sends those wire ids that only its layout knows."""
+    if 0 <= ams_id <= 3:
+        return range(4)
+    if 4 <= ams_id <= 15 or _is_ht(ams_id):
+        return range(1)
+    if ams_id == EXTERNAL:
+        return range(min(holders, 2))
+    raise UnsupportedUnitError(f"no known wire ids for unit {ams_id}")
+
+
+def _known_slot(ams_id: int, tray_id: int, *, holders: int = 2) -> None:
+    if tray_id not in _slots(ams_id, holders=holders):
+        raise UnsupportedUnitError(f"unit {ams_id} has no slot {tray_id}")
+
+
+def _known_global_tray(global_tray: int) -> None:
+    """A load or unload's tray: an AMS 0-3's ``ams*4+slot``, an AMS-HT's unit id, or an
+    external holder's 254 or 255 (P24). An AMS 4-15 has no global tray Bambuddy loads."""
+    if not (
+        0 <= global_tray <= 15 or _is_ht(global_tray) or global_tray in (EXTERNAL_TRAY, EXTERNAL)
+    ):
+        raise UnsupportedUnitError(f"no known wire ids for global tray {global_tray}")
 
 
 @dataclass(frozen=True)
 class KProfileRow:
     """One ``filaments`` entry of ``extrusion_cali_set``. ``ams_id`` and ``tray_id`` are
-    always 0 and ``n_coef`` ``"0.000000"`` (P2), so they are not fields here."""
+    always 0 and ``n_coef`` ``"0.000000"`` (P2), and ``nozzle_diameter`` is the command's,
+    so they are not fields here."""
 
     cali_idx: int
     extruder_id: int
     nozzle_id: str
-    nozzle_diameter: str
     filament_id: str
     name: str
     k_value: str
@@ -72,7 +101,7 @@ class SlotParams(BaseModel):
     selection (``extrusion_cali_sel``, or ``extrusion_cali_set_slot`` with a K value and no
     profile). The slot and the K selection take different setting ids (P3): the preset's
     (``preset_setting_id``) and the K profile's (``k_setting_id``), as Bambuddy's route
-    does (``routes/printers.py`` L3207-L3225, L3291 at the pinned commit). ``tray_color``
+    does (``routes/printers.py`` L3207-L3225, L3295 at the pinned commit). ``tray_color``
     is ``RRGGBBAA`` without ``#``."""
 
     tray_info_idx: str
@@ -104,8 +133,10 @@ def wire_slot(ams_id: int, tray_id: int, *, external_count: int) -> WireSlot:
     ``external_count`` is ``len(PrinterStatus.vt_tray)``, which prefers the report's
     ``vir_slot`` (P1). With more than one holder each is its own unit (254 Ext-L, 255
     Ext-R) at tray 0, which Bambuddy marks as not yet captured from Studio (L8724-L8735);
-    with one, the global tray 254 of unit 255. A regular AMS 0-3 sends its local slot;
-    anything else Bambuddy addresses as a one-slot unit (slot 0, L8740-L8752)."""
+    with one, the global tray 254 of unit 255. A regular AMS 0-3 sends its local slot; an
+    AMS 4-15 and an AMS-HT Bambuddy addresses as a one-slot unit (slot 0, L8749-L8753).
+    Any other unit, or a slot its unit lacks, is ``UnsupportedUnitError`` (P24)."""
+    _known_slot(ams_id, tray_id, holders=external_count)
     if ams_id == EXTERNAL:
         if external_count > 1:
             return WireSlot(EXTERNAL_TRAY + tray_id, 0, 0)
@@ -123,15 +154,21 @@ def cali_set_tray(ams_id: int, tray_id: int) -> int:
     with ``legacy_tray_index``:
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/utils/tray_ids.py#L132-L138
 
+    These are Bambuddy's indexes, not unique ones: HT-A gives 0 and HT-B 4 (AMS 0 and AMS 1
+    slot 0), and an external holder 0 or 1 (AMS 0 slot 0 or 1). The firmware's numbering
+    makes them collide with AMS slots; Task 14's live check must confirm them (R-7276-5).
+
     Any other unit, an AMS 4-15 among them, raises ``UnsupportedUnitError`` (P22): Bambuddy
-    sends it its raw ``tray_id``, which is AMS 0's index, and no source gives a right one."""
+    sends it its raw ``tray_id``, which is AMS 0's index, and no source gives a right one.
+    So does a slot its unit lacks (P24)."""
+    if 4 <= ams_id <= 15:
+        raise UnsupportedUnitError(f"no known K set tray index for unit {ams_id}")
+    _known_slot(ams_id, tray_id)
     if _is_ht(ams_id):
         return (ams_id - AMS_HT_IDS.start) * 4 + tray_id
     if ams_id == EXTERNAL:
         return tray_id
-    if 0 <= ams_id <= 3:
-        return ams_id * 4 + tray_id
-    raise UnsupportedUnitError(f"no known K set tray index for unit {ams_id}")
+    return ams_id * 4 + tray_id
 
 
 def extrusion_cali_get(nozzle_diameter: str, seq: str) -> dict[str, Any]:
@@ -159,7 +196,8 @@ def extrusion_cali_set(
     L7794-L7809): single-nozzle firmware answers ``tray_id`` -1 with ``fail``, "invalid
     tray_id", while it applies the write (#2718 there, P2). A new profile's
     ``setting_id`` is the caller's: Bambuddy makes one (``PF`` and 17 random digits,
-    L7710-L7716), which a pure builder cannot."""
+    L7710-L7716), which a pure builder cannot. Every entry takes the command's
+    ``nozzle_diameter``, as the batch does (L7803)."""
     return {
         "print": {
             "command": "extrusion_cali_set",
@@ -172,7 +210,7 @@ def extrusion_cali_set(
                     "k_value": row.k_value,
                     "n_coef": "0.000000",
                     "name": row.name,
-                    "nozzle_diameter": row.nozzle_diameter,
+                    "nozzle_diameter": nozzle_diameter,
                     "nozzle_id": row.nozzle_id,
                     "setting_id": row.setting_id,
                     "tray_id": 0,
@@ -319,7 +357,9 @@ def extrusion_cali_sel(
     external holder's 254 or 255 in both ids with more than one holder, 254 in both with
     one (L8887-L8900); anything else its local tray at slot 0 (L8914-L8920). No
     ``setting_id``: Studio never sends one and firmware mislinks the profile with it
-    (L8867-L8868). ``external_count`` as in ``wire_slot``."""
+    (L8867-L8868). ``external_count`` as in ``wire_slot``. Any other unit, or a slot its
+    unit lacks, is ``UnsupportedUnitError`` (P24)."""
+    _known_slot(ams_id, tray_id, holders=external_count)
     if ams_id == EXTERNAL:
         if external_count > 1:
             ids = (EXTERNAL_TRAY + tray_id, EXTERNAL_TRAY + tray_id, 0)
@@ -391,7 +431,9 @@ def ams_get_rfid(ams_id: int, slot_id: int, seq: str) -> dict[str, Any]:
     ``sequence_id`` of ``_send_rfid_command``, L8661):
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L8567-L8648
 
-    No ``M620 R`` fallback (R-7276-11)."""
+    No ``M620 R`` fallback (R-7276-11). Any other unit than ``wire_slot`` takes, or a slot
+    its unit lacks, is ``UnsupportedUnitError`` (P24)."""
+    _known_slot(ams_id, slot_id)
     return {
         "print": {
             "command": "ams_get_rfid",
@@ -413,7 +455,9 @@ def ams_change_filament_load(
     temperatures (L8392-L8396); an AMS-HT is its unit id with slot 0 and itself as target,
     an AMS ``(tray // 4, tray % 4)`` with the global tray as target
     (``change_filament_wire_ids``, L239-L254). ``extruder_id`` only when given
-    (L8415-L8416)."""
+    (L8415-L8416). Any other tray is ``UnsupportedUnitError`` (P24): the A2L AMS-Lite's
+    24-27, for one, goes out as unit 16 in Bambuddy."""
+    _known_global_tray(global_tray)
     if global_tray == EXTERNAL:
         temp = right_temp if right_temp >= UNLOAD_FLOOR else RIGHT_DEFAULT
         ams_id, slot_id, curr, tar = EXTERNAL, 0, temp, temp
@@ -444,7 +488,9 @@ def ams_change_filament_unload(source_tray: int, *, nozzle_temp: int, seq: str) 
 
     Addressed to the source's unit (255 for an external holder, an AMS-HT's own id, an
     AMS ``tray // 4``; L8467-L8471), slot and target 255, at the nozzle's temperature or
-    ``UNLOAD_DEFAULT`` below ``UNLOAD_FLOOR`` (L8516-L8518)."""
+    ``UNLOAD_DEFAULT`` below ``UNLOAD_FLOOR`` (L8516-L8518). Any other tray is
+    ``UnsupportedUnitError``, as for a load (P24)."""
+    _known_global_tray(source_tray)
     if source_tray in (EXTERNAL, EXTERNAL_TRAY):
         ams_id = EXTERNAL
     elif _is_ht(source_tray):

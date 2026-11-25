@@ -4,6 +4,7 @@ Bambuddy's ``bambu_mqtt.py`` at the pinned commit sends it, with a fresh
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import astuple
 from functools import partial
 
@@ -51,7 +52,7 @@ def test_cali_get_shape() -> None:
         (0, 2, 1, (0, 2, 2), (0, 2, 2)),  # AMS 0: local tray 2, global 2
         (1, 3, 1, (1, 3, 3), (1, 7, 3)),  # AMS 1 slot 3: global 7
         (3, 1, 1, (3, 1, 1), (3, 13, 1)),  # AMS 3 slot 1: global 13
-        (4, 1, 1, (4, 1, 0), (4, 1, 0)),  # AMS 4: Bambuddy's single-slot branch
+        (4, 0, 1, (4, 0, 0), (4, 0, 0)),  # AMS 4: Bambuddy's one-slot branch
         (128, 0, 1, (128, 0, 0), (128, 0, 0)),  # AMS-HT
         (255, 0, 1, (255, 254, 0), (254, 254, 0)),  # single external holder
         (255, 0, 2, (254, 0, 0), (254, 254, 0)),  # Ext-L on a printer with two
@@ -145,11 +146,11 @@ def test_cali_set_slot_tray_index(ams_id: int, tray_id: int, cali_tray: int) -> 
 @pytest.mark.parametrize("ams_id", [4, 15])
 def test_cali_set_slot_refuses_an_ams_past_3(ams_id: int) -> None:
     with pytest.raises(UnsupportedUnitError):
-        cali_set_tray(ams_id, 1)
+        cali_set_tray(ams_id, 0)
     with pytest.raises(UnsupportedUnitError):
         extrusion_cali_set_slot(
             ams_id,
-            1,
+            0,
             k_value=0.02,
             nozzle_diameter="0.4",
             filament_id="GFL05",
@@ -159,18 +160,88 @@ def test_cali_set_slot_refuses_an_ams_past_3(ams_id: int) -> None:
         )
 
 
-def test_cali_set_sends_tray_zero_ams_zero_and_no_n_coef() -> None:
+def _cali_sel(ams_id: int, tray_id: int, external_count: int) -> object:
+    return extrusion_cali_sel(
+        ams_id,
+        tray_id,
+        external_count=external_count,
+        cali_idx=3,
+        filament_id="GFL05",
+        nozzle_diameter="0.4",
+        seq="1",
+    )
+
+
+#: A unit by its id and a slot in it: what ``wire_slot``, ``extrusion_cali_sel``,
+#: ``cali_set_tray`` and ``ams_get_rfid`` take.
+UNIT_BUILDERS: list[Callable[[int, int, int], object]] = [
+    lambda ams, tray, count: wire_slot(ams, tray, external_count=count),
+    _cali_sel,
+    lambda ams, tray, count: cali_set_tray(ams, tray),
+    lambda ams, tray, count: ams_get_rfid(ams, tray, "1"),
+]
+
+
+@pytest.mark.parametrize("build", UNIT_BUILDERS)
+@pytest.mark.parametrize("ams_id", [16, 32, 200, -1])  # A2L, AMS 3H, past HT, negative
+def test_an_unknown_unit_is_refused(build: Callable[[int, int, int], object], ams_id: int) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        build(ams_id, 0, 2)
+
+
+@pytest.mark.parametrize("build", UNIT_BUILDERS)
+@pytest.mark.parametrize(
+    ("ams_id", "tray_id", "external_count"),
+    [
+        (0, 7, 2),  # an AMS has slots 0-3: not AMS 1 slot 3
+        (0, 4, 2),
+        (3, -1, 2),
+        (4, 1, 2),  # an AMS 4-15 is one slot
+        (128, 1, 2),  # an AMS-HT is one slot
+        (255, 2, 2),  # two holders at most
+    ],
+)
+def test_a_slot_outside_its_unit_is_refused(
+    build: Callable[[int, int, int], object], ams_id: int, tray_id: int, external_count: int
+) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        build(ams_id, tray_id, external_count)
+
+
+@pytest.mark.parametrize("build", UNIT_BUILDERS[:2])
+@pytest.mark.parametrize(
+    ("tray_id", "external_count"),
+    [
+        (1, 1),  # Ext-R on a printer with one holder
+        (0, 0),  # a printer that reports no holder
+    ],
+)
+def test_a_holder_the_printer_lacks_is_refused(
+    build: Callable[[int, int, int], object], tray_id: int, external_count: int
+) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        build(255, tray_id, external_count)
+
+
+@pytest.mark.parametrize("global_tray", [16, 24, 32, 63, 127, 136, 200, 253, 256, -1])
+def test_load_and_unload_refuse_an_unknown_tray(global_tray: int) -> None:
+    with pytest.raises(UnsupportedUnitError):
+        ams_change_filament_load(global_tray, extruder_id=None, right_temp=0, seq="1")
+    with pytest.raises(UnsupportedUnitError):
+        ams_change_filament_unload(global_tray, nozzle_temp=220, seq="1")
+
+
+def test_cali_set_sends_tray_zero_ams_zero_and_the_command_nozzle() -> None:
     row = KProfileRow(
         cali_idx=-1,
         extruder_id=1,
         nozzle_id="HH00-0.4",
-        nozzle_diameter="0.4",
         filament_id="GFL05",
         name="PLA Basic HF",
         k_value="0.025000",
         setting_id="PF12345678901234567",
     )
-    body = extrusion_cali_set([row, row], "0.4", "11")
+    body = extrusion_cali_set([row, row], "0.6", "11")
     entry = {
         "ams_id": 0,
         "cali_idx": -1,
@@ -179,7 +250,7 @@ def test_cali_set_sends_tray_zero_ams_zero_and_no_n_coef() -> None:
         "k_value": "0.025000",
         "n_coef": "0.000000",
         "name": "PLA Basic HF",
-        "nozzle_diameter": "0.4",
+        "nozzle_diameter": "0.6",
         "nozzle_id": "HH00-0.4",
         "setting_id": "PF12345678901234567",
         "tray_id": 0,
@@ -188,7 +259,7 @@ def test_cali_set_sends_tray_zero_ams_zero_and_no_n_coef() -> None:
         "print": {
             "command": "extrusion_cali_set",
             "filaments": [entry, entry],
-            "nozzle_diameter": "0.4",
+            "nozzle_diameter": "0.6",
             "sequence_id": "11",
         }
     }
