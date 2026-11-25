@@ -1815,8 +1815,14 @@ class Catalogue:
             summaries: list[ModelSummary] = []
             for row in listed:
                 # A row whose model.json Postgres cannot store reads its file, as
-                # `record` does (#7631 review).
-                raw = self._file_raw(row.template_id) if _not_storable(row) else row.meta
+                # `record` does (#7631 review). Its folder gone, it is left out, as
+                # `_list_rows` leaves it out (#7661).
+                if _not_storable(row):
+                    if not self.exists(row.template_id):
+                        continue
+                    raw = self._file_raw(row.template_id)
+                else:
+                    raw = row.meta
                 if raw is None:
                     continue
                 try:
