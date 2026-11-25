@@ -320,6 +320,7 @@ def test_a_runs_queue_is_its_parked_calls_steps_and_requested_grant(client: Test
             "hop_until": "2026-11-14T11:00:00Z",
             "reason": None,
             "proposed": False,
+            "people_only": True,
             "hops": [{**hops[0], "reason": None}],
         }
     ]
