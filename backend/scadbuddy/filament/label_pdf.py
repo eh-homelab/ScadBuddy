@@ -5,7 +5,9 @@ left, centred top to bottom; the text column beside it is centred too. A roll te
 prints one label a page, a sheet template on its grid, and the `sheet` layout of a roll
 template packs the labels on Letter paper (R-7157-7). The text is DejaVu Sans with
 a Noto fallback chain, embedded (`label_fonts.py`; #7216, R-7216-1 to R-7216-3): each line is
-drawn as runs of one font each, measured by `label_fonts.width_mm`."""
+drawn as runs of one font each, measured by `label_fonts.width_mm`. A spool label prints the
+fields its request or the setting chooses (R-7216-9); with `qr` left out, the text column
+takes the QR code's width too."""
 
 from __future__ import annotations
 
@@ -31,7 +33,8 @@ Layout = Literal["roll", "sheet"]
 #: The browser label's QR box and quiet zone (`labelSheet.ts` `QR_MM`, `QUIET_MM`).
 QR_MM: Final = 19.8
 QUIET_MM: Final = 2.6
-#: The text column's right padding.
+#: The text column's right padding, and the room kept above and below its lines when they are
+#: fitted to the label's height (R-7216-10).
 PAD_MM: Final = 1.5
 #: The packed sheet (R-7157-7): US Letter, 10 mm margins, 2 mm gaps, 190 mm of labels across
 #: as the browser's sheet (`LabelsPage.tsx` `printCss`).
@@ -50,7 +53,8 @@ PLAIN: Final[Weight] = "regular"
 #: place's code have a line height of their size (`BIG_LEADING`); every other line is
 #: `LEADING` times its size, and the first line under the big text has `GAP_MM` above it.
 #: The browser label (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use
-#: these same values, with `PAD_MM`, so it keeps the same lines as the PDF.
+#: these same values, with `PAD_MM`, so it keeps the same lines as the PDF. A chosen field
+#: with no value makes no line.
 NUMBER_MM: Final = 9.0
 CODE_MM: Final = 8.0
 PLACE_NAME_MM: Final = 3.2

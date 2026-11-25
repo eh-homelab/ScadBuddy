@@ -34,9 +34,8 @@ DEFAULT_FIELDS: Final[tuple[LabelField, ...]] = ("number", "material", "colour",
 
 
 def in_order(fields: Sequence[LabelField]) -> list[LabelField]:
-    """``fields`` with no repeat, at least one, in ``ALL_FIELDS`` order (R-7216-9)."""
-    if not fields:
-        raise ValueError("choose at least one field")
+    """``fields`` with no repeat, in ``ALL_FIELDS`` order (R-7216-9). ``Fields``'s
+    ``min_length`` refuses an empty list before this runs."""
     if len(set(fields)) != len(fields):
         raise ValueError("a field is named twice")
     return [field for field in ALL_FIELDS if field in fields]
