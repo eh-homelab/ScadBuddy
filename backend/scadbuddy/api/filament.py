@@ -3331,8 +3331,3 @@ async def run_filament_sync(state: StateDep) -> SyncRun:
             code=reason,
         )
     return SyncRun(requested_at=requested_at)
-
-
-async def _spool_or_404(filament: Filament, spool_id: UUID) -> None:
-    if await asyncio.to_thread(filament.spools.get, spool_id) is None:
-        raise _no_spool(spool_id)
