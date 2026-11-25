@@ -155,6 +155,13 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   at a time, a newer pick replaces a waiting one, only the newest save's failure shows) moves into a
   hook, `useSettingSaver`, that the template and `filament_label_output` both use. — The same race
   exists for both settings. — If wrong: the hook is one file to change.
+- **R-7216-17 A format or dpi pick never writes fields the page has not read.** `PUT /settings`
+  replaces the whole `filament_label_output` value. A pick made before `GET /settings` answers
+  shows and downloads at once, but its save waits for the read and then stores the picked format
+  and dpi with the stored `fields`. When the read fails, the page saves nothing and keeps the pick
+  for its downloads. A stored value read after a pick does not undo the pick (R-7216-16). — Task 6's
+  review found that a pick before the read saved the default fields over the stored ones. — If
+  wrong: one branch in the page's save.
 
 - **P1 (pre-flight) Task 1 makes `filament_label_output` whole.** Task 1 stores `{format, dpi,
   fields}`, with `fields` at the R-7216-9 default; Task 3 makes `fields` act. — One shape of the
