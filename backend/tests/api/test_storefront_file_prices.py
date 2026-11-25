@@ -42,8 +42,10 @@ from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     FakeSlicer,
     crud,
     render_body,
+    render_until_done,
     sliced,
 )
+from tests.api.test_storefront_renders import priced as render_priced
 from tests.support.sliced3mf import sliced_3mf
 
 pytestmark = pytest.mark.requires_postgres
@@ -429,6 +431,27 @@ def test_a_design_switched_to_a_file_listing_has_changed(
     publish(crud.api, design["id"])
     for r in _template_reads(crud, design):
         problem_of(r, "listing_changed", 409)
+
+
+def test_the_variant_preview_of_a_switched_listing_is_404(
+    crud: CrudCaller,
+    sliced: type[FakeSlicer],
+    keychain: NativeFile,
+    template: dict[str, Any],
+    pla_red: str,
+) -> None:
+    """A picture of the design the listing showed before: gone, not changed."""
+    design = publish(crud.api, create(crud.api, listing_body(template, pla_red))["id"])
+    job = render_until_done(crud, TOKEN_A, design, {})
+    render_priced(crud, job["id"])
+    [row] = rows(
+        crud, "SELECT variant_key FROM storefront_slice_prices WHERE listing_id = %s", design["id"]
+    )
+    preview = f"/variants/{row['variant_key']}/preview.glb"
+    assert crud.get(preview).status_code == 200
+    save(crud.api, design, **body(keychain, [pla_red], slug=None, commit=None, media_ids=[]))
+    publish(crud.api, design["id"])
+    problem_of(crud.get(preview), "variant_not_found", 404)
 
 
 def test_the_price_shown_is_the_price_charged(

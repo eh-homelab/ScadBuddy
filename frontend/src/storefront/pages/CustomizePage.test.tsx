@@ -1297,11 +1297,16 @@ describe('CustomizePage of a file listing (#6710)', () => {
     )
     const { user } = show(FILE_ID)
     const again = await screen.findByRole('button', { name: 'Load the latest version' })
-    server.use(http.get('/api/store/v1/listings/l4', () => HttpResponse.json({ ...KEYCHAIN, id: FILE_ID })))
+    server.use(
+      http.get('/api/store/v1/listings/l4', () => HttpResponse.json({ ...KEYCHAIN, id: FILE_ID })),
+      http.post('/api/store/v1/renders', () => HttpResponse.json(DONE, { status: 202 })),
+      http.get('/api/store/v1/renders/:id/estimate', () => HttpResponse.json(ESTIMATE)),
+    )
     await user.click(again)
     expect(await screen.findByLabelText('Name')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Part 1/ })).toBeNull()
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The template page settled, debounce included: a read of the file page's would have come.
+    expect(await screen.findByText('$12.40 for one')).toBeInTheDocument()
     expect(prices).toHaveLength(1)
   })
 
@@ -1310,11 +1315,15 @@ describe('CustomizePage of a file listing (#6710)', () => {
     const { user } = show('l1')
     const again = await screen.findByRole('button', { name: 'Load the latest version' })
     const sent = renders()
-    server.use(http.get('/api/store/v1/listings/l1', () => HttpResponse.json({ ...FILE, id: 'l1' })))
+    server.use(
+      http.get('/api/store/v1/listings/l1', () => HttpResponse.json({ ...FILE, id: 'l1' })),
+      http.post('/api/store/v1/listings/l1/price', () => HttpResponse.json({ ...LAST, source: 'slice', price_minor: 700, retry_after: null })),
+    )
     await user.click(again)
     expect(await screen.findByRole('button', { name: /Part 1/ })).toBeInTheDocument()
     expect(screen.queryByLabelText('Name')).toBeNull()
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The file page settled: a render of the template page's would have come.
+    expect(await screen.findByText('$7.00 for one')).toBeInTheDocument()
     expect(sent).toEqual([])
   })
 })
