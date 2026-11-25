@@ -626,6 +626,9 @@ async def test_a_call_let_through_with_no_decision_on_record_runs_nothing(
     run, call_id = await parked(outward)
     await AgentClient(outward.client, run.workflow_id).approve_tool(call_id, approved=True)
     await ended_as(outward, api, run, call_id, approved=False)
+    after = await settled(outward, run, call_id)
+    [step] = [s for s in after.steps if s.call_id == call_id]
+    assert step.error == "NoApprovalError"
 
 
 @pytest.mark.parametrize("body", [DENY, APPROVE], ids=["deny", "approve"])

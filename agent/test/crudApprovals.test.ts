@@ -46,7 +46,7 @@ function service(api: FakeApi, told: unknown[][] = []): ApprovalService {
 function row(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: AID,
-    session_id: SID,
+    session_id: null,
     turn_id: null,
     tool_use_id: 'toolu_1',
     tool: 'print_output',
@@ -76,26 +76,31 @@ function row(extra: Record<string, unknown> = {}): Record<string, unknown> {
   }
 }
 
-const SESSION = { owner_kind: 'browser', owner_id: 'browser', owner_label: 'You', creator_kind: 'browser', creator_id: 'browser', offer_kind: null, offer_id: null }
-
 describe('the approvals through the CRUD routes', () => {
   it("decides on the API, with the decision's span, and hands its events to the log", async () => {
     const api = new FakeApi()
     const told: unknown[][] = []
     const batch = { session_id: SID, events: [{ v: 1, type: 'approval.resolved' }], seqs: [4] }
     const decided = row({ decision: 'approved', decided_by_kind: 'browser', decided_by_id: 'browser', decided_by_label: 'You', decided_at: '2026-11-15T10:01:00Z' })
-    api.answers.push({ approval: row() }, { session: SESSION }, { approval: row() }, { approval: decided, logged: [batch] })
+    api.answers.push({ approval: row() }, { approval: row() }, { approval: decided, logged: [batch] })
     const settled = await service(api, told).decide(ME, AID, true)
     expect(settled.decision).toBe('approved')
-    expect(api.seen.map((s) => s.path)).toEqual([`/approvals/row?id=${AID}`, `/approvals/session?session_id=${SID}`, `/approvals/row?id=${AID}`, '/approvals/settle'])
-    expect(api.seen[3]?.body).toMatchObject({ id: AID, decision: 'approved', by: ME, expiry_s: 300, reason: null })
+    expect(api.seen.map((s) => s.path)).toEqual([`/approvals/row?id=${AID}`, `/approvals/row?id=${AID}`, '/approvals/settle'])
+    expect(api.seen[2]?.body).toMatchObject({ id: AID, decision: 'approved', by: ME, expiry_s: 300, reason: null })
     expect(told).toEqual([[SID, batch.events, [4]]])
+  })
+
+  it("never shows or decides a session's row (#7323)", async () => {
+    const api = new FakeApi()
+    api.answers.push({ approval: row({ session_id: SID }) })
+    await expect(service(api).decide(ME, AID, true)).rejects.toMatchObject({ code: 'not_found' })
+    expect(api.seen.map((s) => s.path)).toEqual([`/approvals/row?id=${AID}`])
   })
 
   it('refuses a decision the SQL path refused before any write is asked for', async () => {
     const api = new FakeApi()
     // Another agent with no approval grant may not decide.
-    api.answers.push({ approval: row() }, { session: { ...SESSION, owner_kind: 'bearer', owner_id: 'agent-2', creator_kind: 'bearer', creator_id: 'agent-2' } })
+    api.answers.push({ approval: row({ requested_by_id: 'agent-2' }) })
     await expect(service(api).decide({ kind: 'bearer', id: 'agent-2', label: 'Agent two' }, AID, true)).rejects.toThrow(ApprovalError)
     expect(api.seen.map((s) => s.path)).not.toContain('/approvals/settle')
   })
@@ -103,7 +108,7 @@ describe('the approvals through the CRUD routes', () => {
   it('answers a decision that lost as a conflict', async () => {
     const api = new FakeApi()
     const denied = row({ decision: 'denied', decided_at: '2026-11-15T10:01:00Z' })
-    api.answers.push({ approval: row() }, { session: SESSION }, { approval: row() }, { approval: null, logged: [] }, { approval: denied })
+    api.answers.push({ approval: row() }, { approval: row() }, { approval: null, logged: [] }, { approval: denied })
     await expect(service(api).decide(ME, AID, true)).rejects.toMatchObject({ code: 'conflict' })
   })
 

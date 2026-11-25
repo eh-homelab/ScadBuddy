@@ -2053,10 +2053,10 @@ async def get_schema(
 #: to change with the bytes. `version` is None wherever git is not available, so
 #: there a replaced thumbnail keeps the key it had; and the model directory and the
 #: outputs are plain files on a volume anyone with access can change. A strong ETag
-#: saves the download instead. Once the template rows are copied (#7317), the tag
-#: names the image's source: the cover's sha256 as its row's last refresh took it,
-#: ``output-<id>`` or ``preview-<id>``. Then a matching ``If-None-Match`` is a 304
-#: that reads no file. Before the copy, and for a row that lags its media
+#: saves the download instead. The tag names the image's source (#7317): the cover's
+#: sha256 as its template row's last refresh took it, ``output-<id>`` or
+#: ``preview-<id>``. Then a matching ``If-None-Match`` is a 304 that reads no file.
+#: For a template with no row and for a row that lags its media
 #: (`TemplateRow.media_newer`), the tag is the sha256 of the bytes served. So a cover
 #: that someone replaces by hand on the volume, with no refresh, keeps its old tag:
 #: a client that holds it gets 304 and the old image until the next refresh or copy
@@ -2085,10 +2085,10 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
         "video -- or, when it has none, the plate image of its first generated "
         "output, or else its default-render preview. 404 when there is none of the "
         "three. Carries a strong `ETag` that names the image and `Cache-Control: "
-        "no-cache`; a matching `If-None-Match` is answered 304 with no body. Once the "
-        "template rows are copied, the tag is the cover's sha256, `output-<id>` or "
-        "`preview-<id>`; before that, and while a template's row lags its media, it "
-        "is the sha256 of the image."
+        "no-cache`; a matching `If-None-Match` is answered 304 with no body. The tag is "
+        "the cover's sha256, `output-<id>` or `preview-<id>`; for a template not yet "
+        "copied to its record, and while its record lags its media, it is the sha256 "
+        "of the image."
     ),
 )
 async def get_thumbnail(

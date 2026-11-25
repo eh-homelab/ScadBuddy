@@ -78,6 +78,7 @@ def _world(tmp_path: Path, pool: PgPool, conninfo: str | None) -> World:
     failures: list[str] = []
     refresh = TemplateRefresh(catalogue, rows, on_failure=failures.append)
     catalogue.refresh = refresh
+    catalogue.rows = rows
     if history is not None:
         history.template_rows = refresh
     image = tmp_path / "image"
@@ -386,7 +387,8 @@ def test_a_read_that_fails_for_a_commit_is_counted_and_the_commit_stands(
 
     world.catalogue.update("demo", ModelPatch(description="kept"))
 
-    assert world.catalogue.record("demo").description == "kept"
+    # The files and the history hold it; the row waits for the next copy run.
+    assert world.catalogue.read_raw_meta("demo")["description"] == "kept"
     assert world.failures == ["commit"]
     head = world.history.head()
     assert world.history.log("demo")[0].commit == head
@@ -409,7 +411,8 @@ def test_a_write_that_fails_for_a_commit_is_counted_and_the_head_stands(
 
     world.catalogue.update("demo", ModelPatch(description="kept"))
 
-    assert world.catalogue.record("demo").description == "kept"
+    # The files and the history hold it; the row waits for the next copy run.
+    assert world.catalogue.read_raw_meta("demo")["description"] == "kept"
     assert world.failures == ["commit"]
     assert world.rows.get("demo") == before
     head = world.history.head()
