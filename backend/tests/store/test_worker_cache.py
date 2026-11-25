@@ -14,11 +14,12 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import DataPaths, result_name, result_path
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import JobResult, PartInfo
@@ -451,3 +452,101 @@ async def test_a_template_activity_another_worker_published_is_reused_not_run_ag
     key = first["key"]
     assert (on_b.dir_for(key) / "n.txt").read_text() == "n"
     assert (key, "job", "j2") in refs_b.held
+
+
+# ── #7318: a node-local cache root ──────────────────────────────────────────────
+
+
+async def test_the_stages_name_a_pieces_files_under_blobs_whatever_the_cache_root(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#7318: a cache outside the data dir (a node-local emptyDir) still names a piece's
+    files ``blobs/<key>/<file>``, the stored form, and `result_path` finds them there."""
+    env = ActivityEnvironment()
+    paths = demo_paths(tmp_path / "w")
+    deps = worker_deps(tmp_path / "w", paths)
+    node = tmp_path / "node" / "blobs"
+    blobs = CachedBlobStore(LocalBlobStore(node), content, max_bytes=1 << 30, min_age=0)
+    on_node = RenderActivities(dataclasses.replace(deps, blobs=blobs))
+    req = piece_request()
+    prepared = await env.run(on_node.prepare, req)
+    main = await env.run(on_node.render_main, req, prepared)
+    await env.run(on_node.render_solids, req, prepared, main)
+    piece = await env.run(on_node.finish_piece, req, prepared, main)
+    assert piece.result.model_3mf == f"blobs/{req.piece_key}/model.3mf"
+    found = result_path(piece.result.model_3mf, blobs_root=blobs.root, data_root=paths.root)
+    assert found == node / req.piece_key / "model.3mf" and found.is_file()
+
+
+def test_a_result_name_outside_the_blobs_is_relative_to_the_data_dir(tmp_path: Path) -> None:
+    data, node = tmp_path / "data", tmp_path / "node"
+    assert result_name(node / "k" / "m.3mf", blobs_root=node, data_root=data) == "blobs/k/m.3mf"
+    shared = data / "blobs"
+    assert result_name(shared / "k" / "m.3mf", blobs_root=shared, data_root=data) == (
+        "blobs/k/m.3mf"
+    )
+    elsewhere = data / "cache" / "render-job" / "j" / "m.3mf"
+    assert result_name(elsewhere, blobs_root=node, data_root=data) == "cache/render-job/j/m.3mf"
+    assert result_path("blobs/k/m.3mf", blobs_root=node, data_root=data) == node / "k" / "m.3mf"
+    assert result_path("cache/render-job/j/m.3mf", blobs_root=node, data_root=data) == elsewhere
+
+
+async def test_read_file_reads_one_file_without_unpacking_a_miss(
+    tmp_path: Path, content: ContentStore, spans: InMemorySpanExporter
+) -> None:
+    """#7318: a small file read whole comes from the stored blob in memory on a miss (no
+    directory is unpacked onto the cache), and from the cached copy on a hit."""
+    a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
+    (a.dir_for(K) / "file").write_bytes(b"the doc")
+    await a.publish(K, scope=SCOPE)
+    spans.clear()
+    assert await b.read_file(K, "file") == b"the doc"
+    assert not (b.root / K).exists()
+    assert await b.fetch(K)
+    assert await b.read_file(K, "file") == b"the doc"
+    assert await b.read_file(K, "absent") is None
+    assert await b.read_file(render_key("never"), "file") is None
+    hits = [
+        (s.attributes or {}).get("scadbuddy.cache.hit")
+        for s in spans.get_finished_spans()
+        if s.name == "blob_cache.read_file"
+    ]
+    assert hits == [False, True, True, None]
+
+
+async def test_read_file_of_a_lost_blob_is_none_and_forgets_it(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
+    (a.dir_for(K) / "file").write_bytes(b"x")
+    await a.publish(K, scope=SCOPE)
+    stat = content.index.get(K)
+    assert stat is not None
+    await content.backend.remove(stat.ref.backend_id)
+    assert await b.read_file(K, "file") is None
+    assert content.index.get(K) is None
+
+
+async def test_local_store_read_file(tmp_path: Path) -> None:
+    local = LocalBlobStore(tmp_path / "blobs")
+    assert await local.read_file("k", "file") is None
+    (local.dir_for("k") / "file").write_bytes(b"x")
+    assert await local.read_file("k", "file") == b"x"
+
+
+async def test_a_fetch_is_a_span_saying_hit_or_miss(
+    tmp_path: Path, content: ContentStore, spans: InMemorySpanExporter
+) -> None:
+    """#7318: a piece cache hit or miss shows in Tempo, not only in the counter."""
+    a, b = worker(tmp_path / "a", content), worker(tmp_path / "b", content)
+    (a.dir_for(K) / "model.3mf").write_bytes(b"3mf")
+    await a.publish(K, scope=SCOPE)
+    spans.clear()
+    assert await b.fetch(K)
+    assert await b.fetch(K)
+    found = [
+        (s.attributes or {}).get("scadbuddy.cache.hit")
+        for s in spans.get_finished_spans()
+        if s.name == "blob_cache.fetch"
+    ]
+    assert found == [False, True]

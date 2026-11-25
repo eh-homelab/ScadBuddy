@@ -13,20 +13,18 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import psycopg
 import pytest
 import pytest_asyncio
-from fastapi import Depends, FastAPI
 from starlette.requests import Request
 
 from scadbuddy.agent_changes import hub as hub_module
-from scadbuddy.agent_changes.component import CHANGES, chain_signals
+from scadbuddy.agent_changes.component import chain_signals
 from scadbuddy.agent_changes.hub import (
     CHANNELS,
     GAP,
@@ -37,16 +35,9 @@ from scadbuddy.agent_changes.hub import (
     StreamsFullError,
     frames,
 )
-from scadbuddy.api import crud_agent_changes, crud_areas
-from scadbuddy.auth.check import auth_check
-from scadbuddy.auth.component import AUTH
-from scadbuddy.auth.gate import CALLER_SCOPE_KEY, AuthGate
+from scadbuddy.api import crud_agent_changes
+from scadbuddy.auth.gate import CALLER_SCOPE_KEY
 from scadbuddy.auth.models import Service
-from scadbuddy.auth.service_credentials import (
-    InProcessProvider,
-    ServiceCaller,
-    ServiceCredentialStore,
-)
 from scadbuddy.core.events import (
     PG_CHANNEL,
     AgentOperationEvent,
@@ -54,17 +45,10 @@ from scadbuddy.core.events import (
     SessionBusEvent,
     encode_event,
 )
-from scadbuddy.core.metrics import Metrics
-from scadbuddy.core.pg_events import LoggedEvent, PgNotifyEventBus, Replay
-from scadbuddy.core.pg_listener import PgListener
-from scadbuddy.core.problems import install_problem_handlers
-from scadbuddy.crud import listener as crud_listener
-from scadbuddy.render.pg_store import migrate
-from tests.conftest import open_pg_pool
-from tests.crud.crud_support import _NoSessions, _Noted
+from scadbuddy.core.pg_events import LoggedEvent, Replay
+from tests.crud.crud_support import PROMPTLY, Served, Sse, served_changes
 
 BASE = "/api/v1/internal/crud/agent"
-PROMPTLY = 10.0
 
 
 def _model(slug: str) -> ModelEvent:
@@ -366,82 +350,10 @@ async def test_a_fresh_stream_starts_where_it_subscribed_and_never_moves_back() 
 # -- served, over Postgres ----------------------------------------------------------------
 
 
-@dataclass
-class Served:
-    url: str
-    bus: PgNotifyEventBus
-    hub: ChangeHub
-    token: Callable[[ServiceCaller], dict[str, str]]
-    conninfo: str
-
-
 @pytest_asyncio.fixture
 async def served(pg_conninfo: str) -> AsyncIterator[Served]:
-    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
-        migrate(conn)
-    pool = open_pg_pool(pg_conninfo)
-    credentials = ServiceCredentialStore(pool)
-    listener = PgListener(pg_conninfo, check_interval=1.0, backoff=0.05, max_backoff=0.2)
-    bus = PgNotifyEventBus(pg_conninfo, listener=listener)
-    hub = ChangeHub(per_credential=2)
-    hub.attach(listener, bus)
-    await bus.start()
-    parts: dict[Any, Any] = {
-        AUTH: SimpleNamespace(
-            would_refuse=_Noted(),
-            verifiers={},
-            credentials=credentials,
-            core=SimpleNamespace(metrics=Metrics()),
-        ),
-        CHANGES: hub,
-    }
-    app = FastAPI(dependencies=[Depends(auth_check)])
-    app.state.scadbuddy = SimpleNamespace(
-        settings=SimpleNamespace(auth_mode="enforce"),
-        components=SimpleNamespace(get=lambda key: parts[key]),
-        events=bus,
-    )
-    app.include_router(crud_agent_changes.router, prefix="/api/v1")
-    app.include_router(crud_areas.router, prefix="/api/v1")
-    install_problem_handlers(app)
-    app.add_middleware(AuthGate, sessions=lambda: _NoSessions(), credentials=lambda: credentials)
-    await crud_listener.start(app, 0)
-    port = crud_listener.crud_listener_port(app)
-
-    def token(caller: ServiceCaller = "agent") -> dict[str, str]:
-        minted = InProcessProvider(caller, lambda: credentials).token()
-        assert minted is not None
-        return {"authorization": f"Bearer {minted}"}
-
-    try:
-        yield Served(f"http://127.0.0.1:{port}", bus, hub, token, pg_conninfo)
-    finally:
-        hub.shutdown()
-        await crud_listener.stop(app)
-        await bus.aclose()
-        pool.close()
-
-
-class Sse:
-    """One open stream, read a frame at a time."""
-
-    def __init__(self, response: httpx.Response) -> None:
-        self.response = response
-        self._lines = response.aiter_lines()
-
-    async def next(self, timeout: float = PROMPTLY) -> dict[str, Any]:
-        fields: dict[str, Any] = {}
-        deadline = time.monotonic() + timeout
-        while True:
-            line = await asyncio.wait_for(
-                anext(self._lines), max(0.01, deadline - time.monotonic())
-            )
-            if line == "" and fields:
-                return fields
-            if not line or line.startswith(":"):
-                continue
-            name, _, value = line.partition(": ")
-            fields[name] = json.loads(value) if name == "data" else value
+    async with served_changes(pg_conninfo, crud_agent_changes.router, per_credential=2) as it:
+        yield it
 
 
 async def _open(

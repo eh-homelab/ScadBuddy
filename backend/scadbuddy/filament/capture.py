@@ -3,8 +3,10 @@
 and ``ams_reading`` events, with the spool's place following the tray.
 
 `reconcile` compares each tray of the report with the spools in that tray's place (a
-location with ``printer_id`` set). The spool the tray holds (`FilamentInventory.holder_on`:
-its tag, else the placed spool whose fingerprint still matches) is the tray's. Any other
+location with ``printer_id`` set). The spool the tray holds is the tray's: its tag's,
+read through `tags.seen_on` as a phone's reading is (#7273), which marks the tag seen by
+the AMS; else the placed spool whose fingerprint still matches
+(`FilamentInventory.holder_on`). Any other
 spool in the place is ``unloaded`` and moves back to the place it came from; the holder
 is ``loaded`` and moves in. Every event is timed at the report (``seen_at``), never the
 clock, so a resent report books nothing twice and a late one never reorders the ledger.
@@ -40,15 +42,15 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_trays
-from scadbuddy.filament import ledger, prints
+from scadbuddy.filament import ledger, prints, tags
 from scadbuddy.filament import models as m
-from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.inventory import FilamentInventory, FoundBy
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import RUNNING, is_fresh, status_from_report
 from scadbuddy.printers.store import PrinterStore
-from scadbuddy.spools.models import clean_tag_uid, clean_tray_uuid
+from scadbuddy.spools.models import SeenTray, clean_tag_uid, clean_tray_uuid
 
 Conn = Connection[DictRow]
 logger = logging.getLogger(__name__)
@@ -246,6 +248,31 @@ def _holders(
     return places, current, locked
 
 
+def _holder(conn: Conn, printer: UUID, seen: SeenTray) -> tuple[UUID | None, FoundBy | None]:
+    """The spool ``seen`` holds, as `FilamentInventory.holder_on` finds it, but a tray with
+    a key is read through `tags.seen_on` first, as a phone's reading is (#7273 G3), so
+    its tag is marked seen by the AMS. The mark skips a locked tag row: the caller holds
+    spools, and a bind locks the tag before its spools. `tags.seen_on` looked the keys up
+    already, so a miss goes on to the fingerprint only (`FilamentInventory.holder_by_link`)."""
+    if seen.tray_uuid is None and seen.tag_uid is None:
+        return FilamentInventory.holder_on(conn, printer, seen)
+    _, holder = tags.seen_on(
+        conn,
+        tags.TagRead(
+            source="ams",
+            uid=seen.tag_uid,
+            tray_uuid=seen.tray_uuid,
+            printer_id=printer,
+            ams_id=seen.ams_id,
+            tray_id=seen.tray_id,
+        ),
+    )
+    if holder is not None:
+        return holder, "tag"
+    linked = FilamentInventory.holder_by_link(conn, printer, seen)
+    return (None, None) if linked is None else (linked, "link")
+
+
 def reconcile(
     conn: Conn, printer_id: str, report: Mapping[str, Any], seen_at: datetime, *, actor: str
 ) -> CaptureResult:
@@ -272,9 +299,7 @@ def reconcile(
             continue
         ams_id, tray_id = key
         seen = filled.get(key)
-        holder, found_by = (
-            FilamentInventory.holder_on(conn, printer, seen) if seen is not None else (None, None)
-        )
+        holder, found_by = _holder(conn, printer, seen) if seen is not None else (None, None)
         place = places.get(key)
         here = current.get(place, []) if place is not None else []
         loaded = False

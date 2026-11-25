@@ -37,6 +37,7 @@ function row(fields: Partial<PrinterRow> & Pick<PrinterRow, 'id' | 'serial' | 'n
     has_access_code: false,
     preferred_path: 'auto',
     lan_move_pending: false,
+    camera_recording: true,
     created_at: STAMP,
     updated_at: STAMP,
     ...fields,

@@ -19,6 +19,8 @@ expect "true false false true false" test-fixtures/prime-tower/tower-choice.json
 expect "true false false true false" e2e-stack/compose.yaml
 expect "true false false true false" deploy/security/seccomp/profile-fetch.json
 expect "true false false true false" deploy/security/apparmor/scadbuddy-intake-sandbox
+expect "true false false true false" deploy/camera/mediamtx-relay.yml
+expect "true false false true false" backend/scadbuddy/camera/recorder.py
 expect "false false false false false" deploy/CLAUDE.md
 expect "true false true true false" workers/rust/vectors/slice_plate.json
 expect "true false false true false" frontend/page-csp.txt

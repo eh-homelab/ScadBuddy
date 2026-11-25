@@ -384,6 +384,24 @@ def test_every_registry_write_announces_the_printer(client: TestClient) -> None:
     assert [(e.kind, e.printer_id) for e in seen] == [("printer.changed", pid)] * 3
 
 
+def test_patching_the_camera_toggle_announces_the_printer(client: TestClient) -> None:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    seen: list[PrinterEvent] = []
+    publish = state.events.publish
+
+    def record(event: Any) -> None:
+        if isinstance(event, PrinterEvent):
+            seen.append(event)
+        publish(event)
+
+    state.events.publish = record  # type: ignore[method-assign]
+    pid = create(client)["id"]
+    seen.clear()
+    patched = client.patch(f"/api/v1/printers/{pid}", json={"camera_recording": False})
+    assert patched.json()["camera_recording"] is False
+    assert [(e.kind, e.printer_id) for e in seen] == [("printer.changed", pid)]
+
+
 # ── #4186 review ─────────────────────────────────────────────────────────────────────
 
 

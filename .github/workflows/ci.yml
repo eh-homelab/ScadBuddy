@@ -2370,6 +2370,116 @@ jobs:
             -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
             xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
 
+  # The camera relay's and recorder's images (#7328, docs/features/printer-cameras.md):
+  # the Dockerfile's `camera-relay` and `camera-recorder` targets, checked as the cluster
+  # runs them. The build itself checks the pinned MediaMTX's version and that neither
+  # process imports Postgres code. Then: uid 10001, MediaMTX and curl (its hooks run curl)
+  # in both, TZ=UTC in the recorder, each controller's refusals (exit 2), and each MediaMTX
+  # started on its own config with its control API answering on localhost. The relay's
+  # read user comes from MTX_AUTHINTERNALUSERS_0_USER/_PASS, as in the Deployment: a
+  # DESCRIBE with that user gets past auth (404, no stream), a wrong password gets 401.
+  # In the `image` lane, and in `CI Summary`'s needs.
+  camera-image:
+    name: Camera images build and smoke
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v4
+        # Google's Docker Hub mirror: Docker Hub refuses some anonymous pulls (#3370).
+        with:
+          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
+
+      # build-image.yml's `camera` job shares the scope; mode=min (the Actions cache is
+      # at its ceiling, #743).
+      - name: Build the camera relay image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: camera-relay
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-camera-relay:ci
+          cache-from: type=gha,scope=camera
+          cache-to: type=gha,scope=camera,mode=min
+
+      # No cache-to: a second write to the scope would replace the relay's cache entry. The
+      # recorder shares every layer of the relay's but its config COPY and its ENV TZ, which
+      # take no time to build.
+      - name: Build the camera recorder image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: camera-recorder
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-camera-recorder:ci
+          cache-from: type=gha,scope=camera
+
+      - name: Camera smoke
+        run: |
+          set -euo pipefail
+          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci; do
+            test "$(docker run --rm "$image" id -u)" = 10001
+            test "$(docker run --rm "$image" mediamtx --version)" = v1.21.4
+            docker run --rm "$image" curl --version | head -n 1
+          done
+          test "$(docker run --rm scadbuddy-camera-recorder:ci printenv TZ)" = UTC
+          status=0
+          docker run --rm --network none scadbuddy-camera-relay:ci > "$RUNNER_TEMP/relay.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/relay.log"
+          test "$status" -eq 2
+          grep -q 'setting api_internal_url: Field required' "$RUNNER_TEMP/relay.log"
+          status=0
+          docker run --rm --network none -e TZ=Europe/Paris -e SCADBUDDY_DATABASE_URL=x \
+            scadbuddy-camera-recorder:ci > "$RUNNER_TEMP/recorder.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/recorder.log"
+          test "$status" -eq 2
+          grep -q 'SCADBUDDY_DATABASE_URL is set' "$RUNNER_TEMP/recorder.log"
+          grep -q 'so TZ must be UTC' "$RUNNER_TEMP/recorder.log"
+
+      - name: MediaMTX on each image's config
+        run: |
+          set -euo pipefail
+          docker run -d --name relay-mtx --network none \
+            -e MTX_AUTHINTERNALUSERS_0_USER=reader -e MTX_AUTHINTERNALUSERS_0_PASS=ci-secret \
+            scadbuddy-camera-relay:ci mediamtx /etc/mediamtx/mediamtx.yml
+          docker run -d --name recorder-mtx --network none \
+            scadbuddy-camera-recorder:ci mediamtx /etc/mediamtx/mediamtx.yml
+          for c in relay-mtx recorder-mtx; do
+            for _ in $(seq 30); do
+              docker exec "$c" curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list && break
+              sleep 1
+            done
+            docker logs "$c"
+            docker exec "$c" curl -fsS http://127.0.0.1:9997/v3/paths/list
+          done
+          docker exec relay-mtx curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"source":"publisher"}' http://127.0.0.1:9997/v3/config/paths/add/ci
+          docker exec -i relay-mtx python - <<'PY'
+          import base64, socket, sys
+          cases = [("right", "reader:ci-secret", b"404"), ("wrong", "reader:wrong", b"401"), ("none", None, b"401")]
+          for label, cred, code in cases:
+              s = socket.create_connection(("127.0.0.1", 8554))
+              head = "DESCRIBE rtsp://127.0.0.1:8554/ci RTSP/1.0\r\nCSeq: 1\r\n"
+              if cred:
+                  head += "Authorization: Basic " + base64.b64encode(cred.encode()).decode() + "\r\n"
+              s.sendall((head + "\r\n").encode())
+              status = s.recv(200).split(b"\r\n")[0]
+              s.close()
+              print(label, status.decode())
+              if status.split(b" ")[1] != code:
+                  sys.exit(f"{label}: want {code.decode()}, got {status.decode()}")
+          PY
+
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
   # backend/openapi.json and both schema.d.ts files are generated at build and
@@ -2849,7 +2959,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, freshness, go-client]
+    needs: [layout, lint, markdown, frontend, frontend-unit, frontend-e2e, frontend-e2e-split, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, rust, slicer-image, profile-fetch-image, camera-image, freshness, go-client]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -2890,6 +3000,7 @@ jobs:
           RUST_RESULT: ${{ needs.rust.result }}
           SLICER_IMAGE_RESULT: ${{ needs.slicer-image.result }}
           PROFILE_FETCH_IMAGE_RESULT: ${{ needs.profile-fetch-image.result }}
+          CAMERA_IMAGE_RESULT: ${{ needs.camera-image.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
@@ -2975,6 +3086,7 @@ jobs:
           assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$need_agent_durable"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
           assert "Profile-fetch image build and driver tests" "$PROFILE_FETCH_IMAGE_RESULT" "$need_image"
+          assert "Camera images build and smoke"          "$CAMERA_IMAGE_RESULT" "$need_image"
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$(need "$has_models")"

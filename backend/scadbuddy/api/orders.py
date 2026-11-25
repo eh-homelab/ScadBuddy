@@ -66,7 +66,6 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives, mirror_archives
 from scadbuddy.orders.attempt_media import start_media
-from scadbuddy.orders.bambuddy import ServedLibrary
 from scadbuddy.orders.component import OrdersComponent, OrdersDep
 from scadbuddy.orders.costs import (
     CostRates,
@@ -160,6 +159,7 @@ from scadbuddy.orders.report import (
     profit_report,
 )
 from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
+from scadbuddy.orders.served_library import ServedLibrary
 from scadbuddy.orders.spool_import import density_for, inventory_groups
 from scadbuddy.orders.spool_import import fill_densities as fill_densities_in
 from scadbuddy.orders.spool_import import import_spools as import_spools_into

@@ -1063,7 +1063,7 @@ export function CustomizePage() {
   }
 
   // Reopened inputs wait for their migration: the panel must not paint defaults first.
-  if (schemaState.loading || migrating) {
+  if (schemaState.loading || migrating || (schemaState.error && version && modelState.loading)) {
     return (
       <div
         role="status"
@@ -1090,6 +1090,30 @@ export function CustomizePage() {
       <PageProblem title="Could not load this model" message={schemaState.error.message}>
         <Button type="button" onClick={schemaState.reload}>
           Try again
+        </Button>
+        <Button asChild variant="ghost">
+          <Link to="/">Back to models</Link>
+        </Button>
+      </PageProblem>
+    )
+  }
+
+  const backToCurrent = () => {
+    const next = new URLSearchParams(search)
+    next.delete('version')
+    setSearch(next, { replace: true })
+  }
+
+  // #7314 — a link to a version the history does not have, of a model that is here. A
+  // deleted model's is a 404 too, so this waits for the model's own answer (below).
+  if (schemaState.error && version && modelState.data) {
+    return (
+      <PageProblem
+        title="That version is not here"
+        message={`This model has no revision ${version.slice(0, 7)}. Its current version is available.`}
+      >
+        <Button type="button" onClick={backToCurrent}>
+          Back to current
         </Button>
         <Button asChild variant="ghost">
           <Link to="/">Back to models</Link>
@@ -1305,11 +1329,7 @@ export function CustomizePage() {
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => {
-                const next = new URLSearchParams(search)
-                next.delete('version')
-                setSearch(next, { replace: true })
-              }}
+              onClick={backToCurrent}
             >
               Back to current
             </Button>

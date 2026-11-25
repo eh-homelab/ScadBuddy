@@ -193,7 +193,7 @@ export const printerSlotTools: Tool[] = [
     description:
       "Write Bambuddy's label of an AMS unit (0-15, or an AMS-HT 128-135), then name ScadBuddy's place of the unit " +
       "the same. A refused Bambuddy write changes nothing; `place_problem` `no_ams_kind` says the place was not " +
-      'named (no location kind is marked AMS). 1-100 printable characters. Bambuddy refuses it to every API key while its auth ' +
+      'named (no location kind is marked AMS), `no_printer` that the printer was deleted meanwhile. 1-100 printable characters. Bambuddy refuses it to every API key while its auth ' +
       'is on. Only what the user asks. Writes Bambuddy and ScadBuddy; approved first.',
     input: z.object({
       printer_id: printerId,

@@ -50,6 +50,22 @@ describe('Filament (#6262)', () => {
     await waitFor(() => expect(mockSettings()).toMatchObject({ filament_burn_window_days: 14, filament_lead_time_days: 21, filament_safety_margin_days: 10 }))
   })
 
+  it('saves the tag format for new tags', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const format = within(filament).getByRole('combobox', { name: 'Tag format for new tags' })
+    expect(format).toHaveTextContent('OpenSpool')
+    await choose(user, format, 'OpenTag3D')
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_tag_format).toBe('opentag3d'))
+  })
+
+  it('refuses a tag format that is neither OpenSpool nor OpenTag3D, as the API does', async () => {
+    await expect(api.putSettings({ filament_tag_format: 'tigertag' as 'openspool' })).rejects.toMatchObject({ status: 422 })
+    expect(mockSettings().filament_tag_format).toBe('openspool')
+  })
+
   const DEFAULT_SYNC = { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' } as const
 
   it('offers the four directions for each of the six data types', async () => {

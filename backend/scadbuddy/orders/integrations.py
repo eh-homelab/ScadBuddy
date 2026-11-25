@@ -1,13 +1,15 @@
 """`OrderIntegrations`: the one seam between orders and Bambuddy (#4253, spec 2026-10-18
 §8, Rulings 3 and 7).
 
-Everything orders does with Bambuddy is in ``orders/bambuddy.py``, reached only through
-this seam. Without ``bambuddy_url`` (F10) the seam is :data:`NOT_LINKED`, which does
-nothing and answers "not linked", so a deployment with no Bambuddy (the native path,
-#3818) is missing these mirrors and nothing else. :func:`choose` picks the seam for the
-running settings; ``OrdersComponent.integrations`` re-chooses it whenever the running
-``bambuddy_url`` differs from the one it chose for, which ``api/runtime.py`` re-applies on
-every ``settings.changed``, so setting the URL later lights it up without a restart.
+Everything orders does with Bambuddy is in ``orders/bambuddy.py``, reached through this
+seam, and for a library file and a quote's slice through ``orders/served_library.py`` and
+``orders/quote_preview.py`` (#7467). Without ``bambuddy_url`` (F10) the seam is
+:data:`NOT_LINKED`, which does nothing and answers "not linked", so a deployment with no
+Bambuddy (the native path, #3818) is missing these mirrors and nothing else.
+:func:`choose` picks the seam for the running settings; ``OrdersComponent.integrations``
+re-chooses it whenever the running ``bambuddy_url`` differs from the one it chose for,
+which ``api/runtime.py`` re-applies on every ``settings.changed``, so setting the URL later
+lights it up without a restart.
 """
 
 from __future__ import annotations

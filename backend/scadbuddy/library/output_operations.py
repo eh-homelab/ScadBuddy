@@ -50,7 +50,7 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.render.runner import OpenSCADError, with_defaults
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.store.content import template_title
 from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.workflows.models import ArrangeInputs
@@ -169,7 +169,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # A piece the store no longer has (aged out, or the Bambuddy store unreachable)
         # is not fetched, and the copy would fail with a server path in its message.
         files = (result.model_3mf, result.preview_glb)
-        if not all((state.outputs.paths.root / name).is_file() for name in files):
+        root = state.outputs.paths.root
+        if not all(result_file(blobs, root, name).is_file() for name in files):
             raise _gone(job)
         files_dir = None
         if chosen is not None and chosen.files_key is not None:
@@ -217,6 +218,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     inputs={} if arranged else inputs,
                     index=index,
                     files_dir=files_dir,
+                    blobs_root=blobs.root,
                     arranged_from=sources,
                     output_id=output_id,
                     print_settings=print_settings,

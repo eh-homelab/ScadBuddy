@@ -298,7 +298,12 @@ function UnitBlock({
     setSaving(true)
     try {
       const saved = clear ? await api.clearAmsLabel(row.id, unit.ams_id) : await api.setAmsLabel(row.id, unit.ams_id, label.trim())
-      const place = saved.place_problem === 'no_ams_kind' ? ' Its place was not named: no location kind is marked AMS.' : ''
+      const place =
+        saved.place_problem === 'no_ams_kind'
+          ? ' Its place was not named: no location kind is marked AMS.'
+          : saved.place_problem === 'no_printer'
+            ? ' Its place was not named: the printer was deleted meanwhile.'
+            : ''
       onLabelled(clear ? `Cleared the label of ${unit.unit}.${place}` : `Labelled ${unit.unit} “${label.trim()}”.${place}`, place !== '')
       setRenaming(false)
     } catch (cause) {

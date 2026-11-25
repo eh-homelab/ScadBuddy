@@ -1,0 +1,54 @@
+# MediaMTX in the camera relay's pod (printer camera recording, phase 1). The relay process
+# (`backend/scadbuddy/camera/relay.py`) adds one path per printer through the control API,
+# which listens on localhost only. The recorders read those paths over RTSP on :8554 with
+# the one read user. Keys: https://raw.githubusercontent.com/bluenviron/mediamtx/main/mediamtx.yml
+#
+# The read user comes from the environment. MediaMTX reads no variables inside this file;
+# it overrides a key from `MTX_<KEY>`, and a list entry by its index
+# (https://mediamtx.org/docs/features/configuration). So the pod sets
+#   MTX_AUTHINTERNALUSERS_0_USER=$(MTX_READ_USER)
+#   MTX_AUTHINTERNALUSERS_0_PASS=$(MTX_READ_PASS)
+# Without them, entry 0 keeps the placeholder below: its pass is the sha256 of a random
+# value that nobody kept, so no client can read.
+
+logLevel: info
+
+# The timeout of read operations, at MediaMTX's default: the v1.21.4 release's mediamtx.yml
+# (https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml). Pinned here, so an
+# upstream change of the default cannot change it, as in mediamtx-recorder.yml.
+readTimeout: 10s
+
+api: yes
+apiAddress: 127.0.0.1:9997
+metrics: yes
+metricsAddress: 127.0.0.1:9998
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+moq: no
+
+authMethod: internal
+authInternalUsers:
+  # Entry 0: the recorders' read user (see above).
+  - user: read-user-unset
+    pass: sha256:Wbdt6Pfz3S83QDssMcx0gtQt06QotiJ7mTUszfkUehU=
+    ips: []
+    permissions:
+      - action: read
+        path:
+  # The relay process, from localhost only: the control API and the metrics.
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+      - action: metrics
+
+# The relay adds every path through the API. A path that is not configured cannot be read
+# or published.
+paths: {}

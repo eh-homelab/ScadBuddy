@@ -4,10 +4,10 @@ that reaches ``bambuddy.client`` (``tests/test_orders_bambuddy_seam.py`` checks 
 :class:`BambuddyIntegrations` is the ``OrderIntegrations`` seam with ``bambuddy_url`` set
 (``orders/integrations.py``): the spool import's tray assignments (its spools are
 ScadBuddy's own since #6262), the order's nested projects (§8.1) and an attempt's
-archives (§8.2). The functions below it are
-the quote's slice through Bambuddy's slicer (#4250 Ruling 2), the print dialog's own
-background slice, which the quote takes on whichever slicer the stack has; they are
-here so that ``orders/`` has one door to the client.
+archives (§8.2). Below it are what a quote's slice on Bambuddy's path needs
+(``quote_preview.py``, #4250 Ruling 2) and Bambuddy's side of the library that serves
+(``served_library.py``). They are here so that ``orders/`` has one door to the client, and
+what needs no Bambuddy loads this module only where it takes Bambuddy's branch (#7467).
 """
 
 from __future__ import annotations
@@ -15,32 +15,27 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from contextlib import aclosing, asynccontextmanager
+from collections.abc import AsyncIterator, Sequence
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
 
-from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for, maybe_client
+from scadbuddy.bambuddy.client import BambuddyClient, Operation, client_for
 from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import (
     FINISH_PHOTO_PREFIX,
     ArchiveDetail,
     FolderCreate,
-    LibraryFile,
     PrinterMaintenanceOverview,
     SliceJob,
     SpoolAssignment,
 )
-from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
-from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.print_source import LibrarySource, PrintSource
+from scadbuddy.bambuddy.preview import preview_job
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
 from scadbuddy.bambuddy.send import Sink, upload_raw
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.bambuddy_pull import read_assignments
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
-from scadbuddy.orders.held_print import STOREFRONT_FOLDER, NativeShelf, Shelf, Shelved
 from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
@@ -50,12 +45,8 @@ from scadbuddy.orders.integrations import (
     MaintenanceTask,
     MediaTooLargeError,
 )
-from scadbuddy.print_library.ids import is_native_id
-from scadbuddy.print_library.reads import NativeCopies, NativeReads, reads_for, served_reads
-
-if TYPE_CHECKING:
-    from scadbuddy.orders.storefront.held_file import HeldFile
-    from scadbuddy.print_library.native import NativeLibrary
+from scadbuddy.orders.served_library import STOREFRONT_FOLDER, Shelved
+from scadbuddy.print_library.reads import LibraryReads, served_reads
 
 logger = logging.getLogger(__name__)
 
@@ -250,53 +241,14 @@ class BambuddyIntegrations:
 # -- the quote's slice through Bambuddy's slicer (#4250) ---------------------------------
 
 
-async def start_quote_preview(
-    source: PrintSource,
-    settings: StoredSettings,
-    uploads: BambuddyUploadStore,
-    request: PrintRunRequest,
-    *,
-    lan: bool,
-    **kwargs: Any,
-) -> list[PreviewStarted]:
-    """``start_preview_plates`` with the client a run on Bambuddy's path needs, or none
-    for a printer the LAN reaches (plan 2026-10-18 D3)."""
-    async with maybe_client(settings, native=lan) as client:
-        return await start_preview_plates(client, source, settings, uploads, request, **kwargs)
+#: The client's type, for ``quote_preview.py``: no other file of ``orders/`` names
+#: ``bambuddy.client``.
+type SliceClient = BambuddyClient
 
 
-async def start_library_quote_preview(
-    file_id: int,
-    settings: StoredSettings,
-    uploads: BambuddyUploadStore,
-    request: PrintRunRequest,
-    *,
-    lan: bool,
-    native_reads: NativeCopies | None,
-    held: HeldFile | None = None,
-    **kwargs: Any,
-) -> list[PreviewStarted]:
-    """A library file item's slice (#5544): :func:`start_quote_preview` of the file, read
-    as the dialog's background slice of a library file reads it (``bambuddy/operations.py``
-    ``preview_run``): its slots from the download it uploads (#2550), and a native run's
-    copy into the native library. A sliced file is refused there (422): it has nothing to
-    slice. With ``held`` (a file listing's price, #6710 §7.3.1) the file is read from its
-    held copy in place of the library, and its copies name the copy's version; the rest of
-    the slice is the same."""
-    async with maybe_client(settings, native=lan) as client:
-        source = await LibrarySource.load(
-            client,
-            file_id,
-            uploads=uploads,
-            settings=settings,
-            read_own=True,
-            files=held if held is not None else reads_for(file_id, client, native_reads),
-            native=native_reads if lan else None,
-            held=held is not None,
-        )
-        return await start_preview_plates(
-            client, source, settings, uploads, request, native_reads=native_reads, **kwargs
-        )
+def slice_client(settings: StoredSettings) -> AbstractAsyncContextManager[SliceClient]:
+    """The client a quote's slice on Bambuddy's path starts with (``quote_preview.py``)."""
+    return client_for(settings)
 
 
 async def quote_preview_job(
@@ -321,63 +273,19 @@ async def download_sliced(settings: StoredSettings, file_id: int, limit: int) ->
     return bytes(data)
 
 
-# -- a library file item's file (#5544) --------------------------------------------------
+# -- Bambuddy's library, when it serves (``served_library.py``) ---------------------------
 
 
-class ServedLibrary:
-    """``orders/quote.py`` ``LibraryFiles`` over the library that serves (#5544), read as
-    ``POST /print/library/{file_id}/run`` reads it (``check_served``, ``served_reads``):
-    ScadBuddy's own on ``library_backend=native``, else Bambuddy's. A file of the other
-    library is not there, as that route's 404 says."""
-
-    def __init__(self, settings: SettingsStore, native: NativeReads) -> None:
-        self.settings = settings
-        self.native = native
-
-    async def file(self, file_id: int) -> LibraryFile | None:
-        """The file, or None when the library that serves does not have it (deleted,
-        trashed, or the other library's). Any other failure raises."""
-        native = await self.native()
-        if is_native_id(file_id) != (native is not None):
-            return None
-        stored = await asyncio.to_thread(self.settings.load)
-        async with maybe_client(stored, native=native is not None) as client:
-            try:
-                return await served_reads(file_id, client, native).library_file(file_id)
-            except ApiError as error:
-                if error.status == 404:
-                    return None
-                raise
-
-    async def exists(self, file_id: int) -> bool:
-        return await self.file(file_id) is not None
-
-    async def download(self, file_id: int) -> AsyncGenerator[bytes]:
-        """The file's bytes, from the library that serves (a storefront file listing's
-        publish, #6710 §5.1)."""
-        native = await self.native()
-        stored = await asyncio.to_thread(self.settings.load)
-        async with maybe_client(stored, native=native is not None) as client:
-            reads = served_reads(file_id, client, native)
-            async with aclosing(reads.download_library_file(file_id)) as chunks:
-                async for chunk in chunks:
-                    yield chunk
-
-    async def colours(self, file_id: int) -> dict[int, str]:
-        """The file's slot colours by slot id (from 1), as its filament requirements name
-        them; empty when they cannot be read (the slots are then grey)."""
-        native = await self.native()
-        stored = await asyncio.to_thread(self.settings.load)
-        try:
-            async with maybe_client(stored, native=native is not None) as client:
-                needs = await served_reads(file_id, client, native).filament_requirements(file_id)
-        except ApiError:
-            return {}
-        return {slot.slot_id: slot.color for slot in needs.filaments if slot.color}
+@asynccontextmanager
+async def bambuddy_reads(settings: StoredSettings, file_id: int) -> AsyncIterator[LibraryReads]:
+    """Bambuddy's library, for ``orders/served_library.py`` ``ServedLibrary``'s read of
+    ``file_id``; a native id is its 404."""
+    async with client_for(settings) as client:
+        yield served_reads(file_id, client, None)
 
 
 class BambuddyShelf:
-    """``orders/held_print.py`` ``Shelf`` over Bambuddy's library (#6710 §10.2). Its
+    """``orders/served_library.py`` ``Shelf`` over Bambuddy's library (#6710 §10.2). Its
     listing states no hash, so a file of the copy's size has its ``file_hash`` read
     (``GET /library/files/{id}``)."""
 
@@ -435,14 +343,9 @@ class BambuddyShelf:
 
 
 @asynccontextmanager
-async def served_shelf(
-    settings: SettingsStore, native: NativeLibrary | None, uploads: BambuddyUploadStore
-) -> AsyncIterator[Shelf]:
-    """``orders/held_print.py``'s shelf of the library that serves: ``native`` when it
-    serves, else Bambuddy's."""
-    if native is not None:
-        yield NativeShelf(native)
-        return
-    stored = await asyncio.to_thread(settings.load)
-    async with client_for(stored) as client:
+async def bambuddy_shelf(
+    settings: StoredSettings, uploads: BambuddyUploadStore
+) -> AsyncIterator[BambuddyShelf]:
+    """Bambuddy's shelf, for ``orders/served_library.py`` ``served_shelf``."""
+    async with client_for(settings) as client:
         yield BambuddyShelf(client, uploads)

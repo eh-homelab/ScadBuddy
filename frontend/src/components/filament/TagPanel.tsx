@@ -1,6 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { SmartphoneNfcIcon } from 'lucide-react'
+import { useState } from 'react'
+import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
-import { bindTag, getTag, scanTag, unbindTag, type SpoolDetail, type TagBind } from '../../api/filament'
+import { bindTag, getTag, unbindTag, type SpoolDetail, type TagBind } from '../../api/filament'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -9,12 +12,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { KINDS } from './tagKinds'
-import { SpoolLink } from './SpoolLink'
 
 const message = (cause: unknown) => (cause instanceof ApiError ? cause.detail : 'The server could not be reached. Try again.')
-
-/** How long the scan waits for a tag at a reader (the route takes 1 to 50 s). */
-const SCAN_SECONDS = 30
 
 interface Props {
   spool: SpoolDetail
@@ -27,13 +26,14 @@ interface Props {
  * the open binding was made with `override`; the weight-lock line follows the spool's own
  * `weight_locked`, which unbinding never clears), the last one it held
  * with "Bind tag again" (free) or "Tag is on spool #N — Move it here" (another spool holds it
- * now; Decision 7), and a form to bind any tag by its UID or tray UUID, which "Scan a tag"
- * fills from a SpoolBuddy reader. A restore binds nothing: the tag comes back only through
+ * now; Decision 7), and a form to bind any tag by its UID or tray UUID.
+ * A restore binds nothing: the tag comes back only through
  * these buttons, which post the last tag's own keys. The server moves a tag that another
  * spool holds whether or not `override` is set. "Move it here" sends `override: false`
  * (Decision 3). The override box is for a Bambu tag that belongs to a different filament
  * than this spool: it needs a tray UUID, and it sends `override: true`, which makes the
  * binding keep this spool's own filament (the AMS percentage never changes its grams left).
+ * "Read or write with a phone" opens the scan page (#7273), which reads and writes tags through Web NFC.
  */
 export function TagPanel({ spool, onChanged }: Props) {
   const [uid, setUid] = useState('')
@@ -42,13 +42,8 @@ export function TagPanel({ spool, onChanged }: Props) {
   const [override, setOverride] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [scanning, setScanning] = useState(false)
-  const [scanNote, setScanNote] = useState<ReactNode>(null)
-  const scan = useRef<AbortController | null>(null)
   /** Counts the changes made here, so the open tag's binding (its Override mark) is read again. */
   const [changes, setChanges] = useState(0)
-
-  useEffect(() => () => scan.current?.abort(), [])
 
   const openTag = spool.tag
   const binding = useAsync(() => (openTag ? getTag(openTag.id) : Promise.resolve(null)), [openTag?.id, changes])
@@ -95,44 +90,6 @@ export function TagPanel({ spool, onChanged }: Props) {
     )
   }
 
-  async function scanForTag() {
-    scan.current?.abort()
-    const controller = new AbortController()
-    scan.current = controller
-    setScanning(true)
-    setScanNote(null)
-    setError(null)
-    try {
-      const found = await scanTag({ timeoutS: SCAN_SECONDS }, controller.signal)
-      if (controller.signal.aborted) return
-      if (found.status === 'timeout') {
-        setScanNote('No tag seen')
-        return
-      }
-      setUid(found.tag_uid ?? '')
-      setTray(found.tray_uuid ?? '')
-      if (found.kind) setKind(found.kind)
-      if (found.kind !== 'bambu_mifare') setOverride(false)
-      const holder = found.sb_spool && found.sb_spool.id !== spool.id ? found.sb_spool : null
-      setScanNote(
-        holder ? (
-          <>
-            <SpoolLink spool={holder} className="underline underline-offset-2">
-              Spool #{holder.number}
-            </SpoolLink>{' '}
-            already holds this tag
-          </>
-        ) : null,
-      )
-    } catch (cause) {
-      if (controller.signal.aborted) return
-      if (cause instanceof ApiError && (cause.status === 502 || cause.status === 504)) setScanNote('Could not reach the reader through Bambuddy')
-      else setError(message(cause))
-    } finally {
-      if (scan.current === controller) setScanning(false)
-    }
-  }
-
   return (
     <div className="flex flex-col gap-3" data-testid="tag-panel">
       {spool.tag ? (
@@ -167,24 +124,11 @@ export function TagPanel({ spool, onChanged }: Props) {
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" size="sm" variant="outline" disabled={scanning} onClick={() => void scanForTag()}>
-          Scan a tag
+        <Button asChild size="sm" variant="ghost">
+          <Link to={filamentLinks.scan}>
+            <SmartphoneNfcIcon /> Read or write with a phone
+          </Link>
         </Button>
-        {scanning && (
-          <>
-            <p role="status" className="text-[13px] text-muted-foreground">
-              Hold the tag to the reader
-            </p>
-            <Button type="button" size="xs" variant="ghost" onClick={() => scan.current?.abort()}>
-              Stop
-            </Button>
-          </>
-        )}
-        {scanNote && (
-          <p role="status" className="text-[13px] text-muted-foreground">
-            {scanNote}
-          </p>
-        )}
       </div>
 
       <form
@@ -199,7 +143,7 @@ export function TagPanel({ spool, onChanged }: Props) {
           <Label htmlFor="tag-uid" className="text-[13px]">
             Tag UID
           </Label>
-          <Input id="tag-uid" className="font-mono" value={uid} disabled={scanning} onChange={(e) => setUid(e.target.value)} />
+          <Input id="tag-uid" className="font-mono" value={uid} onChange={(e) => setUid(e.target.value)} />
         </div>
         <div className="flex flex-col gap-1">
           <Label htmlFor="tag-tray" className="text-[13px]">
@@ -208,7 +152,6 @@ export function TagPanel({ spool, onChanged }: Props) {
           <Input
             id="tag-tray"
             className="font-mono"
-            disabled={scanning}
             value={tray}
             onChange={(e) => {
               setTray(e.target.value)

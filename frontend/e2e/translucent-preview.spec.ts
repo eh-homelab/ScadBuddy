@@ -38,7 +38,12 @@ test('the preview draws a translucent colour see-through and a clear one at the 
   await shot(page, 'clear.png')
 
   // The light viewer (`prefers-color-scheme: light`): the same clear part on a white ground.
+  // The canvas is keyed by the theme's background (Preview.tsx), so the light theme mounts
+  // a new one: wait for the dark one to go, or the checks below can read it while it is
+  // replaced ("Element is not attached to the DOM", #7577).
+  const dark = await canvas.elementHandle()
   await page.emulateMedia({ colorScheme: 'light' })
+  await expect.poll(() => dark?.evaluate((element) => element.isConnected)).toBe(false)
   await expect(canvas).toHaveAttribute('data-see-through', '0.35')
   await settled(canvas)
   await shot(page, 'clear-light.png')

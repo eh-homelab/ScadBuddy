@@ -62,7 +62,8 @@ Each fact says where it was measured. "Read" means a read of the code on `origin
    but not to `start_library_quote_preview` for a file (`operations.py:264-279`). That
    function forwards its other keywords to `start_preview_plates`
    (`orders/bambuddy.py:292-321`), which takes `slot_presets` (`bambuddy/preview.py:331`).
-   Read.
+   Read. Since #7467 the function is in `orders/quote_preview.py`; the lines of
+   `orders/bambuddy.py` that this spec cites for it are on the commit that was read.
 5. **A slot with no spool is sliced in the file's own colour.** `resolver.resolve` sets
    `colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"`
    (`bambuddy/resolver.py:354`): a storefront slot has no spool, so it takes the colour
@@ -579,9 +580,9 @@ price key only (the listing's version and the colours), so a change that keeps t
 nothing again. It keeps the last price on screen marked as updating until the new colours
 are priced; a `last` answer (§7.5) shows at once, marked as updating, and the page reads
 again after its `retry_after`. With no price known, "Working out the price…" shows from
-the change on, through the debounce. It stops at a `render_limited` or `rate_limited`
-refusal with its text, and keeps the last price on screen, not marked as updating, since
-no update will come. So does a read past the time limit, or one that fails after a `last`
+the change on, through the debounce. A `render_limited` or `rate_limited` refusal shows
+its text and keeps the last price on screen, not marked as updating, until a read answers
+(§7.5: one read on its own, then "Try again"). So does a read past the time limit, or one that fails after a `last`
 answer. That price is never shown as firm: the page says "This was our last price. We
 confirm the price before you pay." until the colours change or a new read is due. With no
 price on screen, the time limit shows "We price this design by hand". A plate chooser ("Plate 1", …)
@@ -804,13 +805,20 @@ A file listing has no render, so its price is read by the listing and the colour
   same).
 
 As built (PR 6): "always show a price". While the visitor's colours have no price yet
-(`slice_estimate` answers `pending`), the route answers `last`: the listing's last firm
-price of the file it sells now, of any colours (`SlicePrices.listing_last`, the newest
-`done` row of the pinned sha256, index `storefront_slice_prices_listing_last`; the
-listing's own row first, else another published listing's of the same file, since they share a price,
-§7.4), with the pending `retry_after`. The slice runs
-behind it as before, and a read again answers the colours' own price. A listing with no
-such row answers `pending`. `last` is never a cart line's price (`line_prices.py` reads
+(`planned_estimate` answers `pending`), the route answers `last`: the last firm price of
+the file the listing sells now (`SlicePrices.listing_last`, a `done` row of the pinned
+sha256, index `storefront_slice_prices_listing_last`), with the pending `retry_after`. The
+row is a file listing's, never a template's render of the same bytes (#7523). The listing's
+own rows come first, of any colours and setup: the newest of the chosen material, else the
+newest. With none, the newest of another published listing, since they share a price
+(§7.4), only for the chosen material and the same setup: the row's `setup_key` (the sha256
+of the subject's kind and the slice request, migration
+`20261124T2302Z_storefront_slice_price_setup.sql`; a row from before has none and matches no
+other listing) is the colours' own. The slice runs behind it as before, and a read again
+answers the colours' own price. A listing with no such row answers `pending`. Over the
+visitor's limit no slice starts: the answer is that `last` with the limit's `retry_after`,
+and 429 `render_limited` only when there is no such row (#7523). The page then reads once
+more on its own after a wait of 10 minutes or less, and offers "Try again" after that. `last` is never a cart line's price (`line_prices.py` reads
 `firm_price` only), as the template instant read's `last` (#6921) is not.
 
 ### 7.6 The cart and the checkout
@@ -1034,9 +1042,10 @@ a failed project ensure is. The find skips a run's per-print copy (`per_print`),
 sweep trashes. A retry of the same claim finds the item moved and keeps that file while it
 stands (`Shelf.stands`: live, with the pinned sha256, or a Bambuddy row that states no hash,
 whose bytes the next print's check reads); when it is gone since, the held copy is
-put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The Bambuddy side of the restore
-(`BambuddyShelf`, `served_shelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
-reaches the Bambuddy client. The check reads a Bambuddy file that states no hash only when its
+put back again, as any missing file is, and only a missing held copy is `library_file_gone`. The shelf of the library that
+serves (`served_shelf`, `NativeShelf`) is in `orders/served_library.py`, which needs no Bambuddy
+(#7467); Bambuddy's (`BambuddyShelf`) is in `orders/bambuddy.py`, the one file of `orders/` that
+reaches the Bambuddy client, loaded only when Bambuddy's library serves. The check reads a Bambuddy file that states no hash only when its
 stated size is the held copy's; another size is other bytes. The restore runs before the
 print claims the item, so a claim refused after it (on hold, claimed by another print) leaves
 the item on the restored file; that is intended, and the next print restores nothing.
@@ -1240,8 +1249,10 @@ customer, until the step that makes it safe.
 7. **`feat(agent): draft a file listing`** (agent, shared vectors). After 3.
 
 Not in this split: #6922 (warm the slice price on publish and Prepare colours) warms
-every published listing through publish, so it covers file listings once PR 3 lands. A
-file listing needs no change of its own there.
+template listings only: its run prices the 3MF of a render, and a file listing has none.
+#7523 added the file listing: the publish run submits no render and prices the colours the
+page opens on (`prepare.py` `_warm_file`), with no visitor charge. Prepare colours stays a
+template listing's.
 
 Then the prod checks of §11.4, as a comment on #6710.
 
@@ -1255,7 +1266,7 @@ Then the prod checks of §11.4, as a comment on #6710.
 - **The slice price.** PR 2 changes `price_key` and `slice_request`. scadify owns that code
   and reviews PR 2. PR 2 starts after scadify's #6921 merges and keeps the
   `variant_key` that #6921 writes on done rows. #6922 (warm the price on publish) covers
-  file listings through publish. No other pricing change is in this design.
+  file listings since #7523 (§12). No other pricing change is in this design.
 - **Easy listing (#6131).** "Sell on storefront…" from the library (§9.5) follows the same
   entry as Sell from a render. #6131's smart defaults do not apply: a file has no
   parameters to lock.

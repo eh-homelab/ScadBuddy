@@ -45,26 +45,25 @@
 - Produces (`tasks/models.py`):
   - `TaskState = Literal["open", "answered", "cancelled", "expired"]`
   - `class TaskOpen(BaseModel)`: `id: str` (the harness call id), `run_id: str`, `title: str` (1–500 chars), `schema_: dict[str, Any]` (alias `schema`), `context: list[dict[str, Any]] = []`, `place: str | None = None`, `ui: str | None = None`, `expires_at: datetime | None = None`
-  - `class Task(TaskOpen)`: `project_id: str | None`, `state: TaskState`, `answer: dict[str, Any] | None`, `answered_by: str | None`, `created_at: datetime`, `updated_at: datetime`
+  - `class TaskQuestion`: `TaskOpen`'s fields without its checks, `state: TaskState`, `created_at: datetime`, `updated_at: datetime`; `class Task(TaskQuestion)`: also `answer: dict[str, Any] | None`, `answered_by: str | None`
   - `class AnswerProblem(BaseModel)`: `field: str` (a path of declared property names and array indexes joined by `/`, `""` for the root), `message: str` (never holds the rejected value)
 - Produces (`core/input_schema.py`, shared with flow inputs and pipelines, whose behaviour does not change):
   - `schema_problems(..., formats: bool = False, defaults: bool = True)`: with `formats`, a string (or string items) may have `format` `email`, `date` or `date-time`, and a default is checked against it; any other format is refused by name; without it `format` stays refused. `defaults=False` skips only the check of `default` values. The patterns deadline covers the whole property pass and starts after `check_schema`.
-  - `FORMATS` and `FORMAT_CHECKER`: a `FormatChecker(formats=())` with exactly those three, `date-time` by our own RFC 3339 check with an offset (the `rfc3339-validator` package is a dev dependency only). `Validator(schema)` without it checks no format, as today; `validate_answer` and the default check of a `formats=True` schema pass `format_checker=FORMAT_CHECKER`.
+  - `FORMATS` and `FORMAT_CHECKER`: a `FormatChecker(formats=())` with exactly those three, `date-time` by our own RFC 3339 check with an offset (the `rfc3339-validator` package is a dev dependency only), and `email` by our own check. `Validator(schema)` without it checks no format, as today; `validate_answer` and the default check of a `formats=True` schema pass `format_checker=FORMAT_CHECKER`.
   - `multipleOf` and `uniqueItems` in `Validator` never raise, and `uniqueItems` is linear.
   - Tests for each: `test_format_needs_the_flag`, `test_a_format_outside_the_list_is_named`, `test_a_default_is_checked_against_its_format`, `test_defaults_false_skips_only_the_defaults`, `test_the_format_checker_holds_exactly_formats`, `test_a_date_time_needs_an_offset`.
 - Produces (`tasks/validate.py`): `validate_answer(schema: dict[str, Any], answer: Any) -> list[AnswerProblem]`; `prompt_schema_problems(schema: dict[str, Any]) -> list[str]` (delegates to `core/input_schema.schema_problems`).
 - Produces (`tasks/store.py`, class `TaskStore` over the shared `scadbuddy-rows` pool, events through `TransactionalEvents.publish_in`):
   - `open(task: TaskOpen) -> Task` (insert; same id again returns the existing row unchanged)
   - `get(task_id: str) -> Task | None`
-  - `list(*, state: TaskState | None = "open", place: str | None = None, limit: int = 100) -> list[Task]`
-  - `mark_answered(task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str, *, final: bool = False) -> Task`: locks the run row `FOR SHARE`, then the task; a run on another execution (a Reset) leaves the task alone; from `open`, or `cancelled` by the run's end, it is `answered`; the same answer again only fills a NULL `by`; anything else raises `TaskNotOpenError(state)`; with `final=True` (the run's own mark, Task 5) the answer replaces another answered or cancelled row's on the same execution, an `expired` row is answered as it stands, an execution the run superseded gets the row as it stands, and any other execution mismatch (a row that lags Temporal) is refused as retryable
-  - `close(task_id: str, state: Literal["expired", "cancelled"]) -> Task | None` (only while `open`; returns None when it was not open)
-  - `cancel_for_run(run_id: str) -> int` (every open task of the run → `cancelled`; returns the count)
-  - `cancel_for_run_in(conn, run_id) -> int` and `match_waiting_in(conn, run_id, waiting_ids, done_ids) -> int`, on the caller's connection, for the run's own transactions in `flows/store.py` (Task 5). After a Reset, an open task in neither set is `cancelled`, and a task in `waiting_ids` that is not open is `open` again with its answer cleared.
+  - `list(*, state: TaskState | None = "open", place: str | None = None, limit: int = 100) -> list[TaskQuestion]`
+  - `mark_answered(task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str, *, final: bool = False) -> Task`: locks the run row `FOR SHARE`, then the task; a run on another execution (a Reset) leaves the task alone; from `open`, or `cancelled` by the run's end, it is `answered`; the same answer again only fills a NULL `by`; anything else raises `TaskNotOpenError(state)`; with `final=True` (the run's own mark, Task 5) the answer replaces another answered or cancelled row's on the same execution, an `expired` row is returned as it stands, an execution the run superseded gets the row as it stands, and an unknown execution on an ended run gets the row as it stands, and on an open run (a row that lags Temporal) it is refused as retryable
+  - `close_or_current(task_id: str, state: Literal["expired", "cancelled"], *, workflow_run_id: str | None = None) -> Task | None` (the row as it stands when it was not open, None for a missing task; with `workflow_run_id` the run's own close, which also replaces an answer)
+  - `cancel_for_run_in(conn, run_id) -> int` (every open task of the run → `cancelled`; returns the count) and `match_waiting_in(conn, run_id, waiting_ids, done_ids) -> int`, on the caller's connection, for the run's own transactions in `flows/store.py` (Task 5). After a Reset, an open task in neither set is `cancelled`, and a task in `waiting_ids` that is not open is `open` again with its answer cleared.
   - Each state change publishes `TaskChanged` in its transaction: `class TaskChanged(BaseEvent)`: `kind: Literal["task.changed"]`, `task_id: str`, `run_id: str`, `state: TaskState`, `place: str | None`.
 - Produces (`tasks/component.py`): `TASKS` component, `TasksDep` (the `core/components.py` pattern, `api/components.py` `component_dep`).
 
-Table: `id text PRIMARY KEY`, `run_id text NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE` (match `workflow_runs.id`'s type), `project_id text NULL`, `title text NOT NULL CHECK (length(title) BETWEEN 1 AND 500)`, `schema jsonb NOT NULL`, `context jsonb NOT NULL DEFAULT '[]'`, `place text NULL CHECK (1 to 100 characters, no control characters: it is part of a topic)`, `ui text NULL`, `expires_at timestamptz NULL`, `state text NOT NULL DEFAULT 'open' CHECK (state IN ('open','answered','cancelled','expired'))`, `answer jsonb NULL`, `answered_by text NULL`, `created_at`/`updated_at timestamptz NOT NULL DEFAULT now()`; index `tasks_open_place ON tasks (place, created_at) WHERE state = 'open'`; index on `run_id`.
+Table: `id text PRIMARY KEY`, `run_id text NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE` (match `workflow_runs.id`'s type), `title text NOT NULL CHECK (length(title) BETWEEN 1 AND 500)`, `schema jsonb NOT NULL`, `context jsonb NOT NULL DEFAULT '[]'`, `place text NULL CHECK (1 to 100 characters, no control characters: it is part of a topic)`, `ui text NULL`, `expires_at timestamptz NULL`, `state text NOT NULL DEFAULT 'open' CONSTRAINT tasks_state CHECK (state IN ('open','answered','cancelled','expired'))`, `answer jsonb NULL`, `answered_by text NULL`, `created_at`/`updated_at timestamptz NOT NULL DEFAULT now()`; index `tasks_open_place ON tasks (place, created_at) WHERE state = 'open'`; index on `run_id`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -85,10 +84,10 @@ def test_a_missing_required_field_is_a_root_problem_naming_it():
     assert p.field == "" and "email" in p.message
 
 def test_a_nested_or_referencing_schema_is_refused_for_a_prompt():
-    assert prompt_schema_problems({"type": "object", "properties": {"x": {"$ref": "#/a"}}})
+    assert prompt_schema_problems({"type": "object", "properties": {"x": {"type": "string", "$ref": "#/a"}}})
 ```
 
-`test_store.py` (marked `requires_postgres`, takes `pg_conninfo`): `test_open_twice_keeps_one_row`, `test_a_different_answer_to_an_answered_task_is_refused` (`TaskNotOpenError` with `state == "answered"`), `test_an_answer_that_landed_before_the_runs_end_is_kept` (a task `cancelled` by its run's end becomes `answered`), `test_the_runs_own_mark_is_final`, `test_close_of_an_answered_task_returns_none`, `test_cancel_for_run_cancels_only_open_tasks_of_that_run` (returns 2 for a run with 2 open + 1 answered, other run untouched), `test_list_filters_by_place`.
+`test_store.py` (marked `requires_postgres`, takes `pg_conninfo`): `test_open_twice_keeps_one_row`, `test_a_different_answer_to_an_answered_task_is_refused` (`TaskNotOpenError` with `state == "answered"`), `test_an_answer_that_landed_before_the_runs_end_is_kept` (a task `cancelled` by its run's end becomes `answered`), `test_the_runs_own_mark_is_final`, `test_close_of_an_answered_task_returns_it_as_it_stands`, `test_cancel_for_run_in_cancels_only_open_tasks_of_that_run` (returns 2 for a run with 2 open + 1 answered, other run untouched), `test_list_filters_by_place`.
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -125,7 +124,7 @@ Expected: PASS
 
 **Files:**
 - Create: `backend/scadbuddy/api/crud_tasks.py` (`router = crud_router("projects")`)
-- Modify: `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["projects"]` gains `"tasks"`), `backend/scadbuddy/worker.py` (`PROJECTS_CRUD_AREAS` gains `"tasks"`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES`, as the projects caller's other routes are listed), the API's router registration
+- Modify: `backend/scadbuddy/api/crud_areas.py` (`CRUD_AREAS["projects"]` gains `"tasks"`), `backend/scadbuddy/worker.py` (`PROJECTS_CRUD_AREAS` gains `"tasks"`) (`CRUD_CLASSES` needs no change: it classes by caller), the API's router registration
 - Create: `backend/scadbuddy/crud/tasks.py` — `RemoteTasks(crud: CrudClient)` with `open(task: TaskOpen) -> Task`, `close(task_id: str, state: Literal["expired","cancelled"]) -> Task | None`, `mark_answered(task_id: str, answer: dict[str, Any], by: str | None, workflow_run_id: str, *, final: bool = False) -> Task`
 - Test: `backend/tests/crud/test_crud_tasks.py`
 
@@ -148,7 +147,7 @@ Expected: PASS
 
 **Interfaces:**
 - Produces routes:
-  - `GET /api/v1/tasks?state=open&place=…&limit=` → `{"tasks": [Task]}`
+  - `GET /api/v1/tasks?state=open&place=…&limit=` → `{"tasks": [TaskQuestion]}`, without the answers
   - `GET /api/v1/tasks/{task_id}` → `Task` | 404
   - `POST /api/v1/tasks/{task_id}/answer`, `Idempotency-Key` required, body `{"answer": {…}}` (an object; body ≤ 16 KB), browser-only → `Task` (state `answered`). Refusals: 404 unknown; 409 `https://scadbuddy.dev/problems/tasks/not-open` with `state`; 422 `https://scadbuddy.dev/problems/tasks/invalid-answer` with `problems: [AnswerProblem]` and the task left open.
 - Produces operation `task_answer` (queue `projects`): input `{run_id, task_id, answer_sealed, by}` (`seal_answer` over the answer's JSON text); it records a `workflow_run_decisions` row as `run_answer` does, calls `AgentClient(...).provide_callback_result(task_id, result={"answer": answer}, update_id=<the decision's request_id>)`, then one best-effort `RemoteTasks.mark_answered` (Task 3; the durable mark is `prompt()`'s own, Task 5). A retry that finds its decision recorded asks `landed` with the pinned execution and never sends into another one: an answer undone by a Reset stays undone. The decision row, one per call, picks the winner of two answers. `CallbackAlreadyResolved` → nothing is marked (this request's answer lost) and the route answers 409 `not-open` with the row's own `state` (`open` until the run's own mark lands); `MalformedCallbackResult` → 422.

@@ -40,6 +40,13 @@ class LocalBlobStore:
         os.utime(path, None)
         return path
 
+    async def read_file(self, key: str, name: str) -> bytes | None:
+        # One volume: the directory is the blob.
+        try:
+            return await asyncio.to_thread((self._path(key) / name).read_bytes)
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+            return None
+
     def exists(self, key: str) -> bool:
         return self._path(key).is_dir()
 

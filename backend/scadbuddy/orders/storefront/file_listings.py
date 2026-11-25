@@ -39,6 +39,7 @@ from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES, ReadOutOfMemoryE
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.media import MAX_IMAGE_BYTES, SNIFF_BYTES, sniff_kind
 from scadbuddy.orders.quote import file_colour
+from scadbuddy.orders.served_library import ServedLibrary
 from scadbuddy.orders.storefront.inputs import effective_materials, material_key
 from scadbuddy.orders.storefront.listings import (
     HOLDER,
@@ -74,7 +75,6 @@ from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
-    from scadbuddy.orders.bambuddy import ServedLibrary
     from scadbuddy.store.content import ContentStore
     from scadbuddy.store.content_models import BlobStat
 
@@ -125,9 +125,6 @@ class HeldBytes:
 
 
 def _served(state: AppState) -> ServedLibrary:
-    # Here, not at the top: the orders' Bambuddy module imports the storefront's.
-    from scadbuddy.orders.bambuddy import ServedLibrary
-
     return ServedLibrary(state.settings_store, state.components.get(PRINT_LIBRARY).serving_native)
 
 
@@ -137,8 +134,7 @@ async def served_file(state: AppState, file_id: int) -> LibraryFile | None:
 
 
 async def download(state: AppState, file_id: int) -> AsyncGenerator[bytes]:
-    """The file's bytes, from the library that serves (`ServedLibrary.download`: only the
-    orders' Bambuddy module reaches the client, #4253)."""
+    """The file's bytes, from the library that serves (`ServedLibrary.download`)."""
     async with aclosing(_served(state).download(file_id)) as chunks:
         async for chunk in chunks:
             yield chunk

@@ -112,6 +112,16 @@ def test_patch_renames_and_sets_the_path(printers: PrinterStore) -> None:
         printers.patch("nope", PrinterPatch(name="B"))
 
 
+def test_patch_camera_recording(printers: PrinterStore) -> None:
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    assert row.camera_recording is True
+    off = printers.patch(row.id, PrinterPatch(camera_recording=False))
+    assert off.camera_recording is False
+    assert printers.get(row.id) == off
+    assert printers.patch(row.id, PrinterPatch(name="B")).camera_recording is False
+    assert printers.patch(row.id, PrinterPatch(camera_recording=True)).camera_recording is True
+
+
 def test_lan_link_seals_and_opens(printers_with_kek: PrinterStore, pg_pool: PgPool) -> None:
     pid = printers_with_kek.create(PrinterCreate(serial=SERIAL, name="A")).id
     row = printers_with_kek.link_lan(

@@ -162,3 +162,25 @@ async def test_a_stalled_settle_gives_up_within_the_bound_and_the_write_stands()
     assert write_failed._value.get() == 0
     assert set(api.timeouts) == {WATCH_CALL_TIMEOUT}
     assert api.now <= ONE_CALL
+
+
+async def test_a_stalled_api_makes_the_camera_seed_give_up_within_the_bound() -> None:
+    """The watch reads the stored camera URL before it follows the printer: that read is
+    bounded as its writes are, and a failure is counted, never the attempt's."""
+    api = Api(stalled=f"/reports/{PRINTER}")
+    blocking, crud = _clients(api)
+    failed = _counter("get_failed")
+    try:
+        watches = WatchActivities(
+            None,  # type: ignore[arg-type]
+            RemoteReports(blocking),
+            None,
+            write_failed=failed,
+        )
+        assert await watches._stored_camera(PRINTER) is None
+    finally:
+        blocking.close()
+        await crud.aclose()
+    assert failed._value.get() == 1
+    assert set(api.timeouts) == {WATCH_CALL_TIMEOUT}
+    assert api.now <= ONE_CALL

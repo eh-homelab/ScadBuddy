@@ -89,7 +89,7 @@ from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job, JobNotFoundError, PlateInfo, QueueFullError
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.storefront.settings import STOREFRONT_PREFIX
 from scadbuddy.storefront.wire import JOB_ID
@@ -709,7 +709,8 @@ async def variant_of(
     filaments = await asyncio.to_thread(price_book, _orders(state))
     by_colour = _filament_for(listing, filaments, colours, list(job.result.colors), material)
     slots = [by_colour.get(colour.casefold()) for colour in job.result.colors]
-    digest = await asyncio.to_thread(model_digest, job.id, state.paths.root / job.result.model_3mf)
+    model = result_file(state.store.blobs, state.paths.root, job.result.model_3mf)
+    digest = await asyncio.to_thread(model_digest, job.id, model)
     return digest, None if None in slots else [slot for slot in slots if slot is not None]
 
 
