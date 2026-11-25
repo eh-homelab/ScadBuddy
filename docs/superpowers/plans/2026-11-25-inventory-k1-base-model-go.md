@@ -14,17 +14,23 @@ K1 default handlers, the base flow, the SQL and the routes, as design §6.2 lays
 The catalog is Go code; a Go test loads `docs/inventory-model/*.yaml` and checks that the
 catalog, the defaults, the special types and every example's resolution equal the proof.
 One migration places every phase 2 row by §8. The Python routes under
-`/api/v1/inventory/*` keep their pydantic contract and forward to
+`/api/v1/inventory/*` keep their pydantic contract. For a read they call
 `/api/v1/internal/crud/inventory/*` on Go's CRUD port with a service credential of a new
-caller, `inventory`, which the API mints in process. The order lifecycle stops writing
-stock in its own transaction: it records a stock call and settles it through Go.
+caller, `inventory`, which the API mints in process. For a write they run a Temporal
+Standalone Activity (`inventory.<Name>`) on the task queue `inventory`, which a worker
+inside `scadbuddy-core` runs (§6.1a). The activity id is the idempotency key. The order
+lifecycle, the printer merge and the `/parts` aliases stop writing stock: the lifecycle and
+the merge start activities, and the aliases are deleted. After K1 no Python code writes a
+stock table.
 
-**Tech Stack:** Go 1.26 (`tools/go/core`, pgx v5, `go.yaml.in/yaml/v3` for tests only),
-Postgres 18 (triggers, PL/pgSQL), Python 3.12 (FastAPI, psycopg 3, httpx, the existing
+**Tech Stack:** Go 1.26 (`tools/go/core`, pgx v5, `go.temporal.io/sdk` v1.49.0 or newer,
+`go.yaml.in/yaml/v3` for tests only), Postgres 18 (triggers, PL/pgSQL), Temporal server
+1.32.1, Python 3.12 (FastAPI, psycopg 3, httpx, `temporalio` 1.36.0, the existing
 `crud/client.py`), React + TypeScript (one panel), the agent's TypeScript tools.
 
-**Spec:** `docs/superpowers/specs/2026-11-25-inventory-kinds-and-handlers-design.md` (§3,
-§4.1–4.4, §4.8, §6, §8, §9 K1), its proof `docs/inventory-model/`, and
+**Spec:** `docs/superpowers/specs/2026-11-25-inventory-kinds-and-handlers-design.md` at
+`c51dba825` (§3, §4.1–4.4, §4.8, §6.1, §6.1a, §6.2, §6.3, §8, §9 K1), its proof
+`docs/inventory-model/`, and
 `docs/superpowers/specs/2026-11-25-go-service-migration-design.md` (#7667: §4 ports and
 areas, §5 what a ported route keeps, §5.1 shared SQL, §5.2 how we check). Executors read
 both specs.
@@ -74,6 +80,54 @@ both specs.
   cascades), `entities/sweep.py:41` (`DELETE FROM entities`). `KINDS` has no `item_kind`
   (`entities/registry.py:37-58`). `Actor.kind` is `browser`, `agent`, `provider`,
   `visitor` or `customer` (`orders/models.py:164-176`).
+- **The `/parts` aliases.** `api/parts.py` serves `GET`/`POST /parts`, `PATCH
+  /parts/{part_id}`, `POST …/stock`, `POST …/adjust` and `GET …/moves` through
+  `inventory/part_alias.py`; the same file also serves `GET`/`PUT /parts/rules/{slug}` and
+  `GET /orders/{order_id}/parts`, `PUT /orders/{order_id}/items/{item_id}/parts`, which are
+  not aliases (they read and write `model_part_rules` and `order_item_parts`). Alias
+  callers: the agent tools `part_list` (its no-`order_id` form) and `part_stock_add`
+  (`agent/src/tools/orders.ts:1572-1633`), `agent/src/sessions/touched.ts:334`, five
+  entries of `agent/src/tools/coverage.ts:136-151`, `agent/test/orders.test.ts:353-406`,
+  `backend/tests/api/test_parts.py`, `docs/features/inventory.md:194`. The frontend calls no
+  alias (`frontend/src/mocks/features/orders/parts.ts:16`). No plugin skill names them
+  (`git grep part_list plugins` finds nothing).
+- **Old problem codes and their readers.** `item_not_counted` and `wrong_tracking`:
+  `inventory/problems.py:96-104`, `api/inventory_stock.py:8,46`,
+  `agent/src/tools/inventory.ts:424-425,492`, `frontend/src/mocks/features/inventory.ts:462-464`,
+  `backend/tests/api/test_inventory_stock.py:132-137,172`,
+  `backend/tests/inventory/test_stock.py:653-686`, `docs/features/inventory.md:43`.
+  `frontend/src/lib/problems.ts` names neither.
+- **Printer merge.** `PrinterStore._merge(conn, gone, kept)` (`printers/store.py:603`) runs
+  inside its callers' transactions (l.667, l.949); it repoints every
+  `PRINTER_REFERENCES` row, including `stock_units.printer_id` (l.358, `ON DELETE SET
+  NULL`), and `repoint_entity` moves `stock_moves.entity_id` (`entities/registry.py:132`, a
+  plain FK, so it refuses the delete of a named entity).
+- **Temporal.** The Python client connects with `pydantic_data_converter` (JSON payloads)
+  and no TLS (`workflows/client.py:89-98`); settings `temporal_address`,
+  `temporal_namespace` (`core/settings.py:648-649`). `temporalio` 1.36.0's
+  `Client.start_activity` and `execute_activity` take `id`, `task_queue`,
+  `schedule_to_close_timeout`, `start_to_close_timeout`, `id_reuse_policy`,
+  `id_conflict_policy`, `retry_policy`, `summary` (read in the installed package,
+  `temporalio/client/_client.py`); a start whose id is taken raises
+  `temporalio.exceptions.ActivityAlreadyStartedError`, and `get_activity_handle(id)` reads
+  its result. Go SDK v1.49.0: `client.StartActivityOptions` (`ID`, `TaskQueue`,
+  `ScheduleToCloseTimeout`, `ScheduleToStartTimeout`, `StartToCloseTimeout`,
+  `HeartbeatTimeout`, `ActivityIDConflictPolicy`, `ActivityIDReusePolicy` of
+  `enumspb.ActivityIdConflictPolicy`/`ActivityIdReusePolicy`, `RetryPolicy`,
+  `TypedSearchAttributes`), `Client.ExecuteActivity(ctx, options, activity, args...)
+  (ActivityHandle, error)`, `GetActivityHandle`; a reused id is the server's
+  `ActivityExecutionAlreadyStarted` (read in the module source,
+  `internal/internal_activity_client.go:30-90`, `client/client.go:965-1634`, from
+  https://proxy.golang.org/go.temporal.io/sdk/@v/v1.49.0.zip). Go patterns to follow
+  (eh-homelab/clusters `tier0/bootstrap/internal/`, SDK v1.47.0): an `Activities` struct
+  that holds the dependencies; each activity registered by name, never the whole struct
+  (`wf/register_test.go`); a worker interceptor on `interceptor.WorkerInterceptorBase`
+  and `ActivityInboundInterceptorBase` (`progress/interceptor.go`).
+- **The activity record.** `ActivityIndex.upsert_in(conn, row, …)`
+  (`activity/index.py:256`) writes an `ActivityRow` (`activity/models.py:28`: `id`, `kind`,
+  `subject`, `status`, `title`, `source`, `source_id`, `detail`, …) under the event log's
+  lock. No CRUD route writes a row for another process; §6.1a's "its CRUD route" does not
+  exist yet (R-K1-22).
 - **CI.** `select-go.sh` selects the `go` job from `tools/go/`, `vendor/`, the migrations
   and its own wiring; not `docs/` (`.github/scripts/select-go.sh:5`). `e2e-stack` runs no
   `scadbuddy-core`.
@@ -99,13 +153,26 @@ both specs.
   handler drops the old parameters; a layer that sets only `params` merges them.
 - Parameter types (`check.py` `TYPES`): `integer`, `number`, `string`, `boolean`, `list`;
   a boolean is never an `integer` or a `number`; `enum` limits a value.
-- Idempotency (§6.1): every Go write takes `Idempotency-Key` (1–200 characters); a repeat
-  returns the stored status and body; a key with another route or body is 422
-  `https://scadbuddy.dev/problems/crud/idempotency-key-reused`; a missing key is 428
-  `https://scadbuddy.dev/problems/crud/idempotency-key-required`. Keys of caller
-  `inventory` are kept 7 days.
-- A route handler holds no SQL and no rule beyond parsing and problem mapping (§6.2,
-  R-P3-54). Every SQL statement is in `internal/inventory/store/`.
+- Crossing the line (§6.1a, owner 2026-11-25): every Python-to-Go write is a Temporal
+  Standalone Activity on the task queue `inventory`, run by the worker in
+  `scadbuddy-core`. Never an outbox table, a sweep, or a SQL transaction that spans both
+  processes. Reads stay HTTP. A public route waits inline (`execute_activity`); a caller
+  that must not wait starts it (`start_activity`).
+- Idempotency (§6.1, §6.1a): the activity id is the idempotency key. Every start sets
+  `id_conflict_policy = USE_EXISTING` and `id_reuse_policy = REJECT_DUPLICATE`. A start
+  that raises `ActivityAlreadyStartedError` reads the result of the existing activity
+  (`get_activity_handle(id).result()`). The activity also records the key with its answer
+  in `crud_requests` (caller `inventory`, kept 7 days), because an activity runs at least
+  once; a repeat with another input is the problem
+  `https://scadbuddy.dev/problems/crud/idempotency-key-reused` (422).
+- A refusal is an answer, not a failure: an activity returns `{status, body}` for every
+  problem it decides (4xx), so Temporal does not retry it and a repeat of the key gets the
+  same refusal. Only an infrastructure error (the database out of reach, a crash) fails
+  the activity, and Temporal retries it.
+- Each Go activity is one function, registered by name (`inventory.<Name>`), shared by a
+  standalone start, a workflow step and the tests (§6.1a).
+- A route handler or an activity holds no SQL and no rule beyond parsing and problem
+  mapping (§6.2, R-P3-54). Every SQL statement is in `internal/inventory/store/`.
 - What a ported route keeps (#7667 §5): CRUD headers on matched routes only, problem JSON,
   pydantic-shaped 422 `errors[].loc`, the body bound (413/411), `X-ScadBuddy-Crud: 1`.
   Each difference from Python goes in `tools/go/core/README.md` "Where it differs".
@@ -124,10 +191,13 @@ both specs.
 
 ## Review Focus
 
-1. **A write retried after a lost answer.** The same `Idempotency-Key` gives back the
-   first status and body and writes nothing; the same key with another body is 422; two
-   requests with one key at once run one write. Test: Task 9
-   `TestARetryReplaysTheFirstAnswer`, `TestTwoRequestsWithOneKeyWriteOnce`.
+1. **A write retried after a lost answer, or run twice by Temporal.** A second start with
+   the same id attaches to the running activity or reads its result; an activity that
+   runs twice (at least once) writes once, because `crud_requests` answers the second run;
+   the same key with another input is 422; a refusal repeated gives the same refusal.
+   Tests: Task 9 `TestARetryReplaysTheFirstAnswer`, `TestTwoRequestsWithOneKeyWriteOnce`;
+   Task 12 `TestAnActivityRunTwiceWritesOnce`; Task 13
+   `test_a_taken_id_reads_the_existing_result`.
 2. **A property that goes with its entity.** The orphan sweep and a printer merge delete
    an `entities` row; the cascade removes its properties. Each remove is recorded with the
    entity's kind and ref and the sweep's or the merge's actor; a direct remove with no
@@ -143,11 +213,15 @@ both specs.
    items to a parent of another class, or a child that sets a key its parent set to
    another value, is refused (422 `class_changed`, the key named) and writes nothing.
    Test: Task 10 `TestAParentChangeThatChangesAClassIsRefused`.
-5. **Go out of reach while a person saves.** A public inventory write answers 503
-   `inventory_unavailable` within the client budget, never a 500; the person's retry with
-   the same `Idempotency-Key` writes once. An order fulfilled while Go is out of reach
-   commits; its stock call settles once on the next sweep. Tests: Task 13
-   `test_go_out_of_reach_is_a_503`, Task 15 `test_a_pending_stock_call_settles_once`.
+5. **Go's worker down while a person saves.** The activity waits on its queue. The
+   public route stops waiting after 15 s and answers 503 `inventory_pending` with the key,
+   never a 500. When the worker comes back the activity runs once, and the person's retry
+   with the same `Idempotency-Key` gets its result. Temporal itself out of reach is 503
+   `inventory_unavailable`, and nothing was started. An order fulfil whose `inventory.Take`
+   cannot be started answers an error, and its retry starts the same id. Tests: Task 13
+   `test_a_slow_worker_is_a_503_and_the_retry_reads_the_result`,
+   `test_temporal_out_of_reach_is_a_503`; Task 16 `test_a_failed_start_fails_the_fulfil`,
+   `test_a_fulfil_retry_starts_the_same_id`.
 
 ---
 
@@ -157,13 +231,13 @@ both specs.
 |---|---|---|
 | 1 | `feat/6949-k1-1-property-history` (from main) | The property history trigger, its readers, the panel and the tool (§4.8). Lands on its own |
 | 2 | `feat/6949-k1-2-inventory-model` (from main) | The class, the catalog and the resolver in Go, and the YAML test |
-| 3 | `feat/6949-k1-3-inventory-migration` (on 2) | The §8 migration, the `inventory` caller, the relation tables |
-| 4 | `feat/6949-k1-4-inventory-core` (on 3) | The store, the default handlers, the base flow, idempotency, the internal routes |
-| 5 | `feat/6949-k1-5-inventory-forwarders` (on 4) | The Python forwarders; the Python kind and item stores go |
-| 6 | `feat/6949-k1-6-order-stock-calls` (on 5) | The order lifecycle settles its stock through Go |
+| 3 | `feat/6949-k1-3-inventory-migration` (on 2) | The §8 migration, the callers `inventory` and `core`, the relation tables |
+| 4 | `feat/6949-k1-4-inventory-core` (on 3) | The store, the default handlers, the base flow, idempotency, the Temporal worker and activities, the read routes |
+| 5 | `feat/6949-k1-5-inventory-forwarders` (on 4) | The Python forwarders (reads over HTTP, writes as activities); the kind and item stores and the `/parts` aliases go; the new problem codes |
+| 6 | `feat/6949-k1-6-order-stock-activities` (on 5) | The order lifecycle and the printer merge start activities; Python's stock writes go |
 | 7 | `feat/6949-k1-7-inventory-docs` (on 6) | Docs |
 
-Layers 1 and 2 are independent. Layers 3, 4 and 5 deploy together (R-K1-18).
+Layers 1 and 2 are independent. Layers 3 to 6 deploy together (R-K1-18).
 
 ---
 
@@ -383,22 +457,23 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
 - [ ] **Step 4: Run** the commands, then `uv run --frozen pytest tests/inventory tests/api/test_inventory.py tests/api/test_inventory_stock.py -n auto -q` (phase 2 still works on the new schema) — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(inventory): kinds get a class; phase 2 rows placed by the K1 rules (#6949, K1 3/7)`
 
-### Task 8: The `inventory` service caller
+### Task 8: The service callers `inventory` and `core`
 
 **Files:**
-- Create: `backend/scadbuddy/migrations/<UTC>_inventory_service_caller.sql`
-- Modify: `backend/scadbuddy/auth/service_auth.py` (`ServiceCaller`), `backend/scadbuddy/auth/service_credentials.py` (`SCOPES`), `backend/scadbuddy/crud/wire.py` (`CrudCaller`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES`), `backend/scadbuddy/crud/idempotency.py` (`prune`)
-- Test: `backend/tests/auth/test_service_credentials.py`, `backend/tests/crud/test_idempotency.py`
+- Create: `backend/scadbuddy/migrations/<UTC>_inventory_service_callers.sql`, `backend/scadbuddy/api/crud_core.py`
+- Modify: `backend/scadbuddy/auth/service_auth.py` (`ServiceCaller`), `backend/scadbuddy/auth/service_credentials.py` (`SCOPES`), `backend/scadbuddy/crud/wire.py` (`CrudCaller`), `backend/scadbuddy/auth/routes.py` (`CRUD_CLASSES`), `backend/scadbuddy/auth/exchange.py` (the `core` service account), `backend/scadbuddy/crud/idempotency.py` (`prune`), `backend/scadbuddy/main.py` (the router), `backend/scadbuddy/api/crud_areas.py` (`core`: `activities`)
+- Test: `backend/tests/auth/test_service_credentials.py`, `backend/tests/crud/test_idempotency.py`, `backend/tests/crud/test_crud_core.py`
 
 **Interfaces:**
-- The caller `inventory`, scope `crud.inventory` only (R-K1-3). The migration extends `service_credentials_caller_check` and `service_caller_suspensions_caller_check` with `'inventory'` (as `20261124T0222Z_camera_service_callers.sql` did).
+- The caller `inventory`, scope `crud.inventory` only, minted in process by the API (R-K1-3). The caller `core` (`scadbuddy-core` calling the API), scope `crud.core` only, by the exchange with its pod's Kubernetes token (proof `k8s`, as the render worker, #5494) (R-K1-22). The migration extends `service_credentials_caller_check` and `service_caller_suspensions_caller_check` with `'inventory'` and `'core'` (as `20261124T0222Z_camera_service_callers.sql` did).
+- `api/crud_core.py`: `POST /api/v1/internal/crud/core/activities`, body an `ActivityRow` (`kind` `inventory`, `source` `temporal`, `source_id` the activity id), answered by `ActivityIndex.upsert_in` in one transaction; `Idempotency-Key` not needed (an upsert by `id` is natural). 413 past 64 KiB.
 - `idempotency.py`: `RETENTION_BY_CALLER: Final = {"inventory": timedelta(days=7)}`; `prune` deletes a row older than its caller's retention, else `RETENTION` (R-K1-2).
 
-- [ ] **Step 1: Write the failing tests:** `test_the_api_mints_an_inventory_credential_in_process` (`InProcessProvider("inventory", …).token()` resolves with scopes `{"crud.inventory"}`); `test_prune_keeps_inventory_keys_seven_days` (rows of `inventory` 2 days and 8 days old, and of `print` 2 days old → only the `inventory` row of 2 days stays).
-- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/auth/test_service_credentials.py tests/crud/test_idempotency.py -q` — Expected: FAIL.
+- [ ] **Step 1: Write the failing tests:** `test_the_api_mints_an_inventory_credential_in_process` (`InProcessProvider("inventory", …).token()` resolves with scopes `{"crud.inventory"}`); `test_core_writes_an_activity_row` (a `core` credential posts a running then a succeeded row with one `id` → one row, `finished_at` set; an `inventory` credential → 403 `wrong_caller`); `test_prune_keeps_inventory_keys_seven_days` (rows of `inventory` 2 days and 8 days old, and of `print` 2 days old → only the `inventory` row of 2 days stays).
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/auth/test_service_credentials.py tests/crud/test_idempotency.py tests/crud/test_crud_core.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the tests and `uv run --frozen pytest tests/auth -q` (route coverage) — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(auth): the inventory service caller (#6949, K1 3/7)`
+- [ ] **Step 5: Commit** `feat(auth): the inventory and core service callers; core writes activity rows (#6949, K1 3/7)`
 
 ---
 
@@ -413,15 +488,17 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
 
 **Interfaces:**
 - `type Actor = json.RawMessage` (an `Actor` JSON object, checked by `ReadActor`).
-- `func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) (status int, body any, err error)) (status int, body []byte, err error)` where `WriteReq{Caller, Key, Route string; Body []byte; Actor Actor}`. In one transaction: `set_config('scadbuddy.actor', actor, true)`; `pg_advisory_xact_lock(1396920913, hashtext(caller || E'\x1f' || key))` (`0x53435251`, `crud/idempotency.py` `LOCK_CLASS`); a stored reply → return it; the same key with another route or body digest → 422 `idempotency-key-reused`; else `do`, then insert the reply. An error from `do` records nothing.
-- Digest (R-K1-2): SHA-256 hex of the body in `seal` canonical JSON. Only Go writes `inventory` rows, so the digest need not be Python's.
+- `type Answer struct{ Status int \`json:"status"\`; Body json.RawMessage \`json:"body"\` }`: what every write gives, a success or a problem.
+- `func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) (status int, body any, err error)) (Answer, error)` where `WriteReq{Caller, Key, Route string; Input []byte; Actor Actor}`. In one transaction: `set_config('scadbuddy.actor', actor, true)`; `pg_advisory_xact_lock(1396920913, hashtext(caller || E'\x1f' || key))` (`0x53435251`, `crud/idempotency.py` `LOCK_CLASS`); a stored answer → return it; the same key with another route or input digest → `Answer{422, idempotency-key-reused problem}`; else `do`, then insert the answer. A problem that `do` decides is an `Answer` and is recorded; an `error` from `do` records nothing and is returned (the activity fails, Temporal retries).
+- Digest (R-K1-2): SHA-256 hex of the input in `seal` canonical JSON. Only Go writes `inventory` rows, so the digest need not be Python's.
 - `func EnsureEntity(ctx, tx pgx.Tx, kind, ref string) (uuid string, err error)`: the statement of `entities/shared/ensure_entity.sql`, the text Python's `EntityStore.ensure` runs (#7667 §5.1).
 - Shared SQL (#7667 §5.1): each file holds one statement; a Go test and a Python test each compare their statement's text, whitespace-normalized, with it.
 
 - [ ] **Step 1: Write the failing tests** (`idempotency_test.go`, `testdb.New`):
   - `TestARetryReplaysTheFirstAnswer`: a write that inserts one row, run twice with key `k` → one row, both answers byte-equal, one `crud_requests` row of caller `inventory`.
-  - `TestAKeyWithAnotherBodyIsRefused` → 422, type `…/idempotency-key-reused`, nothing written.
+  - `TestAKeyWithAnotherInputIsRefused` → `Answer.Status == 422`, type `…/idempotency-key-reused`, nothing written.
   - `TestTwoRequestsWithOneKeyWriteOnce`: two goroutines, one key → one row, two equal answers.
+  - `TestARefusalIsRecorded`: `do` answers 409 → recorded; a repeat gets the 409 and `do` does not run.
   - `TestAFailedWriteRecordsNothing`: `do` returns an error → no `crud_requests` row; a retry runs `do` again.
   - `TestTheActorIsSetInTheTransaction`: `do` reads `current_setting('scadbuddy.actor')` and gets the actor.
   - `TestSharedStatementsMatch` (Go) and `test_shared_statements_match` (Python).
@@ -440,7 +517,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
 - `package wire`: the JSON of `inventory/models.py`, field for field: `ItemKind` (phase 2 fields, plus `nature`, `role`, `counting`, `billing` (`string|null`), `special_type`, `steps`, `incomplete_steps: string[]`); `KindInput`, `KindPatch` (phase 2 fields plus the class keys, `special_type` and `steps`; `tracking` and `life_basis` still taken, R-K1-6); `Item` (phase 2 fields plus `steps`, `incomplete_steps`, `class: {nature, role, counting, billing}`, `special_type`); `ItemInput`, `InventoryItemPatch` (plus `steps`). Readers derive `tracking`, `life_basis`, `life_hours`, `life_months` (R-K1-6) and `compatible_with` (the model kinds' names, R-K1-11).
 - `store.Kinds`: `List(ctx, q, archived bool)`, `Get`, `Create(ctx, tx, in wire.KindInput, by Actor)`, `Update(ctx, tx, id, patch, by)`, `Archive`, `Restore`, `Schema(ctx, q, id) (merged, own json.RawMessage, keysInUse [][2]any, err)`. Each save: build the chain, `Resolve` with no item; `Blocking` problems → `*Refused{Status: 422, Code: "steps_invalid", Problems}`; a class conflict → 422 `class_changed` (key, from, to); a parent change that changes the class of a kind with items (its own or its descendants') → 422 `class_changed`; writes `handler_config_history` for each step whose handler or params changed; rewrites `tracking`, `life_basis`.
 - `store.Items`: `List(ctx, q, f ItemFilter)` (phase 2 filters `kind`, `descendants`, `q`, `low`, `archived`, `compatible` (a model kind by name, through `relations`), `limit` 1–5000 default 1000), `Get`, `Create`, `Update`, `Archive`, `Restore`. A save resolves with the item's steps: `Blocking` → 422 `steps_invalid`; an open class → 422 `class_open`; an item whose resolved special type is `filament_spool` → 409 `filament_item_refused` (phase 2 Ruling 9, until K3). `compatible_with` codes become `compatible_with` relations to model kinds, made under `printer` when missing (the §8 id rule).
-- Errors keep phase 2's problem codes (`inventory/problems.py`): `kind_not_found`, `kind_exists`, `kind_in_use`, `kind_cycle`, `kind_archived`, `item_not_found`, `item_exists`, `bad_property_schema`.
+- Errors keep phase 2's problem codes where the concept stays (`inventory/problems.py`): `kind_not_found`, `kind_exists`, `kind_in_use`, `kind_cycle`, `kind_archived`, `item_not_found`, `item_exists`, `bad_property_schema`, `filament_item_refused`.
 
 Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritten here, one Go test per Python test of the same name in CamelCase (#7667 §5.2 step 4); layer 5 deletes the Python ones.
 
@@ -459,7 +536,7 @@ Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritte
 ### Task 11: The default handlers and the base flow
 
 **Files:**
-- Create: `tools/go/core/internal/inventory/store/stock.go` (lots, units, moves), `tools/go/core/internal/inventory/handlers/steps.go` (the per-step interfaces), `tools/go/core/internal/inventory/handlers/receive.go`, `consume.go`, `count.go`, `move.go`, `retire.go`, `cost.go`, `refuse.go`, `tools/go/core/internal/inventory/flow/flow.go`
+- Create: `tools/go/core/internal/inventory/store/stock.go` (lots, units, moves, repoint), `tools/go/core/internal/inventory/handlers/steps.go` (the per-step interfaces), `tools/go/core/internal/inventory/handlers/receive.go`, `consume.go`, `count.go`, `move.go`, `retire.go`, `cost.go`, `refuse.go`, `tools/go/core/internal/inventory/flow/flow.go`
 - Test: `tools/go/core/internal/inventory/flow/flow_test.go`, `tools/go/core/internal/inventory/store/stock_test.go`, `tools/go/core/internal/inventory/handlers/purity_test.go`
 
 **Interfaces:**
@@ -470,142 +547,184 @@ Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritte
   `Mover{ Move(ctx, tx, MoveIn) error }`,
   `Retirer{ Retire(ctx, tx, RetireIn) (wire.Unit, error) }`,
   `Coster{ Estimate(ctx, q pgx.Tx, item string, qty *big.Rat) (unit *big.Rat, unknown bool, err error) }`.
-  Each `In` carries `Item wire.Item`, `Choice handlers.Choice` (its params), `By store.Actor`, and the phase 2 input fields (`ReceiveLot`, `ReceiveUnits`, `UseInput`, `AdjustInput`, `CountInput`, `LotPatch.location_id`, `UnitPatch.location_id`, `UnitStatusInput`).
+  Each `In` carries `Item wire.Item`, `Choice handlers.Choice` (its params), `By store.Actor`, and the phase 2 input fields (`ReceiveLot`, `ReceiveUnits`, `UseInput` with `order_id` and `order_item_id`, `AdjustInput`, `CountInput`, `LotPatch.location_id`, `UnitPatch.location_id`, `UnitStatusInput`).
   `Lifer`, `Biller`, `Labeler`, `Syncer` are declared and implemented by nothing in K1 (seams for K2–K6).
 - Implementations (R-K1-1: each ports its phase 2 path in `inventory/stock.py`, statement for statement, with its locks: `_open_lock` `pg_advisory_xact_lock(hashtext('stock_lots_open'), hashtext(item_id))`, lots `FOR UPDATE` in `(received_at, id)` order):
-  `receive.lot` (`receive_in`), `receive.units` (`receive_units`), `consume.lot_fifo` (`take`, `use`), `count.lot` (`count_item`; `adjust_lot` is `count.lot` on one lot), `move.place` (the location of a lot or a unit; no stock move), `retire.default` (`set_unit_status`, every status), `cost.lot_fifo` (`estimate_unit_cost`, and the snapshot `take` writes), `cost.unit` (a unit's cost), `refuse` (409 `step_not_applicable` with the step and the class).
+  `receive.lot` (`receive_in`), `receive.units` (`receive_units`), `consume.lot_fifo` (`take`, `use`), `count.lot` (`count_item`; `adjust_lot` is `count.lot` on one lot), `move.place` (the location of a lot or a unit; no stock move, `handlers.yaml` at `c51dba825`), `retire.default` (`set_unit_status`, every status), `cost.lot_fifo` (`estimate_unit_cost`, and the snapshot `take` writes), `cost.unit` (a unit's cost), `refuse` (409 `step_not_applicable` with the step and the class).
   Every other catalog handler has no implementation: `Registry.For` answers `ErrNotBuilt`, which is 409 `handler_not_built` (R-K1-7).
-- `flow.Flow{Pool *pgxpool.Pool; Reg *handlers.Registry}` with `Receive`, `Consume`, `Count`, `Move`, `Retire`, `GiveBack`, `Estimate`, `SetLotCost`. Each: `store.Write` (Task 9); lock and read the item, its chain and the unit's steps; `Resolve`; a step whose choice has a `missing_param` problem → 409 `step_incomplete` (R-K1-8); `Reg.For(step, choice.Handler)`; call it in the transaction. `GiveBack` and `SetLotCost` keep phase 2's paths (`give_back`, `set_lot_cost`); they are not steps.
+- `flow.Flow{Pool *pgxpool.Pool; Reg *handlers.Registry}` with `Receive`, `Consume`, `Count`, `Move`, `Retire`, `GiveBack`, `Recost`, `Repoint`, `Estimate`, `SetLotCost`. Each write: `store.Write` (Task 9); lock and read the item, its chain and the unit's steps; `Resolve`; a step whose choice has a `missing_param` problem → 409 `step_incomplete` (R-K1-8); `Reg.For(step, choice.Handler)`; call it in the transaction. `GiveBack`, `Recost` and `SetLotCost` keep phase 2's paths (`give_back`, `recost_lot`, `set_lot_cost`); they are not steps. `Recost` takes the ids of the orders its caller locked and answers 409 `recost_orders_moved`, writing nothing, when a move of the lot names another order (phase 2's `_OrdersMoved`, now checked under the lot's lock). `Repoint(kind, gone, kept)` moves `stock_moves.entity_id` from the entity `kind:gone` to `kind:kept`, and for `kind = printer` also `stock_units.printer_id`; a repeat finds nothing to move.
+- A lots route on a unit-counted item, or the reverse, is 409 `wrong_counting` (it replaces phase 2's `wrong_tracking`, R-K1-23).
 - `purity_test.go`: a test that parses `handlers/*.go` and `flow/*.go` with `go/parser` and fails on a string literal equal to a kind id of `kinds.yaml` or a special type id (§2 anti-goal). Literals inside `catalog.go` are allowed.
 
-Phase 2's `tests/inventory/test_stock.py` cases are rewritten here, one Go test per Python test (`TestFifoTakesTheOldestLotFirst`, `TestANamedLotIsTakenFirstThenFifo`, `TestAForeignReceiveKeepsWhatWasEntered`, `TestACountSettlesANegativeLotFirst`, `TestBadInputIsRefusedNotA500`, `TestAShortfallGoesNegativeOnTheNewestLot`, `TestAnItemWithNoLotOpensACostUnknownLot`, `TestGiveBackReversesEachUseAtItsOwnCost`, `TestSetLotCostMovesNoPastMove`, `TestAWholeNumberUomRefusesAFraction`, `TestUnitStatusWritesItsMove`, `TestEstimateMatchesTake` (`566.666667` for 15 of 10 @ 500 and 10 @ 700), …). `test_stock.py` stays until its last Python caller goes (R-K1-17).
+Phase 2's `tests/inventory/test_stock.py` cases are rewritten here, one Go test per Python test (`TestFifoTakesTheOldestLotFirst`, `TestANamedLotIsTakenFirstThenFifo`, `TestAForeignReceiveKeepsWhatWasEntered`, `TestACountSettlesANegativeLotFirst`, `TestBadInputIsRefusedNotA500`, `TestAShortfallGoesNegativeOnTheNewestLot`, `TestAnItemWithNoLotOpensACostUnknownLot`, `TestGiveBackReversesEachUseAtItsOwnCost`, `TestSetLotCostMovesNoPastMove`, `TestRecostResnapshotsAndNamesTheOrderItems`, `TestAWholeNumberUomRefusesAFraction`, `TestUnitStatusWritesItsMove`, `TestEstimateMatchesTake` (`566.666667` for 15 of 10 @ 500 and 10 @ 700), …). Layer 6 deletes `test_stock.py` with the Python writes.
 
 - [ ] **Step 1: Write the failing tests:** the ported cases, and:
   - `TestAServiceCannotBeReceived`: an item of `labour` (hourly) → `Receive` is 409 `step_not_applicable` `{step: receive}`; no row.
   - `TestADurableConsumeIsNotBuilt`: `Consume` on a `nozzle` item → 409 `handler_not_built` `{handler: consume.use}` (K2 builds it).
-  - `TestAnIncompleteStepIsRefused`: a durable person kind with `life.hours` and no `hours` → its item's `Receive` works (receive is complete); a direct check of `step_incomplete` uses a kind whose `count` handler is `count.remaining` with no `capacity` → `Count` is 409 `step_incomplete` `{step: count, missing: [capacity]}`.
+  - `TestAnIncompleteStepIsRefused`: a kind whose `count` handler is `count.remaining` with no `capacity` → `Count` is 409 `step_incomplete` `{step: count, missing: [capacity]}`; its `Receive` works.
   - `TestAPlaceChangeWritesNoMove`: `Move` of a lot to a location → `location_id` set, no `stock_moves` row.
+  - `TestRecostRefusesAnUnlockedOrder`: moves of orders `o1` and `o2`, `Recost(lot, ["o1"])` → 409 `recost_orders_moved`, no move changed.
+  - `TestRepointMovesStockRowsOnce`: a move naming `printer:a` and a unit with `printer_id = a` → both name `b`; a second `Repoint` changes nothing.
   - `TestTheBaseFlowNamesNoKind` (`purity_test.go`).
 - [ ] **Step 2: Run** `cd tools/go/core && go test -race ./internal/inventory/...` — Expected: FAIL.
 - [ ] **Step 3: Implement.** Register the K1 implementations in `handlers.Default() *Registry`.
 - [ ] **Step 4: Run** the same — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(core): the K1 default handlers and the inventory base flow (#6949, K1 4/7)`
 
-### Task 12: The internal routes and the areas
+### Task 12: The Temporal worker, the activities, the activity record, and the read routes
 
 **Files:**
-- Create: `tools/go/core/internal/inventory/areas.go`, `tools/go/core/internal/inventory/routes/kinds.go`, `routes/items.go`, `routes/stock.go`, `routes/problems.go`, `tools/go/core/internal/inventory/routes/testdata/answers/*.json`
-- Modify: `tools/go/core/main.go` (mount by caller), `tools/go/core/main_test.go`, `tools/go/core/README.md` (the area table and "Where it differs")
-- Test: `tools/go/core/internal/inventory/routes/routes_test.go`, `tools/go/core/main_test.go`
+- Create: `tools/go/core/internal/inventory/activities/activities.go`, `activities/register.go`, `activities/record.go` (the interceptor), `tools/go/core/internal/temporalx/temporalx.go` (client and worker options from the environment), `tools/go/core/internal/inventory/areas.go`, `tools/go/core/internal/inventory/routes/reads.go`, `routes/problems.go`, `tools/go/core/internal/inventory/activities/testdata/answers/*.json`
+- Modify: `tools/go/core/main.go` (the Temporal client, the worker, mount by caller), `tools/go/core/go.mod`, `vendor/` (`go work vendor`), `tools/go/core/main_test.go`, `tools/go/core/README.md` (variables, the area table, the activities, "Where it differs")
+- Test: `tools/go/core/internal/inventory/activities/activities_test.go`, `activities/register_test.go`, `activities/record_test.go`, `tools/go/core/internal/inventory/routes/reads_test.go`, `tools/go/core/main_test.go`
 
 **Interfaces:**
-- `package inventory`: `const Caller = "inventory"`; `func Areas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route` returns `inventory` (every route) and `inventory:read` (its GETs) (§6.2).
+- Dependency: `go.temporal.io/sdk` v1.49.0 or newer (§6.1a; Standalone Activities on the client side arrived by v1.49.0, `internal/internal_activity_client.go`), and the `go.temporal.io/api` it requires (v1.63.5 for v1.49.0). Vendored by `go work vendor` (`tools/go/CLAUDE.md`).
+- Environment (`temporalx`): `SCADBUDDY_TEMPORAL_ADDRESS` (required when `SCADBUDDY_CORE_AREAS` names `inventory`; the start stops without it), `SCADBUDDY_TEMPORAL_NAMESPACE` (default `scadbuddy`, as `core/config.py:39` `DEFAULT_TEMPORAL_NAMESPACE`), `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` (default `inventory`). No TLS: the Python client uses none (`workflows/client.py`). Payloads use the SDK's default JSON converter, which reads the Python `pydantic_data_converter`'s `json/plain` payloads.
+- `package activities`: `type Activities struct{ Flow *flow.Flow; Kinds *store.Kinds; Items *store.Items }` (the clusters `Activities` pattern). Every method has the shape `func (a *Activities) X(ctx context.Context, in Input) (store.Answer, error)` with `Input{ Key string; Actor json.RawMessage; Params map[string]string; Body json.RawMessage }` (`Params` are the path parameters; `Body` is the public body). Names, registered one by one with `activity.RegisterOptions{Name: …}` in `Register(w worker.Registry, a *Activities)`:
+  `inventory.KindCreate`, `inventory.KindUpdate`, `inventory.KindArchive`, `inventory.KindRestore`, `inventory.ItemCreate`, `inventory.ItemUpdate`, `inventory.ItemArchive`, `inventory.ItemRestore`, `inventory.ReceiveLot`, `inventory.ReceiveUnits`, `inventory.LotUpdate` (cost, place, note), `inventory.LotAdjust`, `inventory.Take` (the use route and an order's take), `inventory.Count`, `inventory.UnitUpdate` (name, serial, place), `inventory.UnitStatus`, `inventory.GiveBack`, `inventory.Recost`, `inventory.Repoint`.
+  `Input.Key` is the activity id; each method calls `store.Write` with `Caller "inventory"`, `Key`, `Route` = the activity name. A problem is returned as an `Answer`; only an infrastructure error is returned as `error` (Global Constraints).
+- Worker: `worker.New(client, queue, worker.Options{Interceptors: []interceptor.WorkerInterceptor{activities.Record(poster)}})`, started by `main.go` beside the HTTP servers and stopped with them.
+- `activities.Record(p Poster) interceptor.WorkerInterceptor` (the clusters `progress` pattern): before each attempt it posts an `ActivityRow` (`id` = `temporal:` + activity id, `kind` `inventory`, `status` `running`, `title` the activity name, `subject` the first entity the input names (`item:<id>`, `lot:<id>`, `unit:<id>`, `item_kind:<id>`), `source` `temporal`, `source_id` the activity id, `detail.attempt`); after it, `succeeded` or `failed` (an `Answer` with status ≥ 400 is `failed` with `detail.problem`). A post that fails is logged and counted; it never fails the activity. `Poster` posts to `POST /api/v1/internal/crud/core/activities` through `SCADBUDDY_CORE_UPSTREAM` with the `core` credential (R-K1-22): `type Poster interface{ Post(ctx, row ActivityRow) error }`; `auth.Exchange{TokenFile string}` reads the pod's projected token (`SCADBUDDY_SERVICE_TOKEN_FILE`) and exchanges it at `POST /api/v1/auth/service-token` as `auth/service_auth.py` `ExchangeReader` does, renewed at half-life.
+- `package inventory`: `const Caller = "inventory"`; `func Areas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]crud.Route` returns `inventory:read` (every read route). Area `inventory` is the reads plus the worker: `main.go` starts the worker only when `SCADBUDDY_CORE_AREAS` names `inventory`.
 - `main.go`: `callerPackages = map[string]areaRoutes{inventory.Caller: inventory.Areas}`; `newRouter` mounts each area of a caller package with `router.Add(caller, routes...)`; an area name in two packages stops the start.
-- Routes under `/api/v1/internal/crud/inventory` (paths as the public ones without `/inventory`, bodies and answers as the public JSON, R-K1-6):
-  - Reads: `GET /kinds` (`?archived=`), `GET /kinds/{kind_id}`, `GET /kinds/{kind_id}/schema`, `GET /items` (Task 10 filters), `GET /items/{item_id}`, `GET /items/{item_id}/lots`, `GET /lots/{lot_id}`, `GET /items/{item_id}/units` (`?status=`), `GET /units/{unit_id}`, `GET /moves` (`?item_id=&lot_id=&unit_id=&order_item_id=&limit=`), `GET /items/{item_id}/estimate?qty=` (Task 15).
-  - Writes (each takes `Idempotency-Key` and `X-ScadBuddy-Actor`, R-K1-5; body bound 64 KiB): `POST /kinds`, `PATCH /kinds/{kind_id}`, `POST /kinds/{kind_id}/archive`, `…/restore`, `POST /items`, `PATCH /items/{item_id}`, `POST /items/{item_id}/archive`, `…/restore`, `POST /items/{item_id}/lots` (receive), `PATCH /lots/{lot_id}` (cost, place, note), `POST /lots/{lot_id}/adjust` (count), `POST /items/{item_id}/use` (consume), `POST /items/{item_id}/count`, `POST /items/{item_id}/units` (receive), `PATCH /units/{unit_id}` (name, serial, place), `POST /units/{unit_id}/status` (retire).
-  - `X-ScadBuddy-Actor` missing or not an `Actor` object → 422 `loc: ["header", "x-scadbuddy-actor"]`.
-- Problems: `https://scadbuddy.dev/problems/inventory/<code>` with `code`, as `inventory/problems.py` writes them; new codes `step_not_applicable`, `step_incomplete`, `handler_not_built`, `steps_invalid`, `class_changed`, `class_open` (409 for the first three, 422 for the rest). A `steps_invalid` answer lists `problems: [{step, handler, reason}]`.
-- `testdata/answers/<route>.json`: one recorded answer per route family (`ItemKind`, `KindList`, `Item`, `ItemList`, `Lot`, `LotList`, `Unit`, `UnitList`, `MoveList`, `KindSchema`), written by `go test ./internal/inventory/routes/ -update` and compared otherwise. Layer 5 validates them with the pydantic models.
+- Read routes under `/api/v1/internal/crud/inventory` (paths as the public ones without `/inventory`, answers as the public JSON, R-K1-6): `GET /kinds` (`?archived=`), `GET /kinds/{kind_id}`, `GET /kinds/{kind_id}/schema`, `GET /items` (Task 10 filters), `GET /items/{item_id}`, `GET /items/{item_id}/lots`, `GET /lots/{lot_id}`, `GET /items/{item_id}/units` (`?status=`), `GET /units/{unit_id}`, `GET /moves` (`?item_id=&lot_id=&unit_id=&order_item_id=&limit=`), `GET /items/{item_id}/estimate?qty=`. There is no write route.
+- Problems: `https://scadbuddy.dev/problems/inventory/<code>` with `code`, as `inventory/problems.py` writes them; new codes `step_not_applicable`, `step_incomplete`, `handler_not_built`, `wrong_counting`, `recost_orders_moved` (409), `steps_invalid`, `class_changed`, `class_open` (422). A `steps_invalid` answer lists `problems: [{step, handler, reason}]`.
+- `testdata/answers/<name>.json`: one recorded `Answer.Body` per activity and per read family (`ItemKind`, `KindList`, `Item`, `ItemList`, `Lot`, `LotList`, `Unit`, `UnitList`, `MoveList`, `KindSchema`, `RecostResult`), written by `go test ./internal/inventory/... -update` and compared otherwise. Layer 5 validates them with the pydantic models.
 
-Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for kinds, items and stock are rewritten here (status, problem `code`, `errors[].loc`); offers stay in Python (R-K1-17).
+Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for kinds, items and stock are rewritten here against the activities (status, problem `code`) and the read routes (`errors[].loc` of a query); offers and the `/parts` rules stay in Python.
 
-- [ ] **Step 1: Write the failing tests:** the ported route cases, and:
+- [ ] **Step 1: Write the failing tests:** the ported cases, and:
+  - `TestEveryActivityIsRegisteredByName` (`register_test.go`, as clusters `TestRegisterActivities_DoesNotPanic`, with `client.NewLazyClient`): `Register` does not panic, and the registered names are exactly the 19 above.
+  - `TestAnActivityRunTwiceWritesOnce` (`testsuite.TestActivityEnvironment`, `testdb.New`): `inventory.Take` with one `Key` run twice → one move, two equal answers.
+  - `TestARefusalIsAnAnswerNotAFailure`: `inventory.ReceiveLot` on a `labour` item → `Answer{409, step_not_applicable}`, `err == nil`.
+  - `TestADatabaseOutOfReachFailsTheActivity`: a closed pool → a non-nil `error` (Temporal retries).
+  - `TestTheRecordPostsStartAndEnd` (`record_test.go`, a fake `Poster`): one activity → a `running` row, then `succeeded`, one `id`; a 409 answer → `failed` with `detail.problem.code`; a `Poster` error → the activity still succeeds.
   - `TestTheInventoryAreaAnswersOnlyItsCaller` (`main_test.go`): an `agent` credential → 403 `wrong_caller`; an `inventory` credential with `crud.inventory` → 200 and `X-ScadBuddy-Crud: 1`.
-  - `TestAReadAreaServesNoWrite`: `SCADBUDDY_CORE_AREAS=inventory:read` → `POST /kinds` is forwarded to `Next` (a stub that answers 599).
-  - `TestAWriteWithNoKeyIs428`.
+  - `TestInventoryNeedsTemporal`: `SCADBUDDY_CORE_AREAS=inventory` without `SCADBUDDY_TEMPORAL_ADDRESS` → `run` returns an error naming the variable.
   - `TestTheAnswersMatchTheirGoldenFiles`.
 - [ ] **Step 2: Run** `cd tools/go/core && go test -race ./...` — Expected: FAIL.
-- [ ] **Step 3: Implement.** A route handler parses, calls `flow` or `store`, and maps problems; nothing else.
+- [ ] **Step 3: Implement.** `go get go.temporal.io/sdk@<v1.49.0 or newer>` in `tools/go/core`, then `go work vendor` at the root.
 - [ ] **Step 4: Run** `cd tools/go/core && go vet ./... && go test -race ./...` and `gofmt -l tools/go` — Expected: PASS, no file listed.
-- [ ] **Step 5: Commit** `feat(core): the inventory internal CRUD routes, areas inventory and inventory:read (#6949, K1 4/7)`
+- [ ] **Step 5: Commit** `feat(core): inventory writes as Temporal activities on queue inventory, reads as CRUD routes (#6949, K1 4/7)`
 
 ---
 
 ## Layer 5 — `feat/6949-k1-5-inventory-forwarders` (on layer 4)
 
-### Task 13: The client and the forwarders
+### Task 13: The clients and the forwarders
 
 **Files:**
 - Create: `backend/scadbuddy/inventory/core_client.py`
-- Modify: `backend/scadbuddy/core/settings.py`, `backend/scadbuddy/inventory/component.py`, `backend/scadbuddy/inventory/models.py`, `backend/scadbuddy/inventory/problems.py`, `backend/scadbuddy/api/inventory.py` (kinds, items), `backend/scadbuddy/api/inventory_stock.py` (lots, units, moves; not `recost`), `frontend/src/lib/problems.ts`, `frontend/src/mocks/features/inventory.ts`
+- Modify: `backend/scadbuddy/core/settings.py`, `backend/scadbuddy/inventory/component.py`, `backend/scadbuddy/inventory/models.py`, `backend/scadbuddy/inventory/problems.py`, `backend/scadbuddy/api/inventory.py` (kinds, items), `backend/scadbuddy/api/inventory_stock.py` (lots, units, moves; `recost` moves in Task 15), `frontend/src/lib/problems.ts`, `frontend/src/mocks/features/inventory.ts`
 - Delete: `backend/scadbuddy/inventory/items.py`; from `inventory/kinds.py` the `KindStore` writes (keep `merged_schema`, `item_schema`, `keys_in_use`, which `entities/` reads); `backend/tests/inventory/test_kinds.py`, `test_items.py` (ported in Task 10)
 - Test: `backend/tests/api/test_inventory.py`, `backend/tests/api/test_inventory_stock.py`, `backend/tests/inventory/test_core_client.py`, `backend/tests/inventory/test_go_answers.py`
 
 **Interfaces:**
-- `Settings.core_crud_url: str | None` (env `SCADBUDDY_CORE_CRUD_URL`, an `http://` URL such as `http://127.0.0.1:8082/api/v1`) (R-K1-4).
-- `core_client.py`: `class InventoryCore` over `CrudClient(core_crud_url, "inventory", ServiceAuth(InProcessProvider("inventory", …)))`: `async def call(self, method: str, path: str, *, by: Actor, json: Any = None, params: Mapping[str, Any] | None = None, key: str | None = None) -> Any`. It sends `X-ScadBuddy-Actor` and, on a write, `Idempotency-Key` = `f"{by.kind}:{by.principal or ''}:{key}"` when the public request carried `key`, else `f"req:{uuid4()}"`. A Go problem is raised as `ApiError` with its status, type, detail and `code` unchanged. `CrudUnavailableError` and an unset `core_crud_url` are 503 `https://scadbuddy.dev/problems/inventory/inventory_unavailable`.
+- `Settings.core_crud_url: str | None` (env `SCADBUDDY_CORE_CRUD_URL`, an `http://` URL such as `http://127.0.0.1:8082/api/v1`) for reads (R-K1-4); `Settings.temporal_task_queue_inventory: str = "inventory"`.
+- `core_client.py`, `class InventoryCore`:
+  - `async def read(self, path: str, *, params: Mapping[str, Any] | None = None) -> Any` over `CrudClient(core_crud_url, "inventory", ServiceAuth(InProcessProvider("inventory", …)))`. `CrudUnavailableError` or no `core_crud_url` → 503 `inventory_unavailable`.
+  - `async def write(self, name: str, *, key: str, by: Actor, params: Mapping[str, str] | None = None, body: Any = None, wait: float = 15.0) -> Any`: `client.execute_activity(f"inventory.{name}", {"key", "actor", "params", "body"}, id=key, task_queue=settings.temporal_task_queue_inventory, schedule_to_close_timeout=timedelta(hours=24), start_to_close_timeout=timedelta(seconds=30), id_conflict_policy=ActivityIDConflictPolicy.USE_EXISTING, id_reuse_policy=ActivityIDReusePolicy.REJECT_DUPLICATE, retry_policy=RetryPolicy(maximum_interval=timedelta(seconds=30)), summary=f"{name} {key}")`, inside `asyncio.wait_for(…, wait)`. `ActivityAlreadyStartedError` → `get_activity_handle(key).result()` in the same wait. The answer `{status, body}`: a status ≥ 400 is raised as `ApiError` with the problem's status, type, detail and `code` unchanged; else `body` is returned. The wait ends → 503 `inventory_pending` with `detail` naming the key and "retry with the same Idempotency-Key"; the activity still runs. A connection failure of the start → 503 `inventory_unavailable`.
+  - `def write_blocking(self, …) -> Any`: the same for synchronous callers (the printer merge, Task 16), through `asyncio.run_coroutine_threadsafe` on the app's loop.
+  - Key: `f"{by.kind}:{by.principal or ''}:{idempotency_key}"` when the public request carried `Idempotency-Key`, else `f"req:{uuid4()}"`.
 - Each public write route takes an optional `Idempotency-Key` header (1–200 characters).
 - `models.py`: `ItemKind`, `KindInput`, `KindPatch`, `Item`, `ItemInput`, `InventoryItemPatch`, `Unit` gain Task 10's fields (`Class = Literal`s, `Steps = dict[str, StepConf]`, `incomplete_steps: list[str]`); the phase 2 fields stay (R-K1-6).
-- `api/inventory.py`, `api/inventory_stock.py`: each kind, item, lot, unit and move route parses, calls `InventoryCore.call`, and validates the answer with its model. Offers and `recost` keep their current code.
-- `frontend/src/lib/problems.ts`: a message for each new code. The mock returns the new fields.
+- `api/inventory.py`, `api/inventory_stock.py`: each kind, item, lot, unit and move route parses, calls `InventoryCore.read` or `write` with the activity of Task 12, and validates the answer with its model. Offers keep their current code (K3).
+- Problem codes (R-K1-23, owner 2026-11-25: the new codes now, with no mapping): `inventory/problems.py` drops `item_not_counted` and `wrong_tracking` and passes Go's codes through. Every reader of an old code changes in this task: `api/inventory_stock.py:8,46` (docstrings and `codes(...)`), `agent/src/tools/inventory.ts:424-425,492` (descriptions: `step_not_applicable`, `wrong_counting`), `frontend/src/mocks/features/inventory.ts:462-464` (`Refused(409, 'step_not_applicable', …)`, `'wrong_counting'`), `frontend/src/lib/problems.ts` (a message for each new code), the backend tests that assert them (rewritten in Go in Task 12; `test_inventory_stock.py:132-137,172` become forwarder pass-through tests), `docs/features/inventory.md:43` (Task 17).
 
-- [ ] **Step 1: Write the failing tests** (the routes with an `httpx.MockTransport` that stands in for Go; it asserts the path, the method, the body, `Idempotency-Key` and `X-ScadBuddy-Actor`):
-  - one round trip per family (kinds, items, lots, units, moves);
-  - `test_a_go_problem_is_passed_through`: Go answers 409 `step_not_applicable` → the public answer is the same status, type and `code`;
-  - `test_go_out_of_reach_is_a_503`: the transport raises `httpx.ConnectError` → 503 `inventory_unavailable` within the budget (a test clock), never 500;
-  - `test_no_core_url_is_a_503`;
-  - `test_a_persons_key_is_forwarded_with_its_actor`;
-  - `test_go_answers_fit_the_public_models` (`test_go_answers.py`): each file in `tools/go/core/internal/inventory/routes/testdata/answers/` validates with its pydantic model, and `model_dump(mode="json")` equals the file.
-- [ ] Add `tools/go/core/internal/inventory/routes/testdata/` to the `backend` lane's pattern in `.github/scripts/select-lanes.sh`, and a case to `select-lanes.test.sh` (root CLAUDE.md "A new cross-tree read").
+- [ ] **Step 1: Write the failing tests** (reads through an `httpx.MockTransport` that stands in for Go; writes through a fake Temporal client that records `execute_activity`'s name, input and options and answers what the test gives):
+  - one round trip per family (kinds, items, lots, units, moves): the read path, and the write's activity name, `id`, `task_queue == "inventory"`, `id_conflict_policy == USE_EXISTING`, `id_reuse_policy == REJECT_DUPLICATE`, and input `actor`;
+  - `test_a_go_problem_is_passed_through`: the activity answers `{status: 409, body: {code: step_not_applicable, …}}` → the public answer is 409 with that type and `code`;
+  - `test_a_taken_id_reads_the_existing_result`: `execute_activity` raises `ActivityAlreadyStartedError` → the route answers the handle's result;
+  - `test_a_slow_worker_is_a_503_and_the_retry_reads_the_result`: the fake never answers → 503 `inventory_pending` after the wait (a test wait of 0.1 s); the retry with the same `Idempotency-Key` uses the same id and gets the answer;
+  - `test_temporal_out_of_reach_is_a_503` (`inventory_unavailable`); `test_go_out_of_reach_is_a_503` (a read; the transport raises `httpx.ConnectError`); `test_no_core_url_is_a_503`;
+  - `test_a_persons_key_is_scoped_to_the_actor`: two actors with one `Idempotency-Key` → two ids;
+  - `test_go_answers_fit_the_public_models` (`test_go_answers.py`): each file in `tools/go/core/internal/inventory/activities/testdata/answers/` validates with its pydantic model, and `model_dump(mode="json")` equals the file.
+- [ ] Add `tools/go/core/internal/inventory/activities/testdata/` to the `backend` lane's pattern in `.github/scripts/select-lanes.sh`, and a case to `select-lanes.test.sh` (root CLAUDE.md "A new cross-tree read").
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_inventory.py tests/api/test_inventory_stock.py tests/inventory -q` — Expected: FAIL.
 - [ ] **Step 3: Implement**; delete the Python kind and item stores and their tests.
 - [ ] **Step 4: Run** the tests, `uv run --frozen pytest tests/auth -q`, `bash .github/scripts/select-lanes.test.sh`, `cd frontend && pnpm gen:api && pnpm typecheck && pnpm lint && pnpm exec vitest run src/pages/inventory src/mocks/features/inventory.test.ts`, `cd agent && pnpm gen:api && pnpm typecheck && pnpm exec vitest run test/inventory.test.ts` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): the public kind, item and stock routes forward to Go (#6949, K1 5/7)`
+- [ ] **Step 5: Commit** `feat(inventory): public inventory reads go to Go's routes and writes to its activities (#6949, K1 5/7)`
 
-### Task 14: The real-stack run and the deployment change
+### Task 14: The `/parts` aliases go
 
 **Files:**
-- Modify: `e2e-stack/compose.yaml` (a `core` service built from `tools/go/core/Dockerfile`, `SCADBUDDY_CORE_AREAS=inventory,inventory:read`, `SCADBUDDY_CORE_CRUD_LISTEN=:8082`; the API gets `SCADBUDDY_CORE_CRUD_URL=http://core:8082/api/v1`), `e2e-stack/CLAUDE.md`
-- Test: one spec in the real-stack e2e (`e2e-stack/`): make a kind, an item, receive a lot, use 1; the item reads `on_hand` one less.
+- Delete: `backend/scadbuddy/inventory/part_alias.py`; from `backend/scadbuddy/api/parts.py` the alias routes (`GET`/`POST /parts`, `PATCH /parts/{part_id}`, `POST …/stock`, `POST …/adjust`, `GET …/moves`) and their models; from `backend/tests/api/test_parts.py` their tests
+- Modify: `backend/scadbuddy/inventory/component.py` (no `parts`), `agent/src/tools/orders.ts` (`part_list`, `part_stock_add`), `agent/src/sessions/touched.ts:334`, `agent/src/tools/coverage.ts:136-151`, `agent/test/orders.test.ts`
+- Keep: `GET`/`PUT /parts/rules/{slug}`, `GET /orders/{order_id}/parts`, `PUT /orders/{order_id}/items/{item_id}/parts` and the tool `order_item_parts_set` (they are order and rule routes, not aliases)
+- Test: `backend/tests/api/test_parts.py`, `agent/test/orders.test.ts`, `agent/test/coverage.test.ts`
 
+**Interfaces (owner 2026-11-25, R-K1-17):**
+- The tool `part_stock_add` is deleted; `inventory_lot_receive` does its work.
+- The tool `part_list` keeps only its `order_id` form: `order_id` becomes required, its route list is `['GET /api/v1/orders/{order_id}/parts']`, and its description drops "Alias of inventory_item_list". The list of every part is `inventory_item_list` with `kind=part` and `descendants=true`.
+- `coverage.ts`: the entries for the deleted routes go; the `/parts/rules/{slug}` entries stay.
+
+- [ ] **Step 1: Write the failing tests:** `test_the_part_aliases_are_gone` (`GET /api/v1/parts` and `POST /api/v1/parts/x/stock` → 404); `test_rules_and_order_parts_still_work` (the kept cases of `test_parts.py` pass); agent: `part_stock_add` is not a tool; `part_list` without `order_id` is refused by its schema; `coverage.test.ts` lists no `/api/v1/parts` alias route.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_parts.py -q` and `cd agent && pnpm exec vitest run test/orders.test.ts test/coverage.test.ts` — Expected: FAIL.
+- [ ] **Step 3: Delete and change** as listed. `git grep -n -E "part_alias|part_stock_add|/api/v1/parts['\"\`]|/parts/\{part_id\}" backend agent frontend plugins docs/features` finds nothing after it except the kept rule routes.
+- [ ] **Step 4: Run** the tests, `cd agent && pnpm lint && pnpm typecheck`, `uv run --frozen pytest tests/auth -q` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(inventory)!: remove the /parts alias routes and part_stock_add (#6949, K1 5/7)`
+
+### Task 15: The real-stack run and the deployment change
+
+**Files:**
+- Modify: `e2e-stack/compose.yaml` (a `core` service built from `tools/go/core/Dockerfile`, `SCADBUDDY_CORE_AREAS=inventory,inventory:read`, `SCADBUDDY_CORE_CRUD_LISTEN=:8082`, `SCADBUDDY_TEMPORAL_ADDRESS=temporal:7233`, `SCADBUDDY_TEMPORAL_NAMESPACE=default`, its service token file; the `app` service gets `SCADBUDDY_CORE_CRUD_URL=http://core:8082/api/v1`), `e2e-stack/CLAUDE.md`
+- Test: one spec in the real-stack e2e (`e2e-stack/`): make a kind, an item, receive a lot, use 1; the item reads `on_hand` one less; the Activities tab lists `inventory.ReceiveLot` and `inventory.Take` as succeeded.
+
+- [ ] **Pre-flight:** check that the `temporal` image in `e2e-stack/compose.yaml` runs server 1.32.0 or newer and that Standalone Activities need no dynamic-config switch there (https://docs.temporal.io/standalone-activity); if one is needed, set it in the compose file and in the Step 6 note.
 - [ ] **Step 1: Write the failing spec** `inventory goes through Go` (the e2e-stack's own runner, `e2e-stack/CLAUDE.md`).
 - [ ] **Step 2: Run** it — Expected: FAIL (503 `inventory_unavailable`).
-- [ ] **Step 3: Add the service and the setting.**
+- [ ] **Step 3: Add the service and the settings.**
 - [ ] **Step 4: Run** it — Expected: PASS.
-- [ ] **Step 5: Commit** `test(e2e-stack): run scadbuddy-core for the inventory routes (#6949, K1 5/7)`
-- [ ] **Step 6 (outside this repo, before the deploy of layers 3–5):** an eh-homelab/clusters PR sets, in the API pod, `SCADBUDDY_CORE_CRUD_LISTEN=:8082` and `SCADBUDDY_CORE_AREAS` with `inventory,inventory:read` on the `scadbuddy-core` container (#7702), and `SCADBUDDY_CORE_CRUD_URL=http://127.0.0.1:8082/api/v1` on the API container. After the deploy, read `inventory_k1_report` on prod (`deploy/CLAUDE.md` "Prod checks") and post the counts on the K1 issue.
+- [ ] **Step 5: Commit** `test(e2e-stack): run scadbuddy-core and its inventory worker (#6949, K1 5/7)`
+- [ ] **Step 6 (outside this repo, before the deploy of layers 3–6):** an eh-homelab/clusters PR. In the API pod: on the `scadbuddy-core` container, `SCADBUDDY_CORE_CRUD_LISTEN=:8082`, `SCADBUDDY_CORE_AREAS` with `inventory,inventory:read` (#7702), `SCADBUDDY_TEMPORAL_ADDRESS` and `SCADBUDDY_TEMPORAL_NAMESPACE` as the API container has them (no mTLS: the Python client uses none), `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY=inventory`, and a projected service-account token for the `core` exchange (`SCADBUDDY_SERVICE_TOKEN_FILE`, as the render worker has); on the API container, `SCADBUDDY_CORE_CRUD_URL=http://127.0.0.1:8082/api/v1`. A NetworkPolicy egress rule from the API pod to the Temporal frontend (7233) if the pod's policy does not already allow it (the API container already reaches it; check whether the rule is per pod or per container, which a NetworkPolicy is not). The exchange's allow-list names the `core` service account. After the deploy, read `inventory_k1_report` on prod (`deploy/CLAUDE.md` "Prod checks") and post the counts on the K1 issue.
 
 ---
 
-## Layer 6 — `feat/6949-k1-6-order-stock-calls` (on layer 5)
+## Layer 6 — `feat/6949-k1-6-order-stock-activities` (on layer 5)
 
-### Task 15: Order stock calls
+### Task 16: Orders and the printer merge start activities; Python's stock writes go
 
 **Files:**
-- Create: `backend/scadbuddy/migrations/<UTC>_order_stock_calls.sql`, `backend/scadbuddy/orders/stock_calls.py`
-- Modify: `backend/scadbuddy/orders/lifecycle.py` (`_lock_parts_of`, `_use_parts`, `_return_parts`, `parts_unit_cost`, `recost_lot`), `backend/scadbuddy/api/inventory_stock.py` (`recost`), `backend/scadbuddy/workflows/housekeeping.py` (a prune-schedule sweep), `tools/go/core/internal/inventory/routes/stock.go` (`POST /order-items/{order_item_id}/give-back`, `POST /lots/{lot_id}/recost`, `GET /items/{item_id}/estimate`), `tools/go/core/internal/inventory/flow/flow.go`
-- Test: `backend/tests/orders/test_stock_calls.py`, `backend/tests/orders/test_parts_lifecycle.py`, `tools/go/core/internal/inventory/routes/orders_test.go`
+- Modify: `backend/scadbuddy/orders/lifecycle.py` (`_lock_parts_of`, `_use_parts`, `_return_parts`, `parts_unit_cost`, `recost_lot`), `backend/scadbuddy/api/inventory_stock.py` (`recost`), `backend/scadbuddy/printers/store.py` (`_merge` and its two callers, l.667 and l.949), `backend/scadbuddy/entities/registry.py` (`repoint_entity` loses its `UPDATE stock_moves`)
+- Delete: from `backend/scadbuddy/inventory/stock.py` every write (`StockStore` and its helpers); keep `parts_moves`, `parts_moved`, `PartsMoved` (readers, R-K1-16); `backend/tests/inventory/test_stock.py` (ported in Task 11)
+- Test: `backend/tests/orders/test_stock_activities.py`, `backend/tests/orders/test_parts_lifecycle.py`, `backend/tests/printers/test_merge_stock.py` (new, beside `test_merge_filament.py`), `backend/tests/test_no_python_stock_writes.py`
 
 **Interfaces:**
-- SQL (R-K1-14): `order_stock_calls (id bigint identity PK, key text NOT NULL UNIQUE, order_id text NOT NULL, order_item_id text NOT NULL, item_id uuid NOT NULL, op text NOT NULL CHECK (op IN ('take','give_back')), qty numeric(20,6), actor jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), tries int NOT NULL DEFAULT 0, last_error text, done_at timestamptz, answer jsonb)`; index `(order_item_id, id) WHERE done_at IS NULL`.
-- Key: `order_item:<order_item_id>:parts:<n>:<item_id>` (design §6.1, with the part item added). `n` is 1 + the count of the order item's earlier calls with that `op`, read under the order's lock.
-- Go: `POST /order-items/{order_item_id}/give-back` body `{item_id}` (phase 2 `give_back`); `POST /lots/{lot_id}/recost` body `{orders: [order_id]}`: 409 `recost_orders_moved` and nothing written when a move of the lot names an order not in the list, else phase 2's `RecostResult`; `GET /items/{item_id}/estimate?qty=` (phase 2 `estimate_unit_cost`). `POST /items/{item_id}/use` takes `order_id` and `order_item_id` (phase 2 `take`'s keywords).
-- `orders/stock_calls.py`: `record_take(conn, order, item, part_item_id, qty, by) -> int`, `record_give_back(conn, order, item, part_item_id, by) -> int` (in the transition's transaction, after `order_item_parts.used` is set); `settle(order_id: str) -> None` (after the commit: each pending call of the order in id order, through `CrudSyncClient` with its key; then, under the order's lock, the `parts.used` or `parts.returned` event with phase 2's detail and `done_at`; a call stops at the first failure of its order item, which `tries` and `last_error` record); a 4xx answer marks the call done with the problem as `answer` and writes `parts.stock_refused`.
-- `lifecycle.py`: `_use_parts` and `_return_parts` record calls instead of `StockStore.take` and `give_back`; the transition calls `settle` after its commit; `_lock_parts_of` goes (each Go call is its own transaction); before the commit, `_use_parts` reads `GET …/estimate` for each part and raises `bad_quantity` as phase 2 does (a read takes no lock, so it cannot wait on the order's lock); `parts_unit_cost` reads the same route; `recost_lot` locks the orders, calls Go's recost with their ids inside its transaction, and retries on `recost_orders_moved` (phase 2 `_RECOST_TRIES`).
-- Housekeeping: `ORDER_STOCK_CALLS_SWEEP = "prune_settle_order_stock_calls"` on the prune schedule (300 s, `PRUNE_INTERVAL`), behind its own workflow patch as each sweep there: `settle` for each order with a call pending for more than 60 s.
+- Keys (§6.1a): `order_item:<order_item_id>:parts:<n>:<item_id>` for `inventory.Take` and `inventory.GiveBack`, where `n` is the item's fulfilment cycle: 1 + the count of its earlier `parts.returned` events, read under the order's lock (so a retry of one fulfil reads the same `n`, and the take after an unfulfil gets a new one). `lot:<lot_id>:recost:<request key>` for `inventory.Recost`. `entity_merge:printer:<gone>:<kept>` for `inventory.Repoint`.
+- `lifecycle.py`, fulfil (R-K1-14):
+  1. In the order's transaction: the transition as today; `order_item_parts.used` set; before the commit, `GET …/items/{item_id}/estimate?qty=` per part refuses `bad_quantity` as phase 2 did (a read takes no lock). Commit.
+  2. Then `InventoryCore.write("Take", key=…, body={qty, order_id, order_item_id})` per part item, in `item_id` order, awaited inline. The answers' moves give the `parts.used` event, written in a short transaction under the order's lock (phase 2's detail).
+  3. A start that fails (Temporal out of reach, or the wait ends) → `LifecycleError("stock_pending", …)` (503): the order stays fulfilled, `parts.used` is not written, and the person retries the fulfil. A fulfil of an already-fulfilled item whose `parts.used` event is missing runs step 2 again with the same keys, which attach to or read the first activities (fulfil is idempotent). A refusal answer → `parts.stock_refused` event with the problem.
+  Unfulfil does the same with `inventory.GiveBack` and `parts.returned`. `_lock_parts_of` goes: each activity is its own transaction.
+- `parts_unit_cost` reads the estimate route. `recost_lot` locks the orders (its transaction), executes `inventory.Recost` with `body={orders: [ids]}` inside it (Go waits on no row Python holds: it locks the lot and its moves, never an order), writes the events, commits; `recost_orders_moved` → the whole recost again (phase 2 `_RECOST_TRIES`).
+- Printer merge (owner 2026-11-25, R-K1-15): `_merge(conn, gone, kept)` first locks the `gone` printer row `FOR UPDATE`, then reads whether a stock row names it (`stock_units.printer_id = gone`, or a `stock_moves.entity_id` of the entity `printer:gone`). If one does, it raises `NeedsRepoint(gone, kept)`; the caller's transaction rolls back; the store calls `InventoryCore.write_blocking("Repoint", key=f"entity_merge:printer:{gone}:{kept}", body={kind: "printer", gone, kept})` with no transaction open, and runs the whole method again (at most 3 times, then `MergeBusy`, 409). With no stock row, the merge goes on as today without the stock references. A stock write that names `gone` after the check waits on the row lock and then fails on its foreign key when the printer is gone (`stock_moves.entity_id`), or would set `printer_id` NULL (`ON DELETE SET NULL`): the lock makes Go's insert wait, and its retry after the commit finds the printer gone and is refused. `PRINTER_REFERENCES` loses `stock_units`; `repoint_entity` loses its `UPDATE stock_moves`.
+- `test_no_python_stock_writes.py`: `git grep`-style scan of `backend/scadbuddy/**/*.py` (not `migrations/`) for `INSERT INTO|UPDATE|DELETE FROM` followed by `items`, `item_kinds`, `stock_lots`, `stock_units`, `stock_moves`; the only allowed hits are `inventory/offers.py` (`supplier_offers`, `offer_price_points` are not stock tables, K3) — so the test fails on any stock-table write.
 
-- [ ] **Step 1: Write the failing tests** (Go faked by `httpx.MockTransport` in Python; the Go routes tested in Go):
-  - `test_fulfil_takes_stock_through_go`: fulfil an item with 2 of a part → one call `take` qty 2 with key `order_item:oi1:parts:1:<part>`, done; one `parts.used` event with the moves' amount.
-  - `test_unfulfil_then_fulfil_uses_new_keys`: keys `…:parts:1:…` (take), `…:parts:1:…` (give_back), `…:parts:2:…` (take).
-  - `test_a_pending_stock_call_settles_once`: the transport fails during the transition → the order is fulfilled, the call pending; the sweep settles it; a second sweep sends nothing; the fake saw one key twice and Go's replay gives one answer.
-  - `test_a_refused_call_is_recorded`: Go answers 422 `bad_quantity` → `parts.stock_refused`, the call done.
-  - `test_bad_quantity_refuses_before_the_commit`: the estimate says overflow → `LifecycleError("bad_quantity")`, the order not changed, no call.
-  - Go: `TestRecostRefusesAnUnlockedOrder`, `TestGiveBackOfAnOrderItem`, `TestEstimateWritesNothing`.
+- [ ] **Step 1: Write the failing tests** (the fake Temporal client of Task 13):
+  - `test_fulfil_takes_stock_through_an_activity`: fulfil an item with 2 of a part → one `inventory.Take`, id `order_item:oi1:parts:1:<part>`, qty `"2"`; one `parts.used` event with the answer's amount.
+  - `test_unfulfil_then_fulfil_uses_new_keys`: `…:parts:1:…` (Take), `…:parts:1:…` (GiveBack), `…:parts:2:…` (Take).
+  - `test_a_failed_start_fails_the_fulfil`: `execute_activity` raises `RPCError` → 503 `stock_pending`; the item is fulfilled; no `parts.used`.
+  - `test_a_fulfil_retry_starts_the_same_id`: after that, the retry starts the same id once more, gets the answer, and writes `parts.used` once.
+  - `test_a_refused_take_is_recorded`: the answer is 422 `bad_quantity` → `parts.stock_refused`.
+  - `test_bad_quantity_refuses_before_the_commit`: the estimate route says overflow → `LifecycleError("bad_quantity")`, the order not changed, no activity.
+  - `test_recost_retries_when_another_order_moved`: the first answer is 409 `recost_orders_moved`, the second a result → two activities with two keys, events once.
+  - `test_a_merge_repoints_stock_first`: a unit with `printer_id = gone` → one `inventory.Repoint` with id `entity_merge:printer:gone:kept`, then the merge commits; with no stock row, no activity.
+  - `test_no_python_stock_writes`.
   - The phase 2 cases of `test_parts_lifecycle.py` still pass with the fake.
-- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/orders/test_stock_calls.py tests/orders/test_parts_lifecycle.py -q` and `cd tools/go/core && go test ./internal/inventory/routes/ -run 'Recost|GiveBack|Estimate'` — Expected: FAIL.
-- [ ] **Step 3: Implement.** Remove from `inventory/stock.py` what only `lifecycle.py` called (`take`, `give_back`, `lock_items`, `estimate_unit_cost`, `recost_lot`) unless `part_alias.py` still calls it.
-- [ ] **Step 4: Run** the tests, then `uv run --frozen pytest tests/orders tests/workflows -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(orders): order parts take and give back stock through Go with idempotent calls (#6949, K1 6/7)`
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/orders/test_stock_activities.py tests/orders/test_parts_lifecycle.py tests/printers tests/test_no_python_stock_writes.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement**; delete the Python stock writes and `test_stock.py`.
+- [ ] **Step 4: Run** the tests, then `uv run --frozen pytest tests/orders tests/printers tests/entities -n auto -q` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(orders): order parts, re-costs and printer merges write stock through Go's activities (#6949, K1 6/7)`
 
 ---
 
 ## Layer 7 — `feat/6949-k1-7-inventory-docs` (on layer 6)
 
-### Task 16: Docs
+### Task 17: Docs
 
 **Files:**
-- Modify: `docs/features/inventory.md`, `docs/architecture/` (the page on processes and the page on data: the inventory tables now have Go as their writer), `backend/CLAUDE.md` (the `inventory/` layout), `tools/go/CLAUDE.md` (`core/` holds `internal/inventory`), `tools/go/core/README.md` (if Task 12 left a gap), `docs/inventory-model/README.md` (one line: the Go test is `internal/inventory/modeldata`), the design's status line ("K1 built")
+- Modify: `docs/features/inventory.md` (the class, the new problem codes in place of `item_not_counted` l.43, the `/parts` aliases gone l.194, the Activities tab rows), `docs/architecture/` (the page on processes: `scadbuddy-core` runs a Temporal worker on queue `inventory`; the page on data: Go writes the inventory tables; the page on Temporal workflows: the standalone activities), `backend/CLAUDE.md` (the `inventory/` layout), `tools/go/CLAUDE.md` (`core/` holds `internal/inventory` and `internal/temporalx`; the Temporal SDK is vendored), `tools/go/core/README.md` (if Task 12 left a gap), `docs/inventory-model/README.md` (one line: the Go test is `internal/inventory/modeldata`), the design's status line ("K1 built")
 
 - [ ] **Step 1:** Write each change; every fact names its file or its PR (#259).
 - [ ] **Step 2: Run** `lychee --offline docs/features/inventory.md docs/inventory-model/README.md` if it is installed, else check each relative link by hand — Expected: no broken link.
@@ -619,35 +738,42 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 |---|---|---|
 | `unit_uses`, `consume.use`, manual readings | `Consumer` for durables is `handler_not_built`; `stock_units.life_*` columns stay unwritten | K2 |
 | Life | `steps.life` is resolved and validated; `Lifer` has no implementation; `life_*` read fields are derived from `steps` | K2 |
-| Handler cache and refresh | No `handler_values`; `handler_config_history` is written from K1 (R-K1-13) | K2 |
+| Handler cache and refresh | No `handler_values`; `handler_config_history` is written from K1 | K2 |
 | Relationships | `relation_types` (five, seeded) and `relations` exist; only `compatible_with` rows; `installed_in_unit_id` stays a column; no `RelationHandler` | K2 |
-| Term services, schedule, signals | `stock_units.starts_at`, `ends_at`, status `ended` exist; no route writes them | K2 |
+| Term services, schedule, signals | `stock_units.starts_at`, `ends_at`, status `ended` exist; no activity writes them. The daily schedule can call the same activity functions as workflow steps (§6.1a) | K2 |
 | The YAML test | Relations and history replay of `check.py` | K2 |
-| Purchasing | Offers, price points and `/parts` aliases stay Python SQL (R-K1-17) | K3 |
-| Filament | `filament_spool` resolves; filament items are refused (`filament_item_refused`); `filament.*` are `handler_not_built` | K3, K4 |
-| Printer | `printer` kind has `special_type` NULL; `printer.*` are `handler_not_built`; `printer_run_hours` untouched | K6 |
+| Purchasing | Offers and price points stay Python SQL (not stock tables) | K3 |
+| Filament | `filament_spool` resolves; filament items are refused (`filament_item_refused`); `filament.*` are `handler_not_built`; `inventory.ReceiveUnits` is the activity `filament.receive` will extend | K3, K4 |
+| Printer | `printer` kind has `special_type` NULL; `printer.*` are `handler_not_built`; `printer_run_hours` untouched; `PrintRun` will call `inventory.Take`-style activities as workflow steps | K6 |
 | Services on orders | No `order_items.service_item_id`; `consume.service` and `bill.*` not built | later phase |
-| Merges | `entities/registry.py` and `printers/store.py` keep their stock `UPDATE`s (R-K1-15) | #7667 phase 4 |
 | Drops | `item_kinds.tracking`, `life_basis`; `items.life_*`, `compatible_with`; `stock_units.life_*`; `inventory_k1_report` | K2, after one release |
+
+## Owner answers (2026-11-25, through the coordinator)
+
+1. Crossing the Python-Go line is a Temporal Standalone Activity (§6.1a), never an outbox, a
+   sweep, or a cross-process SQL transaction. This replaced the first draft's
+   `order_stock_calls` outbox.
+2. Merges do not keep their SQL: they execute `inventory.Repoint` first (R-K1-15).
+3. The `/parts` aliases are deleted in K1, with every caller moved (Task 14). After K1 no
+   Python code writes a stock table (Task 16's test).
+4. The new problem codes are used now, with no mapping (R-K1-23).
 
 ## Rulings (R-K1-n, made in this plan; the owner may change them)
 
 - **R-K1-1. Port as is.** Each K1 default handler ports the phase 2 code path it replaces,
   statement for statement, with its locks (#7667 §1.3: no new behaviour). Where
-  `handlers.yaml` says more, the phase that needs it adds it. So `move.place` writes no
-  `transfer` move (a one-row transfer would break `on_hand` = the sum of moves and
-  `qty <> 0`), and a unit's status change keeps phase 2's moves.
+  `handlers.yaml` says more, the phase that needs it adds it. A unit's status change keeps
+  phase 2's moves; `move.place` writes no move (now in `handlers.yaml`).
 - **R-K1-2. One idempotency ledger.** Go writes `crud_requests` under the caller
-  `inventory`, with `crud/idempotency.py`'s lock class, and `prune` keeps those rows 7 days.
-  No `idempotency_keys` table (design §6.3 names one; the ledger already exists).
-- **R-K1-3. A caller `inventory`.** The Go router accepts a credential only for its path's
-  caller, so the routes under `/internal/crud/inventory/` need a caller of that name. The
-  API mints it in process (`InProcessProvider`), scope `crud.inventory`. A later caller (the
+  `inventory`, with `crud/idempotency.py`'s lock class, and `prune` keeps those rows 7 days
+  (design §6.1 at `c51dba825`). The activity id and the ledger key are the same string.
+- **R-K1-3. A caller `inventory`** for the read routes (`/internal/crud/inventory/`), minted
+  in process by the API (`InProcessProvider`), scope `crud.inventory`. A later caller (the
   print worker in K6) gets the area mounted under its own prefix.
-- **R-K1-4. The address.** `SCADBUDDY_CORE_CRUD_URL`; unset, the inventory routes answer
-  503 `inventory_unavailable`. There is no Python fallback: one writer per table.
-- **R-K1-5. The actor** travels as `X-ScadBuddy-Actor` (an `Actor` as JSON), so the body is
-  the public body. Go sets `scadbuddy.actor` in every write transaction.
+- **R-K1-4. The read address** is `SCADBUDDY_CORE_CRUD_URL`; unset, a read answers 503
+  `inventory_unavailable`. There is no Python fallback: one writer per table.
+- **R-K1-5. The actor** travels in the activity input (`actor`), so `body` is the public
+  body. Go sets `scadbuddy.actor` in every write transaction.
 - **R-K1-6. The public contract grows; nothing is removed.** Kinds and items gain the class
   keys, `special_type`, `steps` and `incomplete_steps`. `tracking`, `life_basis`,
   `life_hours`, `life_months` and `compatible_with` stay, read from the new data and still
@@ -674,49 +800,76 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   as `_`, at most 32), name the code. `item_kind` becomes an entity kind so a relation can
   name a kind. An item write with a new code makes its model kind, by the same rule.
   `?compatible=` reads the relations.
-- **R-K1-12. The history trigger.** A set's actor is `scadbuddy.actor` when it is set, else
-  `updated_by` (so a merge's copies name the merge, not the first writer). A cascade is
-  recorded by a `BEFORE DELETE` trigger on `entities`, because the entity row is gone when
-  the property row's trigger runs. Existing rows get one back-filled `set` each, so the
-  history replays to the current properties from the first day.
-- **R-K1-13. Parameter history starts in K1**, because K1 lets people change steps.
-- **R-K1-14. Order stock calls.** As §6.1 says: the order writes its own row first, then
-  calls Go with a key from that row; the prune schedule's sweep (a Temporal activity)
-  retries. The `parts.used` event is written when the call settles, not in the transition.
-- **R-K1-15. Merges keep their SQL.** `entities/registry.py:132` and `printers/store.py:358`
-  repoint a column inside a transaction that holds `entities` and `printers` rows
-  `FOR UPDATE`. A Go call from inside it would wait on those rows (the foreign key check),
-  and Python would wait on Go. They run no handler; #7667 phase 4 moves them with entities
-  and printers.
+- **R-K1-12. The history trigger** follows §4.8 at `c51dba825`: the actor from
+  `scadbuddy.actor` first, `updated_by` only when it is unset; cascades recorded by a
+  `BEFORE DELETE` trigger on `entities`. Existing rows get one back-filled `set` each, so
+  the history replays to the current properties from the first day.
+- **R-K1-13. Parameter history starts in K1** (§4.7 at `c51dba825`).
+- **R-K1-14 (replaces the first draft's outbox). Orders.** Fulfil commits the order change,
+  then executes `inventory.Take` per part inline with the key
+  `order_item:<id>:parts:<n>:<item>`. A failed start fails the call (503 `stock_pending`);
+  the order stays fulfilled without `parts.used`, and a retry of the fulfil starts the same
+  ids, which attach to or read the first activities. Unfulfil does the same with
+  `inventory.GiveBack`. A re-cost executes `inventory.Recost` inside its order-locked
+  transaction; Go checks the locked orders under the lot's lock (`recost_orders_moved`).
+- **R-K1-15 (replaces "merges keep their SQL"). Printer merge.** The merge locks the gone
+  printer, checks for stock rows naming it, and if any, rolls back, executes
+  `inventory.Repoint` with no transaction open, and runs again. Go's later insert naming the
+  gone printer waits on the lock and then fails on the foreign key (or would be nulled by
+  `ON DELETE SET NULL` on `stock_units.printer_id`, which the check under the lock covers).
+  `entities/registry.py` `repoint_entity` loses its stock `UPDATE`: the printer merge is
+  its only caller (`git grep repoint_entity`).
 - **R-K1-16. Readers keep their reads.** `orders/parts.py:421`, `orders/store.py:2661`
   (and so `orders/costs.py`), `entities/sweep.py:31`, `entities/registry.py:203` read stock
   tables; reads are not writes (§6.1). They move with #7667 phase 5, or in K2 where they need
   a cached value.
-- **R-K1-17. Offers and the `/parts` aliases stay Python SQL** until K3 moves purchasing
-  (or the aliases are deleted). They run no handler. `inventory/stock.py` keeps what
-  `part_alias.py` calls.
-- **R-K1-18. Layers 3, 4 and 5 deploy together.** Between their merges, Python's phase 2
+- **R-K1-17. Offers stay Python SQL until K3; the `/parts` aliases are deleted in K1**
+  (owner). `part_list` keeps its order form; `part_stock_add` goes.
+- **R-K1-18. Layers 3 to 6 deploy together.** Between their merges, Python's phase 2
   writes still work on the new schema (the class columns are nullable), but the prod pin
-  moves only when layer 5 is on main and the clusters change of Task 14 Step 6 is ready.
+  moves only when layer 6 is on main and the clusters change of Task 15 Step 6 is ready.
 - **R-K1-19. The YAML test in K1** covers the catalog, the kinds, the items, the instances
   and the README table, and the property history through the real trigger. `check.py`'s
   relation checks and its replay of lives and cached values come in K2.
 - **R-K1-20. A YAML package for tests only:** `go.yaml.in/yaml/v3`, imported by
   `modeldata` alone.
-- **R-K1-21. Python tests fake Go.** The forwarder and lifecycle tests use
-  `httpx.MockTransport`; the route behaviour is tested in Go; the recorded Go answers are
-  validated by the pydantic models, so "the same JSON" (§6.1) is checked in both trees.
+- **R-K1-21. Python tests fake Go and Temporal.** The forwarder, lifecycle and merge tests
+  use `httpx.MockTransport` for reads and a fake Temporal client for writes; the Go side is
+  tested with `testsuite.TestActivityEnvironment` and `testdb`; the real path runs in
+  `e2e-stack` (Task 15). The recorded Go answers are validated by the pydantic models.
+- **R-K1-22. The activity record goes through a new caller `core`.** §6.1a's interceptor
+  writes through "its CRUD route", which does not exist. `scadbuddy-core` gets the caller
+  `core` (scope `crud.core`, by the `k8s` exchange as the render worker), and Python gets
+  `POST /api/v1/internal/crud/core/activities`, which runs `ActivityIndex.upsert_in`. Go
+  does not write `activity` rows itself: their writer takes the event log's lock and
+  publishes, which stays Python's until #7667 ports it.
+- **R-K1-23. The new problem codes.** `item_not_counted` becomes `step_not_applicable`;
+  `wrong_tracking` becomes `wrong_counting` (the class has no `tracking`); a consume of a
+  durable is `handler_not_built`. `unit_installed` and `filament_item_refused` stay.
+- **R-K1-24. Timeouts.** A public write waits 15 s, then answers 503 `inventory_pending`;
+  the activity has `schedule_to_close_timeout` 24 h and `start_to_close_timeout` 30 s, so
+  a worker that is down for less than a day still runs it once, and a retry with the same
+  key reads its result. Under `REJECT_DUPLICATE`, an id is never run twice in the
+  namespace's retention, so a key whose activity timed out after 24 h stays refused until
+  then; the person makes a new request (a new key).
 
 ## Self-review
 
 - **Spec coverage.** §3 class: Task 5, Task 7. §4.1–4.3 steps, resolution, parameters:
-  Task 5, Task 11. §4.4 special types: Task 5 (catalog), R-K1-7. §4.8: Tasks 1–3, 6. §6.1:
-  Tasks 8, 9, 12, 13, 15. §6.2 layout: Tasks 5, 9–12. §6.3 data for K1: Task 7 (the K2 tables
-  are seams). §7 proof as a test: Task 6. §8: Task 7. §9 K1 needs the CRUD port: Task 14.
-  §4.5–4.7, §5's handlers, §6.4: K2 (seams table).
+  Task 5, Task 11. §4.4 special types: Task 5 (catalog), R-K1-7. §4.7 parameter history:
+  Tasks 7, 10. §4.8: Tasks 1–3, 6. §6.1: Tasks 8, 9, 13, 16. §6.1a: Task 12 (worker,
+  activities, interceptor), Task 13 (starts and policies), Task 16 (orders, merge), Task 15
+  (deployment). §6.2 layout: Tasks 5, 9–12. §6.3 data for K1: Task 7. §7 proof as a test:
+  Task 6. §8: Task 7. §9 K1 needs the CRUD port: Task 15. §4.5–4.7's cache, §5's handlers,
+  §6.4: K2 (seams table).
 - **Type names.** `model.Class`, `model.Chain`, `model.Steps`, `handlers.Catalog`,
   `handlers.Resolution`, `handlers.Problem`, `handlers.Registry`, `store.Write`,
-  `store.Actor`, `flow.Flow`, `inventory.Areas`, `inventory.Caller`, `InventoryCore.call`,
-  `stock_calls.settle` are used with one spelling in every task.
+  `store.Answer`, `store.Actor`, `flow.Flow`, `activities.Activities`,
+  `activities.Register`, `activities.Record`, `inventory.Areas`, `inventory.Caller`,
+  `InventoryCore.read`, `InventoryCore.write`, `InventoryCore.write_blocking` are used with
+  one spelling in every task. The 19 activity names in Task 12 are the ones Tasks 13 and
+  16 start.
+- **No outbox, no sweep.** No task adds a table of pending calls or a housekeeping step;
+  every write that crosses the line is an activity start.
 - **Proportion.** The plan gives signatures, tests and values; no task writes a body that
   its tests determine.
