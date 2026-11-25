@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { isAliasedKind, listCatalog, upsertCatalog, type CatalogInput, type CatalogKind } from '../../api/filament'
 import { AttachmentsPanel } from '../entities/AttachmentsPanel'
+import { KindKeysForm } from '../entities/KindKeysForm'
 import { LinksPanel } from '../entities/LinksPanel'
 import { PropertiesPanel } from '../entities/PropertiesPanel'
 import { AliasChips, AliasList } from './AliasChips'
@@ -112,6 +113,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const [draft, setDraft] = useState<Draft | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [editingKeys, setEditingKeys] = useState(false)
   const [search, setSearch] = useState('')
   const [asked, setAsked] = useState('')
   // A catalog where every row is drawn and may be re-ordered; colours are searched instead.
@@ -341,6 +343,9 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           />
           Show archived
         </label>
+        <Button type="button" size="sm" variant="ghost" className="ml-auto" aria-expanded={editingKeys} onClick={() => setEditingKeys((open) => !open)}>
+          Property keys
+        </Button>
         {needsMore ? (
           <Button type="button" size="sm" onClick={() => { setFormError(null); setDraft(draftOf(spec.fields)) }}>
             <PlusIcon /> Add
@@ -354,6 +359,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           </form>
         )}
       </div>
+      {editingKeys && <KindKeysForm kind={spec.entity} onSaved={() => setEditingKeys(false)} onCancel={() => setEditingKeys(false)} />}
       {searched && <ColourSources onSynced={() => void load()} />}
       {searched && (
         <Input

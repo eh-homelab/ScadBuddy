@@ -17,8 +17,9 @@ vendor`, for consumers outside the workspace) and then runs `go work vendor`; it
 runs `go work sync`, which would move a lagging client's `go.mod` past its own
 `vendor/modules.txt` and edit bambuddy-fs's `go.mod` on a client-only change (#2686).
 bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without the
-device). The Go toolchain is pinned in six places, moved together: `go.work`'s
-`toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, and `GOTOOLCHAIN` in
+device). core's tests need `SCADBUDDY_TEST_DATABASE_URL` (they skip without it;
+CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in seven places, moved together: `go.work`'s
+`toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile` and `tools/go/core/Dockerfile`, and `GOTOOLCHAIN` in
 `go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
 
@@ -29,7 +30,9 @@ device). The Go toolchain is pinned in six places, moved together: `go.work`'s
   consumers); `bambuddy-fs/` is the FUSE mount of Bambuddy's library over it
   (`internal/api` the client wrapper, `internal/fsys` the tree, cache, writes and the
   unsent queue, `internal/telemetry` OTel; README there). Its unsent writes are the
-  only copy of a save, under the state directory, never the cache.
+  only copy of a save, under the state directory, never the cache. `core/` is the
+  API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to Python
+  (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
 
 ## See also
 
