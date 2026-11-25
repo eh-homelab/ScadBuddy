@@ -388,7 +388,13 @@ gives us the visibility into the Activities tab in SB".
   the old row. Calling Go from inside the merge's locked transaction would make the two
   transactions wait on each other; this order avoids it. A stock row that lands on the
   old id between the two steps makes the delete fail on its foreign key, and the merge
-  repeats the first step.
+  repeats the first step. The foreign key protects only `stock_moves.entity_id`.
+  `stock_units.printer_id` is `ON DELETE SET NULL`, so a delete would clear it, not
+  fail. So the printer merge locks the gone printer's row `FOR UPDATE`, then checks
+  whether a stock row names it; if one does, it executes `inventory.Repoint` first. The
+  printer merge runs inside its callers' transactions (`printers/store.py` l.667, l.949),
+  so it rolls back, executes `inventory.Repoint` with no transaction open, and runs
+  again, at most 3 times (plan K1, R-K1-15, R-K1-25).
 - **Visibility.** It is not automatic; every feature writes its own record row and the
   activity record follows it. Renders, print runs and the backend's operations write an
   `activity` row in the same transaction as their own row (`ActivityIndex.upsert_in`, for
@@ -405,7 +411,9 @@ gives us the visibility into the Activities tab in SB".
   1.32.0. The backend's Python SDK is 1.36.0 (`backend/uv.lock`); they need 1.33.0. The Go
   SDK needs 1.49.0; `scadbuddy-core` adds it (vendored, `tools/go/CLAUDE.md`). Go
   Temporal code to follow: eh-homelab/clusters `tier0/bootstrap/internal/` (`wf`,
-  `activities`, `codec`, `progress`), on SDK v1.47.0.
+  `activities`, `codec`, `progress`), on SDK v1.47.0. The e2e stack's dev server
+  (`temporal server start-dev`) must run server 1.32.0 or newer, with Standalone
+  Activities on.
 
 ### 6.2 Layout
 
