@@ -254,7 +254,10 @@ class _Clock:
         return time.monotonic() + self.offset
 
     def end_budget(self) -> None:
-        """Spend the current call's retry budget, so the try in flight is its last."""
+        """Spend the current call's retry budget, so the try in flight is its last.
+
+        Every CRUD call through `deps` shares this clock: a call that is retrying at the
+        same time loses its budget too. Use it only where no other call overlaps."""
         self.offset += 3600
 
 
