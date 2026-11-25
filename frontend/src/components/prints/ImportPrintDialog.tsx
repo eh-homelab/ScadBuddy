@@ -255,19 +255,26 @@ function ImportForm({
   useEffect(() => {
     if (!checked) return
     let current = true
-    let latest = 0
+    let sent = 0
+    // The newest check that said something of the file: an older one that lands later is dropped.
+    let answered = 0
     const check = () => {
       if (document.visibilityState === 'hidden') return
-      const read = ++latest
+      const read = ++sent
       api.checkImportTarget(checked.id).then(
         () => {
-          if (current && read === latest) setCheckError(null)
+          if (!current || read < answered) return
+          answered = read
+          setCheckError(null)
         },
         (caught: unknown) => {
-          if (!current || !(caught instanceof ApiError)) return
-          if (caught.problem.type === LIBRARY_FILE_GONE) markGone(checked, replacementOf(caught))
+          if (!current || read < answered || !(caught instanceof ApiError)) return
+          const isGone = caught.problem.type === LIBRARY_FILE_GONE
+          if (!isGone && caught.status !== 422) return
+          answered = read
+          if (isGone) markGone(checked, replacementOf(caught))
           // A print's own copy stands, but is never a target.
-          else if (caught.status === 422 && read === latest) setCheckError(errorText(caught))
+          else setCheckError(errorText(caught))
         },
       )
     }

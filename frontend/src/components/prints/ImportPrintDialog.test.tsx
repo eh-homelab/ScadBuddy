@@ -487,6 +487,48 @@ describe('ImportPrintDialog', () => {
       await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('the printer did not answer'))
     })
 
+    it('keeps the chosen file when an older check on focus says late that it is gone', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      let fail: (problem: ApiError) => void = () => undefined
+      const older = new Promise<typeof STANDS>((_, reject) => {
+        fail = reject
+      })
+      const check = vi.spyOn(api, 'checkImportTarget').mockReturnValueOnce(older).mockResolvedValue(STANDS)
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(check).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        fail(goneProblem(null))
+        await older.catch(() => undefined)
+      })
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeEnabled()
+    })
+
+    it('keeps the answer of an older check on focus when the newer one did not answer', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      let fail: (problem: ApiError) => void = () => undefined
+      const older = new Promise<typeof STANDS>((_, reject) => {
+        fail = reject
+      })
+      vi.spyOn(api, 'checkImportTarget')
+        .mockReturnValueOnce(older)
+        .mockRejectedValue(new ApiError(503, 'the library did not answer'))
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+        window.dispatchEvent(new Event('focus'))
+      })
+      await act(async () => {
+        fail(new ApiError(422, "library file 1000000501 is a print's own copy"))
+        await older.catch(() => undefined)
+      })
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
+    })
+
     it('drops the reply of an older check on focus when a newer one was sent', async () => {
       nativeLibrary()
       const { dialog } = await chooseLibraryFile()
