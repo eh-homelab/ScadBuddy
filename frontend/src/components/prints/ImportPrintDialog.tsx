@@ -254,9 +254,10 @@ function ImportForm({
     const check = () => {
       if (document.visibilityState === 'hidden') return
       api.checkImportTarget(checked.id).catch((caught: unknown) => {
-        if (current && caught instanceof ApiError && caught.problem.type === LIBRARY_FILE_GONE) {
-          markGone(checked, replacementOf(caught))
-        }
+        if (!current || !(caught instanceof ApiError)) return
+        if (caught.problem.type === LIBRARY_FILE_GONE) markGone(checked, replacementOf(caught))
+        // A print's own copy stands, but is never a target.
+        else if (caught.status === 422) setError(errorText(caught))
       })
     }
     window.addEventListener('focus', check)
