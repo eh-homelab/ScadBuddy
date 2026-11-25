@@ -1093,6 +1093,15 @@ describe('filament location tools', () => {
     expect(names).toEqual([name])
     expect((await runTool(tool('filament_label_sheet_upsert'), { name: `${name}a`, layout }, ctx())).isError).toBe(true)
     expect((await runTool(tool('filament_label_sheet_upsert'), { name: '   ', layout }, ctx())).isError).toBe(true)
+    // 100 code points outside the BMP are 200 UTF-16 units; zod and the backend both count 100.
+    const wide = '\u{1F9F5}'.repeat(100)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: wide, layout }, ctx())).isError).toBeFalsy()
+    expect(names.at(-1)).toBe(wide)
+  })
+
+  it('says a deleted sheet makes the next print a 409 (#7216)', () => {
+    expect(tool('filament_label_sheet_delete').description).toContain('label_sheet_gone')
+    expect(tool('filament_label_sheet_delete').description).not.toContain('default size')
   })
 
   it('deletes a label sheet and reports its id (#7216)', async () => {

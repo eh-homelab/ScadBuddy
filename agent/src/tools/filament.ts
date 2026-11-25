@@ -1952,7 +1952,8 @@ const tools: Tool[] = [
     label: 'Delete a label sheet',
     description:
       'Delete a saved label sheet by its `id` (filament_label_templates `saved`). 404 for an unknown id. A label ' +
-      'choice that names the deleted sheet draws at the default size. Only when the user asks. Writes ScadBuddy only.',
+      'choice that still names the deleted sheet makes the next label print answer 409 `label_sheet_gone`; choose ' +
+      'another template then. Only when the user asks. Writes ScadBuddy only.',
     input: z.object({ sheet_id: z.string().uuid() }),
     risk: 'write',
     source: SOURCE,
