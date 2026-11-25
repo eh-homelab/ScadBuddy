@@ -25,6 +25,7 @@ describe('Filament (#6262)', () => {
     expect(within(filament).getByLabelText('Pull from Bambuddy every')).toHaveValue(300)
     expect(within(filament).getByLabelText('Low stock below, percent')).toHaveValue(20)
     expect(within(filament).getByLabelText('Default cost per kg')).toHaveValue('')
+    expect(within(filament).getByLabelText('Drift notice at, grams')).toHaveValue(10)
     expect(within(filament).getByText('USD')).toBeInTheDocument()
     expect(within(filament).getByRole('link', { name: 'Change it in Orders' })).toHaveAttribute(
       'href',

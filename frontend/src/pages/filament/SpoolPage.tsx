@@ -32,6 +32,7 @@ import {
   type SpoolTypeDetail,
 } from '../../api/filament'
 import { GramsBasis } from '../../components/filament/GramsBasis'
+import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { InsertWeightOffer } from '../../components/filament/InsertWeightOffer'
 import { useInsertWeightCheck } from '../../components/filament/useInsertWeightCheck'
 import { FirstTypePresets } from '../../components/filament/FirstTypePresets'
@@ -730,7 +731,8 @@ export function SpoolPage() {
       grams = accepted.filament_g
       setLists((was) => (was ? { ...was, insertTypes: was.insertTypes.map((one) => (one.id === accepted.insert_type.id ? accepted.insert_type : one)) } : was))
     }
-    await addSpoolEvent(spoolKey, { kind: 'weighed', grams, source: 'scale' })
+    // #7682: with an empty weight the reading goes too, so the event keeps its breakdown.
+    await addSpoolEvent(spoolKey, { kind: 'weighed', grams, source: 'scale', ...(empty ? { reading_g: scale } : {}) })
     setReading('')
     setOfferChoice(null)
     await reload(true)
@@ -746,7 +748,8 @@ export function SpoolPage() {
             {creating
               ? 'Choose its type, or its material if it has none yet.'
               : (() => {
-                  const rest = [leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')
+                  const drift = saved?.drift_notice && saved.last_drift_g != null ? `Drift ${saved.last_drift_g < 0 ? '−' : '+'}${grams(Math.abs(saved.last_drift_g))}` : null
+                  const rest = [leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, drift, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')
                   const what = typeRow && saved?.type_id ? <EntityLink to={filamentLinks.type(saved.type_id)}>{typeRow.code}</EntityLink> : saved?.names.material
                   return (
                     <>
@@ -952,12 +955,16 @@ export function SpoolPage() {
               <div className="grid gap-4 rounded-md border p-3 md:grid-cols-2">
                 <div className="flex flex-col gap-2">
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
-                  <p className="text-[13px] text-muted-foreground">
-                    {saved?.last_weighed_g != null && saved.last_weighed_at
-                      ? `Measured ${grams(saved.last_weighed_g)} on ${new Date(saved.last_weighed_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
-                      : 'Never weighed.'}
-                  </p>
-                  {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} />}
+                  {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
+                    <WeighingBreakdown event={saved.last_weighing} />
+                  ) : (
+                    <p className="text-[13px] text-muted-foreground">
+                      {saved?.last_weighed_g != null && saved.last_weighed_at
+                        ? `Measured ${grams(saved.last_weighed_g)} on ${new Date(saved.last_weighed_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
+                        : 'Never weighed.'}
+                    </p>
+                  )}
+                  {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>
                 {(advanced || reading.trim() !== '') && (
                   <form
