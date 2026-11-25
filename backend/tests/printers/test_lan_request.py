@@ -62,7 +62,11 @@ class FakeClient:
         #: aiomqtt's paho client, which a cut close shuts by force.
         self._client = PahoStub()
 
+    def _client_connect(self) -> None:
+        """aiomqtt's blocking connect, which `request` wraps before the connect (#7616)."""
+
     async def __aenter__(self) -> FakeClient:
+        self._client_connect()
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -181,7 +185,8 @@ async def test_a_close_that_overruns_keeps_the_reply_within_the_deadline(
     assert reply == ours
     assert loop.time() - start < 1.0
     # The cut close shut the socket itself: the printer takes few LAN clients.
-    assert client._client.calls == ["disconnect", "sock_close"]
+    # The socket closes before the disconnect, so the disconnect queues no writer (#7616).
+    assert client._client.calls == ["sock_close", "disconnect"]
 
 
 async def test_a_close_in_time_is_not_forced(monkeypatch: pytest.MonkeyPatch) -> None:
