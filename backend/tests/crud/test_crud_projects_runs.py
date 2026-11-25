@@ -314,8 +314,9 @@ async def test_decisions_record_twice_and_delete(
     held = await remote.get_decision(decision.request_id)
     assert held is not None and held.outcome == "denied"
     assert await remote.get_decision("flow:r1:wr1:none") is None
-    await remote.delete_decision(decision.request_id)
-    await remote.delete_decision(decision.request_id)
+    for _ in range(2):
+        gone = await http.delete(f"{BASE}/decisions", params={"request_id": decision.request_id})
+        assert gone.status_code == 204
     assert await store.get_decision(decision.request_id) is None
     with pytest.raises(HopMovedError):
         await remote.record_decision(_decision(call_id="gone"), at_hop="parent")
@@ -358,7 +359,7 @@ async def test_a_request_id_with_a_slash_reaches_its_route(
     assert await remote.grant_use(decision.request_id) is None
     assert await remote.get_proposal(decision.request_id) is None
     await remote.withdraw_grant_decision(decision.request_id)
-    await remote.delete_decision(decision.request_id)
+    await remote.withdraw_decision(decision)
     assert await store.get_decision(decision.request_id) is None
 
 

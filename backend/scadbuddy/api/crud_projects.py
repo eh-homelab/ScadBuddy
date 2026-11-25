@@ -300,6 +300,8 @@ def _same(held: Decision, decision: Decision) -> bool:
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def delete_decision(request_id: str, flows: FlowsDep) -> None:
+    # Only for a projects worker from before #7588, which undoes a decision by its request
+    # id. Goes with the bare Update id (#7607).
     await flows.store.delete_decision(request_id)
 
 

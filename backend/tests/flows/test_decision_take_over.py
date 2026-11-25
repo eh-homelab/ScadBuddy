@@ -8,25 +8,33 @@ from typing import Any
 
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
+from temporalio import workflow
 from temporalio.client import WorkflowUpdateHandle
 from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.operations import (
     ALREADY_RESOLVED,
     FLOW_DECIDE,
+    FLOW_ESCALATE,
+    NOT_BOUND,
     REPLACED,
     STALE_ENTRY,
     decision_update_id,
+    flow_kinds,
     request_id,
 )
-from tests.flows.fake_api import PLAN, FakeApi, Outward
-from tests.flows.flows_support import Keys, script
-from tests.flows.test_flow_escalation import PRINT_FIVE, STARTER, Escalations, grant
+from scadbuddy.workflows.flow_tools import FLOW_NARROWED_PATCH
+from scadbuddy.workflows.projects_worker import projects_worker
+from tests.flows.fake_api import PLAN, FakeApi, Outward, outward_activities
+from tests.flows.flows_support import HASH_KEY, Keys, script
+from tests.flows.test_flow_escalation import PRINT_FIVE, STARTER, Escalations, grant, waiting
 from tests.flows.test_flow_operations import _no_answer, kinds, operate, started
 from tests.flows.test_flow_reset import point_after, reset
+from tests.flows.test_grant_gate import api_client_of
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -132,6 +140,27 @@ async def lands(
         return await original(self, tool_id, **kwargs)
 
     monkeypatch.setattr(AgentClient, "approve_tool", beaten)
+
+
+async def stopped(
+    outward: Outward,
+    monkeypatch: pytest.MonkeyPatch,
+    request: dict[str, Any],
+    checked: dict[str, Any] | None = None,
+) -> None:
+    """The decision's attempt is cancelled before it sends."""
+
+    async def stops(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        raise asyncio.CancelledError
+
+    decide = kinds(outward)[FLOW_DECIDE]
+    with monkeypatch.context() as m:
+        m.setattr(AgentClient, "approve_tool", stops)
+        with pytest.raises(asyncio.CancelledError):
+            if checked is None:
+                await operate(outward, decide, request)
+            else:
+                await ActivityEnvironment(client=outward.client).run(decide.run, request, checked)
 
 
 @CHANGES
@@ -375,20 +404,220 @@ async def test_a_late_approval_lets_the_call_do_what_the_third_decision_says(
     run, call_id = await parked(outward)
     first = await lost(outward, run, call_id, APPROVE)
     decide = kinds(outward)[FLOW_DECIDE]
-    original = AgentClient.approve_tool
-
-    async def stops(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(AgentClient, "approve_tool", stops)
-    with pytest.raises(asyncio.CancelledError):
-        await operate(outward, decide, asking(run, call_id, DENY))
-    monkeypatch.setattr(AgentClient, "approve_tool", original)
+    await stopped(outward, monkeypatch, asking(run, call_id, DENY))
     await lands(outward, monkeypatch, first)
     third = {**APPROVE, "reason": "now"}
     assert (await operate(outward, decide, asking(run, call_id, third)))["outcome"] == "approved"
     await ended_as(outward, api, run, call_id, approved=True)
     assert await on_record(outward, run, call_id) == as_record(row_of(run, call_id, third))
+
+
+async def test_a_denial_under_the_request_id_alone_is_not_a_later_approvals(
+    outward: Outward, api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The denial that landed was replaced twice: its Update is no approval's."""
+    run, call_id = await parked(outward)
+    first = await lost(outward, run, call_id, DENY)
+    await stopped(outward, monkeypatch, asking(run, call_id, APPROVE))
+    await lands(outward, monkeypatch, first, tagged=False)
+    again = asking(run, call_id, {**APPROVE, "reason": "now"})
+    with pytest.raises(ApiError) as err:
+        await operate(outward, kinds(outward)[FLOW_DECIDE], again)
+    assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
+    assert await on_record(outward, run, call_id) is None
+    await ended_as(outward, api, run, call_id, approved=False)
+
+
+async def test_a_denial_under_the_request_id_alone_is_not_the_retried_approvals(
+    outward: Outward, api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The approval's own next attempt finds its row, not the denial that it replaced."""
+    run, call_id = await parked(outward)
+    first = await lost(outward, run, call_id, DENY)
+    decide = kinds(outward)[FLOW_DECIDE]
+    env = ActivityEnvironment(client=outward.client)
+    request = asking(run, call_id, APPROVE)
+    checked = await env.run(decide.check, request)
+    await stopped(outward, monkeypatch, request, checked)
+    await AgentClient(outward.client, run.workflow_id).approve_tool(
+        call_id, approved=False, update_id=first.request_id
+    )
+    with pytest.raises(ApiError) as err:
+        await env.run(decide.run, request, checked)
+    assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
+    assert await on_record(outward, run, call_id) is None
+    await ended_as(outward, api, run, call_id, approved=False)
+
+
+async def test_a_row_keeps_each_replaced_update_once(
+    outward: Outward, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run, call_id = await parked(outward)
+    for number in range(8):
+        body = DENY if number % 2 else APPROVE
+        await stopped(outward, monkeypatch, asking(run, call_id, body))
+    first = row_of(run, call_id, APPROVE)
+    held = await outward.store.get_decision(first.request_id)
+    assert held is not None
+    # Its own, and the one that a worker from before #7588 may have sent it under.
+    assert sorted(held.response[REPLACED]) == sorted(
+        [await decision_update_id(Keys(), first), first.request_id]
+    )
+
+
+@pytest.mark.parametrize("stops", [False, True], ids=["sent", "unsent"])
+async def test_the_same_decision_twice_over_one_that_never_landed(
+    outward: Outward, api: FakeApi, monkeypatch: pytest.MonkeyPatch, stops: bool
+) -> None:
+    """The other one takes the row over between this one's read and its record."""
+    run, call_id = await parked(outward)
+    await lost(outward, run, call_id, {**APPROVE, "reason": "first"})
+    request = asking(run, call_id, APPROVE)
+    for name in ("one", "two"):
+        await started(outward, FLOW_DECIDE, name, request)
+    decide = kinds(outward)[FLOW_DECIDE]
+    env = ActivityEnvironment(client=outward.client)
+    checked = await env.run(decide.check, request)
+    record = outward.remote.record_decision
+
+    async def second(decision: Decision, **kwargs: Any) -> bool:
+        monkeypatch.setattr(outward.remote, "record_decision", record)
+        if stops:
+            await stopped(outward, monkeypatch, request, checked)
+        else:
+            other = ActivityEnvironment(client=outward.client)
+            assert (await other.run(decide.run, request, checked))["outcome"] == "approved"
+        return await record(decision, **kwargs)
+
+    monkeypatch.setattr(outward.remote, "record_decision", second)
+    assert (await env.run(decide.run, request, checked))["outcome"] == "approved"
+    await ended_as(outward, api, run, call_id, approved=True)
+    assert await on_record(outward, run, call_id) == as_record(row_of(run, call_id, APPROVE))
+
+
+# -- a binding that the call does not have -------------------------------------------
+
+
+async def test_a_binding_shown_for_a_call_with_none_is_refused(
+    outward: Outward, api: FakeApi
+) -> None:
+    """Nothing is recorded, so no resend of it is taken for another decision."""
+    run, call_id = await parked(outward)
+    decide = kinds(outward)[FLOW_DECIDE]
+    request = asking(run, call_id, {**APPROVE, "bound_hash": "zzz"})
+    with pytest.raises(ApiError) as err:
+        await operate(outward, decide, request)
+    assert (err.value.status, err.value.type) == (422, NOT_BOUND)
+    assert await on_record(outward, run, call_id) is None
+    assert (await operate(outward, decide, asking(run, call_id, APPROVE)))["outcome"] == "approved"
+    await ended_as(outward, api, run, call_id, approved=True)
+
+
+async def test_a_running_approval_may_send_whatever_binding_it_was_shown(
+    outward: Outward, api: FakeApi
+) -> None:
+    """A worker from before #7588 resends the row whatever binding its request names, so
+    its running operation holds the row all the same."""
+    run, call_id = await parked(outward)
+    await started(outward, FLOW_DECIDE, "old", asking(run, call_id, {**APPROVE, "bound_hash": "x"}))
+    assert await outward.store.record_decision(row_of(run, call_id, APPROVE))
+    with pytest.raises(ApiError) as err:
+        await operate(outward, kinds(outward)[FLOW_DECIDE], asking(run, call_id, DENY))
+    assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
+    assert await on_record(outward, run, call_id) == as_record(row_of(run, call_id, APPROVE))
+
+
+# -- the run's key cannot be read ----------------------------------------------------
+
+
+class KeyOnce(Keys):
+    """The run's key is read once, and then no more."""
+
+    read = False
+
+    async def key_for(self, subject: str, create: bool) -> bytes:
+        if self.read:
+            raise RuntimeError("no key")
+        self.read = True
+        return await super().key_for(subject, create)
+
+
+class NoKeys(Keys):
+    async def key_for(self, subject: str, create: bool) -> bytes:
+        raise RuntimeError("no key")
+
+
+async def test_a_decision_reads_the_key_before_it_is_recorded(
+    outward: Outward, api: FakeApi
+) -> None:
+    run, call_id = await parked(outward)
+    [decide] = [k for k in flow_kinds(outward.remote, KeyOnce(), HASH_KEY) if k.name == FLOW_DECIDE]
+    await operate(outward, decide, asking(run, call_id, APPROVE))
+    await ended_as(outward, api, run, call_id, approved=True)
+
+
+async def test_a_sessions_denial_with_no_key_records_nothing(
+    outward: Outward, api: FakeApi
+) -> None:
+    escalations = Escalations(outward, api)
+    [escalations.kind] = [
+        k for k in flow_kinds(outward.remote, NoKeys(), HASH_KEY) if k.name == FLOW_ESCALATE
+    ]
+    run_id = await outward.run(guarded(PRINT), started_by=STARTER)
+    run = await waiting(outward, run_id, "parent")
+    call_id = await outward.approval(run_id)
+    with pytest.raises(RuntimeError):
+        await escalations(run_id, call_id, "deny", reason="no")
+    assert await on_record(outward, run, call_id) is None
+
+
+# -- a run from before a call read its decision --------------------------------------
+
+
+async def test_a_run_from_before_2482_runs_nothing_over_a_denial(
+    outward: Outward, api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The SDK keeps the run-wide patch's False, from the replayed first call, for the
+    whole run. The second call, let through on this code, reads its row all the same."""
+    queue = f"projects-{uuid.uuid4().hex[:8]}"
+    assert isinstance(outward.remote, RemoteFlowStore)
+    old = Outward(outward.client, queue, outward.store, outward.remote)
+    activities = outward_activities(outward.remote, api_client_of(api))
+    patched = workflow.patched
+
+    def before_2482(patch_id: str) -> bool:
+        return not patch_id.startswith(FLOW_NARROWED_PATCH) and patched(patch_id)
+
+    with monkeypatch.context() as m:
+        m.setattr(workflow, "patched", before_2482)
+        async with projects_worker(outward.client, queue, activities):
+            run_id = await old.run(
+                script(
+                    f"await queue_print({{'output_id': 'o0'}}, {PLAN!r})",
+                    "try:",
+                    f"    {PRINT}",
+                    "except Exception as e:",
+                    "    o = {'status': str(e)}",
+                    "await wait_for_human('Done?', 600)",
+                    "return o['status']",
+                )
+            )
+            await old.decide(run_id, approved=True)
+            await old.row(
+                run_id,
+                lambda r: len(r.steps) == 2 and [w.kind for w in r.waiting_on] == ["approval"],
+            )
+            call_id = await old.approval(run_id)
+    run = await old.store.get_run(run_id)
+    assert run is not None
+    # A new build replays the run.
+    async with projects_worker(outward.client, queue, activities):
+        first = await lost(old, run, call_id, APPROVE)
+        await lands(old, monkeypatch, first)
+        result = await operate(old, kinds(old)[FLOW_DECIDE], asking(run, call_id, DENY))
+        assert result["outcome"] == "denied"
+        await ended_as(old, api, run, call_id, approved=False)
+    assert len(api.to("/api/v1/print/outputs/o0/run")) == 1
 
 
 async def test_a_call_let_through_with_no_decision_on_record_runs_nothing(

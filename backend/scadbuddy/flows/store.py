@@ -1146,7 +1146,7 @@ class FlowStore:
     def _call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, CASE WHEN status = 'running' THEN request END AS request"
+                "SELECT id, workflow_id, CASE WHEN status = 'running' THEN request END AS request"
                 f" FROM operations WHERE {_ON_CALL}",
                 (f"flow:{run_id}", call_id),
             ).fetchall()

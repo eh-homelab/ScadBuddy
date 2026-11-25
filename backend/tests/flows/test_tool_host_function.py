@@ -3,6 +3,7 @@ D2): the agent's tools as activities on `agent-tools`, here stand-ins registered
 the agent's names on a test queue. An outward tool waits for a person's approval."""
 
 import asyncio
+import dataclasses
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
@@ -26,6 +27,7 @@ from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import Decision
 from scadbuddy.flows.operations import (
     FLOW_DECIDE,
+    NOT_BOUND,
     PRINTER_CHANGED,
     PRINTER_REFUSED,
     PRINTER_UNBOUND,
@@ -48,6 +50,7 @@ from scadbuddy.workflows.project import ProjectWorkflow
 from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.fake_api import Outward, outward_activities
 from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, history_payloads, script
+from tests.flows.test_flow_operations import started
 from tests.flows.test_project_replay import HISTORIES, RECORD
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
@@ -385,7 +388,10 @@ async def test_an_approval_of_another_binding_takes_over_one_that_never_landed(
 
         monkeypatch.setattr(AgentClient, "approve_tool", beaten)
     request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": new}
+    # Its own record, which may not stop it: it sends its own approval.
+    await started(outward, FLOW_DECIDE, "mine", request)
     env = ActivityEnvironment(client=outward.client)
+    env.info = dataclasses.replace(env.info, workflow_id="operation-mine")
     checked = await env.run(decide.check, request)
     await env.run(decide.run, request, checked)
     decision = await outward.store.get_decision(first.request_id)
@@ -400,6 +406,25 @@ async def test_an_approval_of_another_binding_takes_over_one_that_never_landed(
     assert err.value.status == 409
     decision = await outward.store.get_decision(first.request_id)
     assert decision is not None and decision.input_hash == new
+
+
+@pytest.mark.parametrize("name", ["send_to_bambuddy", "print_output"])
+async def test_a_binding_shown_for_a_tool_call_with_none_is_refused(
+    outward: Outward, tools: tuple[Tools, str], name: str
+) -> None:
+    """#7588: the print names no registry printer, so its approval takes no binding."""
+    served, queue = tools
+    args = {"output_id": "o1"}
+    run_id = await outward.run(script(f"return await tool({name!r}, {args!r})"), tools_queue=queue)
+    call_id = await outward.approval(run_id)
+    [decide] = [k for k in flow_kinds(outward.remote, Keys(), HASH_KEY) if k.name == FLOW_DECIDE]
+    request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": "zzz"}
+    env = ActivityEnvironment(client=outward.client)
+    checked = await env.run(decide.check, request)
+    with pytest.raises(ApiError) as err:
+        await env.run(decide.run, request, checked)
+    assert (err.value.status, err.value.type) == (422, NOT_BOUND)
+    assert served.calls == []
 
 
 async def test_an_unknown_tool_is_a_script_error_and_sends_nothing(

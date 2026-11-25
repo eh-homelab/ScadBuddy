@@ -357,8 +357,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never). `operations.py` has the answers: `flow_answer` (a text) and `task_answer` (a
   prompt's, #7364), and the decisions: `flow_decide` (a person's) and `flow_escalate` (the
-  starter session's). A gated body runs only on an approval on record (`flow_decision`,
-  #7588). `store.py` moves a run's tasks in the transaction of the run's own write:
+  starter session's). A print, an arrange or a ScadBuddy tool runs only on an approval on
+  record (`flow_decision`, #7588); the agent checks the row for its own tools and a plugin's. `store.py` moves a run's tasks in the transaction of the run's own write:
   an end cancels the open ones, a Reset makes them match (`TaskStore.cancel_for_run_in`,
   `match_waiting_in`, `reopen_in`).
 - Tasks (#7364): `backend/scadbuddy/tasks/`, the typed questions that flows ask (`prompt`);

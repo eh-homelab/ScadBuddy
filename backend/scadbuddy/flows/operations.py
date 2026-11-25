@@ -92,7 +92,13 @@ person's decision that finds its row on record asks first whether its Update lan
 execution it checked, and sends nothing if it did. Any other attempt of one sends only after
 it checked that this execution is the run's current one. A Reset between that check and the
 send is still crossed (milliseconds: the harness client cannot pin the Update to an
-execution).
+execution). For an approval, the person is then told "approved", and the new execution's
+call does not run: no approval of it is on record.
+
+An approval that reached the run with no row on record lets nothing run either: a row undone
+because Temporal said that its Update never existed, a grant's approval withdrawn after its
+Update was sent, or a worker from before #7588 that deleted a row during the rollout. Each
+fails the call's step; none runs it.
 
 `task_answer` (#7364) is `flow_answer` for a prompt, whose call id is its task's id and
 whose answer is an object the route checked against the task's schema. Once the Update
@@ -185,6 +191,8 @@ RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
 PRINTER_CHANGED = "https://scadbuddy.dev/problems/flow-printer-changed"
 #: An approval of a print on a registry printer the run page could not name (#4445).
 PRINTER_UNBOUND = "https://scadbuddy.dev/problems/flow-printer-unbound"
+#: A `bound_hash` for a call that binds nothing (#7588): the run page shows none for it.
+NOT_BOUND = "https://scadbuddy.dev/problems/flow-call-not-bound"
 #: The API refused the projects worker's read of a print's registry printer (#5466).
 PRINTER_REFUSED = "https://scadbuddy.dev/problems/flow-printer-refused"
 #: A publish's hosted plugin draft is not the one the run page showed (#7199).
@@ -349,6 +357,14 @@ def _printer_changed() -> ApiError:
         status.HTTP_409_CONFLICT,
         "The printer this call prints on is not the one you were shown. Reload it.",
         type_=PRINTER_CHANGED,
+    )
+
+
+def _not_bound() -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "This call names no printer or draft, so its approval takes no `bound_hash`.",
+        type_=NOT_BOUND,
     )
 
 
@@ -570,8 +586,10 @@ def flow_kinds(
 
     async def decision_landed(checked: dict[str, Any], row: Decision) -> bool | None:
         """`landed` for the decision a row records, or for an approval that it replaced."""
-        # Before #7575 (an approval's: #7588) every Update id was the request id alone.
-        return await any_landed(checked, row, [*row.response.get(REPLACED, []), row.request_id])
+        # Before #7575 (an approval's: #7588) every Update id was the request id alone. A
+        # row that took another over says in `REPLACED` whether that id is one of them.
+        others = row.response.get(REPLACED, [row.request_id])
+        return await any_landed(checked, row, others)
 
     async def any_landed(
         checked: dict[str, Any], row: Decision, others: Iterable[str]
@@ -614,7 +632,10 @@ def flow_kinds(
     async def may_send(request: dict[str, Any], held: Decision) -> bool:
         """Whether a running operation's request may still send the decision `held`."""
         if held.kind == "approval":
-            return "approved" in request and _same(held, "approval", request, None)
+            # Whatever binding it was shown: an old worker's resend ignores it, and the
+            # row's hash is the one that is sent in any case.
+            shown = {k: v for k, v in request.items() if k != "bound_hash"}
+            return "approved" in request and _same(held, "approval", shown, None)
         if not {"answer", "answer_sealed"} & request.keys():
             return False
         return bool(canonical({"answer": await answer_of(request)}) == canonical(held.response))
@@ -627,9 +648,13 @@ def flow_kinds(
         if held is None or (held.kind, held.responder) != (decision.kind, "browser"):
             return None
         operations = await store.call_operations(decision.run_id, decision.call_id)
+        own = activity.info().workflow_id
         # Before Temporal is asked: an operation that has ended sends nothing after that.
+        # This one sends its own decision, never `held`.
         for operation in operations:
-            if operation.request is not None and await may_send(operation.request, held):
+            if operation.workflow_id == own or operation.request is None:
+                continue
+            if await may_send(operation.request, held):
                 return None
         if await decision_landed(checked, held) is not False:
             return None
@@ -640,9 +665,13 @@ def flow_kinds(
             before = list(held.response.get(REPLACED, []))
             if held.outcome == "approved":
                 before.append(await decision_update_id(run_keys(), held))
+                if REPLACED not in held.response:
+                    # A worker from before #7588 may have sent it so. Never a denial's:
+                    # under that id it is no approval.
+                    before.append(held.request_id)
             decision.response = {k: v for k, v in decision.response.items() if k != REPLACED}
-            if before:
-                decision.response[REPLACED] = before
+            # Always, empty too: the bare id is then known to be none of the row's.
+            decision.response[REPLACED] = list(dict.fromkeys(before))
         if not await store.take_over_decision(decision, held=held, seen=seen):
             return None
         return held
@@ -682,11 +711,18 @@ def flow_kinds(
             await at_execution(str(checked["workflow_id"]), decision.workflow_run_id)
         replaced = None
         if not await store.record_decision(decision):
-            replaced = await take_over(checked, decision)
-            if replaced is None:
-                raise taken()
+            again = await store.get_decision(decision.request_id)
+            if again is not None and await decision_update_id(run_keys(), again) == update_id:
+                # Another attempt of this decision recorded it since the read, with what it
+                # replaced: its row stands.
+                decision = again
+                sent = await decision_landed(checked, again) is True
+            else:
+                replaced = await take_over(checked, decision)
+                if replaced is None:
+                    raise taken()
         if not sent:
-            await tell(checked, decision, taken, send, replaced)
+            await tell(checked, decision, taken, send, replaced, update_id)
 
     async def tell(
         checked: dict[str, Any],
@@ -694,10 +730,13 @@ def flow_kinds(
         taken: Callable[[], ApiError],
         send: Callable[[str], Awaitable[Any]],
         replaced: Decision | None = None,
+        update_id: str | None = None,
     ) -> None:
-        """`send` the recorded `decision` under its Update id: returns once that landed, or
-        the row stands all the same. `replaced` is the one that it took the row over from."""
-        update_id = await decision_update_id(run_keys(), decision)
+        """`send` the recorded `decision` under its Update id (`update_id`, read before the
+        row was recorded): returns once that landed, or the row stands all the same.
+        `replaced` is the one that it took the row over from."""
+        if update_id is None:
+            update_id = await decision_update_id(run_keys(), decision)
 
         async def arrived() -> bool | None:
             # After a take-over, an Update under the request id alone is the replaced one's:
@@ -777,12 +816,15 @@ def flow_kinds(
         runs it itself). A print on a registry printer is bound to the pair its row links
         now (#4445), and a publish of a hosted plugin's draft to the draft's digest now
         (#7199). Either must be the `bound_hash` the run page showed (`shown`): else a 409,
-        which says whether the page showed another binding or none."""
+        which says whether the page showed another binding or none. A `bound_hash` for a
+        call that binds nothing is a 422 (`NOT_BOUND`), so no row records it."""
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         for parked in await client.get_pending_approvals():
             if parked.tool_id != call_id:
                 continue
             if parked.tool_name not in AGENT_CALLS or hash_key is None:
+                if isinstance(shown, str) and parked.tool_name not in AGENT_CALLS:
+                    raise _not_bound()
                 return None
             name = str(parked.tool_input.get("name"))
             args = parked.tool_input.get("args")
@@ -830,6 +872,8 @@ def flow_kinds(
                 if not hmac.compare_digest(shown, bound):
                     raise _draft_changed() if draft else _printer_changed()
                 return bound
+            if isinstance(shown, str):
+                raise _not_bound()
             return input_hash(hash_key, name, args)
         raise _stale()
 
@@ -1013,6 +1057,9 @@ def flow_kinds(
                 responder=actor,
                 hops=hops_of(checked, "deny", actor),
             )
+            # The run's key first: a denial that cannot be sent is never recorded, where it
+            # would block the person (#7588).
+            update_id = await decision_update_id(run_keys(), decision)
             held = await store.get_decision(decision.request_id)
             if held is not None and (held.outcome, held.responder) == ("denied", actor):
                 # A retried attempt after this very denial was recorded (and maybe sent):
@@ -1025,7 +1072,7 @@ def flow_kinds(
                 raise _with_person() from None
             if not recorded:
                 raise _resolved()
-            await tell(checked, decision, _resolved, approval(checked, decision))
+            await tell(checked, decision, _resolved, approval(checked, decision), None, update_id)
             return {**answer, "outcome": "denied"}
         return await narrow(request, checked, actor, answer)
 

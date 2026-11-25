@@ -169,9 +169,6 @@ class RemoteFlowStore:
         # A body, not a query: a URL is logged, and this one may hold an answer.
         await self._send("POST", "/decisions/withdraw", json=decision.model_dump(mode="json"))
 
-    async def delete_decision(self, request_id: str) -> None:
-        await self._send("DELETE", f"/decisions?request_id={_part(request_id)}")
-
     async def record_grant_decision(self, decision: Decision) -> bool:
         response = await self._send(
             "POST", "/decisions/grant", json=decision.model_dump(mode="json")

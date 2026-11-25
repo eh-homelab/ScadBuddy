@@ -160,14 +160,22 @@ arrange and a tool of ScadBuddy's agent read the row before they act (`flow_deci
 its tools or a plugin's. The call does not run when the row is not an approval, or when there
 is no row (#7588). It runs the input that the row approves: the call as it was parked, or the
 narrowed input, which must match the row's hash. A run that made an approved call before
-#2482 does not read the row for a print or an arrange.
+#2482 reads the row from its next call on, by a marker of the call's own.
+
+So a call stops, and its step fails, when its approval reached the run but its row is gone.
+That happens when the row was undone because Temporal said that the Update never arrived and
+it then arrived, when a grant's approval was withdrawn and its Update then arrived, or when a
+Reset falls between the decision and the call. In the last case the person was told
+"approved" for the execution that the Reset replaced.
 
 **Two decisions.** The first one on the row wins, and another one is refused with a 409. The
 exception is a person's row whose decision never reached the run and that nothing may still
 send, while the call still waits: a later decision of a person takes it over (`take_over`,
 #7588). Two approvals are two decisions when they approve another input or were shown
-another printer or draft. The row of a grant or of the starter session is never taken over,
-and a grant's use is never given back (`RuleUse` in `backend/scadbuddy/flows/grants.py`).
+another printer or draft. An approval of a call that names no printer or draft takes no
+`bound_hash` (422 `flow-call-not-bound`). The row of a grant or of the starter session is never
+taken over (#7675), and a grant's use is never given back (`RuleUse` in
+`backend/scadbuddy/flows/grants.py`).
 
 **A late Update.** When a replaced denial reaches the run first, the call is denied and the
 denial is on the row again. When a replaced approval reaches the run first, the row does not
