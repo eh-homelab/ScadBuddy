@@ -191,7 +191,7 @@ go.opentelemetry.io/proto/otlp/common/v1
 go.opentelemetry.io/proto/otlp/metrics/v1
 go.opentelemetry.io/proto/otlp/resource/v1
 go.opentelemetry.io/proto/otlp/trace/v1
-# golang.org/x/crypto v0.37.0
+# golang.org/x/crypto v0.52.0
 ## explicit; go 1.26.0
 # golang.org/x/crypto v0.57.0
 ## go 1.26.0
@@ -206,7 +206,7 @@ golang.org/x/net/internal/httpcommon
 golang.org/x/net/internal/httpsfv
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sync v0.13.0
+# golang.org/x/sync v0.20.0
 ## explicit; go 1.26.0
 # golang.org/x/sync v0.23.0
 ## go 1.26.0
@@ -216,7 +216,7 @@ golang.org/x/sync/semaphore
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/text v0.24.0
+# golang.org/x/text v0.37.0
 ## explicit; go 1.26.0
 # golang.org/x/text v0.42.0
 ## explicit; go 1.26.0

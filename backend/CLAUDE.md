@@ -156,7 +156,12 @@ tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
 A test's result must not depend on runner speed or the date. A retry budget gets an
 injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
-on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294).
+A call from a test to a server the test runs on a thread of its own (moto, a uvicorn
+`_remote`) may take a longer timeout than the default or the production bound, because
+that thread shares the GIL with the test on a loaded runner: set it in the test or a test
+helper, cite the issue, and keep one test on the production bound where the bound is what
+it checks (the owner's decision of 2026-11-25; #7503, #7556, #7619). A
 "today" is read at each call, never at import: a shard that loads before midnight UTC
 and makes orders after it dated every fake deposit a day early (#6307). A shard builds
 in 2 to 3 minutes. With six shards it tested in 27 to 46, and slow runners hit

@@ -1,12 +1,12 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { act, screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http, type JsonBodyType } from 'msw'
+import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins } from '../../api/aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
 import { BUILT_IN_ANSWER, seedHostedPackage, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { GREETER_SKILL, LONG_CHANGELOG, PREVIEW_CHARS } from '../../mocks/features/pluginPackageFiles'
-import { setPackageProblem } from '../../mocks/features/capabilities'
+import { setPackageChecking, setPackageProblem } from '../../mocks/features/capabilities'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { accessName, choose, optionsOf } from '../../test/select'
@@ -365,6 +365,36 @@ describe('PluginPackagesPanel', () => {
     await waitFor(() => expect(within(card).queryByLabelText('Pending re-pin')).not.toBeInTheDocument())
   })
 
+  it('reads again when a re-pin lands between the first read and the subscription confirmation (#7672)', async () => {
+    seedHostedPackage('greeter', 1, 2)
+    // The first read answers with what it saw when it arrived, and only once the re-pin and
+    // the subscription's confirmation have come: the confirmation must not be taken as current.
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let asked: () => void = () => {}
+    const arrived = new Promise<void>((resolve) => (asked = resolve))
+    server.use(
+      http.get(
+        '/api/v1/ai/plugin-packages',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as JsonBodyType
+          asked()
+          await held
+          return HttpResponse.json(seen)
+        },
+        { once: true },
+      ),
+    )
+    renderPage(<PluginPackagesPanel />)
+    await arrived
+    await aiPlugins.installPackage({ kind: 'hosted', name: 'greeter' })
+    await act(() => new Promise((resolve) => setTimeout(resolve, 100)))
+    release()
+
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    expect(await within(card).findByLabelText('Pending re-pin')).toBeInTheDocument()
+  })
+
   it('keeps a package stored under a built-in name marked not loaded, saying why, and removable', async () => {
     seedStoredPackage('scadbuddy')
     const { user } = renderPage(<PluginPackagesPanel />)
@@ -399,14 +429,23 @@ describe('PluginPackagesPanel', () => {
   })
 
   it('reads the package again while its load is being checked', async () => {
-    seedStoredPackage('greeter')
-    const { user } = renderPage(<PluginPackagesPanel />)
-    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
-    const source = await within(card).findByRole('region', { name: 'Source greeter' })
-    await user.click(within(source).getByRole('button', { name: 'greeter' }))
-    expect(within(source).getAllByText(CHECKING).length).toBeGreaterThan(0)
-    // No reload: the page asks again shortly, and the second read has settled.
-    await waitFor(() => expect(within(source).queryAllByText(CHECKING)).toEqual([]))
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      seedStoredPackage('greeter')
+      // Held at checking: the subscription's confirmation reads the tree again too (#7672).
+      setPackageChecking('greeter', true)
+      const { user } = renderPage(<PluginPackagesPanel />, { userEventOptions: { advanceTimers: vi.advanceTimersByTime } })
+      const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+      const source = await within(card).findByRole('region', { name: 'Source greeter' })
+      await user.click(within(source).getByRole('button', { name: 'greeter' }))
+      expect(within(source).getAllByText(CHECKING).length).toBeGreaterThan(0)
+      setPackageChecking('greeter', false)
+      // No reload: the page asks again shortly (1 s, then 2 s), and the second read has settled.
+      await act(() => vi.advanceTimersByTimeAsync(3000))
+      await waitFor(() => expect(within(source).queryAllByText(CHECKING)).toEqual([]))
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("says an older review's items appear once the package is next loaded", async () => {
@@ -446,6 +485,8 @@ describe('PluginPackagesPanel', () => {
 
   it("follows the package's switch written elsewhere on its badge", async () => {
     seedStoredPackage('greeter')
+    // Held at checking, so the page keeps asking (#7672: the confirmation's read would settle it).
+    setPackageChecking('greeter', true)
     renderPage(<PluginPackagesPanel />)
     const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
     await within(card).findByRole('region', { name: 'Source greeter' })
