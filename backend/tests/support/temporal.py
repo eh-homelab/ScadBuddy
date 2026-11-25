@@ -143,6 +143,9 @@ def temporal_server(db_file: Path | None = None) -> Iterator[str]:
 #: 10 s idle time and `DEV_SERVER_GOGC`. One partition per queue held 373 MiB, but real
 #: servers keep four, and the tests must meet their multi-partition reads (`queue_pollers`,
 #: #7350) and a non-root partition's lag (`routes_to`, #4255), so the partitions stay.
+#: In CI (#7552, run 45513638953) the eight shards' containers peaked at 8.2-10.3 GiB.
+#: If a shard nears the cap again, lower the idle time first, then `DEV_SERVER_GOGC`,
+#: then add a shard; keep the four partitions (#7565).
 DEV_SERVER_DYNAMIC_CONFIG = ('matching.maxTaskQueueIdleTime="10s"',)
 DEV_SERVER_GOGC = "25"
 

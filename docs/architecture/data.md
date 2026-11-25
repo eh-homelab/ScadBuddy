@@ -118,6 +118,16 @@ Processes without store credentials (the slicer) get short-lived transfer URLs i
 a presigned S3 GET, or the API's `/api/v1/internal/blobs/{key}` with an HMAC transfer
 token (`scadbuddy/slicing/transfer.py:52-57`, `scadbuddy/slicing/transfer_token.py`).
 
+On `bambuddy` and `s3`, each process that renders or reads pieces (the API and each render
+worker) keeps a bounded cache of them in front of the store (`scadbuddy/store/cache.py`
+`CachedBlobStore`, capped by `SCADBUDDY_WORKER_CACHE_MAX_BYTES`). It is the data volume's
+`blobs/` unless `SCADBUDDY_BLOB_CACHE_DIR` puts it on a node-local volume (#7318,
+`scadbuddy/store/factory.py` `build_store`); on `local` that `blobs/` is the store itself.
+The cache is never shared: each replica fetches what it lacks. A job's files are named
+`blobs/<key>/<file>` wherever the cache is (`scadbuddy/core/paths.py` `result_path`). A
+fetch and a whole-file read are spans `blob_cache.fetch` and `blob_cache.read_file` with
+`scadbuddy.cache.hit`.
+
 ## Files on the data volume
 
 Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
