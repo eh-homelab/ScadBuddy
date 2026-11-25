@@ -484,8 +484,9 @@ export const flowTools: Tool[] = [
     label: 'Read a flow run',
     description:
       'One flow run: its record, and `pending`, what it waits on now (a question for a person, or an approval). ' +
-      'People answer and approve on the Workflows page, never through a tool. To go back to an earlier point, ' +
-      'see preview_flow_reset.',
+      'People approve on the Workflows page, never through a tool. A question whose `people_only` is false may be ' +
+      "answered with answer_flow_question when the user's setting flow_answerers allows it. To go back to an " +
+      'earlier point, see preview_flow_reset.',
     input: z.object({ run_id: runId }),
     risk: 'read',
     routes: ['GET /api/v1/workflow-runs/{run_id}'],
@@ -566,6 +567,54 @@ export const flowTools: Tool[] = [
           }),
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'answer_flow_question',
+    label: "Answer a flow's question",
+    description:
+      "Answer a flow run's question (#7471): a `wait_for_human` with a text, a `prompt` with an object of its " +
+      "task's fields (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
+      'setting flow_answerers names this session (or its MCP token) and the question is not `people_only`; else a ' +
+      '403 says why. The first answer wins: a later one is told that it was answered already. Not for flow runs.',
+    input: z.object({
+      run_id: runId,
+      call_id: z.string().uuid().describe("The question's call id, from get_flow_run's `pending`"),
+      answer: z
+        .union([z.string().min(1).max(10_000), z.record(z.string(), z.unknown())])
+        .describe("A text for wait_for_human; for prompt, an object of the task's fields"),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/workflow-runs/{run_id}/answer', 'GET /api/v1/tasks/{task_id}', 'POST /api/v1/tasks/{task_id}/answer'],
+    summarize: ({ run_id, call_id }) => `Answer question ${call_id} of flow run ${run_id}`,
+    handler: async ({ run_id, call_id, answer }, ctx) => {
+      if (typeof answer === 'string') {
+        return json(
+          await command(ctx, `answer flow run ${run_id}`, (headers) =>
+            ctx.backend.POST('/api/v1/workflow-runs/{run_id}/answer', {
+              params: { path: { run_id } },
+              body: { call_id, answer },
+              headers,
+            }),
+          ),
+        )
+      }
+      // A prompt's task: its id is the call's. Only one of this run's.
+      const task = await ok(
+        ctx.backend.GET('/api/v1/tasks/{task_id}', { params: { path: { task_id: call_id } } }),
+        `get task ${call_id}`,
+      )
+      if (task.run_id !== run_id) throw new ToolError(`task ${call_id} is not a question of flow run ${run_id}`)
+      return json(
+        await command(ctx, `answer task ${call_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/tasks/{task_id}/answer', {
+            params: { path: { task_id: call_id } },
+            body: { answer },
+            headers,
+          }),
+        ),
+      )
+    },
   }),
 
   defineTool({

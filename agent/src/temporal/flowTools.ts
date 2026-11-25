@@ -18,9 +18,12 @@ import { flowOf } from './flowRuns.js'
 
 export const FLOW_TOOL_TIER_ACTIVITY = 'flow_tool_tier'
 
-/** A tool a flow may call: no browser tool (a flow has no tab). */
+/** Tools no flow calls: a run never answers a flow's question (#7471, `NotForFlows`). */
+const NOT_FOR_FLOWS_TOOLS: ReadonlySet<string> = new Set(['answer_flow_question'])
+
+/** A tool a flow may call: no browser tool (a flow has no tab), nor one of `NOT_FOR_FLOWS_TOOLS`. */
 export function forFlows(tool: Tool): boolean {
-  return !tool.name.startsWith('browser_')
+  return !tool.name.startsWith('browser_') && !NOT_FOR_FLOWS_TOOLS.has(tool.name)
 }
 
 export type FlowToolTier = { name: string; tier: Risk; disabled: boolean }
