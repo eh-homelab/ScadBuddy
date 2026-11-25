@@ -39,7 +39,8 @@ from scadbuddy.printers.bambuddy_sync import (
     fill_lan_after_link,
     sync_printers,
 )
-from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.printers.component import LanCommandsDep, Printers, PrintersDep
+from scadbuddy.printers.lan_command_models import LanCommandOutcome, LanCommandPending
 from scadbuddy.printers.lan_link import LanProbeFailedError, probe_and_link
 from scadbuddy.printers.models import (
     BambuddyLink,
@@ -48,6 +49,7 @@ from scadbuddy.printers.models import (
     PrinterPatch,
     PrinterRow,
 )
+from scadbuddy.printers.native import command_response
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
     KekMissingError,
@@ -56,6 +58,7 @@ from scadbuddy.printers.store import (
     SerialUnknownError,
     VirtualPrinterRowError,
 )
+from scadbuddy.workflows.lan_command import read_lan_commands
 
 logger = logging.getLogger(__name__)
 
@@ -375,6 +378,29 @@ async def delete_virtual_printer(
 @router.get("/{printer_id}", response_model=PrinterRow, summary="One printer")
 async def get_printer(printers: PrintersDep, printer_id: str) -> PrinterRow:
     return await _call(lambda: printers.store.require(printer_id))
+
+
+@router.get(
+    "/{printer_id}/commands/{command_id}",
+    response_model=LanCommandOutcome,
+    responses={status.HTTP_202_ACCEPTED: {"model": LanCommandPending}},
+    summary="Follow a LAN command a route answered 202 for",
+    description=(
+        "A K-profile, AMS slot or configure route that did not finish within its wait answers"
+        " 202 with a `workflow_id`: this is that command's id. It answers 200 with the"
+        " finished replies (a write that may have been sent is `confirmed: false`), or 202"
+        " while the command runs. 404 `command_not_found` for an unknown id or one that"
+        " belongs to another printer. 409 `printer_refused`, `printer_cert_changed` or"
+        " `not_lan_linked`, 502 `printer_no_answer` or `printer_unreachable`, and 503"
+        " `lan_unavailable` as the command's own route answers them."
+    ),
+)
+async def get_printer_command(
+    commands: LanCommandsDep, printer_id: str, command_id: str
+) -> Response:
+    return command_response(
+        await read_lan_commands(commands.client_getter(), printer_id, command_id)
+    )
 
 
 @router.patch("/{printer_id}", response_model=PrinterRow, summary="Rename it, or set its path")

@@ -13,6 +13,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
+from fastapi import Depends
 from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
@@ -26,6 +27,7 @@ from scadbuddy.printers.address import lan_address
 from scadbuddy.printers.command_data import PrinterCommandData
 from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
 from scadbuddy.printers.lan_models import LanReport
+from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rows.component import ROWS
@@ -129,6 +131,14 @@ class Printers:
         self._open()
         return self._command_data
 
+    @property
+    def lan_commands(self) -> LanCommands:
+        """The LAN command runner, on the ``bambuddy`` queue (#7276)."""
+        return LanCommands(
+            client_getter=lambda: self.core.print_runs.client,
+            task_queue=self.core.settings.temporal_task_queue_bambuddy,
+        )
+
     def changed(self, printer_id: str) -> None:
         """Announce a write to ``printer_id``'s row (``printer.changed``)."""
         emit(self.core.events, PrinterEvent(kind="printer.changed", printer_id=printer_id))
@@ -148,3 +158,10 @@ def _build(core: Core, components: Components) -> Printers:
 COMPONENT = Component(PRINTERS, build=_build)
 
 PrintersDep = Annotated[Printers, component_dep(PRINTERS)]
+
+
+def _lan_commands(printers: PrintersDep) -> LanCommands:
+    return printers.lan_commands
+
+
+LanCommandsDep = Annotated[LanCommands, Depends(_lan_commands)]
