@@ -36,7 +36,11 @@ const NAMED_FILES_MAX = 3
 export function HostedPluginsPanel() {
   const list = useAsync(() => hostedPlugins.list(), [])
   const packages = useAsync(() => aiPlugins.listPackages(), [])
-  usePackagesChanged('hosted', () => packages.refresh())
+  // #7460 — a publish, create or delete made elsewhere changes the list's latest versions too.
+  usePackagesChanged('hosted', () => {
+    packages.refresh()
+    list.refresh()
+  })
   const [selected, setSelected] = useState<string | null>(null)
   /** The open editor's files with unsaved edits; a Close or another Edit asks first while any. */
   const [unsaved, setUnsaved] = useState<string[]>([])

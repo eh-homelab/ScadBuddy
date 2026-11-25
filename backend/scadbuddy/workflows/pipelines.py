@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
         StepState,
     )
     from scadbuddy.template import Blob, Part
+    from scadbuddy.workflows.commands import SHORT_TASK_TIMEOUT
     from scadbuddy.workflows.handlers import handler_wait
     from scadbuddy.workflows.models import (
         ACCEPT_ACTIVITY,
@@ -1154,6 +1155,7 @@ class TemplatePipeline:
                     cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                     execution_timeout=_piece_timeout(),
+                    task_timeout=SHORT_TASK_TIMEOUT,
                 )
             except WorkflowAlreadyStartedError:
                 piece: workflow.ExternalWorkflowHandle[RenderPiece] = (

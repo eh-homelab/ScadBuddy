@@ -3,12 +3,12 @@
 Every Temporal workflow task and every async activity a worker runs starts on its
 event loop. A loop held by a blocking call times workflow tasks out (at 3 s for the
 short workflows that start with ``commands.SHORT_TASK_TIMEOUT``, #7288: ``Operation``,
-``SliceWorkflow``, ``SensorNotifyPass``; at Temporal's 10 s default for the rest) while the
-SDK's deadlock detector, which runs on that same loop, says nothing; CPU can read idle
-throughout. The watch is a thread that posts a no-op to the loop every ``interval``.
-How late each one runs is ``scadbuddy_event_loop_lag_seconds``. One that has not run
-after ``threshold`` is a stall: it is counted, and logged at once, while the loop is
-still held, with every thread's stack, so the log names the call that holds it.
+``SliceWorkflow``, ``SensorNotifyPass``, ``RenderPiece``; at Temporal's 10 s default for
+the rest) while the SDK's deadlock detector, which runs on that same loop, says
+nothing; CPU can read idle throughout. The watch is a thread that posts a no-op to the
+loop every ``interval``. How late each one runs is ``scadbuddy_event_loop_lag_seconds``. One
+that has not run after ``threshold`` is a stall: it is counted, and logged at once,
+while the loop is still held, with every thread's stack, so the log names the call that holds it.
 
 A watch thread that itself wakes late was kept from running too: something held the
 GIL, not only the loop. Its stall log says how late it woke.
