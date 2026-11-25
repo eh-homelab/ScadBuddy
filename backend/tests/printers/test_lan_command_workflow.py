@@ -23,6 +23,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan import MQTT_TIMEOUT
 from scadbuddy.printers.lan_command_models import (
     LanCommandInput,
+    LanCommandOutcome,
     LanCommandPending,
     LanCommandReply,
     LanCommandRun,
@@ -317,3 +318,51 @@ async def test_a_read_of_another_printers_command_is_404(client: Client) -> None
     with pytest.raises(ApiError) as missing:
         await read_lan_commands(client, PRINTER, f"lan-command-{PRINTER}-x-none")
     assert missing.value.status == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.parametrize("end", ["cancel", "terminate"])
+@pytest.mark.parametrize(("kind", "expect"), [("write", "unconfirmed"), ("read", "no_answer")])
+async def test_a_run_cancelled_or_terminated_answers_as_one_timed_out(
+    client: Client, monkeypatch: pytest.MonkeyPatch, end: str, kind: str, expect: str
+) -> None:
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0.2)
+    run = LanCommandRun(commands=[command("extrusion_cali_set", kind=kind)])
+    queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+
+    @activity.defn(name=LAN_COMMAND_ACTIVITY)
+    async def lan_command(input: LanCommandInput) -> LanCommandReply:
+        await asyncio.sleep(30)
+        return LanCommandReply(confirmed=True)
+
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[LanCommandWorkflow],
+        activities=[lan_command],
+        workflow_runner=sandboxed_runner(),
+        graceful_shutdown_timeout=timedelta(seconds=0),
+    ):
+        pending = await execute_lan_commands(client, queue, PRINTER, run, key=f"{end}-{kind}")
+        assert isinstance(pending, LanCommandPending)
+        handle = client.get_workflow_handle(pending.workflow_id)
+        if end == "cancel":
+            await handle.cancel()
+        else:
+            await handle.terminate("test")
+        for _ in range(50):
+            outcome: LanCommandPending | LanCommandOutcome | ApiError
+            try:
+                outcome = await read_lan_commands(client, PRINTER, pending.workflow_id)
+            except ApiError as error:
+                outcome = error
+            if not isinstance(outcome, LanCommandPending):
+                break
+            await asyncio.sleep(0.1)
+    if expect == "unconfirmed":
+        assert isinstance(outcome, LanCommandOutcome)
+        assert [reply.confirmed for reply in outcome.replies] == [False]
+    else:
+        assert isinstance(outcome, ApiError)
+        assert outcome.status == status.HTTP_502_BAD_GATEWAY
+        assert outcome.extensions["code"] == "printer_no_answer"

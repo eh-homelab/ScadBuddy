@@ -83,6 +83,9 @@ UNWRAP_TIMEOUT = 5.0
 KEEPALIVE = 10
 #: How long an MQTT connect, or any one MQTT operation, may take (aiomqtt's ``timeout``).
 MQTT_TIMEOUT = 10.0
+#: What a `LanPrinter.request` with a deadline keeps of it for the close: its reply wait
+#: ends this long before the deadline, and the close ends by the deadline.
+CLOSE_RESERVE = 0.5
 
 logger = logging.getLogger(__name__)
 #: paho's own logger, for aiomqtt: at DEBUG it logs the SUBSCRIBE topic, which names the
@@ -468,24 +471,28 @@ class LanPrinter:
         those (`PrinterReportStore`).
 
         Connect, subscribe and publish share one `MQTT_TIMEOUT` (P30), and what fails
-        there is raised: nothing was sent. Once the command is published, no reply within
-        ``wait`` seconds, or by ``until`` (the event loop's time) when that comes first, a
-        dropped connection or a failed close is ``None``: the printer may have taken it."""
+        before the publish is called is raised: nothing was sent. From the publish call on
+        the printer may have the command, so a failure or a timeout there, no reply within
+        ``wait`` seconds (or by ``until``, the event loop's time, less `CLOSE_RESERVE`),
+        or a dropped connection is ``None``. The close ends by ``until`` (else within
+        `MQTT_TIMEOUT`); a close that fails or overruns keeps the reply."""
         loop = asyncio.get_running_loop()
-        published = False
+        may_be_sent = False
         reply: dict[str, Any] | None = None
+        stack = AsyncExitStack()
         try:
-            async with AsyncExitStack() as stack:
-                async with asyncio.timeout(MQTT_TIMEOUT):
-                    client = await stack.enter_async_context(await self._client())
-                    await client.subscribe(self.report_topic)
-                    await client.publish(self.request_topic, json.dumps(command))
-                published = True
-                left = wait if until is None else min(wait, until - loop.time())
-                reply = await self._reply(client, name, seq, max(left, 0.0))
+            async with asyncio.timeout(MQTT_TIMEOUT):
+                client = await stack.enter_async_context(await self._client())
+                await client.subscribe(self.report_topic)
+                may_be_sent = True
+                await client.publish(self.request_topic, json.dumps(command))
+            left = wait if until is None else min(wait, until - CLOSE_RESERVE - loop.time())
+            reply = await self._reply(client, name, seq, max(left, 0.0))
         except (aiomqtt.MqttError, ConnectionError, OSError, TimeoutError):
-            if not published:
+            if not may_be_sent:
                 raise
+        finally:
+            await _close(stack, MQTT_TIMEOUT if until is None else until - loop.time())
         return reply
 
     @staticmethod
@@ -594,6 +601,19 @@ class LanPrinter:
         finally:
             ftp.close()
         return md5.hexdigest()
+
+
+async def _close(stack: AsyncExitStack, budget: float) -> None:
+    """Close a request's MQTT client within ``budget`` seconds. A close that fails or
+    overruns is logged, never raised: what the request read stands."""
+    try:
+        async with asyncio.timeout(max(budget, 0.0)):
+            await stack.aclose()
+    except (aiomqtt.MqttError, ConnectionError, OSError, TimeoutError) as error:
+        logger.info(
+            "a LAN command's connection did not close cleanly",
+            extra={"error": type(error).__name__},
+        )
 
 
 def _close_data(conn: socket.socket) -> None:

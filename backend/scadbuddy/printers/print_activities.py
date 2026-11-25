@@ -672,10 +672,11 @@ class LanActivities:
         ``LAN_UNSURE``, and another certificate ``LAN_CERT_CHANGED``. Every reply wait
         ends a second before the start-to-close, so the activity answers rather than being
         timed out (P30). The reply is returned only: no report is written."""
-        row, lan = await self._printer(input.printer_id, then="")
+        # The deadline counts from the activity's start: the row and code reads too.
         loop = asyncio.get_running_loop()
         timeout = activity.info().start_to_close_timeout
         until = None if timeout is None else loop.time() + timeout.total_seconds() - 1.0
+        row, lan = await self._printer(input.printer_id, then="")
         for attempt in range(tries(input)):
             if attempt:
                 if until is not None and loop.time() + LAN_READ_PAUSE >= until:

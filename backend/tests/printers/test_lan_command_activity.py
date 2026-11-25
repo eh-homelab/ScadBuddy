@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -293,3 +294,17 @@ async def test_a_changed_certificate_is_its_own_refusal(pg_pool: PgPool) -> None
         await _run(pg_pool, lan, write_input())
     assert raised.value.type == LAN_CERT_CHANGED
     assert raised.value.non_retryable
+
+
+async def test_the_deadline_counts_the_printer_read(pg_pool: PgPool) -> None:
+    lan = Scripted()
+    get = PrinterStore.get
+
+    def slow_get(self: PrinterStore, *args: Any, **kwargs: Any) -> Any:
+        time.sleep(0.6)
+        return get(self, *args, **kwargs)
+
+    with mock.patch.object(PrinterStore, "get", slow_get):
+        await _run(pg_pool, lan, write_input(), start_to_close=timedelta(seconds=20))
+    [left] = lan.left
+    assert left <= 18.5

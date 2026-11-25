@@ -34,11 +34,17 @@ class FakeClient:
         *,
         hang: bool = False,
         publish_fails: BaseException | None = None,
+        subscribe_fails: BaseException | None = None,
         replies: list[dict[str, Any]] | None = None,
         drop: bool = False,
+        hang_publish: bool = False,
+        hang_close: bool = False,
     ) -> None:
         self.hang = hang
+        self.hang_publish = hang_publish
+        self.hang_close = hang_close
         self.publish_fails = publish_fails
+        self.subscribe_fails = subscribe_fails
         self.replies = replies or []
         self.drop = drop
         self.published: list[dict[str, Any]] = []
@@ -47,16 +53,22 @@ class FakeClient:
         return self
 
     async def __aexit__(self, *_: object) -> None:
+        if self.hang_close:
+            await asyncio.Event().wait()
         if self.drop:
             raise aiomqtt.MqttError("the connection was lost")
 
     async def subscribe(self, topic: str) -> None:
+        if self.subscribe_fails is not None:
+            raise self.subscribe_fails
         if self.hang:
             await asyncio.Event().wait()
 
     async def publish(self, topic: str, payload: str) -> None:
         if self.publish_fails is not None:
             raise self.publish_fails
+        if self.hang_publish:
+            await asyncio.Event().wait()
         self.published.append(json.loads(payload))
 
     @property
@@ -102,8 +114,15 @@ async def test_connect_subscribe_and_publish_share_one_timeout(
     assert client.published == []
 
 
+async def test_a_failure_during_the_publish_may_have_sent_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(publish_fails=aiomqtt.MqttError("the connection was lost"))
+    assert await _request(_printer(client, monkeypatch)) is None
+
+
 async def test_a_failure_before_the_publish_is_raised(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = FakeClient(publish_fails=aiomqtt.MqttError("not connected"))
+    client = FakeClient(subscribe_fails=aiomqtt.MqttError("not connected"))
     with pytest.raises(aiomqtt.MqttError):
         await _request(_printer(client, monkeypatch))
 
@@ -128,3 +147,33 @@ async def test_the_deadline_ends_the_wait_before_its_seconds(
     start = loop.time()
     assert await _request(_printer(client, monkeypatch), wait=30.0, until=start + 0.05) is None
     assert loop.time() - start < 5.0
+
+
+async def test_a_timeout_during_the_publish_may_have_sent_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(lan, "MQTT_TIMEOUT", 0.05)
+    client = FakeClient(hang_publish=True)
+    assert await _request(_printer(client, monkeypatch)) is None
+
+
+async def test_a_close_that_overruns_keeps_the_reply_within_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ours = {"command": NAME, "sequence_id": SEQ}
+    client = FakeClient(replies=[ours], hang_close=True)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    reply = await _request(_printer(client, monkeypatch), wait=30.0, until=start + 0.3)
+    assert reply == ours
+    assert loop.time() - start < 1.0
+
+
+async def test_a_close_that_overruns_after_silence_ends_by_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeClient(hang_close=True)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    assert await _request(_printer(client, monkeypatch), wait=30.0, until=start + 0.6) is None
+    assert loop.time() - start < 1.5

@@ -28,6 +28,8 @@ from temporalio.common import RetryPolicy, WorkflowIDConflictPolicy, WorkflowIDR
 from temporalio.exceptions import (
     ActivityError,
     ApplicationError,
+    CancelledError,
+    TerminatedError,
     WorkflowAlreadyStartedError,
 )
 from temporalio.exceptions import (
@@ -152,9 +154,10 @@ async def _answer(
     run: LanCommandRun | None,
 ) -> LanCommandAnswer:
     """The run's outcome within `LAN_ROUTE_WAIT_S`, else `LanCommandPending`. A failure is
-    the route's problem (`_problem`). A run that timed out whole (its ``execution_timeout``)
-    answers ``confirmed: false`` for every command when all are writes, which may have
-    reached the printer, else 502 ``printer_no_answer`` (P30)."""
+    the route's problem (`_problem`). A run that timed out whole (its ``execution_timeout``),
+    or was cancelled or terminated, answers ``confirmed: false`` for every command when
+    all are writes, which may have reached the printer, else 502 ``printer_no_answer``
+    (P30)."""
     try:
         async with asyncio.timeout(LAN_ROUTE_WAIT_S):
             outcome: LanCommandOutcome = await handle.result()
@@ -162,7 +165,11 @@ async def _answer(
     except TimeoutError:
         return LanCommandPending(workflow_id=handle.id)
     except WorkflowFailureError as failure:
-        if not isinstance(failure.cause, TemporalTimeoutError):
+        cause = failure.cause
+        # A cancel reaches the running activity first, so the run fails with it.
+        if isinstance(cause, ActivityError) and isinstance(cause.cause, CancelledError):
+            cause = cause.cause
+        if not isinstance(cause, (TemporalTimeoutError, CancelledError, TerminatedError)):
             raise _problem(failure) from failure
         commands = (run or await _started_run(client, handle)).commands
         if any(command.kind == "read" for command in commands):
