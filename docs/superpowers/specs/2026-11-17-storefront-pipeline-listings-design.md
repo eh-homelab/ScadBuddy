@@ -303,8 +303,8 @@ publish's input, as `fixed` is today.
 
 Save (`POST` and `PUT /storefront/listings`) checks only the shape: the reserved keys,
 the size and what a row can hold (rows 3 and 4). It does not read the commit, as it does
-not today. A `PUT` replaces the row, so an editor that does not send `inputs` (every page
-before PR 6) clears them. Publish then refuses the listing on a schema that requires them.
+not today. A `PUT` replaces the row, so the editor sends back the `inputs` and `inputs_v`
+the listing has (PR 2, `listingDraft.ts` `draftOf`). PR 6 sets them.
 
 ## 5. The back-office editor (question 2)
 
@@ -851,7 +851,8 @@ until the step that makes it safe.
    `api/storefront.py` and `orders/storefront/listings.py`, and the test mock in
    `frontend/src/pages/StorefrontListingPage.test.tsx`. The back-office msw mock
    `frontend/src/mocks/features/storefront.ts` fills the new fields, which
-   `pnpm typecheck` needs. It does not touch `slice_price.py`, and touches `line_prices.py`
+   `pnpm typecheck` needs, and `listingDraft.ts` `draftOf` carries a listing's `inputs`
+   and `inputs_v`, so a save in the editor keeps them. It does not touch `slice_price.py`, and touches `line_prices.py`
    in one line: `price_of`, the one caller of `firm_price` (the add and `reprice`), gives
    None for a listing whose snapshot is a pipeline. The first draft left that file alone,
    because no `done` row could exist for a pipeline variant. That was false: `price_key`

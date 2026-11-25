@@ -227,6 +227,30 @@ def test_older_inputs_are_migrated_by_the_templates_own_code(
     assert (published["inputs"], published["inputs_v"]) == ({"cols": 3}, 0)
 
 
+def test_every_other_write_of_a_listing_keeps_its_inputs(
+    client: TestClient, kit: dict[str, Any], pla_red: str
+) -> None:
+    """Only a save replaces them: not a publish, a picture, a move, an order or an
+    unpublish."""
+    inputs = {"cols": 3}
+    other = create(client, kit_body(kit, pla_red))
+    made = create(client, kit_body(kit, pla_red, inputs=inputs, inputs_v=0))
+    path = f"{LISTINGS}/{made['id']}"
+    published = publish(client, made["id"])
+    pictures = {"media_ids": [], "updated_at": published["updated_at"]}
+    for answer in (
+        client.put(f"{path}/media", json=pictures),
+        client.post(f"{path}/move", json={"place": 1}),
+        client.put(f"{LISTINGS}/order", json={"ids": [other["id"], made["id"]]}),
+        client.post(f"{path}/unpublish"),
+        client.post(f"{path}/publish"),
+    ):
+        assert answer.status_code == 200, answer.text
+        row = client.get(path).json()
+        assert (row["inputs"], row["inputs_v"]) == (inputs, 0)
+    assert row["snapshot"]["inputs"]["house"] == {"cols": 3, "storeys": 1}
+
+
 def test_a_migration_that_fails_publishes_nothing(
     client: TestClient, kit: dict[str, Any], pla_red: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

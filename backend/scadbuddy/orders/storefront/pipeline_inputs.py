@@ -166,7 +166,8 @@ async def settled_inputs(
     commit's ``INPUTS_VERSION``. 422 ``listing_inputs_undeclared``, `check_shape`'s,
     ``listing_inputs_invalid`` (``newer``, a failed keyword, ``too_large``) or
     ``listing_inputs_migration_failed``, in that order; a migration's 413, 503 or 504
-    passes through."""
+    passes through. The row keeps what the shop saved, so a republish migrates from it
+    again (spec §8): the result does not depend on how many times it ran."""
     if facts.schema is None:
         raise _refused("listing_inputs_undeclared", facts.fault, "inputs")
     check_shape(listing.inputs)
@@ -206,7 +207,9 @@ def _params(listing: ListingInput, schema: CustomizerSchema) -> dict[str, ParamV
 
 def _path(problem: ValueProblem, schema: dict[str, Any], values: Any) -> list[str]:
     """The path of the input ``problem`` is of: a missing or an extra key's own path, not
-    its object's, so the editor can show the refusal at that key."""
+    its object's, so the editor can show the refusal at that key. Only an object has those
+    keywords, and an array of the subset holds scalars (`core/input_schema.py`), so the
+    walk below meets no array index."""
     path = [part for part in problem.path.split(".") if part]
     if problem.keyword not in ("required", "additionalProperties"):
         return path
