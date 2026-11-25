@@ -46,7 +46,7 @@ The migration seeds the built-in kinds (`20261124T0323Z_inventory_core.sql:189`)
 printer, part (with nozzle, hotend, belt, build plate, AMS part and hardware under it),
 consumable (with desiccant, packaging and lubricant), equipment (with dry bin and tool),
 printed part, assembly, service and spool part. A built-in kind cannot change its tracking.
-A kind with items cannot either (`KindInUse`, `inventory/kinds.py:40`). Kinds are rows, never
+A kind with items cannot either (`KindInUse`, `inventory/kinds.py:41`). Kinds are rows, never
 a list in code (spec §4). A kind archives and restores; it never deletes.
 
 An item's property schema is its kind's `attribute_schema`. So `GET` and `PUT
@@ -120,7 +120,8 @@ both (`stock_moves_one_holder`).
   one. Every lot insert (`receive_in`, `_open_lots`) first takes a transaction advisory lock
   on the item (`_open_lock`, `inventory/stock.py:819`). `lock_items` takes, for each item in
   `item_id` order: the item row `FOR SHARE`, the open lock, then the item's lots `FOR UPDATE`
-  in FIFO order. `take` locks the lots in the same order. So no receive or count adds a lot
+  in FIFO order. `take` locks the lots in the same order; it relies on its caller's
+  `lock_items` for the open lock first. So no receive or count adds a lot
   under a caller that holds `lock_items` (R-P2-32), and a bulk fulfil of several items takes
   no lock out of order (R-P2-28).
 - **Bounds.** No input reaches SQL unchecked (R-P2-16). A quantity or an amount past
@@ -232,7 +233,7 @@ including `inventory_lot_recost` (Ruling 8). None reaches Bambuddy.
 
 ## The UI
 
-The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:145-148` and
+The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:147-151` and
 [frontend.md](../architecture/frontend.md); the code is `frontend/src/pages/inventory/`.
 
 - `/inventory` (`InventoryPage`): a kind tree on the left, the items on the right, with
@@ -246,7 +247,7 @@ The sidebar entry is **Inventory**. The routes are in `frontend/src/App.tsx:145-
 - `/inventory/units/:id` (`UnitPage`) and `/inventory/lots/:id` (`LotPage`): a lot's path
   opens its item's page at the lot's row, where its cost, "Re-cost past uses" and its
   result show.
-- `/orders/parts` redirects to `/inventory?kind=part` (`frontend/src/App.tsx:154`).
+- `/orders/parts` redirects to `/inventory?kind=part` (`frontend/src/App.tsx:156`).
 
 The mock is `frontend/src/mocks/features/inventory.ts`.
 

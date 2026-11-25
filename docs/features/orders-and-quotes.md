@@ -68,7 +68,7 @@ quote estimate prices parts at what a FIFO take would cost now and returns `part
 - UI: `frontend/src/pages/OrdersPage.tsx`, `OrderPage.tsx`, `ProfitPage.tsx`,
   `CustomersPage.tsx`; `frontend/src/components/orders/`. Parts and the model part rules are in
   the Inventory area, `frontend/src/pages/inventory/` (#7067); `/orders/parts` redirects to
-  `/inventory?kind=part` (`frontend/src/App.tsx:154`).
+  `/inventory?kind=part` (`frontend/src/App.tsx:156`).
 - Routes: `backend/scadbuddy/api/orders.py:187`, `order_payments.py`, `order_attachments.py`,
   `order_messages.py`, `order_purchases.py`, `order_sources.py`, `order_bank_deposits.py`,
   `customers.py`, `parts.py`, `machine_rates.py`.
