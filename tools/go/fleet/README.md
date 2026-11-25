@@ -116,6 +116,26 @@ Core caps a send's body at twice its own 16 MiB text limit plus 1 MiB, and refus
 longer text with a 422 that names the limit, so a `-max-text` above 16 MiB does not let
 longer texts through.
 
+## Deploying
+
+Nothing deploys it yet; the Kubernetes objects belong in eh-homelab/clusters. Before a
+deploy:
+
+- Core serves the fleet's routes only when `SCADBUDDY_CORE_AREAS` names `fleet`
+  (`tools/go/core/README.md`). Without it the routes go to Python, which has none of them
+  but `GET …/fleet/changes`.
+- The pod runs as the ServiceAccount `scadbuddy-fleet`, which the API maps to caller
+  `fleet` (`backend/scadbuddy/auth/exchange.py` `SERVICE_ACCOUNTS`).
+- The proof is a projected ServiceAccount token, audience `scadbuddy`, from a projected
+  volume (not `subPath`), named by `FLEETCHAT_SERVICE_TOKEN_FILE`. On compose or a laptop,
+  use `FLEETCHAT_SERVICE_BOOTSTRAP_FILE` and the file `fleet` in the API's
+  `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` instead. Never deploy `FLEETCHAT_CREDENTIAL_FILE`: a
+  fixed credential is not renewed.
+- A NetworkPolicy that admits only ScadBuddy's pods on 8080 (the server has no auth of
+  its own) and lets the pod reach only DNS and core.
+- `FLEETCHAT_SESSION_TIMEOUT`: keep the 24 h default, or set a shorter one; never `0`
+  while Claude Code is a client.
+
 ## Commands
 
 ```bash
