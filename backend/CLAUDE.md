@@ -1511,6 +1511,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   listing, an output or a `model.json` names, each with an `Imported-From` trailer. It only
   reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
   the build to the git remote in Settings, and to no other branch.
+  `library/models_switch.py` (`preflight`, `run --dump <dir>`, `rollback --dump <dir>`; in
+  that image while no API runs) puts the second in the place of the first, with each row
+  and `meta.json` that holds an old commit id; never run it on prod but by
+  `docs/models-switch-runbook.md`. A new column that holds a models commit goes into its
+  `COLUMNS` and `_plan_rows`.
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
