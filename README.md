@@ -466,8 +466,9 @@ on shutdown.
     connection that holds the print dialog's background-slice follow locks, so that one
     replica follows each slice (#6158, `preview_follow/claims.py`), and
     `scadbuddy-stage-locks` 4, where a saving output holds its objects' locks from its
-    first upload to its commit (#7477; at most 4 saves upload at once per pod, the rest
-    wait). On top of the pools come short-lived
+    first upload to its commit (#7477; at most 3 saves upload at once per pod, the rest
+    wait) and a removal holds an object's exclusive lock through the backend's remove
+    (one at a time per pod, on the fourth connection, #7756 review). On top of the pools come short-lived
     connections of their own, one per lock or claim held at that moment: the models and
     flows repository write locks (`library/repo_lock.py`), an order's project lock
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,

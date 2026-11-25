@@ -565,7 +565,13 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 removed = await sweep_content(
                     state.store.content, state.refs, grace=state.config.sweep_grace
                 )
-                unrecorded = await _sweep_unrecorded(state.store.content, state.config.sweep_grace)
+                # A `LocalContentBackend` is swept for unrecorded objects only as the
+                # outputs' own store, above (#7477); no other store over one is (none
+                # is built in prod; #7756 review).
+                if not isinstance(state.store.content.backend, LocalContentBackend):
+                    unrecorded = await _sweep_unrecorded(
+                        state.store.content, state.config.sweep_grace
+                    )
             except BaseException:
                 # BaseException on purpose: a cancelled sweep must stay cancelled, not be
                 # replaced by the trim's own failure below.
@@ -2623,7 +2629,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # pool, open only from here on.
     pool = state.settings_store.pool
     # #7477 review I2: a save's stage hold takes a connection of a small pool of its own,
-    # never the shared one, and waits for a slot of it before its first upload.
+    # never the shared one, and waits for a slot of it before its first upload; a
+    # removal's exclusive lock takes that pool's reserved connection (#7756 review).
     stage_locks = StageLocks(state.settings_store.stage_lock_pool, STAGE_LOCK_SLOTS)
     source = RenderSettingsSource(pool, state.settings)
     try:

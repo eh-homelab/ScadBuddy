@@ -41,9 +41,16 @@ COPIED_REFS_SQL = (
 )
 
 
-#: The connections of the API's stage-lock pool (`StageLocks`, #7477 review I2), and so
-#: how many saves may be in their upload phase at once on one pod.
-STAGE_LOCK_SLOTS = 4
+#: How many saves may be in their upload phase at once on one pod, each with one
+#: connection of the API's stage-lock pool (`StageLocks`, #7477 review I2).
+STAGE_LOCK_SLOTS = 3
+#: The stage-lock pool's connections kept for removals' exclusive locks
+#: (`StageLocks.claim_connection`, #7756 review): a removal holds one through the
+#: backend's remove, a round trip, so it is never the API's shared pool's.
+CLAIM_LOCK_SLOTS = 1
+#: The size of the stage-lock pool (`scadbuddy-stage-locks`): every save slot and every
+#: removal slot has a connection of its own, so neither waits for the other's.
+STAGE_LOCK_POOL_SIZE = STAGE_LOCK_SLOTS + CLAIM_LOCK_SLOTS
 
 
 def _drop_or_discard(conn: Connection[DictRow], query: str, params: tuple[str, ...]) -> None:
@@ -112,18 +119,30 @@ class StageHold:
 
 
 class StageLocks:
-    """Where stage holds take their connection, and how many saves may hold one at once
-    (#7477 review I2). The pool is small and of its own, not the API's shared one: a save
-    holds its connection from its first upload to its commit and meanwhile needs the
-    shared pool for its index reads and its rows, so holds taken there could take every
-    connection and stall every route. ``slots`` is the pool's size: a save waits for a
-    slot before its first upload (`hold`), so its one hold connection is always free, and
-    it never waits mid-save for a second one."""
+    """Where stage holds and removals take their lock connection, and how many of each
+    may hold one at once (#7477 review I2, #7756 review). The pool is small and of its
+    own, not the API's shared one: a save holds its connection from its first upload to
+    its commit and meanwhile needs the shared pool for its index reads and its rows, and
+    a removal holds its exclusive lock through the backend's remove, so locks taken there
+    could take every connection and stall every route. The pool holds ``slots`` plus
+    ``claim_slots`` connections: a save waits for one of ``slots`` before its first
+    upload (`hold`), and a removal for one of ``claim_slots`` (`claim_connection`), so
+    each one's connection is always free when its turn comes, and a save never waits
+    mid-save for a second one. A removal takes its lock without waiting and needs no
+    other connection, so a removal slot is never held for longer than one remove."""
 
-    def __init__(self, pool: Pool, slots: int) -> None:
+    def __init__(self, pool: Pool, slots: int, claim_slots: int = CLAIM_LOCK_SLOTS) -> None:
         self.pool = pool
         self.slots = slots
         self._free = asyncio.Semaphore(slots)
+        self._claims = threading.BoundedSemaphore(claim_slots)
+
+    @contextlib.contextmanager
+    def claim_connection(self) -> Iterator[Connection[DictRow]]:
+        """A connection for a removal's exclusive lock, once a removal slot is free.
+        Blocking."""
+        with self._claims, self.pool.connection() as conn:
+            yield conn
 
     @contextlib.asynccontextmanager
     async def hold(self) -> AsyncIterator[StageHold]:
@@ -209,9 +228,10 @@ class BlobIndex:
     `retrying` runs either form again when Postgres picks it as a deadlock's victim."""
 
     def __init__(self, pool: Pool, *, stage_locks: StageLocks | None = None) -> None:
-        """``stage_locks``: where `stage_hold` takes its connections. The API passes its
-        own small pool (`SettingsStore.stage_lock_pool`); without it they come from
-        ``pool``, bounded to `STAGE_LOCK_SLOTS` saves (tests, tools)."""
+        """``stage_locks``: where `stage_hold` and `claim_unnamed` take their lock
+        connections. The API passes its own small pool (`SettingsStore.stage_lock_pool`);
+        without it they come from ``pool``, bounded to `STAGE_LOCK_SLOTS` saves and
+        `CLAIM_LOCK_SLOTS` removals (tests, tools)."""
         self._pool = pool
         self._stage_locks = stage_locks or StageLocks(pool, STAGE_LOCK_SLOTS)
 
@@ -520,7 +540,9 @@ class BlobIndex:
         comes meanwhile waits for the remove and then uploads again. False: a stager holds
         it (a save between its upload and its commit), or a row names it; leave it."""
         name = object_lock_name(backend, sha256)
-        with self._pool.connection() as conn:
+        # The stage-lock pool's removal slot, not the shared pool: the lock is held
+        # through the caller's remove, a backend round trip (#7756 review).
+        with self._stage_locks.claim_connection() as conn:
             row = conn.execute(
                 "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (name,)
             ).fetchone()

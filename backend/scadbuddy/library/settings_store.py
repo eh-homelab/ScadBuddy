@@ -110,7 +110,7 @@ from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
-from scadbuddy.store.index import STAGE_LOCK_SLOTS
+from scadbuddy.store.index import STAGE_LOCK_POOL_SIZE
 
 if TYPE_CHECKING:
     from scadbuddy.core.pg_listener import PgListener
@@ -1165,10 +1165,11 @@ class SettingsStore:
             max_size=defaults.database_pool_size,
         )
         # A save's stage holds (#7477 review I2, `store/index.py` `StageLocks`): a small
-        # pool of their own, so a save's hold never takes the shared pool's connections.
-        # Nothing connects until a save stages.
+        # pool of their own, so a save's hold never takes the shared pool's connections,
+        # nor does a removal's exclusive lock, held through the backend's remove (#7756
+        # review). Nothing connects until a save stages or a removal claims.
         self._stage_lock_pool = row_pool(
-            defaults.database_url, name="scadbuddy-stage-locks", max_size=STAGE_LOCK_SLOTS
+            defaults.database_url, name="scadbuddy-stage-locks", max_size=STAGE_LOCK_POOL_SIZE
         )
 
     @property
@@ -1217,7 +1218,8 @@ class SettingsStore:
 
     @property
     def stage_lock_pool(self) -> ConnectionPool[Connection[DictRow]]:
-        """The stage holds' own pool, `STAGE_LOCK_SLOTS` connections (`StageLocks`)."""
+        """The stage holds' and removals' own pool, `STAGE_LOCK_POOL_SIZE` connections
+        (`StageLocks`)."""
         return self._stage_lock_pool
 
     def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:

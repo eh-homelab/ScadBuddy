@@ -1040,7 +1040,7 @@ class OutputStore:
         store with no index row (`OutputBytes.put_folder`), then `commit` (#7256, spec §6.6), so
         the row, its keys' index rows naming those objects, its ``output_files`` rows and the
         holds of its keys are one transaction: one commit, however many files (#7477). With no
-        blob store (`local`, `bambuddy`) or no rows, it puts nothing. When the sweep freed an
+        blob store (`bambuddy`) or no rows, it puts nothing. When the sweep freed an
         object the save reused before that transaction held it (`ReuseLostError`), the
         transaction rolls back whole, the save uploads its own copy of every object it reused
         (`OutputBytes.own_copies`) and commits once more. A deadlock runs the transaction again

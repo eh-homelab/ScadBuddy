@@ -36,6 +36,7 @@ import aiohttp
 from botocore.exceptions import ClientError, HTTPClientError
 from botocore.exceptions import ConnectionError as BotoConnectionError
 
+from scadbuddy.core.tracing import AttributeValue, span
 from scadbuddy.library.output_rows import (
     OutputBlobs,
     OutputFileBlob,
@@ -391,17 +392,27 @@ class OutputBytes:
         #7477). Every reused one is put again with no lookup, not only the lost one, so
         the next transaction reuses nothing and cannot lose again. On a failure the
         copies made so far are removed (``hold`` is closed first), and the caller drops
-        ``blobs``."""
+        ``blobs``. One span, ``outputs.own_copies``, and one log line give the number of
+        files put again (``scadbuddy.reused_files``, #7756 review)."""
         made: list[StagedBlob] = []
-        try:
-            for item in blobs.staged:
-                if item.reused:
+        reused = [item for item in blobs.staged if item.reused]
+        attributes: dict[str, AttributeValue] = {
+            "scadbuddy.slug": slug,
+            "scadbuddy.reused_files": len(reused),
+        }
+        logger.info(
+            "a save lost a reused blob; putting its own copies",
+            extra={"slug": slug, "count": len(reused)},
+        )
+        with span("outputs.own_copies", attributes=attributes):
+            try:
+                for item in reused:
                     made.append(
                         await self._stage_file(item.key, item.path, slug, own=True, hold=hold)
                     )
-        except Exception:
-            await self.drop_staged(OutputBlobs(staged=tuple(made)), hold)
-            raise
+            except Exception:
+                await self.drop_staged(OutputBlobs(staged=tuple(made)), hold)
+                raise
         copies = {item.key: item for item in made}
         return dataclasses.replace(
             blobs, staged=tuple(copies.get(item.key, item) for item in blobs.staged)

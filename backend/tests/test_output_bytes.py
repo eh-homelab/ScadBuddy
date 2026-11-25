@@ -4,6 +4,7 @@ blobs of kind ``output``, and the temporary files for readers that need a path."
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import threading
@@ -16,6 +17,9 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputFileNameError, usable
 from scadbuddy.library.output_rows import (
@@ -32,7 +36,14 @@ from scadbuddy.store.content import (
     BlobScope,
     ContentStore,
 )
-from scadbuddy.store.index import BlobIndex, Pool, object_lock_name
+from scadbuddy.store.index import (
+    STAGE_LOCK_POOL_SIZE,
+    STAGE_LOCK_SLOTS,
+    BlobIndex,
+    Pool,
+    StageLocks,
+    object_lock_name,
+)
 from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.s3 import S3ContentBackend
 from tests.support.store import flip_first_byte, local_content, moto_s3, record_reads, store_pool
@@ -629,3 +640,44 @@ def test_a_claim_whose_unlock_fails_drops_its_connection(
         _failing_unlocks(monkeypatch)
     monkeypatch.undo()
     assert _lock_free(pg_conninfo, name)
+
+
+async def test_a_claim_takes_its_lock_connection_from_the_stage_lock_pool(
+    pg_conninfo: str,
+) -> None:
+    """#7756 review: a release keeps its exclusive lock through the backend's remove, a
+    round trip, so its connection is the stage-lock pool's reserved one, never the API's
+    shared pool's. With the shared pool spent and every save slot holding its own lock
+    connection, a claim still gets one, and frees it at its end."""
+    kwargs = {"autocommit": True, "row_factory": dict_row}
+    with (
+        ConnectionPool(
+            pg_conninfo,
+            min_size=0,
+            max_size=1,
+            timeout=1,
+            connection_class=Connection[DictRow],
+            kwargs=kwargs,
+        ) as shared,
+        ConnectionPool(
+            pg_conninfo,
+            min_size=0,
+            max_size=STAGE_LOCK_POOL_SIZE,
+            timeout=1,
+            connection_class=Connection[DictRow],
+            kwargs=kwargs,
+        ) as locks,
+    ):
+        index = BlobIndex(shared, stage_locks=StageLocks(locks, STAGE_LOCK_SLOTS))
+        held = shared.getconn()
+        try:
+            async with contextlib.AsyncExitStack() as stack:
+                for n in range(STAGE_LOCK_SLOTS):
+                    hold = await stack.enter_async_context(index.stage_hold())
+                    await asyncio.to_thread(hold.take, "local", str(n) * 64)
+                sha = "e" * 64
+                for _ in range(2):
+                    with index.claim_unnamed("local", f"output/{sha}", sha) as free:
+                        assert free
+        finally:
+            shared.putconn(held)

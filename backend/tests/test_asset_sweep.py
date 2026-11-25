@@ -16,6 +16,7 @@ from scadbuddy.core.config import DEFAULT_JOB_TTL, Config
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.bambuddy import BambuddyContentBackend
 from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.s3 import S3ContentBackend
 
 
@@ -446,3 +447,37 @@ async def test_on_local_the_blob_sweep_sweeps_the_outputs_unrecorded_objects(
     assert recorded("output/kept") and not recorded("output/gone")
     ttl = timedelta(seconds=86400)
     assert before - ttl <= cutoff <= datetime.now(UTC) - ttl
+
+
+async def test_the_blob_sweep_sweeps_no_other_local_content_store_for_unrecorded_objects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """#7756 review: `LocalContentBackend` is an `UnrecordedSweeper` for the outputs' own
+    store on `local` only. A shared content store over one (none in prod) is not swept
+    for unrecorded objects: its plain puts take no stage hold."""
+    calls: list[datetime] = []
+
+    async def sweep_unrecorded(self: LocalContentBackend, *, cutoff: datetime, **_: Any) -> int:
+        calls.append(cutoff)
+        return 1
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(LocalContentBackend, "sweep_unrecorded", sweep_unrecorded)
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    monkeypatch.setattr(main, "GeometryIndex", _Geometry)
+    state = SimpleNamespace(
+        store=SimpleNamespace(
+            content=SimpleNamespace(
+                backend=LocalContentBackend(tmp_path / "shared"),
+                index=_Index(),
+                claim_object=None,
+            ),
+            blobs=object(),
+        ),
+        refs=SimpleNamespace(pool=object()),
+        config=SimpleNamespace(sweep_grace=86400),
+    )
+    await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
+    assert calls == []

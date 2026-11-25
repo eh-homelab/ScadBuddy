@@ -290,10 +290,14 @@ releases; the render worker's content store (over the CRUD routes) takes no lock
 index never admits kind `output` (`api/crud_render.py` `READ_KINDS`), so it never removes
 an output's object. A connection whose unlock fails is closed, never given back to its
 pool with the lock. The holds take their connections from a small pool of their own
-(`scadbuddy-stage-locks`, `STAGE_LOCK_SLOTS`, 4; `store/index.py` `StageLocks`), never the
-API's shared pool: a save waits for a free one before its first upload, so at most that
-many saves per pod are between their first upload and their commit, and none waits
-mid-save for a second lock connection. A cancel cannot stop the row's transaction, which
+(`scadbuddy-stage-locks`, `STAGE_LOCK_POOL_SIZE`, 4; `store/index.py` `StageLocks`), never
+the API's shared pool: a save waits for one of its `STAGE_LOCK_SLOTS` (3) before its first
+upload, so at most that many saves per pod are between their first upload and their
+commit, and none waits mid-save for a second lock connection. A removal's exclusive lock
+takes the pool's last connection (`CLAIM_LOCK_SLOTS`, 1; `StageLocks.claim_connection`),
+and checks the index on it too, since it holds the lock through the backend's remove (a
+round trip on S3 or Bambuddy): removals on one pod run one at a time, and none holds a
+connection of the shared pool (#7756 review). A cancel cannot stop the row's transaction, which
 runs in a thread: the save keeps its locks until that thread ends, then the cancel stands.
 When a reuse is lost, the save removes the `meta.json` its first commit wrote before it
 puts its own copies, so a cancel meanwhile leaves a folder the hold reaper removes, as a

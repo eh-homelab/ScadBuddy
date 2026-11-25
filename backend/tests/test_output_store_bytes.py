@@ -16,6 +16,7 @@ from typing import Any, BinaryIO
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import Connection
 from psycopg.errors import DeadlockDetected, UniqueViolation
 from psycopg.rows import DictRow, dict_row
@@ -49,7 +50,7 @@ from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import ReuseLostError, StoreFullError
-from scadbuddy.store.index import BlobIndex, Pool, StageLocks
+from scadbuddy.store.index import CLAIM_LOCK_SLOTS, BlobIndex, Pool, StageLocks
 from scadbuddy.store.local import LocalContentBackend
 from tests.support.arrange import finished_job
 from tests.support.output_blobs import put_folder_at_keys
@@ -647,10 +648,12 @@ async def test_a_save_whose_reused_object_was_freed_puts_its_own_copies(
     content: ContentStore,
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
+    spans: InMemorySpanExporter,
 ) -> None:
     """#7477's rule for a lost reuse: the sweep freed an object the save reused after
     its put found it. The row's transaction rolls back whole, the save uploads its own
-    copy of every file it reused, and writes the row once more, reusing nothing."""
+    copy of every file it reused, and writes the row once more, reusing nothing. The
+    re-uploads are one span with their count (#7756 review)."""
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
     first = await store.save(job, name="first", files_dir=files)
@@ -672,9 +675,13 @@ async def test_a_save_whose_reused_object_was_freed_puts_its_own_copies(
         return insert(row, conn)
 
     monkeypatch.setattr(store.rows, "insert", freed_first)
+    spans.clear()
     meta = await store.save(job, name="second", files_dir=files)
     assert len(reused) == 2
     assert any(reused[0]) and not any(reused[1])
+    [copied] = [s for s in spans.get_finished_spans() if s.name == "outputs.own_copies"]
+    assert copied.attributes is not None
+    assert copied.attributes["scadbuddy.reused_files"] == sum(reused[0])
     row = store.rows.get(meta.id)
     assert row is not None and row.bytes_at is not None
     directory = store.directory(meta.id)
@@ -1318,7 +1325,7 @@ async def test_a_save_past_the_stage_slots_waits_and_the_index_pool_stays_usable
             ConnectionPool(
                 pg_conninfo,
                 min_size=0,
-                max_size=slots,
+                max_size=slots + CLAIM_LOCK_SLOTS,
                 timeout=1,
                 connection_class=Connection[DictRow],
                 kwargs={"autocommit": True, "row_factory": dict_row},
