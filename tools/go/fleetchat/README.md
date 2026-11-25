@@ -33,8 +33,9 @@ no binary and no storage of its own: **the host supplies the `Store` and the
   mostly control bytes (6× when JSON-escaped), or HTML-heavy text from an encoder
   that escapes `<>&`, can get HTTP 413 before `ErrTooLong`.
 - `Config.SessionTimeout` closes a `NewHandler` session, with its subscriptions,
-  after that long without a request; `0` (the default) never does, so a client
-  that exits without a DELETE leaves its session open. The SDK counts only POSTs
+  after that long without a request; `0` (the library's default) never does, so a
+  client that exits without a DELETE leaves its session open. Claude Code is such a
+  client, so a host should set one (`tools/go/fleet` defaults to 24 h). The SDK counts only POSTs
   as activity, so a timeout also ends a session that only holds a GET stream.
 
 An agent is its Claude Code `session_id`, a canonical lower-case UUID; its

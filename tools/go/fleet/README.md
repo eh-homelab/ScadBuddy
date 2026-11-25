@@ -75,13 +75,16 @@ no auth of its own; a NetworkPolicy admits only ScadBuddy's pods.
 | `-max-text` | `FLEETCHAT_MAX_TEXT` | `16777216` (16 MiB) |
 | `-page-size` | `FLEETCHAT_PAGE_SIZE` | `50` |
 | `-max-page-size` | `FLEETCHAT_MAX_PAGE_SIZE` | `200` |
-| `-session-timeout` | `FLEETCHAT_SESSION_TIMEOUT` | `0` (never): a Go duration |
+| `-session-timeout` | `FLEETCHAT_SESSION_TIMEOUT` | `24h`: a Go duration; `0` never closes a session |
 
 A flag wins over its variable, which wins over the default. A bad value, from either,
 stops the start. `--help` and `-version` need no core URL.
 
 `-session-timeout` closes an MCP session, with its inbox subscriptions, after that long
-without a request. The MCP SDK counts only POSTs as activity, so a timeout also ends a
+without a request. Claude Code never sends `DELETE /mcp` when it exits (measured
+2026-11-25 with Claude Code 2.1.332: four `claude -p` runs through a logging proxy
+against a local stack sent none), so with `0` every run would leave its session
+and its subscription open for the life of the process. The MCP SDK counts only POSTs as activity, so a timeout also ends a
 session that only holds its GET stream open.
 
 Core caps a send's body at twice its own 16 MiB text limit plus 1 MiB, so a

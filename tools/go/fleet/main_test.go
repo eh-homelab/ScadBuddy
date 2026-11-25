@@ -30,7 +30,7 @@ func TestConfig(t *testing.T) {
 		}
 		want := config{
 			Listen: ":8080", CoreURL: "http://core:8080", CredentialFile: "/run/token",
-			MaxText: 16777216, PageSize: 50, MaxPageSize: 200,
+			MaxText: 16777216, PageSize: 50, MaxPageSize: 200, SessionTimeout: 24 * time.Hour,
 		}
 		if c != want {
 			t.Errorf("got %+v, want %+v", c, want)

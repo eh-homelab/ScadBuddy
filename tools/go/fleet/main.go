@@ -112,7 +112,7 @@ func parseConfigTo(args []string, getenv func(string) string, out io.Writer) (co
 		{"max-text", "FLEETCHAT_MAX_TEXT", "the largest message text, in bytes", num(&c.MaxText), "16777216"},
 		{"page-size", "FLEETCHAT_PAGE_SIZE", "the inbox page when a call gives no limit", num(&c.PageSize), "50"},
 		{"max-page-size", "FLEETCHAT_MAX_PAGE_SIZE", "the largest inbox page", num(&c.MaxPageSize), "200"},
-		{"session-timeout", "FLEETCHAT_SESSION_TIMEOUT", "close an MCP session after this long without a POST; 0 never does", dur(&c.SessionTimeout), "0s"},
+		{"session-timeout", "FLEETCHAT_SESSION_TIMEOUT", "close an MCP session after this long without a POST (Claude Code never sends DELETE /mcp); 0 never does", dur(&c.SessionTimeout), "24h"},
 	}
 	fs := flag.NewFlagSet("fleet", flag.ContinueOnError)
 	fs.SetOutput(out)
