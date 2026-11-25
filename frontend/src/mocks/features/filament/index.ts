@@ -164,6 +164,18 @@ function insertBasis(body: Record<string, unknown>): InsertBasis {
   return body.empty_weight_basis === 'placeholder' ? 'placeholder' : 'person'
 }
 
+/** `insert_weights.forget_spool_on` (#7450-1): a derived weight is the mean of the rows left; with none left it stays. */
+function forgetInsertReading(spoolId: string) {
+  const gone = insertReadings.get(spoolId)
+  if (!gone) return
+  insertReadings.delete(spoolId)
+  const inserts = state.catalogs['insert-types']
+  const at = inserts.findIndex((one) => one.id === gone.insert_type_id)
+  const left = [...insertReadings.values()].filter((one) => one.insert_type_id === gone.insert_type_id).map((one) => one.derived_g)
+  if (at < 0 || inserts[at]!.empty_weight_basis !== 'derived' || left.length === 0) return
+  inserts[at] = { ...inserts[at]!, empty_weight_g: Math.floor(left.reduce((sum, one) => sum + one, 0) / left.length + 0.5), updated_at: now() }
+}
+
 /** `insert_weights.check_on` (#7280 R-7280-1, D1, D2) over the mock's spools and ledger. */
 function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck'] {
   const effective = view(row).effective ?? {}
@@ -179,7 +191,7 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
     filament_g: weight == null ? null : reading - weight,
   })
   if (row.archived_at) return answer('archived')
-  if (!insert) return answer('no_insert')
+  if (!insert || insert.archived_at) return answer('no_insert')
   if (label == null) return answer('no_label_weight')
   const used = state.events
     .filter((event) => event.spool_id === row.id)
@@ -190,14 +202,15 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
       return read != null && read < label - 0.5
     })
   if (used) return answer('used')
-  if (row.grams_left == null || Math.abs(row.grams_left - label) >= 0.5) return answer('not_full')
+  // #7449-1, #7449-3: no grams left and no use is full; the 0.5 g edge is full too.
+  if (row.grams_left != null && Math.abs(row.grams_left - label) > 0.5) return answer('not_full')
   const derived = reading - label
   if (derived <= 0) return answer('not_above_label')
   if (derived > label) return answer('derived_too_heavy')
   const others = [...insertReadings.entries()].filter(([spool, one]) => spool !== row.id && one.insert_type_id === insert.id).map(([, one]) => one.derived_g)
   const all = [...others, derived]
   const mean = Math.floor(all.reduce((sum, one) => sum + one, 0) / all.length + 0.5)
-  if (mean < 1) return answer('not_above_label')
+  if (mean < 1) return answer('mean_below_1g')
   const placeholder = isPlaceholder(insert.empty_weight_basis, insert.note)
   return answer(null, {
     insert_type_id: insert.id,
@@ -2276,6 +2289,7 @@ export const handlers = [
     state.events = state.events.filter((event) => event.spool_id !== row.id)
     state.bindings = state.bindings.filter((one) => one.spool_id !== row.id)
     state.bbLinks.delete(row.id)
+    forgetInsertReading(row.id)
     return new HttpResponse(null, { status: 204 })
   }),
   http.post(`${BASE}/spools/:id/archive`, async ({ params, request }) => {
@@ -2401,12 +2415,16 @@ export const handlers = [
     const row = findSpool(String(params.id))
     if (!row) return problem(404, `no spool ${String(params.id)}`)
     const raw = await request.json()
-    const extra = extraKeys(raw, ['reading_g'])
+    const extra = extraKeys(raw, ['reading_g', 'new_empty_weight_g'])
     if (extra) return extra
     const reading = readingParam((raw as { reading_g?: unknown }).reading_g)
     if (reading == null) return problem(422, 'body.reading_g: Input should be greater than 0')
     const { offer, reason } = insertWeightCheck(row, reading)
     if (!offer) return problem(409, `no insert weight offer for spool ${row.id}: ${reason}`, { code: 'no_insert_weight_offer', reason })
+    const expected = (raw as { new_empty_weight_g?: number | null }).new_empty_weight_g
+    if (expected != null && expected !== offer.new_empty_weight_g) {
+      return problem(409, `the insert weight of spool ${row.id} is now ${offer.new_empty_weight_g} g; check again`, { code: 'insert_weight_changed', new_empty_weight_g: offer.new_empty_weight_g })
+    }
     insertReadings.set(row.id, { insert_type_id: offer.insert_type_id, reading_g: reading, label_weight_g: offer.label_weight_g, derived_g: offer.derived_g })
     const inserts = state.catalogs['insert-types']
     const at = inserts.findIndex((one) => one.id === offer.insert_type_id)
