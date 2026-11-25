@@ -318,6 +318,13 @@ def test_a_save_at_a_revision_whose_pipeline_cannot_be_read_keeps_no_version(
     assert refusal(client, body)["type"] == "listing_inputs_undeclared"
 
 
+def test_a_save_at_a_revision_that_declares_no_shape_keeps_its_version(
+    client: TestClient, template: dict[str, Any], pla_red: str
+) -> None:
+    kit = {**template, "commit": committed(client, template["slug"], declared=False)}
+    assert create(client, kit_body(kit, pla_red))["inputs_v"] == 1
+
+
 def test_every_other_write_of_a_listing_keeps_its_inputs(
     client: TestClient, kit: dict[str, Any], pla_red: str
 ) -> None:

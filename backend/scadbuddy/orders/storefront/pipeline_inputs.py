@@ -106,7 +106,8 @@ def check_unexpected(listing: ListingInput) -> None:
 class PipelineFacts:
     """What a commit declares of its pipeline, read without running it."""
 
-    inputs_version: int
+    #: None when the declaration or its module cannot be read (``schema`` is then None).
+    inputs_version: int | None
     #: The declared inputs schema, or None with why it cannot be used in ``fault``.
     schema: dict[str, Any] | None
     fault: str
@@ -123,13 +124,13 @@ def pipeline_facts(directory: Path, slug: str) -> PipelineFacts | None:
     declared = meta.pipeline
     if declared is None:
         # The catalogue keeps a declaration it cannot read (`pipeline_raw`).
-        return PipelineFacts(0, None, f"the pipeline {slug!r} declares cannot be read")
+        return PipelineFacts(None, None, f"the pipeline {slug!r} declares cannot be read")
     version = inputs_version_in(directory, declared)
     sets_params = tuple(declared.sets_params)
-    if not (directory / declared.module).is_file():
-        # Its version is then no version (0), and a render of it would fail.
-        fault = f"{slug!r} has no pipeline module {declared.module}"
-        return PipelineFacts(version, None, fault, sets_params)
+    if version is None:
+        # A render of it would fail.
+        fault = f"the pipeline module {declared.module} of {slug!r} cannot be read"
+        return PipelineFacts(None, None, fault, sets_params)
     if declared.inputs is None:
         fault = f"{slug!r} declares no shape for its inputs (model.json pipeline.inputs)"
         return PipelineFacts(version, None, fault, sets_params)
@@ -172,7 +173,7 @@ async def settled_inputs(
     ``listing_inputs_migration_failed``, in that order; a migration's 413, 503 or 504
     passes through. The row keeps what the shop saved, so a republish migrates from it
     again (spec §8): the result does not depend on how many times it ran."""
-    if facts.schema is None:
+    if facts.schema is None or facts.inputs_version is None:
         raise _refused("listing_inputs_undeclared", facts.fault, "inputs")
     check_shape(listing.inputs)
     inputs, made_at = listing.inputs, listing.inputs_v
