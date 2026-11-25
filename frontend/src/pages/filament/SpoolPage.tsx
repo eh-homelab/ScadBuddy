@@ -31,6 +31,7 @@ import {
   type SpoolType,
   type SpoolTypeDetail,
 } from '../../api/filament'
+import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
@@ -555,6 +556,8 @@ export function SpoolPage() {
   const { check: insertCheck, pending: checkPending } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
   // #7683: a new spool read under its label weight: the person says what is up before it is recorded.
   const [resolutionChoice, setResolutionChoice] = useState<{ reading: number; resolution: Resolution } | null>(null)
+  // #7684: the archive asks for a reason and an optional final weighing.
+  const [archiveOpen, setArchiveOpen] = useState(false)
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setNotice(null)
     setDraft((was) => ({ ...was, [key]: value }))
@@ -927,9 +930,24 @@ export function SpoolPage() {
             {!creating && saved && (
               <div className="flex flex-wrap items-center gap-2 border-t pt-3">
                 {!saved.archived_at && (
-                  <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, { archived: true }); await reload(true) })}>
-                    <ArchiveIcon /> Archive
-                  </Button>
+                  <>
+                    <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setArchiveOpen(true)}>
+                      <ArchiveIcon /> Archive
+                    </Button>
+                    <ArchiveSpoolDialog
+                      key={saved.id}
+                      spool={saved}
+                      emptyWeightG={empty?.empty_weight_g ?? null}
+                      open={archiveOpen}
+                      onOpenChange={setArchiveOpen}
+                      onArchived={(archived, continueWithGrams) => {
+                        setArchiveOpen(false)
+                        // #7684: a respooled spool goes on as a new one, its final filament as the new spool's grams.
+                        if (continueWithGrams != null) guard.leaveTo(filamentLinks.continueSpool(archived.id, continueWithGrams))
+                        else void reload(true)
+                      }}
+                    />
+                  </>
                 )}
                 {saved.in_use ? (
                   <p className="text-[13px] text-muted-foreground">It has prints, so job costs keep their source.</p>
