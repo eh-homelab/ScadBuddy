@@ -405,7 +405,10 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   label choice, `filament_label_template` `{template: "saved", sheet_id}`. For a saved sheet
   that is chosen, "Edit sheet…" changes it, and "Delete" deletes it after a confirm; the page
   then goes back to the 50 x 25 mm roll label. After each save or delete, the page reads the
-  template list again. A saved sheet prints on its own grid, as a sheet template does. When
+  template list again. It also reads it again when its tab is shown again, and before "Print",
+  which waits for that read and prints on the newest grid, so a sheet that the agent edits
+  while the page is open prints as edited; a failed read prints with the grid the page has
+  (R-7216-21). A saved sheet prints on its own grid, as a sheet template does. When
   the stored choice names a sheet that is not in the list, the page draws at 50 x 25 mm and
   says that the saved sheet was deleted; "Download" still sends the stored choice and shows
   the 409.

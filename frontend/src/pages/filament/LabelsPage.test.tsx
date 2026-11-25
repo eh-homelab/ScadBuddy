@@ -39,6 +39,41 @@ afterEach(() => {
   localStorage.clear()
 })
 
+/**
+ * Every `GET /filament/label-templates` answer the page reads, as the promise of its JSON body. `settled(n)` waits
+ * until the page has read `n` answers' bodies, then one macrotask, which runs after the rest of each read's chain
+ * (microtasks only): a test's assert then sees what the page made of every answer, however slow the runner.
+ * `calls` lists every request the page starts, `<method> <url>`, in the order it starts them: the client calls
+ * `fetch` before its first `await`, so a request the page made is here before any later one reaches a handler.
+ */
+function watchTemplateReads() {
+  const reads: Promise<unknown>[] = []
+  const calls: string[] = []
+  const real = globalThis.fetch
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    calls.push(`${init?.method ?? 'GET'} ${url}`)
+    const response = await real(input, init)
+    if (url.includes('/filament/label-templates')) {
+      const json = response.json.bind(response)
+      response.json = () => {
+        const body = json()
+        reads.push(body.catch(() => {}))
+        return body
+      }
+    }
+    return response
+  })
+  return {
+    calls,
+    async settled(count: number) {
+      await waitFor(() => expect(reads.length).toBeGreaterThanOrEqual(count))
+      await Promise.all(reads)
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)))
+    },
+  }
+}
+
 /** The settings with the label template `choice`, and every `PUT /settings` body in `puts`. */
 function serveTemplate(choice: object, puts: unknown[] = []) {
   server.use(
@@ -589,7 +624,8 @@ describe('the labels page', () => {
     const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Print' }))
-    expect(print).toHaveBeenCalled()
+    // Print reads the template list first (R-7216-21).
+    await waitFor(() => expect(print).toHaveBeenCalledTimes(1))
   })
 
   it('draws a label for every printer place of ?printers=all, in order, with its code and name', async () => {
@@ -824,6 +860,7 @@ describe('saved sheets (#7216)', () => {
     serve()
     const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
     const sheets: object[] = []
+    const { settled } = watchTemplateReads()
     // The first GET (the mount read) waits until the test lets it answer, with the list from before the save.
     let releaseFirst!: () => void
     const firstHeld = new Promise<void>((resolve) => (releaseFirst = resolve))
@@ -854,7 +891,7 @@ describe('saved sheets (#7216)', () => {
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Drawer fronts'))
     // The mount read answers last, without the new sheet: the page keeps the newer list.
     act(() => releaseFirst())
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await settled(gets)
     expect(screen.queryByText('The saved sheet was deleted. Choose another template.')).toBeNull()
     expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Drawer fronts')
   })
@@ -863,12 +900,15 @@ describe('saved sheets (#7216)', () => {
     serve()
     serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
     let sheets: object[] = []
+    const { settled } = watchTemplateReads()
+    let gets = 0
     // The GET after the save waits until the test lets it answer, with the list it read at its start.
     let releaseSaveRead!: () => void
     const saveReadHeld = new Promise<void>((resolve) => (releaseSaveRead = resolve))
     let holdNext = false
     server.use(
       http.get('*/api/v1/filament/label-templates', async () => {
+        gets += 1
         const now = [...sheets]
         if (holdNext) {
           holdNext = false
@@ -902,7 +942,7 @@ describe('saved sheets (#7216)', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     // The read after the save answers last, with the deleted sheet in it.
     act(() => releaseSaveRead())
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await settled(gets)
     await user.click(screen.getByRole('combobox', { name: 'Label' }))
     await screen.findAllByRole('option')
     expect(screen.queryByRole('option', { name: 'Drawer fronts' })).toBeNull()
@@ -912,7 +952,14 @@ describe('saved sheets (#7216)', () => {
     serve()
     const puts = serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
     let sheets = [sheet(SHEET_ID, 'Shelf strip')]
-    serveSaved(() => sheets)
+    const { calls } = watchTemplateReads()
+    let gets = 0
+    server.use(
+      http.get('*/api/v1/filament/label-templates', () => {
+        gets += 1
+        return HttpResponse.json({ ...LABEL_TEMPLATES, saved: sheets })
+      }),
+    )
     let releaseDelete!: () => void
     const deleteHeld = new Promise<void>((resolve) => (releaseDelete = resolve))
     let deleteArrived = false
@@ -931,10 +978,73 @@ describe('saved sheets (#7216)', () => {
     await waitFor(() => expect(deleteArrived).toBe(true))
     await choose(user, screen.getByRole('combobox', { name: 'Label' }), /Avery L7160/)
     await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'avery_l7160' } }]))
+    const before = gets
+    const started = calls.length
     act(() => releaseDelete())
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    // The page reads the list once the delete has answered, after it checked the choice: a save of the default
+    // label would have started before that read.
+    await waitFor(() => expect(gets).toBe(before + 1))
+    expect(calls.slice(started).filter((call) => call.startsWith('PUT'))).toEqual([])
     expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent(/Avery L7160/)
     expect(puts).toEqual([{ filament_label_template: { template: 'avery_l7160' } }])
+  })
+
+  /** The grid the print copy has: its `grid-template-columns` rule. */
+  const printGrid = () => /grid-template-columns: repeat\(\d+, [\d.]+mm\)/.exec(document.querySelector('style')?.textContent ?? '')?.[0]
+
+  it('reads the saved sheets again when the tab is shown again (R-7216-21)', async () => {
+    serve()
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let sheets = [sheet(SHEET_ID, 'Shelf strip')]
+    serveSaved(() => sheets)
+    const { calls } = watchTemplateReads()
+    const listReads = () => calls.filter((call) => call.startsWith('GET') && call.includes('/filament/label-templates')).length
+    renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(printGrid()).toBe('grid-template-columns: repeat(2, 60mm)'))
+    // The agent edits the sheet while the page is open.
+    sheets = [sheet(SHEET_ID, 'Shelf strip', { cols: 3 })]
+    const before = listReads()
+    // A tab that is hidden reads nothing (the page starts a read at once, so none started is none).
+    const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    act(() => void document.dispatchEvent(new Event('visibilitychange')))
+    expect(listReads()).toBe(before)
+    hidden.mockReturnValue('visible')
+    act(() => void document.dispatchEvent(new Event('visibilitychange')))
+    await waitFor(() => expect(printGrid()).toBe('grid-template-columns: repeat(3, 60mm)'))
+  })
+
+  it('reads the saved sheets before Print, and prints on the newest grid (R-7216-21)', async () => {
+    serve()
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let sheets = [sheet(SHEET_ID, 'Shelf strip')]
+    serveSaved(() => sheets)
+    const grids: (string | undefined)[] = []
+    vi.spyOn(window, 'print').mockImplementation(() => void grids.push(printGrid()))
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(printGrid()).toBe('grid-template-columns: repeat(2, 60mm)'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
+    sheets = [sheet(SHEET_ID, 'Shelf strip', { cols: 3 })]
+    await user.click(screen.getByRole('button', { name: 'Print' }))
+    await waitFor(() => expect(grids).toEqual(['grid-template-columns: repeat(3, 60mm)']))
+  })
+
+  it('prints with the grid it has when the read before Print fails (R-7216-21)', async () => {
+    serve()
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let fail = false
+    server.use(
+      http.get('*/api/v1/filament/label-templates', () =>
+        fail ? HttpResponse.json({ detail: 'no' }, { status: 500 }) : HttpResponse.json({ ...LABEL_TEMPLATES, saved: [sheet(SHEET_ID, 'Shelf strip')] }),
+      ),
+    )
+    const grids: (string | undefined)[] = []
+    vi.spyOn(window, 'print').mockImplementation(() => void grids.push(printGrid()))
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(printGrid()).toBe('grid-template-columns: repeat(2, 60mm)'))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Print' })).toBeEnabled())
+    fail = true
+    await user.click(screen.getByRole('button', { name: 'Print' }))
+    await waitFor(() => expect(grids).toEqual(['grid-template-columns: repeat(2, 60mm)']))
   })
 
   it('shows a note when the saved sheet is gone', async () => {

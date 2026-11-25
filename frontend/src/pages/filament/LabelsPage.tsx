@@ -218,6 +218,10 @@ export function LabelsPage() {
   const choiceNow = useRef<LabelTemplateChoice>(DEFAULT_CHOICE)
   // #7216 — each template list read takes the next number, and only the newest read's answer lands.
   const templatesRead = useRef(0)
+  // R-7216-21 — Print reads the list first; each print after that read is one more here, and an effect prints
+  // once the newest list is drawn.
+  const [printing, setPrinting] = useState(false)
+  const [prints, setPrints] = useState(0)
   const [editingCustom, setEditingCustom] = useState(false)
   const [draft, setDraft] = useState({ width: '', height: '' })
   const [customProblem, setCustomProblem] = useState<string | null>(null)
@@ -257,7 +261,7 @@ export function LabelsPage() {
   useEffect(() => {
     let live = true
     // A list that cannot be read leaves the default label, which needs none.
-    readTemplates(() => live)
+    void readTemplates(() => live)
     // An unreadable setting leaves the default too; the place labels say so themselves.
     api
       .getSettings()
@@ -348,16 +352,26 @@ export function LabelsPage() {
   }
 
   /**
-   * Reads the template list, at the start and again after a sheet changed. Only the newest read's answer lands, so an
-   * older list never replaces a sheet saved or deleted since; a failed read keeps the list the page has.
+   * Reads the template list: at the start, after a sheet changed, when the tab is shown again and before Print
+   * (R-7216-21). Only the newest read's answer lands, so an older list never replaces a sheet saved or deleted since;
+   * a failed read keeps the list the page has. The promise settles once the answer is in, or the read failed.
    */
-  function readTemplates(live: () => boolean = () => true) {
+  function readTemplates(live: () => boolean = () => true): Promise<void> {
     const read = ++templatesRead.current
-    listLabelTemplates()
-      .then((list) => {
+    return listLabelTemplates().then(
+      (list) => {
         if (live() && read === templatesRead.current) setTemplates(list)
-      })
-      .catch(() => {})
+      },
+      () => {},
+    )
+  }
+
+  /** R-7216-21 — Print draws on the newest grid: a sheet edited elsewhere (the agent) since the page read it prints as edited. */
+  const print = async () => {
+    setPrinting(true)
+    await readTemplates()
+    setPrinting(false)
+    setPrints((n) => n + 1)
   }
 
   /** #7216 — a sheet saved in the editor is in the list at once, and it becomes the choice. */
@@ -366,7 +380,7 @@ export function LabelsPage() {
     setEditingCustom(false)
     setTemplates((was) => was && { ...was, saved: [...was.saved.filter((one) => one.id !== sheet.id), sheet] })
     save({ template: 'saved', sheet_id: sheet.id })
-    readTemplates()
+    void readTemplates()
   }
 
   /** #7216 — deletes a sheet after the confirm. When it was the choice, the page goes back to the default label. */
@@ -386,7 +400,7 @@ export function LabelsPage() {
     // The choice when the DELETE answers: a pick made while it was in flight stays.
     const now = choiceNow.current
     if (now.template === 'saved' && now.sheet_id === sheet.id) save(DEFAULT_CHOICE)
-    readTemplates()
+    void readTemplates()
   }
 
   /** A field left for the template picker saves nothing: the pick that follows decides. */
@@ -411,6 +425,24 @@ export function LabelsPage() {
     if (choice.template === 'custom' && choice.width_mm === width && choice.height_mm === height) return
     save({ template: 'custom', width_mm: width, height_mm: height })
   }
+
+  // R-7216-21 — a tab shown again reads the list again, so a sheet edited elsewhere meanwhile is drawn as edited.
+  useEffect(() => {
+    let live = true
+    const shown = () => {
+      if (document.visibilityState === 'visible') void readTemplates(() => live)
+    }
+    document.addEventListener('visibilitychange', shown)
+    return () => {
+      live = false
+      document.removeEventListener('visibilitychange', shown)
+    }
+  }, [])
+
+  // The print runs after the render that drew the newest list.
+  useEffect(() => {
+    if (prints > 0) window.print()
+  }, [prints])
 
   useEffect(() => {
     if (!placesKey) return
@@ -632,7 +664,7 @@ export function LabelsPage() {
           >
             <FileDownIcon /> Download
           </Button>
-          <Button type="button" size="sm" disabled={count === 0} onClick={() => window.print()}>
+          <Button type="button" size="sm" disabled={count === 0 || printing} onClick={() => void print()}>
             <PrinterIcon /> Print
           </Button>
           {pdfNeedsBase && (

@@ -170,6 +170,25 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   with the changes. The last checked box stays disabled on the list the page shows. — Task 7's
   review found that a tick before the read saved the default list over the stored one. — If wrong:
   the page's field state is one reducer.
+- **R-7216-19 One vector file holds the fit.** `test-fixtures/filament/label-fit-vectors.json` holds
+  the fit constants (`PAD_MM`, `QR_MM`, `QUIET_MM`, `NUMBER_MM`, `CODE_MM`, `PLACE_NAME_MM`,
+  `LEADING`, `BIG_LEADING`, `GAP_MM`, `FIELD_MM`, `BOLD_FIELDS`) and fit cases (a label height, the
+  chosen fields, the fields with a value, the lines kept).
+  `backend/tests/filament/test_label_fit_vectors.py` checks `label_pdf.py` against it, and
+  `frontend/src/components/filament/labelFitVectors.test.ts` checks `labelSheet.ts`, whose
+  constants `Label.tsx` draws with. — The final review (M-3) found that nothing tied the two copies
+  of R-7216-10. — If wrong: two tests and one file to remove.
+- **R-7216-20 PDFium runs on its own one-thread executor.** `label_png.py` runs every rasterise on
+  a module-level `ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdfium")` through
+  `loop.run_in_executor`, so PNG requests that wait for PDFium wait in that executor's queue and
+  hold no worker of the API's shared `to_thread` pool. The one thread also keeps PDFium to one call
+  at a time. — The final review (M-4) found that waiting requests filled the shared pool. — If
+  wrong: one executor to change.
+- **R-7216-21 Print reads the saved sheets again.** The Labels page reads `GET /label-templates`
+  again when its tab becomes visible again, and before Print draws: Print waits for that read and
+  then draws on the newest grid; a failed read prints with what the page has. Only the newest read's
+  answer lands. — The final review (M-5) found that an edit made elsewhere (the agent) while the
+  page was open reached Download but not Print. — If wrong: two calls of the page's list read.
 
 - **P1 (pre-flight) Task 1 makes `filament_label_output` whole.** Task 1 stores `{format, dpi,
   fields}`, with `fields` at the R-7216-9 default; Task 3 makes `fields` act. — One shape of the
