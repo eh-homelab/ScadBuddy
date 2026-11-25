@@ -80,9 +80,12 @@ The replay log
 monotonically increasing ``seq``. :meth:`replay` reads the events after a ``seq``,
 oldest first, with a limit, and says whether rows the caller has not seen were
 already pruned. A row of a kind this process has no model for comes back as an
-:class:`~.events.OpaqueEvent`. It is pruned by age and by row count
-(``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``)
-every `PRUNE_INTERVAL`, by every replica; the deletes are idempotent.
+:class:`~.events.OpaqueEvent`. Nothing is pruned by default. Rows age out by the
+event's own ``retention_seconds``, by kind prefix
+(``SCADBUDDY_EVENT_LOG_RETENTION_KINDS``) or by the global age and row count
+(``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``; see
+`EventLogRetention` for the precedence), every `PRUNE_INTERVAL`, by every replica; the
+deletes are idempotent.
 
 Consuming it (a backend WebSocket gateway, #406)
 ------------------------------------------------
@@ -124,8 +127,8 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from psycopg import AsyncConnection, Connection
@@ -248,12 +251,28 @@ class EventLogMissingError(RuntimeError):
     """The bus was started on a database the job store has not migrated."""
 
 
+# A kind equals a prefix or sits under it (`job` covers `job.progress`, not `jobs.x`);
+# `left()` and `||` rather than LIKE, as `_` in a kind is a LIKE wildcard. The first form
+# takes the prefix as a parameter, the second reads it from `unnest(...) AS p`.
+_MATCHES = "(kind = %s::text OR left(kind, length(%s::text) + 1) = %s::text || '.')"
+_MATCHES_P = "(kind = p OR left(kind, length(p) + 1) = p || '.')"
+
+
 @dataclass(frozen=True)
 class EventLogRetention:
-    """How much of the log to keep. 0 is no limit on that dimension."""
+    """How much of the log to keep. 0 is no limit on that dimension, and the default:
+    every event is kept.
+
+    Precedence, per row: the event's own ``retention_seconds`` (in its payload), then the
+    longest ``kinds`` prefix that matches its kind (a prefix matches the kind itself and
+    its dotted sub-kinds), then ``seconds``. ``rows`` caps only the rows that neither of
+    the first two covers. A 0 anywhere on the first two keeps the row forever and still
+    covers it.
+    """
 
     seconds: float = 0.0
     rows: int = 0
+    kinds: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -598,20 +617,51 @@ class PgNotifyEventBus:
         return {str(event_id): int(seq) for event_id, seq in rows}
 
     async def prune_log(self) -> int:
-        """Apply the retention settings; returns the rows removed."""
+        """Apply the retention settings; returns the rows removed.
+
+        One ``DELETE`` per rule class (see `EventLogRetention` for the precedence): an
+        event's own retention, each kind prefix (longest first, so a row goes to the
+        longest prefix that matches), then the global seconds and rows over the rest.
+        """
+        retention = self.retention
+        prefixes = sorted(retention.kinds, key=len, reverse=True)
+        own = "payload->>'retention_seconds'"
         removed = 0
         async with self._pool.connection() as conn:
-            if self.retention.seconds > 0:
+            cursor = await conn.execute(
+                f"DELETE FROM events WHERE ({own})::float8 > 0"
+                f" AND logged_at < now() - make_interval(secs => ({own})::float8)"
+            )
+            removed += max(0, cursor.rowcount)
+            for index, prefix in enumerate(prefixes):
+                seconds = retention.kinds[prefix]
+                if seconds <= 0:
+                    continue
                 cursor = await conn.execute(
-                    "DELETE FROM events WHERE logged_at < now() - make_interval(secs => %s)",
-                    (self.retention.seconds,),
+                    f"DELETE FROM events WHERE {own} IS NULL AND {_MATCHES}"
+                    f" AND NOT EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p"
+                    f" WHERE {_MATCHES_P})"
+                    " AND logged_at < now() - make_interval(secs => %s)",
+                    (prefix, prefix, prefix, prefixes[:index], seconds),
                 )
                 removed += max(0, cursor.rowcount)
-            if self.retention.rows > 0:
+            uncovered = (
+                f"{own} IS NULL AND NOT EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p"
+                f" WHERE {_MATCHES_P})"
+            )
+            if retention.seconds > 0:
                 cursor = await conn.execute(
-                    "DELETE FROM events WHERE seq <= ("
-                    " SELECT seq FROM events ORDER BY seq DESC OFFSET %s LIMIT 1)",
-                    (self.retention.rows,),
+                    f"DELETE FROM events WHERE {uncovered}"
+                    " AND logged_at < now() - make_interval(secs => %s)",
+                    (prefixes, retention.seconds),
+                )
+                removed += max(0, cursor.rowcount)
+            if retention.rows > 0:
+                cursor = await conn.execute(
+                    f"DELETE FROM events WHERE {uncovered} AND seq <= ("
+                    f" SELECT seq FROM events WHERE {uncovered}"
+                    " ORDER BY seq DESC OFFSET %s LIMIT 1)",
+                    (prefixes, prefixes, retention.rows),
                 )
                 removed += max(0, cursor.rowcount)
         if removed:

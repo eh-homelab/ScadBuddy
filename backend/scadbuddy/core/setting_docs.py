@@ -527,11 +527,20 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "event_log_retention_seconds": SettingDoc(
             "Keep live-update events for",
-            "For replay after a short disconnect. 0 is no limit.",
+            "How long to keep events for replay after a disconnect. 0 is no limit, the"
+            " default: no event is lost.",
         ),
         "event_log_retention_rows": SettingDoc(
             "Keep at most this many live-update events",
-            "Older events are pruned past this count. 0 is no limit.",
+            "Older events are pruned past this count. 0 is no limit, the default. The count"
+            " covers only events that no other rule keeps or ages out.",
+        ),
+        "event_log_retention_kinds": SettingDoc(
+            "Keep events of a kind for",
+            "Seconds to keep each kind of event, by kind prefix, such as job: 3600. A"
+            " prefix covers its sub-kinds, and the longest matching prefix wins. 0 keeps"
+            " that kind forever. An event's own retention beats this, and the first two"
+            " settings apply to the kinds left over.",
         ),
         "realtime_sockets": SettingDoc(
             "Live-update connections",

@@ -907,6 +907,7 @@ class SettingsPatch(BaseModel):
     git_remote_token: str | None = Field(default=None, max_length=4096)
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
+    event_log_retention_kinds: dict[str, float] | None = None
     flow_approval_timeout_seconds: int | None = None
     spool_overlay_refresh_seconds: int | None = None
     #: The Filament section (#6262 Task 13): see `core.settings.FilamentSync`.

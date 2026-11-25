@@ -5,6 +5,7 @@ job events through it, and the bus a database URL selects."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -544,6 +545,133 @@ async def test_an_emptied_log_still_knows_what_was_pruned(
         conn.execute("DELETE FROM events")
 
     assert (await bus.replay(0)).gap
+
+
+def _log_rows(conninfo: str, rows: list[tuple[str, float, float | None]]) -> None:
+    """Rows of the log: (kind, age in seconds, own ``retention_seconds``). The ids are
+    ``r0``, ``r1``, ... in order."""
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        for n, (kind, age, own) in enumerate(rows):
+            payload: dict[str, object] = {
+                "id": f"r{n}",
+                "at": "2026-11-25T00:00:00Z",
+                "kind": kind,
+                "topics": [],
+            }
+            if own is not None:
+                payload["retention_seconds"] = own
+            conn.execute(
+                "INSERT INTO events (event_id, kind, at, logged_at, payload)"
+                " VALUES (%s, %s, now(), now() - make_interval(secs => %s), %s::jsonb)",
+                (f"r{n}", kind, age, json.dumps(payload)),
+            )
+
+
+def _kept(conninfo: str) -> list[str]:
+    with psycopg.connect(conninfo) as conn:
+        return [row[0] for row in conn.execute("SELECT event_id FROM events ORDER BY seq")]
+
+
+DAY = 86400.0
+
+
+@pytest.mark.requires_postgres
+async def test_default_keeps_everything(make_bus: BusFactory, pg_conninfo: str) -> None:
+    assert EventLogRetention() == EventLogRetention(seconds=0, rows=0, kinds={})
+    bus = await make_bus(retention=EventLogRetention())
+    _log_rows(pg_conninfo, [("fleet.message", 2 * DAY, None), ("job.progress", 400 * DAY, None)])
+    assert await bus.prune_log() == 0
+    assert _kept(pg_conninfo) == ["r0", "r1"]
+
+
+@pytest.mark.requires_postgres
+async def test_global_seconds(make_bus: BusFactory, pg_conninfo: str) -> None:
+    bus = await make_bus(retention=EventLogRetention(seconds=3600))
+    _log_rows(pg_conninfo, [("fleet.message", 7200, None), ("fleet.message", 60, None)])
+    assert await bus.prune_log() == 1
+    assert _kept(pg_conninfo) == ["r1"]
+
+
+@pytest.mark.requires_postgres
+async def test_kind_prefix_longest_wins(make_bus: BusFactory, pg_conninfo: str) -> None:
+    kinds = {"job": 60, "job.progress": 10}
+    bus = await make_bus(retention=EventLogRetention(kinds=kinds))
+    _log_rows(
+        pg_conninfo,
+        [
+            ("job.progress", 20, None),  # over 10 s: pruned
+            ("job.progress", 5, None),  # under 10 s: kept
+            ("job.done", 20, None),  # `job`'s 60 s: kept
+            ("job.done", 120, None),  # over 60 s: pruned
+            ("jobs.x", 120, None),  # `job` does not cover `jobs.x`: kept forever
+            ("job", 120, None),  # the prefix itself: pruned
+            ("job.progress_x", 20, None),  # not under `job.progress`: `job`'s 60 s, kept
+        ],
+    )
+    assert await bus.prune_log() == 3
+    assert _kept(pg_conninfo) == ["r1", "r2", "r4", "r6"]
+
+
+@pytest.mark.requires_postgres
+async def test_event_own_retention_wins(make_bus: BusFactory, pg_conninfo: str) -> None:
+    bus = await make_bus(retention=EventLogRetention(seconds=3600, kinds={"job": 3600}))
+    _log_rows(
+        pg_conninfo,
+        [
+            ("job.done", 2 * 3600, 0),  # own 0 beats the 1 h rule: forever
+            ("fleet.message", 2 * 3600, 0),  # own 0 beats the global 1 h: forever
+            ("fleet.message", 20, 10),  # own 10 s: pruned after 20 s
+            ("fleet.message", 5, 10),  # own 10 s, not yet
+            ("job.done", 20, 10),  # own 10 s beats the 1 h rule
+            ("job.done", 2 * 3600, None),  # no own value: the 1 h rule prunes it
+        ],
+    )
+    assert await bus.prune_log() == 3
+    assert _kept(pg_conninfo) == ["r0", "r1", "r3"]
+
+
+@pytest.mark.requires_postgres
+async def test_rows_cap_only_uncovered(make_bus: BusFactory, pg_conninfo: str) -> None:
+    bus = await make_bus(retention=EventLogRetention(rows=1, kinds={"job": 0}))
+    _log_rows(
+        pg_conninfo,
+        [
+            ("job.a", 50, None),  # covered by a 0 rule: forever
+            ("fleet.a", 40, None),
+            ("fleet.b", 30, 0),  # own 0: forever
+            ("fleet.c", 20, None),
+            ("fleet.d", 10, None),
+        ],
+    )
+    assert await bus.prune_log() == 2
+    assert _kept(pg_conninfo) == ["r0", "r2", "r4"]
+
+
+@pytest.mark.parametrize(
+    ("kinds", "message"),
+    [
+        ({"job": -1}, "must be at least 0"),
+        ({"Job": 5}, "is not a kind prefix"),
+        ({"job.": 5}, "is not a kind prefix"),
+        ({"": 5}, "is not a kind prefix"),
+        ({"job%": 5}, "is not a kind prefix"),
+    ],
+)
+def test_kinds_setting_validation(kinds: dict[str, float], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings.model_validate({"event_log_retention_kinds": kinds})
+
+
+def test_kinds_setting_defaults_and_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
+    assert defaults.event_log_retention_kinds == {}
+    assert defaults.event_log_retention_seconds == 0
+    assert defaults.event_log_retention_rows == 0
+    monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_KINDS", '{"job.progress": 30, "fleet": 0}')
+    settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
+    assert settings.event_log_retention_kinds == {"job.progress": 30, "fleet": 0}
 
 
 def _result() -> JobResult:

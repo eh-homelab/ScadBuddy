@@ -778,9 +778,13 @@ class Settings(BaseSettings):
 
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
-    # limit on that dimension.
+    # limit on that dimension, and the default (an event is kept forever).
+    # SCADBUDDY_EVENT_LOG_RETENTION_KINDS (JSON object): seconds to keep each kind and
+    # its sub-kinds, by dotted prefix ({"job": 3600}); the longest prefix that matches
+    # wins, and 0 keeps that prefix forever. An event's own `retention_seconds` beats it.
     event_log_retention_seconds: float = DEFAULT_EVENT_LOG_RETENTION_SECONDS
     event_log_retention_rows: int = DEFAULT_EVENT_LOG_RETENTION_ROWS
+    event_log_retention_kinds: dict[str, float] = Field(default_factory=dict)
 
     @field_validator("event_log_retention_seconds", "event_log_retention_rows")
     @classmethod
@@ -788,6 +792,22 @@ class Settings(BaseSettings):
         if value < 0:
             name = f"SCADBUDDY_{(info.field_name or '').upper()}"
             raise ValueError(f"{name} must be at least 0, not {value}")
+        return value
+
+    @field_validator("event_log_retention_kinds")
+    @classmethod
+    def _retention_kinds_valid(cls, value: dict[str, float]) -> dict[str, float]:
+        for prefix, seconds in value.items():
+            if not KIND_PREFIX.fullmatch(prefix):
+                raise ValueError(
+                    f"SCADBUDDY_EVENT_LOG_RETENTION_KINDS: {prefix!r} is not a kind prefix"
+                    " (dotted lowercase segments, such as 'job.progress')"
+                )
+            if seconds < 0:
+                raise ValueError(
+                    f"SCADBUDDY_EVENT_LOG_RETENTION_KINDS: {prefix!r} must be at least 0,"
+                    f" not {seconds}"
+                )
         return value
 
     # SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS (#1057): how long an outward host call of
@@ -957,6 +977,9 @@ LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 #: a value saved in the UI wins, and a reset goes back to the environment, then the
 #: default. ``tests/test_settings_coverage.py`` fails when a field is neither, so an
 #: environment-only setting cannot slip in unnoticed.
+#: A kind prefix of `event_log_retention_kinds`: dotted kind segments (`job`, `job.progress`).
+KIND_PREFIX: Final = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*")
+
 BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "data_dir": "The data volume. It is needed before any stored setting can be read.",
@@ -1222,6 +1245,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "duplicate_staging_max_age": "live",
         "event_log_retention_seconds": "live",
         "event_log_retention_rows": "live",
+        "event_log_retention_kinds": "live",
         # Read by every flow run's start.
         "flow_approval_timeout_seconds": "live",
         # A key change swaps the client and refetches the catalogue.

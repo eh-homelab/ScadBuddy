@@ -311,6 +311,7 @@ class SettingsView(BaseModel):
     has_git_remote_token: bool = False
     event_log_retention_seconds: float
     event_log_retention_rows: int
+    event_log_retention_kinds: dict[str, float] = Field(default_factory=dict)
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
