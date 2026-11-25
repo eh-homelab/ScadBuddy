@@ -146,6 +146,9 @@ def hs256(service_account: str) -> str:
         ("system:serviceaccount:bambuddy:scadbuddy", "agent"),
         ("system:serviceaccount:bambuddy:scadbuddy-storefront", "storefront"),
         ("system:serviceaccount:bambuddy:scadbuddy-profile-fetch", "profile-fetch"),
+        ("system:serviceaccount:bambuddy:scadbuddy-camera", "camera"),
+        ("system:serviceaccount:bambuddy:scadbuddy-camera-relay", "camera-relay"),
+        ("system:serviceaccount:bambuddy:scadbuddy-camera-edge", "camera"),
         # Every pod that names no ServiceAccount runs as `default`: never a caller.
         ("system:serviceaccount:bambuddy:default", None),
         ("system:serviceaccount:bambuddy:pgadmin", None),

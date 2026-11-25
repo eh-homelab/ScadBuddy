@@ -2426,10 +2426,22 @@ jobs:
           tags: scadbuddy-camera-recorder:ci
           cache-from: type=gha,scope=camera
 
+      # No cache-to, for the recorder's reason: the edge shares every layer of the relay's
+      # but its config COPY.
+      - name: Build the camera edge image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: camera-edge
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-camera-edge:ci
+          cache-from: type=gha,scope=camera
+
       - name: Camera smoke
         run: |
           set -euo pipefail
-          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci; do
+          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci scadbuddy-camera-edge:ci; do
             test "$(docker run --rm "$image" id -u)" = 10001
             test "$(docker run --rm "$image" mediamtx --version)" = v1.21.4
             docker run --rm "$image" curl --version | head -n 1
@@ -2447,6 +2459,12 @@ jobs:
           test "$status" -eq 2
           grep -q 'SCADBUDDY_DATABASE_URL is set' "$RUNNER_TEMP/recorder.log"
           grep -q 'so TZ must be UTC' "$RUNNER_TEMP/recorder.log"
+          status=0
+          docker run --rm --network none -e SCADBUDDY_DATABASE_URL=x \
+            scadbuddy-camera-edge:ci > "$RUNNER_TEMP/edge.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/edge.log"
+          test "$status" -eq 2
+          grep -q 'SCADBUDDY_DATABASE_URL is set; the camera edge holds no database secret' "$RUNNER_TEMP/edge.log"
 
       - name: MediaMTX on each image's config
         run: |
@@ -2456,7 +2474,9 @@ jobs:
             scadbuddy-camera-relay:ci mediamtx /etc/mediamtx/mediamtx.yml
           docker run -d --name recorder-mtx --network none \
             scadbuddy-camera-recorder:ci mediamtx /etc/mediamtx/mediamtx.yml
-          for c in relay-mtx recorder-mtx; do
+          docker run -d --name edge-mtx --network none \
+            scadbuddy-camera-edge:ci mediamtx /etc/mediamtx/mediamtx.yml
+          for c in relay-mtx recorder-mtx edge-mtx; do
             for _ in $(seq 30); do
               docker exec "$c" curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list && break
               sleep 1
