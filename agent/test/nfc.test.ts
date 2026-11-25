@@ -106,8 +106,31 @@ describe('NFC job tools', () => {
     )
     const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), flowTurn: { run_id: 'r', call_id: 'c' } })
     expect(got.isError).toBe(true)
-    expect(JSON.stringify(got.content)).toMatch(/cannot run in a flow run/)
+    expect(JSON.stringify(got.content)).toMatch(/cannot run from a flow run/)
     expect(posted).toBe(false)
+  })
+
+  it("refuses a flow-started session's turn, and runs in a person's session", async () => {
+    const FLOWS = '0e5a3c1e-1111-4222-8333-000000000001'
+    const PERSONS = '0e5a3c1e-1111-4222-8333-000000000002'
+    let posts = 0
+    server.use(
+      http.post(JOBS, () => {
+        posts += 1
+        return HttpResponse.json(job('done', { kind: 'write', records: [REC] }), { status: 201 })
+      }),
+    )
+    const sessions = { keepsBackgroundTools: async (id: string) => id === PERSONS } as unknown as ToolContext['sessions']
+    const refused = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), sessions, session: FLOWS })
+    expect(refused.isError).toBe(true)
+    expect(posts).toBe(0)
+    const noManager = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), session: PERSONS })
+    expect(noManager.isError).toBe(true)
+    expect(posts).toBe(0)
+    const ran = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), sessions, session: PERSONS })
+    expect(ran.isError).toBeFalsy()
+    expect(firstText(ran)).toMatchObject({ job_id: JOB, state: 'done' })
+    expect(posts).toBe(1)
   })
 
   it('nfc_write refuses records past 16', async () => {
