@@ -344,13 +344,15 @@ def breakdown(
     empty: EmptyWeight | None,
     expected: float | None,
     tared: bool = False,
+    resolved: bool = False,
 ) -> dict[str, Any]:
     """A weighing's ``data`` keys (#7682): the reading, what was taken off it for the empty
     spool and where that came from (``insert`` when it is the effective empty weight,
     ``tared`` when the scale was tared on the empty spool so nothing was taken off (#7683),
     else ``person``: the client took something else off, or nothing was known), the grams
     the ledger expected and the drift, ``grams - expected``, to 0.1 g; both null with no
-    ``expected``."""
+    ``expected``. A ``resolved`` weighing (#7683: the person explained the shortfall)
+    keeps ``expected_g`` and records no drift."""
     empty_g = reading_g - grams
     source: str
     basis: str | None
@@ -368,7 +370,7 @@ def breakdown(
         "empty_basis": basis,
         "empty_name": name,
         "expected_g": expected,
-        "drift_g": None if expected is None else round(grams - expected, 1),
+        "drift_g": None if expected is None or resolved else round(grams - expected, 1),
     }
 
 

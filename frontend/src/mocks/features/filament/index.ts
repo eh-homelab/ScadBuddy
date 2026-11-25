@@ -2435,7 +2435,8 @@ export const handlers = [
           empty_basis: own ? (isPlaceholder(own.empty_weight_basis, own.note) ? 'placeholder' : own.empty_weight_basis) : null,
           empty_name: own?.name ?? null,
           expected_g: expected,
-          drift_g: expected == null ? null : Math.round((grams - expected) * 10) / 10,
+          // #7683: a resolved weighing keeps what was expected and records no drift.
+          drift_g: expected == null || body.resolution != null ? null : Math.round((grams - expected) * 10) / 10,
         })
       }
       const drift = typeof data.drift_g === 'number' ? data.drift_g : null

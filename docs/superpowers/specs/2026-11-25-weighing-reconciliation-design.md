@@ -175,6 +175,9 @@ placeholder empty weight. The change:
   event (`data.changes` `{"added_full": [before, false]}` or
   `{"label_weight_g": [before, new]}`, `before` the spool's own value, null when it came
   from the type) at the weighing's `at`, before the weighing, in the same transaction.
+- As built in #7683: a weighing with a `resolution` keeps `expected_g` (what the ledger
+  believed) and records `drift_g` null, so `last_drift_g` stays null and no Drift mark
+  appears: the person just explained the gap (the owner's call of 2026-11-25).
 
 ### 5.4 End of life (slice C, #7684)
 

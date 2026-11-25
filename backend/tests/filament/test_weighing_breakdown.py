@@ -221,6 +221,16 @@ def test_tared_books_the_reading_as_filament(pg_pool: PgPool) -> None:
 
 
 @pg
+def test_a_resolved_weighing_has_no_drift(pg_pool: PgPool) -> None:
+    """The person just explained the gap: what the ledger believed stays on the record,
+    the drift does not, and the spool gets no Drift mark."""
+    spool = _new_spool(pg_pool)
+    event = _weigh(pg_pool, spool, reading_g=900, resolution="tared")
+    assert event.data["expected_g"] == 1000 and event.data["drift_g"] is None
+    assert _get(pg_pool, spool).last_drift_g is None
+
+
+@pg
 def test_short_marks_the_spool_not_added_full(pg_pool: PgPool) -> None:
     spool = _new_spool(pg_pool)
     event = _weigh(pg_pool, spool, reading_g=800, resolution="short")

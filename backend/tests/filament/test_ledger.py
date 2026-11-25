@@ -268,6 +268,12 @@ def test_breakdown_of_a_tared_reading_has_no_empty_weight() -> None:
     }
 
 
+def test_breakdown_of_a_resolved_weighing_keeps_the_expected_and_no_drift() -> None:
+    empty = EmptyWeight(200, "insert", "catalog", "Plastic", None)
+    found = breakdown(reading_g=800, grams=600, empty=empty, expected=1000, resolved=True)
+    assert (found["expected_g"], found["drift_g"], found["empty_source"]) == (1000, None, "insert")
+
+
 def test_breakdown_with_no_empty_weight_is_a_persons() -> None:
     assert breakdown(reading_g=1000, grams=1000, empty=None, expected=1000.04) == {
         "reading_g": 1000,

@@ -23,9 +23,10 @@ export function WeighingBreakdown({ event }: { event: SpoolEvent }) {
       : data.empty_source === 'person'
         ? `+ spool ${grams(data.empty_g)} (taken off by hand)`
         : `+ spool ${grams(data.empty_g)} (${[data.empty_name, data.empty_basis ? (BASIS[data.empty_basis] ?? data.empty_basis) : null].filter(Boolean).join(', ')})`
-  const drift = data.drift_g ?? 0
+  const drift = data.drift_g
+  // #7683: a resolved weighing keeps what was expected but no drift: the gap was explained.
   const compared =
-    data.expected_g == null
+    data.expected_g == null || drift == null
       ? ''
       : ` The ledger expected ${grams(data.expected_g)}. ${
           Math.abs(drift) < 1 ? 'The scale matches the prints.' : `The scale found ${grams(Math.abs(drift))} ${drift < 0 ? 'less' : 'more'} than the prints accounted for.`

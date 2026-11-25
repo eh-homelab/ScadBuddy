@@ -525,7 +525,8 @@ describe('a new spool read under its label weight (#7683)', () => {
   it('a tared reading is the filament, and label_wrong sets the label', async () => {
     const tared = await addSpoolEvent(spoolId(9), { kind: 'weighed', source: 'scale', reading_g: 950, resolution: 'tared' })
     expect(tared.grams_after).toBe(950)
-    expect(tared.data).toMatchObject({ resolution: 'tared', empty_source: 'tared', empty_g: 0, empty_basis: null, empty_name: null })
+    expect(tared.data).toMatchObject({ resolution: 'tared', empty_source: 'tared', empty_g: 0, empty_basis: null, empty_name: null, expected_g: 1000, drift_g: null })
+    expect((await getSpool(spoolId(9))).last_drift_g).toBeNull()
     await resetMockState()
     const fixed = await addSpoolEvent(spoolId(9), { kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'label_wrong' })
     expect(fixed.grams_after).toBe(720)

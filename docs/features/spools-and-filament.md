@@ -212,7 +212,8 @@ until it is called again with one. The store checks the choice again under the r
 (a resolution the check no longer offers is 422 `no_below_label` with the check's
 `reason`), books the side effect as an `edited` event before the weighing, and keeps
 `resolution` and `shortfall_g` in the event's `data`; a `tared` weighing's `empty_source`
-is `tared`, `empty_g` 0. The timeline says "scale tared on the spool", "spool short by
+is `tared`, `empty_g` 0. A resolved weighing keeps `expected_g` and records no `drift_g`,
+so it raises no Drift mark: the person just explained the gap. The timeline says "scale tared on the spool", "spool short by
 100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
 scale was tared on the spool)". Design: the same spec, §5.3.
 
