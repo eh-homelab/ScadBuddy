@@ -53,8 +53,9 @@ PLAIN: Final[Weight] = "regular"
 #: place's code have a line height of their size (`BIG_LEADING`); every other line is
 #: `LEADING` times its size, and the first line under the big text has `GAP_MM` above it.
 #: The browser label (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use
-#: these same values, with `PAD_MM`, so it keeps the same lines as the PDF. A chosen field
-#: with no value makes no line.
+#: these same values, with `PAD_MM`, so it keeps the same lines as the PDF;
+#: `test-fixtures/filament/label-fit-vectors.json` holds them, and both sides' tests check it
+#: (R-7216-19). A chosen field with no value makes no line.
 NUMBER_MM: Final = 9.0
 CODE_MM: Final = 8.0
 PLACE_NAME_MM: Final = 3.2

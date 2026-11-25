@@ -91,11 +91,19 @@ export const DEFAULT_FIELDS: readonly LabelField[] = ['number', 'material', 'col
  * under it (`GAP_MM` above it), and each other line (`LEADING` times its size, `FIELD_MM`).
  */
 export const NUMBER_MM = 9
-const GAP_MM = 1
-const LEADING = 1.25
-const FIELD_MM: Partial<Record<LabelField, number>> = { material: 3.2, colour: 3, hex: 2.6, brand: 2.6, location: 2.6, temps: 2.6, weight: 2.6, note: 2.6, added: 2.6 }
-/** The fields that print in bold (`label_pdf.py` `BOLD_FIELDS`). */
-const BOLD_FIELDS: ReadonlySet<LabelField> = new Set(['material'])
+export const GAP_MM = 1
+export const LEADING = 1.25
+/** The big number's and the place code's line height over their size (`label_pdf.py` `BIG_LEADING`). */
+export const BIG_LEADING = 1
+/** A place label's code cap and its name's size (`label_pdf.py` `CODE_MM`, `PLACE_NAME_MM`). */
+export const CODE_MM = 8
+export const PLACE_NAME_MM = 3.2
+export const FIELD_MM: Partial<Record<LabelField, number>> = { material: 3.2, colour: 3, hex: 2.6, brand: 2.6, location: 2.6, temps: 2.6, weight: 2.6, note: 2.6, added: 2.6 }
+/**
+ * The fields that print in bold (`label_pdf.py` `BOLD_FIELDS`). `test-fixtures/filament/label-fit-vectors.json`
+ * holds every fit constant here and in `label_pdf.py`, and both sides' tests check them (R-7216-19).
+ */
+export const BOLD_FIELDS: ReadonlySet<LabelField> = new Set(['material'])
 
 /** One line of a spool label: its field, its text, its size in mm, and its weight. */
 export type LabelLine = { field: LabelField; text: string; sizeMm: number; bold: boolean }
@@ -190,7 +198,7 @@ export const gapAbove = (lines: readonly LabelLine[], at: number): boolean => at
 /** The height a line takes in the fit: its gap and its line box (`label_pdf.py` `_Line.fit_height_mm`). */
 const fitHeightMm = (lines: readonly LabelLine[], at: number): number => {
   const line = lines[at]!
-  return (gapAbove(lines, at) ? GAP_MM : 0) + (line.field === 'number' ? line.sizeMm : line.sizeMm * LEADING)
+  return (gapAbove(lines, at) ? GAP_MM : 0) + line.sizeMm * (line.field === 'number' ? BIG_LEADING : LEADING)
 }
 
 /**

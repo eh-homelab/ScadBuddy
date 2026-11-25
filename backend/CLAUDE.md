@@ -1184,7 +1184,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   lines while the block is taller than the label less 2 x `PAD_MM`, from line heights only
   (`NUMBER_MM`, `CODE_MM`, `FIELD_MM`, `LEADING`, `BIG_LEADING`, `GAP_MM`; the big text
   counted at its full size), never a chosen number or a place's code; the browser label
-  (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use the same values.
+  (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use the same values:
+  `test-fixtures/filament/label-fit-vectors.json` holds them and fit cases, and
+  `tests/filament/test_label_fit_vectors.py` and the frontend's `labelFitVectors.test.ts` check
+  both sides against it (R-7216-19).
   With no `qr` the text column starts at `QUIET_MM`. Place labels ignore the fields.
   `label_png.py` rasterises the PDF with pypdfium2, every
   PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), each page a
