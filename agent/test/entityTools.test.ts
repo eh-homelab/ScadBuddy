@@ -6,6 +6,7 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { memoryWorkspace } from './helpers/workspace.js'
+import { IMAGE_BYTES_MAX } from '../src/sessions/images.js'
 
 // Entity attachments and links (#6950, phase 1 Task 7): the generic `/entities/{ref}` routes.
 
@@ -86,6 +87,15 @@ describe('entity attachment and link tools', () => {
       expect(result.content.some((c) => c.type === 'image')).toBe(false)
       expect(firstText(result)).toMatchObject({ viewable: false, media_type: type, size_bytes: 4 })
     }
+  })
+
+  it('answers a photo too large to view as a note, never as an image block the model would refuse', async () => {
+    const big = Buffer.alloc(IMAGE_BYTES_MAX + 1)
+    big.set([0xff, 0xd8, 0xff])
+    server.use(http.get(`${base(SPOOL)}/attachments/${ID}/content`, () => new HttpResponse(big, { headers: { 'Content-Type': 'image/jpeg' } })))
+    const result = await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())
+    expect(result.content.some((c) => c.type === 'image')).toBe(false)
+    expect(firstText(result)).toMatchObject({ viewable: false, media_type: 'image/jpeg', size_bytes: IMAGE_BYTES_MAX + 1 })
   })
 
   it("refuses an order's entity with the backend's use_order_route", async () => {

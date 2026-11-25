@@ -7,7 +7,7 @@ import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
 import { blob, defineTool, image, json, ToolError } from './registry.js'
-import { IMAGE_MEDIA_TYPES } from '../sessions/images.js'
+import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
@@ -183,10 +183,11 @@ export const entityTools = [
     name: 'entity_attachment_get',
     label: "See an entity's file",
     description:
-      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo as an image " +
-      'you can see; a HEIC or AVIF photo only as a note that you cannot view it; any other file as its bytes. ' +
-      '`thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use it when ' +
-      'the full photo is over the inline limit, or when a glance is enough.',
+      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
+      'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
+      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; any other file as its ' +
+      'bytes. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
+      'it for a photo too large to view, or when a glance is enough.',
     input: z.object({
       entity,
       attachment_id: attachmentId,
@@ -199,8 +200,17 @@ export const entityTools = [
       const part = thumbnail ? 'thumbnail' : 'content'
       const path = `/api/v1/entities/${encodeURIComponent(ref)}/attachments/${encodeURIComponent(attachment_id)}/${part}`
       const render = (bytes: ArrayBuffer, mimeType: string): CallToolResult => {
-        if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) return image(bytes, mimeType)
-        // A HEIC or AVIF photo is kept as an image, but an image block of it is refused by the model.
+        if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
+          // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
+          if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
+          return json({
+            viewable: false,
+            media_type: mimeType,
+            size_bytes: bytes.byteLength,
+            note: 'A photo too large for you to view (over 5 MB as base64). Call again with `thumbnail: true` for a small copy.',
+          })
+        }
+        // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
         if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
           return json({
             viewable: false,
@@ -232,7 +242,9 @@ export const entityTools = [
       FROM_WORKSPACE_ONLY,
     input: z
       .object({
-        entity: fileOwner,
+        entity: fileOwner.describe(
+          "The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `insert_type:<id>` (or another filament catalog's row). Not an order's: attach those with order_attach",
+        ),
         workspace_path: workspacePathInput,
         workspace_sha256: workspaceShaInput,
         filename: z.string().min(1).max(255).optional().describe("e.g. \"label.jpg\"; the workspace file's own name by default"),
