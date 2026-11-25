@@ -166,9 +166,10 @@ describe('/mcp: HTTPS and Origin from the shared allowlist (src/http/origins.ts,
 
   it('accepts HTTPS terminated at a trusted proxy, with and without the public Origin', async () => {
     const { app } = testApp({ settings: { mode: 'disabled' } })
-    const noOrigin = await open(app, { address: INGRESS, headers: HTTPS })
+    const lan = { ...HTTPS, 'x-forwarded-for': '192.168.1.5' }
+    const noOrigin = await open(app, { address: INGRESS, headers: lan })
     expect((await noOrigin.listTools()).tools.length).toBe(ALL_TOOLS.length)
-    const publicOrigin = await open(app, { address: INGRESS, headers: { ...HTTPS, origin: 'https://scadbuddy.test' } })
+    const publicOrigin = await open(app, { address: INGRESS, headers: { ...lan, origin: 'https://scadbuddy.test' } })
     expect((await publicOrigin.listTools()).tools.length).toBe(ALL_TOOLS.length)
   })
 
@@ -300,6 +301,38 @@ describe('/mcp: disabled mode', () => {
     const write = await client.callTool({ name: 'install_font', arguments: { family: 'Lobster Two' } })
     expect(write.isError).toBe(true)
     expect(firstText(write)).toContain('needs the "write" tier')
+  })
+})
+
+describe('/mcp: disabled mode from outside the anonymous networks (#7767)', () => {
+  const initialize = (app: Parameters<typeof appFetch>[0], headers: Record<string, string>) =>
+    appFetch(app, { address: INGRESS, headers: { ...HTTPS, ...headers } })(MCP_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } },
+      }),
+    })
+
+  it('serves a LAN caller the ingress names, and refuses an internet caller with the bearer challenge', async () => {
+    const { app } = testApp({ settings: { mode: 'disabled' } })
+    expect((await initialize(app, { 'x-forwarded-for': '192.168.1.5' })).status).toBe(200)
+    // The internet caller forged a private first value; the ingress appended its real address.
+    const res = await initialize(app, { 'x-forwarded-for': '192.168.1.5, 203.0.113.9' })
+    expect(res.status).toBe(401)
+    expect(res.headers.get('www-authenticate')).toBe('Bearer realm="scadbuddy"')
+    // A trusted proxy that names no caller: the address is unknown, so refused.
+    expect((await initialize(app, {})).status).toBe(401)
+  })
+
+  it('serves an internet caller that sends a valid bearer token', async () => {
+    const { app, tokens } = testApp({ settings: { mode: 'disabled' } })
+    const { token } = await tokens.mint({ name: 'ci', tier: 'read' })
+    const res = await initialize(app, { 'x-forwarded-for': '203.0.113.9', authorization: `Bearer ${token}` })
+    expect(res.status).toBe(200)
   })
 })
 

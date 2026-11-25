@@ -183,6 +183,39 @@ export function forwardedClient(req: RequestFacts, policy: OriginPolicy): string
   return inBlockList(policy.trustedProxies, req.peer) ? lastValue(req.header('x-forwarded-for')) : undefined
 }
 
+/**
+ * The caller's address for an access decision (#7767: `disabled` mode's
+ * anonymous networks). From a peer that is not a trusted proxy, the peer
+ * itself: its `X-Forwarded-For` is not believed. From a trusted proxy, the
+ * right-most `X-Forwarded-For` hop that is not a trusted proxy. That is the
+ * last address a trusted proxy saw; hops to its left came from that caller
+ * and can be forged. When every hop is a trusted proxy, the left-most one.
+ *
+ * Unknown (undefined) when the peer is unknown, when a trusted proxy names no
+ * client, or when a hop it must read is not a plain IP address (`unknown`, an
+ * address with a port). A caller must treat unknown as untrusted.
+ *
+ * This differs from `forwardedClient`, which takes the last hop even when that
+ * hop is itself a trusted proxy. With a chain of trusted proxies (the ingress,
+ * then another proxy in front of this service) that last hop is the inner
+ * proxy's own address, not the caller's.
+ */
+export function callerAddress(req: RequestFacts, policy: OriginPolicy): string | undefined {
+  if (req.peer === undefined) return undefined
+  const peer = plainAddress(req.peer)
+  if (isIP(peer) === 0) return undefined
+  if (!inBlockList(policy.trustedProxies, peer)) return peer
+  const header = req.header('x-forwarded-for')
+  if (header === undefined || header.trim() === '') return undefined
+  const hops = header.split(',').map((hop) => plainAddress(hop.trim()))
+  for (let i = hops.length - 1; i >= 0; i--) {
+    const hop = hops[i]!
+    if (isIP(hop) === 0) return undefined
+    if (i === 0 || !inBlockList(policy.trustedProxies, hop)) return hop
+  }
+  return undefined
+}
+
 export type OriginVerdict =
   | { ok: true; origin: string; via: 'public' | 'loopback' }
   | { ok: false; reason: 'no-origin' | 'malformed-origin' | 'not-allowed' }

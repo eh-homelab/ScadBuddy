@@ -336,8 +336,8 @@ const resources = new ResourceHub(events)
 // A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (the worker's own emptyDir, plan Step 9.5).
 const paths = { stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir }
 // The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
-// the `mcp_oidc` setting is enabled (#262), otherwise the `mcp_auth_mode` and
-// `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
+// the `mcp_oidc` setting is enabled (#262), otherwise the `mcp_auth_mode`,
+// `mcp_anonymous_cap` and `mcp_anonymous_networks` (#7767) keys. One reader for /mcp, per request, and for Settings
 // (routes/mcpAuthMode.ts), so both report the same thing. A read that throws
 // makes /mcp fail closed (mcp/http.ts).
 const authSettings = mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo)

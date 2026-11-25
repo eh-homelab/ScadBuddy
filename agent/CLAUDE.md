@@ -181,7 +181,7 @@ and its backend module:
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;
-  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed and /mcp are reached on the LAN host and on the public URL, where the ingress does no sign-in for them (clusters#4017, 2026-11-25). #6936: a commit pin of any source
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed and /mcp are reached on the LAN host and on the public URL, where the ingress does no sign-in for them (clusters#4017, 2026-11-25), so `disabled` mode serves `anonymous` only to a caller from `ai_settings.mcp_anonymous_networks` (`authenticate.ts`, the address from `http/origins.ts` `callerAddress`, #7767). #6936: a commit pin of any source
   (a bare `marketplace.json` URL's git entry too) is listed with its `sha`; a bytes pin (archive,
   npm) as an `archive` at `…/plugins/{name}/archives/{sha256}.zip` (the served zip's sha256),
   served from its mirror (`package-mirrors`): a zip pin as its exact bytes, a tarball as a
@@ -521,7 +521,7 @@ opens every one and seals it again byte for byte).
     jsdom's `File` cannot pass undici's multipart parser). An `/mcp` client puts a file
     into its principal workspace with `PUT /mcp/workspace/<path>` (#4550,
     `src/mcp/uploads.ts`, mounted by `mountMcp` behind `/mcp`'s gates and auth; `write`
-    tier, `disabled` mode refused), raw bytes answered with `{name, mediaType, size, sha256}`.
+    tier, an `anonymous` caller of `disabled` mode refused), raw bytes answered with `{name, mediaType, size, sha256}`.
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude

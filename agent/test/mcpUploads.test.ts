@@ -140,10 +140,19 @@ describe('PUT /mcp/workspace/<path>', () => {
 
     it('refuses disabled auth mode: no credential names a workspace', async () => {
       const { put, written } = await setup({ mode: 'disabled' })
-      const res = await put('a.png', PNG)
+      const res = await put('a.png', PNG, { 'x-forwarded-for': '192.168.1.5' })
       expect(res.status).toBe(403)
       expect(((await res.json()) as { error: string }).error).toContain('disabled auth mode')
       expect(written).toHaveLength(0)
+    })
+
+    it('takes the token in disabled mode from a caller outside the anonymous networks (#7767)', async () => {
+      const { put, written } = await setup({ mode: 'disabled' })
+      const res = await put('a.png', PNG, { 'x-forwarded-for': '192.168.1.5, 203.0.113.9' })
+      expect(res.status).toBe(201)
+      expect(written).toHaveLength(1)
+      const anonymous = await put('b.png', PNG, { 'x-forwarded-for': '203.0.113.9', authorization: '' })
+      expect(anonymous.status).toBe(401)
     })
 
     it('refuses plain HTTP and a foreign Origin before auth', async () => {

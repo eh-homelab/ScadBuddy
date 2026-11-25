@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  DEFAULT_ANONYMOUS_NETWORKS as NETS,
   DEFAULT_MCP_AUTH,
   mcpAuthSettings,
   SETTING_MCP_ANONYMOUS_CAP,
@@ -27,13 +28,13 @@ describe('mcpAuthSettings', () => {
     const warned: string[] = []
     expect(await mcpAuthSettings(reader({}), (m) => warned.push(m))()).toEqual(DEFAULT_MCP_AUTH)
     expect(await mcpAuthSettings(undefined, (m) => warned.push(m))()).toEqual(DEFAULT_MCP_AUTH)
-    expect(DEFAULT_MCP_AUTH).toEqual({ mode: 'bearer', configuredMode: 'bearer', anonymousCap: 'outward' })
+    expect(DEFAULT_MCP_AUTH).toEqual({ mode: 'bearer', configuredMode: 'bearer', anonymousCap: 'outward', anonymousNetworks: NETS })
     expect(warned).toEqual([])
   })
 
   it('reads both keys', async () => {
     const values: Record<string, unknown> = { [SETTING_MCP_AUTH_MODE]: 'disabled', [SETTING_MCP_ANONYMOUS_CAP]: 'write' }
-    expect(await mcpAuthSettings(reader(values), () => {})()).toEqual({ mode: 'disabled', configuredMode: 'disabled', anonymousCap: 'write' })
+    expect(await mcpAuthSettings(reader(values), () => {})()).toEqual({ mode: 'disabled', configuredMode: 'disabled', anonymousCap: 'write', anonymousNetworks: NETS })
   })
 
   it('fails closed on a value it does not know: bearer, and a read cap', async () => {
@@ -41,7 +42,7 @@ describe('mcpAuthSettings', () => {
     const settings = mcpAuthSettings(reader({ [SETTING_MCP_AUTH_MODE]: 'open', [SETTING_MCP_ANONYMOUS_CAP]: 7 }), (m) =>
       warned.push(m),
     )
-    expect(await settings()).toEqual({ mode: 'bearer', configuredMode: 'bearer', anonymousCap: 'read' })
+    expect(await settings()).toEqual({ mode: 'bearer', configuredMode: 'bearer', anonymousCap: 'read', anonymousNetworks: NETS })
     expect(warned).toEqual([
       expect.stringContaining(`${SETTING_MCP_AUTH_MODE} is "open"`),
       expect.stringContaining(`${SETTING_MCP_ANONYMOUS_CAP} is 7`),
@@ -72,7 +73,7 @@ describe('mcpAuthSettings', () => {
     for (const mode of [undefined, 'bearer', 'oidc']) {
       const warned: string[] = []
       const settings = mcpAuthSettings(reader({ [SETTING_MCP_AUTH_MODE]: mode }), (m) => warned.push(m), oidcRepo(enabled))
-      expect(await settings(), String(mode)).toEqual({ mode: 'oidc', configuredMode: 'bearer', anonymousCap: 'outward', oidc: enabled })
+      expect(await settings(), String(mode)).toEqual({ mode: 'oidc', configuredMode: 'bearer', anonymousCap: 'outward', anonymousNetworks: NETS, oidc: enabled })
       expect(warned).toEqual([])
     }
     // The stricter of two explicit choices: OIDC over `disabled`, said once.

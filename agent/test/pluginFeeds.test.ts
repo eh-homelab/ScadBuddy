@@ -288,11 +288,23 @@ describe('the feed on the /mcp auth', () => {
     expect((await broken.get(`${FEED}/marketplace.json`, bearer(token))).status).toBe(401)
   })
 
-  it('lets anyone read in disabled mode, as /mcp does, whatever the anonymous cap', async () => {
+  it('lets a caller from the anonymous networks read in disabled mode, as /mcp does, whatever the anonymous cap', async () => {
+    const lan = { 'x-forwarded-for': '192.168.1.5' }
     for (const cap of ['read', 'write', 'outward'] as const) {
-      const res = await made({ settings: { mode: 'disabled', anonymousCap: cap } }).get(`${FEED}/marketplace.json`)
+      const res = await made({ settings: { mode: 'disabled', anonymousCap: cap } }).get(`${FEED}/marketplace.json`, lan)
       expect(res.status, cap).toBe(200)
     }
+  })
+
+  it('needs a token in disabled mode from a caller outside the anonymous networks (#7767)', async () => {
+    const { tokens, get } = made({ settings: { mode: 'disabled' } })
+    // A forged first value does not make a public caller look private.
+    const internet = { 'x-forwarded-for': '192.168.1.5, 203.0.113.9' }
+    const refused = await get(`${FEED}/marketplace.json`, internet)
+    expect(refused.status).toBe(401)
+    expect(refused.headers.get('www-authenticate')).toBe('Bearer realm="scadbuddy"')
+    const { token } = await tokens.mint({ name: 'x', tier: 'read' })
+    expect((await get(`${FEED}/marketplace.json`, { ...internet, ...bearer(token) })).status).toBe(200)
   })
 
   it('passes the transport gates /mcp passes: HTTPS, and no foreign Origin', async () => {

@@ -23,7 +23,7 @@ import {
   type PluginFeedReader,
   type Unlisted,
 } from '../plugins/feed.js'
-import { effectiveRequest, requestOrigin } from '../http/origins.js'
+import { callerAddress, effectiveRequest, requestOrigin } from '../http/origins.js'
 import { requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -144,7 +144,13 @@ export const route: RouteModule = {
       if (refused) return refused
       if (!(await isReady())) return c.json({ error: "AI unavailable: the API does not serve the agent's CRUD areas yet" }, 503)
       const { settings, tokens } = await resolveAuth()
-      const auth = await authenticate(c.req.raw, { settings, tokens, clientAddress: facts.peer, oidc })
+      const auth = await authenticate(c.req.raw, {
+        settings,
+        tokens,
+        clientAddress: facts.peer,
+        callerAddress: callerAddress(facts, deps.origins),
+        oidc,
+      })
       if (!auth.ok) return auth.response
       if (!hasTier(auth.principal, 'read')) return c.json({ error: 'reading the feed needs the read tier' }, 403)
       return undefined

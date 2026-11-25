@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  callerAddress,
   checkOrigin,
   effectiveRequest,
   isLoopbackPeer,
@@ -138,5 +139,32 @@ describe('checkOrigin', () => {
   it('knows loopback peers', () => {
     for (const peer of ['127.0.0.1', '127.9.9.9', '::1', '::ffff:127.0.0.1']) expect(isLoopbackPeer(peer)).toBe(true)
     for (const peer of ['10.0.0.1', '::ffff:10.0.0.1', 'localhost', undefined]) expect(isLoopbackPeer(peer)).toBe(false)
+  })
+})
+
+describe('callerAddress (the address an access decision uses, #7767)', () => {
+  const policy = originPolicy('https://scadbuddy.example', '10.42.0.0/16')
+  const xff = (value: string) => ({ 'x-forwarded-for': value })
+
+  it('is the peer when the peer is not a trusted proxy, whatever X-Forwarded-For says', () => {
+    expect(callerAddress(req('203.0.113.9', xff('192.168.1.5')), policy)).toBe('203.0.113.9')
+    expect(callerAddress(req('::ffff:192.168.1.5', {}), policy)).toBe('192.168.1.5')
+  })
+
+  it('is the right-most X-Forwarded-For hop that is not a trusted proxy, from a trusted peer', () => {
+    // A forged first value, the real client, then two trusted proxies' pod addresses.
+    expect(callerAddress(req('10.42.0.5', xff('192.168.1.5, 198.51.100.7, 10.42.1.2, 10.42.0.9')), policy)).toBe(
+      '198.51.100.7',
+    )
+    expect(callerAddress(req('10.42.0.5', xff('::ffff:198.51.100.7')), policy)).toBe('198.51.100.7')
+    // Every hop a trusted proxy: the left-most one is the caller.
+    expect(callerAddress(req('10.42.0.5', xff('10.42.3.3, 10.42.1.2')), policy)).toBe('10.42.3.3')
+  })
+
+  it('is unknown when a trusted peer names no client, or a hop is not an address', () => {
+    for (const headers of [{}, xff(''), xff('unknown'), xff('198.51.100.7:4711'), xff('198.51.100.7,, 10.42.1.2')]) {
+      expect(callerAddress(req('10.42.0.5', headers), policy), JSON.stringify(headers)).toBeUndefined()
+    }
+    expect(callerAddress(req(undefined, {}), policy)).toBeUndefined()
   })
 })

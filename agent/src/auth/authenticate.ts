@@ -1,4 +1,5 @@
-import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
+import { BlockList } from 'node:net'
+import { checkOrigin, inBlockList, isSecureTransport, type OriginPolicy, parseCidr, type RequestFacts } from '../http/origins.js'
 import { mcpResourceUri, type OidcConfig, type OidcConfigRepo, type OidcProvider, resourceMetadataUrl } from './oidc.js'
 import { type Principal, type Tier, TIERS, tiersUpTo } from './principal.js'
 import { FailClosedTokenStore, TOKEN_PREFIX, type TokenStore } from './tokens.js'
@@ -15,7 +16,9 @@ import { FailClosedTokenStore, TOKEN_PREFIX, type TokenStore } from './tokens.js
 //   - `oidc` is on while the OIDC configuration (`ai_settings.mcp_oidc`,
 //     src/auth/oidc.ts, #262) is enabled, whatever the mode key says;
 //   - otherwise the `mcp_auth_mode` key picks `bearer` (the default) or
-//     `disabled`, and `mcp_anonymous_cap` caps `disabled`.
+//     `disabled`, and `mcp_anonymous_cap` caps `disabled`;
+//   - `mcp_anonymous_networks` lists the networks from which `disabled` mode
+//     serves `anonymous` (#7767). Any other caller is handled as in `bearer`.
 // An unset key is the default; a value that is not one of the allowed ones
 // fails closed.
 
@@ -30,6 +33,12 @@ export type McpAuthSettings = {
   configuredMode?: Exclude<McpAuthMode, 'oidc'> | undefined
   /** The most an `anonymous` caller may do in `disabled` mode. Full access by default (spec §8.3). */
   anonymousCap: Tier
+  /**
+   * The networks (CIDR ranges or addresses) from which `disabled` mode serves
+   * `anonymous` (#7767). A caller from anywhere else, or whose address is
+   * unknown, is handled as `bearer` mode handles it.
+   */
+  anonymousNetworks: readonly string[]
   /** The IdP, in `oidc` mode (#262). */
   oidc?: OidcConfig | undefined
 }
@@ -62,16 +71,48 @@ export function quoted(value: string): string {
   return `"${value.replace(/[^\x20\x21\x23-\x5b\x5d-\x7e]/g, (c) => (c === '"' || c === '\\' ? "'" : '?'))}"`
 }
 
+/** Loopback, RFC 1918 and IPv6 unique local addresses: what `mcp_anonymous_networks` is when unset. */
+export const DEFAULT_ANONYMOUS_NETWORKS: readonly string[] = [
+  '127.0.0.0/8',
+  '::1/128',
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  'fc00::/7',
+]
+
 export const DEFAULT_MCP_AUTH: McpAuthSettings = {
   mode: 'bearer',
   configuredMode: 'bearer',
   anonymousCap: 'outward',
+  anonymousNetworks: DEFAULT_ANONYMOUS_NETWORKS,
 }
 
 /** ai_settings key: `"bearer"` (the default), `"disabled"` or `"oidc"`. */
 export const SETTING_MCP_AUTH_MODE = 'mcp_auth_mode'
 /** ai_settings key: `"read"`, `"write"` or `"outward"` (the default), the anonymous cap in `disabled` mode. */
 export const SETTING_MCP_ANONYMOUS_CAP = 'mcp_anonymous_cap'
+
+/** ai_settings key: a JSON list of CIDR ranges or addresses; unset is `DEFAULT_ANONYMOUS_NETWORKS`. */
+export const SETTING_MCP_ANONYMOUS_NETWORKS = 'mcp_anonymous_networks'
+
+/** The list when `value` is a list of IP addresses or CIDR ranges, else undefined. */
+export function networkList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.every((entry) => typeof entry === 'string' && parseCidr(entry) !== undefined)
+    ? (value as string[])
+    : undefined
+}
+
+/** Whether `address` is in one of `networks`. An unknown address is in none. */
+export function inNetworks(networks: readonly string[], address: string | undefined): boolean {
+  const list = new BlockList()
+  for (const entry of networks) {
+    const cidr = parseCidr(entry)
+    if (cidr) list.addSubnet(cidr.address, cidr.prefix, cidr.family === 4 ? 'ipv4' : 'ipv6')
+  }
+  return inBlockList(list, address)
+}
 
 const MODES: readonly string[] = ['bearer', 'disabled', 'oidc'] satisfies McpAuthMode[]
 
@@ -90,7 +131,8 @@ export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
  * would do without one: only bearer tokens verify).
  *
  * A value that is not allowed is not guessed at: an unknown mode is `bearer`
- * and an unknown cap is `read`. `disabled` mode, and each bad or overridden
+ * and an unknown cap is `read`, and a network list that is not one is empty
+ * (no caller is served as `anonymous`). `disabled` mode, and each bad or overridden
  * value, is logged through `warn` when it is first seen, and again whenever it
  * changes, rather than on every request.
  */
@@ -102,9 +144,10 @@ export function mcpAuthSettings(
   let lastWarning = ''
   return async () => {
     if (!settings) return DEFAULT_MCP_AUTH
-    const [mode, cap, oidcConfig] = await Promise.all([
+    const [mode, cap, networks, oidcConfig] = await Promise.all([
       settings.get<unknown>(SETTING_MCP_AUTH_MODE),
       settings.get<unknown>(SETTING_MCP_ANONYMOUS_CAP),
+      settings.get<unknown>(SETTING_MCP_ANONYMOUS_NETWORKS),
       oidc?.get(),
     ])
     const warnings: string[] = []
@@ -127,10 +170,22 @@ export function mcpAuthSettings(
       resolved.anonymousCap = 'read'
       warnings.push(`ai_settings ${SETTING_MCP_ANONYMOUS_CAP} is ${JSON.stringify(cap)}, not one of ${TIERS.join(', ')}; using read`)
     }
+    if (networks !== undefined) {
+      const list = networkList(networks)
+      resolved.anonymousNetworks = list ?? []
+      if (!list) {
+        warnings.push(
+          `ai_settings ${SETTING_MCP_ANONYMOUS_NETWORKS} is ${JSON.stringify(networks)}, not a list of IP addresses ` +
+            'or CIDR ranges; using an empty list (no caller is served as "anonymous")',
+        )
+      }
+    }
     if (resolved.mode === 'disabled') {
+      const from = resolved.anonymousNetworks.length ? resolved.anonymousNetworks.join(', ') : 'no network'
       warnings.push(
-        `MCP auth is DISABLED (ai_settings ${SETTING_MCP_AUTH_MODE}): /mcp serves any HTTPS caller that can reach it ` +
-          `as "anonymous", up to the "${resolved.anonymousCap}" tier (spec §8.3). Outward actions still need a human approval.`,
+        `MCP auth is DISABLED (ai_settings ${SETTING_MCP_AUTH_MODE}): /mcp serves an HTTPS caller from ${from} ` +
+          `(ai_settings ${SETTING_MCP_ANONYMOUS_NETWORKS}) as "anonymous", up to the "${resolved.anonymousCap}" tier ` +
+          '(spec §8.3). Any other caller needs a bearer token. Outward actions still need a human approval.',
       )
     }
     const warning = warnings.join('\n')
@@ -272,24 +327,59 @@ async function authenticateOidc(
   }
 }
 
+/** `bearer` mode, and `disabled` mode for a caller outside the anonymous networks. */
+async function authenticateBearer(request: Request, tokens: TokenStore, clientAddress: string | undefined): Promise<AuthResult> {
+  const token = bearerOf(request)
+  if (token === undefined) {
+    return {
+      ok: false,
+      response: problem(401, 'a bearer token is required', {
+        'WWW-Authenticate': `Bearer realm="${REALM}"`,
+      }),
+    }
+  }
+  const principal = await tokens.verify(token)
+  if (!principal) {
+    return {
+      ok: false,
+      response: problem(401, 'the bearer token is unknown, expired or revoked', {
+        'WWW-Authenticate': `Bearer realm="${REALM}", error="invalid_token"`,
+      }),
+    }
+  }
+  return { ok: true, principal: { ...principal, clientIp: clientAddress } }
+}
+
 /** `authenticate(request) → principal`, one interface for every mode (spec §8.1, D6). */
 export async function authenticate(
   request: Request,
   deps: {
     settings: McpAuthSettings
     tokens: TokenStore
+    /** The socket peer, recorded on the principal for the audit log. */
     clientAddress: string | undefined
+    /**
+     * The caller's address as a trusted proxy names it (http/origins.ts
+     * `callerAddress`), never a raw X-Forwarded-For. `disabled` mode serves
+     * `anonymous` only when it is in `settings.anonymousNetworks`.
+     */
+    callerAddress: string | undefined
     oidc?: OidcRuntime | undefined
   },
 ): Promise<AuthResult> {
   const { settings, tokens, clientAddress } = deps
   switch (settings.mode) {
     case 'disabled':
-      // The operator chose to trust the network (spec §8.3). Outward tools
-      // still stop at the approval gate, which is independent of auth.
-      // `anonymous` is only the base id: ../mcp/http.ts rebinds it to
-      // `anonymous:<sessionId>` so anonymous sessions stay apart, which makes
-      // the session id the one thing separating LAN clients in this mode.
+      // The operator chose to trust the networks it listed (spec §8.3, #7767).
+      // A caller from anywhere else, or whose address is unknown, is handled
+      // as `bearer` mode handles it. Outward tools still stop at the approval
+      // gate, which is independent of auth. `anonymous` is only the base id:
+      // ../mcp/http.ts rebinds it to `anonymous:<sessionId>` so anonymous
+      // sessions stay apart, which makes the session id the one thing
+      // separating LAN clients in this mode.
+      if (!inNetworks(settings.anonymousNetworks, deps.callerAddress)) {
+        return authenticateBearer(request, tokens, clientAddress)
+      }
       return {
         ok: true,
         principal: {
@@ -301,26 +391,7 @@ export async function authenticate(
       }
     case 'oidc':
       return authenticateOidc(request, deps)
-    case 'bearer': {
-      const token = bearerOf(request)
-      if (token === undefined) {
-        return {
-          ok: false,
-          response: problem(401, 'a bearer token is required', {
-            'WWW-Authenticate': `Bearer realm="${REALM}"`,
-          }),
-        }
-      }
-      const principal = await tokens.verify(token)
-      if (!principal) {
-        return {
-          ok: false,
-          response: problem(401, 'the bearer token is unknown, expired or revoked', {
-            'WWW-Authenticate': `Bearer realm="${REALM}", error="invalid_token"`,
-          }),
-        }
-      }
-      return { ok: true, principal: { ...principal, clientIp: clientAddress } }
-    }
+    case 'bearer':
+      return authenticateBearer(request, tokens, clientAddress)
   }
 }

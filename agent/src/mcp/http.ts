@@ -21,7 +21,7 @@ import {
 import { type OidcProvider, protectedResourceMetadata, RESOURCE_METADATA_PATH } from '../auth/oidc.js'
 import type { Principal } from '../auth/principal.js'
 import type { TokenStore } from '../auth/tokens.js'
-import type { OriginPolicy } from '../http/origins.js'
+import { callerAddress, type OriginPolicy } from '../http/origins.js'
 import { requestFacts, type RemoteAddress } from '../routes/guard.js'
 import { installResources } from '../resources/server.js'
 import type { ResourceHub } from '../resources/hub.js'
@@ -452,7 +452,13 @@ export function mountMcp(
       return new Response(null, { status: 405, headers: { Allow: 'GET, POST, DELETE' } })
     }
 
-    const auth = await authenticate(request, { settings, tokens, clientAddress, oidc })
+    const auth = await authenticate(request, {
+      settings,
+      tokens,
+      clientAddress,
+      callerAddress: callerAddress(facts, http.origins),
+      oidc,
+    })
     if (!auth.ok) return auth.response
 
     const sessionId = request.headers.get('mcp-session-id')

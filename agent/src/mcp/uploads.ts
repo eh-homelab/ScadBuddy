@@ -3,6 +3,7 @@ import type { AuditOutcome, AuditSink } from '../audit/log.js'
 import { authenticate, type McpAuthSettings, mcpTransportProblem, type OidcRuntime } from '../auth/authenticate.js'
 import { hasTier, type Principal } from '../auth/principal.js'
 import type { TokenStore } from '../auth/tokens.js'
+import { callerAddress } from '../http/origins.js'
 import { cleanMediaType } from '../routes/sessionFiles.js'
 import { requestFacts } from '../routes/guard.js'
 import {
@@ -155,7 +156,13 @@ export function mountMcpUploads(app: Hono, deps: McpUploadDeps, http: McpHttpCon
     const { settings, tokens } = await deps.resolveAuth()
     if (request.method !== 'PUT') return problem(c, 405, 'upload a file with PUT', { Allow: 'PUT' })
 
-    const auth = await authenticate(request, { settings, tokens, clientAddress: facts.peer, oidc: deps.oidc })
+    const auth = await authenticate(request, {
+      settings,
+      tokens,
+      clientAddress: facts.peer,
+      callerAddress: callerAddress(facts, http.origins),
+      oidc: deps.oidc,
+    })
     if (!auth.ok) return auth.response
     const principal = auth.principal
     let name = uploadPathOf(request.url) ?? ''

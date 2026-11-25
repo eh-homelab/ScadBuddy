@@ -2,7 +2,13 @@ import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import type { AuditContext } from '../src/audit/log.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
-import { mcpAuthSettings, SETTING_MCP_ANONYMOUS_CAP, SETTING_MCP_AUTH_MODE } from '../src/auth/authenticate.js'
+import {
+  DEFAULT_ANONYMOUS_NETWORKS,
+  mcpAuthSettings,
+  SETTING_MCP_ANONYMOUS_CAP,
+  SETTING_MCP_ANONYMOUS_NETWORKS,
+  SETTING_MCP_AUTH_MODE,
+} from '../src/auth/authenticate.js'
 import { defaultOidcConfig, type OidcConfigRepo } from '../src/auth/oidc.js'
 import { type McpAuthView, registerMcpAuthModeRoutes } from '../src/routes/mcpAuthMode.js'
 import { appFetch, baseDeps, connect, INGRESS, LOOPBACK, testApp, UNTRUSTED } from './helpers/mcp.js'
@@ -51,6 +57,8 @@ function setup(store = memorySettings(), options: Parameters<typeof testApp>[0] 
   return { ...made, store, fetch: appFetch(made.app, { address: INGRESS, headers: UI }) }
 }
 
+const NETS = DEFAULT_ANONYMOUS_NETWORKS
+
 /** The stored values as the page showed them, which a PUT sends as `expected`. */
 const DEFAULTS = { mode: 'bearer', anonymous_cap: 'outward' } as const
 
@@ -76,6 +84,8 @@ describe('/api/v1/ai/mcp/auth', () => {
       mode: 'bearer',
       configured_mode: 'bearer',
       anonymous_cap: 'outward',
+      anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
+      default_anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
     } satisfies McpAuthView)
   })
 
@@ -85,12 +95,16 @@ describe('/api/v1/ai/mcp/auth', () => {
       mode: 'bearer',
       configured_mode: 'bearer',
       anonymous_cap: 'outward',
+      anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
+      default_anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
     })
     const unknown = setup(memorySettings({ [SETTING_MCP_AUTH_MODE]: 'open', [SETTING_MCP_ANONYMOUS_CAP]: 'all' }))
     expect(await (await unknown.fetch(URL_BASE)).json()).toEqual({
       mode: 'bearer',
       configured_mode: 'bearer',
       anonymous_cap: 'read',
+      anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
+      default_anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
     })
   })
 
@@ -100,6 +114,8 @@ describe('/api/v1/ai/mcp/auth', () => {
       mode: 'oidc',
       configured_mode: 'disabled',
       anonymous_cap: 'outward',
+      anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
+      default_anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
     })
 
     // Saving `disabled` stores it, but /mcp keeps requiring authentication.
@@ -109,7 +125,7 @@ describe('/api/v1/ai/mcp/auth', () => {
       expected: { mode: 'disabled', anonymous_cap: 'outward' },
     })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ mode: 'oidc', configured_mode: 'disabled', anonymous_cap: 'read' })
+    expect(await res.json()).toEqual({ mode: 'oidc', configured_mode: 'disabled', anonymous_cap: 'read', anonymous_networks: [...NETS], default_anonymous_networks: [...NETS] })
     expect(store.map.get(SETTING_MCP_AUTH_MODE)).toBe('disabled')
     await expect(connect(app)).rejects.toThrow()
   })
@@ -126,7 +142,7 @@ describe('/api/v1/ai/mcp/auth', () => {
 
     const res = await put(fetch, { mode: 'disabled', anonymous_cap: 'read', expected: DEFAULTS })
     expect(res.status).toBe(200)
-    const off = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'read' }
+    const off = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'read', anonymous_networks: [...NETS], default_anonymous_networks: [...NETS] }
     expect(await res.json()).toEqual(off)
     expect(Object.fromEntries(store.map)).toEqual({ mcp_auth_mode: 'disabled', mcp_anonymous_cap: 'read' })
     expect(await (await fetch(URL_BASE)).json()).toEqual(off)
@@ -215,6 +231,60 @@ describe('/api/v1/ai/mcp/auth', () => {
     expect(store.map.get(SETTING_MCP_AUTH_MODE)).toBe('disabled')
     expect(lines).toEqual([
       `mcp auth: mcp_auth_mode set to disabled, anonymous cap read (was bearer, outward; from ${INGRESS})`,
+    ])
+  })
+
+  it('saves the anonymous networks, and /mcp serves anonymous only from them (#7767)', async () => {
+    const { app, fetch, store } = setup()
+    const res = await put(fetch, {
+      mode: 'disabled',
+      anonymous_cap: 'read',
+      anonymous_networks: [' 192.168.10.0/24', 'fd00::/8'],
+      expected: { ...DEFAULTS, anonymous_networks: [...NETS] },
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ anonymous_networks: ['192.168.10.0/24', 'fd00::/8'], default_anonymous_networks: [...NETS] })
+    expect(store.map.get(SETTING_MCP_ANONYMOUS_NETWORKS)).toEqual(['192.168.10.0/24', 'fd00::/8'])
+    // The test client comes from loopback, which the new list leaves out.
+    await expect(connect(app)).rejects.toThrow(/bearer token is required/)
+    await (await connect(app, { address: INGRESS, headers: { 'x-forwarded-proto': 'https', 'x-forwarded-for': '192.168.10.4' } })).close()
+  })
+
+  it('answers 409 when the stored networks are not what the page showed, and saves nothing', async () => {
+    const { fetch, store } = setup(memorySettings({ [SETTING_MCP_ANONYMOUS_NETWORKS]: ['10.0.0.0/8'] }))
+    const res = await put(fetch, {
+      mode: 'disabled',
+      anonymous_cap: 'outward',
+      anonymous_networks: ['0.0.0.0/0'],
+      expected: { ...DEFAULTS, anonymous_networks: [...NETS] },
+    })
+    expect(res.status).toBe(409)
+    expect(Object.fromEntries(store.map)).toEqual({ [SETTING_MCP_ANONYMOUS_NETWORKS]: ['10.0.0.0/8'] })
+  })
+
+  it('refuses a network that is not an address or CIDR range, and networks without the expected ones', async () => {
+    const { fetch, store } = setup()
+    for (const [body, pattern] of [
+      [{ ...DEFAULTS, anonymous_networks: ['lan'], expected: { ...DEFAULTS, anonymous_networks: [...NETS] } }, /^anonymous_networks\.0: "lan" is not/],
+      [{ ...DEFAULTS, anonymous_networks: ['10.0.0.0/33'], expected: { ...DEFAULTS, anonymous_networks: [...NETS] } }, /anonymous_networks\.0/],
+      [{ ...DEFAULTS, anonymous_networks: '10.0.0.0/8', expected: { ...DEFAULTS, anonymous_networks: [...NETS] } }, /^anonymous_networks:/],
+      [{ ...DEFAULTS, anonymous_networks: ['10.0.0.0/8'], expected: DEFAULTS }, /^expected\.anonymous_networks:/],
+    ] as const) {
+      const res = await put(fetch, body)
+      expect(res.status, JSON.stringify(body)).toBe(400)
+      expect(await detail(res)).toMatch(pattern)
+    }
+    expect(store.map.size).toBe(0)
+  })
+
+  it('logs a change of the networks', async () => {
+    const { hono, lines } = loggedRoute()
+    const fetch = appFetch(hono, { address: INGRESS, headers: UI })
+    const body = { ...DEFAULTS, anonymous_networks: ['192.168.10.0/24'], expected: { ...DEFAULTS, anonymous_networks: [...NETS] } }
+    expect((await put(fetch, body)).status).toBe(200)
+    expect(lines).toEqual([
+      `mcp auth: mcp_auth_mode set to bearer, anonymous cap outward, anonymous networks 192.168.10.0/24` +
+        ` (was bearer, outward, ${NETS.join(' ')}; from ${INGRESS})`,
     ])
   })
 
