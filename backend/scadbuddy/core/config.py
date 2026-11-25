@@ -181,6 +181,19 @@ class Config:
     download_cache_dir: Path | None = None
     #: Its cap; 0 keeps no downloads at all.
     download_cache_max_bytes: int = DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
+    #: #7316: the directory is this process's alone (a node-local emptyDir), so a hit
+    #: is read in place after its check, with no private copy. The API only.
+    download_cache_private: bool = False
+    #: #7316: where this process spools whole files while it works on them. Under
+    #: ``blob-spool``, the store's request-body spool (`ContentStore.spool`): a cached
+    #: download's private copy, the slicer's and print worker's PUT bodies, slice
+    #: bodies, native thumbnail copies and an order's archive copy. Under
+    #: ``library-spool``, every read of a Bambuddy library file. Unset, under the data
+    #: volume's ``cache/``. Only files of this process's own go here (README
+    #: "Deploying" sizes it). `build_store` applies it on the API and on a render
+    #: worker where it is set there. It reads it once, onto the download cache, so with
+    #: no download cache (a cap of 0) a library read spools under ``cache/``.
+    spool_dir: Path | None = None
 
     @property
     def sweep_grace(self) -> float:
@@ -352,6 +365,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     source: Mapping[str, str] = os.environ if env is None else env
     data_dir = source.get("SCADBUDDY_DATA_DIR")
     downloads_dir = source.get("SCADBUDDY_DOWNLOAD_CACHE_DIR")
+    spool_dir = source.get("SCADBUDDY_SPOOL_DIR")
     return Config(
         openscad=source.get("SCADBUDDY_OPENSCAD") or DEFAULT_OPENSCAD,
         data_dir=Path(data_dir) if data_dir else DEFAULT_DATA_DIR,
@@ -414,6 +428,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         download_cache_max_bytes=_int_or(
             source.get("SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES"), DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
         ),
+        download_cache_private=(source.get("SCADBUDDY_DOWNLOAD_CACHE_PRIVATE") or "").lower()
+        in ("1", "true", "yes", "on"),
+        spool_dir=Path(spool_dir) if spool_dir else None,
     )
 
 
