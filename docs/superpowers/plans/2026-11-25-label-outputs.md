@@ -190,6 +190,13 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   answer lands. — The final review (M-5) found that an edit made elsewhere (the agent) while the
   page was open reached Download but not Print. — If wrong: two calls of the page's list read.
 
+- **R-7216-22 Print waits at most 5 s, for the newest read.** Print waits on one signal that the
+  newest template read settles (also a read a save, a delete or the shown tab starts while Print
+  waits), and at most 5 s (`labelSheet.ts` `printTiming`); then it prints with what the page has.
+  — The re-review of the final fix wave found that a read that never answered kept Print off for
+  good (`api/client.ts` has no fetch timeout), and that Print could print before a newer read
+  landed. — If wrong: a print up to 5 s late, or on the grid read before a slower edit.
+
 - **P1 (pre-flight) Task 1 makes `filament_label_output` whole.** Task 1 stores `{format, dpi,
   fields}`, with `fields` at the R-7216-9 default; Task 3 makes `fields` act. — One shape of the
   setting from its first commit. — If wrong: none.
