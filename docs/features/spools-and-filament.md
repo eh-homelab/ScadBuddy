@@ -261,7 +261,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - `bb_sync_*.py` and `bambuddy_pull.py`;
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
     `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them);
-  - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); no route calls `BambuddyClient.set_k_profile` and its siblings in `backend/scadbuddy/bambuddy/client.py` now.
+  - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); `BambuddyClient` has no K-profile write, slot command, slot preset or AMS label call any more (removed in #7276; it keeps only the K-table read `k_profiles` that `profile_fetch.py` uses).
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
@@ -358,8 +358,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - bulk edit, archive and restore (#7151): `test_filament_spool_bulk_ops.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`;
-  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`;
-  - `backend/tests/api/test_printer_slots.py`, `backend/tests/bambuddy/test_client_slots.py`.
+  - `backend/tests/api/test_printer_kprofiles.py`;
+  - `backend/tests/api/test_printer_slots.py`.
 - Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`),
   `frontend/src/components/settings/PrinterAmsSlots.test.tsx` (mocks `frontend/src/mocks/features/printerAmsSlots.ts`),
   and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
