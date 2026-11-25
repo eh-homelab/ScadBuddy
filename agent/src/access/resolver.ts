@@ -42,32 +42,35 @@ export class AccessResolver {
   registryOverrides(): ToolOverrides {
     return {
       of: async (tool) => {
-        const own = this.risk.get(tool)
-        if (own === undefined) return { disabled: false }
+        if (this.risk.get(tool) === undefined || !this.reader) return { disabled: false }
         const source = registrySource(tool)
-        const access = source === BUILTIN_SOURCES.browser ? await this.switchedItem(source, tool, own) : await this.item(source, tool, own)
-        if (access === 'off') return { disabled: true }
-        return { ...(access === own ? {} : { tier: access }), disabled: false }
+        // One read: a browser tool's source rows (its switch with them), else the tool's one row.
+        const rows = source === BUILTIN_SOURCES.browser ? await this.reader.rows([source]) : [await this.rowOf(this.reader, source, tool)].filter((r) => r !== undefined)
+        return this.overrideFrom(tool, rows)
       },
       disabled: async () => new Set((await this.registry()).disabled_tools),
       snapshot: async () => {
-        const sources = [BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser]
-        const rows = this.reader ? await this.reader.rows(sources) : []
-        const browserOn = sourceEnabled(BUILTIN_SOURCES.browser, rows)
-        // As `of` above, from the one read's rows: no read per tool (#7731).
-        const of = (tool: string): ToolOverride => {
-          const own = this.risk.get(tool)
-          if (own === undefined || !this.reader) return { disabled: false }
-          const source = registrySource(tool)
-          const row = rows.find((r) => r.source === source && r.item === tool)
-          const access = source === BUILTIN_SOURCES.browser && !browserOn ? 'off' : toolAccess(own, row, isRegistrySource(source))
-          if (access === 'off') return { disabled: true }
-          return { ...(access === own ? {} : { tier: access }), disabled: false }
-        }
+        const rows = this.reader ? await this.reader.rows([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser]) : []
+        // Each tool from the one read's rows: no read per tool (#7731).
         const disabled = new Set(registryOverrides(this.tools, rows).disabled_tools)
-        return { of: async (tool) => of(tool), disabled: async () => disabled }
+        return { of: async (tool) => this.overrideFrom(tool, rows), disabled: async () => disabled }
       },
     }
+  }
+
+  /**
+   * A registry tool's override from rows read for it (#7750, one rule for `of` and `snapshot`):
+   * `off` when its source is `builtin:browser` and that is switched off, else its row's access
+   * (or its own tier) by the registry rule; none for a tool outside the set or with no reader.
+   */
+  private overrideFrom(tool: string, rows: readonly AccessRow[]): ToolOverride {
+    const own = this.risk.get(tool)
+    if (own === undefined || !this.reader) return { disabled: false }
+    const source = registrySource(tool)
+    const row = rows.find((r) => r.source === source && r.item === tool)
+    const access = source === BUILTIN_SOURCES.browser && !sourceEnabled(source, rows) ? 'off' : toolAccess(own, row, isRegistrySource(source))
+    if (access === 'off') return { disabled: true }
+    return { ...(access === own ? {} : { tier: access }), disabled: false }
   }
 
   async plugin(source: string): Promise<{ toolTiers: Record<string, RiskTier>; disabledTools: string[] }> {
