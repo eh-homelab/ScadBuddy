@@ -257,8 +257,9 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
                 )
             )
         assert started.status_code == 202, started.text
-        # The source moves only once the run waits at the lock: moved earlier, a patch
-        # run could read the moved source and refuse its edit with a 422 (#7598).
+        # The source moves only once the run waits at the test's hold before
+        # `_save_source`, its source already read and patched: moved earlier, a patch run
+        # could read the moved source and refuse its edit with a 422 (#7598).
         assert entered.wait(60), "the run never reached _save_source"
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
     finally:
