@@ -587,7 +587,11 @@ function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnec
         onReconnect()
       })
       .catch((cause: unknown) =>
-        setReconnect({ refused: cause instanceof ApiError ? cause.detail : 'The reconnect could not be sent.' }),
+        setReconnect({
+          // A problem with no detail still says what it is: its title.
+          refused:
+            (cause instanceof ApiError && (cause.detail || cause.problem.title)) || 'The reconnect could not be sent.',
+        }),
       )
       .finally(() => setSending(false))
   }

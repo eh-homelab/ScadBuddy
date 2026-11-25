@@ -90,7 +90,8 @@ export const PRINTERS_NOW: PrinterNow[] = [
     bambuddy_url: null,
     bambuddy_archive_page: false,
     error: null,
-    // #7330 — recorded, with the live edge set up: its camera is the live view.
+    // #7330 — recorded, with the live edge set up: its camera is the live view. Mocks
+    // only: a real recorded printer has a LAN link (`camera/store.py` `_sources`).
     camera_live: true,
   },
 ]

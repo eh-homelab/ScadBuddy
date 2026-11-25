@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type Hls from 'hls.js'
 import { LoaderCircleIcon, RotateCwIcon, VideoOffIcon } from 'lucide-react'
 import { api } from '../../api/client'
+import { hlsLoader } from './hlsLoader'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -54,7 +55,8 @@ export function LivePlayer({
     let session: string | null = null
     let hls: Hls | null = null
     let framed = false
-    const offering = new AbortController()
+    /** Bumped by each HLS start and by `fail`: an hls.js load for an older one starts nothing. */
+    let hlsAttempt = 0
     const timers = new Set<ReturnType<typeof setTimeout>>()
     const later = (ms: number, run: () => void) => {
       const timer = setTimeout(() => {
@@ -83,7 +85,7 @@ export function LivePlayer({
       session = null
     }
     const endWebRtc = () => {
-      offering.abort()
+      // An offer still in flight is not aborted: its late answer ends its own session.
       if (peer) {
         peer.oniceconnectionstatechange = null
         peer.ontrack = null
@@ -104,6 +106,7 @@ export function LivePlayer({
     }
     const fail = () => {
       if (over) return
+      hlsAttempt++
       clearTimers()
       endWebRtc()
       endHls()
@@ -124,6 +127,7 @@ export function LivePlayer({
     /** LL-HLS, with a new wait for a first frame unless `retry` keeps the running one. */
     const startHls = async (retry = false) => {
       if (over) return
+      const mine = ++hlsAttempt
       if (!retry) {
         clearTimers()
         later(HLS_WAIT_MS, fail)
@@ -136,12 +140,12 @@ export function LivePlayer({
       const source = `${base}/hls/index.m3u8`
       let Player: typeof Hls
       try {
-        Player = (await import('hls.js')).default
+        Player = (await hlsLoader.load()).default
       } catch {
-        fail()
+        if (!over && mine === hlsAttempt) fail()
         return
       }
-      if (over) return
+      if (over || mine !== hlsAttempt) return
       if (Player.isSupported()) {
         const player = new Player({ lowLatencyMode: true })
         hls = player
@@ -174,41 +178,49 @@ export function LivePlayer({
       connection.ontrack = (event) => {
         element.srcObject = event.streams[0] ?? new MediaStream([event.track])
       }
+      const current = () => !over && peer === connection
+      const connected = () => ['connected', 'completed'].includes(connection.iceConnectionState)
       connection.oniceconnectionstatechange = () => {
         const ice = connection.iceConnectionState
-        if (ice === 'connected' || ice === 'completed') {
+        if (connected()) {
           clearTimers()
-          setShowing(true)
           report('webrtc')
         } else if (ice === 'failed') {
           void startHls()
+        } else if (ice === 'disconnected') {
+          // It may come back; a frozen frame under "WebRTC" for longer it must not show.
+          later(WEBRTC_WAIT_MS, () => {
+            if (current() && !connected()) void startHls()
+          })
         }
       }
-      await connection.setLocalDescription(await connection.createOffer())
-      await gathered(connection)
-      if (over || peer !== connection) return
-      const response = await fetch(`${base}/whep`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/sdp' },
-        body: connection.localDescription?.sdp ?? '',
-        signal: offering.signal,
-      })
-      const location = response.headers.get('Location')
-      if (response.ok && location) session = location
-      if (over || peer !== connection) {
-        endSession()
-        return
+      try {
+        await connection.setLocalDescription(await connection.createOffer())
+        await gathered(connection)
+        if (!current()) return
+        const response = await fetch(`${base}/whep`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: connection.localDescription?.sdp ?? '',
+        })
+        const location = response.headers.get('Location')
+        if (response.ok && location) session = location
+        if (!current()) {
+          // The answer came after the fallback, the close or another printer.
+          endSession()
+          return
+        }
+        if (!response.ok || !location) throw new Error(`WHEP answered ${response.status}`)
+        await connection.setRemoteDescription({ type: 'answer', sdp: await response.text() })
+      } catch {
+        if (current()) void startHls()
       }
-      if (!response.ok || !location) throw new Error(`WHEP answered ${response.status}`)
-      await connection.setRemoteDescription({ type: 'answer', sdp: await response.text() })
     }
 
     if (typeof RTCPeerConnection === 'undefined') {
       void startHls()
     } else {
-      startWebRtc().catch(() => {
-        if (!over && !offering.signal.aborted) void startHls()
-      })
+      void startWebRtc()
     }
 
     return () => {

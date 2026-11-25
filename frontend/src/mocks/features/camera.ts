@@ -6,7 +6,11 @@ import { printersNowState } from './printersNow'
  * #7330 — a printer's recorded camera and its live view. A card with `camera_live` is
  * recorded, with both feeds receiving. The mocks have no live edge: the WHEP offer is
  * refused as the edge's 502, so the player falls back to LL-HLS at once, as on a network
- * where WebRTC's UDP is blocked. The HLS playlist is live and has no segment yet: hls.js
+ * where WebRTC's UDP is blocked. The HLS routes answer as MediaMTX v1.21.4 does through
+ * the proxy (`backend/tests/api/test_camera_live.py`): `index.m3u8` with no cookie is a
+ * 302 to `index.m3u8?cookieCheck=1`, which names its media playlist relative to itself
+ * with the session in the `session` query key. The media playlist is live and has no
+ * segment yet: hls.js
  * gives up on it, the player asks again each second, and says "Camera unavailable" when
  * its 10 s wait ends.
  */
@@ -50,6 +54,20 @@ function notRecorded(printerId: string) {
   )
 }
 
+/** The session the mocked edge names in its relative URIs. */
+export const MOCK_HLS_SESSION = 'mock-session'
+
+/** The multivariant playlist, after the cookie check. */
+const INDEX = [
+  '#EXTM3U',
+  '#EXT-X-VERSION:9',
+  '#EXT-X-INDEPENDENT-SEGMENTS',
+  '',
+  '#EXT-X-STREAM-INF:BANDWIDTH=1200000,CODECS="avc1.64001f",RESOLUTION=1280x720,FRAME-RATE=30.000',
+  `video1_stream.m3u8?session=${MOCK_HLS_SESSION}`,
+  '',
+].join('\n')
+
 /** A live LL-HLS media playlist before its first segment. */
 const PLAYLIST = [
   '#EXTM3U',
@@ -89,11 +107,18 @@ export const handlers = [
     ),
   ),
   http.delete('/api/v1/camera/live/:id/whep/:session', () => new HttpResponse(null, { status: 200 })),
-  http.get('/api/v1/camera/live/:id/hls/:name', ({ params }) =>
-    String(params.name).endsWith('.m3u8')
-      ? new HttpResponse(PLAYLIST, {
-          headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' },
-        })
-      : new HttpResponse(null, { status: 404 }),
-  ),
+  http.get('/api/v1/camera/live/:id/hls/:name', ({ params, request }) => {
+    const query = new URL(request.url).searchParams
+    const headers = { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'no-store' }
+    if (params.name === 'index.m3u8') {
+      if (query.get('cookieCheck') !== '1') {
+        return new HttpResponse(null, { status: 302, headers: { Location: 'index.m3u8?cookieCheck=1' } })
+      }
+      return new HttpResponse(INDEX, { headers })
+    }
+    if (params.name === 'video1_stream.m3u8' && query.get('session') === MOCK_HLS_SESSION) {
+      return new HttpResponse(PLAYLIST, { headers })
+    }
+    return new HttpResponse(null, { status: 404 })
+  }),
 ]

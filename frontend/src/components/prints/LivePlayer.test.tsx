@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../../mocks/server'
+import { hlsLoader } from './hlsLoader'
 import { HLS_RETRY_MS, HLS_WAIT_MS, LivePlayer, type LiveState, WEBRTC_WAIT_MS } from './LivePlayer'
 
 /** A fake hls.js: what the player asked of each instance. */
@@ -88,12 +89,13 @@ interface Seen {
   deleted: string[]
 }
 
-function edge(answer: 'ok' | 'down' = 'ok'): Seen {
+function edge(answer: 'ok' | 'down' = 'ok', hold?: Promise<void>): Seen {
   const seen: Seen = { offers: [], deleted: [] }
   let next = 0
   server.use(
     http.post('/api/v1/camera/live/:id/whep', async ({ request, params }) => {
       seen.offers.push(await request.text())
+      await hold
       if (answer === 'down') {
         return HttpResponse.json(
           { type: 'https://scadbuddy.dev/problems/camera-edge-unreachable', title: 'Bad Gateway', status: 502 },
@@ -146,6 +148,10 @@ describe('LivePlayer (#7330)', () => {
     act(() => peer.connect())
     expect(states.at(-1)).toBe('webrtc')
     expect(screen.getByText('WebRTC')).toBeInTheDocument()
+    // Connected is not yet a picture: "Connecting" stays until the first frame.
+    expect(screen.getByText('Connecting')).toBeInTheDocument()
+    fireEvent.loadedData(document.querySelector('video')!)
+    expect(screen.queryByText('Connecting')).toBeNull()
     // Connected in time: no fallback after the wait.
     await act(() => vi.advanceTimersByTimeAsync(WEBRTC_WAIT_MS + 1))
     expect(hlsFake.instances).toHaveLength(0)
@@ -166,6 +172,70 @@ describe('LivePlayer (#7330)', () => {
     expect(hlsFake.instances[0]!.media).toBeInstanceOf(HTMLVideoElement)
     expect(states.at(-1)).toBe('hls')
     expect(screen.getByText('HLS')).toBeInTheDocument()
+  })
+
+  it('ends the session of an answer that comes after the fallback', async () => {
+    let answer = () => {}
+    const seen = edge('ok', new Promise<void>((resolve) => (answer = resolve)))
+    const { states } = renderPlayer()
+    await waitFor(() => expect(seen.offers).toHaveLength(1))
+    await act(() => vi.advanceTimersByTimeAsync(WEBRTC_WAIT_MS))
+    await waitFor(() => expect(hlsFake.instances).toHaveLength(1))
+    expect(seen.deleted).toEqual([])
+
+    answer()
+    await waitFor(() => expect(seen.deleted).toEqual([`${BASE}/whep/session-1`]))
+    expect(FakePeer.all[0]!.remote).toBeNull()
+    expect(hlsFake.instances).toHaveLength(1)
+    expect(states.at(-1)).toBe('hls')
+  })
+
+  it('falls back to HLS when ICE stays disconnected for 6 s', async () => {
+    const seen = edge()
+    const { states } = renderPlayer()
+    await waitFor(() => expect(FakePeer.all[0]?.remote).not.toBeNull())
+    const peer = FakePeer.all[0]!
+    act(() => peer.connect())
+    const drop = () => {
+      peer.iceConnectionState = 'disconnected'
+      peer.oniceconnectionstatechange?.()
+    }
+
+    // Back within the wait: no fallback.
+    act(drop)
+    await act(() => vi.advanceTimersByTimeAsync(WEBRTC_WAIT_MS - 1_000))
+    act(() => peer.connect())
+    await act(() => vi.advanceTimersByTimeAsync(2_000))
+    expect(hlsFake.instances).toHaveLength(0)
+    expect(states.at(-1)).toBe('webrtc')
+
+    act(drop)
+    await act(() => vi.advanceTimersByTimeAsync(WEBRTC_WAIT_MS))
+    await waitFor(() => expect(hlsFake.instances).toHaveLength(1))
+    expect(peer.closed).toBe(true)
+    await waitFor(() => expect(seen.deleted).toEqual([`${BASE}/whep/session-1`]))
+    expect(states.at(-1)).toBe('hls')
+  })
+
+  it('starts no hls.js when the wait ended while hls.js was still loading', async () => {
+    edge('down')
+    let loaded = () => {}
+    const real = hlsLoader.load
+    const late = new Promise<void>((resolve) => (loaded = resolve))
+    const load = vi.spyOn(hlsLoader, 'load').mockImplementation(async () => {
+      await late
+      return real()
+    })
+    const { states } = renderPlayer()
+    await waitFor(() => expect(load).toHaveBeenCalled())
+    await act(() => vi.advanceTimersByTimeAsync(HLS_WAIT_MS))
+    expect(states.at(-1)).toBe('failed')
+
+    loaded()
+    await act(() => vi.advanceTimersByTimeAsync(10))
+    expect(hlsFake.instances).toHaveLength(0)
+    expect(states.at(-1)).toBe('failed')
+    load.mockRestore()
   })
 
   it('falls back to HLS at once when the offer is refused', async () => {

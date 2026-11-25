@@ -13,8 +13,11 @@ test.describe('the live camera (#7330)', () => {
     const offers: string[] = []
     const playlists: string[] = []
     const reconnects: string[] = []
+    const reads: string[] = []
     page.on('request', (request) => {
-      const path = new URL(request.url()).pathname
+      const url = new URL(request.url())
+      const path = url.pathname
+      if (path.includes('/hls/')) reads.push(path.split('/hls/')[1] + url.search)
       if (request.method() === 'POST' && path.endsWith('/whep')) offers.push(path)
       if (path.endsWith('/hls/index.m3u8')) playlists.push(path)
       if (request.method() === 'POST' && path.endsWith('/camera/reconnect')) reconnects.push(path)
@@ -29,6 +32,11 @@ test.describe('the live camera (#7330)', () => {
     await expect.poll(() => playlists.length).toBeGreaterThan(0)
     expect(offers).toEqual(['/api/v1/camera/live/00000000-0000-4000-8000-000000000003/whep'])
     expect(playlists[0]).toBe('/api/v1/camera/live/00000000-0000-4000-8000-000000000003/hls/index.m3u8')
+    // MediaMTX's 302 to its cookie check is followed, and the media playlist it names
+    // relative to the redirected URL, with the session in the query, is read.
+    await expect.poll(() => reads).toEqual(
+      expect.arrayContaining(['index.m3u8', 'index.m3u8?cookieCheck=1', 'video1_stream.m3u8?session=mock-session']),
+    )
 
     const feeds = dialog.getByRole('list', { name: 'Camera feeds' })
     await expect(feeds.getByTestId('camera-feed-relay')).toContainText('Live feed')
@@ -49,7 +57,7 @@ test.describe('the live camera (#7330)', () => {
   test('closing the dialog stops the HLS reads', async ({ page }) => {
     const playlists: string[] = []
     page.on('request', (request) => {
-      if (new URL(request.url()).pathname.endsWith('/hls/index.m3u8')) playlists.push(request.url())
+      if (new URL(request.url()).pathname.includes('/hls/')) playlists.push(request.url())
     })
     await page.goto('/prints')
     await page.getByRole('button', { name: 'Camera of Spare' }).click()
@@ -60,7 +68,7 @@ test.describe('the live camera (#7330)', () => {
     await dialog.getByRole('button', { name: 'Close' }).click()
     await expect(dialog).toBeHidden()
     const read = playlists.length
-    // hls.js reloads a live playlist about once a target duration (1 s here).
+    // hls.js reloads a live media playlist about once a target duration (1 s here).
     await page.waitForTimeout(3_000)
     expect(playlists).toHaveLength(read)
   })

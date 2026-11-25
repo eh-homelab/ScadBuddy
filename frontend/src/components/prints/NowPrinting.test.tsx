@@ -681,6 +681,22 @@ describe('the live camera (#7330)', () => {
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('printer x is not recorded')
   })
 
+  it("shows the refusal's title when it has no detail", async () => {
+    server.use(
+      http.post('/api/v1/printers/:id/camera/reconnect', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/camera-not-recorded', title: 'Camera not recorded', status: 409, detail: '' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await user.click(await within(dialog).findByRole('button', { name: 'Reconnect' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Camera not recorded')
+  })
+
   it('keeps the Bambuddy MJPEG image for a printer without a live view', async () => {
     const reads: string[] = []
     server.use(
