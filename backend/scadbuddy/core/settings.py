@@ -371,6 +371,9 @@ class Settings(BaseSettings):
     # copy) and library-spool/ (every read of a Bambuddy library file). The API's, and
     # a render worker's where it is set there. Unset, under the data volume's cache/.
     spool_dir: Path | None = None
+    # #7318: the piece cache's root on a remote store (a node-local emptyDir); unset, the
+    # data volume's blobs/. Ignored on the local store, where blobs/ is the record.
+    blob_cache_dir: Path | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
@@ -906,6 +909,7 @@ class Settings(BaseSettings):
             download_cache_max_bytes=self.download_cache_max_bytes,
             download_cache_private=self.download_cache_private,
             spool_dir=self.spool_dir,
+            blob_cache_dir=self.blob_cache_dir,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
@@ -1116,6 +1120,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "spool_dir": (
             "A directory of the deployment's volumes, like the download cache's: the"
             " process needs it before any stored setting is read."
+        ),
+        "blob_cache_dir": (
+            "A directory of the deployment's volumes, like the spool's: the store is built"
+            " at start, from it."
         ),
         "storefront_public_url": (
             "The storefront edge's origin (#4960), set on its Deployment beside the edge's own"

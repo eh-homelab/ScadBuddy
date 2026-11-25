@@ -428,7 +428,8 @@ on shutdown.
   replaced by a newer one is cancelled, waiting or running, and identical waiting requests share
   one job. An identical OpenSCAD run (same template, revision, file and
   parameters) is rendered once and its piece kept in the blob store
-  (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
+  (`/data/blobs/` on the `local` store; on a remote store that is each process's
+  cache, which `SCADBUDDY_BLOB_CACHE_DIR` can move), so a later job that needs it reuses it; a piece no job
   references is removed after `SCADBUDDY_JOB_TTL` (a day while it is 0, which keeps renders forever).
   - `SCADBUDDY_JOB_TTL` (seconds, `86400` by default): how long a settled render job
     and its files are kept. `0` keeps settled renders and their files forever (#6236).
@@ -1110,7 +1111,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   local store runs only in-process (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`), on the API's
   own volume and git. The worker's `/data` is its own (an `emptyDir` is enough). It
   renders from the template snapshots that the API stores, writes each piece to the
-  store, and keeps a cache of pieces under `/data/blobs/`.
+  store, and keeps a cache of pieces under `/data/blobs/` (or
+  `SCADBUDDY_BLOB_CACHE_DIR`, where it is set).
 - **Environment:** `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, `SCADBUDDY_REVISION`, which is the worker's **build
@@ -1468,9 +1470,9 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 `python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
 `applications/scadbuddy/scadbuddy-projects.yaml`, same image.
 
-- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations
-  and payload keys go through the API's CRUD routes, and it starts only once the API
-  lists the `flows`, `operations` and `payload-keys` areas. A `SCADBUDDY_DATABASE_URL`
+- **What it needs:** no database (#5298). Its flow runs, decisions, grants, operations,
+  tasks and payload keys go through the API's CRUD routes, and it starts only once the API
+  lists the `flows`, `operations`, `payload-keys` and `tasks` areas. A `SCADBUDDY_DATABASE_URL`
   that is still set is logged once and ignored. It needs the KEK
   (`SCADBUDDY_SECRET_KEY_FILE`: a flow's payloads are sealed per run, and the worker
   refuses to start without it), `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and
@@ -1614,9 +1616,10 @@ workers restart.
     set) onto its volume, as the API does. A library a template pins outside the
     image is cloned on **each worker pod**, the first time it renders that template,
     so the workers need network access (egress) to those libraries' Git remotes.
+  - A worker trims its cache to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently
+    used first) after each write that grows it (#689).
   - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
-    interval, and **only** then, a worker trims its cache to
-    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
+    interval a worker trims the cache again (a backstop), removes the
     revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default, and
     a day while it is 0, which keeps renders forever), and
     removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
@@ -1769,13 +1772,16 @@ workers restart.
 | `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render worker API key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
 | `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
 | `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
-| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. It is trimmed to this every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`), not on write. |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` or `s3` store. It is trimmed to this after each fetch or publish (#689), and again every `SCADBUDDY_ASSET_SWEEP_INTERVAL` (on a worker, every 300 s when that is `0`). |
 | `SCADBUDDY_DOWNLOAD_CACHE_DIR` | API: `<data>/cache/downloads`; worker: none | Whole files downloaded from Bambuddy, named by their SHA-256 (#2788). A blob this process stored or fetched, and a library 3MF Bambuddy states a hash for, is read from here rather than downloaded again. An entry is renamed in only after its bytes match its name, and every read uses a private copy whose digest was checked (or, with `SCADBUDDY_DOWNLOAD_CACHE_PRIVATE`, the entry itself, checked first), so a bad entry is a miss. **Never give a render worker write access to the API's directory**: workers run template code, which could then fill the volume. A worker with none downloads as before. |
 | `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` | 4 GiB | Its cap, least recently used first, trimmed on each write. An entry used within the activity timeout is kept even past it, so a read under way keeps its file. `0` keeps nothing. |
 | `SCADBUDDY_DOWNLOAD_CACHE_PRIVATE` | `false` | API only, and only with `SCADBUDDY_DOWNLOAD_CACHE_DIR` set (#7316). `true` says that directory is this container's alone (an `emptyDir` mounted in no other container): a hit is then checked and read in place, with no private copy. Never on a shared directory, and never on a render worker, which runs template code in its container. Each replica then keeps its own cache. |
 | `SCADBUDDY_SPOOL_DIR` | `<data>/cache` | #7316. Where this process spools whole files while it works on them. `blob-spool/` holds the store's request-body spool: a cached download's private copy while it is read, the slicer worker's sliced 3MF (`PUT /api/v1/internal/blobs/…`), the print worker's per-print library copy (`PUT /api/v1/internal/library/files`), a background slice's 3MF while it is read, a Bambuddy library file downloaded for a slice, a sliced 3MF on its way to the library, a native library file copied for its thumbnail, and an order item's copy of a past print's archive. `library-spool/` holds every read of a Bambuddy library file (the file route, previews, choices, analyses, Arrange, and library prints from the dialog, a batch or an order). All are this process's own: unnamed files, except the archive copy, a named file removed when its upload ends. So a node-local `emptyDir` is right. The API reads it, and so does a render worker where it is set there (`build_store`). It is set once on the download cache, so with `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES=0` a library read spools under `<data>/cache` instead. A browser upload's body still streams to `<data>/cache`, since its claim is linked there for a run that may be another replica's. |
+| `SCADBUDDY_BLOB_CACHE_DIR` | `<data>/blobs` | #7318. Where this process keeps its piece cache on the `bambuddy` or `s3` store: each rendered piece (and each kept file it serves by path, such as an order's attachment) it fetched or published, unpacked under `<key>/`, capped by `SCADBUDDY_WORKER_CACHE_MAX_BYTES`. The store is the record, and each process fetches what it lacks, so a node-local `emptyDir` is right: on the shared `/data` NFS volume every hit read a marker file over NFS and every miss unpacked a piece onto it. A job's files keep their stored names (`blobs/<key>/<file>`), wherever the cache is. A small file read whole (a filament preset document, a hosted plugin's zip) is read from the store in memory on a miss, with nothing unpacked. Each replica keeps its own cache, so each fetches a piece once. On the `local` store `<data>/blobs` is the store itself, so the setting is ignored there. After a move the old `<data>/blobs` is read by nothing; remove it by hand once every replica runs with the setting. The API reads it, and so does a render worker where it is set there (`build_store`). |
 
 On a node-local `emptyDir`, the download cache's free-space reserve (1 GiB) is read from the node's disk, not from the volume's `sizeLimit`, and the kubelet evicts a pod whose `emptyDir` passes its `sizeLimit` ([Kubernetes: emptyDir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)). So size the `emptyDir` for the download cache and for every body spooled at the same time. The cache: its cap, with room for its overshoot: entries read within the activity timeout are kept past the cap, each fill under way holds up to a quarter of the cap, and each spooled copy as much again. Twice `SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES` covers that (8 GiB for the default 4 GiB). The request bodies add their own sizes, one for each under way: up to 128 MiB for a sliced 3MF, a slicer PUT or a background slice read (`bambuddy/preview.py` `MAX_SLICED_BYTES`); up to 272 MiB for a per-print library copy (`bambuddy/print_source.py` `MAX_DOWNLOAD_BYTES`, 256 MiB, plus `api/internal_library.py` `LAYOUT_HEADROOM`, 16 MiB); up to 1 GiB for an order's archive copy (`orders/past_prints.py` `MAX_COPY_BYTES`). A library read of a Bambuddy library file that is not kept spools the whole file, whatever its size, and a thumbnail copy spools a whole native library file: each adds its largest file. A slice of a Bambuddy library file spools up to 272 MiB (`workflows/slicing_activities.py` `MAX_INPUT_BYTES`, #7499). So start from twice the cache's cap plus 2 GiB (10 GiB for the default 4 GiB), and add more for a large library or for many prints and slices at once.
+
+Size the piece cache's `emptyDir` (`SCADBUDDY_BLOB_CACHE_DIR`) for its cap and its overshoot. A write trims it to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (10 GiB by default), but a piece used within the activity timeout (`SCADBUDDY_RENDER_TIMEOUT` plus a margin) is kept past the cap, and each unpack under way writes the new copy before the old one is removed, so it holds a piece twice for a moment. A trim may also leave crash-left staging directories (follow-up #8). So set the `sizeLimit` to the cap plus the pieces read within one activity timeout plus slack: for the API, 12 GiB for the default 10 GiB cap, or set a smaller cap with a smaller volume. A miss holds the piece in memory while it unpacks, as before. Watch `scadbuddy_worker_cache_bytes` against the cap; the kubelet evicts a pod whose `emptyDir` passes its `sizeLimit` ([Kubernetes: emptyDir](https://kubernetes.io/docs/concepts/storage/volumes/#emptydir)).
 
 The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
 each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →

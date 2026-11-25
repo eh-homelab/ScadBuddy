@@ -178,8 +178,10 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: The profile-fetch ``runs`` area is ``…/profile-fetch/runs/{id}/files/{sha256}``,
 #: ``…/import`` and ``…/failed``: a fetch's preset files, their import as the type's
 #: ScadBuddy presets (#7176), and its failure (#6625, `api/crud_profile_fetch.py`).
+#: The projects ``tasks`` area is ``…/projects/tasks`` and its ``/{id}/close`` and
+#: ``/{id}/answered``: the typed questions a flow asks (#7364, `api/crud_tasks.py`).
 CRUD_AREAS: dict[CrudCaller, list[str]] = {
-    "projects": ["flows", "operations", "payload-keys"],
+    "projects": ["flows", "operations", "payload-keys", "tasks"],
     "render": ["settings", "jobs", "refs", "blob-index", "store-folders", "assets", "libraries"],
     "print": [
         "settings",

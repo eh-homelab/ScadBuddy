@@ -10,7 +10,7 @@ test.describe('workflows (#1057)', () => {
     await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Workflows' }).click()
     await expect(page).toHaveURL(/\/workflows$/)
     const runs = page.getByRole('list', { name: 'Flow runs' })
-    await expect(runs.locator('[data-run]')).toHaveCount(5)
+    await expect(runs.locator('[data-run]')).toHaveCount(6)
     await expect(page.locator('[data-run="run-ask"]')).toContainText('Waiting for your answer: Swap to pink?')
 
     await page.locator('[data-run="run-ask"]').getByRole('link', { name: 'swap v1' }).click()
@@ -19,6 +19,59 @@ test.describe('workflows (#1057)', () => {
     await page.getByRole('button', { name: 'Answer' }).click()
     await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
     await expect(page.getByRole('textbox', { name: 'Your answer' })).toHaveCount(0)
+  })
+
+  // #7364 — a prompt is answered from its task's schema; the server's check speaks by field.
+  test('a prompt asks for its fields, and an answered run moves on', async ({ page }) => {
+    await page.goto('/workflows/runs/run-prompt')
+    const email = page.getByRole('textbox', { name: /^Email/ })
+    await email.fill('jo')
+    await page.getByLabel('Pickup time').fill('2026-12-01T17:30')
+    await page.getByRole('button', { name: 'Answer' }).click()
+    await expect(page.getByText('not a valid email')).toBeVisible()
+    await expect(email).toHaveValue('jo')
+    await expect(email).toBeFocused()
+    await email.fill('jo@example.com')
+    await page.getByRole('button', { name: 'Answer' }).click()
+    await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
+    await expect(email).toHaveCount(0)
+  })
+
+  test('Enter in a text input sends the answer', async ({ page }) => {
+    await page.goto('/workflows/runs/run-prompt')
+    const email = page.getByRole('textbox', { name: /^Email/ })
+    await email.fill('jo@example.com')
+    await email.press('Enter')
+    await expect(page.getByTestId('flow-run-status')).toHaveText('Running')
+    await expect(email).toHaveCount(0)
+  })
+
+  test('Enter in a text input starts the run', async ({ page }) => {
+    await page.goto('/workflows/flows/def-coasters')
+    await page.getByRole('button', { name: 'Start run' }).click()
+    const template = page.getByRole('dialog', { name: 'Start coasters' }).getByRole('textbox', { name: /^Template/ })
+    await template.fill('coaster')
+    await template.press('Enter')
+    await expect(page).toHaveURL(/\/workflows\/runs\/run-new-1$/)
+  })
+
+  test('a phone shows every value of a long context, which scrolls in its own box', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/workflows/runs/run-prompt')
+    const context = page.getByRole('group', { name: 'Context' })
+    const value = context.getByText('Ring the side bell')
+    await value.scrollIntoViewIfNeeded()
+    const box = (await value.boundingBox())!
+    // Its column has room for the text, inside the screen.
+    expect(box.width).toBeGreaterThan(120)
+    expect(box.x + box.width).toBeLessThanOrEqual(390)
+    expect(await page.evaluate<number>('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+    expect((await context.boundingBox())!.height).toBeLessThanOrEqual(260)
+    await context.evaluate((node) => (node.scrollTop = 0))
+    await context.focus()
+    await expect(context).toBeFocused()
+    await page.keyboard.press('End')
+    await expect.poll(() => context.evaluate((node) => node.scrollTop)).toBeGreaterThan(0)
   })
 })
 
@@ -214,7 +267,7 @@ for (const { name, viewport } of [
       await expect(dialog.getByRole('button', { name: 'Forget run' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Forget run' }).click()
       await expect(page).toHaveURL(/\/workflows$/)
-      await expect(page.locator('[data-run]')).toHaveCount(4)
+      await expect(page.locator('[data-run]')).toHaveCount(5)
       await expect(page.locator('[data-run="run-done"]')).toHaveCount(0)
     })
 

@@ -105,10 +105,12 @@ be confirmed by a human (§8.2). In the tab, their confirmation controls carry t
 - `click` refuses any element inside a `[data-agent-user-only]` ancestor, with the code
   `refused`. The message says only the user can press it (`USER_ONLY_MESSAGE` in
   [`global.ts`](../../frontend/src/agent/global.ts)).
-- `fill` refuses user-only fields and every `type="password"` input: "Credentials are
-  for the user to type; an agent never fills them."
-- `snapshot` never reads a password back. It reports `(typed, hidden)` or an empty
-  string (`valueOf()` in `snapshot.ts`).
+- `fill` refuses a user-only field: "This is for the user to fill in." It refuses any
+  other `type="password"` input: "Credentials are for the user to type; an agent never
+  fills them."
+- `snapshot` never reads a password back, nor the text typed in a user-only field. It
+  reports `(typed, hidden)` or an empty string (`valueOf()` in `snapshot.ts`). It reports
+  the state of a user-only checkbox or radio button.
 - The fallbacks search only inside an open modal dialog while one is up, as a user could
   only reach what is in it (`activeDialog()` and `findByRole()` in `dom.ts`).
 
@@ -122,6 +124,8 @@ Controls marked user-only on `main` (`grep -rn "{...USER_ONLY}" frontend/src`):
 | [`PresetPicker.tsx`](../../frontend/src/components/PresetPicker.tsx) | Delete preset |
 | [`DeleteModelButton.tsx`](../../frontend/src/components/DeleteModelButton.tsx) | Delete model |
 | [`HistoryPage.tsx`](../../frontend/src/pages/HistoryPage.tsx) | Delete output |
+| [`PendingCard.tsx`](../../frontend/src/components/flows/PendingCard.tsx) | A flow run's approvals, and the form of a text answer |
+| [`TaskCard.tsx`](../../frontend/src/components/flows/TaskCard.tsx) | The form of a prompt's answer (#7364) |
 | [`SettingsPage.tsx`](../../frontend/src/pages/SettingsPage.tsx) | Test connection button, WebMCP toggle, Add to Bambuddy sidebar, Save changes |
 
 A confirmation of a change that stays in the page is not outward and carries no

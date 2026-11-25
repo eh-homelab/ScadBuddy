@@ -77,6 +77,19 @@ async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body
     ...
 
 
+@agent.callback_tool_defn(inherently_safe=True, timeout=timedelta(days=3650))
+async def open_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body]
+    """Wait for a person to answer `question`, for ten years (#7364)."""
+    ...
+
+
+@agent.tool_defn(inherently_safe=True)
+async def wait_open(question: str, runner: agent.Injected[AgentWorkflowRunner]) -> HumanAnswer:
+    """Ask `question` with no timer but the callback's own."""
+    result: HumanAnswer = await run_callback(runner.run_tool, open_answer, None, question=question)
+    return result
+
+
 @agent.tool_defn(inherently_safe=True)
 async def wait(
     question: str, timeout_s: int, runner: agent.Injected[AgentWorkflowRunner]
@@ -117,9 +130,19 @@ async def child(n: int) -> int:
     return result
 
 
-#: Registered with the plugin; `human_answer` is not offered to the script.
-PROBE_TOOLS = [step, label, outward, human_answer, wait, gated_via_nested, child]
-SCRIPT_TOOLS = [step, label, outward, wait, gated_via_nested, child]
+#: Registered with the plugin; the callbacks are not offered to the script.
+PROBE_TOOLS = [
+    step,
+    label,
+    outward,
+    human_answer,
+    open_answer,
+    wait,
+    wait_open,
+    gated_via_nested,
+    child,
+]
+SCRIPT_TOOLS = [step, label, outward, wait, wait_open, gated_via_nested, child]
 
 
 @activity.defn(name="probe_close")

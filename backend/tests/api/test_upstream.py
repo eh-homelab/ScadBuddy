@@ -651,6 +651,20 @@ def test_a_conflicting_merge_answers_merged_and_starts_nothing(
     assert _workflow_ids(app, "model_upstream_merge") == []
 
 
+def test_a_base_the_history_lost_still_answers_and_merges_nothing_over(
+    client: TestClient, settings: Settings
+) -> None:
+    """#7314: the models repository was replaced, and the base named a commit of the old one."""
+    _duplicate(client)
+    meta = settings.data_dir / "models" / MINE / "model.json"
+    raw = json.loads(meta.read_text())
+    raw["upstream"]["base"] = "f" * 40
+    meta.write_text(json.dumps(raw))
+    answer = _upstream(client)
+    assert (answer["state"], answer["preview"]["base"]) == ("update", "")
+    assert answer["preview"]["merged"] == _source(client)
+
+
 def test_upstream_actions_are_operations(
     client: TestClient, app: FastAPI, settings: Settings, bundled: Path
 ) -> None:

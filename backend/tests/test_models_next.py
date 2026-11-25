@@ -203,6 +203,18 @@ def test_a_pin_at_a_commit_of_another_template(old: Old, dest: Path) -> None:
     assert found["a", other] == found["a", first] != found["b", other]
 
 
+def test_a_file_that_moves_to_another_template_is_a_change_of_both(old: Old, dest: Path) -> None:
+    """The commit that takes the file away is that template's newest one."""
+    old.save("a", scad="cube();\n", mesh=ONE)
+    old.save("b", scad="sphere();\n")
+    old.write("b", {MESH: ONE})
+    (old.root / "a" / MESH).unlink()
+    moved = old.commit("Recover uncommitted changes")
+    made(old, dest)
+    assert {slug for slug, commit in ids(dest) if commit == moved} == {"a", "b"}
+    assert problems(old, dest) == []
+
+
 def test_a_pin_of_a_deleted_template_resolves_and_is_not_current(old: Old, dest: Path) -> None:
     pinned = old.save("a", "one", scad="cube(1);\n", mesh=ONE)
     old.save("a", "two", scad="cube(2);\n")
@@ -479,6 +491,19 @@ def _forged(old: Old, dest: Path) -> Path:
     return dest
 
 
+def _written_to(old: Old, dest: Path) -> Path:
+    """A built one that holds a file no run made."""
+    made(old, dest)
+    (dest / "a/notes.txt").write_text("mine")
+    return dest
+
+
+def _changed(old: Old, dest: Path) -> Path:
+    made(old, dest)
+    (dest / "a/model.scad").write_text("cube(9);\n")
+    return dest
+
+
 BAD: dict[str, Callable[[Old, Path], Path]] = {
     "the live one": lambda old, dest: old.root,
     "inside the live one": lambda old, dest: old.root / "next",
@@ -488,6 +513,8 @@ BAD: dict[str, Callable[[Old, Path], Path]] = {
     "not empty": _foreign,
     "a file": lambda old, dest: old.root / "a" / "model.scad",
     "committed to since": _committed_to,
+    "a file of its own": _written_to,
+    "changed": _changed,
     "not whole": _forged,
     "no parent": lambda old, dest: dest / "deeper",
 }
@@ -863,6 +890,9 @@ def test_the_two_commands(
     assert "refused" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         models_next.main(["switch"])
+    assert models_next.main(["build"]) == 2
+    assert "holds changes" in capsys.readouterr().err
+    (dest / "a/model.scad").write_text("cube(2);\n")
     git(old.root, "update-index", "--add", "--cacheinfo", f"160000,{first},a/sub")
     git(old.root, "commit", "-q", "-m", "A submodule")
     assert models_next.main(["build"]) == 2

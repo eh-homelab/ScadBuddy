@@ -77,6 +77,10 @@ export function isStaleEntry(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && (error.problem.type ?? '').endsWith('/stale-entry')
 }
 
+/** #7364 — the backend's 409 for a task that takes no answer, and its 422 for one that does not fit. */
+export const TASK_NOT_OPEN = 'https://scadbuddy.dev/problems/tasks/not-open'
+export const TASK_INVALID_ANSWER = 'https://scadbuddy.dev/problems/tasks/invalid-answer'
+
 export const STALE_ENTRY_MESSAGE = 'This request is out of date. The run has moved on.'
 
 /** The topic every run's change is published on, and one run's (backend `api/realtime.py`). */
@@ -84,6 +88,8 @@ export const FLOW_RUNS_TOPIC = 'workflow-runs'
 /** #265 — a flow's definition changed: registered, restored, renamed, archived or deleted. */
 export const FLOWS_TOPIC = 'flows'
 export const flowRunTopic = (id: string) => `workflow-run:${id}`
+/** #7364 — one task's changes (`task.changed`). */
+export const taskTopic = (id: string) => `task:${id}`
 
 /** How often the pages read while the realtime socket is unavailable. */
 export const FLOW_POLL_MS = 5_000

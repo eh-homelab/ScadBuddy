@@ -3,15 +3,16 @@
 
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
 
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_activities import FlowActivities, FlowTaskActivities
 from scadbuddy.workflows.projects_worker import projects_worker
-from tests.crud.crud_support import served_projects
+from tests.crud.crud_support import remote_tasks, served_projects
 from tests.flows.fake_api import FakeApi, Outward, outward_worker
 from tests.flows.flows_support import Flows
 from tests.support.temporal import temporal_available, temporal_server
@@ -35,15 +36,19 @@ def jobs(pg_conninfo: str) -> Iterator[JobProjection]:
         store.close()
 
 
-@pytest.fixture
-async def flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flows]:
+@asynccontextmanager
+async def serve_flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flows]:
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
     # The worker's store and payload keys are the CRUD routes', as the projects worker's
     # (#5298).
     async with (
         served_projects(store, temporal_address) as (client, remote, worker_client),
-        projects_worker(worker_client, queue, FlowActivities(remote).all()),
+        projects_worker(
+            worker_client,
+            queue,
+            [*FlowActivities(remote).all(), *FlowTaskActivities(remote_tasks(remote)).all()],
+        ),
     ):
         flows = Flows(client, queue, store, remote)
         try:
@@ -52,6 +57,12 @@ async def flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flo
             for worker, task in flows.cleanup:
                 await worker.shutdown()
                 await task
+
+
+@pytest.fixture
+async def flows(temporal_address: str, jobs: JobProjection) -> AsyncIterator[Flows]:
+    async with serve_flows(temporal_address, jobs) as served:
+        yield served
 
 
 @pytest.fixture
