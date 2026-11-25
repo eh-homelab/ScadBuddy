@@ -825,6 +825,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
 
+    @activity.defn(name=ACTIVITY_SWEEP)
+    async def sweep_activity() -> None:
+        await _heartbeating(_sweep_activity_logged(state))
+
     @activity.defn(name=TEMPLATE_COPY_SWEEP)
     async def copy_templates_to_rows() -> None:
         # #7317: its own stop, as the output copy's: the worker's shutdown ends the run
@@ -836,10 +840,6 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         except asyncio.CancelledError:
             stop.set()
             raise
-
-    @activity.defn(name=ACTIVITY_SWEEP)
-    async def sweep_activity() -> None:
-        await _heartbeating(_sweep_activity_logged(state))
 
     @activity.defn(name=ATTACHMENTS_SWEEP)
     async def sweep_print_attachments() -> None:
@@ -938,8 +938,8 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_preview_slices,
         sweep_lost_slice_starts,
         maintain_models_git,
-        copy_templates_to_rows,
         sweep_activity,
+        copy_templates_to_rows,
         sweep_print_attachments,
         sweep_entity_orphans,
         sweep_print_library,

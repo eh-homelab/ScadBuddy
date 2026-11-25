@@ -159,7 +159,7 @@ phase 1 nothing reads the rows yet; the readers move to them in phase 2.
 - Each API start copies the files to rows once (`scadbuddy/library/template_copy.py`
   `copy_templates`, one replica at a time under the advisory lock `COPY_LOCK`; a run that
   does not get it does nothing). The housekeeping sweep `housekeeping_copy_templates`
-  (`workflows/housekeeping.py` `TEMPLATE_COPY_SWEEP`, directly after the git sweep, behind
+  (`workflows/housekeeping.py` `TEMPLATE_COPY_SWEEP`, directly after the activity sweep, behind
   `TEMPLATE_COPY_PATCH`) copies again on each run of the sweeps' Schedule. Each run is a
   row of `template_copy_runs`. The copy reconciles: outside the write lock it walks the
   folders, reads every version with one `git log` walk and stats each template's files; a
@@ -170,11 +170,13 @@ phase 1 nothing reads the rows yet; the readers move to them in phase 2.
   now.
 - A run whose walk may have missed templates (a listing, stat or batch read failed, git
   failed in a batch, `models/` is missing, or the walk saw no template while rows exist)
-  drops no row and ends `incomplete`, with no `finished_at`. A stopped run has no
+  or whose walk of the history failed (each row then keeps its stored version, so only a
+  template whose stamp changed is read again) drops no row and ends `incomplete`, with no `finished_at`. A stopped run has no
   `finished_at` either.
 - `GET /api/v1/model-records/copy-status` answers the last run: `started_at`,
   `finished_at`, `incomplete`, `added`, `refreshed`, `dropped`, and `unreadable`, each
-  walked template whose row keeps no `meta` (`scadbuddy/api/models.py`
+  walked template whose row has a `meta_error`: its `model.json` is not JSON, cannot be
+  stored, or does not validate (`scadbuddy/api/models.py`
   `template_copy_status`; 404 before any run).
 - Pods on an older build write the files and commit with no rows, during a roll-out and
   after a rollback. The next housekeeping sweep repairs their rows. After a roll-out,

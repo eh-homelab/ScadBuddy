@@ -249,11 +249,13 @@ def test_the_attempt_media_sweep_is_last_on_both_schedules() -> None:
     assert sweep_timeout(ATTEMPT_MEDIA_SWEEP) == ATTEMPT_MEDIA_TIMEOUT
 
 
-def test_the_template_copy_follows_the_git_sweep_on_the_sweeps_schedule() -> None:
+def test_the_template_copy_follows_the_activity_sweep_on_the_sweeps_schedule() -> None:
     """#7317 (plan decision 9): the copy of the templates' files to rows runs in each
-    sweep run, right after the models repository's gc, behind its own patch. Sweeps off
+    sweep run, right after the activity sweep (which stays right after the models
+    repository's gc, as prod runs it), behind its own patch. Sweeps off
     (`asset_sweep_interval` 0) turns it off, as every sweep."""
-    assert SWEEPS[SWEEPS.index(GIT_SWEEP) + 1] == TEMPLATE_COPY_SWEEP
+    assert SWEEPS[SWEEPS.index(GIT_SWEEP) + 1] == ACTIVITY_SWEEP
+    assert SWEEPS[SWEEPS.index(ACTIVITY_SWEEP) + 1] == TEMPLATE_COPY_SWEEP
     assert TEMPLATE_COPY_SWEEP not in PRUNE_SWEEPS
     assert sweep_timeout(TEMPLATE_COPY_SWEEP) == timedelta(minutes=15)
 

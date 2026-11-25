@@ -114,8 +114,9 @@ GIT_PATCH = "housekeeping-maintain-models-git"
 #: once. It repairs what no refresh wrote: a pod on an older build, a failed refresh, a
 #: commit or a file edit made by hand on the volume, a restored volume. Its advisory
 #: lock keeps one run at a time: a run that does not get it (another replica's, or the
-#: start's copy) does nothing. Directly after `GIT_SWEEP`, behind its own patch; on the
-#: sweeps' Schedule only, so it obeys their switch.
+#: start's copy) does nothing. Directly after `ACTIVITY_SWEEP` (which must stay right
+#: after `GIT_SWEEP`: prod runs it there), behind its own patch; on the sweeps' Schedule
+#: only, so it obeys their switch.
 TEMPLATE_COPY_SWEEP = "housekeeping_copy_templates"
 TEMPLATE_COPY_PATCH = "housekeeping-copy-templates"
 #: Activity retention and repair (spec 2026-10-09 §6). Last: it reads what the sweeps
@@ -285,8 +286,8 @@ SWEEPS = (
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
     GIT_SWEEP,
-    TEMPLATE_COPY_SWEEP,
     ACTIVITY_SWEEP,
+    TEMPLATE_COPY_SWEEP,
     ATTACHMENTS_SWEEP,
     ENTITY_ORPHANS_SWEEP,
     LIBRARY_SWEEP,

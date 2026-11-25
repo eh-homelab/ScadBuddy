@@ -49,7 +49,9 @@ sweeps, and ``template_copy`` with ``TEMPLATE_COPY_PATCH`` (#7317, recorded with
 ``template_output_copy`` with all three, which runs all three
 (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
-them.
+them. ``template_copy``, ``template_copy_attempt_media`` and ``template_output_copy``
+were recorded again before #7317 merged, when ``TEMPLATE_COPY_SWEEP`` moved after
+``ACTIVITY_SWEEP``: no deployed build had run the old order.
 """
 
 from __future__ import annotations
