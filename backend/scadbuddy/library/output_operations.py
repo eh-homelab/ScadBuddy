@@ -230,8 +230,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             # Not on cancellation: the prepare or commit thread cannot be stopped and may
             # still finish the output, and an output written without its holds loses its
             # Parts at the next sweep. A cancel during the puts stops the save at once and
-            # leaves a folder with no meta.json, which the hold reaper removes with its
-            # holds (#1007).
+            # leaves a folder with no meta.json, which no code removes (#7257); the output
+            # has no row, so the hold reaper releases its holds (#1007).
             try:
                 await asyncio.to_thread(release_parts, state.refs, output_id)
             except psycopg.Error:

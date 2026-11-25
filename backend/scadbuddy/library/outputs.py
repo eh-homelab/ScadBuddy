@@ -1020,9 +1020,9 @@ class OutputStore:
         again, a `StoreFullError` and a `UniqueViolation` on an id another output holds among
         them; that output's keys never named this save's objects, so its bytes stay its own
         (#7478 review). A cancel during the puts stops the save at once, with no discard: the
-        folder stays with no ``meta.json``, and the hold reaper removes it and its holds later
-        (#1007). A cancel during `prepare` or `commit` cannot stop their thread, which may still
-        finish the output."""
+        folder stays with no ``meta.json``, and no code removes it (#7257, D10). The output has
+        no row, so the hold reaper releases its holds later (#1007). A cancel during `prepare`
+        or `commit` cannot stop their thread, which may still finish the output."""
         prepared = await asyncio.to_thread(
             self.prepare,
             job,
@@ -2308,8 +2308,8 @@ def hold_parts(
     refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject], slug: str
 ) -> None:
     """The output's Parts outlive the job that rendered them: Arrange reads them (§7).
-    The output's slug is recorded first, so the reaper can tell a deleted output from
-    one whose slug directory is missing."""
+    The hold reaper releases them once the output has no row (#7257). The slug write
+    into ``output_hold_slugs`` is a no-op on a dropped table; nothing reads it now."""
     _record_slug(refs, output_id, slug)
     for obj in manifest:
         refs.add(obj.part, OUTPUT_HOLDER, output_id)
