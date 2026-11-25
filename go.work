@@ -7,4 +7,5 @@ use (
 	./tools/go/scadbuddy-client
 	./tools/go/core
 	./tools/go/fleetchat
+	./tools/go/fleet
 )
