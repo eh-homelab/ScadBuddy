@@ -1616,9 +1616,10 @@ workers restart.
     set) onto its volume, as the API does. A library a template pins outside the
     image is cloned on **each worker pod**, the first time it renders that template,
     so the workers need network access (egress) to those libraries' Git remotes.
+  - A worker trims its cache to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently
+    used first) after each write that grows it (#689).
   - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
-    interval, and **only** then, a worker trims its cache to
-    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
+    interval a worker trims the cache again (a backstop), removes the
     revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default, and
     a day while it is 0, which keeps renders forever), and
     removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
