@@ -1,12 +1,12 @@
 import { z } from 'zod'
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { BackendClient } from '../api/backend.js'
-import { binary } from './binary.js'
+import { readCapped } from './binary.js'
 import { ok } from './call.js'
 import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
-import { blob, defineTool, image, json, ToolError } from './registry.js'
+import { defineTool, image, json, ToolError } from './registry.js'
+import { WorkspaceError, workspaceOf } from '../workspace/store.js'
 import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
@@ -33,6 +33,8 @@ const caption = z.string().max(1000)
 const linkKind = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text, `other` when left out: `support`, `datasheet`, `store`, ...')
 
 const deleted = (what: string) => json({ deleted: what })
+/** The most of a file entity_attachment_get reads: the workspace's default file cap. */
+const FILE_READ_MAX = 25 * 1024 * 1024
 
 // Properties (#7026, spec §6.3a): an entity's key-value properties and a kind's property schema
 // (backend/scadbuddy/api/entity_properties.py). Reads are `read`; a property or schema write is
@@ -185,8 +187,9 @@ export const entityTools = [
     description:
       "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
       'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
-      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; any other file as its ' +
-      'bytes. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
+      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; any other file (a PDF ' +
+      'manual, a receipt) kept in your workspace and answered as `workspace_file`: workspace_read reads a text ' +
+      'file, and a binary one (a PDF) can be attached or uploaded from there but not read. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
       'it for a photo too large to view, or when a glance is enough.',
     input: z.object({
       entity,
@@ -197,39 +200,58 @@ export const entityTools = [
     routes: ['GET /api/v1/entities/{ref}/attachments/{attachment_id}/content', 'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail'],
     handler: async ({ entity: ref, attachment_id, thumbnail }, ctx) => {
       const params = { params: { path: { ref, attachment_id } }, parseAs: 'stream' as const }
-      const part = thumbnail ? 'thumbnail' : 'content'
-      const path = `/api/v1/entities/${encodeURIComponent(ref)}/attachments/${encodeURIComponent(attachment_id)}/${part}`
-      const render = (bytes: ArrayBuffer, mimeType: string): CallToolResult => {
-        if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
-          // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
-          if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
-          return json({
-            viewable: false,
-            media_type: mimeType,
-            size_bytes: bytes.byteLength,
-            note: 'A photo too large for you to view (over 5 MB as base64). Call again with `thumbnail: true` for a small copy.',
-          })
-        }
-        // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
-        if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
-          return json({
-            viewable: false,
-            media_type: mimeType,
-            size_bytes: bytes.byteLength,
-            note: `A ${mimeType} photo, which you cannot view: only PNG, JPEG, GIF and WebP can be shown to you. Ask the person for a JPEG or PNG copy.`,
-          })
-        }
-        return blob(`scadbuddy://entities/${ref}/attachments/${attachment_id}`, bytes, mimeType)
+      const what = `get file ${attachment_id} of ${ref}`
+      const result = await (thumbnail
+        ? ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail', params)
+        : ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/content', params))
+      const stream = (await ok(Promise.resolve(result), what)) as ReadableStream<Uint8Array> | null
+      const mimeType = result.response.headers.get('content-type')?.split(';')[0]?.trim() || (thumbnail ? 'image/webp' : 'application/octet-stream')
+      const length = result.response.headers.get('content-length')
+      const read = await readCapped(stream, length !== null && /^\d+$/.test(length) ? Number(length) : undefined, FILE_READ_MAX)
+      // Never a backend path: a model given one guessed a URL for it (#7727).
+      if (!read.inline) {
+        return json({ viewable: false, media_type: mimeType, size_bytes: read.size ?? null, note: `Larger than ${FILE_READ_MAX} bytes: too large to read here.` })
       }
-      return binary(
-        thumbnail
-          ? ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail', params)
-          : ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/content', params),
-        `get file ${attachment_id} of ${ref}`,
-        ctx,
-        { path, name: attachment_id, fallbackType: thumbnail ? 'image/webp' : 'application/octet-stream' },
-        render,
-      )
+      const bytes = read.bytes
+      if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
+        // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
+        if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
+        return json({
+          viewable: false,
+          media_type: mimeType,
+          size_bytes: bytes.byteLength,
+          note:
+            'A photo too large for you to view (over 5 MB as base64).' +
+            (mimeType === 'image/gif' ? '' : ' Call again with `thumbnail: true` for a small copy.'),
+        })
+      }
+      // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
+      if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
+        return json({
+          viewable: false,
+          media_type: mimeType,
+          size_bytes: bytes.byteLength,
+          note: `A ${mimeType} photo, which you cannot view: only PNG, JPEG, GIF and WebP can be shown to you. Ask the person for a JPEG or PNG copy.`,
+        })
+      }
+      // Any other file (a PDF manual, a receipt) goes to the workspace as a pointer, which a session turn
+      // carries (a `resource` block reaches it only as "[resource]", temporal/toolActivities.ts callBlocks).
+      if (!ctx.workspace) {
+        return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: 'There is no workspace to keep it in here.' })
+      }
+      try {
+        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${attachment_id.replace(/[^A-Za-z0-9_.-]/g, '_')}`, new Uint8Array(bytes), {
+          mediaType: mimeType,
+          source: { tool: 'entity_attachment_get', entity: ref, attachment_id },
+        })
+        return json({
+          workspace_file: { name: info.path, mediaType: info.mediaType, size: info.size, sha256: info.sha256 },
+          note: 'Kept in your workspace: workspace_read reads it when it is text; a binary file can be attached or uploaded from there.',
+        })
+      } catch (err) {
+        if (err instanceof WorkspaceError) return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: `Not kept: ${err.message}` })
+        throw err
+      }
     },
   }),
   defineTool({

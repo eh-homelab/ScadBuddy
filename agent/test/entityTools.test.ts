@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
@@ -24,6 +25,18 @@ function tool(name: string): Tool {
   const t = ALL_TOOLS.find((x) => x.name === name)
   if (!t) throw new Error(`no tool ${name}`)
   return t
+}
+
+/** A workspace that keeps what is written, for a file the tool stores. */
+function memoryWorkspaceWithWrites() {
+  const written = new Map<string, Buffer>()
+  const workspace = {
+    async write(_ws: unknown, path: string, bytes: Uint8Array, o?: { mediaType?: string }) {
+      written.set(path, Buffer.from(bytes))
+      return { path, mediaType: o?.mediaType ?? 'application/octet-stream', size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') }
+    },
+  } as unknown as NonNullable<ToolContext['workspace']>
+  return { written, workspace }
 }
 
 function ctx(): ToolContext {
@@ -71,13 +84,13 @@ describe('entity attachment and link tools', () => {
     expect(photo.content).toEqual([{ type: 'image', mimeType: 'image/jpeg', data: jpeg.toString('base64') }])
     const thumb = await get.execute({ entity: SPOOL, attachment_id: ID, thumbnail: true }, ctx())
     expect(thumb.content).toEqual([{ type: 'image', mimeType: 'image/webp', data: Buffer.from('RIFF').toString('base64') }])
-    const pdf = await get.execute({ entity: PRINTER, attachment_id: ID }, ctx())
-    expect(pdf.content).toEqual([
-      {
-        type: 'resource',
-        resource: { uri: `scadbuddy://entities/${PRINTER}/attachments/${ID}`, mimeType: 'application/pdf', blob: Buffer.from('%PDF-1.7').toString('base64') },
-      },
-    ])
+    const ws = memoryWorkspaceWithWrites()
+    const pdf = await get.execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
+    expect(pdf.content.some((c) => c.type === 'resource' || c.type === 'resource_link')).toBe(false)
+    expect(firstText(pdf)).toMatchObject({
+      workspace_file: { name: `attachments/${ID}`, mediaType: 'application/pdf', size: 8 },
+    })
+    expect(ws.written.get(`attachments/${ID}`)?.toString()).toBe('%PDF-1.7')
   })
 
   it('answers a HEIC or AVIF photo as a note, never as an image block the model would refuse', async () => {
@@ -87,6 +100,25 @@ describe('entity attachment and link tools', () => {
       expect(result.content.some((c) => c.type === 'image')).toBe(false)
       expect(firstText(result)).toMatchObject({ viewable: false, media_type: type, size_bytes: 4 })
     }
+  })
+
+  it('answers a file too large to read as a note, never a backend path', async () => {
+    server.use(
+      http.get(`${base(PRINTER)}/attachments/${ID}/content`, () =>
+        new HttpResponse(null, { headers: { 'Content-Type': 'video/mp4', 'Content-Length': String(26 * 1024 * 1024) } }),
+      ),
+    )
+    const result = await tool('entity_attachment_get').execute({ entity: PRINTER, attachment_id: ID }, ctx())
+    expect(firstText(result)).toMatchObject({ viewable: false, media_type: 'video/mp4', size_bytes: 26 * 1024 * 1024 })
+    expect(JSON.stringify(result.content)).not.toContain('/api/v1/entities')
+  })
+
+  it('answers a GIF too large to view without the thumbnail hint, which has no GIF', async () => {
+    const big = Buffer.alloc(IMAGE_BYTES_MAX + 1)
+    big.write('GIF89a')
+    server.use(http.get(`${base(SPOOL)}/attachments/${ID}/content`, () => new HttpResponse(big, { headers: { 'Content-Type': 'image/gif' } })))
+    const answer = firstText(await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())) as { note: string }
+    expect(answer.note).not.toContain('thumbnail')
   })
 
   it('answers a photo too large to view as a note, never as an image block the model would refuse', async () => {
