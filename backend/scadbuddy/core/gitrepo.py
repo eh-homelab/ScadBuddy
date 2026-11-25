@@ -356,18 +356,9 @@ class GitRepo:
         """A git binary exists and ``root`` is a repository."""
         return shutil.which(self.git) is not None and (self.root / ".git").is_dir()
 
-    def _run(
-        self,
-        *args: str,
-        check: bool = True,
-        text: bool = True,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-        config: Sequence[str] = (),
-    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
-        # `None` is the sentinel, so an explicit 0 is honoured (#2343).
-        limit = self.timeout if timeout is None else timeout
-        command = [
+    def command(self, *args: str, config: Sequence[str] = ()) -> list[str]:
+        """The argv of a git call on this repository, for a caller that streams one."""
+        return [
             self.git,
             "--no-pager",
             "-c",
@@ -380,6 +371,19 @@ class GitRepo:
             *(part for item in config for part in ("-c", item)),
             *args,
         ]
+
+    def _run(
+        self,
+        *args: str,
+        check: bool = True,
+        text: bool = True,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        config: Sequence[str] = (),
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        # `None` is the sentinel, so an explicit 0 is honoured (#2343).
+        limit = self.timeout if timeout is None else timeout
+        command = self.command(*args, config=config)
         # Another replica's commit is visible to this call, not 60 s later (#2385).
         self.revalidate()
         try:

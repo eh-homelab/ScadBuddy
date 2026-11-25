@@ -82,11 +82,14 @@ as it is. A push of a repository that uses LFS runs `git lfs push` first, with `
 derived from the remote's own URL.
 
 **Builder.** A command in the API's image. It makes `data/models-next`. It is idempotent
-and reads the old repository only. It commits, oldest first, each pinned (slug, commit), and
-then the current version of every template, with the original author and date. Each
-commit has an `Imported-From: <old id>` trailer, so git itself holds the id map. It also
-copies ignored files that are data (videos in `media/`), and not `.renders/` or wrappers.
-It points each `model.json` upstream at the new id.
+and reads the old repository only. It commits each pinned (slug, commit) and the current
+version of every template and built-in, in the order of the old history, with the original
+author and date. (As built: one order for all of them, not the pins first. An upstream is
+older than the `model.json` that names it, so its new id is known when that file is
+written.) Each commit has an `Imported-From: <old id>` trailer, so git itself holds the id
+map. It also copies ignored files that are data (videos in `media/`), and not `.renders/`
+or wrappers. It points each `model.json` upstream at the new id. An id that the new history
+does not have stays as it was.
 
 **Check.** Every file's sha256, current and pinned, old against new. Every mesh model
 renders. Push to a branch of the remote, clone, pull, compare again.
