@@ -84,6 +84,14 @@ sequenceDiagram
 - Customer model imports after the check are a later phase
   (`backend/scadbuddy/workflows/staged_file.py:17`;
   [#6133](https://github.com/eh-homelab/ScadBuddy/issues/6133)).
+- The first read of a done render's preview on an API replica fetches its files from the
+  blob store. While that runs, the read answers 503 `preview_not_ready` after a few seconds
+  (`backend/scadbuddy/orders/storefront/renders.py` `preview_ready`); the edge asks again for
+  10 s, and the viewer (`frontend/src/lib/previewLoader.ts`) asks again on a 502, 503 or 504
+  with a backoff, so a slow store shows as loading, not as an error
+  ([#6968](https://github.com/eh-homelab/ScadBuddy/issues/6968)). The app's own viewers use
+  the same loader, so there any 502, 503 or 504 (a `database_unavailable` too) shows as
+  loading for about 30 s before the failure shows.
 - A published listing with no price (published before #6922, or whose price run ended with
   none) gets its run from the housekeeping sweep `housekeeping_warm_listings`
   (`backend/scadbuddy/orders/storefront/prepare.py` `warm_unpriced`, #7665): once per

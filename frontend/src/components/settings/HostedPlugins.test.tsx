@@ -331,6 +331,43 @@ describe('HostedPluginsPanel', () => {
     expect(within(editor).queryByRole('button', { name: 'skills/print-notes/stale.md' })).not.toBeInTheDocument()
   })
 
+  it("shows the first read's files when a save's read fails before it answers (#7747)", async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let asked: () => void = () => {}
+    const arrived = new Promise<void>((resolve) => (asked = resolve))
+    // The first read of the files (the editor's) is held; the save's (and its retries) are refused.
+    let calls = 0
+    let released = false
+    server.use(
+      http.get('/api/v1/hosted-plugins/:name/files', async ({ request }) => {
+        // This handler's own read of the answer goes on to the mock's handler.
+        if (request.headers.get('x-test-inner')) return undefined
+        calls += 1
+        if (calls === 1) {
+          const seen = (await (await fetch(request.url, { headers: { 'x-test-inner': '1' } })).json()) as JsonBodyType
+          asked()
+          await held
+          return HttpResponse.json(seen)
+        }
+        if (!released) return HttpResponse.json({ detail: 'refused' }, { status: 400 })
+        return undefined
+      }),
+    )
+    const { user } = renderPage(<HostedPluginsPanel />)
+    const editor = await openPlugin(user, 'print-notes')
+    await arrived
+
+    await user.type(within(editor).getByLabelText('Description'), '!')
+    await user.click(within(editor).getByRole('button', { name: 'Save details' }))
+    await waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
+
+    released = true
+    release()
+    expect(await within(editor).findByRole('button', { name: 'skills/print-notes/SKILL.md' })).toBeInTheDocument()
+  })
+
   it("reads nothing again for another plugin's change (#7672)", async () => {
     const { user } = renderPage(<HostedPluginsPanel />)
     const editor = await openPlugin(user, 'print-notes')

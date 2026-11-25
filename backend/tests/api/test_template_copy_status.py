@@ -1,6 +1,7 @@
 """`GET /model-records/copy-status` (#7317): the last run of the copy of the templates'
 files to rows, at an API start or in a housekeeping sweep. The tests' apps skip the
-start's copy (`app_template_copy_off`) unless a test is marked `template_copy`."""
+start's background copy (`app_template_copy_off`) unless a test is marked
+`template_copy`; the first copy before the app serves still runs (phase 3)."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -54,8 +56,9 @@ def _finished(client: TestClient) -> dict[str, Any]:
     raise AssertionError(f"no finished copy run: {client.get(STATUS).json()}")
 
 
-@pytest.mark.template_copy
 def test_copy_status_reports_the_last_run(placed_client: TestClient) -> None:
+    """The run is the start's first copy (phase 3, `main._first_template_copy`): the
+    database had no finished run, and the background copy is off."""
     body = _finished(placed_client)
 
     assert datetime.fromisoformat(body["started_at"]) <= datetime.fromisoformat(body["finished_at"])
@@ -87,6 +90,41 @@ def test_copy_status_reports_an_incomplete_run_and_its_unreadable(client: TestCl
 
 
 def test_copy_status_404_before_any_run(client: TestClient) -> None:
+    """The app's start ran the first copy (phase 3), so the runs go first: a database
+    the copy never ran on."""
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.projection.pool.connection() as conn:
+        conn.execute("DELETE FROM template_copy_runs")
     response = client.get(STATUS)
     assert response.status_code == 404
     assert response.json()["detail"] == "no copy of the templates to rows has run"
+
+
+def _finished_runs(conninfo: str) -> list[int]:
+    """The ``added`` of each finished run, oldest first."""
+    with psycopg.connect(conninfo) as conn:
+        rows = conn.execute(
+            "SELECT added FROM template_copy_runs WHERE finished_at IS NOT NULL ORDER BY id"
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+@pytest.mark.template_copy
+def test_a_start_after_a_finished_run_copies_in_the_background(
+    settings: Settings, app: FastAPI, pg_conninfo: str
+) -> None:
+    """A database with a finished run gets no first copy: the background start copy
+    (`main._copy_templates_logged`) records the second run and adds the templates
+    placed on the volume."""
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("INSERT INTO template_copy_runs (finished_at) VALUES (clock_timestamp())")
+    models = DataPaths(settings.data_dir).models
+    for slug in PLACED:
+        (models / slug).mkdir(parents=True)
+        (models / slug / "model.scad").write_text("cube(10);\n")
+    with TestClient(app) as client:
+        deadline = time.monotonic() + 30
+        while len(_finished_runs(pg_conninfo)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert _finished_runs(pg_conninfo) == [0, len(PLACED)]
+        assert set(PLACED) <= set(_rows(client).ids())
