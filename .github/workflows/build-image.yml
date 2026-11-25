@@ -42,11 +42,13 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    # A push that changes only docs/**/*.md builds no image, so it deploys
-    # nothing either (deploy-main.yml runs on this workflow). GitHub does not
-    # apply path filters to tag pushes, so a release always builds.
+    # A push that changes only docs/**/*.md, CLAUDE.md or AGENTS.md files builds
+    # no image, so it deploys nothing either (deploy-main.yml runs on this workflow).
+    # GitHub does not apply path filters to tag pushes, so a release always builds.
     paths-ignore:
       - "docs/**/*.md"
+      - "**/CLAUDE.md"
+      - "**/AGENTS.md"
   workflow_dispatch:
 
 # Never cancel a publish. Two concurrent pushes to main would otherwise race on

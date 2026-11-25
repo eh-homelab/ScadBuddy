@@ -292,15 +292,16 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
   that opens a file outside its tree) needs its path in that lane's pattern.
-- Docs-only changes: when every changed path is `docs/**/*.md`, `select-lanes.sh` prints
+- Docs-only changes: when every changed path is `docs/**/*.md`, or a `CLAUDE.md` or
+  `AGENTS.md` in any directory (these select no lane), `select-lanes.sh` prints
   `docs_only=true`, and the `lint`, `frontend*`, `agent`, `models`, `freshness`,
   `go-select` and `go` jobs skip too; `CI Summary` re-derives it. The `markdown` job
-  (markdownlint-cli2 0.20.0 over `docs/**/*.md`, config `.markdownlint-cli2.jsonc`, style
-  rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
+  (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config
+  `.markdownlint-cli2.jsonc`, style rules off) runs on every change. A docs-only push to `main` starts neither `ci.yml`
   nor `build-image.yml` (`paths-ignore`), so it builds and deploys nothing.
 - `build-go-image.yml` publishes each `tools/go/*` CLI (every one with a `main.go`
   must have a Dockerfile) as `ghcr.io/eh-homelab/scadbuddy-<module>` on a push to main
-  touching Go, a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
+  touching Go (a `CLAUDE.md` or `AGENTS.md` aside), a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)

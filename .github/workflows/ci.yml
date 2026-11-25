@@ -60,6 +60,8 @@ on:
     # one job a docs-only change needs (select-lanes.sh `docs_only`).
     paths-ignore:
       - "docs/**/*.md"
+      - "**/CLAUDE.md"
+      - "**/AGENTS.md"
   # Weekly, and on demand, so every template's verify.sh runs against the image
   # even in a week when nothing merged (#229). The template checks are the
   # reason; the rest of CI rides along because it is cheap and it is the same
@@ -187,8 +189,9 @@ jobs:
       # push, the schedule, a dispatch, or a diff that cannot be read selects every
       # lane. `CI Summary` re-derives the same answer from its own checkout, so a
       # skipped lane job is accepted only where this change really does not need it.
-      # `docs_only`: every changed path is docs/**/*.md. Then the lint, frontend,
-      # agent, models, freshness and Go jobs skip too; only `markdown` checks it.
+      # `docs_only`: every changed path is docs/**/*.md, or a CLAUDE.md or AGENTS.md
+      # in any directory. Then the lint, frontend, agent, models, freshness and Go
+      # jobs skip too; only `markdown` checks it.
       - name: Select the lanes this change needs
         id: lanes
         env:
@@ -455,9 +458,10 @@ jobs:
   # took about 1 minute each there, so this job now takes about 5.
   # ── Markdown lint ───────────────────────────────────────────────────────────
   #
-  # markdownlint-cli2 over docs/**/*.md with `.markdownlint-cli2.jsonc` (the
-  # style rules are off; it checks structure). Runs on every change: on a
-  # docs-only change (`docs_only`) it is the only check that runs.
+  # markdownlint-cli2 over docs/**/*.md and each CLAUDE.md and AGENTS.md outside
+  # vendor/, with `.markdownlint-cli2.jsonc` (the style rules are off; it checks
+  # structure). Runs on every change: on a docs-only change (`docs_only`) it is the
+  # only check that runs.
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest
@@ -3059,7 +3063,7 @@ jobs:
           need_agent_durable=false
           if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
           need_rust=$(lane rust)
-          # A docs-only change (every path docs/**/*.md) needs only `markdown`.
+          # A docs-only change (select-lanes.sh `docs_only`) needs only `markdown`.
           not_docs=true
           if [ "$(lane docs_only)" = true ]; then not_docs=false; fi
           need() { if [ "$1" = true ] && [ "$not_docs" = true ]; then echo true; else echo false; fi; }

@@ -31,6 +31,8 @@ on:
       - "go.work.sum"
       - "vendor/**"
       - ".github/workflows/build-go-image.yml"
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
   workflow_dispatch:
     inputs:
       commit_sha:
