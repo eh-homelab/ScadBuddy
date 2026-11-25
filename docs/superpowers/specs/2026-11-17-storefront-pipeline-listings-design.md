@@ -684,9 +684,14 @@ for the first. `materialize_result` does not raise for a key the store no longer
 -> list[RenderedOutput]` gets the first output through `output_for_reference` (one submit
 and wait, or the output saved before). It then reads the job that output was saved from,
 saves each later entry of `job.outputs` with `"index": k` under `saved_as(k)`, in index
-order, and reuses an output already saved there while it `reference_matches`. A job that
-was pruned since gives the first output alone, which the check below refuses.
-`output_for_reference` stays as it is for the order's render and the quote.
+order, and reuses an output already saved there while it `reference_matches` and is of
+the same job. The first output is reused only while its job can still be read
+(`output_for_reference`'s `needs_job`, #7655): once the prune took that job, the
+reference renders again, and each output of the new job is saved under
+`rerendered_output_id(saved_as(k), job_id)`, one id per output and job, so no attempt
+saves it twice. A job gone between that check and the read gives the first output alone,
+which the check below refuses. The order's render and the quote do not pass `needs_job`,
+so they reuse a matching output as before.
 `storefront_output_id(render_key, index=0)` keeps today's id for index 0. For a
 later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
 `uuid5(NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}:{index}").hex`
