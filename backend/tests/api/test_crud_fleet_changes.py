@@ -16,6 +16,7 @@ import pytest_asyncio
 
 from scadbuddy.agent_changes import hub as hub_module
 from scadbuddy.api import crud_agent_changes, crud_camera, crud_fleet
+from scadbuddy.auth.service_credentials import ServiceCaller
 from scadbuddy.core.events import PG_CHANNEL, ModelEvent, OpaqueEvent, PrinterEvent, encode_event
 from scadbuddy.core.pg_events import hold_event_log
 from tests.crud.crud_support import PROMPTLY, Served, Sse, served_changes
@@ -23,6 +24,7 @@ from tests.crud.crud_support import PROMPTLY, Served, Sse, served_changes
 pytestmark = pytest.mark.requires_postgres
 
 BASE = "/api/v1/internal/crud/fleet"
+AGENT_BASE = "/api/v1/internal/crud/agent"
 
 
 def _message(n: int = 1) -> OpaqueEvent:
@@ -156,12 +158,14 @@ async def test_another_callers_credential_is_refused(served: Served) -> None:
         assert fleet.json()["areas"] == ["changes", "fleet"]
 
 
-async def _status(client: httpx.AsyncClient, served: Served, caller: str) -> int:
+async def _status(
+    client: httpx.AsyncClient, served: Served, caller: ServiceCaller, base: str
+) -> int:
+    """The status of one stream request, read and closed at once."""
+
     async def ask() -> int:
         async with client.stream(
-            "GET",
-            f"{served.url}{BASE}/changes",
-            headers=served.token("fleet"),
+            "GET", f"{served.url}{base}/changes", headers=served.token(caller)
         ) as response:
             return response.status_code
 
@@ -175,11 +179,8 @@ async def test_fleet_streams_have_a_budget_of_their_own(served: Served) -> None:
         try:
             for _ in range(crud_fleet.FLEET_STREAMS_MAX):
                 opened.append(await _open(client, served))
-            assert await _status(client, served, "fleet") == 429
-            agent = await client.get(
-                f"{served.url}/api/v1/internal/crud/agent/areas", headers=served.token("agent")
-            )
-            assert agent.status_code == 200
+            assert await _status(client, served, "fleet", BASE) == 429
+            assert await _status(client, served, "agent", AGENT_BASE) == 200
         finally:
             for ctx, _ in opened:
                 await ctx.__aexit__(None, None, None)
