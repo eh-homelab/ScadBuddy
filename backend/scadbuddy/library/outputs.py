@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol
 
 from botocore.exceptions import ClientError
 from fastapi import status
+from psycopg import Error as PsycopgError
 from psycopg.errors import UndefinedTable
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
@@ -986,8 +987,14 @@ class OutputStore:
         return True
 
     def _release_row_claim(self, output_id: str) -> None:
-        if self.rows is not None:
+        """A release that fails is logged and left to the hold reaper's prune, so the
+        claim's own answer (False, or the folder's error) stands (#7257)."""
+        if self.rows is None:
+            return
+        try:
             self.rows.release_claim(output_id)
+        except PsycopgError:
+            logger.exception("could not release a claim", extra={"id": output_id})
 
     async def save(
         self,
@@ -2370,7 +2377,9 @@ def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
 
 
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
-#: its Parts before it writes meta.json (api/outputs.py `create_output`).
+#: its Parts before it writes meta.json (api/outputs.py `create_output`). It is also the
+#: lease of an id claim: the reaper prunes an `output_claims` row older than this, so a
+#: save that runs longer than this can lose its claim (#7257).
 ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 

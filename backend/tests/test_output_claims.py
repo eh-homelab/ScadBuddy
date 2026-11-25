@@ -4,10 +4,12 @@ pod (the table only) share one claim during release B's roll."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 
+import psycopg
 import pytest
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -87,3 +89,33 @@ def test_reaper_prunes_stale_claims(tmp_path: Path, pool: Pool) -> None:
     assert reap_orphan_holds(refs, store, grace=timedelta(0)) == 0
     assert _claims(pool) == {}
     assert rows.claim("a" * 32, SLUG) is True
+
+
+class _ReleaseFails(OutputRows):
+    def release_claim(self, output_id: str) -> None:
+        raise psycopg.OperationalError("the database is gone")
+
+
+def test_failed_release_in_claim_is_logged_not_raised(
+    tmp_path: Path, pool: Pool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A row claim's release that fails (A4 review M2) is logged and left to the
+    reaper's prune. A folder that is there still answers False, so a quote takes a fresh
+    id. Another mkdir error raises as that error, not as the database's."""
+    paths = DataPaths(root=tmp_path)
+    store = OutputStore(paths)
+    store.rows = _ReleaseFails(pool)
+    taken = "d" * 32
+    paths.output_dir(SLUG, taken).mkdir(parents=True)
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
+        assert store.claim(SLUG, taken) is False
+    assert "could not release a claim" in caplog.text
+
+    blocked = "e" * 32
+    parent = paths.output_dir(SLUG, blocked).parent
+    parent.chmod(0o500)
+    try:
+        with pytest.raises(PermissionError):
+            store.claim(SLUG, blocked)
+    finally:
+        parent.chmod(0o700)
