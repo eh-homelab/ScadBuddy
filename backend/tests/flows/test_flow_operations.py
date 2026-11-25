@@ -421,6 +421,13 @@ async def task_request(run: Run, call_id: str, answer: Any) -> dict[str, Any]:
     return {"run_id": run.id, "task_id": call_id, "answer_sealed": sealed, "by": "jane"}
 
 
+async def _no_answer(self: WorkflowUpdateHandle[Any], **kwargs: Any) -> Any:
+    """Temporal cannot say whether an Update landed."""
+    raise WorkflowUpdateRPCTimeoutOrCancelledError() from RPCError(
+        "deadline", RPCStatusCode.DEADLINE_EXCEEDED, b""
+    )
+
+
 def _as_text(monkeypatch: pytest.MonkeyPatch, error: BaseException | None = None) -> list[str]:
     """The parked `wait_for_human` takes a text, so a typed answer reaches it as one; then
     `error`, as if the reply were lost. Returns the calls sent to."""
@@ -819,12 +826,7 @@ async def test_an_answer_whose_fate_is_unknown_is_not_taken_over(
     first = await stuck(flows, name, run, call_id)
     sent = _as_text(monkeypatch)
 
-    async def slow(self: WorkflowUpdateHandle[Any], **kwargs: Any) -> Any:
-        raise WorkflowUpdateRPCTimeoutOrCancelledError() from RPCError(
-            "deadline", RPCStatusCode.DEADLINE_EXCEEDED, b""
-        )
-
-    monkeypatch.setattr(WorkflowUpdateHandle, "result", slow)
+    monkeypatch.setattr(WorkflowUpdateHandle, "result", _no_answer)
     request = await answering(name, run, call_id, "two")
     with pytest.raises(ApiError) as err:
         await operate(flows, kinds(flows, Marks())[name], request)
@@ -899,7 +901,7 @@ async def test_an_answer_that_lands_after_its_take_over_is_on_record_again(
     flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str, how: str
 ) -> None:
     """`untagged`: sent before #7575. `third`: while another answer's operation runs."""
-    run, call_id = await parked(flows)
+    run, call_id = await two_questions(flows)
     first = await stuck(flows, name, run, call_id)
     original = AgentClient.provide_callback_result
     third = await answering(name, run, call_id, "three")
@@ -921,7 +923,6 @@ async def test_an_answer_that_lands_after_its_take_over_is_on_record_again(
         await operate(flows, kinds(flows, marks)[name], await answering(name, run, call_id, "two"))
     assert (err.value.status, err.value.type) == (409, REFUSED[name])
     assert marks.made == []
-    assert (await flows.finished(run.id)).result == f"result: {given(name, 'one')!r}"
     assert await responses(flows, run, call_id) == first.response
 
 
@@ -976,6 +977,65 @@ async def test_an_answer_that_an_old_worker_sent_first_landed(
     result = await operate(flows, kinds(flows, marks)[name], request)
     assert result["outcome"] == "answered"
     assert len(marks.made) == (name == TASK_ANSWER)
+    assert await responses(flows, run, call_id) == row.response
+
+
+@BOTH
+@pytest.mark.parametrize("sent_by", ["old worker", "replaced answer"])
+async def test_an_answer_that_lands_first_and_ends_the_run_is_on_record(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str, sent_by: str
+) -> None:
+    """The second send finds the run closed, not the call resolved."""
+    run, call_id = await parked(flows)
+    first = row_of(name, run, call_id, "one")
+    if sent_by == "old worker":
+        request = await answering(name, run, call_id, "one")
+        await started(flows, name, "first", request)
+        assert await flows.store.record_decision(first)
+        update_id = first.request_id
+    else:
+        await stuck(flows, name, run, call_id)
+        request = await answering(name, run, call_id, "two")
+        update_id = await answer_update_id(Keys(), first)
+    _as_text(monkeypatch)
+    typed = AgentClient.provide_callback_result
+
+    async def beaten(self: AgentClient, tool_id: str, *, result: Any, **kwargs: Any) -> Any:
+        await typed(self, tool_id, result={"answer": "one"}, update_id=update_id)
+        await flows.client.get_workflow_handle(run.workflow_id).result()
+        return await typed(self, tool_id, result=result, **kwargs)
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", beaten)
+    answer = kinds(flows, Marks())[name]
+    if sent_by == "old worker":
+        assert (await operate(flows, answer, request))["outcome"] == "answered"
+    else:
+        with pytest.raises(RPCError):
+            await operate(flows, answer, request)
+    assert await responses(flows, run, call_id) == first.response
+
+
+@BOTH
+async def test_a_refused_answer_whose_fate_is_unknown_stays_on_record(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await two_questions(flows)
+    row = row_of(name, run, call_id, "one")
+    _as_text(monkeypatch)
+    typed = AgentClient.provide_callback_result
+
+    async def beaten(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
+        await typed(self, tool_id, result=result, update_id=row.request_id)
+        try:
+            return await typed(self, tool_id, result=result, update_id=update_id)
+        finally:
+            monkeypatch.setattr(WorkflowUpdateHandle, "result", _no_answer)
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", beaten)
+    with pytest.raises(CallbackResultError):
+        await operate(
+            flows, kinds(flows, Marks())[name], await answering(name, run, call_id, "one")
+        )
     assert await responses(flows, run, call_id) == row.response
 
 

@@ -11,7 +11,8 @@ The row lives as long as the Update may have landed (#2247):
 
 - The harness refusing the Update is definite: the row is deleted. The exception is an
   answer that a worker from before #7575 sent first, under the request id alone: it
-  landed, so the row stays and the operation succeeds.
+  landed, so the row stays and the operation succeeds. When Temporal cannot say whether
+  it did, the next rule's last sentence holds.
 - Any other failure (an RPC error, a deadline, the reply lost) is settled by asking
   Temporal for the Update by its id. Completed means it landed: the row stays and the
   operation succeeds. No such Update means it never landed: the row is deleted, so a
@@ -40,8 +41,8 @@ All of these must hold:
 Anything else refuses the answer, and a later one may take the row over. A send past all
 this (a paused or cancelled attempt, an Update on its way) is another Update: the run takes one
 of the two and refuses the other, which undoes its own row alone (`withdraw`). When the
-attempt that took the row over is refused so, it puts the first answer back if that one
-landed.
+attempt that took the row over is refused so, or finds the run ended, it puts the first
+answer back if that one landed.
 
 The safety against a late Update is not in the take-over's checks: the harness resolves a
 call once, so the script gets one answer, and an Update id is of one answer, so a late one
@@ -546,8 +547,7 @@ def flow_kinds(
         return False
 
     async def settle(
-        checked: dict[str, Any],
-        update_id: str,
+        ask: Callable[[], Awaitable[bool | None]],
         err: BaseException,
         undo: Callable[[], Awaitable[None]],
     ) -> bool:
@@ -556,7 +556,7 @@ def flow_kinds(
         when Temporal says the Update never existed."""
         if isinstance(err, asyncio.CancelledError):
             return False
-        verdict = await landed(checked, update_id)
+        verdict = await ask()
         if verdict is False:
             await undo()
         return verdict is True
@@ -633,17 +633,30 @@ def flow_kinds(
         if sent:
             return decision
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
+
+        async def arrived() -> bool | None:
+            # After a take-over, an Update under the request id alone is the replaced answer's.
+            if replaced is None:
+                return await answer_landed(checked, decision)
+            return await landed(checked, update_id)
+
+        async def undo() -> None:
+            if replaced is None or not await put_back(checked, decision, replaced):
+                await withdraw(decision)
+
         try:
             await client.provide_callback_result(
                 decision.call_id, result=response, update_id=update_id
             )
         except CallbackResultError as err:
             resolved = err.error_type == "CallbackAlreadyResolved"
-            # After a take-over, an Update under the request id alone is the replaced answer's.
-            if resolved and replaced is None and await answer_landed(checked, decision):
-                return decision
-            if not (resolved and replaced and await put_back(checked, decision, replaced)):
-                await withdraw(decision)
+            if resolved:
+                verdict = await arrived()
+                if verdict is None:
+                    raise
+                if verdict:
+                    return decision
+            await undo()
             if err.error_type == "MalformedCallbackResult":
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "The run cannot take that answer."
@@ -652,7 +665,7 @@ def flow_kinds(
                 raise taken() from None
             raise _stale() from None
         except BaseException as err:
-            if not await settle(checked, update_id, err, lambda: withdraw(decision)):
+            if not await settle(arrived, err, undo):
                 raise
         return decision
 
@@ -783,7 +796,7 @@ def flow_kinds(
             raise _stale() from None
         except BaseException as err:
             rid = decision.request_id
-            if not await settle(checked, rid, err, lambda: forget(rid)):
+            if not await settle(lambda: landed(checked, rid), err, lambda: forget(rid)):
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": decision.outcome}
 
@@ -1022,7 +1035,7 @@ def flow_kinds(
             raise _stale() from None
         except BaseException as err:
             rid = decision.request_id
-            if not await settle(checked, rid, err, lambda: forget(rid)):
+            if not await settle(lambda: landed(checked, rid), err, lambda: forget(rid)):
                 raise
 
     async def check_reset(request: dict[str, Any]) -> dict[str, Any]:
