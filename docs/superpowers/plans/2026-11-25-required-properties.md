@@ -18,6 +18,11 @@ agent's zod tools.
 **Spec:** `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.3b (with
 §6.3a, §6.4, D18, phase 1c).
 
+
+**Status (2026-11-25):** PR 1 ships Tasks 1–5 (spools, spool types, catalogs). Task 6
+(items and item kinds) waits for the inventory session's base-kind design (epic #6949,
+its comment on #7703); materials and subtypes later become item kinds, so their checks
+move to the kind schema then.
 ## Global Constraints
 
 - Kinds that check (`REQUIRED_KINDS`): `spool`, `spool_type`, `material`, `subtype`, `brand`,
