@@ -328,7 +328,7 @@ async def test_a_failing_sweep_fails_its_activity(
     )
     state = SimpleNamespace(
         render=SimpleNamespace(prune=_broken_async, store=SimpleNamespace(read=None)),
-        outputs=SimpleNamespace(rows=object()),
+        outputs=SimpleNamespace(rows=object(), bytes=None),
         projection=SimpleNamespace(pool=object(), conninfo=""),
         store=SimpleNamespace(content=None),
         blobs=object(),
