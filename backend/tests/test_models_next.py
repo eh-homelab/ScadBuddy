@@ -14,18 +14,23 @@ from pathlib import Path
 import psycopg
 import pytest
 
-from scadbuddy.core.gitrepo import LOCK_NAME, git_env
+from scadbuddy.core.gitrepo import LOCK_NAME, GitError, git_env
+from scadbuddy.core.settings import Settings
+from scadbuddy.git_remote.push import RemoteTarget
 from scadbuddy.library import models_next
 from scadbuddy.library.history import ModelHistory, RevisionNotFoundError
 from scadbuddy.library.models_next import (
     MAP_NAME,
+    TRIAL_BRANCH,
     Pin,
     RefusedError,
     build,
     check,
     derived_map,
+    push_trial,
     read_pins,
 )
+from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.library.upstream import Upstream, state_of
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -40,6 +45,7 @@ TWO = ONE[::-1]
 GONE = "0" * 39 + "1"
 #: A library's commit, which is of another repository.
 LIBRARY = "a" * 40
+SECRET = "trial-token-1234567890"
 
 
 def git(root: Path, *args: str, env: dict[str, str] | None = None, stdin: bytes = b"") -> bytes:
@@ -307,13 +313,37 @@ def test_a_dismissed_update_stays_dismissed(old: Old, dest: Path) -> None:
     dismissed = old.save("b", "two", scad="cube(2);\n")
     link = {"id": "b", "path": "b", "base": base, "dismissed": dismissed}
     old.save("a", scad="cube(1);\n", meta=meta(link))
+    old.save("b", "three", scad="cube(3);\n")
     report = build(old.root, dest, [], live=old.root)
     held = json.loads((dest / "a/model.json").read_bytes())["upstream"]
-    # Nothing pins the base, so the new history has no id for it: the old one stays.
-    assert held["base"] == base
+    # Nothing else pins them: a duplicate keeps what it merges from.
+    assert held["base"] == ids(dest)["b", base]
     assert held["dismissed"] == ids(dest)["b", dismissed]
+    assert report.unmapped == []
+    assert problems(old, dest) == []
+
+
+def test_the_base_of_a_kept_base_is_kept(old: Old, dest: Path) -> None:
+    first = old.save("c", scad="cube(1);\n")
+    second = old.save("b", scad="cube(2);\n", meta=meta({"id": "c", "path": "c", "base": first}))
+    old.save("c", "later", scad="cube(9);\n")
+    old.save("a", scad="cube(3);\n", meta=meta({"id": "b", "path": "b", "base": second}))
+    old.save("b", "later", scad="cube(8);\n", meta=meta(None))
+    new = made(old, dest)
+    found = ids(dest)
+    held = json.loads(new.show(found["b", second], "b/model.json"))
+    assert held["upstream"]["base"] == found["c", first]
+    assert problems(old, dest) == []
+
+
+def test_a_base_the_old_one_does_not_have_stays(old: Old, dest: Path) -> None:
+    old.save("b", scad="cube(1);\n")
+    old.save("a", scad="cube(1);\n", meta=meta({"id": "b", "path": "b", "base": GONE}))
+    report = build(old.root, dest, [], live=old.root)
+    assert json.loads((dest / "a/model.json").read_bytes())["upstream"]["base"] == GONE
     assert len(report.unmapped) == 1
-    assert base in report.unmapped[0] and "a at" in report.unmapped[0]
+    assert GONE in report.unmapped[0] and "a at" in report.unmapped[0]
+    assert report.unresolved == []
     assert problems(old, dest) == []
 
 
@@ -879,6 +909,74 @@ def test_the_pins_are_the_orders_the_revisions_and_the_listings(pg_conninfo: str
 
 
 @pytest.mark.requires_postgres
+def test_the_trial_push_is_a_complete_copy(old: Old, dest: Path, tmp_path: Path) -> None:
+    old.save("a", scad="cube();\n", mesh=ONE)
+    new = made(old, dest)
+    remote = tmp_path / "remote.git"
+    remote.mkdir()
+    git(remote, "init", "-q", "--bare")
+    target = RemoteTarget(url=f"file://{remote}")
+    assert push_trial(dest, f"{TRIAL_BRANCH}-1", target, live=old.root) == new.head()
+    refs = git(remote, "for-each-ref", "--format=%(refname) %(objectname)").decode().split()
+    assert refs == [f"refs/heads/{TRIAL_BRANCH}-1", new.head()]
+    stored = {p.name for p in (remote / "lfs/objects").rglob("*") if p.is_file()}
+    assert stored == {hashlib.sha256(ONE).hexdigest()}
+
+
+@pytest.mark.parametrize("branch", ["models", "flows", "main", "x/models-trial", "models-trial:x"])
+def test_a_trial_push_to_another_branch_is_refused(old: Old, dest: Path, branch: str) -> None:
+    old.save("a", scad="cube();\n")
+    made(old, dest)
+    with pytest.raises(RefusedError, match="branch"):
+        push_trial(dest, branch, RemoteTarget(url="file:///nowhere"), live=old.root)
+
+
+def test_a_trial_push_of_anything_else_is_refused(old: Old, dest: Path) -> None:
+    old.save("a", scad="cube();\n")
+    target = RemoteTarget(url="file:///nowhere")
+    for root in (old.root, dest):
+        with pytest.raises(RefusedError):
+            push_trial(root, TRIAL_BRANCH, target, live=old.root)
+    made(old, dest)
+    (dest / "a/model.scad").write_text("cube(9);\n")
+    with pytest.raises(RefusedError, match="holds changes"):
+        push_trial(dest, TRIAL_BRANCH, target, live=old.root)
+
+
+def test_the_trial_push_is_to_the_stored_remote_and_shows_no_token(
+    old: Old,
+    dest: Path,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    old.save("a", scad="cube();\n")
+    made(old, dest)
+    monkeypatch.setenv("SCADBUDDY_DATABASE_URL", pg_conninfo)
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", "127.0.0.1:1")
+    monkeypatch.setenv("SCADBUDDY_DATA_DIR", str(old.data))
+    store = SettingsStore(Settings())
+    store.open()
+    try:
+        assert models_next.main(["push", "--branch", TRIAL_BRANCH]) == 2
+        assert "no git remote" in capsys.readouterr().err
+        url = "http://127.0.0.1:1/o/r"
+        store.save(SettingsPatch(git_remote_url=url, git_remote_token=SECRET))
+        seen: list[RemoteTarget] = []
+
+        def refuse(_: Path, __: str, target: RemoteTarget, *, live: Path) -> str:
+            seen.append(target)
+            raise GitError(f"git push failed: {SECRET}", SECRET)
+
+        monkeypatch.setattr(models_next, "push_trial", refuse)
+        assert models_next.main(["push", "--branch", TRIAL_BRANCH]) == 2
+    finally:
+        store.close()
+    assert [(t.url, t.token) for t in seen] == [(url, SECRET)]
+    said = capsys.readouterr()
+    assert "failed" in said.err and SECRET not in said.err + said.out
+
+
 def test_the_two_commands(
     old: Old,
     dest: Path,

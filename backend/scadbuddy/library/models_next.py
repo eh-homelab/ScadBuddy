@@ -3,14 +3,16 @@
 
 ``python -m scadbuddy.library.models_next build`` makes ``data/models-next`` from
 ``data/models``; ``… check`` compares the two. Both run in the API's image with its own
-database credential, and only read the old repository and the database. Nothing here
-serves the new repository, or changes a row.
+database credential, and only read the old repository and the database. ``… push`` sends
+the new one to a trial branch of the git remote that Settings names. Nothing here serves
+the new repository, or changes a row.
 
 What the new history holds
 --------------------------
 A first commit of ``.gitignore`` and ``.gitattributes`` (what `ModelHistory.ensure_repo`
 writes), then one commit per version that is kept: each (slug, commit) an order item, an
-order revision or a listing pins, and the current version of each template and built-in.
+order revision or a listing pins, the current version of each template and built-in, and
+the upstream revisions that the ``model.json`` of any of these names.
 A commit changes its own template only. It has the old commit's author, committer, dates
 and message, and an ``Imported-From: <old id>`` trailer. So the map of old ids to new ones
 is in git; `derived_map` reads it, and ``.git/scadbuddy-models-next.json`` is a copy.
@@ -24,7 +26,7 @@ The order is the old history's, pins, current versions and built-ins together. A
 ``model.json`` can only name an upstream commit that is older than itself, so that commit
 is already in the new history when the file is written, and its new id is known: `base`
 and `dismissed` are pointed at it, in the pinned versions too. An id the new history does
-not have (a revision that nothing pins) is left as it is: it resolves to nothing, which
+not have (the old one has lost the revision) is left as it is: it resolves to nothing, which
 `upstream.plan_merge` takes as no base (#7534). Nothing else in a ``model.json`` is a
 commit of this repository; a library's pin is of the library's own.
 
@@ -50,7 +52,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import IO, Any, NamedTuple, Self
+from typing import IO, TYPE_CHECKING, Any, NamedTuple, Self
 
 from scadbuddy.core.gitrepo import (
     _FIELD,
@@ -72,6 +74,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
+from scadbuddy.git_remote.push import RemoteTarget, scrub
 from scadbuddy.library.history import (
     LFS_POINTER,
     LFS_SIZE,
@@ -82,9 +85,14 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
+if TYPE_CHECKING:
+    from scadbuddy.core.settings import Settings
+
 #: The map, kept in the new repository's ``.git``. It also marks what a run may replace.
 MAP_NAME = "scadbuddy-models-next.json"
 TRAILER = "Imported-From"
+#: What a trial push's branch starts with. The app pushes to `git_remote.push.BRANCHES`.
+TRIAL_BRANCH = "models-trial"
 #: GitHub warns of a file over this size, and refuses one over 100 MB:
 #: https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github
 MAX_BLOB_BYTES = 50 * 1024 * 1024
@@ -104,6 +112,7 @@ PLACES = ("order_items", "order_item_revisions", "storefront_listings")
 UPSTREAM_FIELDS = ("base", "dismissed")
 
 _COMMIT = re.compile(r"[0-9a-f]{40}")
+_TRIAL = re.compile(rf"{TRIAL_BRANCH}(-[a-z0-9]+)*")
 _OID = re.compile(rb"^oid sha256:([0-9a-f]{64})$", re.MULTILINE)
 _TRAILER_LINE = re.compile(rb"[A-Za-z0-9][A-Za-z0-9-]*: .+")
 _UPSTREAM_ID = re.compile(rb'("(?:base|dismissed)"\s*:\s*")[0-9a-f]{40}(?=")')
@@ -474,6 +483,7 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
         else:
             pinned.setdefault(pin.slug, {})[commit_id] = tree
 
+    _keep_upstreams(objects, [*trees.values()], pinned)
     versions: list[_Version] = []
     for slug in sorted({*trees, *pinned}):
         line: list[_Version] = []
@@ -498,6 +508,28 @@ def _plan(objects: _Objects, pins: Sequence[Pin]) -> _Plan:
     }
     wanted.update({(slug, commit): trees[slug] for slug, commit in current.items()})
     return _Plan(head, versions, unresolved, current, wanted)
+
+
+def _keep_upstreams(objects: _Objects, trees: list[str], pinned: dict[str, dict[str, str]]) -> None:
+    """Pin what each kept version's ``model.json`` names as its upstream's revision: without
+    its base, a duplicate merges as one that has none, and all that differs conflicts."""
+    left = [*trees, *(tree for held in pinned.values() for tree in held.values())]
+    seen: set[str] = set()
+    while left:
+        tree = left.pop()
+        if tree in seen:
+            continue
+        seen.add(tree)
+        entry = objects.files(tree).get(MODEL_META_NAME)
+        if entry is None or entry.mode == SYMLINK_MODE:
+            continue
+        for slug, commit in _upstream_refs(objects.blob(entry.oid)).values():
+            found = objects.commit_id(commit)
+            below = None if found is None else objects.tree(found, slug)
+            # One that is gone is reported when the version that names it is written.
+            if found is not None and below is not None:
+                pinned.setdefault(slug, {})[found] = below
+                left.append(below)
 
 
 def _add(
@@ -543,9 +575,9 @@ def _json(raw: bytes) -> Any:
         return None
 
 
-def _upstream_ids(raw: bytes, ids: Mapping[tuple[str, str], str]) -> dict[str, tuple[str, str]]:
-    """Each upstream field of ``model.json`` that holds an id: the id, and the new one
-    ("" where the new history has none)."""
+def _upstream_refs(raw: bytes) -> dict[str, tuple[str, str]]:
+    """Each upstream field of ``model.json`` that holds an id: the template it is a
+    revision of, and the id."""
     body = _json(raw)
     upstream = body.get("upstream") if isinstance(body, dict) else None
     if not isinstance(upstream, dict):
@@ -560,8 +592,15 @@ def _upstream_ids(raw: bytes, ids: Mapping[tuple[str, str], str]) -> dict[str, t
     for name in UPSTREAM_FIELDS:
         value, owner = upstream.get(name), owners[name]
         if isinstance(value, str) and _COMMIT.fullmatch(value) and isinstance(owner, str):
-            found[name] = (value, ids.get((owner, value), ""))
+            found[name] = (owner, value)
     return found
+
+
+def _upstream_ids(raw: bytes, ids: Mapping[tuple[str, str], str]) -> dict[str, tuple[str, str]]:
+    """Each upstream field of ``model.json`` that holds an id: the id, and the new one
+    ("" where the new history has none)."""
+    refs = _upstream_refs(raw)
+    return {name: (value, ids.get((owner, value), "")) for name, (owner, value) in refs.items()}
 
 
 def _expected(raw: bytes, ids: Mapping[tuple[str, str], str]) -> Any:
@@ -919,6 +958,26 @@ def _put(staged: Path, target: Path) -> None:
     shutil.rmtree(retired)
 
 
+# ── the trial push ────────────────────────────────────────────────────────────
+
+
+def push_trial(dest: Path, branch: str, target: RemoteTarget, *, live: Path) -> str:
+    """Push what a build made, meshes first, to a trial branch at ``target``; its HEAD.
+    Never a force, and never a branch that ScadBuddy itself pushes to."""
+    if not _TRIAL.fullmatch(branch):
+        raise RefusedError(f"{branch} is not a trial branch ({TRIAL_BRANCH}…)")
+    if dest.resolve() == live.resolve():
+        raise RefusedError(f"{dest} is the models directory")
+    repo = _Repo(dest)
+    head = repo.head() if repo.available else None
+    if head is None:
+        raise RefusedError(f"{dest} is not a repository with a commit")
+    _may_replace(dest)
+    ref = f"refs/heads/{branch}"
+    repo.push(target.url, head, ref, username=target.username, password=target.token)
+    return head
+
+
 # ── the check ─────────────────────────────────────────────────────────────────
 
 
@@ -1191,12 +1250,17 @@ def main(argv: Sequence[str]) -> int:
         command = commands.add_parser(name, help=text)
         command.add_argument("--old", type=Path, help="default: the data directory's models")
         command.add_argument("--dest", type=Path, help="default: models-next beside it")
+    trial = commands.add_parser("push", help="push it to a trial branch of the git remote")
+    trial.add_argument("--dest", type=Path, help="default: models-next beside the models")
+    trial.add_argument("--branch", required=True, help=f"{TRIAL_BRANCH}, or {TRIAL_BRANCH}-<name>")
     options = parser.parse_args(argv)
 
     settings = Settings()
     live = DataPaths(settings.data_dir).models
-    old: Path = options.old or live
     dest: Path = options.dest or live.with_name("models-next")
+    if options.command == "push":
+        return _push(settings, dest, options.branch, live)
+    old: Path = options.old or live
     pins = read_pins(settings.database_url)
     try:
         if options.command == "build":
@@ -1206,6 +1270,35 @@ def main(argv: Sequence[str]) -> int:
         print(f"refused: {error}", file=sys.stderr)
     except (BuildError, GitError) as error:
         print(f"failed: {error}", file=sys.stderr)
+    return 2
+
+
+def _push(settings: Settings, dest: Path, branch: str, live: Path) -> int:
+    from scadbuddy.library.settings_store import SettingsStore
+
+    store = SettingsStore(settings)
+    # Not `store.open`, which migrates: this only reads. The URL and its token are of one
+    # snapshot, as the app reads them.
+    store._pool.open(wait=True, timeout=store.connect_timeout)
+    try:
+        remote = store.snapshot().runtime
+    finally:
+        store.close()
+    if not remote.git_remote_url:
+        print("refused: no git remote is set", file=sys.stderr)
+        return 2
+    target = RemoteTarget(
+        remote.git_remote_url, remote.git_remote_username, remote.git_remote_token
+    )
+    try:
+        head = push_trial(dest, branch, target, live=live)
+    except RefusedError as error:
+        print(f"refused: {error}", file=sys.stderr)
+    except GitError as error:
+        print(f"failed: {scrub(str(error), target.token)}", file=sys.stderr)
+    else:
+        print(f"pushed {head} to {branch}")
+        return 0
     return 2
 
 
