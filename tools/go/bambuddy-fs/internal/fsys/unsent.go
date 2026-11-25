@@ -1145,6 +1145,13 @@ func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, 
 		}
 		t.forget(got.FolderID)
 	}
+	// The node becomes the stored file before its local copy moves. A reader that still
+	// finds the entry then opens the local copy, and one that does not reads got (#7563).
+	if n != nil {
+		n.mu.Lock()
+		n.file, n.queued = got, nil
+		n.mu.Unlock()
+	}
 	if !conflict {
 		t.deleteBases(ctx, rec.Bases, got.ID)
 	}
@@ -1156,11 +1163,6 @@ func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, 
 	}
 	t.remember(got)
 	slog.Info("unsent write sent", "path", e.dir, "folder", got.FolderID, "name", got.Name, "file", got.ID)
-	if n != nil {
-		n.mu.Lock()
-		n.file, n.queued = got, nil
-		n.mu.Unlock()
-	}
 	return n
 }
 
