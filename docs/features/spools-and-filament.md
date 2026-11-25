@@ -177,8 +177,9 @@ slot (`tray_empty`) or the one already feeding (`already_loaded`), and refresh r
 filament is loaded (`filament_loaded`). Configure takes any SB spool (its values and its type's
 preset and K value for the slot's nozzle) or the values by hand. A slot's saved preset is
 ScadBuddy's own (`printers/command_data.py`), and an AMS unit's label is the name of
-ScadBuddy's place of the unit; neither is sent to the printer or to Bambuddy. The page asks
-before every printer write.
+ScadBuddy's place of the unit; neither is sent to the printer or to Bambuddy. A reset clears
+the saved preset only when the printer confirms it in the route's own answer (P43); otherwise
+the page says the preset was kept. The page asks before every printer write.
 
 An override tag's slot is configured the same way: the RFID reconcile
 (`backend/scadbuddy/filament/rfid_slots.py`) runs the configure's commands over the LAN link

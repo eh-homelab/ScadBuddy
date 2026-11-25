@@ -383,6 +383,30 @@ describe('PrinterAmsSlots (#7153)', () => {
     expect(printerCommandsPublished()).toBe(2)
   })
 
+  it('says a reset clears the saved preset only once the printer confirms it (P43)', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    await user.click(screen.getByRole('button', { name: 'Reset' }))
+    expect(within(await screen.findByRole('alertdialog')).getByText(/its saved preset once the printer confirms the reset/)).toBeInTheDocument()
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Reset' }))
+    await said('Reset: sent to AMS-A slot 2.')
+    expect(screen.getByRole('status')).not.toHaveTextContent('was kept')
+  })
+
+  it('says the saved preset was kept when the reset answered late (P43)', async () => {
+    printRunPoll.intervalMs = 20
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    setPrinterCommandSlow(1)
+    await user.click(screen.getByRole('button', { name: 'Reset' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset' }))
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'Reset: sent to AMS-A slot 2. Its saved preset Bambu PETG Basic @BBL H2C was kept; use “Clear saved preset” to clear it.',
+      ),
+    )
+  })
+
   it('stops following a slot command when the panel closes', async () => {
     printRunPoll.intervalMs = 5
     const follows: string[] = []

@@ -35,7 +35,8 @@ function ctx(tier: 'read' | 'outward' = 'outward'): ToolContext {
 
 const COMMANDS = ['printer_slot_configure', 'printer_slot_reset', 'printer_slot_refresh', 'printer_slot_load', 'printer_slot_unload']
 const OWN = ['printer_slot_preset_set', 'printer_slot_preset_clear', 'printer_ams_label_set', 'printer_ams_label_clear']
-const COMMAND = `lan-command-${PRINTER}-ams_change_filament-${'b'.repeat(64)}`
+// P63: lan-command-<printer>-<route kind>-<sha256[:32] of the key>.
+const COMMAND = `lan-command-${PRINTER}-slot-load-${'b'.repeat(32)}`
 
 describe('AMS slot tools (#7153)', () => {
   it.each(COMMANDS)('%s is outward and approved first', (name) => {

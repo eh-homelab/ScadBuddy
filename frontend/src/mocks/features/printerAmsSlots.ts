@@ -10,7 +10,7 @@ import type {
   SlotPresetBody,
   SlotView,
 } from '../../api/types'
-import { commandAnswer, joined, lanRefusal } from './printerCommands'
+import { answersAtOnce, commandAnswer, joined, lanRefusal } from './printerCommands'
 import { printersState } from './printers'
 
 /**
@@ -267,7 +267,9 @@ export const handlers = [
       return problem(409, 'H2C has filament loaded; unload it before the AMS can read a tag again', 'filament_loaded')
     }
     if (action === 'reset') {
-      Object.assign(target, { material: null, colour: null, preset_id: null, preset_name: null, saved_preset: null })
+      Object.assign(target, { material: null, colour: null, preset_id: null, preset_name: null })
+      // As the route: only a reset the printer acknowledged in this answer clears the saved preset (P43).
+      if (message === SENT && answersAtOnce()) target.saved_preset = null
     }
     state.sent.push(`${action} ${ams}/${tray}`)
     return commandAnswer(id, request, { ams_id: ams, tray_id: tray, action, message } satisfies SlotCommandSent)

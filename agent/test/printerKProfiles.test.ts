@@ -20,7 +20,8 @@ afterAll(() => server.close())
 
 const PRINTER = '8d6f3c1e-0000-4000-8000-000000000001'
 const BASE = `${BACKEND}/api/v1/printers/${PRINTER}`
-const COMMAND = `lan-command-${PRINTER}-extrusion_cali_set-${'a'.repeat(64)}`
+// P63: lan-command-<printer>-<route kind>-<sha256[:32] of the key>.
+const COMMAND = `lan-command-${PRINTER}-kprofile-set-${'a'.repeat(32)}`
 
 function tool(name: string): Tool {
   const t = ALL_TOOLS.find((x) => x.name === name)

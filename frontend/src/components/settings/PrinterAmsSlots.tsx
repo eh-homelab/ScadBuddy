@@ -40,7 +40,7 @@ const ASKS: Record<Action, { title: string; does: string; verb: string }> = {
   load: { title: 'Load', does: 'feeds this slot’s filament to the hotend', verb: 'Load' },
   unload: { title: 'Unload', does: 'pulls the filament back out of the hotend', verb: 'Unload' },
   refresh: { title: 'Read the tag again', does: 'makes the AMS read the spool’s RFID tag again', verb: 'Read the tag' },
-  reset: { title: 'Reset', does: 'clears the slot’s filament setting and its saved preset', verb: 'Reset' },
+  reset: { title: 'Reset', does: 'clears the slot’s filament setting, and its saved preset once the printer confirms the reset', verb: 'Reset' },
 }
 
 const NOZZLES = [
@@ -145,11 +145,19 @@ function AmsBody({ row }: { row: PrinterRow }) {
           api.slotCommand(row.id, unit.ams_id, slot.tray_id, action, { ...options, onWaiting }),
         )
         const title = ASKS[pending.action].title
-        setMessage(
-          unconfirmed(sent.message)
-            ? { text: `${title}: sent to ${slot.label}; the printer did not confirm it. Read the AMS before you send it again.`, warn: true }
-            : { text: `${title}: sent to ${slot.label}.`, warn: false },
-        )
+        const said = unconfirmed(sent.message)
+          ? { text: `${title}: sent to ${slot.label}; the printer did not confirm it. Read the AMS before you send it again.`, warn: true }
+          : { text: `${title}: sent to ${slot.label}.`, warn: false }
+        // A reset clears the saved preset only when the printer confirmed it in the route's own answer
+        // (P43): one it answered late, or a resend, keeps it, so read the slot to say which.
+        if (action === 'reset' && slot.saved_preset) {
+          const kept = await api.printerAms(row.id).then(
+            (fresh) => fresh.units.find((u) => u.ams_id === unit.ams_id)?.slots.find((s) => s.tray_id === slot.tray_id)?.saved_preset,
+            () => undefined,
+          )
+          if (kept) said.text += ` Its saved preset ${kept.preset_name} was kept; use “Clear saved preset” to clear it.`
+        }
+        setMessage(said)
       }
       ams.refresh()
     } catch (cause) {
