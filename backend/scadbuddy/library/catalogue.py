@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import hashlib
@@ -963,25 +964,32 @@ class Catalogue:
                 return directory / item.poster, content_type_of(item.poster)
         return None
 
-    def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+    async def read_thumbnail(self, slug: str) -> tuple[bytes, str] | None:
         """The catalogue thumbnail and its content type: the template's cover, else
-        the first generated output's plate cover, else the default-render preview,
-        else None."""
+        the first generated output's plate cover (`OutputStore.read_plate_cover`, from
+        the output's blobs, #7256), else the default-render preview, else None. The file
+        reads run in threads."""
         with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
-            found = self._thumbnail(slug)
+            found = await asyncio.to_thread(self._own_cover, slug)
+            if found is None and self.outputs is not None:
+                plate = await self.outputs.read_plate_cover(slug)
+                found = (plate, "image/png") if plate is not None else None
+            if found is None:
+                found = await asyncio.to_thread(self._preview, slug)
             current.set_attribute("scadbuddy.found", found is not None)
             return found
 
-    def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+    def _own_cover(self, slug: str) -> tuple[bytes, str] | None:
+        """The template's own cover image and its content type. Blocking."""
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
             with contextlib.suppress(FileNotFoundError):
                 return cover[0].read_bytes(), cover[1]
-        if self.outputs is not None:
-            plate = self.outputs.plate_cover(slug)
-            if plate is not None:
-                return plate, "image/png"
+        return None
+
+    def _preview(self, slug: str) -> tuple[bytes, str] | None:
+        """The default-render preview, when it is served. Blocking."""
         if self.previews is None or not self.serve_previews:
             return None
         preview = self.previews.image(slug)

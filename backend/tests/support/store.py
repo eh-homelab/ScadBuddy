@@ -6,11 +6,14 @@ the render worker's: a directory under the index of the API's CRUD routes (#5298
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import io
 import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 from psycopg import Connection
@@ -55,6 +58,18 @@ def local_content(
     )
 
 
+async def flip_first_byte(content: ContentStore, key: str) -> None:
+    """Corrupt a blob of a local ``content`` behind the index's back; its length stays
+    the same, so only the sha256 check finds it."""
+    found = await content.stat(key)
+    assert found is not None
+    assert isinstance(content.backend, LocalContentBackend)
+    path = content.backend.root / found.ref.backend_id
+    data = bytearray(path.read_bytes())
+    data[0] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
 def s3_content(
     settings: S3Settings, pool: Pool, *, max_total_bytes: int = 0, max_count: int = 0
 ) -> ContentStore:
@@ -64,6 +79,49 @@ def s3_content(
         max_total_bytes=max_total_bytes,
         max_count=max_count,
     )
+
+
+def _on_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+class _RecordedFile(io.FileIO):
+    """A file that notes, for each read, whether it ran on an event loop's thread."""
+
+    def __init__(self, path: Path, reads: list[bool]) -> None:
+        super().__init__(path, "rb")
+        self._reads = reads
+
+    def read(self, size: int | None = -1, /) -> bytes:
+        self._reads.append(_on_loop())
+        return super().read(size)
+
+    def readall(self) -> bytes:
+        self._reads.append(_on_loop())
+        return super().readall()
+
+    def readinto(self, buffer: Any, /) -> int:
+        self._reads.append(_on_loop())
+        return super().readinto(buffer)
+
+
+def record_reads(monkeypatch: pytest.MonkeyPatch, root: Path) -> list[bool]:
+    """Every read of a file under ``root`` that `Path.open` opens for reading from now on:
+    True for a read on an event loop's thread, False for one in a worker thread."""
+    reads: list[bool] = []
+    opened = Path.open
+
+    def probe(self: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+        if mode == "rb" and self.is_relative_to(root):
+            return io.BufferedReader(_RecordedFile(self, reads))
+        return opened(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", probe)
+    return reads
 
 
 def render_key(name: str) -> str:

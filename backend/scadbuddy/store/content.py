@@ -235,7 +235,7 @@ class ContentStore:
             await self._release_unindexed(ref, reused)
             raise
         if previous is not None and previous.backend_id != ref.backend_id:
-            await self._release_replaced(key, previous)
+            await self.release_replaced(key, previous)
         return ref
 
     async def link(
@@ -254,7 +254,7 @@ class ContentStore:
             self.index.put, key, ref, slug=scope.slug, meta=meta or {}, reuse=True
         )
         if previous is not None and previous.backend_id != ref.backend_id:
-            await self._release_replaced(key, previous)
+            await self.release_replaced(key, previous)
         return ref
 
     async def _release_unindexed(self, ref: BlobRef, reused: bool) -> None:
@@ -263,7 +263,9 @@ class ContentStore:
         if not reused:
             await self._release(ref)
 
-    async def _release_replaced(self, key: str, previous: BlobRef) -> None:
+    async def release_replaced(self, key: str, previous: BlobRef) -> None:
+        """Release ``previous``, the object ``key`` named before a write moved it on,
+        unless another row still names it."""
         if previous.backend != self.name:
             # The key now names this backend's object, so no row names the old one: it
             # is left untracked on the other backend rather than deleted from here.
@@ -319,7 +321,7 @@ class ContentStore:
             await self._release(ref)
             return None
         if previous is not None and previous.ref.backend_id != ref.backend_id:
-            await self._release_replaced(key, previous.ref)
+            await self.release_replaced(key, previous.ref)
         return ref
 
     async def _keep_download(self, sha: str, data: BlobData) -> None:
@@ -464,6 +466,18 @@ class ContentStore:
     async def read(self, ref: BlobRef) -> bytes:
         async with aclosing(self.get(ref)) as chunks:
             return b"".join([chunk async for chunk in chunks])
+
+    async def verify(self, ref: BlobRef) -> bool:
+        """Whether the backend holds ``ref``'s bytes whole: a download from the backend,
+        never from `downloads`, checked against its sha256. False when the object is
+        missing or its bytes are not its sha256."""
+        try:
+            async with aclosing(self._download(ref)) as chunks:
+                async for _ in chunks:
+                    pass
+        except (BlobCorruptError, BlobMissingError):
+            return False
+        return True
 
     async def stat(self, key: str) -> BlobStat | None:
         stat = await asyncio.to_thread(self.index.get, key)

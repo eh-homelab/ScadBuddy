@@ -25,8 +25,11 @@ import type {
 export type PrintSource =
   | {
       kind: 'output'
-      /** `manifest`, `colors` and `name` are what Re-arrange needs, when the caller has them (§7). */
-      output: Pick<Output, 'id' | 'slug'> & Partial<Pick<Output, 'manifest' | 'colors' | 'name'>>
+      /**
+       * `manifest`, `colors` and `name` are what Re-arrange needs, when the caller has them (§7);
+       * `preview_version` names the preview mesh in its URL (#7256).
+       */
+      output: Pick<Output, 'id' | 'slug'> & Partial<Pick<Output, 'manifest' | 'colors' | 'name' | 'preview_version'>>
     }
   | { kind: 'library'; file: Pick<LibraryEntry, 'id' | 'filename'> }
 
@@ -135,14 +138,15 @@ export function attachPrintToProject(subject: string, body: ProjectAttach): Prom
 /** Looked up at call time, so a test's `vi.spyOn(api, …)` still sees every call. */
 export function sourceApi(source: PrintSource): SourceApi {
   if (source.kind === 'output') {
-    const { id, slug } = source.output
+    const { id, slug, preview_version: previewVersion } = source.output
     return {
       // Only named when chosen, so a read for a Bambuddy printer is as it always was.
       getChoices: (printerId, printer) => (printer ? api.getChoices(id, printerId, printer) : api.getChoices(id, printerId)),
       getFilaments: (query) => api.getFilaments(id, query),
       getPlates: () => api.getOutputPlates(id),
       plateThumbnailUrl: (index) => api.outputPlateThumbnailUrl(id, index),
-      previewUrl: (plate, onePlate) => (onePlate ? api.outputPreviewGlbUrl(id, plate) : api.outputPreviewGlbUrl(id)),
+      previewUrl: (plate, onePlate) =>
+        onePlate ? api.outputPreviewGlbUrl(id, plate) : api.outputPreviewGlbUrl(id, undefined, previewVersion),
       run: (body, signal, within) => api.runPrint(id, body, signal, within),
       check: (body, processValues) => api.checkPrint(id, body, processValues),
       preview: (body, fresh) => api.previewSlice(id, body, fresh),

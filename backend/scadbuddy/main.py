@@ -126,6 +126,8 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
+from scadbuddy.library.output_byte_copy import copy_output_bytes
+from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
@@ -238,6 +240,7 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_SWEEP,
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
+    OUTPUT_BYTES_SWEEP,
     OUTPUT_COPY_SWEEP,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CLOSES_SWEEP,
@@ -363,7 +366,7 @@ async def _close_quietly(state: AppState) -> None:
             logger.exception("could not release what a failed start opened")
 
 
-def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
+async def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the projection, then every
@@ -373,9 +376,29 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     store's lock per asset.
     ``stop``, once set, ends it before its next asset (#2140), and before and after
     reading the references, which no per-asset check can interrupt (#2554).
+    The records and the sweep run in threads; the outputs' references are read on the
+    loop, since an output's 3MF can come from the blob store (#7256).
     """
     if stopped(stop):
         return []
+    records = await asyncio.to_thread(_asset_records, state)
+    if records is None:
+        return []
+    referenced = await referenced_asset_ids(state.paths, records, state.outputs)
+    if stopped(stop):
+        return []
+    removed = await asyncio.to_thread(
+        state.assets.sweep, referenced, grace=state.config.asset_sweep_grace, stop=stop
+    )
+    state.metrics.assets_swept.inc(len(removed))
+    if removed:
+        logger.info("removed unused uploads", extra={"count": len(removed)})
+    return removed
+
+
+def _asset_records(state: AppState) -> list[Mapping[str, Any]] | None:
+    """The JSON records from Postgres that can name an upload; None when the orders'
+    cannot be read, which skips the pass. Blocking."""
     jobs = state.render.store.list_jobs()
     # Whole inputs, not only their `params`: a template UI's own state can name an
     # upload too (#725). A job's `params` beside them, for a row whose inputs are `{}`.
@@ -389,15 +412,8 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
         records += state.components.get(ORDERS).store.item_inputs()
     except Exception:
         logger.exception("skipping the asset sweep: the orders' inputs could not be read")
-        return []
-    referenced = referenced_asset_ids(state.paths, records)
-    if stopped(stop):
-        return []
-    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
-    state.metrics.assets_swept.inc(len(removed))
-    if removed:
-        logger.info("removed unused uploads", extra={"count": len(removed)})
-    return removed
+        return None
+    return records
 
 
 def _sweep_checkouts(state: AppState) -> list[str]:
@@ -466,7 +482,7 @@ async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = N
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
-        removed = await asyncio.to_thread(sweep_assets, state, stop)
+        removed = await sweep_assets(state, stop)
         if remote is None or cutoff is None:
             return
         if stop is not None and stop.is_set():
@@ -667,6 +683,69 @@ async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> Non
         await _copy_outputs_once(state, stop)
 
 
+async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> None:
+    """One run of the byte copy of the saved outputs to the blob store (#7256,
+    `copy_output_bytes`), logged. It takes the copy's advisory lock, so one replica copies
+    at a time; a run that does not get it does nothing. On the `local` and `bambuddy`
+    stores it records a refused run. A failure is logged, then raised."""
+    rows = state.outputs.rows
+    if rows is None:
+        return
+    try:
+        result = await copy_output_bytes(
+            state.outputs, rows, state.store.content, state.projection.conninfo, stop
+        )
+    except Exception:
+        logger.exception(
+            "could not copy the outputs' bytes to the blob store; the next sweep or start retries"
+        )
+        raise
+    if result is not None:
+        logger.info(
+            "copied the outputs' bytes to the blob store",
+            extra={
+                "copied": result.copied,
+                "verified": result.verified,
+                "skipped": result.skipped,
+                "failed": len(result.failed),
+                "damaged": len(result.damaged),
+                "refused": result.refused,
+                "incomplete": result.incomplete,
+                "stopped": stop.is_set(),
+            },
+        )
+
+
+async def _copy_output_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's byte copy (#7256), once and best effort: a failure is logged only. The
+    housekeeping sweep `OUTPUT_BYTES_SWEEP` runs it again, for the files of pods on an
+    older build."""
+    with suppress(Exception):
+        await _copy_output_bytes_once(state, stop)
+
+
+async def _copy_outputs_and_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's copies: the rows (#7255), then the bytes (#7256), which walk the rows
+    the first copy wrote. The bytes are copied only when the last row copy run finished:
+    a run that is ``incomplete`` (an outputs volume not there) or did not end leaves the
+    byte copy to the sweep `OUTPUT_BYTES_SWEEP`."""
+    await _copy_outputs_logged(state, stop=stop)
+    if stop.is_set():
+        return
+    rows = state.outputs.rows
+    if rows is None:
+        return
+    try:
+        last = await asyncio.to_thread(rows.last_run)
+    except Exception:
+        logger.exception("could not read the last row copy; the start does not copy the bytes")
+        return
+    if last is None or last["finished_at"] is None or last["incomplete"]:
+        logger.info("the row copy did not finish; the start does not copy the outputs' bytes")
+        return
+    await _copy_output_bytes_logged(state, stop=stop)
+
+
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
 HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 
@@ -812,6 +891,17 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
             stop.set()
             raise
 
+    @activity.defn(name=OUTPUT_BYTES_SWEEP)
+    async def copy_output_bytes_to_blobs() -> None:
+        # #7256: its own stop, as the row copy's: the worker's shutdown or any cancel ends
+        # the run between outputs and frees its advisory lock.
+        stop = threading.Event()
+        try:
+            await _heartbeating(_copy_output_bytes_once(state, stop), stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:
         await _heartbeating(_sweep_flow_runs_logged(state))
@@ -937,6 +1027,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_backfills,
         reap_output_holds,
         copy_outputs_to_rows,
+        copy_output_bytes_to_blobs,
         sweep_flow_runs,
         sweep_preview_slices,
         sweep_lost_slice_starts,
@@ -2494,6 +2585,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
+    # #7256: the outputs' bytes are read from the blob store first, never on `local`
+    # (no content store) or `bambuddy`.
+    if usable(state.store.content):
+        assert state.store.content is not None
+        state.outputs.bytes = OutputBytes(state.store.content)
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
     # a failure anywhere here (a refused OpenSCAD probe, a render service or bus that
     # will not start) releases what is open, the store and its pool included, rather
@@ -2599,8 +2695,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # #7255: every saved output's files copied to its row, and the rows reconciled
         # with the files; until a copy run finishes, a missing row falls back to them.
         # The housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for older pods' writes.
+        # #7256: then their bytes to the blob store (`OUTPUT_BYTES_SWEEP` again).
         copy_now = asyncio.create_task(
-            _copy_outputs_logged(state, stop=stop_background), name="copy outputs"
+            _copy_outputs_and_bytes_logged(state, stop=stop_background), name="copy outputs"
         )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.

@@ -1103,11 +1103,11 @@ async def estimate(
         ) from None
     await asyncio.to_thread(require_output, outputs, output_id)
 
-    def measured() -> list[EstimatedPart]:
+    async def measured() -> list[EstimatedPart]:
         parts: list[EstimatedPart] = []
         plate, plates = 1, 1
         while plate <= plates:
-            analysis = outputs.geometry(output_id, plate)
+            analysis = await outputs.geometry(output_id, plate)
             plates = analysis.plates
             parts += [
                 EstimatedPart(
@@ -1123,7 +1123,7 @@ async def estimate(
         return parts
 
     try:
-        parts = await asyncio.to_thread(measured)
+        parts = await measured()
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except (ValueError, zipfile.BadZipFile) as error:

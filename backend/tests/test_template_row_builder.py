@@ -3,6 +3,7 @@ decisions 6 and 7): one template's files read into its derived row."""
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import os
@@ -156,7 +157,7 @@ def _assert_cover_is_the_thumbnail(
     catalogue: Catalogue, template_id: str, path: str
 ) -> TemplateRow:
     row = _row(catalogue, template_id)
-    thumbnail = catalogue.thumbnail(template_id)
+    thumbnail = asyncio.run(catalogue.read_thumbnail(template_id))
     assert thumbnail is not None
     assert row.cover == {
         "path": path,

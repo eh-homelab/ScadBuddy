@@ -23,8 +23,6 @@ import json
 import logging
 import re
 import time
-import xml.etree.ElementTree as ET
-import zipfile
 from collections.abc import Awaitable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
@@ -89,6 +87,7 @@ from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_path
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
+from scadbuddy.library.output_rows import Role
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -104,7 +103,6 @@ from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
 
@@ -1293,21 +1291,22 @@ def _library_files(
 
 
 def _output_files(outputs: OutputStore, meta: OutputMeta) -> list[PrintFile]:
+    """The output's 3MF and preview, each sized from the blob index, else its file
+    (#7256). Blocking."""
     files: list[PrintFile] = []
-    directory = outputs.directory(meta.id)
     name = download_filename(meta)
-    own: tuple[tuple[Literal["output_3mf", "preview_glb"], str, str, str], ...] = (
-        ("output_3mf", MODEL_NAME, "model.3mf", name),
-        ("preview_glb", PREVIEW_NAME, "preview.glb", name.removesuffix(".3mf") + ".glb"),
+    own: tuple[tuple[Literal["output_3mf", "preview_glb"], Role, str, str], ...] = (
+        ("output_3mf", "model", MODEL_NAME, name),
+        ("preview_glb", "preview", PREVIEW_NAME, name.removesuffix(".3mf") + ".glb"),
     )
-    for kind, file_name, route, download in own:
-        path = directory / file_name
-        if path.is_file():
+    for kind, role, route, download in own:
+        size = outputs.role_size(meta.id, role)
+        if size is not None:
             files.append(
                 PrintFile(
                     kind=kind,
                     name=download,
-                    size=path.stat().st_size,
+                    size=size,
                     url=f"/api/v1/outputs/{meta.id}/{route}",
                 )
             )
@@ -1360,21 +1359,13 @@ def _media(link: LinkedPrint, archive: ArchiveDetail, added: list[Attachment]) -
     )
 
 
-def _output_plate_names(outputs: OutputStore, output_id: str) -> dict[int, str]:
-    try:
-        plates = plates_of(outputs.directory(output_id) / MODEL_NAME)
-    except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError):
-        return {}
-    return {plate.index: plate.name for plate in plates if plate.name}
-
-
 async def _plate_names(
     link: LinkedPrint, outputs: OutputStore, client: BambuddyClient, native: NativeLibrary | None
 ) -> dict[int, str]:
     """#2055 — each plate's name, from what this print was of. Advisory: an unreadable
     source names nothing, and the caption keeps the plate's number."""
     if link.output_id is not None:
-        return await asyncio.to_thread(_output_plate_names, outputs, link.output_id)
+        return await outputs.plate_names(link.output_id)
     if link.library_file_id is None:
         return {}
     reads = native if native is not None and is_native_id(link.library_file_id) else client

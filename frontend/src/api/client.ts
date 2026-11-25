@@ -2148,10 +2148,16 @@ export const api = {
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
-  /** #1723 — the output's preview mesh, every part in its colour. */
-  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
-  outputPreviewGlbUrl: (id: string, plate?: number) =>
-    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
+  /**
+   * #1723 — the output's preview mesh, every part in its colour; with `plate` that one
+   * plate of its 3MF (#2169). `version` is the output's `preview_version` (#7256), as
+   * `outputThumbnailUrl`'s: it names the mesh, so the browser may keep it. A plate's
+   * mesh is cut from the 3MF and takes none.
+   */
+  outputPreviewGlbUrl: (id: string, plate?: number, version?: string | null) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${
+      plate !== undefined ? `?plate=${plate}` : version ? `?v=${seg(version)}` : ''
+    }`,
 
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
