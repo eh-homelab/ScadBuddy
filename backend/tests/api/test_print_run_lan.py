@@ -12,7 +12,7 @@ import asyncio
 import contextlib
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Coroutine, Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -313,7 +313,10 @@ def test_a_gone_oldest_run_gives_way_once_the_sweep_records_it(
 
 
 def test_the_prune_passes_run_holds_sweep_ends_a_gone_run(
-    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+    client: TestClient,
+    workflow_reaper: WorkflowReaper,
+    sequences: list[Any],
+    app_run_holds_sweep_off: Callable[[AppState], Coroutine[Any, Any, None]],
 ) -> None:
     """#6871 (review of #6939): the run-holds sweep, on the prune Schedule every
     `PRUNE_INTERVAL` whatever the asset sweep's interval, records a run whose sequence is
@@ -325,7 +328,7 @@ def test_the_prune_passes_run_holds_sweep_ends_a_gone_run(
     (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
     assert card["lan_run"]["run_id"] == gone
 
-    workflow_reaper.run(app_main._reap_run_holds_logged(_state(client)))
+    workflow_reaper.run(app_run_holds_sweep_off(_state(client)))
 
     stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
     assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] == stopped
@@ -359,7 +362,10 @@ def test_a_queued_runs_card_reads_whether_the_print_it_waits_for_still_runs(
     assert card["lan_run"]["queued"] and not card["lan_run"]["queued_for_print"]
 
 
-def test_a_hanging_describe_never_stops_the_hold_reap(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_hanging_describe_never_stops_the_hold_reap(
+    monkeypatch: pytest.MonkeyPatch,
+    app_run_holds_sweep_off: Callable[[AppState], Coroutine[Any, Any, None]],
+) -> None:
     """#6871 (review of #6948): each run's sequence check is bounded, and one that does
     not answer is skipped, so the run-holds reap after it still runs."""
 
@@ -384,7 +390,7 @@ def test_a_hanging_describe_never_stops_the_hold_reap(monkeypatch: pytest.Monkey
     monkeypatch.setattr(printing_api, "SEQUENCE_CHECK_TIMEOUT", timedelta(milliseconds=50))
     monkeypatch.setattr(app_main, "reap_run_holds", reap)
     state = SimpleNamespace(print_runs=SimpleNamespace(store=Store(), client=Client()), refs="refs")
-    asyncio.run(asyncio.wait_for(app_main._reap_run_holds_logged(state), timeout=5))  # type: ignore[arg-type]
+    asyncio.run(asyncio.wait_for(app_run_holds_sweep_off(state), timeout=5))  # type: ignore[arg-type]
     assert reaped == ["refs"]
 
 
