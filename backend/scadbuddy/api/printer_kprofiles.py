@@ -140,7 +140,8 @@ def _write(row: PrinterRow, name: str, payload: dict[str, object]) -> LanCommand
     summary="A printer's K-profiles",
     description=(
         "The K table the printer holds for one nozzle diameter, read over ScadBuddy's LAN link"
-        " (`extrusion_cali_get`, tried three times). 502 `printer_no_answer` when the printer"
+        " (`extrusion_cali_get`, tried three times), with `extruders`, how many extruders the"
+        " printer's last report lists. 502 `printer_no_answer` when the printer"
         " does not answer." + COMMAND
     ),
 )
@@ -160,7 +161,8 @@ async def get_printer_kprofiles(
                 wait_s=LAN_REPLY_WAIT_READ,
                 kind="read",
             )
-        ]
+        ],
+        answer={"extruders": len(seen.nozzles) or None},
     )
     return await _send(commands, row, seen, run)
 

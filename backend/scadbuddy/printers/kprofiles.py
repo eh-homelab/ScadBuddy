@@ -214,9 +214,12 @@ def set_rows(rows: Sequence[KProfileSet]) -> list[KProfileRow]:
 
 
 def kprofile_table_view(run: LanCommandRun, outcome: LanCommandOutcome) -> KProfileTable:
-    """``GET /kprofiles``'s body: the table at the nozzle diameter the command asked for."""
+    """``GET /kprofiles``'s body: the table at the nozzle diameter the command asked for,
+    with the extruder count the route put in the run's ``answer`` (P54)."""
     nozzle_diameter = str(run.commands[0].payload["print"]["nozzle_diameter"])
-    return table_of(outcome.replies[0].reply or {}, nozzle_diameter)
+    table = table_of(outcome.replies[0].reply or {}, nozzle_diameter)
+    table.extruders = (run.answer or {}).get("extruders")
+    return table
 
 
 def kprofile_write_view(run: LanCommandRun, outcome: LanCommandOutcome) -> KProfileWriteResult:

@@ -109,8 +109,11 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
   const [deleting, setDeleting] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ text: string; warn: boolean } | null>(null)
-  const dual = row.bambuddy_view?.nozzle_count === 2
   const profiles = table.data?.profiles ?? []
+  // P54: the count is the printer's own report's (`extruders`); a list that names none is two
+  // when a profile is on extruder 1.
+  const extruders = table.data?.extruders ?? (profiles.some((profile) => profile.extruder_id === 1) ? 2 : 1)
+  const dual = extruders > 1
   const noted = notes.data?.notes ?? {}
   const rowKey = (profile: KProfile) => `${profile.slot_id}-${profile.extruder_id}-${profile.filament_id}`
 

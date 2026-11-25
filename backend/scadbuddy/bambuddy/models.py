@@ -1149,6 +1149,9 @@ class KProfileTable(BambuddyModel):
 
     profiles: list[KProfile] = Field(default_factory=list)
     nozzle_diameter: str | None = None
+    #: How many extruders the printer has, from ScadBuddy's stored report (#7276, P54):
+    #: the LAN route fills it; None where nothing says (Bambuddy's own answer).
+    extruders: int | None = None
 
 
 class KProfileWriteResult(BambuddyModel):

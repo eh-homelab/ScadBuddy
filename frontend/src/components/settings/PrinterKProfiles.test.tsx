@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { printRunPoll } from '../../api/client'
 import type { PrinterRow } from '../../api/types'
 import { printerCommandKeys, setPrinterCommandSlow } from '../../mocks/features/printerCommands'
-import { mockKProfileNotes, mockKProfiles, setKProfileUnconfirmed } from '../../mocks/features/printerKProfiles'
+import {
+  mockKProfileNotes,
+  mockKProfiles,
+  setKProfileExtruders,
+  setKProfileUnconfirmed,
+} from '../../mocks/features/printerKProfiles'
 import { initialPrinters, setLanLinked } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
@@ -59,6 +64,30 @@ describe('PrinterKProfiles (#7154)', () => {
     expect(screen.getByRole('columnheader', { name: 'Extruder' })).toBeInTheDocument()
   })
 
+  it('a LAN-only dual printer shows the Extruder column (P54)', async () => {
+    // The shape comes from the list's `extruders`, the printer's own report, not Bambuddy's view.
+    const lanOnly = { ...h2c, bambuddy_printer_id: null, bambuddy_view: null }
+    const { user } = await opened(lanOnly)
+    expect(await screen.findByRole('columnheader', { name: 'Extruder' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add a K-profile' }))
+    const form = screen.getByRole('form', { name: 'Add a K-profile' })
+    await user.click(within(form).getByRole('combobox', { name: 'Extruder' }))
+    expect(await screen.findByRole('option', { name: 'Both extruders' })).toBeInTheDocument()
+  })
+
+  it('reads one extruder from the list even where Bambuddy says two', async () => {
+    setKProfileExtruders(1)
+    await opened()
+    await screen.findByRole('row', { name: 'K-profile Bambu PLA Basic' })
+    expect(screen.queryByRole('columnheader', { name: 'Extruder' })).not.toBeInTheDocument()
+  })
+
+  it('takes a profile on extruder 1 for two extruders when the list names no count', async () => {
+    setKProfileExtruders(null)
+    await opened({ ...h2c, bambuddy_view: null })
+    expect(await screen.findByRole('columnheader', { name: 'Extruder' })).toBeInTheDocument()
+  })
+
   it('says when the printer holds no profile for the nozzle', async () => {
     const { user } = await opened()
     await screen.findByRole('row', { name: 'K-profile Bambu PLA Basic' })
@@ -108,6 +137,7 @@ describe('PrinterKProfiles (#7154)', () => {
   })
 
   it('adds a high-flow profile on a single-nozzle printer with the one-profile route', async () => {
+    setKProfileExtruders(1)
     const { user } = await opened(single)
     await screen.findByRole('row', { name: 'K-profile Bambu PLA Basic' })
     expect(screen.queryByRole('columnheader', { name: 'Extruder' })).not.toBeInTheDocument()

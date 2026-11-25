@@ -10,7 +10,8 @@ import { printersState } from './printers'
  * route answers (`printerCommands.ts` `lanRefusal`), so a test links printer 1's row first. A
  * write without an `Idempotency-Key` is a 428. `setKProfileUnconfirmed(true)` makes the printer
  * leave every write unconfirmed; `printerCommands.ts` `setPrinterCommandSlow` makes every command
- * a 202 to follow. The notes are ScadBuddy's own and need no LAN link.
+ * a 202 to follow. The list answers `extruders`, 2 as the H2C reports (`setKProfileExtruders`).
+ * The notes are ScadBuddy's own and need no LAN link.
  */
 
 export const H2C = '00000000-0000-4000-8000-000000000001'
@@ -52,6 +53,7 @@ const state = {
   notes: { PFUS1: 'Calibrated on the textured plate' } as Record<string, string>,
   unconfirmed: false,
   nextSlot: 3,
+  extruders: 2 as number | null,
 }
 
 export function reset(): void {
@@ -59,6 +61,12 @@ export function reset(): void {
   state.notes = { PFUS1: 'Calibrated on the textured plate' }
   state.unconfirmed = false
   state.nextSlot = 3
+  state.extruders = 2
+}
+
+/** The list's `extruders`, as the route reads it from the printer's last report; `null` for a report that names none. */
+export function setKProfileExtruders(count: number | null): void {
+  state.extruders = count
 }
 
 export function setKProfileUnconfirmed(on: boolean): void {
@@ -111,6 +119,7 @@ export const handlers = [
     return commandAnswer(String(params.id), request, {
       profiles: state.profiles.filter((profile) => profile.nozzle_diameter === nozzle),
       nozzle_diameter: nozzle,
+      extruders: state.extruders,
     } satisfies KProfileTable)
   }),
   http.get('/api/v1/printers/:id/kprofiles/notes', ({ params }) =>
