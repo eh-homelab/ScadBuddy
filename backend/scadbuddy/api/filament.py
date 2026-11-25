@@ -9,8 +9,9 @@ Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags` 
 `filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
 (``sb_to_bb`` or ``two_way``);
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
-`POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
-tag (`filament/rfid_slots.py`), whatever ``tags`` says.
+`POST /rfid/reconcile` runs the mode and the tag push, whatever ``tags`` says, and then
+configures the AMS slot of each override tag over ScadBuddy's own LAN link, never through
+Bambuddy (`filament/rfid_slots.py`, #7276).
 `POST /filament/presets/bambuddy-import` reads Bambuddy's local presets and writes
 ScadBuddy's own presets only (#7244).
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
@@ -201,6 +202,7 @@ from scadbuddy.profile_fetch.wire import (
 )
 from scadbuddy.profile_fetch.workflow import NOT_STARTED as TDFP_NOT_STARTED
 from scadbuddy.rows.component import ROWS, Rows
+from scadbuddy.slicing.component import SlicingDep
 from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     TemporalUnreachableError,
@@ -3040,12 +3042,15 @@ async def set_rfid_override_mode(
         "is brought to the override mode and the setting `filament_auto_add_unknown_rfid`, "
         "then the queued tag changes are pushed (only with "
         "`filament_sync.tags` `sb_to_bb` or `two_way`), then the AMS slot of each override tag is "
-        "configured with its type's preset. Answers the mode's status and the tag push "
-        "counts, and the override slots' counts (`slots` is null with no Bambuddy)."
+        "configured with its type's preset over ScadBuddy's own LAN link (Bambuddy is not "
+        "called for it; only LAN-linked printers with a fresh report count). Answers the "
+        "mode's status and the tag push counts, and the override slots' counts: `unconfirmed` "
+        "counts a configure sent that the printer had not acknowledged in time. `slots` is "
+        "null when another reconcile holds the slots."
     ),
 )
 async def reconcile_rfid(
-    filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep
+    filament: FilamentDep, store: SettingsStoreDep, printers: PrintersDep, slicing: SlicingDep
 ) -> m.RfidReconcileReport:
     # Each step fails alone, as in the activity: one broken step never skips the others.
     try:
@@ -3066,7 +3071,11 @@ async def reconcile_rfid(
         tags = m.TagPushReport(failed=1)
     try:
         slots = await reconcile_slots_now(
-            filament, store.load, printers=printers.store, reports=printers.reports
+            filament,
+            printers=printers.store,
+            reports=printers.reports,
+            commands=printers.lan_commands,
+            profiles=slicing.profiles,
         )
     except Exception as error:
         logger.warning("could not configure the slots", extra={"error": type(error).__name__})

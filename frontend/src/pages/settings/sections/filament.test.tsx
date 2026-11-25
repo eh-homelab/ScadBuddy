@@ -638,7 +638,7 @@ describe('Filament (#6262)', () => {
         HttpResponse.json({
           mode: { override_mode: true, state: 'applied', devices: [] },
           tags: { pushed: 0, moved: 0, cleared: 0, unchanged: 0, failed: 2 },
-          slots: { configured: 0, unchanged: 0, no_preset: 0, no_temps: 0, no_nozzle: 0, failed: 1 },
+          slots: { configured: 0, unconfirmed: 2, unchanged: 0, no_preset: 0, no_temps: 0, no_nozzle: 0, failed: 1 },
         }),
       ),
     )
@@ -648,6 +648,7 @@ describe('Filament (#6262)', () => {
     await user.click(await within(filament).findByRole('button', { name: 'Apply now' }))
     expect(await within(filament).findByText(/2 tags were not sent/)).toBeInTheDocument()
     expect(within(filament).getByText(/1 slot was not set/)).toBeInTheDocument()
+    expect(within(filament).getByText(/2 slots were sent, but the printer did not confirm in time/)).toBeInTheDocument()
   })
 
   it('says which slots were skipped for no preset or no nozzle', async () => {

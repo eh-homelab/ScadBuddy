@@ -2239,11 +2239,16 @@ class TagPushReport(BaseModel):
 
 
 class SlotReport(BaseModel):
-    """What one reconcile of the override slots did (#6264). ``no_preset``: the type has no
-    preset for the nozzle. ``no_temps``: the spool has no nozzle temperatures, the tray
-    reports none, or the spool has no material or colour to send. Neither calls Bambuddy."""
+    """What one reconcile of the override slots did (#6264, #7276). ``no_preset``: the type
+    has no preset for the nozzle, or the preset has no Bambu filament id ScadBuddy knows.
+    ``no_temps``: the spool has no nozzle temperatures, the tray reports none, or the spool
+    has no material or colour to send. ``no_nozzle``: the report does not say which nozzle
+    the tray feeds. None of the three sends a command. ``unconfirmed``: the configure was
+    sent, but the printer had not acknowledged it when ScadBuddy stopped waiting (P36); it
+    may still apply, and a later pass sends it again unless the tray shows it."""
 
     configured: int = 0
+    unconfirmed: int = 0
     unchanged: int = 0
     no_preset: int = 0
     no_temps: int = 0
@@ -2296,8 +2301,8 @@ class RfidModeSet(BaseModel):
 
 
 class RfidReconcileReport(BaseModel):
-    """What one reconcile did: the mode, the tags and the override slots (``None`` when no
-    Bambuddy is configured: the step is skipped)."""
+    """What one reconcile did: the mode, the tags and the override slots (``None`` when
+    another reconcile holds the slots: the step is skipped)."""
 
     mode: RfidStatus
     tags: TagPushReport

@@ -1,34 +1,39 @@
-"""The AMS slot of an override tag, configured with its type's preset (#6264).
+"""The AMS slot of an override tag, configured with its type's preset (#6264, #7276).
 
 A tag bound with ``override=True`` says: the spool's own values stand, not what the Bambu
-tag says. Bambuddy's AMS reads the tag, so ScadBuddy tells the slot the spool's values with
-Bambuddy's slot-configure route (`BambuddyClient.configure_slot`). Every step is
-state-based: the report's tray values are read first, and a write follows only a
-difference (`reconcile_slots`)."""
+tag says. The AMS reads the tag, so ScadBuddy tells the slot the spool's values over its own
+LAN link: the AMS slot configure's commands (`printers/ams_slots.py` `configure_values` and
+`configure_commands`, plan 2026-11-25 Task 9, P42), run by a `LanCommandSender`. Bambuddy
+is not called. Every step is state-based: the report's tray values are read first, and a
+write follows only a difference (`reconcile_slots`)."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.extruders import extruder_of
-from scadbuddy.bambuddy.models import PrinterStatus, SlotConfigure
+from fastapi import status as http
+
+from scadbuddy.bambuddy.catalogue import Catalogue
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL
-from scadbuddy.bambuddy.trays import seen_trays
+from scadbuddy.bambuddy.trays import seen_trays, tray_at
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.component import Filament
 from scadbuddy.filament.presets import effective_k_values, effective_presets, preset_for
 from scadbuddy.filament.rfid_push import acquire_lock, error_label
-from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.printers.reports import PrinterReportStore, report_status
-from scadbuddy.printers.status import is_fresh, mounted_nozzles
+from scadbuddy.printers import ams_slots as sc
+from scadbuddy.printers.lan_command_models import LanCommandPending, LanCommandRun
+from scadbuddy.printers.lan_commands import SlotParams, UnsupportedUnitError
+from scadbuddy.printers.native import LanCommandSender, is_lan_linked, live_status
+from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.slicing.catalogue import catalogue_for
+from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.spools.models import SeenTray
 
 logger = logging.getLogger(__name__)
@@ -41,122 +46,21 @@ SLOTS_LOCK = "scadbuddy:filament:rfid_slots"
 RECONFIGURE_WARNING = 3
 
 
-def installed_nozzle(
-    status: PrinterStatus, report: Mapping[str, Any], ams_id: int, tray_id: int = 0
-) -> str | None:
-    """The diameter of the nozzle installed on the extruder the AMS unit ``ams_id`` feeds
-    (``"0.4"``), or ``None`` when the report does not say. ``status`` is the report's
-    `PrinterStatus` (`report_status`); the extruder is `bambuddy/extruders.py`
-    `extruder_of` of it.
-
-    Measured on `tests/printers/fixtures/lan-report-h2c-idle.json` (an H2C, firmware
-    01.02.00.00, recorded 2026-10-24). The installed nozzle of extruder ``n`` is the entry
-    of ``print.device.nozzle.info`` whose ``id`` is ``n`` (ids 0 and 1; ids from 16 are the
-    rack; `mounted_nozzles` indexes by id), and its ``diameter`` is the key: ``0.6`` for id
-    0 and ``0.4`` for id 1. That fixture says nothing direct about which extruder an AMS
-    feeds: no unit fixes one (bits 8-11 of each unit's ``info`` are ``0xE``, "not fixed",
-    as ``11002E03`` shows). With the Filament Track Switch, bits 24-27 of ``info`` give the
-    inlet the unit rests on (``0x11`` is inlet A, ``0x10`` inlet B), and inlet A rests on
-    the left extruder, B on the right. That mapping is Bambuddy's ``FTS_INLET_EXTRUDER``
-    (`bambuddy/extruders.py`, "measured on the maintainer's H2C", mirroring Bambuddy's
-    ``utils/fts_routing.py``:
-    https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/utils/fts_routing.py), and
-    this function takes it as the documented field: with the switch fitted any AMS can
-    reach either nozzle, so this is the nozzle the unit rests on, not one the printer
-    promises. `lan-report-h2c.json` has no ``info`` on its units, so there the answer is
-    ``None``."""
-    extruder = extruder_of(ams_id, tray_id, status)
-    if extruder is None:
-        return None
-    nozzle = mounted_nozzles(dict(report)).get(extruder)
-    return None if nozzle is None else nozzle.nozzle_diameter or None
-
-
-def _tray_temps(report: Mapping[str, Any], ams_id: int, tray_id: int) -> tuple[int, int] | None:
-    """The nozzle temperatures a tray reports (``nozzle_temp_min`` and ``nozzle_temp_max``,
-    strings in `lan-report-h2c.json`), or ``None`` when either is missing, blank, not a
-    number or ``0``."""
-    block = report.get("ams")
-    units = block.get("ams") if isinstance(block, dict) else None
-    for unit in units if isinstance(units, list) else []:
-        if not isinstance(unit, dict) or str(unit.get("id")) != str(ams_id):
-            continue
-        trays = unit.get("tray")
-        for tray in trays if isinstance(trays, list) else []:
-            if not isinstance(tray, dict) or str(tray.get("id")) != str(tray_id):
-                continue
-            try:
-                low, high = int(tray["nozzle_temp_min"]), int(tray["nozzle_temp_max"])
-            except (KeyError, TypeError, ValueError):
-                return None
-            return (low, high) if low > 0 and high > 0 else None
-    return None
-
-
-def slot_params(
-    spool: m.Spool,
-    presets: Sequence[m.EffectivePreset],
-    k_values: Sequence[m.EffectiveKValue],
-    printer_id: UUID,
-    printer_model: str,
-    nozzle: str,
-    tray_temps: tuple[int, int] | None,
-    extruder: int | None,
-) -> SlotConfigure | None:
-    """What the slot is configured with: the spool's values and its type's preset for this
-    printer model and ``nozzle``. ``None`` when there is no such preset, or it is a
-    ScadBuddy preset Bambuddy has no mirror of (#7176; the caller tells both from the rest),
-    or the spool has no material or colour to send, or no temperatures: the spool's own,
-    else ``tray_temps`` (what the tray reports). The K value is the one of this printer,
-    ``extruder`` and nozzle; without one ``cali_idx`` is ``-1`` and the K value is empty."""
-    preset = preset_for(presets, printer_model, nozzle)
-    # Bambuddy knows a ScadBuddy preset by its mirror's id only (#7176).
-    ref = None if preset is None else preset.for_bambuddy()
-    effective = spool.effective
-    material = spool.names.material
-    low, high = effective.nozzle_temp_min, effective.nozzle_temp_max
-    if low is None or high is None:
-        low, high = tray_temps if tray_temps else (None, None)
-    if (
-        preset is None
-        or ref is None
-        or material is None
-        or effective.rgba is None
-        or low is None
-        or high is None
-    ):
-        return None
-    k = next(
-        (
-            row
-            for row in k_values
-            if row.printer_id == printer_id
-            and row.extruder == extruder
-            and row.nozzle_diameter == nozzle
-        ),
-        None,
-    )
-    return SlotConfigure(
-        tray_info_idx=ref,
-        tray_type=material,
-        tray_sub_brands=preset.slicer_filament_name or spool.names.subtype or material,
-        tray_color=effective.rgba.lstrip("#").upper(),
-        nozzle_temp_min=low,
-        nozzle_temp_max=high,
-        cali_idx=-1 if k is None or k.cali_idx is None else k.cali_idx,
-        nozzle_diameter=nozzle,
-        setting_id=None if k is None else k.setting_id,
-        k_value=None if k is None else float(k.k_value),
-    )
-
-
-def _shows(seen: SeenTray, params: SlotConfigure) -> bool:
+def _shows(seen: SeenTray, params: SlotParams) -> bool:
     """Whether the report's tray already shows what ``params`` would set."""
     return (
         seen.tray_info_idx == params.tray_info_idx
         and (seen.material or "") == params.tray_type
-        and (seen.rgba or "").lstrip("#").upper() == params.tray_color
+        and (seen.rgba or "").lstrip("#").upper() == params.tray_color.upper()
     )
+
+
+def _label(exc: ApiError) -> str:
+    """What a failed configure records: the problem's ``code`` (``printer_refused``,
+    ``printer_no_answer``, ``printer_unreachable``, ...), else `error_label`. Never the
+    message."""
+    code = exc.extensions.get("code")
+    return code if isinstance(code, str) else error_label(exc)
 
 
 def _read(
@@ -233,27 +137,41 @@ def _failed(
 
 async def reconcile_slots(
     store: Filament,
-    client: BambuddyClient,
+    commands: LanCommandSender,
     *,
     printers: PrinterStore,
     reports: PrinterReportStore,
+    catalogue: Catalogue | None,
 ) -> m.SlotReport:
     """Configure the slot of every override tag a printer's fresh report shows. A printer
-    counts when it has a ``bambuddy_printer_id`` and a fresh report. A filled tray counts
-    only when its holder was found by its tag (`FilamentInventory.trays`) and the holder
-    spool has an open binding with ``override=True``.
+    counts when it is linked over the LAN (`is_lan_linked`) and has a fresh report, read
+    through `live_status`; its Bambuddy link does not matter. A filled tray counts only
+    when its holder was found by its tag (`FilamentInventory.trays`) and the holder spool
+    has an open binding with ``override=True``.
 
-    A counted slot is ``unchanged`` only when both hold: the row's hash equals the digest of
-    the params, for the same spool (the hash is an attempt guard: what ScadBuddy sent), and
-    the report's tray already shows the params' ``tray_info_idx``, material and colour. The
-    AMS re-reads a Bambu tag when it reloads and resets the slot, so the hash is never
-    trusted alone. Any difference is configured, and the row is written with the hash and
-    ``configured_at``. A failure records ``attempts`` and ``last_error`` (`error_label`),
-    stores no hash, and the next slot goes on. A type with no preset for the nozzle is
-    ``no_preset``, a spool with no temperatures of its own and none on the tray (or no
-    material or colour) is ``no_temps``, a tray whose nozzle the report does not say is
-    ``no_nozzle``; none calls Bambuddy. The spool's temperatures come first; the tray's
-    reported ones fill in.
+    The slot's values are the AMS slot configure's (`ams_slots.configure_values` with the
+    spool, its presets and K values, P42): the preset's ids come from the native
+    ``catalogue`` (`slot_ids`; with none, every preset is ``no_preset``), and a K profile
+    made for another filament is sent as a new
+    K value. A counted slot is ``unchanged`` only when both hold: the row's hash equals the
+    digest of the params, for the same spool (the hash is an attempt guard: what ScadBuddy
+    sent), and the report's tray already shows the params' ``tray_info_idx``, material and
+    colour. The AMS re-reads a Bambu tag when it reloads and resets the slot, so the hash is
+    never trusted alone. Any difference is configured: `guard` checks the stored report
+    first (R-7276-12), and a printer that prints or whose AMS is busy is sent nothing and
+    counted nowhere, so a later pass configures it. Then the commands
+    (`configure_commands`) run once, and the row is written with the hash and
+    ``configured_at``. A run the printer acknowledged is ``configured``; one still open
+    (`LanCommandPending`) or with a write it did not acknowledge is ``unconfirmed`` (P36:
+    it may be on its way, so it is neither done nor failed) and writes the row as a
+    configure does, since the next pass checks the tray anyway. A refused or unanswered
+    run (an `ApiError`: ``printer_refused``, ``printer_no_answer``,
+    ``printer_unreachable``) records ``attempts`` and ``last_error`` (`_label`), stores no
+    hash, and the next slot goes on. A type with no preset for the nozzle, or one whose
+    preset has no filament id in the catalogue, is ``no_preset``; a spool with no
+    temperatures of its own and none on the tray (or no material or colour) is
+    ``no_temps``; a tray whose nozzle the report does not say is ``no_nozzle``; none sends
+    a command. The spool's temperatures come first; the tray's reported ones fill in.
 
     Not verifiable from a recording: whether the AMS reports the preset's ``tray_info_idx``
     back after a configure. If it does not, the tray never shows what was sent, and every
@@ -265,18 +183,17 @@ async def reconcile_slots(
     the tray has no spool) is sent nothing: ScadBuddy cannot know the tag's own values, and
     the AMS reads a Bambu tag again when the spool is reloaded. Its row is deleted, so that
     a later override on the slot configures again. A spool's deletion cascades its row away;
-    closing or turning off a binding does not, so this deletes it. Only a printer with a
-    fresh report is touched, so a stale report deletes nothing."""
+    closing or turning off a binding does not, so this deletes it. Only a counted printer is
+    touched, so a stale report or a printer with no LAN link deletes nothing."""
     report = m.SlotReport()
     now = datetime.now(UTC)
     for row in await asyncio.to_thread(printers.list):
-        if row.bambuddy_printer_id is None:
+        if not is_lan_linked(row):
             continue
-        stored = await asyncio.to_thread(reports.get, row.id)
-        if stored is None or not is_fresh(stored[1], now):
+        status = await live_status(reports, row, now=now)
+        if not status.connected:
             continue
         printer = UUID(row.id)
-        status = report_status(row, stored, now=now)
         seen = {(tray.ams_id, tray.tray_id): tray for tray in seen_trays(status)}
         view = await asyncio.to_thread(store.inventory.trays, printer, list(seen.values()))
         keep: list[tuple[int, int]] = []
@@ -290,27 +207,35 @@ async def reconcile_slots(
             if not override:
                 continue
             keep.append((ams_id, tray_id))
-            tray = seen[ams_id, tray_id]
-            nozzle = installed_nozzle(status, stored[0], ams_id, tray_id)
-            if nozzle is None:
+            tray = tray_at(status, ams_id, tray_id)
+            nozzle = sc.nozzle_of(status, ams_id, tray_id)
+            if tray is None or nozzle is None:
                 report.no_nozzle += 1
                 continue
-            found = preset_for(presets, PRINTER_MODEL, nozzle)
-            if found is None or found.for_bambuddy() is None:
-                # A ScadBuddy preset with no mirror (#7176) is none Bambuddy can set.
+            preset = preset_for(presets, PRINTER_MODEL, nozzle)
+            if (
+                preset is None
+                or catalogue is None
+                or sc.slot_ids(catalogue, preset.slicer_filament) is None
+            ):
                 report.no_preset += 1
                 continue
-            params = slot_params(
-                spool,
-                presets,
-                k_values,
-                printer,
-                PRINTER_MODEL,
-                nozzle,
-                _tray_temps(stored[0], ams_id, tray_id),
-                extruder_of(ams_id, tray_id, status),
-            )
-            if params is None:
+            try:
+                params, sent = sc.configure_values(
+                    sc.SlotConfigureBody(),
+                    status,
+                    tray,
+                    ams_id,
+                    tray_id,
+                    printer=printer,
+                    spool=spool,
+                    presets=presets,
+                    k_values=k_values,
+                    catalogue=catalogue,
+                )
+            except ApiError as exc:
+                if exc.status != http.HTTP_422_UNPROCESSABLE_CONTENT:
+                    raise
                 report.no_temps += 1
                 continue
             digest = params.digest()
@@ -318,14 +243,37 @@ async def reconcile_slots(
                 slot is not None
                 and slot["spool_id"] == spool.id
                 and slot["params_hash"] == digest
-                and _shows(tray, params)
+                and _shows(seen[ams_id, tray_id], params)
             ):
                 report.unchanged += 1
                 continue
             try:
-                await client.configure_slot(row.bambuddy_printer_id, ams_id, tray_id, params)
+                sc.guard(status, "configure", ams_id, tray_id)
             except ApiError as exc:
-                label = error_label(exc)
+                logger.info(
+                    "an override slot waits for its printer",
+                    extra={
+                        "printer_id": row.id,
+                        "ams_id": ams_id,
+                        "tray_id": tray_id,
+                        "reason": _label(exc),
+                    },
+                )
+                continue
+            try:
+                run = LanCommandRun(
+                    commands=sc.configure_commands(
+                        params,
+                        ams_id,
+                        tray_id,
+                        external_count=len(status.vt_tray),
+                        printer_id=row.id,
+                    ),
+                    answer=sent.model_dump(mode="json"),
+                )
+                answer = await commands.run(row.id, run)
+            except (ApiError, UnsupportedUnitError) as exc:
+                label = _label(exc) if isinstance(exc, ApiError) else "unsupported_unit"
                 logger.warning(
                     "could not configure an override slot",
                     extra={
@@ -341,7 +289,12 @@ async def reconcile_slots(
             repeats = await asyncio.to_thread(
                 _configured, store, printer, ams_id, tray_id, spool.id, digest
             )
-            report.configured += 1
+            if isinstance(answer, LanCommandPending) or not all(
+                reply.confirmed for reply in answer.replies
+            ):
+                report.unconfirmed += 1
+            else:
+                report.configured += 1
             if repeats >= RECONFIGURE_WARNING:
                 logger.warning(
                     "an override slot was configured again with the same values",
@@ -358,22 +311,23 @@ async def reconcile_slots(
 
 async def reconcile_slots_now(
     store: Filament,
-    load: Callable[[], StoredSettings],
     *,
     printers: PrinterStore,
     reports: PrinterReportStore,
+    commands: LanCommandSender,
+    profiles: Profiles | None,
 ) -> m.SlotReport | None:
-    """`reconcile_slots` with a client of its own, one at a time across processes
-    (`SLOTS_LOCK`, on a connection of its own); ``None`` (the step is skipped, not a
-    failure) when no Bambuddy is configured or another holds the lock."""
-    settings = await asyncio.to_thread(load)
-    if not settings.bambuddy_url:
-        return None
+    """`reconcile_slots` on the native catalogue of ``profiles`` (with ScadBuddy's own
+    presets, `catalogue_for`; with no slicer profiles, none, so a slot with a preset is
+    ``no_preset``), one at a time across processes (`SLOTS_LOCK`, on a connection of its
+    own). ``None`` (the step is skipped, not a failure) only when another holds the lock."""
     lock = await acquire_lock(store.spools.conninfo, SLOTS_LOCK)
     if lock is None:
         return None
     try:
-        async with client_for(settings) as client:
-            return await reconcile_slots(store, client, printers=printers, reports=reports)
+        catalogue = None if profiles is None else await catalogue_for(None, native=profiles)
+        return await reconcile_slots(
+            store, commands, printers=printers, reports=reports, catalogue=catalogue
+        )
     finally:
         await asyncio.to_thread(lock.close)

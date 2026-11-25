@@ -127,6 +127,8 @@ function reportLine(report: RfidReconcileReport): string {
   if (report.tags.failed > 0) parts.push(`${plural(report.tags.failed, 'tag was', 'tags were')} not sent; they stay queued for the next refresh`)
   const failedSlots = report.slots?.failed ?? 0
   if (failedSlots > 0) parts.push(`${plural(failedSlots, 'slot was', 'slots were')} not set; ${failedSlots === 1 ? 'it is' : 'they are'} tried again on the next refresh`)
+  const unconfirmed = report.slots?.unconfirmed ?? 0
+  if (unconfirmed > 0) parts.push(`${plural(unconfirmed, 'slot was', 'slots were')} sent, but the printer did not confirm in time; ${unconfirmed === 1 ? 'it is' : 'they are'} checked again on the next refresh`)
   const noTemps = report.slots?.no_temps ?? 0
   if (noTemps > 0) parts.push(`${plural(noTemps, 'spool has', 'spools have')} no nozzle temperatures, so its slot is not set`)
   const noPreset = report.slots?.no_preset ?? 0

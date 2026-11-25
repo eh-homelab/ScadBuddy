@@ -31,6 +31,8 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sb_presets import PresetImport
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
+from scadbuddy.printers.native import LanCommandSender
+from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.workflows.spool_refresh import (
     CAPTURE_ACTIVITY,
     FILAMENT_PULL_ACTIVITY,
@@ -214,11 +216,15 @@ def filament_rfid_activity(
     filament: Filament,
     load: Callable[[], StoredSettings],
     sync: Callable[[], FilamentSync],
+    commands: LanCommandSender,
+    profiles: Callable[[], Profiles | None],
 ) -> Callable[[], Any]:
     """``filament_rfid_reconcile``: Bambuddy's auto-add of unknown RFID spools brought to
     the override mode (`filament/rfid_mode.reconcile_mode`), then ScadBuddy's tag bindings
     told to Bambuddy (`filament/rfid_push.drain_tags`), then the AMS slot of each override
-    tag configured (`filament/rfid_slots.reconcile_slots`, #6264). Each step fails alone; the
+    tag configured over ScadBuddy's own LAN link with ``commands`` (the ``LanCommand``
+    workflow on the ``bambuddy`` queue) and the native presets of ``profiles``
+    (`filament/rfid_slots.reconcile_slots`, #6264, #7276). Each step fails alone; the
     activity returns ``done`` or ``failed`` and never raises, so the run never fails on it.
     A mode left ``pending`` is a failure; ``blocked`` is shown on the status, not one."""
 
@@ -245,7 +251,11 @@ def filament_rfid_activity(
             failed = True
         try:
             slots = await reconcile_slots_now(
-                filament, load, printers=printers.store, reports=printers.reports
+                filament,
+                printers=printers.store,
+                reports=printers.reports,
+                commands=commands,
+                profiles=profiles(),
             )
             failed = failed or (slots is not None and slots.failed > 0)
         except Exception as error:
