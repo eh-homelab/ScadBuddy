@@ -1,6 +1,7 @@
 """`GET /model-records/copy-status` (#7317): the last run of the copy of the templates'
 files to rows, at an API start or in a housekeeping sweep. The tests' apps skip the
-start's copy (`app_template_copy_off`) unless a test is marked `template_copy`."""
+start's background copy (`app_template_copy_off`) unless a test is marked
+`template_copy`; the first copy before the app serves still runs (phase 3)."""
 
 from __future__ import annotations
 
@@ -54,8 +55,9 @@ def _finished(client: TestClient) -> dict[str, Any]:
     raise AssertionError(f"no finished copy run: {client.get(STATUS).json()}")
 
 
-@pytest.mark.template_copy
 def test_copy_status_reports_the_last_run(placed_client: TestClient) -> None:
+    """The run is the start's first copy (phase 3, `main._first_template_copy`): the
+    database had no finished run, and the background copy is off."""
     body = _finished(placed_client)
 
     assert datetime.fromisoformat(body["started_at"]) <= datetime.fromisoformat(body["finished_at"])
@@ -87,6 +89,11 @@ def test_copy_status_reports_an_incomplete_run_and_its_unreadable(client: TestCl
 
 
 def test_copy_status_404_before_any_run(client: TestClient) -> None:
+    """The app's start ran the first copy (phase 3), so the runs go first: a database
+    the copy never ran on."""
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    with state.projection.pool.connection() as conn:
+        conn.execute("DELETE FROM template_copy_runs")
     response = client.get(STATUS)
     assert response.status_code == 404
     assert response.json()["detail"] == "no copy of the templates to rows has run"

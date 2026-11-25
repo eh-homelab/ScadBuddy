@@ -5,6 +5,7 @@ import importlib
 import logging
 import pkgutil
 import threading
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -138,7 +139,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
-from scadbuddy.library.template_copy import copy_templates
+from scadbuddy.library.template_copy import TemplateCopyResult, copy_templates
 from scadbuddy.operations.blob_claims import sweep_upload_blobs
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
@@ -609,13 +610,14 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.exception("could not index the saved outputs; the next start retries")
 
 
-async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
+async def _copy_templates_once(state: AppState, stop: threading.Event) -> TemplateCopyResult | None:
     """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
-    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
-    that does not get it does nothing. A failure is logged, then raised."""
+    logged, and its result. It takes the copy's advisory lock, so one replica copies at a
+    time; a run that does not get it does nothing and answers None, as it does when the
+    catalogue has no rows. A failure is logged, then raised."""
     refresh = state.catalogue.refresh
     if refresh is None:
-        return
+        return None
     try:
         result = await asyncio.to_thread(
             copy_templates, state.catalogue, refresh.rows, refresh, state.projection.pool, stop
@@ -634,6 +636,53 @@ async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
                 "incomplete": result.incomplete,
                 "stopped": stop.is_set(),
             },
+        )
+    return result
+
+
+#: How long the start waits for another replica's first copy of the templates (#7317
+#: phase 3, plan D4), and how often it asks whether that copy has finished, in seconds.
+FIRST_COPY_WAIT = 300.0
+FIRST_COPY_POLL = 1.0
+
+
+async def _first_template_copy(state: AppState, stop: threading.Event) -> None:
+    """The first copy of the templates to rows, before the app serves (#7317 phase 3,
+    plan D4): the catalogue's lists read only rows. When a copy run has finished (every
+    start after the first), it does nothing. Otherwise it runs one copy and waits for it.
+    When another replica holds the copy lock (replicas of a fresh install that start
+    together), it waits up to `FIRST_COPY_WAIT` for that replica's run to finish. A copy
+    that fails or ends incomplete, or a wait that ends, is logged at error level and the
+    app serves anyway: the housekeeping sweep `TEMPLATE_COPY_SWEEP` copies again."""
+    refresh = state.catalogue.refresh
+    if refresh is None:
+        return
+    rows = refresh.rows
+    try:
+        if await asyncio.to_thread(rows.copied):
+            return
+        result = await _copy_templates_once(state, stop)
+        if result is not None:
+            if result.incomplete:
+                logger.error(
+                    "the first copy of the templates to rows was incomplete; the lists lack"
+                    " what it missed until the next copy run"
+                )
+            return
+        deadline = time.monotonic() + FIRST_COPY_WAIT
+        while time.monotonic() < deadline and not stop.is_set():
+            await asyncio.sleep(FIRST_COPY_POLL)
+            if await asyncio.to_thread(rows.copied):
+                return
+        logger.error(
+            "another replica's first copy of the templates to rows did not finish in time;"
+            " this one serves, and the lists lack what is not copied yet",
+            extra={"waited_s": FIRST_COPY_WAIT},
+        )
+    except Exception:
+        logger.exception(
+            "the first copy of the templates to rows failed; the app serves, and the next"
+            " copy run copies them"
         )
 
 
@@ -2616,6 +2665,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.fonts.prepare()
         state.openscad_version = await probe_openscad_version(state.config)
         await _start_render(state)
+        # #7317 phase 3: the catalogue's lists read only rows, so a database where no copy
+        # run has finished (a fresh install, a test's) gets its first copy before the app
+        # serves. Nothing stops it: the start waits for it.
+        await _first_template_copy(state, threading.Event())
         # After the projection, which migrated the database: the bus writes the event
         # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
         # was published before now (the built-in sync's commits) waited.

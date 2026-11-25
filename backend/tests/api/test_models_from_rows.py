@@ -1,6 +1,8 @@
-"""`slugs`, `list_models` and `record` read the `templates` rows once a copy run has
-finished (#7317 phase 2, plan Task 7). Each test reads through one app before the copy
-(the files), then runs `copy_templates`, then reads the same again (the rows)."""
+"""`slugs`, `list_models` and `record` read the `templates` rows (#7317 phase 2, plan
+Task 7; phase 3: the app's start copies first, so they read rows from the start). A test
+that edits template files by hand runs the copy (`_copy`), as production's next copy run
+repairs such an edit. The lists are compared with what the files say: each template's
+`Catalogue._fresh_record`, through the routes' own selection, sort and window."""
 
 from __future__ import annotations
 
@@ -16,18 +18,25 @@ import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import TypeAdapter
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.models import ModelFacets, select_models, sort_models, tag_counts
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import catalogue as catalogue_module
-from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.catalogue import (
+    Catalogue,
+    InvalidModelMetaError,
+    ModelNotFoundError,
+    ModelRecord,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.output_copy import copy_outputs
-from scadbuddy.library.template_copy import copy_templates
 from scadbuddy.library.template_refresh import TemplateRefresh
 from scadbuddy.library.template_rows import TemplateRows
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -89,8 +98,9 @@ def _output(client: TestClient, slug: str) -> str:
 
 
 def _copy(client: TestClient) -> None:
-    """The outputs copied first (so the output covers read rows on both sides), then
-    the templates; after it the catalogue reads rows."""
+    """The outputs copied first (so the output covers read rows), then the templates:
+    the copy that repairs the hand edits a test made (#7317 phase 3: the app's start
+    already copied once, so the catalogue reads rows before it too)."""
     state = _state(client)
     outputs = state.outputs.rows
     assert outputs is not None
@@ -100,12 +110,7 @@ def _copy(client: TestClient) -> None:
     while not outputs.copied():
         assert time.monotonic() < deadline, "no finished outputs copy"
         time.sleep(0.1)
-    refresh = state.catalogue.refresh
-    assert refresh is not None
-    assert not state.catalogue._from_rows()
-    result = copy_templates(state.catalogue, refresh.rows, refresh, state.projection.pool)
-    assert result is not None and not result.incomplete
-    assert state.catalogue._from_rows()
+    sync_template_rows(client)
 
 
 @pytest.fixture
@@ -176,9 +181,58 @@ def _lists(client: TestClient) -> list[tuple[int, str | None, Any]]:
     return answers
 
 
-def test_get_models_is_the_same_before_and_after_the_copy(world: TestClient) -> None:
-    before = _lists(world)
-    listed = {model["slug"]: model for model in before[0][2]}
+def _from_files(client: TestClient) -> tuple[list[str], list[ModelRecord]]:
+    """Every template id, and the record the files give of each one a listing holds:
+    `_fresh_record` with the fields a listing leaves out. A template whose `model.json`
+    cannot be read is not listed."""
+    catalogue = _state(client).catalogue
+    slugs = catalogue.slugs()
+    records = []
+    for slug in slugs:
+        try:
+            record = catalogue._fresh_record(slug)
+        except InvalidModelMetaError:
+            continue
+        records.append(record.model_copy(update={"previous_version": None, "ui_version": None}))
+    return slugs, records
+
+
+def _json(records: list[ModelRecord]) -> Any:
+    return TypeAdapter(list[ModelRecord]).dump_python(records, mode="json", by_alias=True)
+
+
+def _expected_lists(client: TestClient) -> list[tuple[int, str | None, Any]]:
+    """`LIST_QUERIES` answered from the files: an unfiltered page is a window of the
+    template ids (`X-Total-Count` counts them all), filled past a template left out; a
+    filtered one goes through the route's own `select_models` and `sort_models`."""
+    slugs, records = _from_files(client)
+    answers: list[tuple[int, str | None, Any]] = []
+    for query in LIST_QUERIES:
+        if set(query) <= {"limit", "after"}:
+            after = query.get("after")
+            start = 0 if after is None else slugs.index(after) + 1
+            shown = [record for record in records if slugs.index(record.slug) >= start]
+            limit = query.get("limit")
+            page = shown if limit is None else shown[:limit]
+            answers.append((200, str(len(slugs)), _json(page)))
+            continue
+        tag = query.get("tag")
+        selected = sort_models(
+            select_models(
+                records, query.get("q"), None if tag is None else [tag], query.get("origin")
+            ),
+            query.get("sort"),
+        )
+        answers.append((200, str(len(selected)), _json(selected)))
+    return answers
+
+
+def test_get_models_is_what_the_files_say(world: TestClient) -> None:
+    _copy(world)
+
+    answers = _lists(world)
+
+    listed = {model["slug"]: model for model in answers[0][2]}
     # The fixture is what it says, so the comparison covers each source.
     assert listed["widget-copy"]["upstream_state"] == "update"
     assert listed["gadget"]["thumbnail_source"] == "output"
@@ -186,42 +240,46 @@ def test_get_models_is_the_same_before_and_after_the_copy(world: TestClient) -> 
     assert listed["widget"]["thumbnail_source"] == "model"
     assert next(item["id"] for item in listed[BUILTIN]["media"]) == "thumbnail"
     assert len(listed[BUILTIN]["media"]) == 2
-
-    _copy(world)
-
-    assert _lists(world) == before
+    assert answers == _expected_lists(world)
 
 
-def test_model_facets_are_the_same_before_and_after_the_copy(world: TestClient) -> None:
+def test_model_facets_are_what_the_files_say(world: TestClient) -> None:
     queries: list[dict[str, Any]] = [
         {},
         {"q": "widget"},
         {"tag": ["box", "gift"]},
         {"origin": "mine"},
     ]
-    before = [world.get("/api/v1/model-facets", params=query).json() for query in queries]
-
     _copy(world)
+    _, records = _from_files(world)
 
-    assert [world.get("/api/v1/model-facets", params=query).json() for query in queries] == before
+    for query in queries:
+        selected = select_models(records, query.get("q"), query.get("tag"), query.get("origin"))
+        expected = ModelFacets(
+            total=len(records),
+            matched=len(selected),
+            tags=tag_counts(selected, query.get("tag") or []),
+        )
+        answer = world.get("/api/v1/model-facets", params=query).json()
+        assert answer == expected.model_dump(mode="json"), query
 
 
-def test_get_model_is_the_same_before_and_after_the_copy(world: TestClient) -> None:
-    slugs = ["widget", "widget-copy", "gadget", "plain", "broken", BUILTIN, "missing"]
-
-    def read() -> list[tuple[int, Any]]:
-        answers = []
-        for slug in slugs:
-            response = world.get(f"/api/v1/models/{slug}")
-            answers.append((response.status_code, response.json()))
-        return answers
-
-    before = read()
-    assert before[0][1]["previous_version"] is not None
-
+def test_get_model_is_what_the_files_say(world: TestClient) -> None:
     _copy(world)
+    catalogue = _state(world).catalogue
 
-    assert read() == before
+    for slug in ["widget", "widget-copy", "gadget", "plain", BUILTIN]:
+        response = world.get(f"/api/v1/models/{slug}")
+        assert response.status_code == 200, response.text
+        assert response.json() == catalogue._fresh_record(slug).model_dump(mode="json"), slug
+    assert world.get("/api/v1/models/widget").json()["previous_version"] is not None
+    # Its `model.json` is not JSON: the answer says so, as its files do.
+    broken = world.get("/api/v1/models/broken")
+    assert broken.status_code == 409, broken.text
+    assert "not JSON" in broken.json()["detail"]
+    with pytest.raises(InvalidModelMetaError, match="not JSON"):
+        catalogue._fresh_record("broken")
+    assert world.get("/api/v1/models/missing").status_code == 404
 
 
 def test_unreadable_meta_counts_but_is_not_listed(world: TestClient) -> None:
@@ -261,13 +319,11 @@ def test_slugs_order_is_the_walks_order(client: TestClient, paths: DataPaths) ->
     for slug in ("b", "B", "_x", "é"):
         (paths.models / slug).mkdir()
         (paths.models / slug / "model.scad").write_text("cube(1);\n", encoding="utf-8")
-    catalogue = _state(client).catalogue
-    before = catalogue.slugs()
-    assert before[:4] == ["B", "_x", "b", "é"]
 
     _copy(client)
 
-    assert catalogue.slugs() == before
+    # The walk's order: by code point, mine before the built-ins.
+    assert _state(client).catalogue.slugs() == ["B", "_x", "b", "é", BUILTIN]
 
 
 def test_a_template_with_no_row_is_not_listed_after_the_copy(
@@ -322,10 +378,11 @@ def test_a_write_answers_its_change_when_the_refresh_failed(
     assert row is not None and row.name == "Widget"
 
 
-def test_the_catalogue_reads_rows_only_once_copied(world: TestClient) -> None:
+def test_the_catalogue_reads_rows_from_the_start(world: TestClient) -> None:
+    """The app's start copied first (phase 3, `main._first_template_copy`)."""
     catalogue: Catalogue = _state(world).catalogue
     assert catalogue.rows is _rows(world)
-    assert not catalogue._from_rows()
+    assert catalogue._from_rows()
 
 
 def _refresh_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -411,11 +468,15 @@ def test_a_meta_postgres_cannot_store_is_read_from_its_file(
 ) -> None:
     """Review M2: a `model.json` jsonb refuses (NaN) has no `meta` in its row; its
     record, its place in the list (the tag filter and the facets too) and its summary
-    are read from the file, as before the copy (#7631 review)."""
+    are read from the file (#7631 review)."""
     _create(world, "nan", {"name": "Not a number"})
     paths.model_meta("nan").write_text(
         '{"name": "Not a number", "tags": ["odd"], "ratio": NaN}', encoding="utf-8"
     )
+    _copy(world)
+    row = _rows(world).get("nan")
+    assert row is not None and row.meta is None
+    assert row.meta_error is not None and row.meta_error.startswith("not storable")
     catalogue = _state(world).catalogue
 
     def read() -> tuple[Any, ...]:
@@ -436,12 +497,11 @@ def test_a_meta_postgres_cannot_store_is_read_from_its_file(
     assert [model["slug"] for model in before[2][1]] == ["nan"]
     assert "nan" in [summary.slug for summary in before[4]]
     assert [summary.slug for summary in before[5]] == ["nan", "widget"]
+    assert before[0][1] == catalogue._fresh_record("nan").model_dump(mode="json")
+    assert before[1] == _expected_lists(world)
 
     _copy(world)
 
-    row = _rows(world).get("nan")
-    assert row is not None and row.meta is None
-    assert row.meta_error is not None and row.meta_error.startswith("not storable")
     assert read() == before
 
 
