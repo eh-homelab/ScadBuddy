@@ -38,6 +38,8 @@ type Route struct {
 	Handle Handler
 	// MaxBody is the route's body bound, 0 for a route with none.
 	MaxBody int64
+	// Status is the status of an answer that is no problem, 0 for 200.
+	Status int
 }
 
 // Params are a matched path's parameters.
@@ -90,7 +92,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	answer, err := rt.answer(route, r, params)
 	if err == nil {
-		err = httpx.WriteJSON(w, answer)
+		status := route.Status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		err = httpx.WriteJSONStatus(w, status, answer)
 	}
 	if err != nil {
 		httpx.WriteProblem(w, r, problemOf(r, err))
@@ -122,12 +128,22 @@ func (rt *Router) match(r *http.Request) (*mounted, Params) {
 next:
 	for i := range rt.routes {
 		route := &rt.routes[i]
-		if route.Method != r.Method || len(route.segments) != len(path) {
+		last := len(route.segments) - 1
+		rest := strings.HasSuffix(route.segments[last], "...}")
+		if route.Method != r.Method || len(route.segments) != len(path) &&
+			!(rest && len(path) > len(route.segments)) {
 			continue
 		}
 		params := Params{}
 		for j, want := range route.segments {
-			if strings.HasPrefix(want, "{") {
+			if j == last && rest {
+				// A trailing {name...} takes the rest of the path, slashes and all.
+				value := strings.Join(path[j:], "/")
+				if value == "" {
+					continue next
+				}
+				params[strings.Trim(want, "{.}")] = value
+			} else if strings.HasPrefix(want, "{") {
 				if path[j] == "" {
 					continue next
 				}

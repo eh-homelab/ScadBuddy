@@ -10,12 +10,28 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `SCADBUDDY_CORE_AREAS` | none | What Go answers, comma-separated (below). An unknown name stops the start |
 | `SCADBUDDY_CORE_LISTEN` | `:8080` | The address it listens on |
 | `SCADBUDDY_AUTH_MODE` | `off` | Only `enforce` changes a refusal's words |
+| `SCADBUDDY_SECRET_KEY_FILE` | none | The KEK, read as Python reads it. A sealed area (†) does not start without it; a file that is set and cannot be read stops the start |
+| `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | none | The KEK before it, during a rotation: what it sealed still opens |
 
 | Area | Routes under `/api/v1/internal/crud/agent` |
 |---|---|
 | `session-events:read` | `GET` `/sessions/{id}/events`, `…/events/last-seq`, `…/events/user-turn`, `…/events/turn` |
 | `session-events` | those, and `POST` `/sessions/{id}/events` and `…/fork-log` |
 | `session-turns:read` | `GET /sessions/{id}/turn` |
+| `settings`, `settings:read` | `GET`, `POST` `/settings` |
+| `credentials` †, `credentials:read` † | `GET` `/credentials`, `…/one`, `…/key`; `POST` `/credentials` and `…/save`, `…/delete`, `…/order`, `…/reset`, `…/name`, `…/events`, `…/reveal` |
+| `payload-keys` † | `POST /payload-keys/{subject}` |
+| `keys` † | `GET /keys/input-hash` (`POST /fetch-grants` stays in Python) |
+| `notify` †, `notify:read` † | `/push/vapid`, `/push/subscriptions` (and `…/remove`), `/push/sent`, `/push/poll-lease`, `/notify-channels` and every route under it (`GET /push/waiting` stays in Python) |
+| `transcripts` †, `transcripts:read` † | `/sessions/{id}/entries` (and `…/last`, `…/landed`, `…/delete`), `…/transcript` (and `…/head`, `…/moved`), `…/cwd`, `…/subkeys`, `/transcripts` |
+| `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
+| `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
+| `mcp-relay` | `POST /mcp-relay/*` |
+
+`internal/seal` is the agent's sealed format (`backend/scadbuddy/core/secrets.py`), the payload
+codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
+open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's validator, pinned by
+`pending-input-vectors.json`; no route uses it yet.
 
 A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always overwritten.
 
@@ -27,6 +43,17 @@ A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always o
   `::jsonb` reads then failed.
 - A 422's `errors[].loc` is the same; `msg` may differ. Clients read `loc`.
 - An unexpected error is a 500 with detail `InternalError`, not the Python exception's name.
+- The KEK files are read once, at the start. Python reads them again after a failed read, and
+  answers 503 `kek-missing` while it has none; here a sealed area without a KEK does not start.
+- Times are written in UTC. Python writes them in the database session's time zone, which is UTC
+  on prod.
+- A body bound refuses a body with no `Content-Length` (411) on the routes with one. Python's
+  JSON gate counts a chunked body instead.
+- A number, boolean or UUID in a body is read strictly: pydantic's lax mode also takes a numeric
+  string. A UUID in another spelling is still read and written lower-case with hyphens.
+- The approvals' input hash refuses JSON past 512 levels; Python's parser goes to about 1000.
+- A gate response with a lone surrogate (`\ud800`) reads as U+FFFD; Python's validator refuses
+  it.
 
 ## Tests
 
