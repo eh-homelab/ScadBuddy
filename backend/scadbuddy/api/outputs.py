@@ -102,7 +102,7 @@ from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiErro
 from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
+from scadbuddy.library.output_query import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
 from scadbuddy.library.output_rows import Role
 from scadbuddy.library.outputs import (
     BACK_OFFICE,

@@ -20,7 +20,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from psycopg import Connection
@@ -29,6 +29,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.library.output_query import OutputQuery, query_ids
 from scadbuddy.store.content_models import BlobRef, ReuseLostError
 from scadbuddy.store.index import BlobIndex
 
@@ -186,7 +187,7 @@ class ByteWrite:
 _COLUMNS = (
     "output_id, slug, meta, params, inputs, record, manifest, bom, arranged_from,"
     " backfill, has_plate_cover, copied_at, files_stamp, model_blob, preview_blob,"
-    " thumbnail_blob, bytes_at"
+    " thumbnail_blob, bytes_at, params_text"
 )
 
 #: Release the byte holds of the rows ``holder_id = ANY(%s)``: only keys of the output's
@@ -236,6 +237,10 @@ class OutputRow:
     #: When a save or the byte copy put its blobs; ``None`` while the files hold them.
     #: The store sets it, so the value given is ignored.
     bytes_at: datetime | None = None
+    #: The parameters that differ from the template's defaults, for the list's ``q``
+    #: (`output_query.params_text`, #7257). ``None``: a row the copy or an older build
+    #: wrote, until `OutputIndex.record` or the next release's migration fills it.
+    params_text: str | None = None
 
 
 def _json(value: Any) -> Jsonb | None:
@@ -269,6 +274,7 @@ def _row(data: DictRow) -> OutputRow:
             thumbnail=data["thumbnail_blob"],
         ),
         bytes_at=data["bytes_at"],
+        params_text=data["params_text"],
     )
 
 
@@ -298,8 +304,8 @@ def _values(row: OutputRow) -> tuple[Any, ...]:
 _INSERT = (
     "INSERT INTO outputs (output_id, slug, meta, params, inputs, record, manifest, bom,"
     " arranged_from, backfill, has_plate_cover, created_at, model_blob, preview_blob,"
-    " thumbnail_blob, bytes_at)"
-    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+    " thumbnail_blob, params_text, bytes_at)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
     " CASE WHEN %s THEN clock_timestamp() END)"
 )
 
@@ -318,7 +324,8 @@ _SAVE_UPSERT = (
     " arranged_from = EXCLUDED.arranged_from, backfill = EXCLUDED.backfill,"
     " has_plate_cover = EXCLUDED.has_plate_cover, created_at = EXCLUDED.created_at,"
     " model_blob = EXCLUDED.model_blob, preview_blob = EXCLUDED.preview_blob,"
-    " thumbnail_blob = EXCLUDED.thumbnail_blob, bytes_at = EXCLUDED.bytes_at,"
+    " thumbnail_blob = EXCLUDED.thumbnail_blob, params_text = EXCLUDED.params_text,"
+    " bytes_at = EXCLUDED.bytes_at,"
     " bytes_stamp = NULL, damaged = '[]', files_stamp = NULL, copied_at = clock_timestamp()"
     " WHERE outputs.files_stamp IS NOT NULL AND outputs.slug = EXCLUDED.slug"
 )
@@ -436,6 +443,7 @@ def _insert(
         blobs.model,
         blobs.preview,
         blobs.thumbnail,
+        row.params_text,
         blobs.model is not None,
     )
     if not conn.execute(_SAVE_UPSERT, values).rowcount:
@@ -459,6 +467,8 @@ def _insert(
     _release_bytes(conn, [row.output_id])
     _write_files(conn, row.output_id, blobs.files)
     _hold_keys(conn, row.output_id, blobs.keys())
+    # The id is saved now: its claim (`OutputRows.claim`) goes with the save (#7257).
+    conn.execute("DELETE FROM output_claims WHERE output_id = %s", (row.output_id,))
     return replaced
 
 
@@ -566,10 +576,23 @@ _COPY_REFRESH = (
 )
 
 
+#: The cut-over mark, written once (plan D2). The last byte run by id is the one judged.
+_TRY_CUT_OVER = (
+    "INSERT INTO output_cutover (byte_run_id)"
+    " SELECT r.id FROM (SELECT id, finished_at, refused, failed FROM output_byte_runs"
+    " ORDER BY id DESC LIMIT 1) r"
+    " WHERE r.finished_at IS NOT NULL AND r.refused IS NULL AND r.failed = '[]'::jsonb"
+    " AND EXISTS (SELECT 1 FROM output_copy_runs WHERE finished_at IS NOT NULL)"
+    " AND NOT EXISTS (SELECT 1 FROM outputs WHERE bytes_at IS NULL)"
+    " ON CONFLICT DO NOTHING"
+)
+
+
 class OutputRows:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
         self._copied = False
+        self._cut_over = False
         self._lock = threading.Lock()
 
     def get(self, output_id: str) -> OutputRow | None:
@@ -1180,6 +1203,69 @@ class OutputRows:
         with self._lock:
             self._copied = True
         return True
+
+    def try_cut_over(self) -> bool:
+        """Write the cut-over mark (#7257, plan D2) when, in one statement: a row copy
+        run has finished; the last byte run has finished, with no refusal and no failure;
+        and no row waits for its bytes (``bytes_at`` NULL). It is written once; a later
+        call changes nothing. Whether the mark exists now."""
+        with self._pool.connection() as conn:
+            conn.execute(_TRY_CUT_OVER)
+        return self.cut_over()
+
+    def cut_over(self) -> bool:
+        """Whether the cut-over mark exists. Once true it stays true for this object."""
+        with self._lock:
+            if self._cut_over:
+                return True
+        if self.cut_over_at() is None:
+            return False
+        with self._lock:
+            self._cut_over = True
+        return True
+
+    def cut_over_at(self) -> datetime | None:
+        """When the cut-over mark was written, by the database's clock."""
+        with self._pool.connection() as conn:
+            found = conn.execute("SELECT at FROM output_cutover").fetchone()
+        if found is None:
+            return None
+        at: datetime = found["at"]
+        return at
+
+    def query(self, query: OutputQuery) -> tuple[list[str], int]:
+        """`OutputIndex.query` on ``outputs`` (#7257): the page's output ids, newest
+        first, and how many the filters select. ``after`` must be an id the filters
+        select, else `AfterNotListedError`."""
+        with self._pool.connection() as conn:
+            return query_ids(conn, "outputs", query)
+
+    def claim(self, output_id: str, slug: str) -> bool:
+        """Claim ``output_id`` for a save of ``slug`` (#7257, plan D6): True when this
+        call claimed it. False when a claim of it stands, or an output of that id is
+        saved. The save's row deletes the claim (`insert`)."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO output_claims (output_id, slug) SELECT %s, %s"
+                " WHERE NOT EXISTS (SELECT 1 FROM outputs WHERE output_id = %s)"
+                " ON CONFLICT DO NOTHING",
+                (output_id, slug, output_id),
+            )
+        return cursor.rowcount == 1
+
+    def release_claim(self, output_id: str) -> None:
+        """Free a claim whose save failed, so another attempt can claim the id."""
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM output_claims WHERE output_id = %s", (output_id,))
+
+    def prune_claims(self, grace: timedelta) -> int:
+        """Delete the claims older than ``grace``, by the database's clock: a save that
+        died between its claim and its row. How many went."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM output_claims WHERE claimed_at < clock_timestamp() - %s", (grace,)
+            )
+        return cursor.rowcount
 
     def start_run(self) -> int:
         with self._pool.connection() as conn:

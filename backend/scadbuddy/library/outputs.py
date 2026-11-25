@@ -1153,6 +1153,8 @@ class OutputStore:
         holds, in one transaction (spec §6.6); what `OutputRows.insert` returns. The row is
         the record: when the insert fails, the files written for the save go and the save
         fails."""
+        from scadbuddy.bambuddy.project_file import cached_defaults
+        from scadbuddy.library.output_query import params_text
         from scadbuddy.library.output_rows import OutputRow
 
         assert self.rows is not None
@@ -1183,6 +1185,8 @@ class OutputStore:
             has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
             copied_at=meta.created_at,
             blobs=blobs or OutputBlobs(),
+            # The list's text on the row (#7257), as `OutputIndex.record` writes it.
+            params_text=params_text(prepared.params, cached_defaults(self.paths, meta.slug)),
         )
         try:
             return self.rows.insert(row)

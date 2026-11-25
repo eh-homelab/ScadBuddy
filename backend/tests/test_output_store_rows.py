@@ -21,9 +21,11 @@ import psycopg
 import pytest
 
 from scadbuddy.api.outputs import detail
+from scadbuddy.bambuddy.project_file import cached_defaults
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_index import OutputIndex
+from scadbuddy.library.output_query import params_text
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
     OutputBlobs,
@@ -109,6 +111,20 @@ async def test_create_writes_row_with_meta_params_inputs(
     assert row.manifest is not None and len(row.manifest) == len(store.manifest(meta.id))
     with zipfile.ZipFile(store.directory(meta.id) / MODEL_NAME) as archive:
         assert row.has_plate_cover == (PLATE_THUMBNAIL in archive.namelist())
+
+
+async def test_save_writes_params_text(tmp_path: Path, projection: JobProjection) -> None:
+    """#7257: the row carries the list's parameter text, as the index row does."""
+    paths, job, _ = await finished_job(tmp_path, width=30)
+    job = job.model_copy(update={"params": {"width": 30}})
+    store = _store(paths, projection)
+    # No index: the save's own row write is what is checked, not `OutputIndex.record`'s.
+    store.index = None
+    meta = save_files(store, job)
+    row = rows_of(store).get(meta.id)
+    assert row is not None
+    expected = params_text(job.params, cached_defaults(store.paths, job.slug))
+    assert "width=30" in expected and row.params_text == expected
 
 
 async def test_get_reads_row_not_meta_file(
