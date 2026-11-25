@@ -167,7 +167,7 @@ same way, `vite.config.ts`).
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too (its case with `file` is a new
   file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`; its
-  cases with `source` are a pipeline design's, #5701, `designInputs.ts` `soldDesign`, which the agent does not read yet); a
+  cases with `source` are a pipeline design's, #5701, `designInputs.ts` `soldDesign`, whose agent copy is `storefrontDraft.ts` `soldDesign`); a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
