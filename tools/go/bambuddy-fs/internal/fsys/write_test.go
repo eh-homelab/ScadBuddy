@@ -257,11 +257,14 @@ func renameat2(t *testing.T, from, to string, flags uintptr) error {
 		t.Fatal(err)
 	}
 	const atFDCWD = ^uintptr(99) // -100
-	_, _, errno := syscall.Syscall6(nr, atFDCWD, uintptr(unsafe.Pointer(f)), atFDCWD, uintptr(unsafe.Pointer(g)), flags, 0)
-	if errno != 0 {
-		return errno
-	}
-	return nil
+	// The tests rename only where the mount refuses before any library call (#7718).
+	return retryEINTR(func() error {
+		_, _, errno := syscall.Syscall6(nr, atFDCWD, uintptr(unsafe.Pointer(f)), atFDCWD, uintptr(unsafe.Pointer(g)), flags, 0)
+		if errno != 0 {
+			return errno
+		}
+		return nil
+	})
 }
 
 func TestRenameNoReplaceAndOverAFolder(t *testing.T) {

@@ -510,7 +510,11 @@ func saveByRename(t *testing.T, dir, data string) {
 
 // retryEINTR calls a raw syscall through the mount again while it answers EINTR, as Go's
 // os package does. A FUSE request that a signal interrupts (Go's preemption signal under
-// -race) is cancelled and answers EINTR (api.Errno) before it changes anything (#7718).
+// -race) is cancelled and answers EINTR (api.Errno, #7718). Retry only calls that have
+// changed nothing when they answer it: the wait in tree.list before Rename changes
+// anything, a rename of a queued save or one refused before a library call, and the
+// xattr handlers. A stored-file or folder rename whose library call was cancelled in
+// flight may already have been applied, so a test of one must not retry it blindly.
 func retryEINTR(call func() error) error {
 	for {
 		if err := call(); !errors.Is(err, syscall.EINTR) {
