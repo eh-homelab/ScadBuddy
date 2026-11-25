@@ -38,14 +38,18 @@
 - Test: `backend/tests/filament/test_empty_weight.py`
 
 **Interfaces:**
-- Produces: `class EmptyWeight(NamedTuple): grams: int; source: Literal["insert"]; basis: str; name: str` and `def effective_on(conn: Conn, spool_id: UUID) -> EmptyWeight | None`: the insert type of the spool, else of its type (`coalesce(s.insert_type_id, t.insert_type_id)`, the same join as `insert_weights.check_on`), `None` for no insert or no such spool. The docstring names #7278: parts are added here, callers do not change.
+- Produces: `class EmptyWeight(NamedTuple): grams: int; source: Literal["insert"]; basis: str; name: str; note: str | None` and `def effective_on(conn: Conn, spool_id: UUID) -> EmptyWeight | None`: the insert type of the spool, else of its type (`coalesce(s.insert_type_id, t.insert_type_id)`, the same join as `insert_weights.check_on`), `None` for no insert or no such spool. `basis` is `placeholder` whenever `insert_weights.is_placeholder(empty_weight_basis, note)` says so, else the column's value (`catalog`, `person`, `derived`, `weighed_empty`). The docstring names #7278: parts are added here, callers do not change.
 
 - [ ] **Step 1: Write the failing tests** (`requires_postgres`, the `PgPool` fixture and `CatalogStore` / `FilamentSpoolStore` setup as `tests/filament/test_insert_weights.py` does)
 
 ```python
 def test_the_spools_own_insert_wins_over_its_types(pool) -> None:
     # type insert 180 g "Cardboard", spool insert 200 g "Plastic"
-    assert effective_on(conn, spool_id) == EmptyWeight(200, "insert", "catalog", "Plastic")
+    assert effective_on(conn, spool_id) == EmptyWeight(200, "insert", "catalog", "Plastic", None)
+
+def test_a_placeholder_note_makes_the_basis_placeholder(pool) -> None:
+    # insert basis "catalog", note "Placeholder weight until weighed"
+    assert effective_on(conn, spool_id).basis == "placeholder"
 
 def test_the_types_insert_is_taken_when_the_spool_sets_none(pool) -> None:
     assert effective_on(conn, spool_id).grams == 180
@@ -62,7 +66,7 @@ Expected: FAIL, `ModuleNotFoundError: scadbuddy.filament.empty_weight`
 
 - [ ] **Step 3: Implement `effective_on` in `backend/scadbuddy/filament/empty_weight.py`**
 
-One query: spool left-joined to its type and to `filament_insert_types` on the coalesced id, selecting `empty_weight_g, empty_weight_basis, name`.
+One query: spool left-joined to its type and to `filament_insert_types` on the coalesced id, selecting `empty_weight_g, empty_weight_basis, name, note`; then `is_placeholder` on the basis and note.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -88,7 +92,7 @@ git commit -m "feat(filament): a spool's effective empty weight in one place (#7
 - Consumes: Task 1's `effective_on`.
 - Produces:
   - `SpoolEventAdd.reading_g: Grams | None = None` ("the scale reading with the spool, a weighing only"). Validator: `reading_g` with a kind other than `weighed` is a `ValueError("only a weighing has reading_g")`; `reading_g < grams` is `ValueError("reading_g is below grams")`; a weighing with neither `grams` nor `reading_g` keeps today's "a weighing needs grams".
-  - `ledger.expected_before(events: Sequence[m.SpoolEvent], at: datetime | None, *, weight_locked: bool, label_weight_g: int | None) -> float | None`: `grams_left` over the events with `e.at < at` (all of them when `at` is None).
+  - `ledger.expected_before(events: Sequence[m.SpoolEvent], at: datetime | None, *, weight_locked: bool, label_weight_g: int | None) -> float | None`: `grams_left` over the events with `e.at < at`, plus the delta events (`source` in `_DELTA`) with `e.at == at`, since rule 1 puts deltas before readings at one instant (all events when `at` is None).
   - `ledger.breakdown(*, reading_g: float, grams: float, empty: EmptyWeight | None, expected: float | None) -> dict[str, Any]`: the seven data keys of Global Constraints. `empty_source` is `insert` only when `empty is not None and abs(reading_g - grams - empty.grams) < 0.05`, else `person` with `empty_basis` null and `empty_name` null.
   - `class NoEmptyWeightError(ValueError)` in `spools.py`: a weighing with `reading_g` and no `grams` on a spool with no effective empty weight.
   - `add_event`: for `kind == "weighed"`, resolve `empty = effective_on(conn, spool_id)`; `grams = body.grams if body.grams is not None else body.reading_g - empty.grams` (raise `NoEmptyWeightError` when `empty` is None); when `body.reading_g` is not None, `data |= breakdown(...)` with `expected = expected_before(ledger.events(conn, spool_id), body.at, weight_locked=…, label_weight_g=…)` read from the spool's row (the same `coalesce` as `refresh_derived`). The `grams` go to `absolute_g` as today.
@@ -102,16 +106,17 @@ def test_expected_before_takes_only_events_before_the_time() -> None:
               _event(2, "print_ended", "print_actual", delta_g=-50, ref_kind="print_run", ref_id="r"),
               _event(5, "print_ended", "print_actual", delta_g=-30, ref_kind="print_run", ref_id="s")]
     assert expected_before(events, T0 + timedelta(minutes=3), weight_locked=False, label_weight_g=1000) == 750
+    assert expected_before(events, T0 + timedelta(minutes=5), weight_locked=False, label_weight_g=1000) == 720  # a delta at the same instant counts
     assert expected_before(events, None, weight_locked=False, label_weight_g=1000) == 720
 
 def test_breakdown_names_the_insert_when_the_client_took_it_off() -> None:
-    empty = EmptyWeight(200, "insert", "placeholder", "Plastic")
+    empty = EmptyWeight(200, "insert", "placeholder", "Plastic", "placeholder weight")
     assert breakdown(reading_g=1180, grams=980, empty=empty, expected=992) == {
         "reading_g": 1180, "empty_g": 200, "empty_source": "insert", "empty_basis": "placeholder",
         "empty_name": "Plastic", "expected_g": 992, "drift_g": -12.0}
 
 def test_breakdown_is_a_persons_when_the_grams_disagree_with_the_insert() -> None:
-    empty = EmptyWeight(200, "insert", "catalog", "Plastic")
+    empty = EmptyWeight(200, "insert", "catalog", "Plastic", None)
     assert breakdown(reading_g=1180, grams=962, empty=empty, expected=None) == {
         "reading_g": 1180, "empty_g": 218, "empty_source": "person", "empty_basis": None,
         "empty_name": None, "expected_g": None, "drift_g": None}
@@ -299,7 +304,7 @@ git commit -m "feat(filament): the weigh form and the phone send the scale readi
 
 **Interfaces:**
 - Produces: `WeighingBreakdown({ event }: { event: SpoolEvent })`, a `<p>` with two sentences:
-  - `Weighed {reading} on {date}: filament {grams_after} + spool {empty_g} ({empty_name}, {basis word}).` The basis word: `catalog` → "from the catalog", `placeholder` → "placeholder", `derived` → "from new spools", `person` → "by hand"; for `empty_source` `person`: `spool {empty_g} (taken off by hand)`.
+  - `Weighed {reading} on {date}: filament {grams_after} + spool {empty_g} ({empty_name}, {basis word}).` The basis word: `catalog` → "from the catalog", `placeholder` → "placeholder", `derived` → "from new spools", `weighed_empty` → "weighed empty", `person` → "by hand" (the backend already resolved `placeholder` by `is_placeholder`, so the word follows `empty_basis` alone); for `empty_source` `person`: `spool {empty_g} (taken off by hand)`.
   - When `expected_g` is not null: `The ledger expected {expected}. ` then `The scale matches the prints.` (|drift| < 1), `The scale found {|drift|} less than the prints accounted for.` (drift < 0) or `… more than …` (drift > 0).
   - `GramsBasis` adds, before the anchor row, when `addedFull === true`, `labelWeight != null` and the anchor's source is not `scale` or `person`: `Started at the label weight {label}. {SOURCE word, capitalised} reported {anchor grams}; {label - anchor} unexplained.` ("Bambuddy reported 979.3 g; 20.7 g unexplained."). Nothing when the gap is under 0.05 g.
 
@@ -365,7 +370,7 @@ git commit -am "feat(filament): drift on the timeline, the spool heading and the
 **Files:**
 - Modify: `backend/CLAUDE.md` (the `filament/` `ledger.py` note: one clause on `reading_g`, the breakdown's `data` keys and `last_drift_g`; `empty_weight.py` listed as the one empty-weight resolver)
 - Modify: `docs/features/spools-and-filament.md` (a short "Weighing breakdown" paragraph with the keys and the sentence)
-- Modify: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md` (an "As built in #7682" line under §5.1 naming `empty_source`/`empty_name`, which the spec's key list lacks)
+- Modify: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md` (an "As built in #7682" line under §5.1 only if the build departs from its key list)
 
 - [ ] **Step 1: Write the docs.**
 - [ ] **Step 2: Run the full checks**

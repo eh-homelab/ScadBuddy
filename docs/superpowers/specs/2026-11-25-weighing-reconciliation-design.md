@@ -90,14 +90,18 @@ The change:
   event keeps. When `grams` is left out and `reading_g` given, the store computes
   `grams = reading_g - empty_g` with the effective empty weight, and refuses (422) a spool
   with no empty weight known, naming it.
-- The `weighed` event's `data` keeps: `reading_g`, `empty_g`, `empty_basis` (`insert`
-  with the insert's `empty_weight_basis`, or `parts` once #7278 lands, or `person` when
-  the client subtracted something else), `expected_g` (the grams left the ledger gave
-  just before the event's time, null when there was no anchor), `drift_g`
-  (`grams - expected_g`, null when `expected_g` is null). The ledger's walk computes
-  `expected_g` at write time, in the transaction that records the event, with the events
-  earlier than the weighing's `at` (a back-dated weighing is compared with what was
-  believed then).
+- The `weighed` event's `data` keeps: `reading_g`; `empty_g`; `empty_source` (`insert`,
+  or `parts` once #7278 lands, or `person` when the client subtracted something else
+  than the effective empty weight); `empty_basis` (for `insert`, the insert's
+  `empty_weight_basis`, with `placeholder` decided by `insert_weights.is_placeholder`,
+  the basis or the note; null for `person`); `empty_name` (the insert's name, null for
+  `person`); `expected_g` (the grams left the ledger gave just before the event's time,
+  null when there was no anchor); `drift_g` (`grams - expected_g`, null when
+  `expected_g` is null: negative means the scale found less filament than the ledger
+  expected). The ledger's walk computes `expected_g` at write time, in the transaction
+  that records the event, over the events before the weighing's `at` and, by the
+  ledger's rule 1 (at one instant deltas come before readings), the delta events at
+  exactly that `at` (a back-dated weighing is compared with what was believed then).
 - The effective empty weight is one function in `filament`, as #7278 §5 names it. Until
   #7278, it returns the insert type's `empty_weight_g` through the spool → type
   resolution that `check_on` in `insert_weights.py` already does.
@@ -152,6 +156,8 @@ placeholder empty weight. The change:
   posts `resolution` with `reading_g`, and the event's `data.resolution` and
   `data.shortfall_g` keep it. The agent's weighing tool takes the same field.
 - With no empty weight known, only `tared` is offered.
+- #7280's offer needs a reading above the label weight, so `below_label` and the offer
+  never meet on one reading.
 
 ### 5.4 End of life (slice C, #7684)
 
@@ -166,10 +172,13 @@ The change:
   `archived` event, at the archive's time.
 - The `archived` event's `data` keeps `reason` and the lifetime reconciliation:
   `started_g` (the spool's first `scale` or `person` filament reading, else its label
-  weight for an added-full spool, else null), `ledger_consumed_g` (the lifetime
-  consumption `consumed_g` the spool already reports), `scale_consumed_g`
+  weight for an added-full spool, else null), `ledger_consumed_g` (the plates' grams
+  the ledger's walk counts from `started_g`'s event to the archive, by §5.5's rules of
+  the filament spec, ignoring every `consumed_reset`: the spool's `consumed_g` counts
+  only since the newest reset, so it is not this number), `scale_consumed_g`
   (`started_g - final filament`, null without a final reading), `drift_g`
-  (`scale_consumed_g - ledger_consumed_g`).
+  (`ledger_consumed_g - scale_consumed_g`, the same sign as §5.1's: negative means
+  the scale found less filament than the ledger expected).
 - Before the archive, the page says what it sees when the numbers disagree with the
   reason: `finished` with more than 5 g left ("25 g of filament are still on it"),
   or anything but `finished` at 0 g. The person can go on.
@@ -204,8 +213,9 @@ change:
   same source as the grams (the estimate, then the actual when the printer reports
   it; Bambuddy's usage rows have no length and keep none).
 - The spool's lifetime shows grams and metres consumed and the density they imply:
-  `grams / (metres × π × (diameter / 2)²)`, with the diameter in centimetres, against
-  the type's `density_g_cm3`. A mismatch over 5 % is a sentence on the spool, never a
+  `grams / (metres × 100 × π × (diameter_cm / 2)²)`, every length in centimetres
+  (1 m = 100 cm; 1 m of 1.75 mm PLA at 1.24 g/cm³ is about 2.98 g), against the type's
+  `density_g_cm3`. A mismatch over 5 % is a sentence on the spool, never a
   booking.
 - §5.2's drift sentence names a likely cause when one fits: the implied density is off
   and the label weight is right (a wrong density on the type), or the drift matches
