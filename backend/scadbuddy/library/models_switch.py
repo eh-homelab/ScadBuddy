@@ -765,6 +765,20 @@ def _load_dump(directory: Path) -> Dump | None:
     )
 
 
+def _open_dump(paths: DataPaths, directory: Path) -> Dump | None:
+    """`_load_dump`, and only if each file it names is an output's ``meta.json``. Its hash
+    shows a dump that was cut short, and not one that was changed: a path in it is where
+    `rollback` writes."""
+    dump = _load_dump(directory)
+    outputs = paths.outputs.resolve()
+    for file in [] if dump is None else dump.files:
+        parts = Path(file.path).parts
+        inside = (paths.root / file.path).resolve().parent.parent.parent == outputs
+        if len(parts) != 4 or parts[0] != outputs.name or parts[3] != META_NAME or not inside:
+            raise SwitchRefusedError(f"the dump names {file.path}, which is not an output's")
+    return dump
+
+
 def _check_dump(paths: DataPaths, found: Found, dump: Dump, recorded: str | None) -> None:
     """That the dump is of this switch, and of the rows and files that are not changed."""
     if (dump.old_head, dump.new_head, dump.ids) != (found.old_head, found.new_head, found.ids):
@@ -801,7 +815,7 @@ def _is_new(paths: DataPaths, file: File) -> bool:
 def run(paths: DataPaths, conninfo: str, directory: Path) -> bool:
     """Do the switch, or finish one that stopped. False where it was done already."""
     directory = _check_place(paths, directory)
-    dump = _load_dump(directory)
+    dump = _open_dump(paths, directory)
     with _connected(conninfo) as conn:
         found = _survey(conn, paths, begun=dump is not None)
         if found.refused:
@@ -939,7 +953,7 @@ def rollback(paths: DataPaths, conninfo: str, directory: Path) -> None:
     """Put back what the dump holds. It removes no file, and no row but those that the API
     makes again."""
     directory = _check_place(paths, directory)
-    dump = _load_dump(directory)
+    dump = _open_dump(paths, directory)
     if dump is None:
         raise SwitchRefusedError(f"the dump {directory} is not there")
     with _connected(conninfo) as conn:

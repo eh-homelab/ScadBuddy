@@ -1162,6 +1162,30 @@ def test_a_number_keeps_its_digits_and_an_unknown_key_stays(world: World) -> Non
 # ── the dump directory ────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    "path", ["outputs/../../escape/meta.json", "/tmp/escape/meta.json", "models/a/model.json"]
+)
+def test_a_dump_that_names_a_file_outside_the_outputs_is_refused(world: World, path: str) -> None:
+    world.run()
+    files = world.dump / "files.jsonl"
+    lines = files.read_bytes().splitlines(keepends=True)
+    first = json.loads(lines[0])
+    first["path"] = path
+    files.write_bytes(json.dumps(first).encode() + b"\n" + b"".join(lines[1:]))
+    manifest = world.dump / "manifest.json"
+    body = json.loads(b"".join(manifest.read_bytes().splitlines(keepends=True)[:-1]))
+    body["files"]["files.jsonl"] = hashlib.sha256(files.read_bytes()).hexdigest()
+    signed = (json.dumps(body, indent=1) + "\n").encode()
+    manifest.write_bytes(signed + f"{hashlib.sha256(signed).hexdigest()}\n".encode())
+    before = snapshot(world)
+    with pytest.raises(SwitchRefusedError, match="not an output's"):
+        world.rollback()
+    with pytest.raises(SwitchRefusedError, match="not an output's"):
+        world.run()
+    assert snapshot(world) == before
+    assert not (world.paths.root.parent / "escape").exists()
+
+
 def test_a_dump_directory_that_holds_something_else_is_refused(world: World) -> None:
     world.dump.mkdir()
     (world.dump / "x").write_text("x")
