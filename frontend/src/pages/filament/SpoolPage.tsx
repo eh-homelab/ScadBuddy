@@ -7,6 +7,7 @@ import {
   addSpoolEvent,
   archiveSpool,
   bulkCreateSpools,
+  bulkUpdateSpools,
   copySpool,
   deleteSpool,
   getSpool,
@@ -61,7 +62,8 @@ import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { entityApi, type PropertyValue } from '../../components/entities/api'
 import { DefinedFields } from '../../components/entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../../components/entities/definedProperties'
+import { fieldErrorsOf, propertiesPatch, refusalText, requiredOf, type FieldErrors } from '../../components/entities/definedProperties'
+import { RequiredKeysDialog } from '../../components/entities/RequiredKeysDialog'
 import { useAsync } from '../../lib/useAsync'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
@@ -475,6 +477,10 @@ export function SpoolPage() {
   const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
   const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
   const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
+  // #7703: "Create type from this spool" asks first for the keys a type requires.
+  const typeKeys = useAsync(() => entityApi.propertySchema('spool_type'), [])
+  const typeSchema = typeKeys.data?.schema ?? {}
+  const [askType, setAskType] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -684,7 +690,8 @@ export function SpoolPage() {
   /** "Reset to type": `null` for the one field, at once; other unsaved edits stay. */
   const reset = (name: keyof Draft & keyof SpoolPatch) =>
     act(async () => {
-      await patchSpool(spoolKey, { [name]: null })
+      // The unchecked bulk route (#7703): a one-field action works on an incomplete spool.
+      await bulkUpdateSpools([spoolKey], { [name]: null })
       const fresh = await reload(true)
       setDraft((was) => ({ ...was, [name]: draftOf(fresh)[name] }))
     })
@@ -912,10 +919,25 @@ export function SpoolPage() {
                       size="xs"
                       variant="outline"
                       disabled={busy || dirty}
-                      onClick={() => void act(async () => { await makeTypeFromSpool(saved); await reload(false) }, 'Type created')}
+                      onClick={() =>
+                        requiredOf(typeSchema).length > 0 ? setAskType(true) : void act(async () => { await makeTypeFromSpool(saved); await reload(false) }, 'Type created')
+                      }
                     >
                       Create type from this spool
                     </Button>
+                    <RequiredKeysDialog
+                      schema={typeSchema}
+                      title="The new type needs these properties"
+                      action="Create type"
+                      open={askType}
+                      onCancel={() => setAskType(false)}
+                      onSubmit={async (properties) => {
+                        await makeTypeFromSpool(saved, properties)
+                        setAskType(false)
+                        setNotice('Type created')
+                        await reload(false)
+                      }}
+                    />
                     {dirty && <span className="text-[12px] text-muted-foreground">Save the spool first.</span>}
                   </div>
                 )}

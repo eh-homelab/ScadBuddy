@@ -10,6 +10,9 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { LinkTypeDialog } from '../filament/LinkTypeDialog'
+import { entityApi, type PropertyValue } from '../entities/api'
+import { requiredOf } from '../entities/definedProperties'
+import { RequiredKeysDialog } from '../entities/RequiredKeysDialog'
 import { bookRowIds, linkTypeToBook, MakeTypeError, makeTypeFromBook, rankCandidates, type BookRowIds, type TypeCandidate } from '../filament/makeType'
 import { DataTable, type Column } from '../records/DataTable'
 import { refusalText } from './refusal'
@@ -134,6 +137,10 @@ export function FilamentsEditor({
   const [filled, setFilled] = useState<DensityFillRow[] | null>(null)
   /** #7159: the row whose "Make a type" found types of its brand and colour, and its catalog ids. */
   const [choice, setChoice] = useState<{ row: Filament; ids: BookRowIds } | null>(null)
+  // #7703: a new type is made with the keys its kind requires, asked first.
+  const typeKeys = useAsync(() => entityApi.propertySchema('spool_type'), [])
+  const typeSchema = typeKeys.data?.schema ?? {}
+  const [askFor, setAskFor] = useState<Filament | null>(null)
   /**
    * #7344 R-7344-1: the choice's types come from the current `types`, so a reload while it is
    * open adds, drops or updates them; with none left the choice closes.
@@ -206,6 +213,10 @@ export function FilamentsEditor({
   }
 
   async function makeNewType(filament: Filament) {
+    if (requiredOf(typeSchema).length > 0) {
+      setAskFor(filament)
+      return
+    }
     try {
       await makeTypeFromBook(filament)
       onTypesChanged?.()
@@ -510,6 +521,23 @@ export function FilamentsEditor({
           onClose={() => setChoice(null)}
         />
       )}
+      <RequiredKeysDialog
+        schema={typeSchema}
+        title="The new type needs these properties"
+        action="Create type"
+        open={askFor !== null}
+        onCancel={() => setAskFor(null)}
+        onSubmit={async (properties: Record<string, PropertyValue>) => {
+          try {
+            await makeTypeFromBook(askFor!, properties)
+          } catch (err) {
+            // The dialog marks the fields from the server's refusal, which MakeTypeError wraps.
+            throw err instanceof MakeTypeError ? err.cause : err
+          }
+          setAskFor(null)
+          onTypesChanged?.()
+        }}
+      />
     </section>
   )
 }
