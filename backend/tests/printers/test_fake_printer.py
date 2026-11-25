@@ -13,6 +13,9 @@ on main yet; once it is, this test drives it instead (its ports are fixed at 888
 so the fake's are configurable for now). One difference: this client verifies the
 fake's certificate, which names ``127.0.0.1``, where ``LanPrinter`` pins a printer's
 SHA-256 (``test_the_certificate_survives_a_restart`` keeps that pin meaningful).
+
+The K-profile and AMS commands (#7276) are sent by `LanPrinter.request` itself, pinned,
+through `fake_lan.running_fake_lan`: the one test of it on the wire (plan 2026-11-25 P28).
 """
 
 import asyncio
@@ -34,6 +37,24 @@ from typing import Any, BinaryIO
 import aiomqtt
 import pytest
 
+from scadbuddy.printers import lan as lan_module
+from scadbuddy.printers.lan import LanPrinter
+from scadbuddy.printers.lan_commands import (
+    KProfileRow,
+    WireSlot,
+    ams_change_filament_load,
+    ams_change_filament_unload,
+    ams_filament_setting,
+    ams_get_rfid,
+    ams_reset,
+    extrusion_cali_del,
+    extrusion_cali_get,
+    extrusion_cali_sel,
+    extrusion_cali_set,
+    extrusion_cali_set_slot,
+    refusal,
+    wire_slot,
+)
 from tests.support import fake_lan
 from tests.support.fake_lan import (
     ACCESS_CODE,
@@ -542,3 +563,409 @@ async def test_the_start_moves_past_a_taken_ftps_port(
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
+
+
+# The K-profile and AMS commands (#7276, plan 2026-11-25 Task 3), sent by `LanPrinter.request`
+# over the fake's real broker: the only test of `request` on the wire (P28).
+
+
+@dataclass
+class _Linked:
+    printer: LanPrinter
+    fake: fake_lan.FakeLan
+
+
+@pytest.fixture
+async def linked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Linked]:
+    async with fake_lan.running_fake_lan(tmp_path, monkeypatch) as fake:
+        printer = LanPrinter(fake.host, fake.serial, fake.access_code, fake.cert_sha256)
+        yield _Linked(printer, fake)
+
+
+async def _ask(
+    linked: _Linked, payload: dict[str, Any], *, wait: float = 5.0
+) -> dict[str, Any] | None:
+    body = payload["print"]
+    return await linked.printer.request(
+        payload, name=body["command"], seq=body["sequence_id"], wait=wait
+    )
+
+
+async def _result(linked: _Linked, payload: dict[str, Any]) -> str | None:
+    reply = await _ask(linked, payload)
+    return None if reply is None else str(reply.get("result"))
+
+
+def _row(cali_idx: int, k_value: str, *, filament_id: str = "GFA00") -> KProfileRow:
+    return KProfileRow(
+        cali_idx=cali_idx,
+        extruder_id=0,
+        nozzle_id="HS01-0.4",
+        filament_id=filament_id,
+        name=f"PLA {k_value}",
+        k_value=k_value,
+        setting_id="PF00000000000000001",
+    )
+
+
+async def _profiles(linked: _Linked, diameter: str, seq: str) -> list[dict[str, Any]]:
+    reply = await _ask(linked, extrusion_cali_get(diameter, seq))
+    assert reply is not None
+    assert reply["result"] == "success" and reply["nozzle_diameter"] == diameter
+    filaments: list[dict[str, Any]] = reply["filaments"]
+    return filaments
+
+
+def _tray(report: dict[str, Any], unit: str, tray: str) -> dict[str, Any]:
+    trays = next(u["tray"] for u in report["ams"]["ams"] if u["id"] == unit)
+    found: dict[str, Any] = next(t for t in trays if t["id"] == tray)
+    return found
+
+
+async def test_the_report_has_k_values_and_an_idle_ams(linked: _Linked) -> None:
+    """As the H2C's report (``lan-report-h2c-idle.json``): each AMS tray has a
+    ``cali_idx``, and ``ams_status`` is at the top of ``print`` (P7)."""
+    report = (await linked.printer.probe()).print
+    assert report["ams_status"] == 0 and "ams_status" not in report["ams"]
+    tray = _tray(report, "0", "0")
+    assert (tray["cali_idx"], tray["k"]) == (-1, "0.020000")
+
+
+async def test_a_k_profile_set_then_get_lists_it(linked: _Linked) -> None:
+    assert await _profiles(linked, "0.4", "1") == []
+    made = await _ask(linked, extrusion_cali_set([_row(-1, "0.025000")], "0.4", "2"))
+    assert made is not None
+    assert (made["command"], made["sequence_id"], made["result"]) == (
+        "extrusion_cali_set",
+        "2",
+        "success",
+    )
+    other = _row(-1, "0.030000", filament_id="GFG00")
+    assert await _result(linked, extrusion_cali_set([other], "0.4", "3")) == "success"
+    listed = await _profiles(linked, "0.4", "4")
+    assert [(p["cali_idx"], p["filament_id"], p["k_value"]) for p in listed] == [
+        (1, "GFA00", "0.025000"),
+        (2, "GFG00", "0.030000"),
+    ]
+    # As Bambuddy parses a reply (`_parse_kprofile_entries`): the diameter is the envelope's.
+    assert set(listed[0]) == {
+        "cali_idx",
+        "extruder_id",
+        "nozzle_id",
+        "filament_id",
+        "name",
+        "k_value",
+        "n_coef",
+        "setting_id",
+    }
+
+    # Another index replaces that profile; a delete removes one; diameters are apart.
+    assert await _result(linked, extrusion_cali_set([_row(1, "0.021000")], "0.4", "5")) == (
+        "success"
+    )
+    deleted = extrusion_cali_del(
+        cali_idx=2,
+        filament_id="GFG00",
+        nozzle_id="HS01-0.4",
+        nozzle_diameter="0.4",
+        extruder_id=0,
+        setting_id=None,
+        dual_nozzle=True,
+        seq="6",
+    )
+    assert await _result(linked, deleted) == "success"
+    listed = await _profiles(linked, "0.4", "7")
+    assert [(p["cali_idx"], p["k_value"]) for p in listed] == [(1, "0.021000")]
+    assert await _profiles(linked, "0.6", "8") == []
+
+    linked.fake.post("/__reset")
+    assert await _profiles(linked, "0.4", "9") == []
+
+
+async def test_a_slot_configure_shows_in_the_next_report(linked: _Linked) -> None:
+    slot = wire_slot(0, 2, external_count=1)
+    setting = ams_filament_setting(
+        slot,
+        tray_info_idx="GFL99",
+        tray_type="PETG",
+        tray_sub_brands="PETG HF",
+        tray_color="#00ae42ff",
+        nozzle_temp_min=230,
+        nozzle_temp_max=260,
+        setting_id="GFSL99",
+        seq="11",
+    )
+    assert await _result(linked, setting) == "success"
+    profiles = [_row(3, "0.031000"), _row(4, "0.032000"), _row(5, "0.033000")]
+    assert await _result(linked, extrusion_cali_set(profiles, "0.4", "10")) == "success"
+    select = extrusion_cali_sel(
+        0, 2, external_count=1, cali_idx=3, filament_id="GFL99", nozzle_diameter="0.4", seq="12"
+    )
+    assert await _result(linked, select) == "success"
+    tray = _tray((await linked.printer.probe()).print, "0", "2")
+    assert {
+        "tray_info_idx": "GFL99",
+        "tray_type": "PETG",
+        "tray_sub_brands": "PETG HF",
+        "tray_color": "00AE42FF",
+        "cols": ["00AE42FF"],
+        "nozzle_temp_min": "230",
+        "nozzle_temp_max": "260",
+        "cali_idx": 3,
+        "k": "0.031000",
+    }.items() <= tray.items()
+
+    # The external holder, and an AMS-HT's one slot.
+    external = extrusion_cali_sel(
+        255, 0, external_count=1, cali_idx=4, filament_id="", nozzle_diameter="0.4", seq="13"
+    )
+    ht = extrusion_cali_sel(
+        128, 0, external_count=1, cali_idx=5, filament_id="", nozzle_diameter="0.4", seq="14"
+    )
+    assert await _result(linked, external) == "success"
+    assert await _result(linked, ht) == "success"
+    report = (await linked.printer.probe()).print
+    assert (report["vt_tray"]["cali_idx"], report["vt_tray"]["k"]) == (4, "0.032000")
+    assert _tray(report, "128", "0")["cali_idx"] == 5
+
+    # Empty values reset the slot.
+    assert await _result(linked, ams_reset(slot, "15")) == "success"
+    tray = _tray((await linked.printer.probe()).print, "0", "2")
+    assert (tray["tray_type"], tray["tray_info_idx"], tray["tray_color"]) == ("", "", "00000000")
+    assert (tray["nozzle_temp_min"], tray["nozzle_temp_max"]) == ("0", "0")
+
+
+async def test_a_slot_the_printer_lacks_is_refused(linked: _Linked) -> None:
+    """A second external holder: this fake reports one (``report.json``)."""
+    lacking = ams_filament_setting(
+        WireSlot(255, 0, 0),
+        tray_info_idx="GFL99",
+        tray_type="PLA",
+        tray_sub_brands="",
+        tray_color="FFFFFFFF",
+        nozzle_temp_min=190,
+        nozzle_temp_max=240,
+        setting_id=None,
+        seq="16",
+    )
+    reply = await _ask(linked, lacking)
+    assert reply is not None and refusal(reply) is not None
+
+
+async def test_a_select_of_a_missing_profile_is_refused(linked: _Linked) -> None:
+    """Index 1 exists for 0.4 only: selecting it on 0.6, or index 2 on 0.4, is refused
+    and the slot keeps its K."""
+    assert await _result(linked, extrusion_cali_set([_row(1, "0.025000")], "0.4", "17")) == (
+        "success"
+    )
+    for seq, (index, diameter) in enumerate([(2, "0.4"), (1, "0.6")], start=18):
+        select = extrusion_cali_sel(
+            0,
+            0,
+            external_count=1,
+            cali_idx=index,
+            filament_id="GFA00",
+            nozzle_diameter=diameter,
+            seq=str(seq),
+        )
+        reply = await _ask(linked, select)
+        assert reply is not None and refusal(reply) is not None
+    tray = _tray((await linked.printer.probe()).print, "0", "0")
+    assert (tray["cali_idx"], tray["k"]) == (-1, "0.020000")
+
+
+async def test_a_slot_k_set_changes_the_tray_not_the_table(linked: _Linked) -> None:
+    """``extrusion_cali_set_slot`` (``cali_idx`` -1, ``n_coef`` 1.4, an ``HS00-`` nozzle,
+    the flat tray index) sets that slot's K and lists no profile."""
+    payload = extrusion_cali_set_slot(
+        0,
+        3,
+        k_value=0.027,
+        nozzle_diameter="0.4",
+        filament_id="GFG99",
+        setting_id="GFSG99",
+        name="PETG",
+        seq="19",
+    )
+    assert await _result(linked, payload) == "success"
+    tray = _tray((await linked.printer.probe()).print, "0", "3")
+    assert (tray["cali_idx"], tray["k"]) == (-1, "0.027000")
+    assert await _profiles(linked, "0.4", "20") == []
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"command": "extrusion_cali_sel", "cali_idx": "x", "ams_id": 0, "tray_id": 0},
+        {"command": "extrusion_cali_sel", "nozzle_diameter": "0.4", "ams_id": 0, "slot_id": 0},
+        {"command": "ams_filament_setting", "ams_id": "zero", "tray_id": 0, "slot_id": 0},
+        {"command": "ams_filament_setting", "tray_id": 0, "slot_id": 0},
+        {"command": "ams_change_filament", "ams_id": 0, "slot_id": 0, "target": "one"},
+        {"command": "ams_change_filament", "ams_id": 0, "slot_id": 0},
+        {"command": "extrusion_cali_del", "nozzle_diameter": "0.4", "filament_id": "GFA00"},
+        {"command": "extrusion_cali_set", "nozzle_diameter": "0.4", "filaments": [{"x": 1}]},
+        {"command": "extrusion_cali_get"},
+    ],
+    ids=[
+        "sel index not a number",
+        "sel no index",
+        "setting unit not a number",
+        "setting no unit",
+        "change target not a number",
+        "change no target",
+        "del no index",
+        "set entry no index",
+        "get no diameter",
+    ],
+)
+async def test_a_malformed_command_is_refused_and_the_printer_carries_on(
+    linked: _Linked, command: dict[str, Any]
+) -> None:
+    payload = {"print": {**command, "sequence_id": "90"}}
+    reply = await _ask(linked, payload)
+    assert reply is not None and refusal(reply) is not None
+    assert await _result(linked, ams_get_rfid(0, 0, "91")) == "success"
+
+
+async def test_a_refused_k_set_changes_nothing(linked: _Linked) -> None:
+    """Every entry is checked before any is written: a second entry with no index fails
+    the command, and the first one is not listed."""
+    assert await _result(linked, extrusion_cali_set([_row(1, "0.025000")], "0.4", "94")) == (
+        "success"
+    )
+    payload = extrusion_cali_set([_row(1, "0.040000"), _row(2, "0.041000")], "0.4", "95")
+    del payload["print"]["filaments"][1]["cali_idx"]
+    reply = await _ask(linked, payload)
+    assert reply is not None and refusal(reply) is not None
+    listed = await _profiles(linked, "0.4", "96")
+    assert [(p["cali_idx"], p["k_value"]) for p in listed] == [(1, "0.025000")]
+
+
+async def test_a_reset_restores_the_ams(linked: _Linked) -> None:
+    before = (await linked.printer.probe()).print
+    slot = wire_slot(0, 0, external_count=1)
+    assert await _result(linked, ams_reset(slot, "92")) == "success"
+    load = ams_change_filament_load(1, external_count=1, extruder_id=0, right_temp=0, seq="93")
+    assert await _result(linked, load) == "success"
+    assert (await linked.printer.probe()).print["ams"]["tray_now"] == "1"
+    linked.fake.post("/__reset")
+    after = (await linked.printer.probe()).print
+    assert after["ams"] == before["ams"]
+    assert after["vt_tray"] == before["vt_tray"]
+    assert after["ams_status"] == 0
+
+
+async def test_a_load_moves_tray_now_and_unload_returns_255(linked: _Linked) -> None:
+    load = ams_change_filament_load(1, external_count=1, extruder_id=0, right_temp=0, seq="21")
+    seen: list[dict[str, Any]] = []
+    async with asyncio.timeout(10):
+        async for report in linked.printer.reports(command=load):
+            seen.append(dict(report.print))
+            if report.print["ams"]["tray_now"] == "1":
+                break
+    replies = [r for r in seen if r.get("result") == "success"]
+    assert replies and replies[0]["command"] == "ams_change_filament"
+    assert replies[0]["sequence_id"] == "21"
+    # The report the change pushed reads busy; the next one is idle again.
+    assert seen[-1]["ams_status"] == 0x0100
+    after = (await linked.printer.probe()).print
+    assert (after["ams"]["tray_now"], after["ams_status"]) == ("1", 0)
+
+    unload = ams_change_filament_unload(1, external_count=1, nozzle_temp=220, seq="22")
+    assert await _result(linked, unload) == "success"
+    assert (await linked.printer.probe()).print["ams"]["tray_now"] == "255"
+
+
+async def test_a_tag_read_is_answered(linked: _Linked) -> None:
+    assert await _result(linked, ams_get_rfid(0, 1, "31")) == "success"
+
+
+async def test_a_refused_command_answers_fail_with_the_reason(linked: _Linked) -> None:
+    linked.fake.post("/__refuse", {"command": "extrusion_cali_set", "reason": "invalid tray_id"})
+    reply = await _ask(linked, extrusion_cali_set([_row(-1, "0.025000")], "0.4", "41"))
+    assert reply is not None
+    assert (reply["command"], reply["sequence_id"]) == ("extrusion_cali_set", "41")
+    assert refusal(reply) == "invalid tray_id"
+    # Refused: nothing was written; and only the next such command is refused.
+    assert await _profiles(linked, "0.4", "42") == []
+    again = await _ask(linked, extrusion_cali_set([_row(-1, "0.025000")], "0.4", "43"))
+    assert again is not None and refusal(again) is None
+
+
+async def test_a_silent_command_answers_nothing(linked: _Linked) -> None:
+    linked.fake.post("/__silent", {"command": "ams_get_rfid"})
+    assert await _ask(linked, ams_get_rfid(0, 0, "51"), wait=1.0) is None
+    assert await _result(linked, ams_get_rfid(0, 0, "52")) == "success"
+    sent = [
+        e["print"]["sequence_id"]
+        for e in linked.fake.received()["mqtt"]
+        if e.get("print", {}).get("command") == "ams_get_rfid"
+    ]
+    assert sent == ["51", "52"]
+
+
+async def test_a_reset_clears_the_refusals_and_silences(linked: _Linked) -> None:
+    linked.fake.post("/__refuse", {"command": "ams_get_rfid", "reason": "no"})
+    linked.fake.post("/__silent", {"command": "extrusion_cali_get"})
+    linked.fake.post("/__reset")
+    assert await _result(linked, ams_get_rfid(0, 0, "61")) == "success"
+    assert await _profiles(linked, "0.4", "62") == []
+
+
+# A cut connection is shut by force (P31): an aiomqtt release that renames what
+# `lan._force_close` reaches into fails here, instead of leaving a printer's client slot held.
+
+
+def _spy_force_close(monkeypatch: pytest.MonkeyPatch) -> list[aiomqtt.Client]:
+    """The clients `lan._force_close` shuts, so a test proves the cut path ran."""
+    shut: list[aiomqtt.Client] = []
+    force_close = lan_module._force_close
+
+    def spy(client: aiomqtt.Client) -> None:
+        shut.append(client)
+        force_close(client)
+
+    monkeypatch.setattr(lan_module, "_force_close", spy)
+    return shut
+
+
+async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The broker takes the connection, and the client waits for its CONNACK past
+    `MQTT_TIMEOUT`: the connect is cut inside ``__aenter__`` with nothing entered, and its
+    socket is closed at once, not left open until the broker's keepalive."""
+    shut = _spy_force_close(monkeypatch)
+    held: list[Any] = []
+
+    class HeldAtConnack(aiomqtt.Client):
+        async def _wait_for(self, fut: Any, timeout: float | None) -> Any:
+            if fut is self._connected:
+                held.append(self._client.socket())
+                await asyncio.Event().wait()
+            return await super()._wait_for(fut, timeout)
+
+    monkeypatch.setattr(aiomqtt, "Client", HeldAtConnack)
+    monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 1.0)
+    with pytest.raises(TimeoutError):
+        await _ask(linked, ams_get_rfid(0, 0, "71"))
+    assert len(shut) == 1
+    assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1
+
+
+async def test_a_cut_close_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reply is in, then the close never ends (``__aexit__`` hangs before it sends a
+    DISCONNECT, so paho never closes the socket itself): `MQTT_TIMEOUT` cuts the close, the
+    reply stands, and `lan._force_close` closes the socket at once."""
+    shut = _spy_force_close(monkeypatch)
+    held: list[Any] = []
+
+    class HangsOnClose(aiomqtt.Client):
+        async def __aexit__(self, *exc: Any) -> None:
+            held.append(self._client.socket())
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(aiomqtt, "Client", HangsOnClose)
+    monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 1.0)
+    reply = await _ask(linked, ams_get_rfid(0, 0, "81"))
+    assert reply is not None and reply["result"] == "success"
+    assert len(shut) == 1
+    assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1
