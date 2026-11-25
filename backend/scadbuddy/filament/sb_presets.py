@@ -136,8 +136,15 @@ class FilamentPreset(BaseModel):
     #: The Bambuddy ``bb_preset_id`` belongs to (`bb_sync_nudge.instance_for`); ``None``
     #: for a row from before it was kept, taken for the configured one's.
     bb_instance: str | None
+    #: Bambuddy's ``updated_at`` of ``bb_preset_id``, as it sent it: for a ``bambuddy``
+    #: preset when its document was last taken (`refresh_bambuddy`); for a ``3dfp`` or
+    #: ``manual`` one, of the mirror's last write (`preset_mirror._mirrored`; ``None`` for a
+    #: preset sent before the mirror kept it, until its next mirror write), which the links'
+    #: reset compares to prove the same Bambuddy (#7343).
     bb_updated_at: str | None
     mirrored_sha256: str | None
+    #: Why the mirror's last send failed, or, after a successful send, a note that is no
+    #: failure: the untracked copy a lost create left in Bambuddy (`preset_mirror._mirrored`).
     mirror_error: str | None
     mirror_error_at: datetime | None
     created_at: datetime

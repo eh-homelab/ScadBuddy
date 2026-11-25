@@ -1783,7 +1783,8 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
     assert [r.getMessage() for r in records if r.levelno == logging.INFO] == [
         "made this build current"
     ]
-    assert not [r for r in records if r.levelno >= logging.ERROR]
+    # Every logger's records: the loop watch only warns, so any ERROR is the retry's.
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 async def test_making_the_build_current_does_not_give_up(

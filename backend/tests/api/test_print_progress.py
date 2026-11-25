@@ -143,6 +143,8 @@ def test_an_output_last_printed_by_a_pipeline_run_still_opens(
     record = json.loads(path.read_text(encoding="utf-8"))
     record.update(print_route="pipeline", pipeline_run_id=12, queue_item_id=7, library_file_id=41)
     path.write_text(json.dumps(record), encoding="utf-8")
+    # A record that old has no row until the copy (#7255): its file answers.
+    getattr(client.app.state, STATE_ATTR).outputs.rows.delete(output_id)  # type: ignore[attr-defined]
 
     detail = client.get(f"/api/v1/outputs/{output_id}")
     assert detail.status_code == 200

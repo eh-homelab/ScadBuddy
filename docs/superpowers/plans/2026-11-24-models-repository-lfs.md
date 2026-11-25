@@ -4,7 +4,7 @@ Spec: `docs/superpowers/specs/2026-11-24-models-repository-lfs-design.md`. One P
 test first.
 
 1. **LFS support.** Image: `git-lfs`. `GitRepo`/`ModelHistory`: the filter on every call,
-   `.gitattributes` on a fresh repository only, `show` of a mesh with `--filters`, `git lfs
+   `.gitattributes` on a fresh repository only, `show` and `read_blob` of a mesh with `cat-file --filters`, `git lfs
    push` before `push` with `lfs.url` pinned. Tests: a mesh commit's blob is a pointer;
    export, restore, duplicate and an upstream merge give real bytes; an existing repository
    gets no attributes; a push to a `file://` remote clones complete; a `.lfsconfig` does not

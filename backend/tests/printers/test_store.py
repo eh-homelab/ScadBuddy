@@ -112,6 +112,16 @@ def test_patch_renames_and_sets_the_path(printers: PrinterStore) -> None:
         printers.patch("nope", PrinterPatch(name="B"))
 
 
+def test_patch_camera_recording(printers: PrinterStore) -> None:
+    row = printers.create(PrinterCreate(serial=SERIAL, name="A"))
+    assert row.camera_recording is True
+    off = printers.patch(row.id, PrinterPatch(camera_recording=False))
+    assert off.camera_recording is False
+    assert printers.get(row.id) == off
+    assert printers.patch(row.id, PrinterPatch(name="B")).camera_recording is False
+    assert printers.patch(row.id, PrinterPatch(camera_recording=True)).camera_recording is True
+
+
 def test_lan_link_seals_and_opens(printers_with_kek: PrinterStore, pg_pool: PgPool) -> None:
     pid = printers_with_kek.create(PrinterCreate(serial=SERIAL, name="A")).id
     row = printers_with_kek.link_lan(
@@ -325,6 +335,33 @@ def test_a_synthetic_row_merges_into_the_row_holding_the_serial(
     assert printers.get(synthetic.id) is None
     assert reports.get(mine.id) is not None and reports.get(synthetic.id) is None
     assert set(bus.changed()) == {synthetic.id, mine.id}
+
+
+def test_a_merge_moves_a_stock_unit_to_the_kept_printer(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """#7067: `stock_units.printer_id` names the printer a unit is; a merge repoints it."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    with pg_pool.connection() as conn:
+        item = conn.execute(
+            "INSERT INTO items (kind_id, name) VALUES ('printer', 'H2C') RETURNING id"
+        ).fetchone()
+        assert item is not None
+        unit = conn.execute(
+            "INSERT INTO stock_units (item_id, printer_id, cost_minor, origin, created_by)"
+            " VALUES (%s, %s, 0, 'manual', '{}') RETURNING id",
+            (item["id"], synthetic.id),
+        ).fetchone()
+        assert unit is not None
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+
+    printers.ensure_bambuddy(4, serial=SERIAL, name="H2C", model="H2C")
+
+    with pg_pool.connection() as conn:
+        row = conn.execute(
+            "SELECT printer_id FROM stock_units WHERE id = %s", (unit["id"],)
+        ).fetchone()
+    assert row is not None and str(row["printer_id"]) == mine.id
 
 
 def test_a_merge_drops_the_gone_printers_override_slots_and_keeps_the_kept_ones(

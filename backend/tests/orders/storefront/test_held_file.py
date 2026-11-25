@@ -17,7 +17,7 @@ from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import LibrarySource
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.orders import bambuddy as orders_bambuddy
+from scadbuddy.orders import quote_preview
 from scadbuddy.orders.storefront.held_file import HeldFile, PricedFile
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
@@ -131,12 +131,12 @@ async def test_a_held_slice_reads_the_held_bytes_not_the_library(
         seen.update(kwargs)
         return []
 
-    monkeypatch.setattr(orders_bambuddy, "start_preview_plates", started)
+    monkeypatch.setattr(quote_preview, "start_preview_plates", started)
     settings = StoredSettings(bambuddy_url=BASE_URL, bambuddy_api_key="s3cret")
     request = PrintRunRequest.model_validate(
         {"printer_id": 1, "filament_plan": {"slots": []}, "choices": {"nozzles": [{"size": "0.4"}]}}
     )
-    await orders_bambuddy.start_library_quote_preview(
+    await quote_preview.start_library_quote_preview(
         FILE_ID,
         settings,
         None,  # type: ignore[arg-type]

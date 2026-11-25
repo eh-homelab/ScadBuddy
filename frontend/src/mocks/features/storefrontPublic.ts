@@ -339,14 +339,20 @@ function fileOutside(listing: Listing, body: Pick<Body, 'values' | 'colours'>): 
   return null
 }
 
+/** 409 `listing_changed`: the listing moved, or was switched, since its page read it. */
+function changed(): Response {
+  return problem(409, 'Conflict', 'This listing has changed. Load it again.', { type: PROBLEMS + 'listing_changed' })
+}
+
 /**
  * The CRUD side's checks (`orders/storefront/inputs.py`), as far as the mocks need them. A
  * render and its instant read take a template listing only (`files` false): a file listing
- * is 404 there, as the CRUD side's `published_listing` answers (#6710).
+ * is 409 `listing_changed` there, as the CRUD side's `published_listing` answers (#6710).
  */
 function outside(body: Body, files = true): Response | Listing {
   const listing = allListings().find((l) => l.id === body.listing_id)
-  if (!listing || (!files && listing.source === 'library_file')) return refused(404, 'listing_not_found', 'There is no such listing.')
+  if (!listing) return refused(404, 'listing_not_found', 'There is no such listing.')
+  if (!files && listing.source === 'library_file') return changed()
   if (listing.source === 'library_file') return fileOutside(listing, body) ?? listing
   for (const [name, value] of Object.entries(body.values ?? {})) {
     const bound = listing.params[name]
@@ -460,12 +466,10 @@ export const handlers = [
   // slice and answers the listing's `last` price (`pending` when it has none), the next
   // answers the price, as the shop's slice price does.
   http.post(`${base}/listings/:id/price`, async ({ request, params }) => {
-    const listing = allListings().find((l) => l.id === params.id && l.source === 'library_file')
+    const listing = allListings().find((l) => l.id === params.id)
     if (!listing) return refused(404, 'listing_not_found', 'There is no such listing.')
     const body = (await request.json()) as Pick<Body, 'listing_updated_at' | 'colours'>
-    if (body.listing_updated_at !== listing.updated_at) {
-      return problem(409, 'Conflict', 'This listing has changed. Load it again.', { type: PROBLEMS + 'listing_changed' })
-    }
+    if (listing.source !== 'library_file' || body.listing_updated_at !== listing.updated_at) return changed()
     const checked = fileOutside(listing, body)
     if (checked) return checked
     const key = JSON.stringify([listing.id, body.colours])

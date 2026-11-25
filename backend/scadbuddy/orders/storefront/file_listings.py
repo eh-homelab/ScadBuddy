@@ -39,6 +39,7 @@ from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES, ReadOutOfMemoryE
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.media import MAX_IMAGE_BYTES, SNIFF_BYTES, sniff_kind
 from scadbuddy.orders.quote import file_colour
+from scadbuddy.orders.served_library import ServedLibrary
 from scadbuddy.orders.storefront.inputs import effective_materials, material_key
 from scadbuddy.orders.storefront.listings import (
     HOLDER,
@@ -48,6 +49,7 @@ from scadbuddy.orders.storefront.listings import (
     check_sliceable,
     file_copy_key,
     listing_not_found,
+    no_such_listing,
     picture_key,
     problem,
     published_listing,
@@ -73,7 +75,6 @@ from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
-    from scadbuddy.orders.bambuddy import ServedLibrary
     from scadbuddy.store.content import ContentStore
     from scadbuddy.store.content_models import BlobStat
 
@@ -124,9 +125,6 @@ class HeldBytes:
 
 
 def _served(state: AppState) -> ServedLibrary:
-    # Here, not at the top: the orders' Bambuddy module imports the storefront's.
-    from scadbuddy.orders.bambuddy import ServedLibrary
-
     return ServedLibrary(state.settings_store, state.components.get(PRINT_LIBRARY).serving_native)
 
 
@@ -136,8 +134,7 @@ async def served_file(state: AppState, file_id: int) -> LibraryFile | None:
 
 
 async def download(state: AppState, file_id: int) -> AsyncGenerator[bytes]:
-    """The file's bytes, from the library that serves (`ServedLibrary.download`: only the
-    orders' Bambuddy module reaches the client, #4253)."""
+    """The file's bytes, from the library that serves (`ServedLibrary.download`)."""
     async with aclosing(_served(state).download(file_id)) as chunks:
         async for chunk in chunks:
             yield chunk
@@ -539,9 +536,10 @@ async def held_preview(
     (§6.3, §8.1), which a visitor's page recolours by each mesh's slot. 404
     ``listing_not_found`` for a listing that is not a published file listing, and
     ``preview_not_found`` for a plate with no held preview or one the store lost."""
-    listing = await asyncio.to_thread(published_listing, store, listing_id, source="library_file")
+    listing = await asyncio.to_thread(published_listing, store, listing_id, source=None)
     snapshot = listing.file_snapshot
-    assert snapshot is not None
+    if snapshot is None:
+        raise no_such_listing()
     held = snapshot.previews
     stat = None if plate not in held else await _content(state).stat(held[plate])
     if stat is None:

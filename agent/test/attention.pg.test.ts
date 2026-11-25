@@ -10,7 +10,7 @@ import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest, type QuestionV
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/gate/questions.js'
-import { pendingInput, respond } from '../src/routes/pendingInput.js'
+import { pendingInput, respond, sessionPendingInput } from '../src/routes/pendingInput.js'
 import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
 import { durableRequestId } from '../src/gate/ids.js'
 import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
@@ -673,6 +673,16 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     const page = await pendingInput(m)
     expect(page.summaries_truncated).toBe(true)
     expect(page.entries).toHaveLength(PENDING_CAP)
+    // One session's read is capped by that session's own summaries (#7311): another's newer
+    // ones neither push its out nor mark its page truncated.
+    const { session: quiet } = await m.start(browser, { origin: 'chat', title: 'quiet' })
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, created_at)
+      VALUES (gen_random_uuid(), ${quiet.id}, gen_random_uuid(), ${ATTENTION_TOOL}, 'toolu_quiet', '[]', 'attention', 'done', 'x', now() - interval '2 days')`
+    const one = await sessionPendingInput(m, browser, quiet.id)
+    expect(one?.entries.map((e) => e.session_id)).toEqual([quiet.id])
+    expect(one?.summaries_truncated).toBe(false)
+    expect((await sessionPendingInput(m, browser, session.id))?.summaries_truncated).toBe(true)
   })
 
   it("a signed-in person sees the done summary of a session the anonymous browser user owns (D8)", async () => {

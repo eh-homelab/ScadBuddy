@@ -22,7 +22,7 @@ from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM, is_transient
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.client import CrudRefusedError
-from scadbuddy.library.settings_store import SettingsReader
+from scadbuddy.library.settings_store import OPERATION_RETENTION_SECONDS, SettingsStore
 from scadbuddy.operations.kinds import (
     CHECK_ON_BAMBUDDY,
     OPERATION_RUN,
@@ -56,7 +56,7 @@ CHECK_BUDGET_SECONDS = 6.0
 
 def operation_activities(
     store: OperationStore | RemoteOperationStore,
-    settings_store: SettingsReader | None,
+    settings_store: SettingsStore | None,
     kinds: Mapping[str, OperationKind],
 ) -> list[Callable[..., Any]]:
     """``settings_store`` is None with a `RemoteOperationStore`: the API prunes past its
@@ -68,7 +68,8 @@ def operation_activities(
         assert info.workflow_id is not None and info.workflow_run_id is not None
         retention = None
         if settings_store is not None:
-            seconds = (await asyncio.to_thread(settings_store.load)).operation_retention_seconds
+            # One plain setting, from the API's cache (#7384): no settings query.
+            seconds = await asyncio.to_thread(settings_store.get, OPERATION_RETENTION_SECONDS)
             retention = timedelta(seconds=seconds) if seconds is not None else None
         op = input.input
         return await store.insert(

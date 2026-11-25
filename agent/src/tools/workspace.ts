@@ -51,7 +51,7 @@ const path = z
 const sha = z.string().regex(/^[0-9a-f]{64}$/, 'a sha256 as workspace_read or workspace_list gives it')
 
 function filesOf(ctx: ToolContext): { files: WorkspaceFiles; ws: WorkspaceRef } {
-  if (!ctx.workspace) throw new ToolError('the workspace is not available here: it needs the agent database')
+  if (!ctx.workspace) throw new ToolError('the workspace is not available here: this process was started without the workspace store')
   return { files: ctx.workspace, ws: workspaceOf(ctx) }
 }
 

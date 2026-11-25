@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -14,6 +15,7 @@ import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core.events import EventBus, PrinterEvent
 from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
@@ -30,7 +32,7 @@ from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
 from scadbuddy.rack.usage import LanUsage, PickedHotend, RackUsageStore
 from scadbuddy.workflows.printer_watch import PrinterWatchInput
 from tests.conftest import PgPool
-from tests.printers.conftest import KEK
+from tests.printers.conftest import KEK, RecordingBus
 from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
@@ -523,3 +525,154 @@ def test_a_write_older_than_the_row_moves_nothing_back(
     # A write as old as the row is the same write again: written, ending nothing.
     assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
     assert reports.get(pid) == (FINISH_X, later + timedelta(seconds=1))
+
+
+def _camera(url: str | None, percent: int = 0) -> dict[str, Any]:
+    ipcam = {} if url is None else {"rtsp_url": url}
+    return {"gcode_state": "RUNNING", "mc_percent": percent, "ipcam": ipcam}
+
+
+URL_A = "rtsps://10.0.0.9:322/a"
+URL_B = "rtsps://10.0.0.8:322/a"
+
+
+async def _kinds(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+    deltas: list[dict[str, Any]],
+    *,
+    stored: dict[str, Any] | None = None,
+    empty: bool = False,
+) -> list[str]:
+    """The event kinds one watch attempt publishes. ``stored`` is the report the row holds
+    when the attempt starts; ``empty`` watches a printer with no stored report at all."""
+    printers, reports, pid = linked
+    if empty:
+        pid = printers.create(PrinterCreate(serial="01P00A000000002", name="E")).id
+        printers.link_lan(
+            pid, LanLink(host="10.0.0.10", access_code="12345678"), cert_sha256="ab" * 32
+        )
+        assert reports.get(pid) is None
+    elif stored is not None:
+        reports.put(pid, stored, LONG_AGO)
+    bus = RecordingBus()
+    lan = Lan(subscribes=True, deltas=deltas)
+    watches = WatchActivities(
+        printers,
+        reports,
+        cast(EventBus, bus),
+        connect=lambda *a: cast(LanPrinter, lan),
+        write_every=0,
+    )
+
+    def kinds() -> list[str]:
+        return [e.kind for e in bus.events if isinstance(e, PrinterEvent)]
+
+    # Every delta moves ``mc_percent``, so each one announces ``printer.report``, in the
+    # same call as any ``printer.changed`` it brings.
+    await run_until(
+        ActivityEnvironment(), watches, pid, lambda: kinds().count("printer.report") == len(deltas)
+    )
+    return kinds()
+
+
+async def test_watch_announces_changed_on_rtsp_url_change(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_A, 1), _camera(URL_B, 2)])
+    assert kinds.count("printer.changed") == 2  # none to A (the stored report), then A to B
+
+
+async def test_watch_announces_no_change_for_progress_only(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_A, 1), _camera(URL_A, 2)], stored=_camera(URL_A, 0))
+    assert "printer.changed" not in kinds
+    assert kinds.count("printer.report") == 2
+
+
+async def test_a_first_url_with_an_empty_store_is_announced(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_A, 1)], empty=True)
+    assert kinds.count("printer.changed") == 1
+
+
+async def test_a_restart_over_a_stored_report_with_another_url_is_announced(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_B, 1)], stored=_camera(URL_A, 0))
+    assert kinds.count("printer.changed") == 1
+
+
+async def test_a_restart_with_the_same_url_announces_no_change(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(URL_A, 1)], stored=_camera(URL_A, 0))
+    assert "printer.changed" not in kinds
+
+
+async def test_a_dropped_url_is_announced(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    kinds = await _kinds(linked, [_camera(None, 1)], stored=_camera(URL_A, 0))
+    assert kinds.count("printer.changed") == 1
+
+
+async def test_a_cancel_during_the_camera_seed_leaks_no_task() -> None:
+    """The stored camera URL is read before the reader starts: a cancel while that read
+    waits leaves no task behind."""
+    asked, release = threading.Event(), threading.Event()
+
+    class SlowReports(PrinterReportStore):
+        def __init__(self) -> None:
+            pass
+
+        def get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+            asked.set()
+            release.wait(5)
+            return None
+
+        def watch_get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+            return self.get(printer_id)
+
+    lan = Lan(subscribes=True)
+    watches = WatchActivities(None, SlowReports(), None)  # type: ignore[arg-type]
+    before = asyncio.all_tasks()
+    follow = asyncio.create_task(watches._follow("p1", cast(LanPrinter, lan)))
+    try:
+        assert await asyncio.to_thread(asked.wait, 5)
+        follow.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await follow
+    finally:
+        release.set()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert asyncio.all_tasks() - before == set()
+
+
+async def test_a_delta_without_ipcam_before_the_pushall_keeps_the_camera(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    """A reconnect's first message can be a delta, with no ``ipcam`` key, before the
+    ``pushall`` answer (`reports.advance_print`). It says nothing about the camera: no
+    ``printer.changed``, so the relay and the recorders keep the feed, and the stored
+    report keeps its URL for a resync in that window."""
+    _printers, reports, pid = linked
+    delta = {"gcode_state": "RUNNING", "mc_percent": 1}
+    kinds = await _kinds(linked, [delta, _camera(URL_A, 2)], stored=_camera(URL_A, 0))
+    assert "printer.changed" not in kinds
+    got = reports.get(pid)
+    assert got is not None and got[0]["ipcam"] == {"rtsp_url": URL_A}
+
+
+async def test_a_delta_without_ipcam_keeps_the_stored_url(
+    linked: tuple[PrinterStore, PrinterReportStore, str],
+) -> None:
+    _printers, reports, pid = linked
+    reports.put(pid, _camera(URL_A, 0), LONG_AGO)
+    reports.put(pid, {"gcode_state": "RUNNING", "mc_percent": 1}, LONG_AGO)
+    got = reports.get(pid)
+    assert got is not None
+    assert got[0]["ipcam"] == {"rtsp_url": URL_A}
+    assert got[0]["mc_percent"] == 1

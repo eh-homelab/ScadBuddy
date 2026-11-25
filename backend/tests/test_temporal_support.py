@@ -19,6 +19,7 @@ from tests.support.temporal import (
     WorkerThread,
     WorkflowReaper,
     _store_dir,
+    cancel_recorded,
     current_address,
     temporal_client,
     temporal_server,
@@ -138,3 +139,27 @@ def test_a_worker_thread_that_does_not_stop_fails_the_test() -> None:
         WorkerThread(make_worker, join_timeout=0.2),
     ):
         pass
+
+
+class _NeverCancelled:
+    """A workflow handle whose history never records the cancel request."""
+
+    id = "never-cancelled"
+
+    async def cancel(self) -> None:
+        pass
+
+    async def fetch_history(self) -> Any:
+        return type("History", (), {"events": []})()
+
+
+async def test_a_cancel_that_never_lands_fails_the_recorder_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7500: the recorders' wait for the cancel request is bounded, so a cancel the
+    server never records fails with a message that says so, not a test timeout."""
+    import tests.support.temporal as support
+
+    monkeypatch.setattr(support, "CANCEL_RECORDED_WITHIN", 0.2)
+    with pytest.raises(TimeoutError, match="no cancel request"):
+        await cancel_recorded(_NeverCancelled())  # type: ignore[arg-type]

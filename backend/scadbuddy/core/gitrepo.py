@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 GIT = "git"
 LOCK_NAME = ".scadbuddy-git.lock"
 GITIGNORE_NAME = ".gitignore"
+GITATTRIBUTES_NAME = ".gitattributes"
 DEFAULT_LOG_LIMIT = 50
 # Generous for a local repository, small enough that a stalled PVC cannot hold an
 # executor slot for minutes. Overridable with ``SCADBUDDY_GIT_TIMEOUT``.
@@ -333,12 +334,43 @@ class GitRepo:
         """The ``.gitignore`` :meth:`ensure_repo` keeps at the root; None for none."""
         return None
 
+    def _gitattributes_body(self) -> str | None:
+        """The ``.gitattributes`` :meth:`ensure_repo` gives a repository with no commit
+        yet; None for none. One that has history keeps what it has."""
+        return None
+
+    def _filters(self) -> Sequence[str]:
+        """The ``-c`` configuration of this repository's content filters."""
+        return ()
+
+    def _push_large(
+        self, url: str, commit: str, *, env: dict[str, str], config: Sequence[str]
+    ) -> None:
+        """Send what :meth:`push` must have at the remote before ``commit``, and which
+        git itself does not send. Nothing here."""
+
     # ── plumbing ──────────────────────────────────────────────────────────────
 
     @property
     def available(self) -> bool:
         """A git binary exists and ``root`` is a repository."""
         return shutil.which(self.git) is not None and (self.root / ".git").is_dir()
+
+    def command(self, *args: str, config: Sequence[str] = ()) -> list[str]:
+        """The argv of a git call on this repository, for a caller that streams one."""
+        return [
+            self.git,
+            "--no-pager",
+            "-c",
+            f"safe.directory={self.root}",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.autocrlf=false",
+            *(part for item in self._filters() for part in ("-c", item)),
+            *(part for item in config for part in ("-c", item)),
+            *args,
+        ]
 
     def _run(
         self,
@@ -351,18 +383,7 @@ class GitRepo:
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         # `None` is the sentinel, so an explicit 0 is honoured (#2343).
         limit = self.timeout if timeout is None else timeout
-        command = [
-            self.git,
-            "--no-pager",
-            "-c",
-            f"safe.directory={self.root}",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.autocrlf=false",
-            *(part for item in config for part in ("-c", item)),
-            *args,
-        ]
+        command = self.command(*args, config=config)
         # Another replica's commit is visible to this call, not 60 s later (#2385).
         self.revalidate()
         try:
@@ -561,6 +582,9 @@ class GitRepo:
                     not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body
                 ):
                     gitignore.write_text(body, encoding="utf-8")
+                attributes = self._gitattributes_body() if fresh else None
+                if attributes is not None:
+                    (self.root / GITATTRIBUTES_NAME).write_text(attributes, encoding="utf-8")
                 message = "Initial revision" if fresh else RECOVERED_MESSAGE
                 return self._commit_locked(message, ".")
         except (GitError, OSError):
@@ -901,6 +925,7 @@ class GitRepo:
         if password:
             config.append(f"credential.helper={CREDENTIAL_HELPER}")
             env = {**env, PUSH_USERNAME_ENV: username or "git", PUSH_PASSWORD_ENV: password}
+        self._push_large(url, commit, env=env, config=config)
         self._run(
             "push",
             "--quiet",

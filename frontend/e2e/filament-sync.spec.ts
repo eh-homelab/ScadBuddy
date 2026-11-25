@@ -51,7 +51,7 @@ test('the reset dialog says why there is no keep when every comparable linked sp
   await filament.getByRole('button', { name: 'Reset Bambuddy links' }).click()
   const dialog = page.getByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
   await expect(dialog).toContainText(
-    'Every linked spool ScadBuddy could compare (a time on both sides) changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
+    'Every linked spool (or, with no spool linked, filament preset) ScadBuddy could compare (a time on both sides) changed in Bambuddy since ScadBuddy last saw it, so ScadBuddy cannot prove this is the same Bambuddy.',
   )
   await expect(dialog.getByRole('button', { name: 'Keep links' })).toHaveCount(0)
   await expect(dialog.getByRole('button', { name: 'Reset links' })).toBeVisible()

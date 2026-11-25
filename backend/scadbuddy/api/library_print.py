@@ -95,10 +95,10 @@ from scadbuddy.bambuddy.library_listing import (
     search_library,
 )
 from scadbuddy.bambuddy.library_view import (
-    SPOOL_DIRNAME,
     NotViewableError,
     library_filaments,
     library_preview,
+    library_spool,
 )
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
@@ -293,7 +293,9 @@ async def _name_native_outputs(
 ) -> None:
     """Each entry's ``output_id`` from its row (`LibraryEntry` carries none of its own)."""
     rows = await traced_thread(
-        "native_library.files_by_ids", native.rows.files_by_ids, [entry.id for entry in entries]
+        "native_library.files_by_ids",
+        native.rows.listed_files_by_ids,
+        [entry.id for entry in entries],
     )
     made = await native_outputs_for_files(outputs, rows)
     for entry in entries:
@@ -710,6 +712,8 @@ async def post_library_file(
     in ``folder_id`` or the top level; its filename is the library name. The body may be
     as large as the library download cap (#2686)."""
     # The body streamed to the data volume (#7245): the client's upload and the writes.
+    # Not to SCADBUDDY_SPOOL_DIR (#7316): `hold_file` links it into `cache/claims` on the
+    # same volume, and the run that reads the claim may be another replica's.
     with span("library.receive_upload") as current:
         received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
         current.set_attribute("scadbuddy.bytes", sum(received.sizes.values()))
@@ -916,9 +920,10 @@ async def get_library_preview(
     return Response(data, media_type=GLB_MEDIA_TYPE)
 
 
-#: The largest kept file served from the download cache. A hit is copied whole into the
-#: request's own file before its first byte is sent, so past this a cached file would
-#: start later than Bambuddy's stream of it does; it is streamed from Bambuddy instead.
+#: The largest kept file served from the download cache. A hit is checked whole before
+#: its first byte is sent (copied into the request's own file, or, with a private cache,
+#: hashed in place), so past this a cached file would start later than Bambuddy's stream
+#: of it does; it is streamed from Bambuddy instead.
 CACHED_COPY_MAX_BYTES = 256 * 1024 * 1024
 
 
@@ -959,9 +964,8 @@ async def get_library_file(
         # One kept but too large to copy before its first byte is not kept again.
         keep = sha is not None and (kept_size is None or kept_size <= CACHED_COPY_MAX_BYTES)
         if sha is not None and kept_size is not None and kept_size <= CACHED_COPY_MAX_BYTES:
-            copy = await asyncio.to_thread(
-                downloads.private_copy, sha, paths.cache / SPOOL_DIRNAME, what="library_file"
-            )
+            spool = library_spool(paths.cache, downloads)
+            copy = await asyncio.to_thread(downloads.read_checked, sha, spool, what="library_file")
             if copy is not None:
                 size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
                 return StreamingResponse(
@@ -1038,8 +1042,9 @@ async def _native_download(native: NativeLibrary, file_id: int) -> Response:
 
 
 async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
-    """``copy``'s bytes, closing it however the response ends. It has no name on disk,
-    so a dropped connection leaves nothing behind."""
+    """``copy``'s bytes, closing it however the response ends. It is the request's own
+    unnamed copy, so a dropped connection leaves nothing behind, or, with a private
+    cache, the kept entry itself, which stays in the cache."""
     try:
         while chunk := await asyncio.to_thread(copy.read, 1 << 20):
             yield chunk

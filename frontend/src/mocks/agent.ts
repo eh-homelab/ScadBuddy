@@ -35,11 +35,35 @@ import {
   type QueuedEntry,
   type SentImage,
   type ServerEvent,
+  type SessionBrowserInput,
   type SessionStatus,
   type SessionSummary,
 } from '../agent/chat/protocol'
 import { takeAttachment } from './features/assistantAttachments'
 import { PREVIEW_IMAGE } from './features/assistantBlobs'
+
+/**
+ * #7027 — the API's bounds on a session's browser options (backend
+ * `api/crud_agent_sessions.py` `SessionBrowser`), worded as the agent words its
+ * `invalid_browser` refusal; null when they pass.
+ */
+function browserRefusal(b: SessionBrowserInput): string | null {
+  const range = (field: string, n: number, lo: number, hi: number) =>
+    n < lo
+      ? `browser.viewport.${field}: Input should be greater than or equal to ${lo}`
+      : n > hi
+        ? `browser.viewport.${field}: Input should be less than or equal to ${hi}`
+        : null
+  const problem =
+    (b.user_agent !== undefined && !/^[\x20-\x7e]{1,512}$/.test(b.user_agent)
+      ? 'browser.user_agent: should be 1 to 512 printable ASCII characters'
+      : null) ??
+    (b.viewport ? (range('width', b.viewport.width, 320, 3840) ?? range('height', b.viewport.height, 320, 2160)) : null) ??
+    (b.locale !== undefined && (b.locale.length > 35 || !/^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$/.test(b.locale))
+      ? 'browser.locale: should be a BCP 47 language tag'
+      : null)
+  return problem && `the browser options were refused: ${problem}`
+}
 
 type Body<E> = E extends ServerEvent ? Omit<E, 'v'> : never
 type EventBody = Body<ServerEvent>
@@ -143,6 +167,8 @@ interface MockSession extends SessionSummary {
   /** #6386 — the messages sent while a turn ran, oldest first, and the queue's version. */
   queue?: QueuedEntry[]
   queueVersion?: number
+  /** #7027 — the browser options its first message carried. */
+  browser?: SessionBrowserInput
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -594,6 +620,11 @@ export function createMockAgentTransport({
           return
         }
         const isNew = !s
+        const refusal = !s && msg.browser ? browserRefusal(msg.browser) : null
+        if (refusal) {
+          emit({ type: 'error', code: 'invalid_browser', message: refusal })
+          return
+        }
         if (!s) {
           s = {
             sessionId: nextId('chat'),
@@ -606,6 +637,7 @@ export function createMockAgentTransport({
             turns: 0,
             costUsd: 0,
             budgetUsd,
+            ...(msg.browser ? { browser: msg.browser } : {}),
           }
           sessions.set(s.sessionId, s)
           emit({

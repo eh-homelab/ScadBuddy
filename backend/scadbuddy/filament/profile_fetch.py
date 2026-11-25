@@ -100,8 +100,21 @@ HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
 #: How long an import waits for the mirror of what it wrote (#7176); the Schedule's next
-#: pull sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
-#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
+#: pull sends what is left. The mirror's calls (`preset_mirror._send`), each up to the
+#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`), per preset the run wrote (one
+#: per printer model and nozzle): a rewrite is one ``PUT`` and reads no listing; a create
+#: is one ``POST``, after the listing (`_Listing`, read at most once per run, only before a
+#: create or a lost create's match); a rewrite that answers 404 is that ``PUT``, then a
+#: create; a preset whose last create's answer was lost first reads the listing and one
+#: ``GET /local-presets/{id}`` per preset of its name above that create's floor
+#: (`_Listing.made_after`, usually one), then a rewrite of the match, or a create when none
+#: holds its document. So 120 s holds four calls at their limit, for example: four
+#: rewrites; three creates (listing + three ``POST``); a rewrite that answers 404 then
+#: creates (``PUT`` + listing + ``POST``) and one more rewrite; a lost create's match
+#: (listing + ``GET`` + ``PUT``) and one more rewrite; or a lost create's match whose
+#: rewrite answers 404 (listing + ``GET`` + ``PUT`` + ``POST``). At the speed Bambuddy
+#: answers it holds many more. It is a cut-off, not a sum of the worst case: a run past it
+#: stops and the Schedule's next pull sends the rest, so it is not raised. It leaves 7 of
 #: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
 #: of them at 30 s each.
 IMPORT_MIRROR_TIMEOUT: Final = 120.0
@@ -355,8 +368,8 @@ class QueueProbe(Protocol):
 class PollerCache:
     """DescribeTaskQueue's answer per queue, kept `POLLERS_CACHE_SECONDS`: each read of
     a fetch's status (a page polls it) would otherwise ask every partition of the
-    workflow task queue, and of the activity one when the first has no poller: up to
-    `2 * TASK_QUEUE_PARTITIONS` calls (`workflows/pollers.py`)."""
+    workflow task queue and of the activity one: `2 * TASK_QUEUE_PARTITIONS` calls, sent
+    at once (`workflows/pollers.py`)."""
 
     def __init__(
         self,
@@ -406,13 +419,12 @@ class TemporalQueueProbe:
 
     async def _read(self) -> bool:
         # Every partition's pollers: a live worker can be absent from the root's (#7350).
-        for kind in (
-            TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-            TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY,
-        ):
-            if await queue_pollers(self.client, self.task_queue, kind):
-                return True
-        return False
+        # Both types at once, so a miss waits for one round of reads, not two (#7425).
+        answers = await asyncio.gather(
+            queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW),
+            queue_pollers(self.client, self.task_queue, TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY),
+        )
+        return any(answers)
 
 
 def starter(state: AppState) -> Starter:

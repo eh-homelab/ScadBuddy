@@ -185,7 +185,7 @@ describe('the chat socket route', () => {
 
 describe('the chat socket handlers', () => {
   /** The route's handlers on a socket that records what it is sent, with the manager's snapshot answered. */
-  async function openSocket(log: (m: string) => void) {
+  async function openSocket(log: (m: string) => void, more: Record<string, unknown> = {}) {
     let events: WSEvents | undefined
     const capture = ((create: (c: unknown) => WSEvents | Promise<WSEvents>) => async (c: unknown) => {
       events = await create(c)
@@ -194,6 +194,7 @@ describe('the chat socket handlers', () => {
     const app = new Hono()
     const sessions = {
       snapshot: () => Promise.resolve({ v: 1, type: 'sessions.snapshot', sessions: [] }),
+      ...more,
     } as unknown as SessionManager
     registerChatRoute(app, {
       sessions,
@@ -232,6 +233,42 @@ describe('the chat socket handlers', () => {
     expect(codes.filter((c) => c === 'invalid')).toHaveLength(MAX_QUEUED_FRAMES)
     expect(codes.filter((c) => c === 'busy')).toHaveLength(10)
     expect(sent.find((f) => f.code === 'invalid')?.message).toBe('frames must be JSON text')
+  })
+
+  it("starts a new session with the frame's browser options, and ignores them on a send (#7027)", async () => {
+    const BROWSER = { user_agent: 'Mozilla/5.0 Test', viewport: { width: 1280, height: 800 }, locale: 'en-GB' }
+    const S = '0e5a3c1e-1111-4222-8333-944455556666'
+    const started: Record<string, unknown>[] = []
+    const sent: Record<string, unknown>[] = []
+    const logged: string[] = []
+    const { events, ws, sent: frames } = await openSocket((m) => logged.push(m), {
+      start: async (_owner: unknown, options: Record<string, unknown>) => {
+        started.push(options)
+        return { session: { id: S } }
+      },
+      get: async () => ({ id: S }),
+      send: async (_id: string, _owner: unknown, _text: string, options: Record<string, unknown>) => {
+        sent.push(options)
+        return { turnId: 't' }
+      },
+      attach: async () => (async function* () {})(),
+      events: { lastSeq: async () => 0 },
+    })
+    const frame = (extra: Record<string, unknown>) =>
+      events.onMessage?.(
+        new MessageEvent('message', { data: JSON.stringify({ v: 1, type: 'user.message', text: 'hi', context: { route: '/' }, browser: BROWSER, ...extra }) }),
+        ws,
+      )
+    frame({})
+    await new Promise((r) => setTimeout(r, 20))
+    frame({ sessionId: S })
+    await new Promise((r) => setTimeout(r, 20))
+    expect(logged).toEqual([])
+    expect(frames.filter((f) => f.type === 'error')).toEqual([])
+    expect(started).toHaveLength(1)
+    expect(started[0]?.browser).toEqual(BROWSER)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).not.toHaveProperty('browser')
   })
 
   it('logs a transport error, then closes the connection', async () => {

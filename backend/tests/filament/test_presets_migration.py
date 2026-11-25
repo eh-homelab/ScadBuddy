@@ -12,7 +12,7 @@ from psycopg import errors
 
 from scadbuddy.render.pg_store import MIGRATIONS, migrate
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.pg_empty]
 
 NOZZLES = ["0.2", "0.4", "0.6", "0.8"]
 _SPOOL = (

@@ -34,12 +34,14 @@ from tests.api.test_storefront_file_listings import (  # noqa: F401  (fixtures)
     two_colours,
     upload,
 )
+from tests.api.test_storefront_listings import listing_body, template  # noqa: F401  (a fixture)
 from tests.api.test_storefront_public import TOKEN_A
 from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     TOKEN_B,
     CrudCaller,
     FakeSlicer,
     crud,
+    render_body,
     sliced,
 )
 from tests.support.sliced3mf import sliced_3mf
@@ -240,6 +242,18 @@ def test_an_unpublished_listings_price_is_never_anothers_last_price(
     assert r.json()["source"] == "pending"
 
 
+def test_a_price_that_names_no_listing_is_never_a_last_price(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """A row made before its listing was recorded names none: it is no listing's last price."""
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_slice_prices SET listing_id = NULL")
+    r = read(crud, listed, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
+
+
 def test_a_listing_with_no_price_yet_answers_pending(
     crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
 ) -> None:
@@ -305,6 +319,50 @@ def test_an_unpublished_listing_has_no_price(
 ) -> None:
     assert crud.api.post(f"{LISTINGS}/{listed['id']}/unpublish").status_code == 200
     problem_of(read(crud, listed, {0: pla_red, 1: pla_red}), "listing_not_found", 404)
+
+
+def _template_reads(crud: CrudCaller, listing: dict[str, Any]) -> list[Any]:
+    """A template page's reads and add of ``listing`` as the page read it."""
+    sent = render_body(listing, {})
+    return [
+        crud.post("/renders", json=sent, key=uuid.uuid4().hex),
+        crud.post(f"/listings/{listing['id']}/variant", json=sent),
+        crud.post("/draft/items", json={**sent, "quantity": 1}, key=uuid.uuid4().hex),
+    ]
+
+
+def _file_reads(crud: CrudCaller, listing: dict[str, Any], filament: str) -> list[Any]:
+    """A file page's read and add of ``listing`` as the page read it."""
+    colours = {0: filament, 1: filament}
+    return [read(crud, listing, colours), add(crud, listing, colours)]
+
+
+def test_a_file_listing_switched_to_a_design_has_changed(
+    crud: CrudCaller, listed: dict[str, Any], template: dict[str, Any], pla_red: str
+) -> None:
+    """A page that read the file listing is told it changed (409), so it offers "Load the
+    latest version"; an unpublished listing stays 404, and so does its held preview."""
+    design = listing_body(template, pla_red)
+    save(crud.api, listed, source="template", library_file=None, **design)
+    for r in _file_reads(crud, listed, pla_red):
+        problem_of(r, "listing_not_found", 404)
+    publish(crud.api, listed["id"])
+    for r in _file_reads(crud, listed, pla_red):
+        problem_of(r, "listing_changed", 409)
+    gone = crud.get(f"/listings/{listed['id']}/preview/1.glb")
+    problem_of(gone, "listing_not_found", 404)
+
+
+def test_a_design_switched_to_a_file_listing_has_changed(
+    crud: CrudCaller, keychain: NativeFile, template: dict[str, Any], pla_red: str
+) -> None:
+    design = publish(crud.api, create(crud.api, listing_body(template, pla_red))["id"])
+    save(crud.api, design, **body(keychain, [pla_red], slug=None, commit=None, media_ids=[]))
+    for r in _template_reads(crud, design):
+        problem_of(r, "listing_not_found", 404)
+    publish(crud.api, design["id"])
+    for r in _template_reads(crud, design):
+        problem_of(r, "listing_changed", 409)
 
 
 def test_the_price_shown_is_the_price_charged(

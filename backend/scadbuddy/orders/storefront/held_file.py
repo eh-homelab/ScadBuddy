@@ -3,7 +3,7 @@
 Publish keeps a copy of the listed library file in the content store,
 ``listing-file-<sha256>``, and that copy is the version the listing sells. Its price
 slices that copy, never the live library file: :class:`HeldFile` is a ``LibraryReads``
-(``print_library/reads.py``) over it, which ``orders/bambuddy.py``
+(``print_library/reads.py``) over it, which ``orders/quote_preview.py``
 ``start_library_quote_preview`` gives ``LibrarySource.load`` in place of the library's own
 reads. So the slice of a held copy goes through the back office's own pipeline, with only
 the bytes' source changed. A file renamed, changed or deleted in the library after publish

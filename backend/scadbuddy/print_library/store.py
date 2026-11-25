@@ -65,6 +65,32 @@ class NativeFile(BaseModel):
         return file_type_of(self.name)
 
 
+class NativeListedFile(BaseModel):
+    """A live file as a listing shows it (#7346): a `NativeFile` without its plates, so a
+    listing of the whole library neither reads nor validates their jsonb."""
+
+    id: int
+    folder_id: int | None
+    name: str
+    size: int
+    sha256: str
+    has_thumbnail: bool
+    output_id: str | None
+    created_at: datetime
+    print_subject: str | None
+
+    @property
+    def file_type(self) -> str:
+        return file_type_of(self.name)
+
+
+class FolderFiles(BaseModel):
+    """One folder's live files, counted (#7346): how many, and the newest change."""
+
+    count: int
+    latest: datetime
+
+
 def file_type_of(name: str) -> str:
     """Bambuddy's `file_type`: the extension, ``"gcode.3mf"`` for a sliced file."""
     lower = name.lower()
@@ -76,6 +102,9 @@ def file_type_of(name: str) -> str:
 _FILE_COLUMNS = (
     "id, folder_id, name, size, sha256, blob_key, media_type, plates, has_thumbnail,"
     " output_id, filed, created_at, updated_at, deleted_at, print_subject"
+)
+_LISTED_COLUMNS = (
+    "id, folder_id, name, size, sha256, has_thumbnail, output_id, created_at, print_subject"
 )
 _FOLDER_COLUMNS = "id, name, parent_id, created_at"
 _FOLDER_TREE_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:library:tree', 0))"
@@ -108,6 +137,25 @@ def _insert_file(conn: Connection[DictRow], row: NativeFile) -> NativeFile:
     ).fetchone()
     assert out is not None
     return NativeFile.model_validate(out)
+
+
+def _live_in(
+    folder_id: int | None, *, every_folder: bool, filename: str | None
+) -> tuple[str, tuple[Any, ...]]:
+    """The WHERE clause and its parameters of the live files in ``folder_id`` (or every
+    folder), only those named ``filename`` when it is given."""
+    where = "deleted_at IS NULL"
+    params: tuple[Any, ...] = ()
+    if not every_folder:
+        if folder_id is None:
+            where += " AND folder_id IS NULL"
+        else:
+            where += " AND folder_id = %s"
+            params = (folder_id,)
+    if filename is not None:
+        where += " AND name = %s"
+        params = (*params, filename)
+    return where, params
 
 
 def _lock_folder_names(conn: Connection[DictRow], folder_id: int | None) -> bool:
@@ -228,6 +276,11 @@ class NativeLibraryStore:
             rows = conn.execute(sql.encode(), params).fetchall()
         return [NativeFile.model_validate(r) for r in rows]
 
+    def _listed(self, sql: str, params: tuple[Any, ...]) -> list[NativeListedFile]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(sql.encode(), params).fetchall()
+        return [NativeListedFile.model_validate(r) for r in rows]
+
     def _folders(self, sql: str, params: tuple[Any, ...] = ()) -> list[NativeFolder]:
         with self._pool.connection() as conn:
             rows = conn.execute(sql.encode(), params).fetchall()
@@ -263,20 +316,37 @@ class NativeLibraryStore:
     ) -> list[NativeFile]:
         """The live files in ``folder_id`` (or every folder), only those named
         ``filename`` when it is given."""
-        where = "deleted_at IS NULL"
-        params: tuple[Any, ...] = ()
-        if not every_folder:
-            if folder_id is None:
-                where += " AND folder_id IS NULL"
-            else:
-                where += " AND folder_id = %s"
-                params = (folder_id,)
-        if filename is not None:
-            where += " AND name = %s"
-            params = (*params, filename)
+        where, params = _live_in(folder_id, every_folder=every_folder, filename=filename)
         return self._files(
             f"SELECT {_FILE_COLUMNS} FROM library_files WHERE {where} ORDER BY id", params
         )
+
+    def listed_files(
+        self, folder_id: int | None, *, every_folder: bool = False, filename: str | None = None
+    ) -> list[NativeListedFile]:
+        """`files` as a listing shows them: light rows, selected without the plates."""
+        where, params = _live_in(folder_id, every_folder=every_folder, filename=filename)
+        return self._listed(
+            f"SELECT {_LISTED_COLUMNS} FROM library_files WHERE {where} ORDER BY id", params
+        )
+
+    def listed_files_by_ids(self, ids: list[int]) -> list[NativeListedFile]:
+        """`files_by_ids` as light rows."""
+        return self._listed(
+            f"SELECT {_LISTED_COLUMNS} FROM library_files"
+            f" WHERE id = ANY(%s) AND deleted_at IS NULL ORDER BY id",
+            (list(ids),),
+        )
+
+    def folder_files(self) -> dict[int | None, FolderFiles]:
+        """Each folder's live files, counted and dated in one GROUP BY (#7346); the top
+        level's under ``None``. A folder with no live file is not in it."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT folder_id, count(*) AS count, max(updated_at) AS latest"
+                " FROM library_files WHERE deleted_at IS NULL GROUP BY folder_id"
+            ).fetchall()
+        return {r["folder_id"]: FolderFiles(count=r["count"], latest=r["latest"]) for r in rows}
 
     def files_by_sha256(self, digests: list[str]) -> list[NativeFile]:
         """The live files whose bytes are any of ``digests`` (#5355): what a copy into

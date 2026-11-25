@@ -53,14 +53,6 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OPERATION_RUN, KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
 from scadbuddy.orders.archives import copy_check, copy_in
-from scadbuddy.orders.bambuddy import (
-    ServedLibrary,
-    download_sliced,
-    quote_preview_job,
-    served_shelf,
-    start_library_quote_preview,
-    start_quote_preview,
-)
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.held_print import restore_held
 from scadbuddy.orders.lifecycle import (
@@ -97,7 +89,9 @@ from scadbuddy.orders.quote import (
     reference_of,
     support_check,
 )
+from scadbuddy.orders.quote_preview import start_library_quote_preview, start_quote_preview
 from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
+from scadbuddy.orders.served_library import ServedLibrary, served_shelf
 from scadbuddy.orders.spools import item_plan
 from scadbuddy.orders.storefront.slice_price import (
     RUN_ATTEMPTS,
@@ -353,6 +347,9 @@ class PreviewSlicer:
             return SlicedPlate(
                 plate_id=started.plate_id, slicer="native", blob_key=row.sliced_blob_key
             )
+        # Bambuddy's adapter, loaded only for a slice Bambuddy made (#7467).
+        from scadbuddy.orders.bambuddy import quote_preview_job
+
         settings = await asyncio.to_thread(self.core.settings_store.load)
         job = await quote_preview_job(settings, self.core.uploads, started.job_id, subject)
         if job.status == "failed":
@@ -382,6 +379,8 @@ class PreviewSlicer:
                     data += chunk
             return bytes(data)
         assert sliced.file_id is not None
+        from scadbuddy.orders.bambuddy import download_sliced
+
         settings = await asyncio.to_thread(self.core.settings_store.load)
         found = await download_sliced(settings, sliced.file_id, MAX_SLICED_BYTES)
         if found is None:

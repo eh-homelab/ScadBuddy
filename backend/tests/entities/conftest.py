@@ -1,4 +1,4 @@
-"""Fixtures for the entity registry: a migrated throwaway schema."""
+"""Fixtures for the entity registry: a migrated throwaway database."""
 
 from __future__ import annotations
 

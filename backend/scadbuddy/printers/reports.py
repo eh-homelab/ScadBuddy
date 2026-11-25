@@ -289,6 +289,10 @@ class PrinterReportStore:
             return Advance()
         before = None if old is None else old["running_subtask"]
         running, ended = advance_print(before, report)
+        if "ipcam" not in report and old is not None and "ipcam" in (old["report"] or {}):
+            # A delta before a reconnect's ``pushall`` answer has no ``ipcam``: keep the
+            # camera the row shows, or the camera relay would read it as gone (#7328).
+            report = {**report, "ipcam": old["report"]["ipcam"]}
         written = conn.execute(
             "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
             " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
@@ -328,6 +332,11 @@ class PrinterReportStore:
                 (printer_id,),
             ).fetchone()
         return None if data is None else (dict(data["report"]), data["seen_at"])
+
+    def watch_get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+        """`get`, for the printer watch: the print worker's store bounds it as the watch's
+        writes (`crud/print.py` `RemoteReports`)."""
+        return self.get(printer_id)
 
     def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:
         with self.pool.connection() as conn:

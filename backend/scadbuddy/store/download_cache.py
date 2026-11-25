@@ -1,8 +1,10 @@
 """Files downloaded from Bambuddy, kept by the SHA-256 of their bytes (#2788).
 
-One directory of whole files, each named by its digest, on the API's data volume and
-so shared by its replicas: a library file one read downloaded is here for the next
-read of the same bytes, and a blob one replica stored or fetched for the next fetch.
+One directory of whole files, each named by its digest. By default it is on the API's
+data volume and so shared by its replicas: a library file one read downloaded is here
+for the next read of the same bytes, and a blob one replica stored or fetched for the
+next fetch. ``SCADBUDDY_DOWNLOAD_CACHE_DIR`` can put it on a node-local volume instead
+(#7316), each replica then keeping its own.
 Render workers run template code, so they are never given this directory: anything
 that can write it could fill the volume (#2788).
 
@@ -12,7 +14,9 @@ Content addressing is what makes sharing safe without an index:
   a changed file is a new name, not a stale entry.
 * Every read uses bytes whose digest it checked: a private copy of the entry
   (:meth:`DownloadCache.private_copy`), made before the first byte is read, so nothing
-  that can write the shared directory can change them after the check. An entry that
+  that can write the shared directory can change them after the check. A directory
+  this process alone writes (:attr:`DownloadCache.private`, a node-local emptyDir,
+  #7316) is read in place instead, checked through the open file. An entry that
   is not its name is dropped and read as a miss: a fault in the cache stays in the
   cache, never reported as a bad blob or a bad library file.
 * Two processes filling the same entry each write a file of their own beside it and
@@ -198,6 +202,14 @@ class DownloadCache:
     min_age: float = 600.0
     #: Free space no fill or private copy takes (:data:`RESERVE_BYTES`).
     reserve_bytes: int = RESERVE_BYTES
+    #: #7316: the directory is this process's alone (a node-local emptyDir, never a
+    #: share): nothing else can write an entry, so :meth:`read_checked` reads a hit in
+    #: place after its check, with no private copy (SCADBUDDY_DOWNLOAD_CACHE_PRIVATE).
+    private: bool = False
+    #: #7316: the root every library read of this process spools under
+    #: (SCADBUDDY_SPOOL_DIR, else the data volume's ``cache/``), resolved once by
+    #: `build_store`, so no caller passes it. None: the caller's own cache (tests).
+    spool: Path | None = None
 
     @property
     def max_entry_bytes(self) -> int:
@@ -290,6 +302,38 @@ class DownloadCache:
         out.close()
         return None
 
+    def read_checked(self, sha256: str | None, directory: Path, *, what: str) -> BinaryIO | None:
+        """The bytes of the entry for ``sha256``, checked before the first is read, open
+        at their start; the caller closes it. A shared directory gives a
+        :meth:`private_copy` under ``directory``. A :attr:`private` one gives the entry
+        itself, hashed through the open file and then rewound: entries are only ever
+        renamed in, and no other process writes the directory, so the bytes behind that
+        file cannot change after the check. None is a miss, as for a private copy."""
+        if not self.private:
+            return self.private_copy(sha256, directory, what=what)
+        handle = self.open(sha256, what=what)
+        # `open` answers only a sha256; tested again here only to narrow its type.
+        if handle is None or sha256 is None:
+            return None
+        try:
+            digest = hashlib.sha256()
+            while chunk := handle.read(_CHUNK):
+                digest.update(chunk)
+            if digest.hexdigest() == sha256:
+                handle.seek(0)
+                return handle
+            read = os.fstat(handle.fileno())
+        except OSError:
+            logger.warning(
+                "could not read a cached download", extra={"sha256": sha256}, exc_info=True
+            )
+            handle.close()
+            return None
+        handle.close()
+        # Only the file that was read: a good entry a fill renamed in since is kept.
+        self.discard_if(sha256, read)
+        return None
+
     def size(self, sha256: str) -> int | None:
         """The kept entry's size; None when there is none, or the volume cannot say."""
         try:
@@ -306,6 +350,15 @@ class DownloadCache:
         logger.warning(
             "dropped a download cache entry that was not its sha256", extra={"sha256": sha256}
         )
+
+    def discard_if(self, sha256: str, read: os.stat_result) -> None:
+        """:meth:`discard` the entry only while it is still the file ``read`` describes."""
+        try:
+            now = self.path(sha256).stat()
+        except FileNotFoundError:
+            return
+        if (now.st_dev, now.st_ino) == (read.st_dev, read.st_ino):
+            self.discard(sha256)
 
     @contextlib.contextmanager
     def fill(self, sha256: str) -> Iterator[Fill]:

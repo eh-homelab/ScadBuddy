@@ -35,6 +35,11 @@ Why:
   (`/app/backend/tests/unit/services/test_virtual_printer.py:4409` in the Bambuddy image,
   read 2026-11-23).
 - The shop runs the H2C now and plans the H3C (inventory spec §3). Both are RTSPS models.
+- The H2C's RTSPS port 322 presents the same TLS certificate as MQTT port 8883: DER sha256
+  `81ebfc1fa4d01310d253f667533456dbe80e493219934971951d456620fab32c` on both, measured
+  2026-11-24 from the dev host with `openssl s_client -connect 172.16.0.187:<port> | openssl
+  x509 -outform DER | sha256sum`. So the relay's `sourceFingerprint` (the LAN link's stored
+  `cert_sha256`) matches.
 - **Resolution: 1080p**, from the H2C's own LAN report (`ipcam.resolution`,
   `.claude/skills/h2c-print-from-scadbuddy/evals/decode-mapping-from-printer-report/files/printer-report-boys1.json:952`).
 - **Not measured yet:** the H2C stream's codec, frame rate, bitrate, keyframe
@@ -43,6 +48,64 @@ Why:
   these with `ffprobe` and writes them here, with the date and the method.
 - At 2 to 4 Mbit/s, one printer makes about 20 to 45 GB a day. Phase 0 replaces this
   estimate with the measured bitrate.
+- **Phase 0 has not run yet** (2026-11-24): the stream facts listed as not measured above
+  are still not measured. The phase 1 code assumes H.264 and copies it, with no re-encode.
+
+### MediaMTX v1.21.4 (phase 1)
+
+Phase 1 runs MediaMTX v1.21.4, pinned by sha256 in the Dockerfile's `mediamtx` stage
+([release](https://github.com/bluenviron/mediamtx/releases/tag/v1.21.4)). Each fact says how
+it was found: measured in Docker with that version (on `bluenviron/mediamtx:1`, then v1.21.4,
+the release binary, or the `camera-relay`/`camera-recorder` images), or read from the
+release's own files where it says "read".
+
+- **The official image has no shell and no curl.** `bluenviron/mediamtx:1.21.4` has one layer
+  and the entrypoint `/mediamtx`; `docker run --entrypoint sh` and `--entrypoint curl` both
+  fail with "executable file not found" (2026-11-24). The hooks run `curl`, so the camera images
+  take the release binary on a Debian base with `curl`.
+- **Hook keys.** `runOnAvailable` and `runOnUnavailable` fire when a path's source becomes
+  available or unavailable; `runOnRecordSegmentComplete` fires once per finished segment, and
+  once more for the last one when the stream stops. MediaMTX expands `$MTX_PATH`,
+  `$MTX_SEGMENT_PATH` and `$MTX_SEGMENT_DURATION` itself, with no shell: a
+  `touch /w/flag-avail-$MTX_PATH` hook made `flag-avail-live`, and the recorder's `curl` hook
+  reached its hook server with each value in the query. MediaMTX logs no deprecation for
+  these keys (2026-11-24, Tasks 7 and 8 of the plan, an ffmpeg test source). `runOnReady` and `runOnNotReady` still load but
+  are deprecated: in the yml, MediaMTX logs `parameter 'runOnReady' is deprecated and has been
+  replaced with 'runOnAvailable'`; through the control API it logs nothing (2026-11-24, Task 7).
+  The v1.21.4
+  [OpenAPI](https://github.com/bluenviron/mediamtx/blob/v1.21.4/api/openapi.yaml) marks
+  `runOnReady` and `runOnNotReady` `deprecated: true` (read 2026-11-24).
+- **`MTX_SEGMENT_DURATION` is in seconds**, as a decimal: a 14 s ffmpeg test source with
+  `recordSegmentDuration: 4s` gave `4.8`, `4`, `4`, then `0.9` for the last segment when the
+  stream stopped (2026-11-24, Task 8 of the plan, a `sh -c "echo … $MTX_SEGMENT_DURATION"` hook).
+- **`GET /v3/paths/list`** items carry `name, confName, ready, readyTime, available,
+  availableTime, online, onlineTime, source{type,id}, tracks, tracks2, readers, inboundBytes,
+  outboundBytes, inboundFramesInError, bytesReceived, bytesSent`. `ready` is false for a pull
+  that cannot connect and true while an ffmpeg publisher sends (2026-11-24, Task 7).
+- **Credentials are redacted in the lists.** `GET /v3/config/paths/list` shows a source as
+  `rtsps://<redacted>:<redacted>@…` (2026-11-24, Task 7), so the relay compares paths with
+  its own copy. `GET /v3/config/global/get` shows each `authInternalUsers` pass as
+  `<redacted>` (2026-11-24, on the `camera-relay` image).
+- **Each segment's init holds a `moov/udta/mtxi` box** with the stream id, the segment number,
+  the DTS and the NTP time, so no two inits are byte-identical. Every other init box was the
+  same across 4 segments of one ffmpeg stream (2026-11-23, Task 9). The recorder's init digest
+  leaves `udta` out (`camera/mp4.py`).
+- **Segment files are named in the container's local time** (`recordPath`
+  `%Y-%m-%d_%H-%M-%S-%f`); under `TZ=UTC` the names were UTC (2026-11-24, Task 8 of the plan).
+  So the recorder image sets `TZ=UTC`.
+- **`readTimeout` defaults to 10 s.** Read, not measured: the release tarball's
+  [mediamtx.yml](https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml) sets
+  `readTimeout: 10s` (read 2026-11-24). Both configs pin it; the recorder's `ADOPT_AGE`
+  (12 s) assumes it.
+- **A list entry is set from the environment by its index.** MediaMTX reads no `$VAR` in its
+  yml ([configuration](https://mediamtx.org/docs/features/configuration)). With
+  `MTX_AUTHINTERNALUSERS_0_USER` and `_PASS` set on the relay's config, an RTSP `DESCRIBE`
+  with that user got past auth (404, no stream), and a wrong password or none got 401. On the
+  recorder's config the same variables replaced its entry 0, the localhost control-API user,
+  and the control API answered 401 (2026-11-24, `camera-relay` and `camera-recorder` images on
+  arm64, a raw `DESCRIBE` with Basic auth from Python in the container).
+- **Read-only root file system.** Both configs start with `--read-only --cap-drop ALL`, and
+  the control API answers 200 (2026-11-24, Docker).
 
 ## 3. Goals
 
