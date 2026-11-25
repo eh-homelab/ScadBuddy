@@ -9,9 +9,10 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - suppliers, price sheets, invoices and a shopping list;
 - locations with humidity and temperature sensors;
 - RFID tags, NTAG labels, and printed QR labels for spools, places, printers, AMS units and slots;
-- a printer's K-profiles (pressure advance) through Bambuddy: list, set, batch set, delete and notes;
-- a printer's AMS slots through Bambuddy: configure a slot by hand, its saved slicer preset, refresh
-  and reset, load and unload, and the AMS units' labels;
+- a printer's K-profiles (pressure advance) over ScadBuddy's own LAN link: list, set, batch set,
+  delete, and ScadBuddy's notes on them;
+- a printer's AMS slots over ScadBuddy's own LAN link: configure a slot by hand, refresh and reset,
+  load and unload; and ScadBuddy's own saved slicer preset per slot and label per AMS unit;
 - a ledger of spool events, with history, metrics and a forecast;
 - key-value properties on spools and spool types (#7026).
 
@@ -147,25 +148,34 @@ wins over 3DFP's (#7142). Fetching presets is the `ProfileFetch` workflow on the
 profile-fetch worker, and a 3DFP search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
-A printer's K-profiles (#7154, plan
-`docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through
-the Bambuddy printer its registry row links, and shown on its card in Settings → Printers
-(closed until opened: each read asks the printer over MQTT). Each write (set, batch set,
-delete, a note's set and delete) is an operation on the `bambuddy` queue, so the print
-worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of them, and a
-write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
-the notes live in Bambuddy, under the keys its own K-Profiles page uses.
+A printer's K-profiles (#7154, moved off Bambuddy by #7276, plan
+`docs/superpowers/plans/2026-11-25-filament-hardware-off-bambuddy.md` Task 7) are read from
+and written to the printer over ScadBuddy's own LAN link: MQTT `extrusion_cali_*` commands
+(`backend/scadbuddy/printers/lan_commands.py`) run by the `LanCommand` workflow
+(`backend/scadbuddy/workflows/lan_command.py`), routes
+`backend/scadbuddy/api/printer_kprofiles.py`. They are shown on the printer's card in
+Settings → Printers (closed until opened: each read asks the printer). The printer must be
+linked over the LAN (409 `not_lan_linked`) and heard from lately (409 `printer_offline`).
+Set, batch set and delete take an `Idempotency-Key`: a key sent again joins the run it
+started or reads its outcome, so the command reaches the printer once; a write the printer
+did not acknowledge answers `confirmed: false`. A printer slow to answer gets a 202 with the
+run's id, followed at `GET /printers/{id}/commands/{command_id}`. The notes are ScadBuddy's
+own (`backend/scadbuddy/printers/command_data.py`), under the keys Bambuddy's K-Profiles page
+uses; nothing about them is sent to the printer or to Bambuddy.
 
-A printer's AMS slots (#7153, plan `docs/superpowers/plans/2026-11-23-ams-slot-control.md`)
-are read from Bambuddy's live status of the printer its registry row links, and shown on its
-card in Settings → Printers ("AMS slots", closed until opened). The routes call Bambuddy in
-the request. Each write that reaches the printer (configure, reset, refresh, load, unload)
-reads Bambuddy's status first and refuses with a 409 and a `code` while the printer prints,
-while the AMS is busy, or where the slot is not there; load also refuses an empty slot or the
-one already feeding, and refresh refuses while filament is loaded. Configure takes any SB
-spool (its values and its type's preset and K value for the slot's nozzle) or the values by
-hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
-names ScadBuddy's place of the unit. The page asks before every printer write.
+A printer's AMS slots (#7153, moved off Bambuddy by #7276, same plan, Task 8) are read from
+the printer's latest LAN report, and shown on its card in Settings → Printers ("AMS slots",
+closed until opened). Each command (configure, reset, refresh, load, unload) is MQTT over the
+same LAN link (`backend/scadbuddy/api/printer_slots.py`), sent under an `Idempotency-Key` as
+above. Before it sends, ScadBuddy's own guard (`backend/scadbuddy/printers/ams_slots.py`
+`guard`) reads that report and refuses with a 409 and a `code`: `printer_offline` (no fresh
+report), `printer_busy` (a print is active), `ams_busy`, `no_slot`; load also refuses an empty
+slot (`tray_empty`) or the one already feeding (`already_loaded`), and refresh refuses while
+filament is loaded (`filament_loaded`). Configure takes any SB spool (its values and its type's
+preset and K value for the slot's nozzle) or the values by hand. A slot's saved preset is
+ScadBuddy's own (`printers/command_data.py`), and an AMS unit's label is the name of
+ScadBuddy's place of the unit; neither is sent to the printer or to Bambuddy. The page asks
+before every printer write.
 
 ### The phone page (#7273)
 
@@ -255,7 +265,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
-- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`.
+- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`,
+  `printerKProfiles.ts`, `printerCommand.ts` (a printer command's 202, followed or read with `printer_command_get`).
 
 ## Data
 
@@ -354,25 +365,24 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
   the #7151 operations in `components/filament/BulkBar.test.tsx`, `pages/filament/LocationPage.test.tsx`,
   `pages/filament/SpoolsTab.search.test.tsx` and `pages/filament/TagsTab.test.tsx`.
-- Agent: `agent/test/printerSlots.test.ts`.
+- Agent: `agent/test/printerSlots.test.ts`, `agent/test/printerKProfiles.test.ts`.
 
 ## Limits and known issues
 
 - The filament epic is [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260).
-- K-profile writes need Bambuddy's `KPROFILES_CREATE`, `_UPDATE` and `_DELETE`, which no
-  Bambuddy API key can hold
-  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
-  lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
-  `K-profiles (admin only)`. The assistant has no K-profile tool yet
-  ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
-- A slot preset's and an AMS label's writes need Bambuddy's `PRINTERS_UPDATE`, which no
-  Bambuddy API key can hold
-  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
-  line 280): while Bambuddy's auth is on, they are the scope problem naming
-  `Printers (admin only)`. Renaming an AMS unit's place on Filament → Locations does not write
-  Bambuddy's label.
-- A slot write reads the printer's state, then writes: a print started between the two calls
-  is not caught by ScadBuddy (Bambuddy's own reset refuses it).
+- K-profiles and slot commands need a printer linked over ScadBuddy's LAN link: a printer
+  linked only through Bambuddy is refused 409 `not_lan_linked`
+  (`backend/scadbuddy/printers/native.py` `lan_row`), and no Bambuddy scope applies. The
+  assistant's K-profile tools are `printer_kprofile*` and `printer_command_get`
+  (`agent/src/tools/printerKProfiles.ts`, `agent/src/tools/printerCommand.ts`,
+  [#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
+- A slot preset and an AMS label are ScadBuddy's own and reach neither the printer nor
+  Bambuddy. The label is the unit's place name, so renaming that place on Filament →
+  Locations renames the label.
+- A slot command checks the printer's latest LAN report, then sends: a print started after
+  that report is not caught by ScadBuddy's guard (`backend/scadbuddy/printers/ams_slots.py`
+  `guard`), whose refusals are its own 409 codes (`printer_busy`, `ams_busy`, `no_slot`,
+  `printer_offline` and the rest above).
 - Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
   lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:

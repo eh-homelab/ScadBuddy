@@ -278,8 +278,8 @@ async def delete_printer_kprofile(
     summary="Set the note on one of a printer's K-profiles",
     description=(
         "At most 2,000 characters; a blank note deletes it. `setting_id` is the note's key"
-        f" (1 to {NOTE_KEY_MAX} printable characters, no `/`). An upsert: an `Idempotency-Key`"
-        " is accepted and ignored. 404 for an unknown printer."
+        f" (1 to {NOTE_KEY_MAX} printable characters, no `/`, not `.` or `..`). An upsert:"
+        " an `Idempotency-Key` is accepted and ignored. 404 for an unknown printer."
     ),
 )
 async def set_printer_kprofile_note(
@@ -303,8 +303,9 @@ async def set_printer_kprofile_note(
     response_model=KProfileWriteResult,
     summary="Delete the note on one of a printer's K-profiles",
     description=(
-        "A note that is not there is deleted all the same. An `Idempotency-Key` is accepted"
-        " and ignored. 404 for an unknown printer."
+        "A note that is not there is deleted all the same. 422 for a key no note can have"
+        " (`.`, `..`, or longer than the PUT allows). An `Idempotency-Key` is accepted and"
+        " ignored. 404 for an unknown printer."
     ),
 )
 async def delete_printer_kprofile_note(

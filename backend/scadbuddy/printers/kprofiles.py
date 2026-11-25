@@ -70,6 +70,10 @@ def _k_value(value: str) -> str:
 def _note_key(value: str) -> str:
     if "/" in value:
         raise ValueError("cannot hold a /")
+    # A path segment of `.` or `..` is normalised away before the DELETE's route sees it,
+    # so a note under one could never be deleted (#7276 Task 10).
+    if value in (".", ".."):
+        raise ValueError("cannot be . or ..")
     return _printable(value)
 
 
