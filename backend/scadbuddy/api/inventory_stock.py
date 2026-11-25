@@ -6,8 +6,8 @@ unless a lot is named (D2), and a use past the stock on hand goes on the newest 
 flagged `needs_review`. A move's cost is a snapshot (D14): a later lot cost change moves no
 past move. A unit item's stock is its units in stock. A kind with tracking `none` is not
 counted: every call here refuses its items (409 `item_not_counted`). "Re-cost past uses"
-(`POST /inventory/lots/{lot_id}/recost`) comes with the orders' use of items, as it writes
-order events. Only this process reads or writes the tables (#5295).
+(`POST /inventory/lots/{lot_id}/recost`) runs through the orders' lifecycle, as it locks
+the orders and writes their events. Only this process reads or writes the tables (#5295).
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -29,6 +29,7 @@ from scadbuddy.inventory.models import (
     Move,
     ReceiveLot,
     ReceiveUnits,
+    RecostResult,
     Unit,
     UnitPatch,
     UnitStatusInput,
@@ -36,6 +37,9 @@ from scadbuddy.inventory.models import (
 )
 from scadbuddy.inventory.problems import lot_not_found, unit_not_found
 from scadbuddy.orders.actor import current_actor
+from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.lifecycle import LifecycleError
+from scadbuddy.orders.problems import refused as order_refused
 
 router = APIRouter(tags=["inventory"])
 
@@ -142,6 +146,33 @@ async def patch_lot(lot_id: UUID, body: LotPatch, inventory: InventoryDep) -> Lo
 )
 async def adjust_lot(lot_id: UUID, body: AdjustInput, inventory: InventoryDep) -> Lot:
     return await run(inventory.stock.adjust_lot, lot_id, body, current_actor())
+
+
+@router.post(
+    "/inventory/lots/{lot_id}/recost",
+    response_model=RecostResult,
+    summary="Re-cost a lot's past uses",
+    description=(
+        "Every past `use`, `return` and `adjust` move of the lot takes the lot's cost now "
+        "(and its `cost_unknown`): a move's cost is otherwise a snapshot. `moves` counts "
+        "the moves that changed; `orders` names each order item whose parts cost or unknown "
+        "flag changed as job cost reads them (`parts_minor`: the known-cost moves; unknown "
+        "while a use not given back is of unknown cost), before and after. Each such "
+        "order gets one `item.parts_recosted` event with its items' before and after. "
+        "409 `recost_busy` (orders problem) when new order moves kept reaching the lot; "
+        "try again."
+    ),
+    responses=codes(
+        (404, "`lot_not_found`"),
+        (409, _ITEM_CODES + " or `recost_busy`"),
+        (422, "`bad_quantity` (a move's amount at the cost)"),
+    ),
+)
+async def recost_lot(lot_id: UUID, orders: OrdersDep) -> RecostResult:
+    try:
+        return await run(orders.lifecycle.recost_lot, lot_id, current_actor())
+    except LifecycleError as error:
+        raise order_refused(error) from None
 
 
 @router.post(

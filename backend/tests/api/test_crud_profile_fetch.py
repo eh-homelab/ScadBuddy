@@ -946,15 +946,16 @@ def test_a_waiting_import_holds_no_pool_connection(
 ) -> None:
     """R-PR3: a request that finds the run's import lease held waits with no pooled
     connection (it polls with short statements), and the holder holds none while Bambuddy
-    takes its time. Each checkout of the pool is timed: over the wait, the time any
-    connection is checked out stays a small part of it (a held connection would fill it)."""
+    takes its time. Each checkout of the pool is timed: over the wait, no one checkout
+    covers more than half of it (a held connection would cover all of it). The longest,
+    not the sum: on a slow runner the short polls add up to more than the wait (#7593)."""
     monkeypatch.setattr(profile_fetch, "LEASE_POLL_SECONDS", 0.1)
     pool = _state(fetch.client).settings_store.pool
     put_all(fetch)
     reached, release = threading.Event(), threading.Event()
     lock = threading.Lock()
     open_since: dict[int, float] = {}
-    held: list[float] = []
+    held: list[tuple[float, float]] = []
     ids = itertools.count()
     real_connection = pool.connection
 
@@ -970,7 +971,7 @@ def test_a_waiting_import_holds_no_pool_connection(
         finally:
             with lock:
                 del open_since[token]
-                held.append(time.monotonic() - began)
+                held.append((began, time.monotonic()))
 
     monkeypatch.setattr(pool, "connection", timed)
     _slow_k_tables(reached, release)
@@ -986,21 +987,27 @@ def test_a_waiting_import_holds_no_pool_connection(
     second = threading.Thread(target=call, args=("second",))
     second.start()
 
-    def busy() -> tuple[float, int]:
+    def polls() -> int:
+        with lock:
+            return len(held)
+
+    def longest(since: float) -> float:
+        """The longest part of the time since ``since`` that one checkout covered."""
         with lock:
             now = time.monotonic()
-            return sum(held) + sum(now - t for t in open_since.values()), len(held)
+            spans = [*held, *((began, now) for began in open_since.values())]
+        return max((min(end, now) - max(began, since) for began, end in spans), default=0.0)
 
     wait = 1.5
-    before, polls_before = busy()
+    polls_before, start = polls(), time.monotonic()
     time.sleep(wait)
-    after, polls_after = busy()
+    covered, polls_after = longest(start), polls()
     release.set()
     first.join(timeout=60)
     second.join(timeout=60)
     assert replies["second"].json() == replies["first"].json()
     assert polls_after - polls_before >= 3, (polls_before, polls_after)
-    assert after - before < wait / 4, (before, after)
+    assert covered < wait / 2, covered
 
 
 @respx.mock

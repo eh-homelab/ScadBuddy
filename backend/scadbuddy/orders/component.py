@@ -35,6 +35,7 @@ from scadbuddy.filament.sb_presets import FilamentPresetStore
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.definitions import FlowDefinitions
+from scadbuddy.inventory.component import INVENTORY
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.attempt_media import MediaStarter, TemporalMediaStarter
@@ -220,7 +221,11 @@ class OrdersComponent:
     @property
     def lifecycle(self) -> Lifecycle:
         if self._lifecycle is None:
-            self._lifecycle = Lifecycle(self.store, self.core.events, self.refs, self.rules)
+            # The inventory's stock store (#7067): an item's parts leave its lots.
+            stock = None if self._components is None else self._components.get(INVENTORY).stock
+            self._lifecycle = Lifecycle(
+                self.store, self.core.events, self.refs, self.rules, stock=stock
+            )
             self._lifecycle.offered_providers = frozenset(
                 providers(fake=self.core.settings.payments_fake_provider)
             )

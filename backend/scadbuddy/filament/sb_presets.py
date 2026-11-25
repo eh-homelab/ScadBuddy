@@ -717,6 +717,8 @@ async def adopt_at_start(
         try:
             ids = await asyncio.to_thread(bound_bb_ids, pool)
             if not ids:
+                # Logged, so a rollout shows the step ran (#7590).
+                logger.info("no binding names a Bambuddy local preset; nothing to adopt")
                 return
             conninfo = pool.conninfo if isinstance(pool.conninfo, str) else pool.conninfo()
             held = await acquire_lock(conninfo, ADOPT_LOCK)

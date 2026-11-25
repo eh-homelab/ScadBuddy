@@ -31,8 +31,8 @@ def _at(seconds: float) -> datetime:
     return T0 + timedelta(seconds=seconds)
 
 
-def _running(state: str = "RUNNING", subtask: str = JOB) -> dict[str, Any]:
-    return {"gcode_state": state, "subtask_name": subtask, "mc_percent": 10}
+def _running(state: str = "RUNNING", subtask: str = JOB, percent: int = 10) -> dict[str, Any]:
+    return {"gcode_state": state, "subtask_name": subtask, "mc_percent": percent}
 
 
 def _linked(printers: PrinterStore, serial: str = SERIAL) -> str:
@@ -64,11 +64,16 @@ def test_the_first_report_makes_the_row_and_later_reports_advance_it(
     reports.advance(pid, _running(), _at(1.5))
     reports.advance(pid, _running(), _at(1.5))  # a resend after a lost answer
     reports.advance(pid, _running("PAUSE"), _at(11.5))
-    reports.advance(pid, _running("PAUSE"), _at(21.5))
+    reports.advance(pid, _running("PAUSE", percent=11), _at(21.5))
     counter = _counter(pg_pool, pid)
     assert counter is not None
     assert counter.run_seconds == Decimal("11.5")
     assert (counter.state, counter.counted_to) == ("PAUSE", _at(21.5))
+    # A report with nothing new to a reader is not written (#7389): the counter waits for
+    # the next write, which counts the whole stretch.
+    reports.advance(pid, _running("PAUSE", percent=11), _at(31.5))
+    counter = _counter(pg_pool, pid)
+    assert counter is not None and counter.counted_to == _at(21.5)
 
 
 def test_a_long_gap_that_ends_in_another_print_is_unseen(
@@ -106,10 +111,10 @@ def test_after_the_watch_clock_steps_back_the_counter_waits_for_counted_to(
     reports = PrinterReportStore(pg_pool)
     ahead = datetime.now(UTC).replace(microsecond=0) + timedelta(hours=1)
     reports.advance(pid, _running(), ahead)
-    reports.advance(pid, _running(), ahead + timedelta(seconds=10))
+    reports.advance(pid, _running(percent=11), ahead + timedelta(seconds=10))
 
     reports.advance(pid, _running(), _at(0))
-    reports.advance(pid, _running(), _at(10))
+    reports.advance(pid, _running(percent=11), _at(10))
 
     counter = _counter(pg_pool, pid)
     assert counter is not None
@@ -145,7 +150,8 @@ def test_the_counter_keeps_every_microsecond(
     reports = PrinterReportStore(pg_pool)
     reports.advance(pid, _running(), _at(0))
     for step in range(1, 51):
-        reports.advance(pid, _running(), _at(0) + step * timedelta(microseconds=123456))
+        at = _at(0) + step * timedelta(microseconds=123456)
+        reports.advance(pid, _running(percent=step), at)
     counter = _counter(pg_pool, pid)
     assert counter is not None and counter.run_seconds == Decimal("6.1728")
 
@@ -212,7 +218,7 @@ def test_an_unlink_keeps_the_total_and_clears_the_state_and_a_relink_counts_on(
 
     printers_with_kek.link_lan(pid, LanLink(host="10.0.0.9", access_code=CODE), cert_sha256=CERT)
     reports.advance(pid, _running(), _at(40))  # within the gap limit, but no state to count
-    reports.advance(pid, _running(), _at(50))
+    reports.advance(pid, _running(percent=11), _at(50))
     counter = _counter(pg_pool, pid)
     assert counter is not None
     assert counter.run_seconds == 40 and counter.unseen_seconds == 0

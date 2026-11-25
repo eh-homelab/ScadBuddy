@@ -61,7 +61,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, LiteralString
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
@@ -477,22 +477,27 @@ class SlicePrices:
             " WHERE model_sha256 = %s AND status = 'done'"
             " AND currency IS NOT NULL AND total_minor IS NOT NULL"
         )
+        own = (
+            # A file's row from before `setup_key` has no output and no variant key.
+            f"{read} AND listing_id = %s"
+            " AND (setup_key IS NOT NULL OR (variant_key IS NULL AND output_id IS NULL))"
+        )
+        others = f"{read} AND listing_id IN (SELECT id FROM storefront_listings WHERE published)"
+        # One read each, so each takes the order of `storefront_slice_prices_listing_last`.
+        reads: tuple[tuple[LiteralString, tuple[Any, ...]], ...] = (
+            (f"{own} AND slot_filaments <@ %s", (model_sha256, listing_id, alike)),
+            (own, (model_sha256, listing_id)),
+            (
+                f"{others} AND setup_key = %s AND slot_filaments <@ %s",
+                (model_sha256, setup_key, alike),
+            ),
+        )
         with self._pool.connection() as conn:
-            found = conn.execute(
-                # A file's row from before `setup_key` has no output and no variant key.
-                f"{read} AND listing_id = %s"
-                " AND (setup_key IS NOT NULL OR (variant_key IS NULL AND output_id IS NULL))"
-                " ORDER BY coalesce(slot_filaments <@ %s, false) DESC, finished_at DESC LIMIT 1",
-                (model_sha256, listing_id, alike),
-            ).fetchone()
-            if found is None:
-                found = conn.execute(
-                    f"{read} AND listing_id IN (SELECT id FROM storefront_listings WHERE published)"
-                    " AND setup_key = %s AND slot_filaments <@ %s"
-                    " ORDER BY finished_at DESC LIMIT 1",
-                    (model_sha256, setup_key, alike),
-                ).fetchone()
-        return _row(found)
+            for sql, args in reads:
+                found = conn.execute(f"{sql} ORDER BY finished_at DESC LIMIT 1", args).fetchone()
+                if found is not None:
+                    return _row(found)
+        return None
 
     def fail(self, price_key: str, model_sha256: str, failure: str) -> PriceRow:
         """No price for the variant, and why."""

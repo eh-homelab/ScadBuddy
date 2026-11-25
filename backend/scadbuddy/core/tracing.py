@@ -16,7 +16,7 @@ import time
 import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from typing import Final
+from typing import TYPE_CHECKING, Any, Final
 
 from opentelemetry import context, propagate, trace
 from opentelemetry.context import Context
@@ -30,6 +30,9 @@ from opentelemetry.util.types import Attributes
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.trace_scrub import ScrubbingSpanExporter
+
+if TYPE_CHECKING:
+    from psycopg import Connection
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +338,7 @@ def use_traceparent(traceparent: str | None) -> Iterator[None]:
 
 
 __all__ = [
+    "COMMIT_SPAN",
     "DEFAULT_SAMPLER",
     "THREAD_WAIT_ATTRIBUTE",
     "TRACER_NAME",
@@ -347,7 +351,39 @@ __all__ = [
     "link_to",
     "span",
     "traced_thread",
+    "traced_transaction",
     "traces_export_enabled",
     "tracing_disabled",
     "use_traceparent",
 ]
+
+
+#: The span of a write's COMMIT (`traced_transaction`, #7389): prod's commits take 1-2 s,
+#: and untraced they showed as a gap after a request's last query.
+COMMIT_SPAN: Final = "db.commit"
+
+
+@contextmanager
+def traced_transaction(conn: Connection[Any]) -> Iterator[None]:
+    """``conn.transaction()``, its COMMIT inside the span `COMMIT_SPAN`, which records no
+    value. A block that raises rolls back outside the span, and the error goes on. On a
+    connection already in a transaction it is a savepoint, whose release commits nothing,
+    so it gets no span. That includes a connection out of autocommit that has already run
+    a statement (implicitly ``INTRANS``): the commit of that outer transaction, made by
+    its owner, is not traced here either."""
+    from psycopg.pq import TransactionStatus
+
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        with conn.transaction():
+            yield
+        return
+    transaction = conn.transaction()
+    transaction.__enter__()
+    try:
+        yield
+    except BaseException as error:
+        if not transaction.__exit__(type(error), error, error.__traceback__):
+            raise
+        return
+    with span(COMMIT_SPAN):
+        transaction.__exit__(None, None, None)

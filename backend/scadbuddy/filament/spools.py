@@ -22,6 +22,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
@@ -1289,8 +1290,9 @@ class FilamentSpoolStore:
     @contextmanager
     def transaction(self) -> Iterator[Conn]:
         """A connection in a transaction, for a caller that writes a spool, its tags and
-        its events as one (`filament/bambuddy_pull.py`)."""
-        with self._pool.connection() as conn, conn.transaction():
+        its events as one (`filament/bambuddy_pull.py`). Its COMMIT is a span
+        (`core/tracing.py` `traced_transaction`, #7389)."""
+        with self._pool.connection() as conn, traced_transaction(conn):
             yield conn
 
     @staticmethod

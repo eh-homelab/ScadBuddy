@@ -136,6 +136,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
+from scadbuddy.library.template_copy import copy_templates
 from scadbuddy.operations.blob_claims import sweep_upload_blobs
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
@@ -250,6 +251,7 @@ from scadbuddy.workflows.housekeeping import (
     STOREFRONT_DRAFTS_SWEEP,
     STOREFRONT_MAIL_SWEEP,
     SWEEPS,
+    TEMPLATE_COPY_SWEEP,
     TRANSFER_PUTS_SWEEP,
     ensure_schedules,
     library_worker,
@@ -591,6 +593,34 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.exception("could not index the saved outputs; the next start retries")
 
 
+async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
+    """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
+    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
+    that does not get it does nothing. A failure is logged, then raised."""
+    refresh = state.catalogue.refresh
+    if refresh is None:
+        return
+    try:
+        result = await asyncio.to_thread(
+            copy_templates, state.catalogue, refresh.rows, refresh, state.projection.pool, stop
+        )
+    except Exception:
+        logger.exception("could not copy the templates to rows; the next sweep or start retries")
+        raise
+    if result is not None:
+        logger.info(
+            "copied the templates to rows",
+            extra={
+                "added": result.added,
+                "refreshed": result.refreshed,
+                "dropped": result.dropped,
+                "unreadable": len(result.unreadable),
+                "incomplete": result.incomplete,
+                "stopped": stop.is_set(),
+            },
+        )
+
+
 async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
     """One run of the copy of the saved outputs' files to rows (#7255, `copy_outputs`),
     logged. It takes the copy's advisory lock, so one replica copies at a time; a run
@@ -620,6 +650,13 @@ async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
                 "stopped": stop.is_set(),
             },
         )
+
+
+async def _copy_templates_logged(state: AppState, *, stop: threading.Event) -> None:
+    """The start's copy (#7317), once and best effort: a failure is logged only. The
+    housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again."""
+    with suppress(Exception):
+        await _copy_templates_once(state, stop)
 
 
 async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
@@ -795,6 +832,18 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
 
+    @activity.defn(name=TEMPLATE_COPY_SWEEP)
+    async def copy_templates_to_rows() -> None:
+        # #7317: its own stop, as the output copy's: the worker's shutdown ends the run
+        # between batches. Any cancel sets it too, as a timeout's: the thread then ends
+        # and frees the advisory lock.
+        stop = threading.Event()
+        try:
+            await _heartbeating(_copy_templates_once(state, stop), stop)
+        except asyncio.CancelledError:
+            stop.set()
+            raise
+
     @activity.defn(name=ATTACHMENTS_SWEEP)
     async def sweep_print_attachments() -> None:
         await _heartbeating(_sweep_print_attachments_logged(state))
@@ -893,6 +942,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_lost_slice_starts,
         maintain_models_git,
         sweep_activity,
+        copy_templates_to_rows,
         sweep_print_attachments,
         sweep_entity_orphans,
         sweep_print_library,
@@ -1804,6 +1854,9 @@ async def _start_render(state: AppState) -> None:
     failed start opened, each once."""
     projection, service, settings = state.projection, state.render, state.settings
     await asyncio.to_thread(projection.open)
+    # Only now is the `templates` table there (#7317, plan decision 2): the boot
+    # commit `ensure_repo` made before it writes no rows; the start copy fills them.
+    state.history.template_rows = state.catalogue.refresh
     await _prepare_catalogue(state)
     # What a pre-Temporal release was running, nothing
     # will finish (#546).
@@ -2486,6 +2539,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None
     index_now: asyncio.Task[None] | None = None
+    copy_templates_now: asyncio.Task[None] | None = None
     copy_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
@@ -2535,6 +2589,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # missing from the cross-model list meanwhile.
         index_now = asyncio.create_task(
             _index_outputs_logged(state, stop=stop_background), name="index outputs"
+        )
+        # #7317: every template's files copied to its row, and the rows reconciled with
+        # the folders, after `_start_render` made the table and synced the built-ins. The
+        # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again.
+        copy_templates_now = asyncio.create_task(
+            _copy_templates_logged(state, stop=stop_background), name="copy templates"
         )
         # #7255: every saved output's files copied to its row, and the rows reconciled
         # with the files; until a copy run finishes, a missing row falls back to them.
@@ -2596,7 +2656,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if unfollow_backfills is not None:
             await unfollow_backfills()
         await _join_background(
-            stop_background, backfill, attach_now, adopt_now, index_now, copy_now
+            stop_background,
+            backfill,
+            attach_now,
+            adopt_now,
+            index_now,
+            copy_templates_now,
+            copy_now,
         )
         stop_printing.set()
         await _stop_queue_worker(printing, "print")

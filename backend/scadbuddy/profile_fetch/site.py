@@ -486,7 +486,7 @@ class ThreeDfpSite:
                 # here, so a slow page adds a duplicate record (#7547).
                 logger.info(
                     "the My Spools record check for 3DFP filament %d timed out after %d ms"
-                    " with no export button; adding a record (a slow page makes a duplicate)",
+                    " with no export button; will add a record (a slow page makes a duplicate)",
                     tdfp_id,
                     RECORD_WAIT_MS,
                 )
@@ -496,6 +496,11 @@ class ThreeDfpSite:
                 await button.click()
                 await self._pause(2500)
                 logger.info("added 3DFP filament %d to My Spools", tdfp_id)
+            else:
+                logger.info(
+                    '3DFP filament %d\'s page offered no "Add to My Spools" button; nothing added',
+                    tdfp_id,
+                )
         except PlaywrightTimeoutError:
             raise SiteError("timeout", f"adding 3DFP filament {tdfp_id} timed out") from None
         except PlaywrightError:

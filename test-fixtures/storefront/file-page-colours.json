@@ -1,0 +1,46 @@
+[
+  {
+    "case": "each part opens on the colour closest to the file's",
+    "materials": ["PLA"],
+    "filaments": [
+      {"id": "blue", "material": "PLA", "colour": "#0000FF", "alpha": 255},
+      {"id": "red", "material": "PLA", "colour": "#FF0000", "alpha": 255}
+    ],
+    "slots": [
+      {"slot": 0, "colour": "#EE1111", "default": "red"},
+      {"slot": 2, "colour": "#1111EE", "default": "blue"}
+    ],
+    "want": {"0": "red", "2": "blue"}
+  },
+  {
+    "case": "the page knows a colour, so it takes the first filament of it, not the default itself",
+    "materials": ["PLA"],
+    "filaments": [
+      {"id": "clear-red", "material": "PLA", "colour": "#FF0000", "alpha": 128},
+      {"id": "red", "material": "PLA", "colour": "#ff0000", "alpha": 255}
+    ],
+    "slots": [{"slot": 0, "colour": "#FF0000", "default": "red"}],
+    "want": {"0": "clear-red"}
+  },
+  {
+    "case": "the first material of the shop's order that has a filament, whatever the colours' order",
+    "materials": ["ASA", "PLA", "PETG"],
+    "filaments": [
+      {"id": "petg-red", "material": "PETG", "colour": "#FF0000", "alpha": 255},
+      {"id": "petg-blue", "material": "PETG", "colour": "#0000FF", "alpha": 255},
+      {"id": "pla-red", "material": "pla", "colour": "#FF0000", "alpha": 255}
+    ],
+    "slots": [
+      {"slot": 0, "colour": "#FF0000", "default": "pla-red"},
+      {"slot": 1, "colour": "#0000FF", "default": "pla-red"}
+    ],
+    "want": {"0": "pla-red", "1": "pla-red"}
+  },
+  {
+    "case": "a support filament is no part's colour",
+    "materials": ["PLA", "PLA Support"],
+    "filaments": [{"id": "support", "material": "PLA Support", "colour": "#FFFFFF", "alpha": 255}],
+    "slots": [{"slot": 0, "colour": "#FFFFFF", "default": null}],
+    "want": null
+  }
+]

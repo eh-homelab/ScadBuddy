@@ -37,8 +37,12 @@ from scadbuddy.printers.status import STALE_AFTER
 #: `status.RUNNING`, which also holds ``PREPARE``, ``SLICING`` and ``PAUSE``.
 COUNTED_STATE = "RUNNING"
 
-#: The longest gap between two writes that counts on the row's state alone. The watch
-#: writes at least every 10 s while its link is up (`watch.HEARD_EVERY`).
+#: The longest gap between two writes that counts on the row's state alone. While its
+#: link is up, the watch writes the row at least every `reports.REFRESH_EVERY` (30 s)
+#: while reports arrive (a report with nothing new is skipped only within that of the
+#: last written report, which a touch does not move, and of ``counted_to``,
+#: `unchanged_by`), and touches it every `watch.HEARD_EVERY` (10 s) when the link is
+#: quiet.
 GAP_LIMIT = STALE_AFTER
 
 _TENTH = Decimal("0.1")
@@ -97,6 +101,26 @@ def accrue(row: RunHours, t: datetime, report: dict[str, Any] | None) -> RunHour
         if subtask is not None:
             after = replace(after, subtask=subtask)
     return after
+
+
+def unchanged_by(
+    row: RunHours | None, t: datetime, report: dict[str, Any], *, within: timedelta
+) -> bool:
+    """Whether a report seen at ``t`` may go unwritten (`reports.read_view`, #7389) with the
+    counter left as it is: it names the row's state and subtask, and it is at or after
+    ``counted_to`` and less than ``within`` (`reports.REFRESH_EVERY`, under `GAP_LIMIT`)
+    after it. Then the next write counts the whole stretch from ``counted_to`` on the same
+    state, as the two writes would have, and while reports arrive that stretch is at most
+    ``within`` plus the time to the next report, so a skip never makes a gap over
+    `GAP_LIMIT`. A row an unlink cleared, a missing row, or a write before ``counted_to``
+    is written."""
+    return (
+        row is not None
+        and row.counted_to <= t
+        and t - row.counted_to < min(within, GAP_LIMIT)
+        and report.get("gcode_state") == row.state
+        and report.get("subtask_name") == row.subtask
+    )
 
 
 def hours(run_seconds: Decimal) -> Decimal:

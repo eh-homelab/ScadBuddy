@@ -25,7 +25,9 @@ function Field({ label, children, id }: { label: string; id: string; children: R
   )
 }
 
-/** "Add part" (#5543): priced in the shop's currency; a count on the shelf is an `adjust` line. */
+/** "Add part" (#5543): priced in the shop's currency; a count on the shelf is received as a
+ * lot (an `add` line). A part with no supplier has no pack (R-P2-34): its pack fields may stay
+ * empty, and its count is of unknown cost. */
 export function PartForm({ currency, exponent, onDone, onCancel }: { currency: string; exponent: number; onDone: () => void; onCancel: () => void }) {
   const id = useId()
   const [name, setName] = useState('')
@@ -40,13 +42,15 @@ export function PartForm({ currency, exponent, onDone, onCancel }: { currency: s
 
   async function submit(e: FormEvent) {
     e.preventDefault()
-    const size = count(packSize, 1)
-    const price = toMinor(packPrice, exponent)
+    const supplied = supplier.trim() !== ''
+    const size = packSize.trim() || supplied ? count(packSize, 1) : 1
+    const price = packPrice.trim() || supplied ? toMinor(packPrice, exponent) : 0
     const lowStock = low.trim() ? count(low, 0) : 0
     const shelf = onHand.trim() ? count(onHand, 0) : 0
     if (!name.trim()) return setError('Give the part a name.')
     if (size === null) return setError('The pack size is a whole number, at least 1.')
     if (price === null || price < 0) return setError(`The pack price is an amount in ${currency}, such as 5.99.`)
+    if (!supplied && (size !== 1 || price !== 0)) return setError('A part with no supplier has no pack: name its supplier, or leave the pack size and price empty.')
     if (lowStock === null || shelf === null) return setError('The low-stock level and the count on hand are whole numbers, 0 or more.')
     setBusy(true)
     setError(null)
@@ -71,6 +75,7 @@ export function PartForm({ currency, exponent, onDone, onCancel }: { currency: s
       <Field label="Link" id={`${id}-link`}>
         <Input id={`${id}-link`} value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…" />
       </Field>
+      <p className="text-[13px] text-muted-foreground sm:col-span-2">A part with no supplier has no pack: you add it one unit at a time, at the price you give then.</p>
       <Field label="Pack size" id={`${id}-size`}>
         <Input id={`${id}-size`} inputMode="numeric" value={packSize} onChange={(e) => setPackSize(e.target.value)} />
       </Field>
@@ -132,13 +137,15 @@ export function PartStockPanel({ part, mode, onChanged, onClose }: { part: Inven
     const each = price.trim() ? toMinor(price, part.minor_exponent) : undefined
     if (n === null) return setError('Packs is a whole number, at least 1.')
     if (each === null || (each !== undefined && each < 0)) return setError(`The pack price is an amount in ${part.currency}.`)
+    // R-P2-25: with no supplier there is no pack price to fall back on.
+    if (each === undefined && !part.supplier) return setError(`A part with no supplier has no pack price: give the price of one, in ${part.currency}.`)
     void run(() => api.addPartStock(part.id, { packs: n, ...(each !== undefined ? { pack_price_minor: each } : {}), note: note.trim() }))
   }
 
   function adjust(e: FormEvent) {
     e.preventDefault()
-    const n = count(onHand, -1_000_000)
-    if (n === null) return setError('The count is a whole number.')
+    const n = count(onHand, 0)
+    if (n === null) return setError('The count is a whole number, 0 or more.')
     if (!note.trim()) return setError('Say why the count changed.')
     void run(() => api.adjustPartStock(part.id, { on_hand: n, note: note.trim() }))
   }
@@ -155,16 +162,16 @@ export function PartStockPanel({ part, mode, onChanged, onClose }: { part: Inven
       </div>
       {mode === 'stock' && (
         <form onSubmit={addStock} className="grid gap-3 sm:grid-cols-3">
-          <Field label={`Packs of ${part.pack_size}`} id={`${id}-packs`}>
+          <Field label={part.supplier ? `Packs of ${part.pack_size}` : 'Units'} id={`${id}-packs`}>
             <Input id={`${id}-packs`} inputMode="numeric" value={packs} onChange={(e) => setPacks(e.target.value)} />
           </Field>
-          <Field label={`Price a pack (now ${money(part.pack_price_minor)})`} id={`${id}-price`}>
+          <Field label={part.supplier ? `Price a pack (now ${part.cost_unknown ? 'unknown' : money(part.pack_price_minor)})` : 'Price of one'} id={`${id}-price`}>
             <Input id={`${id}-price`} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} />
           </Field>
           <Field label="Note" id={`${id}-note`}>
             <Input id={`${id}-note`} value={note} onChange={(e) => setNote(e.target.value)} />
           </Field>
-          <p className="text-[13px] text-muted-foreground sm:col-span-3">The unit cost becomes the average of the stock on hand and the new packs. Orders already fulfilled keep their cost.</p>
+          <p className="text-[13px] text-muted-foreground sm:col-span-3">The unit cost becomes the average of the stock on hand of known cost and the new packs. Orders already fulfilled keep their cost.</p>
           <div className="sm:col-span-3">
             <Button type="submit" disabled={busy}>
               Add stock
