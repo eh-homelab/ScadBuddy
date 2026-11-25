@@ -1662,7 +1662,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
   (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table,
-  `item`, `lot` and `unit` among them since #7067; `EntityStore`: an `entities` row made by
+  `item`, `lot` and `unit` among them since #7067, and one kind per filament catalog, such
+  as `insert_type`; `EntityStore`: an `entities` row made by
   `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
   and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
   `attachments.py` (`EntityAttachmentStore` over

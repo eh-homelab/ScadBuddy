@@ -3,6 +3,9 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { isAliasedKind, listCatalog, upsertCatalog, type CatalogInput, type CatalogKind } from '../../api/filament'
+import { AttachmentsPanel } from '../entities/AttachmentsPanel'
+import { LinksPanel } from '../entities/LinksPanel'
+import { PropertiesPanel } from '../entities/PropertiesPanel'
 import { AliasChips, AliasList } from './AliasChips'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -93,7 +96,8 @@ function details(fields: Field[], row: Row, names: ReadonlyMap<string, string>):
  * (`?archived=true`). Colours use `RgbaColourField`; an insert type's Bambuddy catalog id
  * is read only (the pull sets it). A material, subtype, brand, category or effect shows
  * its aliases under its name, and its edit form adds and removes them (`AliasChips`,
- * #6706); the pickers elsewhere list names only.
+ * #6706); the pickers elsewhere list names only. Under a saved row's edit form are its
+ * files, links and properties, which are kept as they are added, apart from the form's Save.
  */
 export function CatalogList({ kind }: { kind: CatalogKind }) {
   const spec = CATALOGS.find((one) => one.kind === kind)!
@@ -439,7 +443,16 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                         <tr key={`${row.id}-edit`} className="border-t">
                           <td colSpan={4} className="p-2">
                             {/* On a phone the table scrolls sideways: the form stays in view at its left edge. */}
-                            <div className="sticky left-2 max-w-[calc(100vw-3rem)] sm:static sm:max-w-none">{form}</div>
+                            <div className="sticky left-2 max-w-[calc(100vw-3rem)] sm:static sm:max-w-none">
+                              {form}
+                              <section aria-label={`${row.name}: files, links and properties`} className="mt-3 grid gap-6 rounded-md border p-3 lg:grid-cols-2">
+                                <AttachmentsPanel entity={`${spec.entity}:${row.id}`} />
+                                <div className="flex flex-col gap-6">
+                                  <LinksPanel entity={`${spec.entity}:${row.id}`} />
+                                  <PropertiesPanel entity={`${spec.entity}:${row.id}`} />
+                                </div>
+                              </section>
+                            </div>
                           </td>
                         </tr>,
                       ]
