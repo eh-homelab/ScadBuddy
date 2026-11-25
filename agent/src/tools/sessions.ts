@@ -102,9 +102,9 @@ function manager(ctx: ToolContext): SessionManager {
  * Whether a session this call starts or forks, or a turn it sends, goes without the background
  * built-ins (#5870): a flow run's call, or a call from a session whose turn has none (a flow's
  * session, a Workflow agent's chat), so neither reaches CronCreate, ScheduleWakeup, Workflow or
- * Monitor through another session.
+ * Monitor through another session. nfc_write reads it too: such a call has no person behind it.
  */
-async function withoutBackground(ctx: ToolContext, sessions: SessionManager): Promise<boolean> {
+export async function withoutBackground(ctx: ToolContext, sessions: SessionManager): Promise<boolean> {
   if (ctx.flowTurn) return true
   return ctx.session !== undefined && !(await sessions.keepsBackgroundTools(ctx.session))
 }

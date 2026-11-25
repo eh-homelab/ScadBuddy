@@ -10,6 +10,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.filament import NOT_NUDGED, router
+from scadbuddy.api.printer_slots import router as printer_slots_router
 from tests.api.test_filament import SPOOLS, _spool
 from tests.api.test_filament_tags import (
     _REC,
@@ -77,7 +78,9 @@ def test_the_bambuddy_import_does_not_nudge(
 
 def test_every_route_not_nudged_exists() -> None:
     # A removed route's name left here would hide nothing and mislead the next reader.
-    names = {getattr(route, "name", None) for route in router.routes}
+    # The #7153 slot routes share this dependency from `api/printer_slots.py`.
+    routes = [*router.routes, *printer_slots_router.routes]
+    names = {getattr(route, "name", None) for route in routes}
     assert names >= NOT_NUDGED, sorted(NOT_NUDGED - names)
 
 

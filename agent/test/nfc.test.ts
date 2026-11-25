@@ -96,6 +96,43 @@ describe('NFC job tools', () => {
     expect(firstText(got)).toEqual({ job_id: JOB, state: 'expired', result: null })
   })
 
+  it("nfc_write refuses a flow run's call and queues no job", async () => {
+    let posted = false
+    server.use(
+      http.post(JOBS, () => {
+        posted = true
+        return HttpResponse.json(job('pending'), { status: 201 })
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), flowTurn: { run_id: 'r', call_id: 'c' } })
+    expect(got.isError).toBe(true)
+    expect(JSON.stringify(got.content)).toMatch(/cannot run from a flow run/)
+    expect(posted).toBe(false)
+  })
+
+  it("refuses a flow-started session's turn, and runs in a person's session", async () => {
+    const FLOWS = '0e5a3c1e-1111-4222-8333-000000000001'
+    const PERSONS = '0e5a3c1e-1111-4222-8333-000000000002'
+    let posts = 0
+    server.use(
+      http.post(JOBS, () => {
+        posts += 1
+        return HttpResponse.json(job('done', { kind: 'write', records: [REC] }), { status: 201 })
+      }),
+    )
+    const sessions = { keepsBackgroundTools: async (id: string) => id === PERSONS } as unknown as ToolContext['sessions']
+    const refused = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), sessions, session: FLOWS })
+    expect(refused.isError).toBe(true)
+    expect(posts).toBe(0)
+    const noManager = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), session: PERSONS })
+    expect(noManager.isError).toBe(true)
+    expect(posts).toBe(0)
+    const ran = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), sessions, session: PERSONS })
+    expect(ran.isError).toBeFalsy()
+    expect(firstText(ran)).toMatchObject({ job_id: JOB, state: 'done' })
+    expect(posts).toBe(1)
+  })
+
   it('nfc_write refuses records past 16', async () => {
     let posted = false
     server.use(
@@ -134,9 +171,10 @@ describe('NFC job tools', () => {
   it('cancels a job still open past its expires_at and answers what the server then says', async () => {
     // #7273 M1: no page may arm the job once the agent stopped waiting for it.
     let cancelled = false
+    const expires_at = new Date(Date.now() + 100).toISOString()
     server.use(
-      http.post(JOBS, () => HttpResponse.json(job('pending', {}, 100), { status: 201 })),
-      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job(cancelled ? 'cancelled' : 'armed'))),
+      http.post(JOBS, () => HttpResponse.json(job('pending', { expires_at }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job(cancelled ? 'cancelled' : 'pending', { expires_at }))),
       http.post(`${JOBS}/${JOB}/cancel`, () => {
         cancelled = true
         return HttpResponse.json(job('cancelled'))
@@ -145,6 +183,95 @@ describe('NFC job tools', () => {
     const got = await runTool(tool('nfc_read'), { timeout_s: 1 }, { ...ctx(), pollIntervalMs: 20 })
     expect(cancelled).toBe(true)
     expect(firstText(got)).toEqual({ job_id: JOB, state: 'cancelled', result: null })
+  })
+
+  it('answers the done result of a write that finished after the first expires_at', async () => {
+    // #7419 review: arming moves expires_at, and a write that began is not expired at it.
+    const made = Date.now()
+    const first = new Date(made + 100).toISOString()
+    const armed = new Date(made + 300).toISOString()
+    const result = { uid: '04AA', records: [REC], backup_id: 'b' }
+    let cancels = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC], expires_at: first }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () =>
+        HttpResponse.json(Date.now() - made < 700 ? job('armed', { kind: 'write', expires_at: armed }) : job('done', { kind: 'write', expires_at: armed, result })),
+      ),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json(job('cancelled'))
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), pollIntervalMs: 50 })
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+    expect(cancels).toBe(0)
+  })
+
+  it('never cancels a begun write past its expires_at, and answers its late done', async () => {
+    // #7419 round 2: the tag is backed up, so only the server ends the job.
+    const made = Date.now()
+    const past = new Date(made - 120_000).toISOString()
+    const result = { uid: '04AA', records: [REC], backup_id: 'b' }
+    let cancels = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC] }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () =>
+        HttpResponse.json(
+          Date.now() - made < 400
+            ? job('armed', { kind: 'write', expires_at: past, write_begun: true })
+            : job('done', { kind: 'write', expires_at: past, write_begun: true, result }),
+        ),
+      ),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json({ title: 'Conflict', status: 409, code: 'write_begun' }, { status: 409 })
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), pollIntervalMs: 50 })
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+    expect(cancels).toBe(0)
+  })
+
+  it('waits for a write that began just before its cancel, which answers 409 write_begun', async () => {
+    // #7419 round 3: the page backed the tag up after the last read, so the cancel is refused.
+    const expires_at = new Date(Date.now() + 100).toISOString()
+    const result = { uid: '04AA', records: [REC], backup_id: 'b' }
+    let cancelled = 0
+    let reads = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC], expires_at }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => {
+        reads += 1
+        if (cancelled === 0) return HttpResponse.json(job('pending', { kind: 'write', expires_at, write_begun: false }))
+        return HttpResponse.json(
+          reads < 6 ? job('armed', { kind: 'write', expires_at, write_begun: true }) : job('done', { kind: 'write', expires_at, write_begun: true, result }),
+        )
+      }),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancelled += 1
+        return HttpResponse.json({ title: 'Conflict', status: 409, detail: 'the write has begun', code: 'write_begun' }, { status: 409 })
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), pollIntervalMs: 20 })
+    expect(cancelled).toBe(1)
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'done', result })
+  })
+
+  it('does not cancel a begun write when the call is aborted', async () => {
+    let cancels = 0
+    server.use(
+      http.post(JOBS, () => HttpResponse.json(job('pending', { kind: 'write', records: [REC] }), { status: 201 })),
+      http.get(`${JOBS}/${JOB}`, () => HttpResponse.json(job('armed', { kind: 'write', write_begun: true }))),
+      http.post(`${JOBS}/${JOB}/cancel`, () => {
+        cancels += 1
+        return HttpResponse.json(job('cancelled'))
+      }),
+    )
+    const abort = new AbortController()
+    setTimeout(() => abort.abort(), 120)
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 600 }, { ...ctx(abort.signal), pollIntervalMs: 30 })
+    expect(cancels).toBe(0)
+    expect(firstText(got)).toEqual({ job_id: JOB, state: 'armed', result: null, write_begun: true })
   })
 
   it('cancels the job when the call is aborted', async () => {
