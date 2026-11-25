@@ -27,6 +27,7 @@ from scadbuddy.library import backfill as backfill_module
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import (
     AmbiguousOutputError,
+    _announce,
     attach_backfills,
     attach_job_backfills,
     choose_output,
@@ -46,6 +47,7 @@ from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
 from tests.support.arrange import finished_job
+from tests.support.saved_outputs import save_files
 from tests.support.store import store_pool
 from tests.support.waits import until
 
@@ -73,7 +75,7 @@ async def _legacy_output(tmp_path: Path):  # type: ignore[no-untyped-def]
     """An output saved before manifests, and the done re-render of it."""
     paths, job, written = await finished_job(tmp_path, job_id="rerender")
     store = OutputStore(paths)
-    old = store.create(job.model_copy(update={"outputs": [], "id": "old"}), name="mine")
+    old = save_files(store, job.model_copy(update={"outputs": [], "id": "old"}), name="mine")
     assert store.manifest(old.id) == []
     return store, old, job, written
 
@@ -255,7 +257,7 @@ async def test_a_saved_output_records_which_of_its_jobs_outputs_it_is(tmp_path: 
     paths, job, written = await finished_job(tmp_path, job_id="j1")
     twin = written.model_copy(update={"name": "second layout"})
     store = OutputStore(paths)
-    saved = store.create(job.model_copy(update={"outputs": [written, twin]}), index=1)
+    saved = save_files(store, job.model_copy(update={"outputs": [written, twin]}), index=1)
     record = store.record(saved.id)
     assert record is not None and record.output_index == 1
 
@@ -305,7 +307,7 @@ async def test_an_ambiguous_rerender_of_an_output_with_an_index_says_it_is_not_t
 def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
     """A second output saved before manifests, of the same render, both waiting on it."""
     first = store.ids_for("demo")[0]
-    second = store.create(job.model_copy(update={"outputs": [], "id": "old2"}), name="two").id
+    second = save_files(store, job.model_copy(update={"outputs": [], "id": "old2"}), name="two").id
     store.start_backfill(first, job.id)
     store.start_backfill(second, job.id)
     return first, second
@@ -600,6 +602,21 @@ async def test_an_output_that_cannot_be_read_is_still_attached_and_the_pass_goes
         assert store.manifest(output_id) == written.manifest
         assert store.backfill(output_id) is None
     assert [(e.output_id, e.slug) for e in heard] == [(unreadable, "demo"), (good, "demo")]
+
+
+async def test_a_failed_row_read_still_announces_from_the_directory(tmp_path: Path) -> None:
+    """#7256 review B-M4: the slug's row read fails (a pool timeout); the announcement
+    takes the directory's slug and still goes out."""
+    store, old, _, _ = await _legacy_output(tmp_path)
+
+    class _Unreadable:
+        def slug_of(self, output_id: str) -> str | None:
+            raise TimeoutError("the pool gave no connection")
+
+    store.rows = _Unreadable()
+    bus, heard = _output_events()
+    _announce(bus, store, old.id)
+    assert [(e.output_id, e.slug) for e in heard] == [(old.id, "demo")]
 
 
 @pytest.mark.requires_postgres
@@ -1038,7 +1055,7 @@ async def test_the_reaper_follows_symlinks_as_the_store_does(
     store, so the reaper must count it live, not release its Parts. A second, plain
     output keeps the no-outputs guard out of the way."""
     store, old, job, written = await _legacy_output(tmp_path)
-    store.create(job.model_copy(update={"outputs": [], "id": "plain"}), name="plain")
+    save_files(store, job.model_copy(update={"outputs": [], "id": "plain"}), name="plain")
     part = written.manifest[0].part
     out_dir = store.directory(old.id)
     moved = tmp_path / "elsewhere" / out_dir.name

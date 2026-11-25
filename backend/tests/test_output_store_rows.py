@@ -24,7 +24,15 @@ from scadbuddy.api.outputs import detail
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_index import OutputIndex
-from scadbuddy.library.output_rows import OutputRow, OutputRows
+from scadbuddy.library.output_rows import (
+    OUTPUT_HOLDER,
+    OutputBlobs,
+    OutputFileBlob,
+    OutputRow,
+    OutputRows,
+    output_blob_key,
+    output_file_key,
+)
 from scadbuddy.library.outputs import (
     BACKFILL_NAME,
     META_NAME,
@@ -40,6 +48,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
+from tests.support.saved_outputs import save_files
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -76,7 +85,7 @@ def finish_copy(store: OutputStore) -> None:
 async def saved(tmp_path: Path, projection: JobProjection) -> tuple[OutputStore, OutputMeta, Job]:
     paths, job, _ = await finished_job(tmp_path)
     store = _store(paths, projection)
-    meta = store.create(job, name="first", inputs={"v": 1, "values": {"width": 12}})
+    meta = save_files(store, job, name="first", inputs={"v": 1, "values": {"width": 12}})
     return store, meta, job
 
 
@@ -136,7 +145,7 @@ async def test_missing_row_after_copy_does_not_glob(
     with pytest.raises(OutputNotFoundError):
         store.directory(unknown)
     assert store.manifest(unknown) == []
-    assert store.provenance(unknown) is None
+    assert await store.provenance(unknown) is None
     # A known output is found with no glob too, and so is its model's list.
     assert store.get(meta.id).id == meta.id
     assert [m.id for m in store.list_for(job.slug)] == [meta.id]
@@ -162,14 +171,14 @@ async def test_create_fails_and_cleans_up_when_row_insert_fails(
 ) -> None:
     store, _, job = saved
     taken = "a" * 32
-    other = store.create(job, output_id="b" * 32)
+    other = save_files(store, job, output_id="b" * 32)
     row = rows_of(store).get(other.id)
     assert row is not None
     rows_of(store).insert(
         replace(row, output_id=taken, meta=row.meta.model_copy(update={"id": taken}))
     )
     with pytest.raises(psycopg.errors.UniqueViolation):
-        store.create(job, output_id=taken)
+        save_files(store, job, output_id=taken)
     assert not store.paths.output_dir(job.slug, taken).exists()
     # The other save's row stays: the clean-up deletes only a row the copy wrote.
     assert rows_of(store).get(taken) is not None
@@ -190,7 +199,7 @@ async def test_a_failed_save_leaves_no_row_the_copy_wrote(
     monkeypatch.setattr(rows, "insert", failing)
     output_id = "c" * 32
     with pytest.raises(psycopg.OperationalError):
-        store.create(job, output_id=output_id)
+        save_files(store, job, output_id=output_id)
     assert not store.paths.output_dir(job.slug, output_id).exists()
     assert rows.get(output_id) is None
 
@@ -219,12 +228,31 @@ def _waits_on_a_lock(conninfo: str) -> bool:
     return found is not None and found[0] > 0
 
 
+#: A save's blob keys (#7256): the keys alone; no blob is put.
+_SAVE_BLOBS = OutputBlobs(
+    model=output_blob_key("d" * 32, "model"),
+    preview=output_blob_key("d" * 32, "preview"),
+    files=(OutputFileBlob("a.stl", output_file_key("d" * 32, "a.stl"), 5),),
+)
+
+
+def _holds(conninfo: str, output_id: str) -> set[str]:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        found = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (OUTPUT_HOLDER, output_id),
+        ).fetchall()
+    return {str(key) for (key,) in found}
+
+
+@pytest.mark.parametrize("blobs", [None, _SAVE_BLOBS], ids=["files", "blobs"])
 async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
-    saved: tuple[OutputStore, OutputMeta, Job], pg_conninfo: str
+    saved: tuple[OutputStore, OutputMeta, Job], pg_conninfo: str, blobs: OutputBlobs | None
 ) -> None:
     """The copy read the save's folder and inserted its row, and its batch has not
     committed when the save writes its row. The save waits for the batch, then takes
-    the copy's row over: it keeps its files and does not fail (#7360)."""
+    the copy's row over: it keeps its files and its blob keys, and does not fail
+    (#7360, #7256)."""
     store, meta, job = saved
     rows = rows_of(store)
     output_id = "d" * 32
@@ -240,7 +268,9 @@ async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
     with ThreadPoolExecutor(2) as pool:
         copy = pool.submit(rows.write_copy, batch, [], rows.clock())
         assert batch.inserted.wait(30)
-        save = pool.submit(store.create, job, name="saved", output_id=output_id)
+        save = pool.submit(
+            lambda: store.commit(store.prepare(job, name="saved", output_id=output_id), blobs)
+        )
         deadline = time.monotonic() + 30
         while not _waits_on_a_lock(pg_conninfo):
             assert not save.done(), save.exception()
@@ -254,6 +284,14 @@ async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
     row = rows.get(output_id)
     assert row is not None
     assert row.meta.name == "saved" and row.files_stamp is None
+    if blobs is None:
+        assert row.bytes_at is None and row.blobs == OutputBlobs()
+        assert _holds(pg_conninfo, output_id) == set()
+    else:
+        assert row.bytes_at is not None
+        assert (row.blobs.model, row.blobs.preview) == (blobs.model, blobs.preview)
+        assert rows.files(output_id) == list(blobs.files)
+        assert _holds(pg_conninfo, output_id) == set(blobs.keys())
 
 
 async def test_rename_updates_row(saved: tuple[OutputStore, OutputMeta, Job]) -> None:
@@ -302,7 +340,7 @@ async def test_delete_and_forget_indexed_drop_rows(
     saved: tuple[OutputStore, OutputMeta, Job],
 ) -> None:
     store, meta, job = saved
-    other = store.create(job, name="other")
+    other = save_files(store, job, name="other")
     store.delete(meta.id)
     assert rows_of(store).get(meta.id) is None
     assert rows_of(store).get(other.id) is not None
@@ -391,7 +429,7 @@ async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
     concurrent delete), the model and its outputs stay, so their rows come back from
     the files, as the copy writes them."""
     store, meta, job = saved
-    second = store.create(job, name="second")
+    second = save_files(store, job, name="second")
     finish_copy(store)
     catalogue = _catalogue(store)
     model_dir = store.paths.model_dir(job.slug)
@@ -502,7 +540,7 @@ async def test_a_save_orders_by_the_rows_after_a_copy(
         return real_glob(self, pattern)
 
     monkeypatch.setattr(Path, "glob", no_meta_glob)
-    later = store.create(job, name="second")
+    later = save_files(store, job, name="second")
     assert later.created_at > meta.created_at
     assert [m.id for m in store.list_for(job.slug)] == [later.id, meta.id]
 

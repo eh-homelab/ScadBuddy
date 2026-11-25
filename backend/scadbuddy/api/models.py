@@ -2091,13 +2091,13 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
         "is the sha256 of the image."
     ),
 )
-def get_thumbnail(
+async def get_thumbnail(
     slug: SlugPath,
     catalogue: CatalogueDep,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
 ) -> Response:
     try:
-        ref = catalogue.thumbnail_ref(slug)
+        ref = await catalogue.thumbnail_ref(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if ref is None:
@@ -2107,7 +2107,7 @@ def get_thumbnail(
         headers = {"ETag": ref.etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
     try:
-        found = ref.read()
+        found = await ref.read()
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if found is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import hashlib
@@ -12,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -561,14 +562,14 @@ def revision_meta(directory: Path, slug: str) -> ModelMeta | None:
         return None
 
 
-def inputs_version_in(directory: Path, pipeline: PipelineDeclaration) -> int:
+def inputs_version_in(directory: Path, pipeline: PipelineDeclaration) -> int | None:
     """The ``INPUTS_VERSION`` of the pipeline a template in ``directory`` (a revision's)
-    declares, read without running it (`inputs_version_of`); 0 for a module that cannot
+    declares, read without running it (`inputs_version_of`); None for a module that cannot
     be read."""
     try:
         return inputs_version_of((directory / pipeline.module).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
-        return 0
+        return None
 
 
 def declares_pipeline(directory: Path, slug: str) -> bool:
@@ -626,6 +627,8 @@ class ThumbnailOrigin:
 
 #: A thumbnail read: the image, its content type and the `ETag` of what was read.
 ThumbnailRead = tuple[bytes, str, str]
+#: A thumbnail's read, None for no image. It reads the files in threads.
+ThumbnailReader = Callable[[], Coroutine[Any, Any, ThumbnailRead | None]]
 
 
 @dataclass(frozen=True)
@@ -637,16 +640,17 @@ class ThumbnailRef:
     differ when the source moved in between (plan decision 12); None for no image."""
 
     etag: str
-    read: Callable[[], ThumbnailRead | None]
+    read: ThumbnailReader
 
 
 #: One thumbnail source: its `ETag` and its read, or None when it has no image.
-_ThumbnailSource = Callable[[], tuple[str, Callable[[], ThumbnailRead | None]] | None]
+#: Blocking.
+_ThumbnailSource = Callable[[], tuple[str, ThumbnailReader] | None]
 
 
 def _first_source(sources: list[_ThumbnailSource]) -> ThumbnailRef | None:
     """The first source that has an image, as a ref whose read falls through to the
-    later sources when that image is gone by the time it is read."""
+    later sources when that image is gone by the time it is read. Blocking."""
     for index, source in enumerate(sources):
         found = source()
         if found is None:
@@ -656,15 +660,13 @@ def _first_source(sources: list[_ThumbnailSource]) -> ThumbnailRef | None:
     return None
 
 
-def _read_through(
-    read: Callable[[], ThumbnailRead | None], later: list[_ThumbnailSource]
-) -> Callable[[], ThumbnailRead | None]:
-    def first() -> ThumbnailRead | None:
-        image = read()
+def _read_through(read: ThumbnailReader, later: list[_ThumbnailSource]) -> ThumbnailReader:
+    async def first() -> ThumbnailRead | None:
+        image = await read()
         if image is not None:
             return image
-        fallback = _first_source(later)
-        return None if fallback is None else fallback.read()
+        fallback = await asyncio.to_thread(_first_source, later)
+        return None if fallback is None else await fallback.read()
 
     return first
 
@@ -1026,38 +1028,68 @@ class Catalogue:
                 return directory / item.poster, content_type_of(item.poster)
         return None
 
-    def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
-        """The catalogue thumbnail from the files and its content type: the
-        template's cover, else the first generated output's plate cover, else the
-        default-render preview, else None."""
+    async def read_thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+        """The catalogue thumbnail and its content type: the template's cover, else
+        the first generated output's plate cover (`OutputStore.read_plate_cover`, from
+        the output's blobs, #7256), else the default-render preview, else None. The file
+        reads run in threads."""
+        with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
+            found = await asyncio.to_thread(self._own_cover, slug)
+            if found is None and self.outputs is not None:
+                plate = await self.outputs.read_plate_cover(slug)
+                found = (plate, "image/png") if plate is not None else None
+            if found is None:
+                found = await asyncio.to_thread(self._preview, slug)
+            current.set_attribute("scadbuddy.found", found is not None)
+            return found
+
+    def _own_cover(self, slug: str) -> tuple[bytes, str] | None:
+        """The template's own cover image and its content type. Blocking."""
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
             with contextlib.suppress(FileNotFoundError):
                 return cover[0].read_bytes(), cover[1]
-        if self.outputs is not None:
-            plate = self.outputs.plate_cover(slug)
-            if plate is not None:
-                return plate, "image/png"
+        return None
+
+    def _preview(self, slug: str) -> tuple[bytes, str] | None:
+        """The default-render preview, when it is served. Blocking."""
         if self.previews is None or not self.serve_previews:
             return None
         preview = self.previews.image(slug)
         return (preview, "image/png") if preview is not None else None
 
-    def thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+    async def thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
         """The catalogue thumbnail, named by its source, or None (#7317, plan Task 9).
         From the template's row once the rows are copied: its own cover, else the
         first output's plate cover, else the preview, with no file read or stat
         until ``read``. No row is :class:`ModelNotFoundError`, and so is a row whose
         folder is gone, at ``read``. A row that lags its media
         (`TemplateRow.media_newer`), and every template before the copy, is read
-        from its files, tagged by the bytes."""
+        (`read_thumbnail`) and tagged by the bytes. The lookups and reads run in
+        threads; the output's plate cover is read blob first (#7256)."""
         with span("catalogue.thumbnail_ref", attributes={"scadbuddy.slug": slug}) as current:
-            ref = self._thumbnail_ref(slug)
+            from_rows, ref = await asyncio.to_thread(self._thumbnail_ref, slug)
+            if not from_rows:
+                ref = await self._files_thumbnail_ref(slug)
             current.set_attribute("scadbuddy.found", ref is not None)
             return ref
 
-    def _thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+    async def _files_thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+        found = await self.read_thumbnail(slug)
+        if found is None:
+            return None
+        image, content_type = found
+        # Over the bytes, so it changes exactly when the image does.
+        etag = f'"{hashlib.sha256(image).hexdigest()}"'
+
+        async def read() -> ThumbnailRead:
+            return image, content_type, etag
+
+        return ThumbnailRef(etag, read)
+
+    def _thumbnail_ref(self, slug: str) -> tuple[bool, ThumbnailRef | None]:
+        """Whether the row answers, and its ref when it does. Blocking."""
         row: TemplateRow | None = None
         if self._from_rows():
             assert self.rows is not None
@@ -1065,13 +1097,7 @@ class Catalogue:
             if row is None:
                 raise ModelNotFoundError(slug)
         if row is None or row.media_newer:
-            found = self._thumbnail(slug)
-            if found is None:
-                return None
-            image, content_type = found
-            # Over the bytes, so it changes exactly when the image does.
-            etag = f'"{hashlib.sha256(image).hexdigest()}"'
-            return ThumbnailRef(etag, lambda: (image, content_type, etag))
+            return False, None
         listed = row
         ref = _first_source(
             [
@@ -1081,27 +1107,25 @@ class Catalogue:
             ]
         )
         if ref is None:
-            return None
+            return True, None
         read = ref.read
 
-        def read_if_there() -> ThumbnailRead | None:
+        async def read_if_there() -> ThumbnailRead | None:
             # A row whose folder is gone (a hand removal) has no thumbnail, as
             # `record` (final review M4). Only a read checks: a 304 stats nothing.
-            self._require(slug)
-            return read()
+            await asyncio.to_thread(self._require, slug)
+            return await read()
 
-        return ThumbnailRef(ref.etag, read_if_there)
+        return True, ThumbnailRef(ref.etag, read_if_there)
 
-    def _own_cover_source(
-        self, row: TemplateRow
-    ) -> tuple[str, Callable[[], ThumbnailRead | None]] | None:
+    def _own_cover_source(self, row: TemplateRow) -> tuple[str, ThumbnailReader] | None:
         cover = row.cover
         if cover is None:
             return None
 
-        def read() -> ThumbnailRead | None:
+        async def read() -> ThumbnailRead | None:
             try:
-                image = (self.paths.root / cover["path"]).read_bytes()
+                image = await asyncio.to_thread((self.paths.root / cover["path"]).read_bytes)
             except OSError:
                 return None
             # The same tag as before the copy: the hash of the bytes.
@@ -1109,9 +1133,7 @@ class Catalogue:
 
         return f'"{cover["sha256"]}"', read
 
-    def _output_cover_source(
-        self, slug: str
-    ) -> tuple[str, Callable[[], ThumbnailRead | None]] | None:
+    def _output_cover_source(self, slug: str) -> tuple[str, ThumbnailReader] | None:
         outputs = self.outputs
         if outputs is None:
             return None
@@ -1120,13 +1142,14 @@ class Catalogue:
             return None
         etag = f'"output-{output_id}"'
 
-        def read() -> ThumbnailRead | None:
-            image = outputs.plate_image(output_id)
+        async def read() -> ThumbnailRead | None:
+            # Blob first, else the file, as `read_plate_cover` (#7256).
+            image = await outputs.plate_image(slug, output_id)
             return None if image is None else (image, "image/png", etag)
 
         return etag, read
 
-    def _preview_source(self, slug: str) -> tuple[str, Callable[[], ThumbnailRead | None]] | None:
+    def _preview_source(self, slug: str) -> tuple[str, ThumbnailReader] | None:
         previews = self.previews
         if previews is None or not self.serve_previews:
             return None
@@ -1134,8 +1157,8 @@ class Catalogue:
         if preview_id is None:
             return None
 
-        def read() -> ThumbnailRead | None:
-            found = previews.current_image(slug)
+        async def read() -> ThumbnailRead | None:
+            found = await asyncio.to_thread(previews.current_image, slug)
             if found is None:
                 return None
             current, image = found
@@ -1337,7 +1360,7 @@ class Catalogue:
     def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
         if meta.pipeline is None:
             return 0
-        return inputs_version_in(self.paths.model_dir(slug), meta.pipeline)
+        return inputs_version_in(self.paths.model_dir(slug), meta.pipeline) or 0
 
     def print_settings(self, slug: str) -> dict[str, ProcessValue]:
         """The template's ``print_settings`` as its model.json has them now (#770);

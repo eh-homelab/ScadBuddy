@@ -5,6 +5,7 @@ read (plan decision 12)."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import shutil
 import zipfile
@@ -132,14 +133,18 @@ def test_a_200_tags_what_it_read(world: TestClient) -> None:
     is the new image, tagged with the new preview's id."""
     _copy(world)
     catalogue = _catalogue(world)
-    ref = catalogue.thumbnail_ref("plain")
+    ref = asyncio.run(catalogue.thumbnail_ref("plain"))
     assert ref is not None and ref.etag == PREVIEW_ETAG
     previews = catalogue.previews
     assert previews is not None
     rendered = PREVIEW + b" again"
     assert previews.write("plain", "e" * 64, rendered)
 
-    assert ref.read() == (rendered, "image/png", f'"preview-{"e" * PREVIEW_ID_LENGTH}"')
+    assert asyncio.run(ref.read()) == (
+        rendered,
+        "image/png",
+        f'"preview-{"e" * PREVIEW_ID_LENGTH}"',
+    )
     answer = _thumbnail(world, "plain", PREVIEW_ETAG)
     assert (answer.status_code, answer.content) == (200, rendered)
     assert answer.headers["etag"] == f'"preview-{"e" * PREVIEW_ID_LENGTH}"'

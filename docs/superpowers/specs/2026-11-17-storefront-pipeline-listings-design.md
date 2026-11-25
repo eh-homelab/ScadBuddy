@@ -276,8 +276,8 @@ other than `params` and `v` (below). Their size is checked again with row 7, sin
 migration can add keys (`reason` `too_large`). PR 2's tests check this order.
 
 A `model.json` whose `pipeline` the catalogue cannot read is still a pipeline
-(`declares_pipeline`), and gives row 2, as does a schema file that is a link out of the
-template or one over 64 KiB as written.
+(`declares_pipeline`), and gives row 2, as does a pipeline whose module cannot be read, and a
+schema file that is a link out of the template or one over 64 KiB as written.
 
 The codes follow the `listing_*` style, and each carries `name`, so the editor shows it
 under the field it names (§5.4). `listing_pipeline_unsupported` is gone: no route answers
@@ -302,8 +302,12 @@ The row's own `inputs` and `inputs_v` stay as the shop saved them; they are the 
 publish's input, as `fixed` is today.
 
 Save (`POST` and `PUT /storefront/listings`) checks only the shape: the reserved keys,
-the size and what a row can hold (rows 3 and 4). It does not read the commit, as it does
-not today. A `PUT` replaces the row, so the editor sends back the `inputs` and `inputs_v`
+the size and what a row can hold (rows 3 and 4). It reads one thing of the commit: inputs
+sent with no `inputs_v` are of the commit's `INPUTS_VERSION`, which the row then keeps
+(`listings.py` `with_inputs_version`), so a publish at a later commit migrates them. With a
+null kept, the later commit's own version would be read as theirs and `migrate` skipped. A
+commit that cannot be read, or whose pipeline declaration or module cannot, keeps the null,
+and publish refuses it. A `PUT` replaces the row, so the editor sends back the `inputs` and `inputs_v`
 the listing has (PR 2, `listingDraft.ts` `draftOf`). PR 6 sets them.
 
 ## 5. The back-office editor (question 2)

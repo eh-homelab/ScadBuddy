@@ -32,8 +32,8 @@ visitor's render row keeps it, and the ``done`` price of its render records it. 
 instant read (`instant_variant`, ``POST …/listings/{id}/variant``) takes the render's body
 and answers at once, with no render and no slice started: the price of the choices
 (`slice_price.py` `instant_price`), the preview of the output a slice of them saved
-(`variant_preview` streams it), and the visitor's own render of them while the shop holds
-it.
+(`variant_output` finds it, and the CRUD route streams it), and the visitor's own render
+of them while the shop holds it.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
@@ -56,7 +55,7 @@ from temporalio.client import WorkflowUpdateFailedError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.idempotency import Replay, idempotent_write
-from scadbuddy.library.outputs import PREVIEW_NAME, OutputMeta, OutputNotFoundError
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament, Reference
@@ -782,7 +781,8 @@ def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | 
         return None
     if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
         return None
-    if not (state.outputs.directory(row.output_id) / PREVIEW_NAME).is_file():
+    # A preview blob in the index, else its file (#7256).
+    if not state.outputs.has_role(row.output_id, "preview"):
         return None
     return meta
 
@@ -837,11 +837,11 @@ def variant_not_found() -> ApiError:
     )
 
 
-async def variant_preview(state: AppState, key: str) -> Path:
-    """The preview mesh of the output the priced slice of variant ``key`` saved (#6921,
-    `SlicePrices.variant_row`); 404 ``variant_not_found`` for a key that names none, one
-    whose output is gone, or one whose listing is no longer published or no longer shows
-    the output's design (#6921 review)."""
+async def variant_output(state: AppState, key: str) -> str:
+    """The id of the output the priced slice of variant ``key`` saved, with its preview
+    mesh. 404 ``variant_not_found`` for a key that names none, one whose output or its
+    preview is gone, or one whose listing is no longer published or no longer shows the
+    output's design (#6921 review)."""
     orders = _orders(state)
     row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
     if row is None or row.output_id is None or row.listing_id is None:
@@ -854,7 +854,7 @@ async def variant_preview(state: AppState, key: str) -> Path:
     meta = await asyncio.to_thread(output_of, state, row, listing)
     if meta is None:
         raise variant_not_found()
-    return state.outputs.directory(row.output_id) / PREVIEW_NAME
+    return row.output_id
 
 
 async def variant_colours(state: AppState, key: str) -> list[str] | None:

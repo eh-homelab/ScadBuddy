@@ -106,7 +106,8 @@ def check_unexpected(listing: ListingInput) -> None:
 class PipelineFacts:
     """What a commit declares of its pipeline, read without running it."""
 
-    inputs_version: int
+    #: None when the declaration or its module cannot be read (``schema`` is then None).
+    inputs_version: int | None
     #: The declared inputs schema, or None with why it cannot be used in ``fault``.
     schema: dict[str, Any] | None
     fault: str
@@ -123,9 +124,13 @@ def pipeline_facts(directory: Path, slug: str) -> PipelineFacts | None:
     declared = meta.pipeline
     if declared is None:
         # The catalogue keeps a declaration it cannot read (`pipeline_raw`).
-        return PipelineFacts(0, None, f"the pipeline {slug!r} declares cannot be read")
+        return PipelineFacts(None, None, f"the pipeline {slug!r} declares cannot be read")
     version = inputs_version_in(directory, declared)
     sets_params = tuple(declared.sets_params)
+    if version is None:
+        # A render of it would fail.
+        fault = f"the pipeline module {declared.module} of {slug!r} cannot be read"
+        return PipelineFacts(None, None, fault, sets_params)
     if declared.inputs is None:
         fault = f"{slug!r} declares no shape for its inputs (model.json pipeline.inputs)"
         return PipelineFacts(version, None, fault, sets_params)
@@ -168,7 +173,7 @@ async def settled_inputs(
     ``listing_inputs_migration_failed``, in that order; a migration's 413, 503 or 504
     passes through. The row keeps what the shop saved, so a republish migrates from it
     again (spec §8): the result does not depend on how many times it ran."""
-    if facts.schema is None:
+    if facts.schema is None or facts.inputs_version is None:
         raise _refused("listing_inputs_undeclared", facts.fault, "inputs")
     check_shape(listing.inputs)
     inputs, made_at = listing.inputs, listing.inputs_v
@@ -207,14 +212,16 @@ def _params(listing: ListingInput, schema: CustomizerSchema) -> dict[str, ParamV
 
 def _path(problem: ValueProblem, schema: dict[str, Any], values: Any) -> list[str]:
     """The path of the input ``problem`` is of: a missing or an extra key's own path, not
-    its object's, so the editor can show the refusal at that key. Only an object has those
-    keywords, and an array of the subset holds scalars (`core/input_schema.py`), so the
-    walk below meets no array index."""
+    its object's, so the editor can show the refusal at that key. The
+    object's own path when the walk meets anything but objects."""
     path = [part for part in problem.path.split(".") if part]
     if problem.keyword not in ("required", "additionalProperties"):
         return path
     for part in path:
-        schema, values = schema["properties"][part], values[part]
+        properties = schema.get("properties", {})
+        if part not in properties or not isinstance(values, dict) or part not in values:
+            return path
+        schema, values = properties[part], values[part]
     if problem.keyword == "required":
         keys = [key for key in schema["required"] if key not in values]
     else:

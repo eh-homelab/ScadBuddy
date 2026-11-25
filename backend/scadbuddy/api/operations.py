@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -37,6 +37,7 @@ from scadbuddy.api.accepting import (
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author, current_person
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
+from scadbuddy.operations.blob_claims import BlobClaims, HeldBlob
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.kinds import OperationKind, operation_key
@@ -272,11 +273,11 @@ def _author() -> OperationAuthor | None:
 
 @dataclass(frozen=True)
 class Claimed:
-    """The claims a request wrote (``operations/claims.py``), released once its answer
-    is final (review 3c 1.2)."""
+    """The claims a request wrote (``operations/claims.py``, or a library upload's blob,
+    ``operations/blob_claims.py``), released once its answer is final (review 3c 1.2)."""
 
-    store: ClaimStore
-    held: list[Held]
+    store: ClaimStore | BlobClaims
+    held: Sequence[Held] | Sequence[HeldBlob]
 
 
 async def _release(ops: OperationCommands, claimed: Claimed) -> None:
@@ -287,7 +288,13 @@ async def _release(ops: OperationCommands, claimed: Claimed) -> None:
         return
     running = await ops.store.named_by_running([held.name for held in created])
     for held in created:
-        if held.name not in running:
+        if held.name in running:
+            continue
+        if isinstance(held, HeldBlob):
+            assert isinstance(claimed.store, BlobClaims)
+            await claimed.store.release(held)
+        else:
+            assert isinstance(claimed.store, ClaimStore)
             await asyncio.to_thread(claimed.store.release, held)
 
 

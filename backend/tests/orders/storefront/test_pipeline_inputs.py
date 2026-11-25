@@ -337,6 +337,27 @@ def test_a_shape_that_cannot_be_used_is_undeclared(
         settle(listing(), facts)
 
 
+@pytest.mark.parametrize("module", [None, b"INPUTS_VERSION = 3  # \xff\n"])
+def test_a_pipeline_whose_module_cannot_be_read_is_undeclared(
+    tmp_path: Path, module: bytes | None
+) -> None:
+    template(tmp_path, DECLARED, json.dumps(SCHEMA).encode())
+    path = tmp_path / "pipeline" / "pipeline.py"
+    if module is None:
+        path.unlink()
+    else:
+        path.write_bytes(module)
+    facts = pipeline_facts(tmp_path, "kit")
+    assert facts is not None and facts.schema is None and facts.inputs_version is None
+    assert "pipeline/pipeline.py" in facts.fault
+
+
+def test_a_pipeline_with_no_shape_has_its_version(tmp_path: Path) -> None:
+    declared = {k: v for k, v in DECLARED.items() if k != "inputs"}
+    facts = pipeline_facts(template(tmp_path, declared), "kit")
+    assert facts is not None and facts.schema is None and facts.inputs_version == 3
+
+
 def test_a_schema_outside_the_template_is_not_read(tmp_path: Path) -> None:
     outside = tmp_path / "secret.json"
     outside.write_text(json.dumps(SCHEMA))

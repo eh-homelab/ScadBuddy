@@ -834,7 +834,7 @@ async def preview_view(
     Off the loop and under the render budget, for the reasons `plate_thumbnails`
     gives: it is seconds of numpy on a large mesh, and has no child to kill.
     """
-    if not glb.is_file():
+    if not await asyncio.to_thread(glb.is_file):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
     try:
         png = await asyncio.wait_for(

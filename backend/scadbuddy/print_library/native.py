@@ -41,7 +41,7 @@ from scadbuddy.print_library.store import (
     file_type_of,
 )
 from scadbuddy.render.bambu3mf import MODEL_SETTINGS_NAME, plates_of
-from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.store.content import BlobRef, BlobScope, ContentStore
 
 #: `thumbnail_path` of a file that has a cover: `library_listing._entry` reads only
 #: whether it is set (Bambuddy's is a path on its own disk, never fetched).
@@ -102,6 +102,37 @@ def _read_upload(data: BinaryIO) -> tuple[list[LibraryPlate], bool]:
         for p in entries
     ]
     return plates, cover or any(p.has_thumbnail for p in plates)
+
+
+def _new_row(
+    file_id: int,
+    filename: str,
+    folder_id: int | None,
+    ref: BlobRef,
+    file_type: str,
+    plates: list[LibraryPlate],
+    has_thumbnail: bool,
+    output_id: str | None = None,
+    filed: bool = False,
+) -> NativeFile:
+    """A new file's row, not yet inserted, naming its blob under `blob_key`."""
+    now = datetime.now(UTC)
+    return NativeFile(
+        id=file_id,
+        folder_id=folder_id,
+        name=filename,
+        size=ref.size,
+        sha256=ref.sha256,
+        blob_key=blob_key(file_id),
+        media_type=_media_type(filename, file_type),
+        plates=plates,
+        has_thumbnail=has_thumbnail,
+        output_id=output_id,
+        filed=filed,
+        created_at=now,
+        updated_at=now,
+        deleted_at=None,
+    )
 
 
 def _not_found(file_id: int) -> ApiError:
@@ -316,23 +347,34 @@ class NativeLibrary:
         ref = await self.content.put(
             "library", data, name=filename, scope=BlobScope(), key=key, meta={"file_id": file_id}
         )
-        now = datetime.now(UTC)
-        return NativeFile(
-            id=file_id,
-            folder_id=folder_id,
-            name=filename,
-            size=ref.size,
-            sha256=ref.sha256,
-            blob_key=key,
-            media_type=_media_type(filename, file_type),
-            plates=plates,
-            has_thumbnail=has_thumbnail,
-            output_id=output_id,
-            filed=filed,
-            created_at=now,
-            updated_at=now,
-            deleted_at=None,
+        return _new_row(
+            file_id, filename, folder_id, ref, file_type, plates, has_thumbnail, output_id, filed
         )
+
+    async def adopt(self, filename: str, ref: BlobRef, folder_id: int | None) -> NativeFile:
+        """A person's upload whose bytes are in the store already (#7373): the object
+        ``ref`` names is indexed under the new file's key, moving no bytes, as `copy`
+        does. A 3MF is read once for its plates, from a copy under the spool (a hit in
+        the download cache when this replica received it). `ReuseLostError` (the
+        object freed meanwhile) propagates."""
+        await self._folder_must_exist(folder_id)
+        file_type = file_type_of(filename)
+        plates: list[LibraryPlate] = []
+        has_thumbnail = False
+        if file_type in ("3mf", "gcode.3mf"):
+            await asyncio.to_thread(self.spool.mkdir, parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=self.spool) as copy:
+                async with aclosing(self.content.get(ref)) as chunks:
+                    async for chunk in chunks:
+                        await asyncio.to_thread(copy.write, chunk)
+                plates, has_thumbnail = await traced_thread(
+                    "native_library.read_upload", _read_upload, copy
+                )
+        file_id = await traced_thread("native_library.next_file_id", self.rows.next_file_id)
+        key = blob_key(file_id)
+        await self.content.link(key, ref, scope=BlobScope(), meta={"file_id": file_id})
+        row = _new_row(file_id, filename, folder_id, ref, file_type, plates, has_thumbnail)
+        return await self._insert(row, folder_id)
 
     async def _insert(self, row: NativeFile, folder_id: int | None) -> NativeFile:
         """The row for a blob just stored. Any failure releases the blob first: the generic

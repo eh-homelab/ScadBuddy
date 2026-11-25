@@ -9,7 +9,9 @@ from typing import Any, BinaryIO, Literal
 
 from pydantic import BaseModel
 
-BlobKind = Literal["piece", "snapshot", "asset", "font", "slice", "library", "workspace", "media"]
+BlobKind = Literal[
+    "piece", "snapshot", "asset", "font", "slice", "library", "workspace", "media", "output"
+]
 #: What a put stores: bytes, or a seekable file read from its start, which is hashed and
 #: uploaded a chunk at a time rather than held whole (#503).
 BlobData = bytes | BinaryIO
@@ -38,11 +40,19 @@ def blob_digest(data: BlobData) -> tuple[str, int]:
 
 #: Kinds whose life the sweep decides: pieces, slices, the agent's sealed workspace
 #: files (#4789, held `(ai_session_file, <workspace>/<path>)`), listing media and
-#: snapshots (a cache of git, held only by a published storefront listing, #5282) by
-#: `blob_refs` and grace. Assets have `AssetStore.sweep`; fonts and
-#: library files are skipped here: `print_library/sweep.py` `sweep_library` purges their
-#: trash and collects the blobs no row names.
-SWEPT_KINDS: tuple[BlobKind, ...] = ("piece", "snapshot", "slice", "workspace", "media")
+#: snapshots (a cache of git, held only by a published storefront listing, #5282) and a
+#: saved output's bytes (#7256, held `(output, <output_id>)`) by `blob_refs` and grace.
+#: Assets have `AssetStore.sweep`; fonts and library files are skipped here:
+#: `print_library/sweep.py` `sweep_library` purges their trash and collects the blobs no
+#: row names.
+SWEPT_KINDS: tuple[BlobKind, ...] = (
+    "piece",
+    "snapshot",
+    "slice",
+    "workspace",
+    "media",
+    "output",
+)
 
 
 class BlobScope(BaseModel):

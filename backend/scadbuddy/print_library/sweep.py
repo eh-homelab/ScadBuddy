@@ -2,7 +2,9 @@
 
 `sweep_library` (plan 2026-10-17-native-print-library, Task 6): trash past its retention
 is purged, and a `library` blob no row names is removed. The generic blob sweep never
-touches the `library` kind, so this is the only collector of an orphan.
+touches the `library` kind, so this is the only collector of an orphan, except an
+upload's blob (`library-upload-<sha256>`), which the claims sweep collects
+(`operations/blob_claims.py` `sweep_upload_blobs`, #7373).
 
 `sweep_print_copies` (#4337, #3818 tier A Task 14): the lifetime of what a native run
 puts in the library, its laid-out per-print copies and their slices (``print_subject``).
@@ -49,6 +51,7 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.operations.blob_claims import UPLOAD_KEY_PREFIX
 from scadbuddy.print_library.copies import NATIVE_LOCK, release_moved
 from scadbuddy.print_library.native import NativeLibrary
 
@@ -87,7 +90,9 @@ async def sweep_library(
     for stat in await asyncio.to_thread(
         native.content.index.stats, [LIBRARY_KIND], backend=native.content.name
     ):
-        if stat.key in live or stat.touched_at > stale:
+        # An upload's blob is a claim, kept for a run that may not have read it yet: the
+        # claims sweep collects it (`operations/blob_claims.py`, #7373).
+        if stat.key in live or stat.touched_at > stale or stat.key.startswith(UPLOAD_KEY_PREFIX):
             continue
         if await native.content.delete_if_stale(stat.key, stale):
             orphans += 1

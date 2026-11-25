@@ -601,6 +601,7 @@ def flow_kinds(
     async def put_back(checked: dict[str, Any], decision: Decision, held: Decision) -> bool:
         """Undo a take-over whose replaced answer landed after all; never masks the failure."""
         try:
+            # `seen=None`: no operation matters, as the answer landed. `[]` would let any stop it.
             return await answer_landed(checked, held) is True and await store.take_over_answer(
                 held, held=decision, seen=None
             )

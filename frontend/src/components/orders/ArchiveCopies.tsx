@@ -1,5 +1,5 @@
 import { CheckIcon } from 'lucide-react'
-import { useEffect, useEffectEvent, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import { api } from '../../api/client'
 import type { ArchiveCopy, ArchiveOffer, AttemptArchives, Fulfilment } from '../../api/types'
 import { Button } from '@/components/ui/button'
@@ -25,6 +25,23 @@ function facts(attempt: Fulfilment): string {
   return JSON.stringify([attempt.archive_ids ?? [], attempt.actual_seconds ?? null, attempt.actual_grams ?? null])
 }
 
+/**
+ * When the earliest timelapse still waiting at `readAt` stops waiting: its archive's
+ * completion plus `TIMELAPSE_WAIT_MS`. The row reads once more then, so the waiting text
+ * ends (#7455). Null when no timelapse waits with a known completion time.
+ */
+function timelapseWaitEnds(read: AttemptArchives | null, readAt: number): number | null {
+  const ends = (read?.archives ?? [])
+    .filter((a) => !a.timelapse && !a.timelapse_attachment_id && a.completed_at != null)
+    .map((a) => Date.parse(a.completed_at as string) + TIMELAPSE_WAIT_MS)
+    .filter((end) => end > readAt)
+  return ends.length > 0 ? Math.min(...ends) : null
+}
+
+function offeredTimelapses(read: AttemptArchives | null): Set<number> {
+  return new Set((read?.archives ?? []).filter((a) => a.timelapse).map((a) => a.archive_id))
+}
+
 function attachedIds(read: AttemptArchives | null): string {
   return (read?.archives ?? []).flatMap((a) => [a.finished_attachment_id ?? '', a.timelapse_attachment_id ?? '']).join(',')
 }
@@ -35,27 +52,50 @@ function attachedIds(read: AttemptArchives | null): string {
  * timelapse and answers what is attached now. No order event tells the page of an import
  * (F13), so while a medium is offered and not attached the row reads again, every
  * `ARCHIVE_READ_MS`, at most `ARCHIVE_READS` times; then it offers a copy of only what is
- * still missing. The page is told to reload when a read changed the attempt (times,
+ * still missing. The next read waits `ARCHIVE_READ_MS` after the previous answer, so a slow
+ * read is never dropped (#7455). While a timelapse waits for Bambuddy, the row reads once more
+ * when the wait ends; that read starts the re-reads again only when it brings a newly offered
+ * timelapse. A read the row starts by hand or at the wait's end drops a pending re-read. The page is told to reload when a read changed the attempt (times,
  * grams) or attached a file.
  */
 export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId: string; itemId: string; attempt: Fulfilment; onChanged: () => void }) {
   const [read, setRead] = useState<AttemptArchives | null>(null)
   // When the answer came: the timelapse states are as of that read.
   const [readAt, setReadAt] = useState(0)
+  // True from the start of a read until it answers or fails: the next re-read waits from then (#7455).
+  const [reading, setReading] = useState(true)
   // Bumped to read again; `reads` counts the re-reads since the mount or the last copy.
   const [asked, setAsked] = useState(0)
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Set when the timelapse wait ends; the answer of that read sees it once.
+  const waitEndRead = useRef(false)
+
+  const readAgain = () => {
+    setReading(true)
+    setAsked((n) => n + 1)
+  }
 
   const answered = useEffectEvent((answer: AttemptArchives) => {
     const changed = facts(answer.attempt) !== facts(attempt) || (read !== null && attachedIds(answer) !== attachedIds(read))
+    // A timelapse the wait-end read newly offers is a change: the re-reads start again (spec §4.4).
+    if (waitEndRead.current) {
+      const before = offeredTimelapses(read)
+      if ([...offeredTimelapses(answer)].some((id) => !before.has(id))) setReads(0)
+    }
+    waitEndRead.current = false
     setRead(answer)
     setReadAt(Date.now())
     setError(null)
+    setReading(false)
     if (changed) onChanged()
   })
-  const failed = useEffectEvent((err: unknown) => setError(refusalText(err)))
+  const failed = useEffectEvent((err: unknown) => {
+    waitEndRead.current = false
+    setError(refusalText(err))
+    setReading(false)
+  })
 
   useEffect(() => {
     let live = true
@@ -69,19 +109,32 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
   }, [orderId, itemId, attempt.id, asked])
 
   const waiting = read !== null && read.archives.some(due) && reads < ARCHIVE_READS
+  // Keyed on `reading`, not on `reads`: the clock starts when the previous read answers or
+  // fails, and a read started by hand or at the wait's end clears a pending re-read.
   useEffect(() => {
-    if (!waiting) return
+    if (!waiting || reading) return
     const timer = setTimeout(() => {
       setReads((n) => n + 1)
-      setAsked((n) => n + 1)
+      readAgain()
     }, ARCHIVE_READ_MS)
     return () => clearTimeout(timer)
-  }, [waiting, reads])
+  }, [waiting, reading])
 
   const again = () => {
+    setError(null)
     setReads(0)
-    setAsked((n) => n + 1)
+    readAgain()
   }
+
+  const waitEnds = timelapseWaitEnds(read, readAt)
+  useEffect(() => {
+    if (waitEnds === null) return
+    const timer = setTimeout(() => {
+      waitEndRead.current = true
+      readAgain()
+    }, Math.max(0, waitEnds - Date.now()))
+    return () => clearTimeout(timer)
+  }, [waitEnds])
 
   async function copy(archiveId: number, body: ArchiveCopy) {
     setBusy(true)
@@ -161,9 +214,17 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
         </div>
       ))}
       {error && (
-        <span role="alert" className="text-warn">
-          {error}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span role="alert" className="text-warn">
+            {error}
+          </span>
+          {/* While a medium is due, the next re-read retries on its own (#7629). */}
+          {!waiting && (
+            <Button size="xs" variant="ghost" disabled={busy || reading} onClick={again}>
+              Read again
+            </Button>
+          )}
+        </div>
       )}
     </div>
   )

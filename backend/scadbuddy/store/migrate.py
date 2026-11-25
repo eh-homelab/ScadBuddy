@@ -93,6 +93,8 @@ async def migrate_batch(
     one that moved on meanwhile (its mark missed) is left for the next batch.
     ``heartbeat`` is called with the key, from the event loop, while each copy runs
     (`beat_while`)."""
+    # Checked at each batch too: an output saved after the run started (R5, #7256).
+    await refuse_outputs_to_bambuddy(index, target.backend)
     rows = await asyncio.to_thread(
         index.unmigrated, source.backend, target.backend, limit=limit, started=started
     )
@@ -167,6 +169,24 @@ async def _source_serves(index: BlobIndex, source: ContentBackend, target: Conte
     return False
 
 
+class OutputsNotForBambuddyError(StoreNotReadyError):
+    """Ruling R5 (#7256): saved outputs' bytes never go into Bambuddy's library, so a
+    migration to the `bambuddy` backend is refused while the index holds an output."""
+
+
+OUTPUTS_NOT_FOR_BAMBUDDY = (
+    "the store holds saved outputs' bytes (blobs of kind output), and outputs do not go"
+    " into Bambuddy's library: migrate to s3 instead"
+)
+
+
+async def refuse_outputs_to_bambuddy(index: BlobIndex, target: str) -> None:
+    """`OutputsNotForBambuddyError` when ``target`` is `bambuddy` and the index holds a
+    blob of kind ``output``."""
+    if target == "bambuddy" and await asyncio.to_thread(index.holds_kind, "output"):
+        raise OutputsNotForBambuddyError(OUTPUTS_NOT_FOR_BAMBUDDY)
+
+
 def _error(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
@@ -238,7 +258,9 @@ async def check_backends(
     """`StoreNotReadyError`, saying what to save, unless both backends build from the
     settings as they are now: a run that could not build one would end before it
     copied, and `GET /store/migrate` would show nothing wrong. The target first, the
-    one a migration's settings are most likely still missing for."""
+    one a migration's settings are most likely still missing for. Before either:
+    `OutputsNotForBambuddyError` for a `bambuddy` target while the index holds outputs."""
+    await refuse_outputs_to_bambuddy(BlobIndex(pool), target)
     for name in (target, source):
         if name == "s3" and current.s3 is None:
             raise StoreNotReadyError(S3_NOT_READY)
@@ -274,13 +296,17 @@ def migrate_activity(pool_of: Callable[[], Pool], defaults: Settings) -> Callabl
             except StoreNotReadyError as error:
                 # Not worth retrying until Settings change: the run ends and says why.
                 raise ApplicationError(str(error), non_retryable=True) from error
-            return await migrate_batch(
-                BlobIndex(pool),
-                source,
-                target,
-                limit=params.limit,
-                started=params.started,
-                heartbeat=activity.heartbeat,
-            )
+            try:
+                return await migrate_batch(
+                    BlobIndex(pool),
+                    source,
+                    target,
+                    limit=params.limit,
+                    started=params.started,
+                    heartbeat=activity.heartbeat,
+                )
+            except OutputsNotForBambuddyError as error:
+                # An output saved since the run started: it ends and says why.
+                raise ApplicationError(str(error), non_retryable=True) from error
 
     return store_migrate_batch

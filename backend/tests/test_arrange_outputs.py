@@ -59,6 +59,7 @@ from scadbuddy.workflows.models import (
 from scadbuddy.workflows.outputs import manifest_of, placement_matrix
 from scadbuddy.workflows.pipeline_activities import PipelineActivities, pack_layout
 from tests.support.arrange import finished_job, saved_output
+from tests.support.saved_outputs import save_files
 from tests.test_objects3mf import at, bambu_project
 from tests.test_packing_and_outputs import _deps, _record, _render
 
@@ -137,7 +138,7 @@ async def test_an_output_saved_before_manifests_reads_as_none(tmp_path: Path) ->
     paths, job, _ = await finished_job(tmp_path)
     legacy = job.model_copy(update={"outputs": []})
     store = OutputStore(paths)
-    meta = store.create(legacy, name="old")
+    meta = save_files(store, legacy, name="old")
     assert not (store.directory(meta.id) / "manifest.json").exists()
     assert store.manifest(meta.id) == []
     assert store.arranged_from(meta.id) == []

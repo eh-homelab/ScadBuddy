@@ -31,7 +31,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255; see [Saved outputs](#saved-outputs)) | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
@@ -98,18 +98,21 @@ The stored setting `store_backend` (seeded from the environment, default `local`
 `ContentStore` (`scadbuddy/store/content.py`) maps a logical key to a `BlobRef` (sha256,
 kind, backend, backend id, size; `scadbuddy/store/content_models.py:58-63`), indexed in
 `store_blobs`. The kinds are `piece`, `snapshot`, `asset`, `font`, `slice`, `library`,
-`workspace` and `media` (`content_models.py:12`). A blob stays alive while a `blob_refs`
+`workspace`, `media` and `output` (`content_models.py:12-14`). A blob stays alive while a `blob_refs`
 row holds it (`scadbuddy/store/refs.py:22-30`); unreferenced blobs of the swept kinds are
 deleted after a grace period.
 
 | Logical key | What | Code |
 |---|---|---|
 | 64-hex, `act-<40hex>`, `output-<32hex>-<n>` | a render job's pieces | `scadbuddy/api/crud_render.py:116` |
+| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save puts each under `<key>-save-<attempt>` first, `staged_save_key`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
+| `output-<id>-thumbnail-<sha256>`, `output-<id>-plate_cover-<sha256>` | a thumbnail upload before its key names it (held by nothing); the plate cover read once out of the output's 3MF | `scadbuddy/library/output_rows.py` `staged_thumbnail_key`, `plate_cover_key` |
 | `src-<slug>-<revision>` | a template's source snapshot | `scadbuddy/store/snapshots.py:65-66` |
 | `asset-<id>` | an uploaded template asset | `scadbuddy/store/assets.py:30` |
 | `font-<dir>` | a mirrored font | `scadbuddy/store/fonts.py:27` |
 | `slice-<library_file_id>-<digest>` | a sliced 3MF | `scadbuddy/slicing/store.py:63` |
 | `library-file-<id>`, `library-copy-<hash>`, `library-<id>` | print-library files and copies | `scadbuddy/print_library/native.py:52`, `scadbuddy/print_library/copy_models.py:51`, `scadbuddy/bambuddy/subject.py:102` |
+| `library-upload-<sha256>` | a library upload's bytes, put while the request is received and read by its run on any replica; released once the answer is final, else swept with the claims after a day (#7373) | `scadbuddy/operations/blob_claims.py:39` |
 | `quote-<sha256>`, `attachment-<sha256>` | order quotes and attachments | `scadbuddy/orders/quote.py:727`, `scadbuddy/orders/attachments.py:121` |
 | `customer-preview-<sha256>`, `customer-file-<sha256>`, `listing-media-<sha256>` | storefront uploads and listing media | `scadbuddy/orders/storefront/intake.py:74`, `scadbuddy/orders/storefront/order_page.py:163`, `scadbuddy/orders/storefront/listings.py:963` |
 | `workspace-<sha256>` | an agent workspace file | `scadbuddy/api/internal_workspace.py:43` |
@@ -232,10 +235,49 @@ A saved output's record is a row of `outputs` (#7255, phase 1 of the
 [outputs-in-Postgres spec](../superpowers/specs/2026-11-23-outputs-in-postgres-design.md)):
 what its `meta.json`, `params.json`, `inputs.json`, `record.json`, `manifest.json`,
 `bom.json`, `arranged_from.json` and `backfill.json` hold (`scadbuddy/library/output_rows.py`
-`OutputRows`). Its bytes (`model.3mf`, `preview.glb`, `thumbnail.png`, `files/`) stay in
-`data/outputs/<slug>/<id>/` until #7256 moves them to the blob store. A save writes the
-files, then the row in one transaction; when the row fails, the save fails and its folder
-is removed (`OutputStore._insert_row`). Its last print stays in `output_last_prints`.
+`OutputRows`). Its last print stays in `output_last_prints`.
+
+Its bytes (`model.3mf`, `preview.glb`, `thumbnail.png`, each file in `files/`) are blobs
+of kind `output` (#7256, phase 2), held in `blob_refs` by `(output, <output_id>)`. The row
+names the keys (`model_blob`, `preview_blob`, `thumbnail_blob`, and one `output_files` row
+per `files/` name); `bytes_at` is set once the blobs hold the bytes, and NULL while only
+the files do. The folder `data/outputs/<slug>/<id>/` stays as the fallback until #7257: a
+save still writes it, and every reader reads the file when the row names no blob, or when
+the blob is lost (logged, never a 500). A save writes the folder, puts the bytes under
+keys of its own (`OutputBytes.put_folder`, `<key>-save-<attempt>`), then inserts the row,
+points the output's keys at those objects, and writes its `output_files` rows and its
+holds, in one transaction; then it deletes its staged keys. When the row fails (an id
+that another output holds, `orders/quote.py` `operation_output_id`, among the causes), the
+save fails, its folder is removed (`OutputStore._insert_row`) and its staged keys and
+their objects are deleted: no key of the other output moved, so that output keeps its
+bytes. A put into a full store is a 507. On the `local` backend (no
+content store) and on `bambuddy` (spec §6.4) no output blob is written: the bytes stay
+files. A store migration to `bambuddy` is refused while the index holds an `output` blob
+(`scadbuddy/store/migrate.py` `refuse_outputs_to_bambuddy`). A delete deletes the row
+and releases its byte holds in one transaction, then removes the folder; the content sweep
+removes the blobs after its grace (`OutputRows.delete`).
+
+A save's cost in commits: each put writes its index row in a transaction of its own
+(`ContentStore.put`), one each for `model.3mf`, `preview.glb`, `thumbnail.png` when there,
+and each `files/` entry, before the row's transaction, and the delete of each staged key
+commits once more after it. On prod a commit is known to take 1-2 s, so a save takes some
+seconds more than in phase 1. The save then files its 3MF in
+the native library from the folder it wrote, the same bytes as the model blob, so it
+does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
+own put commits once more. Fewer commits would need a batch put in `ContentStore`:
+upload every file first, then write every index row in one transaction (or in the row's
+own transaction), with its own answer to a reused object that the sweep freed meanwhile
+(`ReuseLostError`) and to a deadlock.
+
+What readers derive of the model (the geometry analysis and its attributed form, the
+asset ids, the plate names, the plate cover) is kept in `output_derived`, once per output.
+The plate cover is a small blob (`output-<id>-plate_cover-<sha256>`); the row names its
+key, or none when the 3MF has no cover. A derive writes only while the model the reader
+read is still the row's (the row's model key names the same sha256, or the files hold the
+bytes). One window stays: an attributed analysis made from a geometry row read between the
+byte copy's model swap and its `drop_derived` can stay stale. It needs a hand-edited
+`model.3mf`, and it is accepted (spec §4.5). A copied row whose model blob is lost keeps no
+derived rows: readers fall back to the file and derive again until the blob is back.
 
 Each API start copies the folders to rows once (`scadbuddy/library/output_copy.py`
 `copy_outputs`, one replica at a time under an advisory lock, held on a connection of its
@@ -278,6 +320,78 @@ its run has a `finished_at`, is not `incomplete`, and started after the last pod
 older build went. Until then, writes of the older pods may have no row yet.
 
 `output_index` stays as it is in this phase; #7257 drops it.
+
+#### The byte copy
+
+The byte copy puts the existing outputs' bytes into the blob store
+(`scadbuddy/library/output_byte_copy.py` `copy_output_bytes`). Each API start runs it once,
+after the row copy, and the housekeeping sweep `housekeeping_copy_output_bytes`
+(`workflows/housekeeping.py` `OUTPUT_BYTES_SWEEP`, after `OUTPUT_COPY_SWEEP`, on the
+sweeps' Schedule) runs it again, with a timeout of 30 minutes (`OUTPUT_BYTES_TIMEOUT`). One
+replica copies at a time, under a session advisory lock. That lock holds one autocommit
+connection of its own (`scadbuddy-output-byte-copy`, no transaction), not a pool's, for the
+whole run: in the sweep up to that timeout, and at a start with no bound (the first start
+after the roll-out copies every output). Each of the run's statements takes a connection of
+the main pool. Each run is
+a row of `output_byte_runs`. It reconciles:
+
+- A row whose `bytes_at` is set and whose `bytes_stamp` (the name, size and `mtime_ns` of
+  the byte files) is the folder's is skipped.
+- For every other row, each byte file is compared with the blob its key names: the
+  index's sha256 first, then the file's hash. An equal file is not put. A different one is
+  put with a compare-and-swap on that sha256, so a live writer that moved the key keeps its
+  blob. A thumbnail goes up under a staged key, and the thumbnail key takes it in the
+  batch's transaction, under the output's thumbnail lock, only while the row, the key and
+  the file are still what the copy read.
+- Each blob the copy put, and every blob of a row not copied before, is read back from the
+  backend and checked (`verified`).
+- When the model key of a row copied before takes other bytes, the rows derived from the
+  old model are deleted at once (`OutputRows.drop_derived`).
+- The rows name their keys in batches of 50 outputs, one transaction each.
+- A missing `model.3mf` or `preview.glb` is `damaged`, on the run and on the row. A
+  `files/` entry that is not a regular file, or has a name an output may not hold, makes
+  the output `damaged` with the names, and it is not copied. A read, put or check that
+  fails is `failed`, and the row keeps `bytes_at` NULL. A stat that fails with anything but
+  a missing file makes the run `incomplete`.
+- A missing file never drops a key. When the row names a blob for that role, or a
+  `files/` name that went, the key and its hold stay, and the file is `damaged`.
+- A volume that is not there is not every output gone (phase 1's rule). An outputs folder
+  that is missing, or lists no slug folder while rows exist, makes the run `incomplete`,
+  and it writes nothing. An output whose folder is missing gets no write, and the run is
+  `incomplete`. At a start, the byte copy runs only after a row copy run that finished
+  (`finished_at` set, not `incomplete`); else the sweep runs it.
+- `copied` counts only the outputs where the run put a blob or named a key the row did
+  not name before.
+
+Refusals: before any put, the copy adds up the bytes and the count of the rows with
+`bytes_at` NULL (an output with a bad `files/` name adds nothing, as it is not copied) and checks them against `store_max_total_bytes` and `store_max_count`.
+Past a cap, the run is `refused`, names the shortfall and puts nothing. The needed bytes
+and count can be more than the copy will add, never less: blobs that a failed run already
+put are counted again until the sweep removes them. On the `local` and the `bambuddy` backends
+every run is refused.
+
+A run has a `finished_at` only when nothing was refused, failed or incomplete and it was
+not stopped. `GET /api/v1/outputs/copy-status` answers the last byte run as `bytes`
+(`null` before any), with `pending`, the count of rows whose bytes the files still hold
+now, and the rows' damage from every run: `damaged_rows`, the count of rows whose
+`damaged` is not empty, and `damaged_sample`, the first 50 of them by output id as
+`{output_id, damaged}`. The run's own `damaged` names only what that run found: a later
+run skips an output whose files did not change.
+
+After a roll-out of phase 2, confirm that every pod runs the new image (`kubectl -n
+bambuddy get pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`.
+Check that `bytes` has a `finished_at`, is not `incomplete`, has no `refused`, started
+after the last pod on the older build went, and that `pending` counts no output but those
+that `damaged_sample` names with `names` (a refused `files/` name keeps `bytes_at` NULL). The first
+runs after the roll-out put and read back every output's bytes. A sweep's run stops at its
+30-minute timeout with no `finished_at`, and the batches it committed stay, so `pending`
+can take several sweeps to reach 0. Before you call a run with no `finished_at` a fault,
+check that `pending` went down since the run before it, and read again after the next
+sweep. Pods on an older build write the files only; the next sweep copies what they wrote. Read `damaged_rows`
+and `damaged_sample`, not the run's `damaged`: a person checks each output they name.
+When `damaged_rows` is more than the sample, list the rest with
+`SELECT output_id, damaged FROM outputs WHERE damaged <> '[]' ORDER BY output_id`. An output with a refused `files/` name keeps its
+folder as the only copy of its bytes until the name is fixed.
 
 ## Generated API files
 

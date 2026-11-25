@@ -263,6 +263,13 @@ RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
 #: the sweeps' Schedule only, so it obeys their switch.
 OUTPUT_COPY_SWEEP = "housekeeping_copy_outputs"
 OUTPUT_COPY_PATCH = "housekeeping-copy-outputs"
+#: #7256: copy the saved outputs' bytes to the blob store and reconcile the rows' blob
+#: keys with the files (`library.output_byte_copy.copy_output_bytes`), as the API's start
+#: does once after the row copy. It catches the files that pods on an older build wrote
+#: only to the share (a thumbnail upload, a save). Its advisory lock keeps one run at a
+#: time. After the row copy, behind its own patch; on the sweeps' Schedule only.
+OUTPUT_BYTES_SWEEP = "housekeeping_copy_output_bytes"
+OUTPUT_BYTES_PATCH = "housekeeping-copy-output-bytes"
 #: #7234 (spec 2026-11-05 §4.6): one step of ``AttemptMedia`` for each order attempt of
 #: the last 14 days that still lacks its finish photo or timelapse and was not read for
 #: media in the last hour (`orders.archives.sweep_media`). It catches what the triggers
@@ -282,6 +289,7 @@ SWEEPS = (
     BACKFILL_SWEEP,
     REAP_SWEEP,
     OUTPUT_COPY_SWEEP,
+    OUTPUT_BYTES_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
@@ -452,6 +460,9 @@ RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: One walk of every output folder: about ten stats each, a read of each folder whose
 #: stamp changed, and a batched write per batch of folders.
 OUTPUT_COPY_TIMEOUT = timedelta(minutes=15)
+#: The byte copy: a stat of each output's byte files, and on its first runs an upload and
+#: a read back of every byte not yet in the store.
+OUTPUT_BYTES_TIMEOUT = timedelta(minutes=30)
 #: One read of the attempts, then one Temporal start per attempt; the downloads run in
 #: each attempt's own ``AttemptMedia`` step, not here.
 ATTEMPT_MEDIA_TIMEOUT = timedelta(minutes=5)
@@ -516,6 +527,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return RUN_HOLDS_TIMEOUT
     if sweep == OUTPUT_COPY_SWEEP:
         return OUTPUT_COPY_TIMEOUT
+    if sweep == OUTPUT_BYTES_SWEEP:
+        return OUTPUT_BYTES_TIMEOUT
     if sweep == ATTEMPT_MEDIA_SWEEP:
         return ATTEMPT_MEDIA_TIMEOUT
     if sweep == TEMPLATE_COPY_SWEEP:
@@ -590,6 +603,8 @@ class Housekeeping:
             if sweep == RUN_HOLDS_SWEEP and not workflow.patched(RUN_HOLDS_PATCH):
                 continue
             if sweep == OUTPUT_COPY_SWEEP and not workflow.patched(OUTPUT_COPY_PATCH):
+                continue
+            if sweep == OUTPUT_BYTES_SWEEP and not workflow.patched(OUTPUT_BYTES_PATCH):
                 continue
             if sweep == ATTEMPT_MEDIA_SWEEP and not workflow.patched(ATTEMPT_MEDIA_PATCH):
                 continue
@@ -731,10 +746,12 @@ async def _action_changed(
 ) -> bool:
     """Whether ``action`` starts another workflow, or passes it other arguments, than
     the ``previous`` action the Schedule held (described, so its arguments encoded).
-    Deliberately ignores ``execution_timeout`` and ``task_queue``: every caller's
-    timeout is either fixed or a deterministic function of the ``args`` already
-    compared, so it never changes without ``args`` changing too, and a queue rename
-    is not new work for the sweeps to converge."""
+    Deliberately ignores ``execution_timeout``, ``task_timeout`` and ``task_queue``:
+    every caller's execution timeout is either fixed or a deterministic function of the
+    ``args`` already compared, so it never changes without ``args`` changing too. A task
+    timeout (`SensorNotifyPass` sets `SHORT_TASK_TIMEOUT`, #7288) and a queue rename are
+    not new work for the sweeps to converge. The update in `ensure_workflow_schedule`
+    writes all three to the Schedule either way (#7531)."""
     if not isinstance(previous, ScheduleActionStartWorkflow):
         return True
     if previous.workflow != action.workflow:

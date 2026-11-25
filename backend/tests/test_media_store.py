@@ -481,7 +481,7 @@ def test_a_built_ins_added_media_is_captioned_reordered_and_removed(
 
 
 @pytest.mark.requires_postgres
-def test_a_built_ins_cover_is_a_choice_of_its_own(
+async def test_a_built_ins_cover_is_a_choice_of_its_own(
     catalogue: Catalogue, builtin: str, store: PostgresMediaStore
 ) -> None:
     added = catalogue.add_media(builtin, _stage(catalogue, PNG, "image", "png")).media[1]
@@ -490,7 +490,7 @@ def test_a_built_ins_cover_is_a_choice_of_its_own(
 
     assert [item.id for item in record.media] == [added.id, "front"]
     assert record.media_cover == added.id
-    assert thumbnail_of(catalogue, builtin) is not None
+    assert await thumbnail_of(catalogue, builtin) is not None
     # The first shipped item is the cover without a choice.
     record = catalogue.set_cover(builtin, "front")
     assert record.media_cover is None

@@ -14,7 +14,8 @@ import pytest
 from temporalio import activity
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.library.settings_store import S3Settings
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import RenderStoreSettings, S3Settings, StoreNotReadyError
 from scadbuddy.store import migrate
 from scadbuddy.store.content import BlobMissingError, BlobScope, ContentBackend, ContentStore
 from scadbuddy.store.index import COPIED_REFS_SQL, BlobIndex, Pool
@@ -657,3 +658,26 @@ def test_the_latest_copies_are_read_off_an_index_not_sorted(pool: Pool) -> None:
     assert any("store_blobs_backend_migrated_touched" in line for line in lines), lines
     # Every sort node, an Incremental Sort too, names its "Sort Key".
     assert not any("Sort Key" in line for line in lines), lines
+
+
+async def test_migrate_to_bambuddy_refused_with_output_blobs(pool: Pool, tmp_path: Path) -> None:
+    """Ruling R5 (#7256): outputs never reach Bambuddy's library through a migration. The
+    check runs before any backend is built, and each batch checks again, for an output put
+    after the run started."""
+    src = local_content(tmp_path / "a", pool)
+    bambuddy = LocalContentBackend(tmp_path / "b")
+    bambuddy.backend = "bambuddy"
+    index = BlobIndex(pool)
+    # Not refused while no output blob is indexed.
+    await migrate.refuse_outputs_to_bambuddy(index, "bambuddy")
+    await src.put("output", b"3mf", name="k", scope=SCOPE, key="output-abc-model")
+    with pytest.raises(StoreNotReadyError, match="output"):
+        # Settings are never read: the refusal comes before any backend is built.
+        await migrate.check_backends(
+            RenderStoreSettings(), pool, cast(Settings, None), "local", "bambuddy"
+        )
+    with pytest.raises(migrate.OutputsNotForBambuddyError):
+        await _batch(index, src.backend, bambuddy)
+    assert index.migration_counts("local", "bambuddy") == (1, 0, 0)
+    # Another target takes them.
+    await migrate.refuse_outputs_to_bambuddy(index, "s3")

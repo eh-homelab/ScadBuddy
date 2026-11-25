@@ -296,7 +296,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
   `copy_outputs`, as the API's start does once, so the writes of pods on an older build
   reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
-  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
+  second run at once do nothing. The byte copy (#7256, `OUTPUT_BYTES_SWEEP`, after
+  `OUTPUT_COPY_SWEEP`, behind `OUTPUT_BYTES_PATCH`, timeout `OUTPUT_BYTES_TIMEOUT`, 30
+  min) runs `library/output_byte_copy.py` `copy_output_bytes` the same way, after the
+  row copy at start: it puts the files' bytes as `output` blobs, refuses on `local`,
+  `bambuddy` or a store past its caps, and its session advisory lock holds one autocommit
+  connection of its own for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -646,7 +651,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the answer is final: only what its own `hold` created, unless a later put rewrote it
   or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
-  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  them). A library upload (`POST /print/library/files`) on a remote store is claimed in
+  the blob store instead (#7373, `operations/blob_claims.py` `BlobClaims`): its body is
+  spooled node-local (`ContentStore.spool`), hashed as it streams and put once as the
+  `library` blob `library-upload-<sha256>` (`ContentStore.put(..., digest=)`, so no second
+  hash), and the run reads that blob on any replica (`store: "blob"` in the request; a
+  native file indexes the same object, `NativeLibrary.adopt`). A release removes the row
+  only while its `touched_at` is the request's own put; the claims sweep removes one older
+  than `CLAIM_MAX_AGE` (`sweep_upload_blobs`), and `sweep_library` leaves it alone. A
+  request with no `store` (the local store's, or an older build's) is a claim file, as
+  before. `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
   with 413. A kind reads the state when it runs, never a route dependency, so a test
   replaces a store on the state (`state.libraries = store`). `api/operations.py`
   `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the
@@ -1510,6 +1524,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes;
   a render worker's `RemoteAssetStore` keeps its copies and reads the rows through CRUD routes, #5298).
+  Saved outputs (outputs-in-Postgres spec 2026-11-23): the record is an `outputs` row
+  (`output_rows.py` `OutputRows`, #7255), and the bytes (`model.3mf`, `preview.glb`,
+  `thumbnail.png`, `files/`) are blobs of kind `output` held by `(output, <id>)`
+  (`output_bytes.py` `OutputBytes`, #7256). The folder `data/outputs/<slug>/<id>/` stays
+  the fallback until #7257: a save still writes it, and a reader reads the file when the
+  row names no blob (`bytes_at` NULL) or the blob is lost. A reader that needs a path
+  opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
+  file under `ContentStore.spool`, #7316, else the NFS file) and runs its sync reader in a thread; there
+  is no blocking helper for sync callers. What a reader derives of the model is kept in `output_derived`, and
+  a derive writes only while the model sha256 it read is the row's
+  (`OutputRows.write_derived_many`); the plate cover's key names its own sha256
+  (`plate_cover_key`). The render worker's blob-index allowlist (`api/crud_render.py` `READ_KINDS`) never
+  admits `output`.
   Template records (#7317, spec `2026-11-25-model-records-in-postgres-design.md`, phase 1;
   `docs/architecture/data.md` "Template records"): `template_rows.py` (`TemplateRows`, the
   derived `templates` rows and the `template_copy_runs` ledger; git stays the record),
@@ -2237,7 +2264,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
   with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
   before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
-  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  drops the slug's `outputs` rows, #7255, and releases their byte holds, #7256, and a
+  failure there keeps the directory); the
   API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are

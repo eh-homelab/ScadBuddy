@@ -20,6 +20,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from scadbuddy.camera.models import rtsp_url
 from scadbuddy.core.tracing import COMMIT_SPAN, span, traced_transaction
+from scadbuddy.filament.capture import tray_projection
+from scadbuddy.filament.rfid_slots import _tray_temps, installed_nozzle
 from scadbuddy.printers import run_hours
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterRow
@@ -30,7 +32,7 @@ from scadbuddy.printers.reports import (
     PrinterReportStore,
     read_view,
 )
-from scadbuddy.printers.status import STALE_AFTER, status_from_report
+from scadbuddy.printers.status import STALE_AFTER, ams_units, status_from_report
 from scadbuddy.printers.store import PrinterStore
 from tests.conftest import PgPool
 
@@ -134,6 +136,19 @@ def test_two_reports_with_one_view_read_alike() -> None:
 
     assert status(first) == status(second)
     assert rtsp_url(first) == rtsp_url(second)
+    # #7564: the filament readers of a stored report too. `capture`'s tray projection,
+    # the AMS units its sensors read, and for each tray the temperatures and the
+    # installed nozzle `rfid_slots` reads.
+    assert tray_projection(first) == tray_projection(second)
+    units = ams_units(first)
+    assert units and units == ams_units(second)
+    trays = [(unit.id, tray.id) for unit in units for tray in unit.tray]
+    assert trays
+    for ams_id, tray_id in trays:
+        assert _tray_temps(first, ams_id, tray_id) == _tray_temps(second, ams_id, tray_id)
+        assert installed_nozzle(status(first), first, ams_id, tray_id) == installed_nozzle(
+            status(second), second, ams_id, tray_id
+        )
 
 
 def test_an_unchanged_report_writes_nothing_until_the_refresh(
