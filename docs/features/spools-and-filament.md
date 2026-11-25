@@ -365,6 +365,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `LEADING`, `BIG_LEADING`, `GAP_MM`), never glyph widths, so the browser label keeps the same
   lines in its own font. Without `qr`, the text column starts at the quiet zone and takes the
   QR code's width too. A place label ignores the fields: it prints its code, name and QR code.
+  The labels page has a box for each field under "Spool label prints" (the last chosen box
+  is off), draws its labels with the same fields and fit (`labelSheet.ts` `spoolLines`,
+  `fitLines`), sends them with "Download", and saves each change in
+  `filament_label_output`. A change of the fields keeps the format and dpi, and a change of
+  the format or dpi keeps the fields.
 - What the labels file prints (#7216, R-7216-1 to R-7216-4): the text is DejaVu Sans, embedded,
   so a name in Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic or Lao prints as
   itself, not as `?`. A character DejaVu lacks takes the first Noto font of a fixed chain that

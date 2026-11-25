@@ -17,7 +17,8 @@ import {
 } from '../../api/filament'
 import { Label, LocationLabel } from '../../components/filament/Label'
 import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
-import { DEFAULT_SIZE, httpsOrigin, labelBase, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg } from '../../components/filament/labelSheet'
+import { LabelFieldsPicker } from '../../components/filament/LabelFieldsPicker'
+import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg } from '../../components/filament/labelSheet'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label as FieldLabel } from '@/components/ui/label'
@@ -75,7 +76,7 @@ const printCss = (layout: Layout, size: LabelSize) => {
 const DEFAULT_CHOICE: LabelTemplateChoice = { template: 'roll_50x25' }
 
 /** #7216 — the output the page starts at, and the one an unreadable setting leaves: the setting's default (R-7216-8, R-7216-9). */
-const DEFAULT_OUTPUT: LabelOutput = { format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] }
+const DEFAULT_OUTPUT: LabelOutput = { format: 'pdf', dpi: 300, fields: [...DEFAULT_FIELDS] }
 
 /** What the Download button's `title` says it gives. */
 const outputTitle = (output: LabelOutput) => (output.format === 'png' ? `Download PNG images at ${output.dpi} dpi` : 'Download a PDF')
@@ -205,9 +206,11 @@ export function LabelsPage() {
   // #7216 — the file's format and dpi: the setting `filament_label_output`, saved at each change.
   const [output, setOutput] = useState<LabelOutput>(DEFAULT_OUTPUT)
   const outputSaver = useSettingSaver('filament_label_output')
-  // R-7216-17: a pick saves only the format and dpi, with the `fields` read from the setting. Until
-  // the read answers, the newest pick waits here; after a failed read, no pick is saved.
-  const outputRead = useRef<{ state: 'reading' | 'read' | 'failed'; fields: LabelOutput['fields']; waiting: LabelOutput | null }>({ state: 'reading', fields: DEFAULT_OUTPUT.fields, waiting: null })
+  const fields = output.fields ?? DEFAULT_FIELDS
+  // R-7216-17: a pick saves only the part it picked (the format, the dpi or the fields), with
+  // the other parts read from the setting. `value` is the stored output with every pick since the
+  // read. Until the read answers, the picked parts wait here; after a failed read, no pick is saved.
+  const outputRead = useRef<{ state: 'reading' | 'read' | 'failed'; value: LabelOutput; waiting: Partial<LabelOutput> | null }>({ state: 'reading', value: DEFAULT_OUTPUT, waiting: null })
   const [outputUnsaved, setOutputUnsaved] = useState(false)
   const picker = useRef<HTMLButtonElement>(null)
   const pickerList = useRef<HTMLDivElement>(null)
@@ -226,15 +229,12 @@ export function LabelsPage() {
         const read = outputRead.current
         const stored = settings.filament_label_output ?? DEFAULT_OUTPUT
         read.state = 'read'
-        read.fields = stored.fields
-        // A pick made before the read keeps its format and dpi (R-7216-16), and is saved now with the stored fields.
+        // The parts picked before the read are kept (R-7216-16), and saved now over the stored rest.
         const picked = read.waiting
         read.waiting = null
-        if (picked) {
-          const next = { ...picked, fields: stored.fields }
-          setOutput(next)
-          outputSaver.save(next)
-        } else setOutput(stored)
+        read.value = { ...stored, ...picked }
+        setOutput(read.value)
+        if (picked) outputSaver.save(read.value)
         const template = settings.filament_label_template
         if (!template || templateSaver.savedBeforeRead) return
         setChoice(cleanChoice(template))
@@ -242,7 +242,7 @@ export function LabelsPage() {
       })
       .catch(() => {
         if (!live) return
-        // The page cannot know the stored fields, so it saves no output; a pick holds on this page only.
+        // The page cannot know the stored output, so it saves no pick; a pick holds on this page only.
         const read = outputRead.current
         read.state = 'failed'
         if (read.waiting) setOutputUnsaved(true)
@@ -260,11 +260,17 @@ export function LabelsPage() {
     templateSaver.save(cleanChoice(next))
   }
 
-  const pickOutput = (next: LabelOutput) => {
-    setOutput(next)
+  /**
+   * One saver for the whole output: a pick changes only the part it picked (the format, the dpi or the
+   * fields) and keeps the other parts, stored or picked.
+   */
+  const pickOutput = (part: Partial<LabelOutput>) => {
+    setOutput((was) => ({ ...was, ...part }))
     const read = outputRead.current
-    if (read.state === 'read') outputSaver.save({ ...next, fields: read.fields })
-    else if (read.state === 'reading') read.waiting = next
+    if (read.state === 'read') {
+      read.value = { ...read.value, ...part }
+      outputSaver.save(read.value)
+    } else if (read.state === 'reading') read.waiting = { ...read.waiting, ...part }
     else setOutputUnsaved(true)
   }
 
@@ -408,7 +414,7 @@ export function LabelsPage() {
   const pickerValue = editingCustom || choice.template === 'custom' ? 'custom' : choice.template
   /** The print copy's labels, in order: a sheet template lays them out a page at a time. */
   const printed: { key: string; node: ReactNode }[] = [
-    ...labels.map(({ spool, svg }) => ({ key: spool.id, node: <Label spool={spool} svg={svg} size={size} testId="print-label" /> })),
+    ...labels.map(({ spool, svg }) => ({ key: spool.id, node: <Label spool={spool} svg={svg} size={size} fields={fields} testId="print-label" /> })),
     ...placeLabels.map((one) => ({ key: one.id, node: <LocationLabel code={one.code} name={one.name} svg={one.svg} size={size} testId="print-label" /> })),
   ]
 
@@ -429,6 +435,7 @@ export function LabelsPage() {
       layout,
       format: output.format,
       dpi: output.dpi,
+      fields: [...fields],
     }
     let file: Blob | null = null
     downloadBlob(
@@ -491,7 +498,7 @@ export function LabelsPage() {
               </span>
             </RadioGroup>
           )}
-          <LabelOutputPicker value={output} onChange={pickOutput} />
+          <LabelOutputPicker value={output} onChange={(next) => pickOutput(next.format !== output.format ? { format: next.format } : { dpi: next.dpi })} />
           <Button
             type="button"
             size="sm"
@@ -549,6 +556,11 @@ export function LabelsPage() {
             {customProblem && <p className="pb-1.5 text-[13px] text-warn">{customProblem}</p>}
           </div>
         )}
+        {placeMode ? (
+          <p className="mb-5 text-[13px] text-muted-foreground">A place label prints its code, its name and its QR code.</p>
+        ) : (
+          <LabelFieldsPicker value={fields} onChange={(next) => pickOutput({ fields: next })} />
+        )}
         {templateSaver.failed && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The label choice could not be saved. It holds on this page only.</p>}
         {(outputSaver.failed || outputUnsaved) && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The file choice could not be saved. It holds on this page only.</p>}
         {pdfProblem && (
@@ -592,7 +604,7 @@ export function LabelsPage() {
         <div className="flex flex-wrap gap-3 rounded-md bg-muted/40 p-3">
           {labels.map(({ spool, svg }) => (
             <div key={spool.id} className="outline outline-1 outline-dashed outline-border">
-              <Label spool={spool} svg={svg} size={size} />
+              <Label spool={spool} svg={svg} size={size} fields={fields} />
             </div>
           ))}
           {placeLabels.map((one) => (

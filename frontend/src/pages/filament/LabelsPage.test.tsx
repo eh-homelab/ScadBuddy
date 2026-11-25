@@ -205,7 +205,7 @@ describe('the label template (#7157)', () => {
     await user.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(saved).toHaveLength(1))
     expect(savedName()).toBe('labels.pdf')
-    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], template: { template: 'box_40x30' }, layout: 'roll', format: 'pdf', dpi: 300 })
+    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], template: { template: 'box_40x30' }, layout: 'roll', format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] })
   })
 
   it('says why the PDF was refused', async () => {
@@ -400,6 +400,83 @@ describe('the label output (#7216)', () => {
     expect(screen.getByRole('combobox', { name: 'Resolution' })).toHaveTextContent('203 dpi')
     expect(screen.getByRole('button', { name: 'Download' })).toHaveAttribute('title', 'Download PNG images at 203 dpi')
     expect(puts).toEqual([])
+  })
+
+  it('saves the fields chosen', async () => {
+    serve()
+    const puts = serveOutput({ format: 'png', dpi: 203, fields: FIELDS })
+    const bodies = serveLabels('image/png')
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'PNG' })).toBeChecked())
+    expect(screen.getAllByText('Bambu Lab')).toHaveLength(2)
+    await user.click(screen.getByRole('checkbox', { name: 'Brand' }))
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 203, fields: ['number', 'material', 'colour', 'qr'] } }]))
+    expect(screen.queryByText('Bambu Lab')).toBeNull()
+    expect(screen.getByRole('checkbox', { name: 'Brand' })).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ format: 'png', dpi: 203, fields: ['number', 'material', 'colour', 'qr'] })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toHaveLength(1)
+  })
+
+  // R-7216-17: a field pick keeps the stored format and dpi, and a format pick keeps the picked fields.
+  it('saves a field pick and a format pick made before the settings arrive once, over the stored rest', async () => {
+    serve()
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('*/api/v1/settings', async () => {
+        await held
+        return HttpResponse.json({ filament_label_output: { format: 'pdf', dpi: 600, fields: ['number', 'weight', 'qr'] }, filament_label_base_url: null, public_url: null })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('checkbox', { name: 'Weight' }))
+    await user.click(screen.getByRole('radio', { name: 'PNG' }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toEqual([])
+    answer()
+    // The fields picked are the default set and the weight; the dpi is the stored one.
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 600, fields: ['number', 'material', 'colour', 'brand', 'weight', 'qr'] } }]))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toHaveLength(1)
+    expect(screen.getByRole('checkbox', { name: 'Weight' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Brand' })).toBeChecked()
+  })
+
+  it('keeps the stored fields under a format pick', async () => {
+    serve()
+    const stored = ['number', 'hex', 'qr']
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: stored })
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'Brand' })).not.toBeChecked())
+    await user.click(screen.getByRole('radio', { name: 'PNG' }))
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 300, fields: stored } }]))
+  })
+
+  it('keeps one field', async () => {
+    serve()
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: ['number', 'qr'] })
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'QR code' })).toBeChecked())
+    expect(screen.getByRole('checkbox', { name: 'Number' })).toBeEnabled()
+    await user.click(screen.getByRole('checkbox', { name: 'QR code' }))
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'pdf', dpi: 300, fields: ['number'] } }]))
+    expect(screen.getByRole('checkbox', { name: 'Number' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Number' })).toBeChecked()
+    expect(screen.getByTestId('label').querySelector('svg')).toBeNull()
+  })
+
+  it('place labels ignore the fields', async () => {
+    serveOutput({ format: 'pdf', dpi: 300, fields: ['note'] })
+    renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
+    await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
+    expect(screen.getByTestId('label').querySelector('svg')).not.toBeNull()
+    expect(screen.getByTestId('label')).toHaveTextContent(/^L-/)
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.getByText('A place label prints its code, its name and its QR code.')).toBeInTheDocument()
   })
 
   it('hides the dpi for PDF', async () => {

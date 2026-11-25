@@ -487,8 +487,8 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " default is the number, material, colour name, brand and QR code. Lines that do"
             " not fit on the label are left off from the bottom; the number, when chosen,"
             " stays. Without the QR code, the text uses its space. Place labels always print"
-            " their code, name and QR code. The Labels page saves the last format and dpi;"
-            " it keeps the stored fields.",
+            " their code, name and QR code. The Labels page saves the last format, dpi and"
+            " fields.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",

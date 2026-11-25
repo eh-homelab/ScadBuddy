@@ -1,5 +1,5 @@
 import QRCode from 'qrcode'
-import type { LabelSheet } from '../../api/filament'
+import type { LabelOutput, LabelSheet, SpoolDetail } from '../../api/filament'
 
 /** The default label size, in mm (plan 2026-11-17 Decision 12): a 50 x 25 mm roll label. */
 export const LABEL_WIDTH_MM = 50
@@ -60,11 +60,132 @@ export const resetMeasuring = (): void => {
  * `measureText`) and takes the size at which it fills the column. Where no canvas can measure, it
  * falls back to a 0.62-per-character estimate (less 1.5 mm), which can differ from the PDF.
  */
-export function bigTextMm(text: string, cap: number, widthMm: number): number {
-  const column = widthMm - 2 * QUIET_MM - QR_MM - 1.5
+export function bigTextMm(text: string, cap: number, widthMm: number, qr = true): number {
+  const column = textColumnMm(widthMm, qr)
   const measured = boldWidth100(text)
   if (measured !== null) return Math.min(cap, (column * 100) / measured)
   return Math.min(cap, (column - 1.5) / (0.62 * Math.max(1, text.length)))
+}
+
+/**
+ * The text column's right padding, and the room kept above and below its lines when they are
+ * fitted to the label's height (`label_pdf.py` `PAD_MM`, R-7216-10).
+ */
+export const PAD_MM = 1.5
+
+/** The text column's width: beside the QR box, or from the quiet zone when the label has no QR code (R-7216-10). */
+export const textColumnMm = (widthMm: number, qr: boolean): number => (qr ? widthMm - 2 * QUIET_MM - QR_MM - PAD_MM : widthMm - QUIET_MM - PAD_MM)
+
+/** #7216 — a field a spool label can print (R-7216-9). */
+export type LabelField = NonNullable<LabelOutput['fields']>[number]
+
+/** Every field, in the order the lines print (`label_output.py` `ALL_FIELDS`). */
+export const ALL_FIELDS: readonly LabelField[] = ['number', 'material', 'colour', 'hex', 'brand', 'location', 'temps', 'weight', 'note', 'added', 'qr']
+
+/** What spool labels printed before #7216 (`label_output.py` `DEFAULT_FIELDS`). */
+export const DEFAULT_FIELDS: readonly LabelField[] = ['number', 'material', 'colour', 'brand', 'qr']
+
+/**
+ * The line sizes in mm, as `label_pdf.py`'s, which must stay the same so the browser keeps the
+ * same lines as the PDF: the big number (`NUMBER_MM`, a line height of its size), the first line
+ * under it (`GAP_MM` above it), and each other line (`LEADING` times its size, `FIELD_MM`).
+ */
+export const NUMBER_MM = 9
+const GAP_MM = 1
+const LEADING = 1.25
+const FIELD_MM: Partial<Record<LabelField, number>> = { material: 3.2, colour: 3, hex: 2.6, brand: 2.6, location: 2.6, temps: 2.6, weight: 2.6, note: 2.6, added: 2.6 }
+/** The fields that print in bold (`label_pdf.py` `BOLD_FIELDS`). */
+const BOLD_FIELDS: ReadonlySet<LabelField> = new Set(['material'])
+
+/** One line of a spool label: its field, its text, its size in mm, and its weight. */
+export type LabelLine = { field: LabelField; text: string; sizeMm: number; bold: boolean }
+
+/** The nozzle temperatures as the label prints them (`labels.py` `temps_text`): `190–230 °C`, or one value. */
+function tempsText(low: number | null | undefined, high: number | null | undefined): string | null {
+  if (low == null || high == null || low === high) {
+    const one = low ?? high
+    return one == null ? null : `${one} °C`
+  }
+  return `${low}–${high} °C`
+}
+
+/** The day `iso` falls on in UTC, as `YYYY-MM-DD`, or null for no date. */
+function utcDay(iso: string | null | undefined): string | null {
+  if (!iso) return null
+  const at = new Date(iso)
+  return Number.isNaN(at.getTime()) ? null : at.toISOString().slice(0, 10)
+}
+
+/** Python's `str.splitlines` breaks. */
+// eslint-disable-next-line no-control-regex -- \x1c to \x1e break a line in Python too.
+const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/
+
+/** Each field's text, as `labels.py` `pdf_labels` makes it; null makes no line. */
+function fieldText(spool: SpoolDetail, field: LabelField): string | null {
+  const effective = spool.effective
+  switch (field) {
+    case 'number':
+      return `#${spool.number}`
+    case 'material':
+      return [spool.names?.material, spool.names?.subtype].filter(Boolean).join(' ') || null
+    case 'colour':
+      return effective?.colour_name || spool.colour_name || null
+    case 'hex':
+      return effective?.rgba ? effective.rgba.slice(0, 7).toUpperCase() : null
+    case 'brand':
+      return spool.names?.brand || null
+    case 'location':
+      return spool.names?.location || null
+    case 'temps':
+      return tempsText(effective?.nozzle_temp_min, effective?.nozzle_temp_max)
+    case 'weight':
+      return effective?.label_weight_g != null ? `${effective.label_weight_g} g` : null
+    case 'note':
+      return (spool.note ?? '').trim().split(LINE_BREAK)[0]?.trim() || null
+    case 'added':
+      return utcDay(spool.created_at)
+    case 'qr':
+      return null
+  }
+}
+
+/**
+ * #7216 — a spool label's lines: one for each chosen field with a value, in `ALL_FIELDS` order
+ * (`label_pdf.py` `_spool_lines`). The QR code is no line. The number's `sizeMm` is its cap; the
+ * label draws it smaller when it is too wide (`bigTextMm`), and the fit counts the cap.
+ */
+export function spoolLines(spool: SpoolDetail, fields: readonly LabelField[]): LabelLine[] {
+  const lines: LabelLine[] = []
+  for (const field of ALL_FIELDS) {
+    if (!fields.includes(field)) continue
+    const size = field === 'number' ? NUMBER_MM : FIELD_MM[field]
+    if (size === undefined) continue
+    const text = fieldText(spool, field)
+    if (text) lines.push({ field, text, sizeMm: size, bold: field === 'number' || BOLD_FIELDS.has(field) })
+  }
+  return lines
+}
+
+/** Whether line `at` of `lines` has `GAP_MM` above it: the first line under the big number. */
+export const gapAbove = (lines: readonly LabelLine[], at: number): boolean => at === 1 && lines[0]?.field === 'number'
+
+/** The height a line takes in the fit: its gap and its line box (`label_pdf.py` `_Line.fit_height_mm`). */
+const fitHeightMm = (lines: readonly LabelLine[], at: number): number => {
+  const line = lines[at]!
+  return (gapAbove(lines, at) ? GAP_MM : 0) + (line.field === 'number' ? line.sizeMm : line.sizeMm * LEADING)
+}
+
+/**
+ * #7216, R-7216-10 — `lines` less the last ones while they are taller than a label of `heightMm`
+ * less `PAD_MM` above and below (`label_pdf.py` `fit_lines`). The number always stays. Only the
+ * line heights count, never a glyph's width, so the browser keeps the PDF's lines in another font.
+ */
+export function fitLines(lines: LabelLine[], heightMm: number): LabelLine[] {
+  const available = heightMm - 2 * PAD_MM
+  const kept = [...lines]
+  const total = () => kept.reduce((sum, _, at) => sum + fitHeightMm(kept, at), 0)
+  while (kept.length > 0 && kept.at(-1)!.field !== 'number' && total() > available + 1e-9) kept.pop()
+  return kept
 }
 
 /** `items` cut into pages of `perPage` (a sheet's cells). */
