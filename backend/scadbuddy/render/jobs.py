@@ -32,6 +32,7 @@ from scadbuddy.core.paths import (
     SOURCE_NAME,
     DataPaths,
     model_path,
+    result_name,
 )
 from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import UsesAssets, file_assets
@@ -1384,10 +1385,13 @@ async def finish_piece_stage(
     thumbnail_executor: Executor | None,
     stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
     schema: CustomizerSchema | None = None,
+    blobs_root: Path | None = None,
 ) -> JobResult:
     """The cover images and `MODEL_NAME`, from `LAYOUT_NAME` and `PREVIEW_NAME` in
     ``work``. ``schema`` is the one the render used, when the caller derived it
-    under its lease; otherwise it is derived here."""
+    under its lease; otherwise it is derived here. ``blobs_root`` is the blob store's
+    root when ``work`` is a piece's directory (`result_name`, #7318); the data volume's
+    ``blobs/`` by default."""
     layout = await asyncio.to_thread(PlateLayout.load, work / LAYOUT_NAME)
     if schema is None:
         schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
@@ -1424,9 +1428,10 @@ async def finish_piece_stage(
             model_name=slug.removeprefix(BUILTIN_PREFIX),
         )
 
+    root = blobs_root or paths.blobs
     return JobResult(
-        model_3mf=str(model_3mf.relative_to(paths.root)),
-        preview_glb=str((work / PREVIEW_NAME).relative_to(paths.root)),
+        model_3mf=result_name(model_3mf, blobs_root=root, data_root=paths.root),
+        preview_glb=result_name(work / PREVIEW_NAME, blobs_root=root, data_root=paths.root),
         source_version=prepared.version,
         parts=result_parts(layout),
         bbox_mm=layout.bbox,

@@ -1139,7 +1139,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (the grace-period sweep). Phase 3 (#426, spec §6): `content.py`/`content_models.py`
   (`ContentStore`, content-addressed keys over a backend), `index.py` (the Postgres index
   with CAS), `archive.py` (a directory as one object), `cache.py` (`CachedBlobStore`, the
-  worker's bounded local copy), `bambuddy.py` (`BambuddyContentBackend`, Bambuddy's
+  worker's and the API's bounded local copy, under `SCADBUDDY_BLOB_CACHE_DIR` when set, #7318:
+  a `JobResult` still names its files `blobs/<key>/<file>`, so read them through
+  `cache.py` `result_file` or `core/paths.py` `result_path`, never `paths.root / name`;
+  a small file read whole goes through `BlobStore.read_file`, `orders/attachments.py`
+  `read_blob`, which unpacks nothing on a miss), `bambuddy.py` (`BambuddyContentBackend`, Bambuddy's
   library as the backend, `verify_bambuddy.py` its check), `locks.py`, `fonts.py`
   (`FontMirror`), `snapshots.py` (revision snapshots for workers) and `assets.py`
   (`RemoteAssets`, uploads reaching workers). `factory.py` builds the `StoreBundle` that

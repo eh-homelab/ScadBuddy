@@ -66,7 +66,7 @@ from scadbuddy.filament.sb_presets import (
     version_on,
 )
 from scadbuddy.filament.types import SpoolTypeStore, list_edit
-from scadbuddy.orders.attachments import blob_path, keep_file
+from scadbuddy.orders.attachments import keep_file, read_blob
 from scadbuddy.profile_fetch.wire import (
     FETCH_WORKFLOW,
     MAX_FILE_BYTES,
@@ -1182,10 +1182,10 @@ def _failed(error: str, missing: dict[tuple[str, str], str]) -> _Ending:
 
 
 async def _read_blob(state: AppState, key: str) -> bytes:
-    path = await blob_path(state.store.blobs, key)
-    if path is None:
+    data = await read_blob(state.store.blobs, key)
+    if data is None:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, f"the blob store lost {key}")
-    return await asyncio.to_thread(path.read_bytes)
+    return data
 
 
 async def _k_values(
