@@ -1,14 +1,19 @@
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
+import { readCapped } from './binary.js'
 import { ok } from './call.js'
+import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
-import { defineTool, json, ToolError } from './registry.js'
+import { defineTool, image, json, ToolError } from './registry.js'
+import { WorkspaceError, workspaceOf } from '../workspace/store.js'
+import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
+import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
-// (backend/scadbuddy/api/entity_attachments.py, entity_links.py). Lists are `read`; every
-// file or link change is `outward`, so a session parks it for a person. An agent upload is out of scope:
-// a file reaches an entity through the UI (an order's through order_attach).
+// (backend/scadbuddy/api/entity_attachments.py, entity_links.py). Lists and a file's bytes are `read`;
+// every file or link change is `outward`, so a session parks it for a person. An agent adds a file
+// from its workspace (entity_attachment_add); an order's files go through order_attach.
 
 const entity = z
   .string()
@@ -21,13 +26,31 @@ const fileOwner = z
   .min(1)
   .max(200)
   .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `insert_type:<id>` (or another filament catalog's row: `material`, `subtype`, `brand`, `category`, `effect`, `insert_material`, `colour`, `location_kind`). Not an order's: change those with order_attachment_update/order_attachment_delete")
-const attachmentId = z.string().min(1).max(100).describe("An attachment's id, as entity_attachment_list gives it")
+const attachmentId = z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).describe("An attachment's id, as entity_attachment_list gives it")
 const linkId = z.string().min(1).max(100).describe("A link's id, as entity_link_list gives it")
 const role = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text: `reference`, `issue`, `finished`, `packed`, `receipt`, `invoice`, `manual`, `photo`, `label`, `other`')
 const caption = z.string().max(1000)
 const linkKind = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text, `other` when left out: `support`, `datasheet`, `store`, ...')
 
 const deleted = (what: string) => json({ deleted: what })
+/** A workspace path segment's most characters (workspace/store.ts `SEGMENT`). */
+const SEGMENT_MAX = 128
+
+/**
+ * A kept file's last path segment, `<id>-<name>`: the name made safe and cut to fit
+ * SEGMENT_MAX, keeping its extension, so a long vendor file name is still kept.
+ */
+export function keptName(id: string, filename: string): string {
+  const safe = filename.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.+/, '') || 'file'
+  const room = SEGMENT_MAX - id.length - 1
+  if (safe.length <= room) return `${id}-${safe}`
+  const dot = safe.lastIndexOf('.')
+  const ext = dot > 0 && safe.length - dot <= 10 ? safe.slice(dot) : ''
+  return `${id}-${safe.slice(0, room - ext.length)}${ext}`
+}
+
+/** The most of a file entity_attachment_get reads: the workspace's default file cap. */
+const FILE_READ_MAX = 25 * 1024 * 1024
 
 // Properties (#7026, spec §6.3a): an entity's key-value properties and a kind's property schema
 // (backend/scadbuddy/api/entity_properties.py). Reads are `read`; a property or schema write is
@@ -173,6 +196,136 @@ export const entityTools = [
     routes: ['GET /api/v1/entities/{ref}/attachments'],
     handler: async ({ entity: ref }, { backend }) =>
       withPage(ref, await onEntity(ref, backend.GET('/api/v1/entities/{ref}/attachments', { params: { path: { ref } } }), `list the files of ${ref}`)),
+  }),
+  defineTool({
+    name: 'entity_attachment_get',
+    label: "See an entity's file",
+    description:
+      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
+      'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
+      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; an SVG, and any other file (a PDF ' +
+      'manual, a receipt) kept in your workspace and answered as `workspace_file`: workspace_read reads a text ' +
+      'file, and a binary one (a PDF) can be attached or uploaded from there but not read. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
+      'it for a photo too large to view, or when a glance is enough.',
+    input: z.object({
+      entity,
+      attachment_id: attachmentId,
+      thumbnail: z.boolean().optional().describe('A small WebP copy of a photo instead of the file itself'),
+    }),
+    risk: 'read',
+    routes: [
+      'GET /api/v1/entities/{ref}/attachments',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
+    ],
+    handler: async ({ entity: ref, attachment_id, thumbnail }, ctx) => {
+      const params = { params: { path: { ref, attachment_id } }, parseAs: 'stream' as const }
+      const what = `get file ${attachment_id} of ${ref}`
+      // The file's own name and type: the content route sends any type it does not serve inline
+      // as application/octet-stream (backend api/attachment_serving.py), so its header cannot say.
+      const { attachments } = await onEntity(ref, ctx.backend.GET('/api/v1/entities/{ref}/attachments', { params: { path: { ref } } }), `list the files of ${ref}`)
+      const record = attachments.find((a) => a.id === attachment_id)
+      if (!record) throw new ToolError(`${what} failed: ${ref} has no file ${attachment_id}; entity_attachment_list lists them`, 404)
+      const result = await (thumbnail
+        ? ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail', params)
+        : ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/content', params))
+      const stream = (await ok(Promise.resolve(result), what)) as ReadableStream<Uint8Array> | null
+      const mimeType = thumbnail ? 'image/webp' : record.media_type
+      const length = result.response.headers.get('content-length')
+      const read = await readCapped(stream, length !== null && /^\d+$/.test(length) ? Number(length) : undefined, FILE_READ_MAX)
+      // Never a backend path: a model given one guessed a URL for it (#7727).
+      if (!read.inline) {
+        const thumbable = !thumbnail && ['image/png', 'image/jpeg', 'image/webp'].includes(mimeType)
+        return json({
+          viewable: false,
+          media_type: mimeType,
+          ...(read.size === undefined ? { size_bytes_over: FILE_READ_MAX } : { size_bytes: read.size }),
+          note: `Larger than ${FILE_READ_MAX} bytes: too large to read here.` + (thumbable ? ' Call again with `thumbnail: true` for a small copy.' : ''),
+        })
+      }
+      const bytes = read.bytes
+      if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
+        // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
+        if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
+        return json({
+          viewable: false,
+          media_type: mimeType,
+          size_bytes: bytes.byteLength,
+          note:
+            'A photo too large for you to view (over 5 MB as base64).' +
+            (mimeType === 'image/gif' ? '' : ' Call again with `thumbnail: true` for a small copy.'),
+        })
+      }
+      // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
+      if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
+        return json({
+          viewable: false,
+          media_type: mimeType,
+          size_bytes: bytes.byteLength,
+          note: `A ${mimeType} photo, which you cannot view: only PNG, JPEG, GIF and WebP can be shown to you. Ask the person for a JPEG or PNG copy.`,
+        })
+      }
+      // Any other file (a PDF manual, a receipt) goes to the workspace as a pointer, which a session turn
+      // carries (a `resource` block reaches it only as "[resource]", temporal/toolActivities.ts callBlocks).
+      if (!ctx.workspace) {
+        return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: 'There is no workspace to keep it in here.' })
+      }
+      try {
+        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${keptName(attachment_id, record.filename)}`, new Uint8Array(bytes), {
+          mediaType: mimeType,
+          source: { tool: 'entity_attachment_get', entity: ref, attachment_id },
+        })
+        return json({
+          workspace_file: { name: info.path, mediaType: info.mediaType, size: info.size, sha256: info.sha256 },
+          note: 'Kept in your workspace: workspace_read reads it when it is text; a binary file can be attached or uploaded from there.',
+        })
+      } catch (err) {
+        if (err instanceof WorkspaceError) return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: `Not kept: ${err.message}` })
+        throw err
+      }
+    },
+  }),
+  defineTool({
+    name: 'entity_attachment_add',
+    label: 'Attach a file to an entity',
+    description:
+      "Attach a file from your workspace to an entity: a spool's label photo, a printer's manual, a receipt. Any " +
+      "file; what it is (`kind`, `media_type`) comes from its bytes. `role` says why it is kept (`other` when left " +
+      "out). An order's files go through order_attach (409 `use_order_route`). Outward: a person approves it." +
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        entity: fileOwner.describe(
+          "The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `insert_type:<id>` (or another filament catalog's row). Not an order's: attach those with order_attach",
+        ),
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+        filename: z.string().min(1).max(255).optional().describe("e.g. \"label.jpg\"; the workspace file's own name by default"),
+        role: role.optional(),
+        caption: caption.optional(),
+      })
+      .strict(),
+    risk: 'outward',
+    routes: ['POST /api/v1/entities/{ref}/attachments'],
+    summarize: ({ entity: ref, filename, workspace_path }) => `Attach ${filename ?? workspace_path} to ${ref}`,
+    handler: async ({ entity: ref, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'entity_attachment_add')
+      const name = filename ?? uploadName(info.path)
+      const fields = {
+        ...(role === undefined ? {} : { role }),
+        ...(caption === undefined ? {} : { caption }),
+      }
+      const part = { name: 'file', filename: name, type: info.mediaType }
+      const what = `attach ${name} to ${ref}`
+      const answer = await command(ctx, what, (headers) =>
+        ctx.backend.POST('/api/v1/entities/{ref}/attachments', {
+          params: { path: { ref } },
+          body: { file: name, role: role ?? null, caption: caption ?? null },
+          ...uploadInit(ctx, info, part, headers, fields),
+        }),
+      )
+      return json(withSent(answer, info))
+    },
   }),
   defineTool({
     name: 'entity_attachment_update',
