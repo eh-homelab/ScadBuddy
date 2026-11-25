@@ -70,8 +70,9 @@ const PAGES = [
   // Spool labels (#6264): with no spools chosen; the route check below reads paths, not queries.
   '/filament/labels',
   // The phone page that reads tags (#7273, the hand-held Scan mode): without Web NFC it shows
-  // how to open it on a phone. `/filament/scan` redirects here.
+  // how to open it on a phone. `/filament/scan`, its old address, redirects to it.
   '/scan',
+  '/filament/scan',
   // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
   '/inventory',
   '/inventory/kinds',
@@ -110,6 +111,12 @@ test('/orders/parts opens the Inventory on the Part kind, not an order (#7067)',
   await page.goto('/orders/parts')
   await expect(page).toHaveURL(/\/inventory\?kind=part$/)
   await expect(page).toHaveTitle(waiting('Inventory · ScadBuddy'))
+})
+
+test('/filament/scan opens the Scan mode at /scan (#7273)', async ({ page }) => {
+  await page.goto('/filament/scan')
+  await expect(page).toHaveURL(/\/scan$/)
+  await expect(page).toHaveTitle(waiting('Scan · ScadBuddy'))
 })
 
 test('covers every route App.tsx declares', () => {
