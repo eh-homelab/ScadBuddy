@@ -244,64 +244,156 @@ for rel in X["relations"]:
     if rel["type"] == "contains":
         held[rel["to"]] = rel["from"]
 
-# Replay the history (design §4.5): uses are booked per unit, through its container.
+# Replay the history (design §4.5, §4.7). Uses are booked per unit, through its
+# container. Every handler value is cached per unit; a row is appended to its history
+# only when the value changes. A refresh recomputes and appends only on a change.
 uses: list[dict] = []  # unit_uses rows: unit, at, hours, prints, via
-for ev in X.get("history", []):
-    if ev["do"] == "add":
-        why = check_relation(ev["rel"], accepts, held)
-        if why:
-            raise Broken(f"history {ev['at']}: refused {ev['rel']}: {why}")
-        held[ev["rel"]["to"]] = ev["rel"]["from"]
-    elif ev["do"] == "remove":
-        if held.get(ev["rel"]["to"]) != ev["rel"]["from"]:
-            raise Broken(f"history {ev['at']}: {ev['rel']['to']} is not in {ev['rel']['from']}")
-        del held[ev["rel"]["to"]]
-    elif ev["do"] == "run":
-        printer = ev["printer"]
-        _, _, res = RESOLVED[INST[printer.split(":", 1)[1]]["item"]]
-        if res["consume"][0] != "printer.consume_run":
-            raise Broken(f"history {ev['at']}: {printer} has no printer consume handler")
-        rows_ = [{"unit": printer, "at": ev["at"], "hours": ev["hours"], "prints": ev["prints"], "via": None}]
-        rows_ += [{"unit": u, "at": ev["at"], "hours": ev["hours"], "prints": ev["prints"], "via": printer}
-                  for u, c in held.items() if c == printer]
-        uses.extend(rows_)
-    else:
-        raise Broken(f"history: unknown event {ev['do']}")
+cache: dict = {}  # unit -> current value (handler_values)
+value_history: list[dict] = []  # handler_value_history
+config_history: list[dict] = []  # handler_config_history
+
+
+def unit_params(unit: str, step: str) -> tuple[str, dict]:
+    """The handler and parameters in force for a unit: its item's, then its own (§4.2)."""
+    inst = INST[unit.split(":", 1)[1]]
+    hid, params = RESOLVED[inst["item"]][2][step]
+    own = (inst.get("steps") or {}).get(step) or {}
+    return hid, {**params, **(own.get("params") or {})}
+
+
+def months_between(a, b) -> int:
+    return (b.year - a.year) * 12 + (b.month - a.month) - (1 if b.day < a.day else 0)
 
 
 def life_state(unit: str, at) -> dict:
     """The unit's life handler, answered from its own unit_uses rows up to `at`."""
     inst = INST[unit.split(":", 1)[1]]
-    _, _, res = RESOLVED[inst["item"]]
-    hid, params = res["life"]
+    hid, params = unit_params(unit, "life")
     rows_ = [u for u in uses if u["unit"] == unit and u["at"] <= at]
+    # A manual reading (like a weighing) sets the measure; later uses count on top of it.
+    readings = [u for u in rows_ if u.get("reading") is not None]
+    base, after = 0, rows_
+    if readings:
+        base = readings[-1]["reading"]
+        after = [u for u in rows_ if u["seq"] > readings[-1]["seq"] and u.get("reading") is None]
     if hid == "life.hours":
         if params["source"] == "container_run_hours":
-            used = sum(u["hours"] for u in rows_ if u["via"])
+            used = base + sum(u["hours"] for u in after if u["via"])
         elif params["source"] == "own_run_hours":
-            used = sum(u["hours"] for u in rows_ if not u["via"])
+            used = base + sum(u["hours"] for u in after if not u["via"])
         else:
-            raise Broken(f"{unit}: manual hours are not in the examples")
+            used = base
         life = params["hours"]
     elif hid == "life.uses":
-        used, life = sum(u["prints"] for u in rows_), params["uses"]
+        used, life = base + sum(u["prints"] for u in after), params["uses"]
+    elif hid == "life.months":
+        used, life = max(months_between(inst["in_service_at"], at), 0), params["months"]
     else:
         raise Broken(f"{unit}: {hid} is not replayed by the examples")
     share = min(used / life, 1)
     cost = inst["cost_minor"]
     salvage = cost * (params.get("salvage_pct") or 0) / 100
     warn = "warn_pct" in params and share * 100 >= params["warn_pct"]
-    return {"used": used, "share": share, "warn": warn, "book": cost - (cost - salvage) * share}
+    return {"used": used, "share": round(share, 4), "warn": warn,
+            "book": round(cost - (cost - salvage) * share, 2)}
 
+
+def recompute(unit: str, at, reason: str) -> bool:
+    """Refresh one unit's cached life value; append history only if it changed."""
+    value = life_state(unit, at)
+    if cache.get(unit) == value:
+        return False
+    cache[unit] = value
+    value_history.append({"unit": unit, "at": at, "reason": reason, **value})
+    return True
+
+
+TRACKED = [f"unit:{i['id']}" for i in X["instances"] if "cost_minor" in i]
+for u in TRACKED:
+    recompute(u, X["history"][0]["at"], "received")
+
+for ev in X.get("history", []):
+    at = ev["at"]
+    if ev["do"] == "add":
+        why = check_relation(ev["rel"], accepts, held)
+        if why:
+            raise Broken(f"history {at}: refused {ev['rel']}: {why}")
+        held[ev["rel"]["to"]] = ev["rel"]["from"]
+        recompute(ev["rel"]["to"], at, "relation")
+    elif ev["do"] == "remove":
+        if held.get(ev["rel"]["to"]) != ev["rel"]["from"]:
+            raise Broken(f"history {at}: {ev['rel']['to']} is not in {ev['rel']['from']}")
+        del held[ev["rel"]["to"]]
+        recompute(ev["rel"]["to"], at, "relation")
+    elif ev["do"] == "run":
+        printer = ev["printer"]
+        if unit_params(printer, "consume")[0] != "printer.consume_run":
+            raise Broken(f"history {at}: {printer} has no printer consume handler")
+        inside = [u for u, c in held.items() if c == printer]
+        uses.append({"unit": printer, "at": at, "hours": ev["hours"], "prints": ev["prints"], "via": None,
+                     "seq": len(uses)})
+        for u in inside:
+            uses.append({"unit": u, "at": at, "hours": ev["hours"], "prints": ev["prints"], "via": printer,
+                         "seq": len(uses)})
+        for u in [printer, *inside]:
+            if u in TRACKED:
+                recompute(u, at, "use")
+    elif ev["do"] == "set_params":
+        unit = ev["target"]
+        inst = INST[unit.split(":", 1)[1]]
+        old = unit_params(unit, ev["step"])
+        steps = inst.setdefault("steps", {})
+        conf = steps.setdefault(ev["step"], {})
+        conf["params"] = {**(conf.get("params") or {}), **ev["params"]}
+        new = unit_params(unit, ev["step"])
+        check_params(f"history {at} {unit}", HANDLERS[new[0]], new[1])
+        config_history.append({"target": unit, "at": at, "step": ev["step"], "handler": new[0],
+                               "old": old[1], "new": new[1], "actor": ev.get("actor", "person")})
+        recompute(unit, at, "params_changed")
+    elif ev["do"] == "reading":
+        unit = ev["target"]
+        if unit_params(unit, ev["step"])[0] not in ("life.hours", "life.uses"):
+            raise Broken(f"history {at}: {unit} {ev['step']} takes no manual reading")
+        uses.append({"unit": unit, "at": at, "hours": 0, "prints": 0, "via": None, "seq": len(uses),
+                     "reading": ev["value"], "actor": ev.get("actor", "person")})
+        recompute(unit, at, "manual")
+    elif ev["do"] == "refresh":
+        scope = TRACKED if ev["scope"] == "all" else [ev["scope"]]
+        changed = [u for u in scope if recompute(u, at, "refresh")]
+        print(f"refresh {ev['scope']} at {at}: {len(changed)} changed {changed}")
+        if "expect_changed" in ev and changed != ev["expect_changed"]:
+            raise Broken(f"refresh at {at}: expected {ev['expect_changed']} to change, got {changed}")
+    else:
+        raise Broken(f"history: unknown event {ev['do']}")
 
 for exp in X.get("expect_life", []):
-    got = life_state(f"unit:{exp['unit']}", exp["at"])
+    got = cache[f"unit:{exp['unit']}"]
     ok = (got["used"] == exp["used"] and abs(got["share"] - exp["share"]) < 1e-4
           and got["warn"] == exp["warn"] and abs(got["book"] - exp["book_value_minor"]) < 0.01)
     if not ok:
-        raise Broken(f"life of {exp['unit']} at {exp['at']}: expected {exp}, got {got}")
+        raise Broken(f"cached life of {exp['unit']}: expected {exp}, got {got}")
     print(f"life as expected: {exp['unit']} used {got['used']}, {got['share']:.1%}, "
           f"warn {got['warn']}, book value {got['book']:.2f}")
+
+# The cache is derived: a rebuild from the sources must give the same values (§4.7).
+last = X["history"][-1]["at"]
+for u in TRACKED:
+    if life_state(u, last) != cache[u]:
+        raise Broken(f"cache of {u} differs from a rebuild: {cache[u]} vs {life_state(u, last)}")
+
+for unit, rows_ in (X.get("expect_history") or {}).items():
+    got = [{k: r[k] for k in ("at", "reason", "used", "share", "book")}
+           for r in value_history if r["unit"] == f"unit:{unit}"]
+    want = [{**r, "at": r["at"]} for r in rows_]
+    if got != want:
+        raise Broken(f"history of {unit}: expected {want}, got {got}")
+    print(f"history as expected: {unit}: " + "; ".join(
+        f"{r['at']} {r['reason']} {r['used']} {r['share']:.2%} {r['book']:.2f}" for r in got))
+for exp in X.get("expect_config_history", []):
+    if not any(c["target"] == exp["target"] and c["step"] == exp["step"] and c["old"].get(exp["key"]) == exp["old"]
+               and c["new"].get(exp["key"]) == exp["new"] for c in config_history):
+        raise Broken(f"config history lacks {exp}")
+    print(f"config history as expected: {exp['target']} {exp['step']}.{exp['key']} {exp['old']} -> {exp['new']}")
 
 rows = ["| Item | Class | " + " | ".join(STEPS) + " |", "|---|---|" + "---|" * len(STEPS)]
 for iid, (cls, special, res) in RESOLVED.items():
@@ -319,4 +411,5 @@ if not m or m.group(1).strip() != table.strip():
     raise Broken("README.md's table is not the resolved one: run with --print and paste it")
 print(f"ok: {len(K)} kinds, {len(HANDLERS)} handlers, {len(ITEMS)} items, "
       f"{len(INST)} instances, {len(X['relations'])} relationships, "
-      f"{len(X.get('history', []))} history events, {len(X.get('expect_life', []))} lives")
+      f"{len(X.get('history', []))} history events, {len(X.get('expect_life', []))} lives, "
+      f"{len(value_history)} value history rows")

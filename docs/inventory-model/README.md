@@ -25,7 +25,10 @@ It resolves each item's class and handlers, checks each handler's step, class an
 parameters, checks each instance and relationship, and checks that §3's table is what it
 resolved. It also checks that the five relationships marked `expect: refused` are refused,
 each for its stated reason. It replays `examples.yaml`'s history (a nozzle and a plate
-move from one printer to another) and checks each unit's life against `expect_life`.
+move from one printer to another, a person enters a reading by hand, a person changes a
+life, two refreshes), and checks the
+cached values, their history and the parameter history against what the YAML expects. It
+also checks that rebuilding the cache from the sources gives the same values.
 Output on 2026-11-25:
 
 ```text
@@ -34,12 +37,19 @@ refused as expected: contains unit:label_printer_1 -> unit:roll_9: unit:label_pr
 refused as expected: contains unit:drill_1 -> unit:nozzle_4: unit:drill_1 does not accept unit:nozzle_4
 refused as expected: contains unit:h2c_1 -> unit:insert_7: unit:insert_7 is already in unit:spool_112
 refused as expected: covers unit:drill_1 -> unit:h2c_1: unit:drill_1: class {'nature': 'physical', 'role': 'durable', 'counting': 'unit'} is not {'nature': 'service', 'billing': 'term'}
-life as expected: nozzle_4 used 1350, 90.0%, warn True, book value 250.00
-life as expected: plate_1 used 900, 90.0%, warn True, book value 400.00
-life as expected: nozzle_3 used 700, 46.7%, warn False, book value 1333.33
+refresh unit:drill_1 at 2027-01-25: 1 changed ['unit:drill_1']
+refresh all at 2027-01-25: 0 changed []
+life as expected: nozzle_4 used 1450, 96.7%, warn True, book value 83.33
+life as expected: plate_1 used 930, 93.0%, warn True, book value 280.00
+life as expected: nozzle_3 used 700, 35.0%, warn False, book value 1625.00
 life as expected: h2c_1 used 700, 7.0%, warn False, book value 325407.00
-life as expected: h2c_2 used 750, 7.5%, warn False, book value 323657.50
-ok: 33 kinds, 38 handlers, 16 items, 17 instances, 16 relationships, 8 history events, 5 lives
+life as expected: h2c_2 used 800, 8.0%, warn False, book value 321908.00
+life as expected: drill_1 used 2, 2.4%, warn False, book value 11742.86
+history as expected: nozzle_4: 2026-12-01 received 0 0.00% 2500.00; 2026-12-02 use 600 40.00% 1500.00; 2027-01-12 use 1350 90.00% 250.00; 2027-01-13 manual 1400 93.33% 166.67; 2027-01-15 use 1450 96.67% 83.33
+history as expected: nozzle_3: 2026-12-01 received 0 0.00% 2500.00; 2026-12-02 use 600 40.00% 1500.00; 2027-01-13 use 700 46.67% 1333.33; 2027-01-14 params_changed 700 35.00% 1625.00
+history as expected: drill_1: 2026-12-01 received 0 0.00% 12000.00; 2027-01-25 refresh 2 2.38% 11742.86
+config history as expected: unit:nozzle_3 life.hours 1500 -> 2000
+ok: 33 kinds, 38 handlers, 16 items, 17 instances, 16 relationships, 13 history events, 6 lives, 21 value history rows
 ```
 
 ## 1. What a thing is: the class
@@ -369,6 +379,8 @@ sequenceDiagram
     U-->>L: 400 + 500 = 900 of 1000: 90%, warning, book value 4.00
 ```
 
+The table is the state on 2027-01-12, after the moves; §6 continues the same history.
+
 | Unit | Rows in `unit_uses` | Life handler | Used | Book value |
 |---|---|---|---|---|
 | Nozzle #4 | 600 h via A, 750 h via B | `life.hours`, 1500 h, through a container | 1350 h (90%, warning) | 25.00 → 2.50 |
@@ -380,7 +392,110 @@ sequenceDiagram
 The `contains` relationship keeps its end date when a unit is removed, so the unit's page
 can also list where it has been and for how long.
 
-## 6. The life of a unit
+## 6. Cached values, their history, and refresh
+
+Every handler value is cached per unit and step (`handler_values`): the used share, book
+value and signals of a life, a roll's remaining count, a lot's unit cost. Pages, stock
+value, job cost and the machine rate read the cache; they never run a handler on a read.
+Each time a value changes, the old one stays: a row is appended to
+`handler_value_history`, never rewritten. A change of handler or parameters is appended to
+`handler_config_history`. The cache is derived: the sources stay `unit_uses`, the moves
+and the parameters, and a rebuild from them must give the same values.
+
+```mermaid
+sequenceDiagram
+    participant E as An event (use, move, params change, refresh, daily schedule)
+    participant B as Base flow (one transaction)
+    participant H as The unit's handler
+    participant C as handler_values (cache)
+    participant VH as handler_value_history
+    participant CH as handler_config_history
+    E->>B: something that touches unit U
+    opt a person changed a handler or its parameters
+        B->>CH: append: old and new, who, when
+    end
+    B->>H: compute U's value now
+    H-->>B: value
+    B->>C: compare with the cached value
+    alt changed
+        B->>C: replace it
+        B->>VH: append: at, reason, value, handler and params in force
+    else the same
+        B-->>E: nothing written
+    end
+```
+
+**Manual readings** (owner, 2026-11-25: "allow for manual, like weight, in advanced").
+The unit page's Advanced section lets a person enter a measured value by hand: the hours
+a nozzle has really run, the prints on a plate, the labels left on a roll, as a weighing
+sets a spool's grams. It is stored as a reading row in `unit_uses` (who, when, the
+value) and is a source, not an edit of the cache: the handler counts later uses on top
+of the newest reading. The value history shows it with the reason `manual`. A refresh
+keeps it, since a refresh recomputes from the sources and the reading is one.
+
+**Refresh.** A person (a button on the unit, item or kind page; an agent tool) or the daily
+schedule asks for a refresh of one unit, an item's units, a kind's units, or all. It
+recomputes each value and appends history only where a value changed, with the reason
+`refresh`. A second refresh at the same time writes nothing. A release that changes a
+handler's formula ends with a refresh of all, so the change shows in the history with
+its date. Time-based values (`life.months`, `life.term`) change with no event: the daily
+schedule is a refresh of them.
+
+What `check.py` replays (`examples.yaml` history), as the history it expects:
+
+| Unit | At | Reason | Used | Share | Book value |
+|---|---|---|---|---|---|
+| Nozzle #4 | 2026-12-01 | received | 0 h | 0% | 25.00 |
+| Nozzle #4 | 2026-12-02 | use (in A, 600 h) | 600 h | 40% | 15.00 |
+| Nozzle #4 | 2027-01-12 | use (in B, 750 h) | 1350 h | 90% | 2.50 |
+| Nozzle #4 | 2027-01-13 | manual (a person reads 1400 h) | 1400 h | 93.33% | 1.67 |
+| Nozzle #4 | 2027-01-15 | use (in B, 50 h, on top of the reading) | 1450 h | 96.67% | 0.83 |
+| Nozzle #3 | 2026-12-01 | received | 0 h | 0% | 25.00 |
+| Nozzle #3 | 2026-12-02 | use (A ran 600 h) | 600 h | 40% | 15.00 |
+| Nozzle #3 | 2027-01-13 | use (A ran 100 h) | 700 h | 46.67% | 13.33 |
+| Nozzle #3 | 2027-01-14 | params_changed (life 1500 → 2000 h) | 700 h | 35% | 16.25 |
+| Drill #1 | 2026-12-01 | received | 0 months | 0% | 120.00 |
+| Drill #1 | 2027-01-25 | refresh | 2 months | 2.38% | 117.43 |
+
+The moves of nozzle #4 and plate #1 changed no value, so they wrote no row. The refresh of
+all on 2027-01-25 found nothing else changed and wrote nothing. The parameter history has
+one row: nozzle #3, `life.hours` `hours` 1500 → 2000.
+
+```mermaid
+erDiagram
+    handler_values {
+        uuid entity_id PK
+        text step PK
+        text handler_id
+        jsonb params
+        jsonb value
+        timestamptz computed_at
+        bigint inputs_through
+    }
+    handler_value_history {
+        bigint id PK
+        uuid entity_id
+        text step
+        timestamptz at
+        text reason
+        text handler_id
+        jsonb params
+        jsonb value
+    }
+    handler_config_history {
+        bigint id PK
+        uuid entity_id
+        text step
+        timestamptz at
+        jsonb old
+        jsonb new
+        jsonb actor
+    }
+    handler_values ||--o{ handler_value_history : "each change"
+    handler_config_history ||--o{ handler_value_history : "params_changed"
+```
+
+## 7. The life of a unit
 
 The statuses are the base flow's. Handlers decide when a unit moves between them.
 
@@ -399,7 +514,7 @@ stateDiagram-v2
     scrapped --> [*]
 ```
 
-## 7. The handlers in Go
+## 8. The handlers in Go
 
 ```mermaid
 classDiagram

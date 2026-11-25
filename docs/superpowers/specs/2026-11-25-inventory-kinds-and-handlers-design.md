@@ -65,7 +65,8 @@ Anti-goals (a failure even if it works):
   handler.
 - A class answer that a kind can change after its parent set it. A spool that becomes a
   service breaks every handler that trusted the class.
-- Two stores of the same fact: life in a column and in a handler, a cost in two places.
+- Two sources of the same fact: life in a column and in a handler, a cost in two places.
+  The handler cache (§4.7) is not a source: it is derived, and a rebuild must match it.
 
 ## 3. The class: what a thing is
 
@@ -170,16 +171,15 @@ Life is a step like the others. Handlers: `life.none`, `life.months` (`months`,
 `salvage_pct`), `life.hours` (`hours`, `source`: the unit's own run hours, the run hours of
 the unit it is installed in, or manual), `life.uses` (`uses`), `life.term` (from the
 instance's `starts_at` to `ends_at`, `warn_days`). A life handler answers a unit's state at
-a time: used share, book value, and signals (a warning, the end). Nothing stores a life
-except the handler's parameters.
+a time: used share, book value, and signals (a warning, the end). Its result is cached,
+with a history (§4.7). This replaces `item_kinds.life_basis`, `items.life_hours`,
+`items.life_months`, `stock_units.life_hours` and `stock_units.life_months`.
 
 A life handler reads only the unit's own `unit_uses` rows (§6.3), never the state of the
 unit it is in now. A print run books a row on the printer and, through it, on each unit
 it contains at that moment. So a nozzle or a plate moved from printer A to printer B keeps
 every hour and print from both, and A's later runs do not count on it. The proof replays
-such a move and checks each life (`docs/inventory-model/README.md` §5.7). This replaces `item_kinds.life_basis`,
-`items.life_hours`, `items.life_months`, `stock_units.life_hours` and
-`stock_units.life_months`.
+such a move and checks each life (`docs/inventory-model/README.md` §5.7).
 
 ### 4.6 Services
 
@@ -207,6 +207,44 @@ Owner rulings, 2026-11-25 (given to scadbuddy-53, relayed on PR #7784):
    own (an outside repair, a fixed service). How the shop's own labour line relates to
    labour items is left to a later phase.
 4. **Selling a service on the storefront is out of scope** (§2).
+
+### 4.7 Cached values, their history, and refresh (owner, 2026-11-25)
+
+The owner: "the system should cache the handler values and keep a history", and "allow
+for a refresh".
+
+- **Cache.** `handler_values` holds, per entity and step, the handler's current result
+  (a life's used share, book value and signals; a roll's remaining count; a lot's unit
+  cost), with the handler id and parameters that made it, when, and the last input it
+  read (`inputs_through`, the newest `unit_uses` row). Pages, stock value, job cost and
+  the machine rate read it. No read runs a handler.
+- **When it is written.** In the transaction of the event that changes a handler's
+  inputs: a use booked, a relationship added or removed, a parameter changed, a retire.
+  A print run updates the printer and every unit it contains. Time-based values
+  (`life.months`, `life.term`) change with no event; the daily schedule refreshes them.
+- **History.** When a cached value changes, a row is appended to
+  `handler_value_history` (at, reason, the value, the handler and parameters in force).
+  A value that did not change writes nothing. Rows are never rewritten: a report of book
+  value at a past date reads the history, so it shows what the shop knew then.
+- **Parameter history.** Every change to a kind's, item's or unit's handler or
+  parameters is appended to `handler_config_history` (old, new, who, when). It explains a
+  value row with the reason `params_changed`.
+- **Manual readings** (owner, 2026-11-25: "allow for manual, like weight, in
+  advanced"). The unit page's Advanced section takes a measured value by hand for a
+  handler that measures something: hours run (`life.hours`), prints (`life.uses`), labels
+  left (`count.remaining`), as `filament.weigh` takes grams. It is a reading row in
+  `unit_uses` (value, who, when), a source like any other: the handler counts later uses
+  on top of the newest reading, and the history shows the reason `manual`. A reading is
+  never an edit of the cache, so a refresh or a rebuild keeps it.
+- **Refresh.** `POST /api/v1/inventory/handler-values/refresh` (forwarded to Go's
+  internal route, §6.1) with a scope: one unit, an item's units, a kind's units, or all.
+  It recomputes each value and appends history only where a value changed, with the
+  reason `refresh`; a repeat at the same time writes nothing. The unit, item and kind
+  pages have a Refresh button, and the agent a tool. A release that changes a handler's
+  formula runs a refresh of all, so the change is dated in the history.
+- **The cache is derived.** The sources stay `unit_uses`, the stock moves, the
+  relationships and the parameters. A rebuild from them must give the cached values; the
+  Go tests check it after every replayed history, as `check.py` does.
 
 ## 5. Relationships
 
@@ -308,6 +346,8 @@ layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
 - New `inventory_signals`: one row per signal raised, so the schedule never raises one
   twice.
 - New `idempotency_keys` for §6.1.
+- New `handler_values` (the cache, primary key `entity_id`, `step`),
+  `handler_value_history` and `handler_config_history` (append only), §4.7.
 - `order_items`: one nullable `service_item_id` (a `custom` item that sells a service,
   §4.6 ruling 2). Orders stay Python's; fulfilling such an item calls Go's consume route.
 
@@ -318,9 +358,10 @@ until #7667 phase 7 moves them. The API and `scadbuddy-core` are the only SQL ho
 ### 6.4 The schedule and the notices
 
 A Python Temporal schedule runs daily, as the housekeeping schedules do until #7667's
-phase 7. Its activity calls `POST /api/v1/internal/crud/inventory/signals/run`. Go asks
-each relationship handler and each life handler for its signals at that time, writes the
-new ones to `inventory_signals`, and queues them as notices the same way sensor notices
+phase 7. Its activity calls `POST /api/v1/internal/crud/inventory/signals/run`. Go first
+refreshes the time-based cached values (§4.7), then asks each relationship handler and
+each life handler for its signals at that time, writes the new ones to
+`inventory_signals`, and queues them as notices the same way sensor notices
 are queued and sent (`filament/sensor_notify.py`, `workflows/sensor_notify.py`). The
 filament sync stays the Python `FilamentBbSync` workflow; in K4 its writes go through the
 Go routes, and `filament.bambuddy_sync` is the Go side of those writes.
@@ -334,8 +375,8 @@ parameters, every instance and every relationship (each container field's `max`
 included), checks that five relationships the design must refuse are refused for their
 stated reason, and checks that the README's table is the resolved one. On 2026-11-25 it
 passed (`uvx --with pyyaml python -I docs/inventory-model/check.py`): 33 kinds, 38
-handlers, 16 items, 17 instances, 16 relationships, and a history of 8 events whose 5
-unit lives it checks. Its 13 Mermaid diagrams rendered with
+handlers, 16 items, 17 instances, 16 relationships, and a history of 13 events whose 6
+unit lives, 21 value history rows and parameter history it checks. Its 15 Mermaid diagrams rendered with
 `@mermaid-js/mermaid-cli` 11.4.2.
 
 The first Go task ports `check.py` to a Go test over the same YAML, so the proof becomes
@@ -376,8 +417,9 @@ Each is an issue under #6949, with layers as stacked PRs.
   units, moves, the internal routes, the Python forwarders for the phase 2 routes, the
   idempotency keys, and the migration of §8. The YAML test. It needs `scadbuddy-core`
   deployed with its CRUD port (#7702), not the front process: Python calls Go directly.
-- K2. Life, services and relationships: `unit_uses`, the life handlers, term instances,
-  the relationship types and container fields, the schedule.
+- K2. Life, services and relationships: `unit_uses`, the life handlers, the handler
+  cache with its history and refresh, term instances, the relationship types and
+  container fields, the schedule.
 - K3. Purchasing in Go, with `filament.receive`: suppliers, offers, price points,
   invoices and the one line model (spec §6.5, §6.7). The filament receive handler comes
   in this phase so that a mixed invoice is confirmed in one Go transaction from the first
@@ -421,6 +463,11 @@ of #7667's phase 6 into this work).
 9. The migration rules of §8 for kinds a person made and items on a root.
 10. Idempotency keys live 7 days (§6.1).
 11. `filament.receive` comes with purchasing in K3, not with the other filament handlers.
+12. The cache is written in the event's transaction, and history only on a change (§4.7).
+13. A past report reads the value history as it was then; a parameter change never
+    rewrites old rows.
+14. A manual reading replaces the counted measure from its time on; it does not change
+    the life's length (`hours`), which is a parameter.
 
 ## 12. Left to the builder
 
