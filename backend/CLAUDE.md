@@ -2420,6 +2420,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `of_version`), so a held copy and a live copy, recorded under one `library:<id>`, are
   never reused, read or superseded for each other. A file's used slots (from 0) reach the
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
+  A pipeline template's listing (#5701, `orders/storefront/pipeline_inputs.py`, spec
+  2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
+  `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
+  ones on the render worker, and `listing_reference` writes the snapshot's around the
+  customer's `params`. No render of one is priced until #5701's PR 3: `estimate_of` starts
+  no slice and `line_prices.py` `price_of` finds no firm price, since `price_key` holds no
+  slug and no inputs. A file listing has no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`

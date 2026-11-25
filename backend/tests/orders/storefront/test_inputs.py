@@ -36,7 +36,7 @@ from scadbuddy.orders.storefront.listings import (
     public_card,
     public_listing,
 )
-from scadbuddy.orders.storefront.renders import _filament_for
+from scadbuddy.orders.storefront.renders import _filament_for, variant_key
 from scadbuddy.orders.storefront.wire import (
     Listing,
     ListingInput,
@@ -47,6 +47,7 @@ from scadbuddy.orders.storefront.wire import (
     RenderBody,
     TextBound,
 )
+from scadbuddy.render.inputs import inputs_key
 from scadbuddy.render.job_models import render_key
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
 from scadbuddy.store.content import ContentStore
@@ -210,6 +211,44 @@ def test_the_reference_comes_from_the_snapshot(listing: Listing) -> None:
         ColourSlot(slot=0, colour="#FF0000", filament_id=PLA_RED),
         ColourSlot(slot=1, colour="#0000FF", filament_id=PLA_BLUE),
     ]
+
+
+def test_a_listing_with_no_pipeline_keeps_its_reference_and_variant_key(
+    listing: Listing,
+) -> None:
+    """#5701 moves neither key: both are stored, and both find a render or a price made
+    before it. The values are those of the code before #5701."""
+    values = listing_values(listing, {"width": 40}, FILAMENTS, SHOP)
+    reference = listing_reference(listing, values, {}, filaments=FILAMENTS).reference
+    assert json.dumps(reference.inputs, sort_keys=True) == (
+        '{"params": {"colour": "#FF0000", "count": 2, "height": 5, "label": "Hi",'
+        ' "shape": "round", "width": 40}, "v": 0}'
+    )
+    assert reference.render_key == (
+        "719adb1d8a4c279be4a6d78ad3e56ee89c5b9d7acedce5017b259da2ad621e09"
+    )
+    choice = resolve_choice(listing, values, {"width"}, FILAMENTS, SHOP)
+    assert variant_key(listing, choice, {0: PLA_RED}) == (
+        "c7a65500e52a6d95fd546854d213fc5477f9105d68f003a34eb57733bb317dc6"
+    )
+
+
+def test_a_pipelines_reference_holds_the_listings_inputs(listing: Listing) -> None:
+    """#5701 (spec 2026-11-17 §7.1): the snapshot's inputs and version, whole, and its key.
+    The customer's values reach `params` only."""
+    house: dict[str, Any] = {"cols": 2, "storeys": 1}
+    snapshot = listing.design[2].model_copy(
+        update={"pipeline": True, "inputs": {"house": house}, "inputs_version": 3}
+    )
+    # The row's own inputs are the next publish's, never a render's.
+    listing = listing.model_copy(update={"snapshot": snapshot, "inputs": {"house": {"cols": 4}}})
+    values = listing_values(listing, {"width": 40}, FILAMENTS, SHOP)
+    reference = listing_reference(listing, values, {0: PLA_RED}, filaments=FILAMENTS).reference
+    assert reference.inputs == {"house": house, "params": values, "v": 3}
+    assert reference.render_key == inputs_key("demo", reference.inputs, COMMIT)
+    with pytest.raises(InputOutsideListingError) as refused:
+        listing_values(listing, {"house": 1}, FILAMENTS, SHOP)
+    assert (refused.value.name, refused.value.reason) == ("house", "unknown")
 
 
 @pytest.mark.parametrize("chosen", [{0: PETG_GREEN}, {0: "no-such-filament"}])

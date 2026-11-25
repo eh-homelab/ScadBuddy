@@ -199,7 +199,9 @@ async def price_of(
     """The firm price of the variant of a line whose design is ``subject``, now
     (`firm_price`), or None. None too when the listing it was added from is gone or
     unpublished, or now shows another design (its slug or commit moved, so the line's
-    design is not the listing's), or a slot's filament is gone or archived. A line of a
+    design is not the listing's), its template is a pipeline (#5701: no render of one is
+    priced yet, and the key, which holds no slug and no inputs, may find the price of the
+    same 3MF from elsewhere), or a slot's filament is gone or archived. A line of a
     file listing (#6710 §7.6, ``subject`` its library file) is priced while its listing is
     still a file listing of that file pinned at the line's sha256, by the listing's own
     snapshot (`priced_file`), as its price read keys it."""
@@ -218,8 +220,11 @@ async def price_of(
         ):
             return None
         file = priced_file(snapshot)
-    elif (listing.slug, listing.commit) != (subject.slug, subject.commit):
-        return None
+    else:
+        if (listing.slug, listing.commit) != (subject.slug, subject.commit):
+            return None
+        if listing.design[2].pipeline:
+            return None
     records = [
         await asyncio.to_thread(orders.store.filament, filament_id)
         for filament_id in variant.slot_filaments

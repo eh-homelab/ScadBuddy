@@ -31,6 +31,13 @@ export interface ListingDraft {
   source?: 'template' | 'library_file'
   /** #6710 — the file a `library_file` listing sells; null until one is picked. */
   library_file?: DraftFile | null
+  /**
+   * #5701 — a pipeline template's own inputs and the version they were made at. The editor
+   * does not set them yet: it sends back the ones the listing has, since a save replaces
+   * the whole listing. Another template starts with none (`emptyDraft`).
+   */
+  inputs?: Record<string, unknown>
+  inputs_v?: number | null
 }
 
 /**
@@ -92,6 +99,8 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     media_ids: listing.media_ids,
     // A listing stored before #6258 has none: the shop's default.
     materials: (listing.materials as string[] | undefined) ?? [],
+    // #5701. A listing stored before it has none, as a template with no pipeline has none.
+    ...(Object.keys((listing.inputs as StorefrontListing['inputs'] | undefined) ?? {}).length > 0 ? { inputs: listing.inputs, inputs_v: listing.inputs_v } : {}),
   }
 }
 
