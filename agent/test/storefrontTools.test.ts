@@ -275,7 +275,15 @@ describe('storefront tools (#6131)', () => {
           expect(posted, vector.name).not.toHaveProperty('inputs_v')
         }
         expect(Object.keys((posted?.['params'] as object | undefined) ?? {}), vector.name).not.toContain('piece')
-        expect(result['notes'], vector.name).toEqual([])
+        // An output with none of the design's own inputs says so (the vectors' empty case).
+        const empty = inputs !== undefined && Object.keys(inputs as object).length === 0
+        expect(result['notes'], vector.name).toEqual(
+          empty
+            ? [
+                `The output holds none of Dollhouse's own design inputs (its pipeline's), so the listing starts with none: open the listing at /storefront/listings/${LISTING} and check "Set up the design" before you publish it.`,
+              ]
+            : [],
+        )
       }
     })
 
