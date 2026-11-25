@@ -89,7 +89,8 @@ The change:
   empty weight; the difference is the empty weight the client used, and it is what the
   event keeps. When `grams` is left out and `reading_g` given, the store computes
   `grams = reading_g - empty_g` with the effective empty weight, and refuses (422) a spool
-  with no empty weight known, naming it.
+  with no empty weight known (`no_empty_weight`) or a reading under that empty weight
+  (`reading_below_empty`), naming it.
 - The `weighed` event's `data` keeps: `reading_g`; `empty_g`; `empty_source` (`insert`,
   or `parts` once #7278 lands, or `person` when the client subtracted something else
   than the effective empty weight); `empty_basis` (for `insert`, the insert's
@@ -119,8 +120,9 @@ The change:
 
   The second line is left out when `expected_g` is null. "less" / "more" follows the
   sign; "matches the prints" under 1 g.
-- An added-full spool whose anchor is not a `scale` or `person` reading shows the gap
-  between its label weight and the anchor:
+- An added-full spool whose anchor is still its `created` event (nothing weighed or
+  re-anchored it since; a later AMS or sync anchor would count printed filament as a
+  gap) shows the gap between its label weight and that starting amount:
 
   ```text
   Started at the label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g unexplained.
