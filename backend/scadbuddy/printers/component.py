@@ -23,6 +23,7 @@ from scadbuddy.core.events import PrinterEvent, emit
 from scadbuddy.core.secrets import Kek
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.printers.address import lan_address
+from scadbuddy.printers.command_data import PrinterCommandData
 from scadbuddy.printers.lan import LanPrinter, fetch_cert_sha256
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.reports import PrinterReportStore
@@ -103,6 +104,7 @@ class Printers:
             previous_kek=settings_kek(core.settings.secret_key_previous_file),
         )
         self._reports = PrinterReportStore(self._pool)
+        self._command_data = PrinterCommandData(self._pool)
         self._opened = False
         self.probe: Probe = lan_probe
         self.watches = Watches(core)
@@ -121,6 +123,11 @@ class Printers:
     def reports(self) -> PrinterReportStore:
         self._open()
         return self._reports
+
+    @property
+    def command_data(self) -> PrinterCommandData:
+        self._open()
+        return self._command_data
 
     def changed(self, printer_id: str) -> None:
         """Announce a write to ``printer_id``'s row (``printer.changed``)."""
