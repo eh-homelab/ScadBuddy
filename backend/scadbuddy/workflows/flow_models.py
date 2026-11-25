@@ -195,11 +195,13 @@ class DecisionAsk(BaseModel):
 class DecisionRead(BaseModel):
     """What a gated body runs (#2482, plan Task B4): a narrowed decision's input, given
     only when it hashes to the decision's own hash. `narrowed` with no `args` is a
-    narrowed decision that does not hold, and the body refuses."""
+    decision that lets nothing run, and the body refuses: a narrowed one that does not
+    hold, or (`refused` says so) none that approves the call (#7588)."""
 
     narrowed: bool = False
     args: dict[str, Any] | None = None
     narrowed_by: str | None = None
+    refused: str | None = None
 
 
 class GrantApprove(BaseModel):

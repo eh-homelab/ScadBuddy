@@ -584,20 +584,25 @@ async def _approved(call_id: str) -> None:
 
 
 #: An approved body reads its decision, and runs a narrowed one's input (#2482): a run
-#: recorded before it replays without.
+#: recorded before it replays without. Such a run reads it from its next call on, by the
+#: call's own marker (`FLOW_NARROWED_PATCH:<call id>`, #7588): a call that a take-over
+#: denied must not run there either.
 FLOW_NARROWED_PATCH = "flow-narrowed-decision"
 
 
 class NarrowedInputError(Exception):
-    """The call was approved narrowed, but the narrowed input is not the one approved:
-    nothing runs."""
+    """The call was approved narrowed, but the narrowed input is not the one approved, or
+    no approval of it is on record (#7588): nothing runs."""
 
 
 async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRead:
     """The call's decision as the body runs it (spec 2026-10-11 §4.2): a narrowed one's
     input, bound to the decision's hash. A narrowed decision that does not hold runs
-    nothing, never the input the call was parked with."""
-    if not workflow.patched(FLOW_NARROWED_PATCH):
+    nothing, never the input the call was parked with. Nor does one that is no approval."""
+    if not (
+        workflow.patched(FLOW_NARROWED_PATCH)
+        or workflow.patched(f"{FLOW_NARROWED_PATCH}:{call_id}")
+    ):
         return DecisionRead()
     read: DecisionRead = await workflow.execute_activity(
         FLOW_DECISION,
@@ -607,7 +612,9 @@ async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRe
         retry_policy=RetryPolicy(maximum_attempts=5),
     )
     if read.narrowed and read.args is None:
-        raise NarrowedInputError("the narrowed input is not the one that was approved")
+        raise NarrowedInputError(
+            read.refused or "the narrowed input is not the one that was approved"
+        )
     return read
 
 
