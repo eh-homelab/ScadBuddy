@@ -274,6 +274,15 @@ describe('HostedPluginsPanel', () => {
         },
         { once: true },
       ),
+      // The event's read also brings a version 2 published elsewhere.
+      http.get(
+        '/api/v1/hosted-plugins/:name/versions',
+        async ({ request }) => {
+          const seen = (await (await fetch(request.url)).json()) as { version: number }[]
+          return HttpResponse.json([...seen, { ...seen.at(-1)!, version: 2 }] as JsonBodyType)
+        },
+        { once: true },
+      ),
     )
     emitRealtime('plugin_packages.changed', ['plugin-packages'], { name: 'print-notes' })
     await arrived
@@ -286,7 +295,8 @@ describe('HostedPluginsPanel', () => {
     release()
     await act(() => new Promise((resolve) => setTimeout(resolve, 200)))
     expect(within(editor).queryByText('The draft is the same as version 1. Edit it to publish again.')).not.toBeInTheDocument()
-    expect(within(editor).getByRole('button', { name: 'Publish version 2' })).toBeEnabled()
+    // The save's draft read does not order the versions: the event's answer still lands.
+    expect(within(within(editor).getByRole('region', { name: 'Versions' })).getByText('Version 2')).toBeInTheDocument()
   })
 
   it("reads nothing again for another plugin's change (#7672)", async () => {

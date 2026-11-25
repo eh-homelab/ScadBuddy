@@ -120,6 +120,9 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
 
   /** Bumped by each read of the draft diff: only the newest read's answer is shown (#7672). */
   const diffReads = useRef(0)
+  // The versions' own order: only the mount and topic reads read them, so a save's draft read
+  // (`reloadDraft`) never stops a newer list of versions from landing (#7672).
+  const versionReads = useRef(0)
 
   const reloadDraft = useCallback(async () => {
     const mine = ++diffReads.current
@@ -134,18 +137,19 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   useEffect(() => {
     let live = true
     const mine = ++diffReads.current
+    const mineVersions = ++versionReads.current
     const { record, result } = recordRead(
       () => Promise.all([hostedPlugins.files(name), hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]),
-      () => live,
+      // A read whose diff a newer one replaced vouches for nothing.
+      () => live && mine === diffReads.current,
     )
     lastRead.current = record
     result.then(
       ([f, d, v]) => {
         if (!live) return
         setFiles(f)
-        if (mine !== diffReads.current) return
-        setDiff(d)
-        setVersions(v)
+        if (mineVersions === versionReads.current) setVersions(v)
+        if (mine === diffReads.current) setDiff(d)
       },
       (caught: unknown) => live && setLoadError(message(caught)),
     )
@@ -162,12 +166,13 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     (signal) => {
       if (signal !== 'resync' && signal.data.name !== name) return
       const mine = ++diffReads.current
+      const mineVersions = ++versionReads.current
       Promise.all([hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]).then(
         ([d, v]) => {
-          // A newer read (a save's, or a later event's) answers for the draft.
-          if (mine !== diffReads.current) return
-          setDiff(d)
-          setVersions(v)
+          // A newer read answers for each: a save's or a later event's for the draft, only a
+          // later event's for the versions.
+          if (mineVersions === versionReads.current) setVersions(v)
+          if (mine === diffReads.current) setDiff(d)
         },
         // As a list's background read: a failed one keeps what is shown (a plugin deleted
         // elsewhere closes the editor when the list is read again).
