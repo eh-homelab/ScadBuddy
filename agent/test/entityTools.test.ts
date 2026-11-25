@@ -218,7 +218,7 @@ describe('entity attachment and link tools', () => {
     server.use(...serveFile(SPOOL, 'image/jpeg', big))
     const result = await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())
     expect(result.content.some((c) => c.type === 'image')).toBe(false)
-    expect(firstText(result)).toMatchObject({ viewable: false, media_type: 'image/jpeg', size_bytes: IMAGE_BYTES_MAX + 1 })
+    expect(firstText(result)).toMatchObject({ inline: false, media_type: 'image/jpeg', size_bytes: IMAGE_BYTES_MAX + 1 })
   })
 
   it("refuses an order's entity with the backend's use_order_route", async () => {
