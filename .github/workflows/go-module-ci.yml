@@ -7,7 +7,7 @@ name: Go Module CI
 # vendor build for a module that ships its own vendor/), then checks that the
 # root vendor/ is what `go work vendor` writes. gofmt is one walk of the whole
 # tree, gooey's step, and each CLI's image is built and run once
-# (build-go-image.yml publishes them).
+# (build-go-image.yml publishes them; build-image.yml's `core` job publishes core, #7667).
 #
 # Path-gated only on a docs-only change (ci.yml `docs_only`), where it skips.
 # Otherwise ci.yml's `go-select` decides whether this change touched Go

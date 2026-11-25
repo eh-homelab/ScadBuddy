@@ -497,6 +497,9 @@ pm_manifest=
 #       one line; a build with no image keeps the pin and warns.
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
   grep -q '^core=none$' "$work/out" || fail "no core line: output is not none"
+  # CORE_DIGEST is set here, so this also checks that a published core image with no
+  # core line in the manifest is not a kept pin.
+  ! grep -q 'keeping the core pin' "$work/log" || fail "no core line: warned about a kept pin"
 else
   fail "no core line: step failed: $(grep '::error' "$work/log")"
 fi
