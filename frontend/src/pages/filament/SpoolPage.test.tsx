@@ -64,6 +64,20 @@ describe('the spool page', () => {
     expect(within(weight).queryByText(/unexplained/)).toBeNull()
   })
 
+  it('names the drift in the heading and on the timeline when it is a notice (#7682)', async () => {
+    open(1)
+    await heading(1)
+    expect(screen.getByRole('heading', { level: 1 }).parentElement).toHaveTextContent(/Drift −12 g/)
+    const history = screen.getByRole('region', { name: 'History' })
+    expect(await within(history).findByText(/reading 890 g, spool 250 g, 12 g less than expected/)).toBeInTheDocument()
+  })
+
+  it('names no drift for a spool whose newest weighing has no breakdown (#7682)', async () => {
+    open(2)
+    await heading(2)
+    expect(screen.getByRole('heading', { level: 1 }).parentElement).not.toHaveTextContent(/Drift/)
+  })
+
   it('says the start gap of an added-full spool whose grams came from Bambuddy (#7682)', async () => {
     open(4)
     await heading(4)

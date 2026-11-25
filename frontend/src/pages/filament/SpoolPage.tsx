@@ -748,7 +748,8 @@ export function SpoolPage() {
             {creating
               ? 'Choose its type, or its material if it has none yet.'
               : (() => {
-                  const rest = [leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')
+                  const drift = saved?.drift_notice && saved.last_drift_g != null ? `Drift ${saved.last_drift_g < 0 ? '−' : '+'}${grams(Math.abs(saved.last_drift_g))}` : null
+                  const rest = [leftNow != null ? grams(leftNow) : null, saved?.low_stock ? 'Low stock' : null, drift, saved?.archived_at ? 'Archived' : null].filter(Boolean).join(', ')
                   const what = typeRow && saved?.type_id ? <EntityLink to={filamentLinks.type(saved.type_id)}>{typeRow.code}</EntityLink> : saved?.names.material
                   return (
                     <>
