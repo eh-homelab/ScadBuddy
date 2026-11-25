@@ -174,6 +174,11 @@ export type ToolOverrides = {
   of(tool: string): Promise<ToolOverride>
   /** Every disabled tool's name, for a tool list (/mcp). */
   disabled(): Promise<ReadonlySet<string>>
+  /**
+   * Every tool's override as one read sees them (#7731): for a list of many tools, whose
+   * `of` per tool would make one read each. Absent: call `of` per tool.
+   */
+  snapshot?(): Promise<ToolOverrides>
 }
 
 /** What a tool runs at now: its override's tier or its own, whether that gates it, and whether it is disabled. */
