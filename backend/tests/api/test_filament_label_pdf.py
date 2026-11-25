@@ -1,16 +1,25 @@
 """#7157: `POST /filament/labels` (the labels PDF), `GET /filament/label-templates` and the
 setting `filament_label_template` (plan
-`docs/superpowers/plans/2026-11-23-label-templates-pdf.md`)."""
+`docs/superpowers/plans/2026-11-23-label-templates-pdf.md`). #7216: the PNG answers and the
+setting `filament_label_output` (plan `docs/superpowers/plans/2026-11-25-label-outputs.md`)."""
 
 from __future__ import annotations
 
+import io
 import re
+import zipfile
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
+import pypdfium2
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
-from scadbuddy.filament import label_pdf
+from scadbuddy.filament import label_fonts, label_pdf, label_png
+from scadbuddy.filament.label_output import ALL_FIELDS, DEFAULT_FIELDS, LabelField
 from scadbuddy.filament.label_pdf import Label, Layout
 from scadbuddy.filament.label_templates import LabelTemplate
 
@@ -52,9 +61,14 @@ def drawn(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[Label], LabelTempl
     calls: list[tuple[list[Label], LabelTemplate, Layout]] = []
     real = label_pdf.render_pdf
 
-    def spy(labels: list[Label], template: LabelTemplate, layout: Layout) -> bytes:
+    def spy(
+        labels: list[Label],
+        template: LabelTemplate,
+        layout: Layout,
+        fields: Sequence[LabelField] = DEFAULT_FIELDS,
+    ) -> bytes:
         calls.append((list(labels), template, layout))
-        return real(labels, template, layout)
+        return real(labels, template, layout, fields)
 
     monkeypatch.setattr(label_pdf, "render_pdf", spy)
     return calls
@@ -84,8 +98,9 @@ def test_the_template_setting_round_trips(client: TestClient) -> None:
         "template": "roll_50x25",
         "width_mm": None,
         "height_mm": None,
+        "sheet_id": None,
     }
-    custom = {"template": "custom", "width_mm": 80, "height_mm": 40}
+    custom = {"template": "custom", "width_mm": 80, "height_mm": 40, "sheet_id": None}
     assert client.put(SETTINGS, json={name: custom}).status_code == 200
     assert client.get(SETTINGS).json()[name] == custom
     assert client.put(SETTINGS, json={name: {"template": "custom"}}).status_code == 422
@@ -103,6 +118,7 @@ def test_a_spool_label_pdf_carries_the_spools_own_data(
     assert 'filename="labels.pdf"' in answer.headers["content-disposition"]
     assert answer.content.startswith(b"%PDF-")
     [(labels, template, layout)] = drawn
+    created = datetime.fromisoformat(str(spool["created_at"])).astimezone(UTC)
     assert labels == [
         label_pdf.SpoolLabel(
             number=int(str(spool["number"])),
@@ -110,6 +126,7 @@ def test_a_spool_label_pdf_carries_the_spools_own_data(
             colour="Jade White",
             brand=None,
             qr=f"scadbuddy:spool:{spool['id']}",
+            added=created.date().isoformat(),
         )
     ]
     # No template sent: the stored setting's, the 50 x 25 mm roll by default.
@@ -215,7 +232,161 @@ def test_an_unknown_id_is_a_404_that_names_it(client: TestClient) -> None:
         {"spool_ids": [str(uuid4()) for _ in range(101)]},
         {"spool_ids": [str(uuid4())], "layout": "fan"},
         {"spool_ids": [str(uuid4())], "template": {"template": "custom", "width_mm": 30}},
+        {"spool_ids": [str(uuid4())], "format": "png", "dpi": 150},
     ],
 )
 def test_a_bad_body_is_a_422(client: TestClient, body: dict[str, object]) -> None:
     assert client.post(PDF, json=body).status_code == 422
+
+
+def test_png_of_one_label_is_labels_png(client: TestClient) -> None:
+    spool = _spool(client)
+    answer = client.post(PDF, json={"spool_ids": [spool["id"]], "format": "png"})
+    assert answer.status_code == 200, answer.text
+    assert answer.headers["content-type"] == "image/png"
+    assert answer.headers["content-disposition"] == 'attachment; filename="labels.png"'
+    assert answer.content.startswith(b"\x89PNG")
+
+
+def test_png_of_several_labels_is_a_zip(client: TestClient) -> None:
+    first, second = _spool(client), _spool(client)
+    body = {"spool_ids": [second["id"], first["id"]], "format": "png", "dpi": 203}
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    assert answer.headers["content-type"] == "application/zip"
+    assert answer.headers["content-disposition"] == 'attachment; filename="labels.zip"'
+    with zipfile.ZipFile(io.BytesIO(answer.content)) as archive:
+        assert archive.namelist() == [
+            f"spool-{second['number']}.png",
+            f"spool-{first['number']}.png",
+        ]
+        assert all(archive.read(name).startswith(b"\x89PNG") for name in archive.namelist())
+
+
+def test_the_stored_output_choice_is_used(client: TestClient) -> None:
+    spool = _spool(client)
+    stored = {"filament_label_output": {"format": "png", "dpi": 203}}
+    assert client.put(SETTINGS, json=stored).status_code == 200
+    answer = client.post(PDF, json={"spool_ids": [spool["id"]]})
+    assert answer.status_code == 200, answer.text
+    assert answer.headers["content-type"] == "image/png"
+    image = Image.open(io.BytesIO(answer.content))
+    assert image.info["dpi"] == pytest.approx((203, 203), abs=0.5)
+    # The request's own format outranks the setting.
+    sent = client.post(PDF, json={"spool_ids": [spool["id"]], "format": "pdf"})
+    assert sent.headers["content-type"] == "application/pdf"
+
+
+def test_a_png_past_the_pixel_limit_is_a_422(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    body = {
+        "spool_ids": [str(uuid4()) for _ in range(100)],
+        "template": {"template": "custom", "width_mm": 190, "height_mm": 190},
+        "format": "png",
+        "dpi": 600,
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 422, answer.text
+    assert answer.json()["code"] == "png_too_large"
+    assert drawn == []
+
+
+def test_the_output_setting_round_trips(client: TestClient) -> None:
+    name = "filament_label_output"
+    default = {
+        "format": "pdf",
+        "dpi": 300,
+        "fields": ["number", "material", "colour", "brand", "qr"],
+    }
+    assert client.get(SETTINGS).json()[name] == default
+    chosen = {"format": "png", "dpi": 600, "fields": ["number", "qr"]}
+    assert client.put(SETTINGS, json={name: chosen}).status_code == 200
+    assert client.get(SETTINGS).json()[name] == chosen
+    assert client.put(SETTINGS, json={name: {"dpi": 150}}).status_code == 422
+    assert client.put(SETTINGS, json={name: {"fields": []}}).status_code == 422
+    assert client.put(SETTINGS, json={name: None}).status_code == 200
+    assert client.get(SETTINGS).json()[name] == default
+
+
+def test_a_missing_label_font_is_a_503(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # R-7216-4: no Helvetica fallback, which would bring back the `?`.
+    missing = tmp_path / "DejaVuSans.ttf"
+    monkeypatch.setitem(label_fonts.DEJAVU, "regular", missing)
+    monkeypatch.setitem(label_fonts.DEJAVU, "bold", missing)
+    label_fonts.reset_for_tests()
+    try:
+        answer = client.post(PDF, json={"spool_ids": [_spool(client)["id"]]})
+    finally:
+        monkeypatch.undo()
+        label_fonts.reset_for_tests()
+    assert answer.status_code == 503, answer.text
+    assert answer.json()["code"] == "label_font_missing"
+    assert str(missing) in answer.text
+
+
+def _pdf_text(pdf: bytes) -> str:
+    """The PDF's text as PDFium reads it, under the labels' PDFium lock."""
+    out = []
+    with label_png._PDFIUM_LOCK:
+        document = pypdfium2.PdfDocument(pdf)
+        try:
+            for at in range(len(document)):
+                page = document[at]
+                textpage = page.get_textpage()
+                out.append(textpage.get_text_range())
+                textpage.close()
+                page.close()
+        finally:
+            document.close()
+    return "\n".join(out)
+
+
+def test_a_spool_label_prints_the_chosen_fields(client: TestClient) -> None:
+    spool = _spool(
+        client,
+        rgba="#00AE42FF",
+        label_weight_g=1000,
+        nozzle_temp_min=190,
+        nozzle_temp_max=230,
+        note="Dry first\nthen print",
+    )
+    place = _place(client, "Shelf Q")
+    moved = client.post(f"{URL}/spools/{spool['id']}/move", json={"location_id": place["id"]})
+    assert moved.status_code == 200, moved.text
+    read = client.get(f"{URL}/spools/{spool['id']}").json()
+    created = datetime.fromisoformat(str(read["created_at"]))
+    body = {
+        "spool_ids": [spool["id"]],
+        "template": {"template": "ams_holder_75x55"},
+        "fields": list(ALL_FIELDS),
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    text = _pdf_text(answer.content)
+    for want in ("#00AE42", "Shelf Q", "190\N{EN DASH}230 °C", "1000 g", "Dry first"):
+        assert want in text
+    assert "then print" not in text
+    # The row's own date, in UTC: never today's.
+    assert created.astimezone(UTC).date().isoformat() in text
+
+
+def test_the_stored_fields_are_used(client: TestClient) -> None:
+    spool = _spool(client)
+    stored = {"filament_label_output": {"format": "pdf", "dpi": 300, "fields": ["number"]}}
+    assert client.put(SETTINGS, json=stored).status_code == 200
+    answer = client.post(PDF, json={"spool_ids": [spool["id"]]})
+    assert answer.status_code == 200, answer.text
+    text = _pdf_text(answer.content)
+    assert f"#{spool['number']}" in text
+    assert "PLA" not in text
+    # The request's own fields outrank the setting.
+    sent = client.post(PDF, json={"spool_ids": [spool["id"]], "fields": ["number", "material"]})
+    assert "PLA" in _pdf_text(sent.content)
+
+
+def test_a_request_with_no_fields_is_a_422(client: TestClient) -> None:
+    answer = client.post(PDF, json={"spool_ids": [str(uuid4())], "fields": []})
+    assert answer.status_code == 422, answer.text

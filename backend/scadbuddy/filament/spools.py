@@ -31,6 +31,7 @@ from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
 from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.empty_weight import effective_on
+from scadbuddy.filament.insert_weights import check_on
 from scadbuddy.filament.invoice_money import price_per_kg, unit_cost
 from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.rfid_push import enqueue_tag, link_origin
@@ -152,6 +153,15 @@ class ReadingBelowEmptyError(ValueError):
 
     def __init__(self) -> None:
         super().__init__("the reading is below the spool's empty weight")
+
+
+class NoBelowLabelError(ValueError):
+    """A weighing sent with a ``resolution`` the insert weight check does not offer now
+    (#7683): ``reason`` is the check's answer (``below_label`` when it offered others)."""
+
+    def __init__(self, reason: m.NoOfferReason | None) -> None:
+        super().__init__(f"no reading under the label weight to resolve: {reason}")
+        self.reason: m.NoOfferReason | None = reason
 
 
 class SpoolTypelessError(ValueError):
@@ -1471,7 +1481,13 @@ class FilamentSpoolStore:
         `ResetBeforeLinkError` (R-7149-12). A weighing with ``reading_g`` keeps its
         breakdown (`ledger.breakdown`, #7682); one with no ``grams`` takes the spool's
         effective empty weight off the reading, `NoEmptyWeightError` when there is
-        none and `ReadingBelowEmptyError` when the reading is under it."""
+        none and `ReadingBelowEmptyError` when the reading is under it. One with a
+        ``resolution`` (#7683) is checked again under the row locks
+        (`insert_weights.check_on`), `NoBelowLabelError` unless the check offers that
+        resolution now; ``short`` first writes ``added_full`` false (unless it is false
+        already) and ``label_wrong`` the spool's own ``label_weight_g``, each with an
+        ``edited`` event at the weighing's time, in the same transaction; it keeps
+        ``expected_g`` and records no ``drift_g``, since the person explained the gap."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
         grams = body.grams
         # Read before the store takes its connection (`FilamentDefaults`' rule).
@@ -1504,20 +1520,23 @@ class FilamentSpoolStore:
                 data |= {"temp_c": temp, "hours": None if hours is None else float(hours)}
             if body.kind == "weighed" and body.reading_g is not None:
                 empty = effective_on(conn, spool_id)
-                if grams is None:
-                    if empty is None:
-                        raise NoEmptyWeightError()
-                    grams = body.reading_g - empty.grams
-                    if grams < 0:
-                        raise ReadingBelowEmptyError()
                 spool = conn.execute(
-                    "SELECT s.weight_locked,"
+                    "SELECT s.weight_locked, s.added_full,"
+                    " s.label_weight_g AS own_label_weight_g,"
                     " coalesce(s.label_weight_g, t.label_weight_g) AS label_weight_g"
                     " FROM filament_spools s LEFT JOIN filament_spool_types t ON t.id = s.type_id"
                     " WHERE s.id = %s",
                     (spool_id,),
                 ).fetchone()
                 assert spool is not None
+                if body.resolution is not None:
+                    grams = self._resolve_below_label(conn, spool_id, body, spool, actor, data)
+                elif grams is None:
+                    if empty is None:
+                        raise NoEmptyWeightError()
+                    grams = body.reading_g - empty.grams
+                    if grams < 0:
+                        raise ReadingBelowEmptyError()
                 expected = ledger.expected_before(
                     ledger.events(conn, spool_id),
                     body.at,
@@ -1525,7 +1544,12 @@ class FilamentSpoolStore:
                     label_weight_g=spool["label_weight_g"],
                 )
                 data |= ledger.breakdown(
-                    reading_g=body.reading_g, grams=grams, empty=empty, expected=expected
+                    reading_g=body.reading_g,
+                    grams=grams,
+                    empty=empty,
+                    expected=expected,
+                    tared=body.resolution == "tared",
+                    resolved=body.resolution is not None,
                 )
             return ledger.record(
                 conn,
@@ -1537,6 +1561,49 @@ class FilamentSpoolStore:
                 actor=actor,
                 data=data,
             )
+
+    @staticmethod
+    def _resolve_below_label(
+        conn: Conn,
+        spool_id: UUID,
+        body: m.SpoolEventAdd,
+        spool: Row,
+        actor: str,
+        data: dict[str, Any],
+    ) -> float:
+        """The filament of a weighing with a ``resolution`` (#7683), its side effect
+        booked: `NoBelowLabelError` unless the check offers that resolution now."""
+        assert body.reading_g is not None and body.resolution is not None
+        check = check_on(conn, spool_id, body.reading_g, lock=True)
+        assert check is not None
+        chosen = next((r for r in check.resolutions if r.kind == body.resolution), None)
+        if check.reason != "below_label" or chosen is None:
+            raise NoBelowLabelError(check.reason)
+        changes: dict[str, list[Any]] | None = None
+        if chosen.kind == "short" and spool["added_full"] is not False:
+            conn.execute(
+                "UPDATE filament_spools SET added_full = false, updated_at = now() WHERE id = %s",
+                (spool_id,),
+            )
+            changes = {"added_full": [spool["added_full"], False]}
+        elif chosen.kind == "label_wrong":
+            conn.execute(
+                "UPDATE filament_spools SET label_weight_g = %s, updated_at = now() WHERE id = %s",
+                (chosen.new_label_weight_g, spool_id),
+            )
+            changes = {"label_weight_g": [spool["own_label_weight_g"], chosen.new_label_weight_g]}
+        if changes is not None:
+            ledger.record(
+                conn,
+                spool_id,
+                "edited",
+                source="person",
+                actor=actor,
+                at=body.at,
+                data={"changes": changes},
+            )
+        data |= {"resolution": chosen.kind, "shortfall_g": check.shortfall_g}
+        return chosen.filament_g
 
     def reset_consumed(self, spool_ids: Sequence[UUID], *, actor: str) -> m.ConsumedResetDone:
         """A person's ``consumed_reset`` on each spool named, in one transaction, the spools

@@ -66,7 +66,10 @@ from scadbuddy.entities.problems import bad_property_value, missing_required
 from scadbuddy.entities.properties import BadPropertyValue, MissingRequiredProperties
 from scadbuddy.filament import (
     capture,
+    label_fonts,
     label_pdf,
+    label_png,
+    label_sheets,
     label_templates,
     rfid_mode,
     tags,
@@ -128,6 +131,15 @@ from scadbuddy.filament.csv_import import (
     import_rows,
 )
 from scadbuddy.filament.insert_weights import NoInsertWeightOfferError
+from scadbuddy.filament.label_output import LabelOutput
+from scadbuddy.filament.label_sheets import (
+    LabelSheetGoneError,
+    LabelSheetIn,
+    LabelSheetNameTakenError,
+    SavedLabelSheet,
+    TooManyLabelSheetsError,
+)
+from scadbuddy.filament.label_sheets import resolve as resolve_template
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.labels import (
     LabelNotFoundError,
@@ -171,6 +183,7 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
+    NoBelowLabelError,
     NoEmptyWeightError,
     OverrideKindError,
     ReadingBelowEmptyError,
@@ -216,7 +229,8 @@ from scadbuddy.workflows.commands import (
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
 #: themselves; the Bambuddy import pulls and writes nothing, so it has nothing to push
-#: (Decision 163), nor has the labels PDF (#7157);
+#: (Decision 163), nor have the labels files (#7157, #7216) and the saved label sheets
+#: (#7216 R-7216-13), which the sync does not push;
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
 #: too, un-nudged, and every labels-page load and agent read calls them; the presets
 #: import (#7244) takes Bambuddy's presets, which Bambuddy already holds. The phone's tag
@@ -230,7 +244,10 @@ NOT_NUDGED = frozenset(
         "reset_filament_sync_links",
         "import_bambuddy",
         "printer_labels",
-        "render_labels_pdf",
+        "render_labels",
+        "create_label_sheet",
+        "replace_label_sheet",
+        "delete_label_sheet",
         "import_bambuddy_presets",
         "back_up_tag",
         "tag_records",
@@ -1760,7 +1777,14 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
         "(`grams - expected_g`). With `reading_g` and no `grams`, the filament is the reading "
         "less the spool's effective empty weight (its insert's, else its type's insert's); a "
         "spool with none is a 422 with `code` `no_empty_weight`, and a reading under the "
-        "empty weight one with `code` `reading_below_empty`. "
+        "empty weight one with `code` `reading_below_empty`. A new spool read under its "
+        "label weight sends `resolution` with `reading_g` alone (#7683): `tared` (the "
+        "filament is the reading), `short` (the reading less the empty weight; the spool "
+        "stops being added full) or `label_wrong` (the same filament, and the spool's own "
+        "`label_weight_g` becomes it, rounded), as `GET …/insert-weight-offer` offered it; "
+        "the side effect is an `edited` event before the weighing, and the event's `data` "
+        "keeps `resolution` and `shortfall_g`. A resolution the check does not offer now "
+        "is a 422 with `code` `no_below_label` and the check's `reason`; nothing is booked. "
         "`dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
         "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
@@ -1794,6 +1818,13 @@ async def add_spool_event(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="reading_below_empty"
         ) from None
+    except NoBelowLabelError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(exc),
+            code="no_below_label",
+            reason=exc.reason,
+        ) from None
     if made is None:
         raise _no_spool(spool_id)
     return made
@@ -1804,7 +1835,14 @@ _INSERT_WEIGHT_RULE = (
     "no print's grams, no delta down, no reading below the label weight) and its grams left "
     "still equal the label weight (the spool's own, else its type's). Only then is an offer "
     "made, and only when the reading is above the label weight and the derived weight "
-    "(`reading_g - label_weight_g`) is at most the label weight."
+    "(`reading_g - label_weight_g`) is at most the label weight. A new spool read under "
+    "its label weight is `reason` `below_label` (#7683): `shortfall_g` is "
+    "`label_weight_g - reading_g`, `resolutions` lists the readings of it with their "
+    "filament grams (`tared`: the scale was tared on the empty spool; `short` and "
+    "`label_wrong`, each the reading less the insert's empty weight, only when that is "
+    "not negative; `label_wrong` also names `new_label_weight_g`), and `default` the one "
+    "to preselect (`tared` within 10 % of the label, else `short`; a reading under the "
+    "empty weight offers `tared` alone, so the default is `tared`)."
 )
 
 
@@ -1817,7 +1855,8 @@ _INSERT_WEIGHT_RULE = (
         "spool and insert. `filament_g` is the reading less the insert's empty weight now "
         "(`null` without an insert). Read it before the weighing is recorded, as the "
         "weighing changes the grams left (#7280).\n\n"
-        f"{_INSERT_WEIGHT_RULE} Otherwise `offer` is `null` and `reason` says why.\n\n"
+        f"{_INSERT_WEIGHT_RULE} Otherwise `offer` is `null` and `reason` says why; a "
+        "`below_label` answer is the choice the weighing's `resolution` names.\n\n"
         "The offer's `new_empty_weight_g` is the mean of the insert's readings with this one, "
         "rounded half up. `checked_by_default` is true only for a placeholder weight or an "
         "earlier derived one; nothing changes the insert until "
@@ -2740,12 +2779,18 @@ async def printer_labels(
         "Each template a label can take (#7157): its `id`, `name`, label `width_mm` and "
         "`height_mm`, and for a sheet of labels its `sheet` (`page` `a4` or `letter`, "
         "`cols`, `rows`, `top_mm`, `left_mm`, `col_gap_mm`, `row_gap_mm`). `custom` takes "
-        "any size within its bounds, one label a page. The setting `filament_label_template` "
-        "holds the one chosen."
+        "any size within its bounds, one label a page. `saved` lists the saved sheet grids "
+        "(#7216), by name with case ignored: each one's `id`, `name`, `layout` (`page`, "
+        "`width_mm`, `height_mm`, `cols`, `rows`, `top_mm`, `left_mm`, `col_gap_mm`, "
+        "`row_gap_mm`), `created_at` and `updated_at`; a label choice names one as "
+        '`{template: "saved", sheet_id}`. The setting `filament_label_template` holds the '
+        "one chosen."
     ),
 )
-async def list_label_templates() -> m.LabelTemplates:
+async def list_label_templates(filament: FilamentDep) -> m.LabelTemplates:
+    saved = await asyncio.to_thread(filament.label_sheets.list)
     return m.LabelTemplates(
+        saved=saved,
         templates=list(label_templates.TEMPLATES),
         custom=m.CustomLabelBounds(
             min_width_mm=label_templates.MIN_WIDTH_MM,
@@ -2756,32 +2801,155 @@ async def list_label_templates() -> m.LabelTemplates:
     )
 
 
+def _no_label_sheet(sheet_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no label sheet {sheet_id}")
+
+
+def _label_sheet_refused(exc: ValueError) -> ApiError:
+    code = (
+        "label_sheet_name_taken"
+        if isinstance(exc, LabelSheetNameTakenError)
+        else "too_many_label_sheets"
+    )
+    return ApiError(status.HTTP_409_CONFLICT, str(exc), code=code)
+
+
+_SHEET_BODY = (
+    "`name` is 1 to 100 characters after trim and NFC, and unique with case ignored. "
+    "`layout`: `page` `a4` or `letter`; a label `width_mm` 40 to 190 and `height_mm` 25 to "
+    "190; `top_mm`, `left_mm`, `col_gap_mm` and `row_gap_mm` (default 0) 0 to 190; `cols` "
+    "1 to 20 and `rows` 1 to 40; the grid must fit the page with 0.01 mm of slack, else 422."
+)
+
+
+@router.post(
+    "/label-sheets",
+    response_model=SavedLabelSheet,
+    status_code=status.HTTP_201_CREATED,
+    summary="Save a label sheet",
+    description=(
+        "Save a named sheet grid of labels (#7216). "
+        + _SHEET_BODY
+        + f" 409 `label_sheet_name_taken` for a name another sheet has, 409 "
+        f"`too_many_label_sheets` past {label_sheets.MAX_SAVED_SHEETS} sheets."
+    ),
+)
+async def create_label_sheet(filament: FilamentDep, body: LabelSheetIn) -> SavedLabelSheet:
+    try:
+        return await asyncio.to_thread(filament.label_sheets.create, body)
+    except (LabelSheetNameTakenError, TooManyLabelSheetsError) as exc:
+        raise _label_sheet_refused(exc) from None
+
+
+@router.put(
+    "/label-sheets/{sheet_id}",
+    response_model=SavedLabelSheet,
+    summary="Replace a label sheet",
+    description=(
+        "Replace a saved sheet's name and layout (#7216); the next print uses the new grid. "
+        + _SHEET_BODY
+        + " 404 for no such sheet, 409 `label_sheet_name_taken` for a name another sheet has."
+    ),
+)
+async def replace_label_sheet(
+    filament: FilamentDep, sheet_id: UUID, body: LabelSheetIn
+) -> SavedLabelSheet:
+    try:
+        sheet = await asyncio.to_thread(filament.label_sheets.replace, sheet_id, body)
+    except LabelSheetNameTakenError as exc:
+        raise _label_sheet_refused(exc) from None
+    if sheet is None:
+        raise _no_label_sheet(sheet_id)
+    return sheet
+
+
+@router.delete(
+    "/label-sheets/{sheet_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a label sheet",
+    description=(
+        "Delete a saved sheet (#7216). A label choice that still names it answers 409 "
+        "`label_sheet_gone` at the next print. 404 for no such sheet."
+    ),
+)
+async def delete_label_sheet(filament: FilamentDep, sheet_id: UUID) -> Response:
+    if not await asyncio.to_thread(filament.label_sheets.delete, sheet_id):
+        raise _no_label_sheet(sheet_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post(
     "/labels",
     response_class=Response,
-    responses={200: {"content": {"application/pdf": {}}, "description": "The labels PDF."}},
-    summary="The labels PDF",
+    responses={
+        200: {
+            "content": {"application/pdf": {}, "image/png": {}, "application/zip": {}},
+            "description": "The labels PDF, one PNG, or a ZIP of PNGs.",
+        }
+    },
+    summary="The labels file",
     description=(
-        "A PDF of the labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the "
-        "order sent; #7157), as Bambuddy's `POST /inventory/labels` gives. Each label "
-        "carries what the Labels page draws: a spool's number, material, colour name and "
-        "brand with the QR code `scadbuddy:spool:<id>`; a place's code and name with the QR "
-        "code of `<label address>/x/L-<n>`. `template` (else the setting "
-        "`filament_label_template`) sets the size; `layout` `roll` is one label a page and "
-        "`sheet` packs them on Letter paper, while a sheet template always prints on its "
-        "own grid. It reads ScadBuddy's own rows only and writes nothing. 404 for an "
-        "unknown spool or place, 409 `no_label_base` for a place label with no label "
-        "address and no public URL, 422 for a bad body or a place address too long for "
-        "its QR code."
+        "The labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the order "
+        "sent; #7157), as Bambuddy's `POST /inventory/labels` gives. A spool label prints "
+        "`fields` (else the setting `filament_label_output`'s; #7216), one line each, top to "
+        "bottom in this order: `number`, `material` (with its subtype), `colour` (its name), "
+        "`hex` (`#RRGGBB`), `brand`, `location` (its place), `temps` (nozzle, "
+        "`190\N{EN DASH}230 °C`), `weight` (label weight, `1000 g`), `note` (its first "
+        "line), `added` (the day it was made, UTC); `qr` adds the QR code "
+        "`scadbuddy:spool:<id>`, and without it the text takes the QR code's room. The "
+        "lines that do not fit the label's height are left off from the bottom; a chosen "
+        "number always stays. The default is `number`, `material`, "
+        "`colour`, `brand` and `qr`. A place label always prints its code and name with the "
+        "QR code of `<label address>/x/L-<n>`. `template` (else the setting "
+        "`filament_label_template`) "
+        "sets the size; `layout` `roll` is one label a page and `sheet` packs them on Letter "
+        "paper, while a sheet template always prints on its own grid. A saved sheet "
+        '(`{template: "saved", sheet_id}`, #7216) is read at each request, so an edit '
+        "applies to the next print. `format` and `dpi` "
+        "(else the setting `filament_label_output`; #7216) choose the file: `pdf` is "
+        "`labels.pdf` (`application/pdf`); `png` is each page as a greyscale PNG at `dpi` "
+        "(203, 300 or 600), one page as `labels.png` (`image/png`) and more as `labels.zip` "
+        "(`application/zip`, stored), whose entries are `spool-<number>.png` and "
+        "`L-<n>.png` for one label a page and `sheet-<n>.png` for a sheet. It reads "
+        "ScadBuddy's own rows only and writes nothing. 404 for an unknown spool or place, "
+        "409 `no_label_base` for a place label with no label address and no public URL, 409 "
+        "`label_sheet_gone` for a saved sheet that was deleted, 422 "
+        "for a bad body or a place address too long for its QR code, 422 "
+        "`png_too_large` for PNGs of more than 400 megapixels in all, and 503 "
+        "`label_font_missing` when the server lacks the labels font (DejaVu Sans), which "
+        "the answer names. The text is DejaVu Sans with a Noto fallback; a character no "
+        "font holds (CJK among them) prints as U+FFFD."
     ),
 )
-async def render_labels_pdf(
-    filament: FilamentDep, store: SettingsStoreDep, body: m.LabelsPdfRequest
+async def render_labels(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.LabelsRequest
 ) -> Response:
     read = await asyncio.to_thread(
-        store.read, {"filament_label_template", "filament_label_base_url", "public_url"}
+        store.read,
+        {
+            "filament_label_template",
+            "filament_label_output",
+            "filament_label_base_url",
+            "public_url",
+        },
     )
     choice = body.template or read.get("filament_label_template") or LabelTemplateChoice()
+    try:
+        # A saved sheet's row is read once, here, so the PDF and the PNG use one grid.
+        template = await asyncio.to_thread(resolve_template, choice, filament.label_sheets)
+    except LabelSheetGoneError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code="label_sheet_gone") from None
+    output = read.get("filament_label_output") or LabelOutput()
+    form = body.format or output.format
+    dpi = body.dpi or output.dpi
+    count = len(body.spool_ids) + len(body.location_ids)
+    if form == "png":
+        try:
+            label_png.check_png_size(template, body.layout, count, dpi)
+        except label_png.PngTooLargeError as exc:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="png_too_large"
+            ) from None
     try:
         labels = await asyncio.to_thread(
             pdf_labels,
@@ -2801,12 +2969,30 @@ async def render_labels_pdf(
         ) from None
     except LabelPayloadTooLongError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
-    pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, choice.resolved(), body.layout)
+    try:
+        pdf = await asyncio.to_thread(
+            label_pdf.render_pdf, labels, template, body.layout, body.fields or output.fields
+        )
+    except label_fonts.LabelFontMissingError as exc:
+        # R-7216-4: never Helvetica, which would print `?` for what DejaVu holds.
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), code="label_font_missing"
+        ) from None
+    content, media_type, name = pdf, "application/pdf", "labels.pdf"
+    if form == "png":
+        pngs = await label_png.rasterise(pdf, dpi)
+        if len(pngs) == 1:
+            content, media_type, name = pngs[0], "image/png", "labels.png"
+        else:
+            sheet = label_pdf.sheet_of(template, body.layout) is not None
+            names = label_png.png_names(labels, sheet, len(pngs))
+            content = label_png.zip_pngs(names, pngs)
+            media_type, name = "application/zip", "labels.zip"
     return Response(
-        content=pdf,
-        media_type="application/pdf",
+        content=content,
+        media_type=media_type,
         headers={
-            "Content-Disposition": 'attachment; filename="labels.pdf"',
+            "Content-Disposition": f'attachment; filename="{name}"',
             "Cache-Control": "no-store",
         },
     )

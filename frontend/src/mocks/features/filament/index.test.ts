@@ -8,6 +8,7 @@ import {
   bulkCreateSpools,
   bulkUpdateSpools,
   copySpool,
+  createLabelSheet,
   createSpool,
   deleteSpool,
   getForecast,
@@ -19,10 +20,12 @@ import {
   getTag,
   getType,
   importSpools,
+  insertWeightOffer,
   listCatalog,
   listEvents,
   listLocations,
   listSensors,
+  listSpoolEvents,
   listSpools,
   listTags,
   moveSpool,
@@ -493,6 +496,47 @@ describe('the spools CSV import (Task 15)', () => {
   })
 })
 
+describe('a new spool read under its label weight (#7683)', () => {
+  it('the check names the shortfall and the three readings with their numbers', async () => {
+    const check = await insertWeightOffer(spoolId(9), 900)
+    expect(check).toMatchObject({ reason: 'below_label', offer: null, shortfall_g: 100, default: 'tared', filament_g: 720 })
+    expect(check.resolutions).toEqual([
+      { kind: 'tared', filament_g: 900, new_label_weight_g: null },
+      { kind: 'short', filament_g: 720, new_label_weight_g: null },
+      { kind: 'label_wrong', filament_g: 720, new_label_weight_g: 720 },
+    ])
+    expect((await insertWeightOffer(spoolId(9), 100)).resolutions.map((one) => one.kind)).toEqual(['tared'])
+    expect((await insertWeightOffer(spoolId(9), 1000)).reason).toBe('not_above_label')
+  })
+
+  it('a weighing with a resolution books it and its side effect; one the check does not offer is a 422', async () => {
+    const short = await addSpoolEvent(spoolId(9), { kind: 'weighed', source: 'scale', reading_g: 800, resolution: 'short' })
+    expect(short.grams_after).toBe(620)
+    expect(short.data).toMatchObject({ resolution: 'short', shortfall_g: 200, empty_source: 'insert', empty_g: 180 })
+    expect((await getSpool(spoolId(9))).added_full).toBe(false)
+    const kinds = (await listSpoolEvents(spoolId(9))).map((one) => one.kind)
+    expect(kinds.slice(-2)).toEqual(['edited', 'weighed'])
+    expect(await refusal(addSpoolEvent(spoolId(1), { kind: 'weighed', reading_g: 900, resolution: 'tared' }))).toMatchObject({
+      status: 422,
+      code: 'no_below_label',
+      reason: 'used',
+    })
+  })
+
+  it('a tared reading is the filament, and label_wrong sets the label', async () => {
+    const tared = await addSpoolEvent(spoolId(9), { kind: 'weighed', source: 'scale', reading_g: 950, resolution: 'tared' })
+    expect(tared.grams_after).toBe(950)
+    expect(tared.data).toMatchObject({ resolution: 'tared', empty_source: 'tared', empty_g: 0, empty_basis: null, empty_name: null, expected_g: 1000, drift_g: null })
+    expect((await getSpool(spoolId(9))).last_drift_g).toBeNull()
+    await resetMockState()
+    const fixed = await addSpoolEvent(spoolId(9), { kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'label_wrong' })
+    expect(fixed.grams_after).toBe(720)
+    const spool = await getSpool(spoolId(9))
+    expect(spool.label_weight_g).toBe(720)
+    expect((await listSpoolEvents(spoolId(9))).at(-2)?.data).toEqual({ changes: { label_weight_g: [null, 720] } })
+  })
+})
+
 describe('extra keys in a write body (every body model of `filament/models.py` forbids them)', () => {
   const body = (extra: object, base: object = {}) => JSON.stringify({ ...base, ...extra })
   const rows = (row: object) => JSON.stringify([row])
@@ -535,5 +579,18 @@ describe('the sensors list (#6684)', () => {
     expect(ids).not.toContain(SENSOR.BOX_TEMP)
     expect(ids).toContain(SENSOR.SHELF_HUMIDITY)
     expect(await listSensors(L.DRY_BOX)).toEqual([])
+  })
+})
+
+describe('the saved label sheets (#7216)', () => {
+  const layout = { page: 'letter' as const, width_mm: 60, height_mm: 30, cols: 2, rows: 5, top_mm: 10, left_mm: 5, col_gap_mm: 2, row_gap_mm: 1 }
+
+  it('refuses a name that matches another by case folding, as `name_key` does', async () => {
+    resetMockState()
+    await createLabelSheet({ name: 'Straße', layout })
+    await expect(createLabelSheet({ name: 'STRASSE', layout })).rejects.toMatchObject({ status: 409 })
+    await expect(createLabelSheet({ name: 'ΣΟΦΟΣ', layout })).resolves.toMatchObject({ name: 'ΣΟΦΟΣ' })
+    // A final sigma (ς) and a plain one (σ) fold the same.
+    await expect(createLabelSheet({ name: 'σοφοσ', layout })).rejects.toMatchObject({ status: 409 })
   })
 })

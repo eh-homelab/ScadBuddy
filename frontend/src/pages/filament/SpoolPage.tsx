@@ -33,6 +33,7 @@ import {
 } from '../../api/filament'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
+import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
 import { InsertWeightOffer } from '../../components/filament/InsertWeightOffer'
 import { useInsertWeightCheck } from '../../components/filament/useInsertWeightCheck'
 import { FirstTypePresets } from '../../components/filament/FirstTypePresets'
@@ -543,6 +544,8 @@ export function SpoolPage() {
   // #7280: a scale reading of a spool with an insert is checked for an offer of its empty weight.
   const scaleReading = DECIMAL.test(reading.trim()) && Number(reading) > 0 ? Number(reading) : null
   const { check: insertCheck, pending: checkPending } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
+  // #7683: a new spool read under its label weight: the person says what is up before it is recorded.
+  const [resolutionChoice, setResolutionChoice] = useState<{ reading: number; resolution: Resolution } | null>(null)
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setNotice(null)
     setDraft((was) => ({ ...was, [key]: value }))
@@ -718,13 +721,25 @@ export function SpoolPage() {
 
   const leftNow = saved?.grams_left ?? null
   const scale = Number(reading)
-  const filament = empty && reading.trim() !== '' && Number.isFinite(scale) ? scale - empty.empty_weight_g : scale
+  /** Only a `below_label` answer for the insert the form shows, as `offer` below. */
+  const belowLabel = empty && insertCheck?.reason === 'below_label' && insertCheck.insert_type_id === empty.id ? insertCheck : null
+  const resolution: Resolution | null = belowLabel ? (resolutionChoice?.reading === scale ? resolutionChoice.resolution : (belowLabel.default ?? 'tared')) : null
+  const chosen = belowLabel?.resolutions.find((one) => one.kind === resolution) ?? null
+  const filament = chosen ? chosen.filament_g : empty && reading.trim() !== '' && Number.isFinite(scale) ? scale - empty.empty_weight_g : scale
   const readingOk = reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament >= 0
   /** Only an offer for the insert the form shows: an unsaved change of insert has none. */
   const offer = empty && insertCheck?.offer?.insert_type_id === empty.id ? insertCheck.offer : null
   const offerChecked = offer ? (offerChoice?.reading === offer.reading_g ? offerChoice.checked : offer.checked_by_default) : false
   /** Accepts a checked offer first, so the weighing's filament is the reading less the new empty weight (D3). */
   async function weigh() {
+    if (belowLabel && resolution) {
+      // #7683: the reading alone, with the choice; the store computes the filament and the side effect.
+      await addSpoolEvent(spoolKey, { kind: 'weighed', source: 'scale', reading_g: scale, resolution })
+      setReading('')
+      setResolutionChoice(null)
+      await reload(true)
+      return
+    }
     let grams = filament
     if (offer && offerChecked) {
       const accepted = await acceptInsertWeight(spoolKey, offer.reading_g)
@@ -980,6 +995,7 @@ export function SpoolPage() {
                     <Input id="spool-reading" inputMode="decimal" className="tabular-nums" value={reading} onChange={(e) => setReading(e.target.value)} />
                     {empty && readingOk && <p className="text-[12px] text-muted-foreground tabular-nums">{grams(filament)} of filament.</p>}
                     {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
+                    {belowLabel && resolution && readingOk && <BelowLabelChoice check={belowLabel} value={resolution} disabled={busy} onChange={(next) => setResolutionChoice({ reading: scale, resolution: next })} />}
                     {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
                     <div>
                       <Button type="submit" size="sm" variant="outline" disabled={busy || !readingOk || checkPending}>
