@@ -1647,10 +1647,15 @@ const tools: Tool[] = [
       "what the insert's empty weight would become (`derived_g`, `new_empty_weight_g`, `current_empty_weight_g`, " +
       '`current_basis`, `sample_count`). When there is an offer and `accept_insert_weight` is left out, the tool books ' +
       'nothing (`event: null`): tell the person the numbers and that makers overfill by about 10-30 g, so the estimate is ' +
-      'slightly heavy, then call again with the same `reading_g` and `accept_insert_weight` true or false. ' +
+      "slightly heavy, and, when `current_basis` is `person`, that the weight a person set is replaced; then call " +
+      'again with the same `reading_g` and `accept_insert_weight` true or false. ' +
       '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
       'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
-      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked.',
+      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked. ' +
+      'A `true` whose mean moved since its check (another spool of the insert was accepted or deleted) is refused ' +
+      '(`insert_weight_changed`) with nothing booked: call again without `accept_insert_weight` and tell the person ' +
+      'the new numbers. A spool weighed into a mean of several readings can end a few grams off its label weight, ' +
+      'so it gets no later offer (`not_full`).',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
@@ -1672,7 +1677,10 @@ const tools: Tool[] = [
     summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight }) =>
       kind === 'weighed'
         ? reading_g !== undefined
-          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
+          ? accept_insert_weight === undefined
+            ? // #7451-2: with an offer this call books nothing; without one it books the weighing.
+              `Check, or record, a reading of ${reading_g} g on spool ${spool_id}`
+            : `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
           : `Record ${grams ?? '?'} g on spool ${spool_id}`
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
@@ -1714,7 +1722,8 @@ const tools: Tool[] = [
         accepted = await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/insert-weight', {
             params: { path },
-            body: { reading_g },
+            // #7450-2: a mean that moved since this check is a 409 `insert_weight_changed`.
+            body: { reading_g, new_empty_weight_g: check.offer.new_empty_weight_g },
           }),
           `take the insert weight of spool ${spool_id}`,
         )

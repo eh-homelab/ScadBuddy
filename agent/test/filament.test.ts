@@ -914,7 +914,8 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     )
     expect(res.isError).toBeFalsy()
     expect(order).toEqual(['offer 1150', 'accept', 'event'])
-    expect(bodies).toEqual([{ reading_g: 1150 }, { kind: 'weighed', source: 'person', grams: 1000 }])
+    // #7450-2: the accept names the offer's weight, so a mean that moved meanwhile is refused.
+    expect(bodies).toEqual([{ reading_g: 1150, new_empty_weight_g: 150 }, { kind: 'weighed', source: 'person', grams: 1000 }])
     const out = firstText(res) as Record<string, { empty_weight_g: number }>
     expect(out.insert_weight_accepted?.empty_weight_g).toBe(150)
   })
@@ -930,6 +931,14 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     expect(res.isError).toBe(true)
     expect(JSON.stringify(res)).toContain('used')
     expect(order).toEqual(['offer 1150'])
+  })
+
+  it('names a check as well as a booking in its approval text (#7451-2)', () => {
+    const summarize = tool('filament_spool_add_event').summarize
+    const base = { spool_id: ROW, kind: 'weighed', source: 'person' } as const
+    expect(summarize({ ...base, reading_g: 1150 })).toBe(`Check, or record, a reading of 1150 g on spool ${ROW}`)
+    expect(summarize({ ...base, reading_g: 1150, accept_insert_weight: false })).toBe(`Record a reading of 1150 g on spool ${ROW}`)
+    expect(summarize({ ...base, reading_g: 1150, accept_insert_weight: true })).toBe(`Record a reading of 1150 g on spool ${ROW} and take its insert weight`)
   })
 
   it('refuses bad combinations before any call', async () => {

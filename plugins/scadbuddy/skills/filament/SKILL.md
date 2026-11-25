@@ -104,12 +104,23 @@ label weight) is at most the label weight. `insert_weight.offer` shows what the 
 weight would become (`derived_g`, `new_empty_weight_g`, the current weight and its basis,
 `sample_count`). When there is an offer, the tool books nothing (`event: null`). Tell the person
 the numbers. Tell them that makers overfill by about 10 to 30 g, so the estimate is slightly
-heavy, and that a later weighing of an empty spool replaces it. Then call again with the same
+heavy, and that they can correct it by editing the insert's empty weight (`filament_catalog_upsert`).
+No empty-spool weighing sets it yet; that is follow-up #7300. When `current_basis` is `person`,
+tell them that accepting replaces the weight a person set. Then call again with the same
 `reading_g` and `accept_insert_weight` true or false. `checked_by_default` is only advice. Pass
 `true` only when the person says to take it; `false` books the weighing with the current empty
 weight. With no offer, the tool books the weighing at once, and `accept_insert_weight: true` is
-refused with nothing booked. The tool writes ScadBuddy only. Without `reading_g`, pass `grams` as
-before.
+refused with nothing booked. When another spool of the insert was accepted or deleted between the
+two calls, `true` is refused (`insert_weight_changed`) with nothing booked: call again without
+`accept_insert_weight` and tell the person the new numbers. The tool writes ScadBuddy only.
+Without `reading_g`, pass `grams` as before.
+
+A spool weighed into a mean of several readings is booked at its reading less the mean, so its
+grams left can end a few grams off its label weight. The check then answers `not_full` for it, so
+it gets no later offer. A spool with no grams left and no use counts as full. The other reasons
+with no offer: `archived` (the spool), `no_insert` (no insert, or an archived one),
+`no_label_weight`, `used`, `not_above_label`, `derived_too_heavy` and `mean_below_1g` (the new
+mean rounds below 1 g).
 
 ## Import an invoice
 
