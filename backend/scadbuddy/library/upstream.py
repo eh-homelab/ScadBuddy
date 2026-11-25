@@ -157,10 +157,9 @@ def _known(history: ModelHistory, commit: str | None) -> str | None:
     if commit is None:
         return None
     try:
-        history.resolve(commit)
+        return history.resolve(commit)
     except RevisionNotFoundError:
         return None
-    return commit
 
 
 def plan_merge(

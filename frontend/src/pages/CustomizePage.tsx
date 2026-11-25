@@ -1063,7 +1063,7 @@ export function CustomizePage() {
   }
 
   // Reopened inputs wait for their migration: the panel must not paint defaults first.
-  if (schemaState.loading || migrating) {
+  if (schemaState.loading || migrating || (schemaState.error && version && modelState.loading)) {
     return (
       <div
         role="status"
@@ -1104,12 +1104,13 @@ export function CustomizePage() {
     setSearch(next, { replace: true })
   }
 
-  // #7314 — a link to a version the history does not have: the model itself may be here.
-  if (schemaState.error && version) {
+  // #7314 — a link to a version the history does not have, of a model that is here. A
+  // deleted model's is a 404 too, so this waits for the model's own answer (below).
+  if (schemaState.error && version && modelState.data) {
     return (
       <PageProblem
         title="That version is not here"
-        message={`This model has no revision ${version.slice(0, 7)}. The current version may still open.`}
+        message={`This model has no revision ${version.slice(0, 7)}. Its current version is available.`}
       >
         <Button type="button" onClick={backToCurrent}>
           Back to current
