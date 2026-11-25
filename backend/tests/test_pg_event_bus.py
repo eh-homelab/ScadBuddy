@@ -27,6 +27,7 @@ from scadbuddy.core.events import (
     ModelEvent,
     OpaqueEvent,
     Subscription,
+    decode_event,
     encode_event,
 )
 from scadbuddy.core.metrics import Metrics
@@ -645,6 +646,62 @@ async def test_rows_cap_only_uncovered(make_bus: BusFactory, pg_conninfo: str) -
     )
     assert await bus.prune_log() == 2
     assert _kept(pg_conninfo) == ["r0", "r2", "r4"]
+
+
+@pytest.mark.requires_postgres
+async def test_a_not_yet_due_own_retention_survives_the_rows_cap(
+    make_bus: BusFactory, pg_conninfo: str
+) -> None:
+    bus = await make_bus(retention=EventLogRetention(rows=1))
+    _log_rows(
+        pg_conninfo,
+        [
+            ("fleet.a", 50, 3600),  # own 1 h, not due: covered, kept
+            ("fleet.b", 40, None),
+            ("fleet.c", 30, None),
+        ],
+    )
+    assert await bus.prune_log() == 1
+    assert _kept(pg_conninfo) == ["r0", "r2"]
+
+
+@pytest.mark.requires_postgres
+async def test_a_kind_zero_is_excluded_from_the_global_seconds(
+    make_bus: BusFactory, pg_conninfo: str
+) -> None:
+    bus = await make_bus(retention=EventLogRetention(seconds=60, kinds={"job": 0}))
+    _log_rows(pg_conninfo, [("job.a", 7200, None), ("fleet.a", 7200, None)])
+    assert await bus.prune_log() == 1
+    assert _kept(pg_conninfo) == ["r0"]
+
+
+@pytest.mark.requires_postgres
+async def test_a_non_numeric_own_retention_reads_as_absent(
+    make_bus: BusFactory, pg_conninfo: str
+) -> None:
+    bus = await make_bus(retention=EventLogRetention(seconds=60))
+    _log_rows(
+        pg_conninfo,
+        [("fleet.a", 7200, None), ("fleet.b", 7200, None), ("fleet.c", 7200, None)],
+    )
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            'UPDATE events SET payload = payload || \'{"retention_seconds": "soon"}\'::jsonb'
+            " WHERE event_id = 'r0'"
+        )
+        conn.execute(
+            "UPDATE events SET payload = payload || '{\"retention_seconds\": null}'::jsonb"
+            " WHERE event_id = 'r1'"
+        )
+    assert await bus.prune_log() == 3
+    assert _kept(pg_conninfo) == []
+
+
+def test_a_negative_own_retention_is_a_broken_envelope() -> None:
+    with pytest.raises(ValueError):
+        decode_event(
+            '{"id":"o","at":"2026-11-25T00:00:00Z","kind":"fleet.message","retention_seconds":-1}'
+        )
 
 
 @pytest.mark.parametrize(

@@ -625,7 +625,12 @@ class PgNotifyEventBus:
         """
         retention = self.retention
         prefixes = sorted(retention.kinds, key=len, reverse=True)
-        own = "payload->>'retention_seconds'"
+        # Only a JSON number counts: any other stored value reads as absent, so one
+        # foreign row cannot make the cast raise and stop every prune.
+        own = (
+            "(CASE WHEN jsonb_typeof(payload->'retention_seconds') = 'number'"
+            " THEN payload->>'retention_seconds' END)"
+        )
         removed = 0
         async with self._pool.connection() as conn:
             cursor = await conn.execute(

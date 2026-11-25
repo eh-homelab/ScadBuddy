@@ -533,7 +533,7 @@ class OpaqueEvent(BaseModel):
         default=[], max_length=MAX_OPAQUE_TOPICS
     )
     #: How long the log keeps the event; ``None`` is the log's own default.
-    retention_seconds: float | None = None
+    retention_seconds: float | None = Field(default=None, ge=0)
     payload: dict[str, Any]
 
 

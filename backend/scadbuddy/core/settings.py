@@ -969,6 +969,9 @@ class NoDatabaseSettings(Settings):
         return value
 
 
+#: A kind prefix of `event_log_retention_kinds`: dotted kind segments (`job`, `job.progress`).
+KIND_PREFIX: Final = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*")
+
 #: What ``log_level`` takes: the standard library's own level names.
 LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
@@ -977,9 +980,6 @@ LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 #: a value saved in the UI wins, and a reset goes back to the environment, then the
 #: default. ``tests/test_settings_coverage.py`` fails when a field is neither, so an
 #: environment-only setting cannot slip in unnoticed.
-#: A kind prefix of `event_log_retention_kinds`: dotted kind segments (`job`, `job.progress`).
-KIND_PREFIX: Final = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*")
-
 BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
     {
         "data_dir": "The data volume. It is needed before any stored setting can be read.",
