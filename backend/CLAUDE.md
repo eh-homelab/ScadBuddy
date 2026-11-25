@@ -769,7 +769,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`POST /print/printers/{id}/trays/{ams}/{tray}/spool`) takes the SB number, places it
   at the tray, then writes Bambuddy's assignment for a linked spool
   (`BambuddyClient.assign_spool`, after which Bambuddy configures the tray over MQTT). This is
-  the one filament hardware write that still goes through Bambuddy; #7641 moves it. A
+  the one write to a printer that still goes through Bambuddy; #7641 moves it. A
   LAN start books its slots' grams as `print_started` estimates at the plate's start in
   `filament_spool_events`, and a print end the report times books its `print_ended` at that time (`filament/prints.py`); the run's settle books any start still open as its actual
   (`done`) or 0 (`filament/print_uses.py`, `print_use_hook`; on the worker through
@@ -798,8 +798,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `tests/fixtures/lan_command_histories/` in `tests/test_lan_command_replay.py`, so a change to
   its commands goes behind `workflow.patched`). It is a new workflow type: roll
   `scadbuddy-print` with `Recreate` (README, "A release that needs `Recreate`"). Routes:
-  `api/printer_kprofiles.py` and `api/printer_slots.py`. `BambuddyClient` keeps one K-profile
-  call, the GET `k_profiles` that `filament/profile_fetch.py` reads, until #7604.
+  `api/printer_kprofiles.py` and `api/printer_slots.py`. `BambuddyClient` keeps one call to a
+  printer's K table, the GET `k_profiles` that `filament/profile_fetch.py` reads, until #7604
+  (its `put_spool_k_profiles` is the filament sync's push of a spool's K values, not a printer
+  write).
   `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
   presets and a process preset's values in Bambuddy's shapes, with ScadBuddy's own
   filament presets as `local` `sb-<id>` refs (`Profiles.own`, #7176). No Bambuddy local

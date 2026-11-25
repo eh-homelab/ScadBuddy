@@ -110,7 +110,7 @@ flowchart LR
   `bambuddy-follow`: print runs, LAN upload and start, follow, printer watches
   ([workflows.md](workflows.md#print-to-the-h2c)), and the filament sync with Bambuddy,
   the Bambuddy pull and the location-sensor alerts (`FilamentBbSync`, `FilamentBbPull`,
-  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-217`), and a printer's K-profile and
+  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-223`), and a printer's K-profile and
   AMS slot commands over its LAN link (`LanCommand`, #7276, started and awaited by the API).
 - **Reads.** The API URL and a service proof as above. Its Bambuddy key comes from the
   CRUD settings route; a printer's access code is opened by the API and handed over a
