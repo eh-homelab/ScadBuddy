@@ -123,6 +123,7 @@ from scadbuddy.core.events import (
     AuthSessionRevoked,
     BusResync,
     CameraFeedEvent,
+    CameraReconnectEvent,
     Event,
     FlowChanged,
     FlowRunEvent,
@@ -270,7 +271,7 @@ def topics_of(event: Event) -> list[str]:
             return [*topics, f"tasks:{event.place}"] if event.place else topics
         case PreviewSliceEvent():
             return [f"preview-slice:{event.slicer}:{event.job_id}"]
-        case PrinterEvent() | CameraFeedEvent():
+        case PrinterEvent() | CameraFeedEvent() | CameraReconnectEvent():
             return ["printers", f"printer:{event.printer_id}"]
         case LibraryChanged():
             return ["libraries", f"model:{event.slug}"]

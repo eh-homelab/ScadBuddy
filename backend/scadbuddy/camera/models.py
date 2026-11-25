@@ -57,6 +57,15 @@ class LeaseAnswer(BaseModel):
 FeedState = Literal["pulling", "retrying", "stalled", "stopped"]
 
 
+class CameraFeed(BaseModel):
+    """One part's stored feed state, as the browser reads it."""
+
+    part: Literal["relay", "recorder"]
+    state: FeedState
+    detail: str | None = None
+    updated_at: datetime
+
+
 class FeedReport(BaseModel):
     part: Literal["relay", "recorder"]
     state: FeedState

@@ -894,6 +894,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Where the API reaches the agent sidecar in its own pod. The flow routes read the"
             " agent's tools from it, and refuse when it does not answer.",
         ),
+        "camera_edge_url": SettingDoc(
+            "Camera edge URL",
+            "Where the API reaches the live camera edge inside the cluster. Unset, the camera"
+            " dialog offers no live view.",
+        ),
         "api_internal_url": SettingDoc(
             "API internal URL",
             "Where the workers reach the API inside the cluster. The API also makes the"

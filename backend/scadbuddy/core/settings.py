@@ -712,6 +712,9 @@ class Settings(BaseSettings):
     # worker reads its store settings through (#5298). Also the base the API mints the
     # native slicer's transfer URLs under (`slicing/transfer.py`, #3822).
     api_internal_url: str | None = None
+    # SCADBUDDY_CAMERA_EDGE_URL (camera live view): the live edge's cluster-internal URL,
+    # which the API proxies the browser's live camera to. Unset, there is no live view.
+    camera_edge_url: str | None = None
     # SCADBUDDY_SLICER_PROFILES_DIR: Bambu Studio's BBL vendor profiles and the image's
     # BAMBU_STUDIO_VERSION, which the native slicer's preset files are built from (#3822).
     slicer_profiles_dir: Path = Path("/opt/slicer-profiles")
@@ -727,6 +730,16 @@ class Settings(BaseSettings):
         parts = urlsplit(value)
         if parts.scheme not in {"http", "https"} or not parts.netloc:
             raise ValueError(f"SCADBUDDY_API_INTERNAL_URL must be an http(s) URL, not {value!r}")
+        return value
+
+    @field_validator("camera_edge_url")
+    @classmethod
+    def _camera_edge_url_is_http(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError(f"SCADBUDDY_CAMERA_EDGE_URL must be an http(s) URL, not {value!r}")
         return value
 
     @field_validator("agent_internal_url")
@@ -1098,6 +1111,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_print_worker_inprocess": (
             "Whether this process serves the print queue itself, decided by whether the"
             " deployment runs the `scadbuddy-print` worker."
+        ),
+        "camera_edge_url": (
+            "Where the API reaches the live camera edge inside the cluster: the deployment's"
+            " Service. Unset, the camera dialog offers no live view."
         ),
         "api_internal_url": (
             "Where the render, print, projects and slicer workers reach the API inside the"

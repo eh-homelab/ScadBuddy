@@ -20,6 +20,7 @@ from psycopg_pool import ConnectionPool
 from pydantic import SecretStr
 
 from scadbuddy.camera.models import (
+    CameraFeed,
     CameraSource,
     CameraSourceWithCode,
     FeedReport,
@@ -203,6 +204,23 @@ class CameraStore:
             expires_at=current["expires_at"],
             indexed_until=current["indexed_until"],
         )
+
+    def camera_state(self, printer_id: str) -> tuple[bool, list[CameraFeed]]:
+        """Whether the printer is recorded, and its stored feed states (relay first).
+        Raises `PrinterNotFoundError` when the printer is gone."""
+        if self._printers is not None:
+            self._printers.require(printer_id)
+        recorded = bool(self._sources(printer_id))
+        key = printer_uuid(printer_id)
+        if key is None:
+            raise PrinterNotFoundError(printer_id)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT part, report->>'state' AS state, report->>'error' AS detail, updated_at"
+                " FROM camera_feeds WHERE printer_id = %s ORDER BY part DESC",
+                (key,),
+            ).fetchall()
+        return recorded, [CameraFeed(**row) for row in rows]
 
     def report_feed(self, printer_id: str, report: FeedReport) -> bool:
         """Store the part's feed state; true when its state changed. Raises
