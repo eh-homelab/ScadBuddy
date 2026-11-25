@@ -169,6 +169,8 @@ REMOVED = (
 
 
 def test_no_filament_hardware_write_goes_through_bambuddy() -> None:
-    src = (Path(__file__).parents[2] / "scadbuddy/bambuddy/client.py").read_text()
+    root = Path(__file__).parents[2] / "scadbuddy/bambuddy"
+    assert not (root / "slot_control.py").exists()
+    src = (root / "client.py").read_text()
     for name in REMOVED:
         assert f"def {name}(" not in src
