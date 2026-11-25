@@ -255,7 +255,7 @@ class NativeLibrary:
             return None
         # The whole file is copied to the spool to read one member: a span (#7245).
         with span("native_library.thumbnail", attributes={"scadbuddy.bytes": stat.ref.size}):
-            # The store's spool is made on its first use (`DownloadCache.private_copy`).
+            # Made here: with a private cache no `DownloadCache.private_copy` ever makes it.
             await asyncio.to_thread(self.spool.mkdir, parents=True, exist_ok=True)
             with tempfile.TemporaryFile(dir=self.spool) as copy:
                 async with aclosing(self.content.get(stat.ref)) as chunks:

@@ -74,7 +74,7 @@ from scadbuddy.orders.storefront.inputs import (
     slot_filaments,
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
-from scadbuddy.orders.storefront.listings import problem, published_listing
+from scadbuddy.orders.storefront.listings import page_outdated, problem, published_listing
 from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
     PriceRow,
@@ -362,7 +362,8 @@ async def checked_choice(
     the reference renders those values. With ``render_colours``, each slot
     ``body.colours`` lacks takes that material's filament of the slot's colour in that
     render (`slot_filaments`). Refusals: 404 ``listing_not_found``, 409
-    ``listing_changed`` (the listing moved since the page read it), 422
+    ``listing_changed`` (the listing moved or was switched to a file since the page
+    read it), 422
     ``input_outside_listing`` (with ``name`` and ``reason``), 422
     ``listing_colours_clash`` (colours no one allowed material offers together, with
     ``parts``, `ColoursClashError`; only the visitor's colours and slots, never a locked
@@ -373,11 +374,7 @@ async def checked_choice(
     visitor's to take the slots from)."""
     listing = await asyncio.to_thread(published_listing, orders.listings, body.listing_id)
     if listing.updated_at != body.listing_updated_at:
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "listing_changed",
-            "This listing has changed. Load it again.",
-        )
+        raise page_outdated()
     filaments = await asyncio.to_thread(price_book, orders)
     materials = effective_materials(listing, shop_materials)
     with listing_refusals():

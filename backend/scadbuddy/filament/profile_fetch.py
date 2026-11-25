@@ -100,8 +100,21 @@ HOLDER: Final = "profile_fetch"
 #: The ledger route of an import.
 IMPORT_ROUTE: Final = "profile-fetch.import"
 #: How long an import waits for the mirror of what it wrote (#7176); the Schedule's next
-#: pull sends what is left. 120 s: Bambuddy's listing and three writes, each up to the
-#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`). It leaves 7 of
+#: pull sends what is left. The mirror's calls (`preset_mirror._send`), each up to the
+#: client's 30 s (`bambuddy/client.py` `DEFAULT_TIMEOUT`), per preset the run wrote (one
+#: per printer model and nozzle): a rewrite is one ``PUT`` and reads no listing; a create
+#: is one ``POST``, after the listing (`_Listing`, read at most once per run, only before a
+#: create or a lost create's match); a rewrite that answers 404 is that ``PUT``, then a
+#: create; a preset whose last create's answer was lost first reads the listing and one
+#: ``GET /local-presets/{id}`` per preset of its name above that create's floor
+#: (`_Listing.made_after`, usually one), then a rewrite of the match, or a create when none
+#: holds its document. So 120 s holds four calls at their limit, for example: four
+#: rewrites; three creates (listing + three ``POST``); a rewrite that answers 404 then
+#: creates (``PUT`` + listing + ``POST``) and one more rewrite; a lost create's match
+#: (listing + ``GET`` + ``PUT``) and one more rewrite; or a lost create's match whose
+#: rewrite answers 404 (listing + ``GET`` + ``PUT`` + ``POST``). At the speed Bambuddy
+#: answers it holds many more. It is a cut-off, not a sum of the worst case: a run past it
+#: stops and the Schedule's next pull sends the rest, so it is not raised. It leaves 7 of
 #: `profile_fetch/workflow.py` `IMPORT_REQUEST_TIMEOUT`'s 9 minutes to the K-table reads, 14
 #: of them at 30 s each.
 IMPORT_MIRROR_TIMEOUT: Final = 120.0

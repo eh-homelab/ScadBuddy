@@ -287,7 +287,15 @@ class BambuddyContentBackend:
 
     # --- ContentBackend ------------------------------------------------------
 
-    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
+    async def upload(
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        digest: tuple[str, int] | None = None,
+    ) -> str:
         media = _MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
         async with self._client() as (client, inbox):
             for attempt in (1, 2):

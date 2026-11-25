@@ -19,6 +19,9 @@ import pytest
 from psycopg import Connection
 from psycopg.errors import DeadlockDetected
 
+from scadbuddy.store import content as content_module
+from scadbuddy.store import local as local_module
+from scadbuddy.store import s3 as s3_module
 from scadbuddy.store.content import (
     BlobCorruptError,
     BlobData,
@@ -32,6 +35,7 @@ from scadbuddy.store.content import (
     StoreFullError,
     sweep_content,
 )
+from scadbuddy.store.content_models import blob_digest
 from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
@@ -67,6 +71,29 @@ async def test_put_then_read_and_the_same_bytes_are_stored_once(
     usage = store.usage()
     assert (usage.count, usage.bytes, usage.by_kind) == (1, 6, {"piece": 6})
     assert (await store.stat(key)) is not None
+
+
+async def test_a_new_put_hashes_the_file_once(
+    content: ContentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The store's digest is the backend's too: a second pass over a 6 MB library file
+    took 0.2-0.3 s on prod (#7287)."""
+    passes = 0
+
+    def counting(data: BlobData) -> tuple[str, int]:
+        nonlocal passes
+        passes += 1
+        return blob_digest(data)
+
+    for module in (content_module, local_module, s3_module):
+        monkeypatch.setattr(module, "blob_digest", counting)
+    path = tmp_path / "upload.3mf"
+    path.write_bytes(os.urandom(1 << 16))
+    with path.open("rb") as fh:
+        ref = await content.put("piece", fh, name="upload.3mf", scope=SCOPE, key=render_key("f"))
+    assert passes == 1
+    assert ref.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert await content.read(ref) == path.read_bytes()
 
 
 class _ClosingBackend(LocalContentBackend):
@@ -289,8 +316,16 @@ class _GatedBackend(LocalContentBackend):
         super().__init__(root)
         self.gate = asyncio.Barrier(2)
 
-    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
-        backend_id = await super().upload(kind, data, name=name, scope=scope)
+    async def upload(
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        digest: tuple[str, int] | None = None,
+    ) -> str:
+        backend_id = await super().upload(kind, data, name=name, scope=scope, digest=digest)
         await self.gate.wait()
         return backend_id
 
@@ -335,7 +370,15 @@ class _ReleasedWhileReused(LocalContentBackend):
 class _DistinctIdsReleasedWhileReused(_ReleasedWhileReused):
     """As Bambuddy does: every upload is a new object with its own id."""
 
-    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
+    async def upload(
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        digest: tuple[str, int] | None = None,
+    ) -> str:
         backend_id = f"{kind}/{uuid.uuid4().hex * 2}"
         path = self._path(backend_id)
         path.parent.mkdir(parents=True, exist_ok=True)

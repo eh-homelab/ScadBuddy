@@ -1060,8 +1060,8 @@ function Model({
   // slot colours, each mesh that names a slot gets its own too, to recolour.
   const { scene, owned, slotted } = useMemo(() => {
     const copy = gltf.scene.clone(true)
-    const slotted = recolours ? ownSlotMaterials(copy) : []
-    return { scene: copy, owned: withPartOpacity(copy), slotted }
+    const owned = withPartOpacity(copy)
+    return { scene: copy, owned, slotted: recolours ? ownSlotMaterials(copy, owned) : [] }
   }, [gltf, recolours])
   useEffect(
     () => () => {

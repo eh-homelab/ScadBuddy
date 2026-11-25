@@ -953,10 +953,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   reads the configured Bambuddy's spools (a failed read is `bambuddy_unreadable: true`);
   when it is the links' own Bambuddy at a new URL (`bb_sync_results.same_bambuddy`: every
   linked BB id there, none older than its link's `bb_updated_at`, one exactly that, at
-  least half the links timed on both sides), a reset with `expect_kept: true` reads them
+  least half the links timed on both sides; with no spool linked, the presets' links by the
+  same rule over Bambuddy's local presets and each preset's `bb_updated_at` (Bambuddy's `updated_at`
+  as ScadBuddy last took it: the mirror's last write, or for a preset imported from Bambuddy,
+  its last import), `wants_preset_listing`, #7343), a reset with `expect_kept: true` reads them
   again and, while that holds, deletes nothing, records the configured instance and answers
   `kept: true` (and `configured_instance`); else 409 `proof_changed`, nothing written. The dry run's `changed_since_pull` is
-  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered. `expect_kept: false` deletes
+  true when every linked spool is there, none is older than its link, at least half the links have a time on both sides (Decision 199), and each one with a time on both sides changed since its link (none exactly as seen; untimed links are skipped), so the dialog can say why no keep is offered; with no spool linked, the same over the linked filament presets (#7343). A mirrored preset sent before the mirror kept Bambuddy's time has none until its next mirror write (R-7343-5). `expect_kept: false` deletes
   without reading Bambuddy (#6845, plan Decisions 193-199). Agent `filament_sync_reset_links` (outward).
   Every pass is also a row of `filament_bb_sync_passes` (#6905, `bb_sync_passes.py`):
   `record_pass` inserts it in the state row's transaction, keyed by the worker's `pass_id` so a
@@ -1451,7 +1454,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the fallback until #7257: a save still writes it, and a reader reads the file when the
   row names no blob (`bytes_at` NULL) or the blob is lost. A reader that needs a path
   opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
-  file on the pod's disk, else the NFS file) and runs its sync reader in a thread; there
+  file under `ContentStore.spool`, #7316, else the NFS file) and runs its sync reader in a thread; there
   is no blocking helper for sync callers. What a reader derives of the model is kept in `output_derived`, and
   a derive writes only while the model sha256 it read is the row's
   (`OutputRows.write_derived_many`); the plate cover's key names its own sha256
@@ -2351,8 +2354,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   colour of, `listings.py` `_offered_file`) and `previews` (edge paths
   `/api/store/v1/listings/{id}/preview/{plate}.glb`); `GET …/listings/{id}/preview/{plate}.glb`
   (`file_listings.py` `held_preview`) streams the plate's held GLB, and the edge relays it. A
-  render, a variant and the prepare run still take a template listing only
-  (`published_listing`'s `source`). Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
+  render, a variant and the prepare run still take a template listing only. A visitor's
+  call of a published listing that sells the other source (the shop switched it since the
+  page read it) is 409 `listing_changed` (`published_listing`'s `source`), so the page
+  offers "Load the latest version"; an unpublished or unknown one is 404
+  `listing_not_found`, and the held preview of a template listing too. Its price read and cart line are `file_prices.py` (#6710 §7.5, §7.6):
   `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers

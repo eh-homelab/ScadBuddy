@@ -4,8 +4,9 @@ outputs-in-Postgres spec 2026-11-23 §4.3).
 It wraps the API's `ContentStore`: keyed puts, a compare-and-swap for the byte copy,
 streamed reads, and a temporary file for a reader that needs a path. The keys are
 `output_rows.output_blob_key` and `output_file_key`; the row and its holds are
-`OutputRows`' to write. The temporary files go under ``content.spool``, the pod's own
-disk, and are removed when the reader is done, error or not.
+`OutputRows`' to write. The temporary files go under ``content.spool``
+(``SCADBUDDY_SPOOL_DIR``, else the data volume's ``cache/blob-spool``, #7316), and are
+removed when the reader is done, error or not.
 
 A sync reader reached from async code (Ruling R6, revised) runs in a thread on the
 temporary file: ``async with blobs.local_file(key, suffix) as path: await

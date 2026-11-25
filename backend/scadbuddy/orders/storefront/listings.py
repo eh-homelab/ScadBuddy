@@ -1616,14 +1616,25 @@ def published_listing(
 ) -> Listing:
     """The listing, when it is published and sells ``source`` (either, for None); 404
     ``listing_not_found`` for an unpublished or unknown one alike, so a visitor cannot tell
-    them apart, and for an id that is not one, before any lookup. A template's render and
-    its prepare run take a template listing only; the public page takes either (#6710)."""
+    them apart, and for an id that is not one, before any lookup. A published one that
+    sells the other source is 409 ``listing_changed``: the shop switched it since the
+    page read it, and the page loads it again (#6710). The public page takes either."""
     listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
-    if (
-        listing is None
-        or not listing.published
-        or listing.snapshot is None
-        or (source is not None and listing.source != source)
-    ):
-        raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+    if listing is None or not listing.published or listing.snapshot is None:
+        raise no_such_listing()
+    if source is not None and listing.source != source:
+        raise page_outdated()
     return listing
+
+
+def no_such_listing() -> ApiError:
+    """404 ``listing_not_found``, as a visitor reads it."""
+    return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+
+
+def page_outdated() -> ApiError:
+    """409 ``listing_changed``, as a visitor reads it: the listing moved since its page
+    read it."""
+    return problem(
+        status.HTTP_409_CONFLICT, "listing_changed", "This listing has changed. Load it again."
+    )
