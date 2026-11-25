@@ -60,6 +60,7 @@ from typing import Any, BinaryIO
 import aiomqtt
 
 from scadbuddy.printers.address import lan_address
+from scadbuddy.printers.lan_commands import matches
 from scadbuddy.printers.lan_models import LanReport, ProjectFile
 
 MQTT_PORT = 8883
@@ -80,6 +81,8 @@ UNWRAP_TIMEOUT = 5.0
 #: within two keepalives (paho 2.1 ``_check_keepalive``). The watch stamps its touch
 #: with that bound (`watch.LINK_PROOF`).
 KEEPALIVE = 10
+#: How long an MQTT connect, or any one MQTT operation, may take (aiomqtt's ``timeout``).
+MQTT_TIMEOUT = 10.0
 
 logger = logging.getLogger(__name__)
 #: paho's own logger, for aiomqtt: at DEBUG it logs the SUBSCRIBE topic, which names the
@@ -410,7 +413,7 @@ class LanPrinter:
             password=self._access_code,
             tls_context=pinned_context(self.cert_sha256),
             tls_insecure=True,  # the pin is the check; the certificate names no host
-            timeout=10.0,
+            timeout=MQTT_TIMEOUT,
             keepalive=KEEPALIVE,
             logger=_MQTT_LOGGER,
         )
@@ -448,6 +451,27 @@ class LanPrinter:
                     continue
                 merged = merge_report(merged, delta)
                 yield LanReport(serial=self.serial, received_at=datetime.now(UTC), print=merged)
+
+    async def request(
+        self, command: dict[str, Any], *, name: str, seq: str, wait: float
+    ) -> dict[str, Any] | None:
+        """Publish ``command`` on a connection of its own and return the first raw
+        ``print`` object that answers it (`lan_commands.matches` on ``name`` and ``seq``),
+        never merged with another report; ``None`` when none came within ``wait`` seconds
+        (#7276). It subscribes before it publishes, so a fast reply is not missed. Nothing
+        here writes a report: the printer's watch keeps those (`PrinterReportStore`)."""
+        async with await self._client() as client:
+            await client.subscribe(self.report_topic)
+            await client.publish(self.request_topic, json.dumps(command))
+            try:
+                async with asyncio.timeout(wait):
+                    async for message in client.messages:
+                        reply = _print_of(message.payload)
+                        if reply is not None and matches(reply, name, seq):
+                            return reply
+            except TimeoutError:
+                return None
+        raise ConnectionError("the printer closed the connection before it answered")
 
     async def publish(self, command: dict[str, Any]) -> None:
         async with await self._client() as client:
