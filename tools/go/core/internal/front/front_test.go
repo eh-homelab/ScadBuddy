@@ -1,8 +1,12 @@
 package front
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -73,5 +77,42 @@ func TestTheCRUDPortServesOnlyItsPaths(t *testing.T) {
 	r.Header.Set("Upgrade", "websocket")
 	if h.ServeHTTP(w, r); w.Code != 404 {
 		t.Error("an upgrade reached the CRUD port")
+	}
+}
+
+// The filter reads the path as the server decoded it, as crud/listener.py reads the ASGI
+// path, so an escaped dot segment or slash is refused as the plain one is.
+func TestAnEscapedPathIsRefusedOnTheWire(t *testing.T) {
+	reached := ""
+	server := httptest.NewServer(CRUDOnly(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = r.URL.EscapedPath()
+		w.WriteHeader(204)
+	})))
+	defer server.Close()
+	for raw, want := range map[string]int{
+		"/api/v1/internal/crud/render/settings":        204,
+		"/api/v1/internal/crud/x%2F..%2F..%2Fmodels":   404,
+		"/api/v1/internal/crud/%2E%2E/%2E%2E/models":   404,
+		"/api/v1/internal/crud/x/%2e%2e/%2e%2e/models": 404,
+		"/api/v1/internal/crud/x%2F%2Fy":               404,
+		"/api/v1/internal/crud/x%2F":                   404,
+		"/api/v1/internal%2Fcrud/x":                    204,
+		"/api/v1/models?x=/api/v1/internal/crud/":      404,
+		"/api/v1/internal/crud/x%252F..%252Fmodels":    204,
+	} {
+		reached = ""
+		conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", raw)
+		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		conn.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != want {
+			t.Errorf("%s: %d (reached %q)", raw, res.StatusCode, reached)
+		}
 	}
 }
