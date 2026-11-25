@@ -39,6 +39,15 @@ def test_roll_entries_are_named_by_the_label_and_sheet_entries_by_page() -> None
     assert png_names([SPOOL] * 31, sheet=True, pages=2) == ["sheet-1.png", "sheet-2.png"]
 
 
+def test_a_repeated_label_gets_a_numbered_entry_and_the_zip_warns_of_no_duplicate(
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    names = png_names([SPOOL, SPOOL, PLACE, SPOOL, PLACE], sheet=False, pages=5)
+    assert names == ["spool-12.png", "spool-12-2.png", "L-7.png", "spool-12-3.png", "L-7-2.png"]
+    zip_pngs(names, [b"x"] * 5)
+    assert len(recwarn) == 0
+
+
 def test_the_zip_is_stored_and_its_bytes_do_not_depend_on_the_date() -> None:
     one = zip_pngs(["a.png"], [b"x"])
     with zipfile.ZipFile(io.BytesIO(one)) as archive:

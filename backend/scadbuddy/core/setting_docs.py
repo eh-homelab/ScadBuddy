@@ -478,7 +478,7 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Label output",
             "The file that the labels download gives: a PDF, or PNG images at 203, 300 or"
             " 600 dpi for label printer software. One page is one PNG; more pages come as a"
-            " ZIP of PNGs. The Labels page saves the last choice.",
+            " ZIP of PNGs.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",

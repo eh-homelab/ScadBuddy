@@ -68,7 +68,7 @@ def render_pngs(pdf: bytes, dpi: int) -> list[bytes]:
                 page = document[at]
                 scale = dpi / _POINTS_PER_INCH
                 try:
-                    image: Image.Image = page.render(scale=scale).to_pil().convert("L")
+                    image: Image.Image = page.render(scale=scale, grayscale=True).to_pil()
                     # pypdfium2 rounds the size up (`math.ceil` in `PdfPage.render`), so a
                     # partial last pixel is cut: the size is the rounded one `png_pixels`
                     # counts.
@@ -87,13 +87,17 @@ def render_pngs(pdf: bytes, dpi: int) -> list[bytes]:
 
 def png_names(labels: Sequence[Label], sheet: bool, pages: int) -> list[str]:
     """The ZIP's entry names: a roll's by the label (`spool-<number>.png`, `L-<n>.png`), a
-    sheet's by the page (`sheet-<n>.png`)."""
+    sheet's by the page (`sheet-<n>.png`). A label used again gets `-2`, `-3` before
+    `.png`, so every page is its own entry."""
     if sheet:
         return [f"sheet-{at}.png" for at in range(1, pages + 1)]
-    return [
-        f"spool-{label.number}.png" if isinstance(label, SpoolLabel) else f"{label.code}.png"
-        for label in labels
-    ]
+    seen: dict[str, int] = {}
+    names: list[str] = []
+    for label in labels:
+        stem = f"spool-{label.number}" if isinstance(label, SpoolLabel) else label.code
+        seen[stem] = seen.get(stem, 0) + 1
+        names.append(f"{stem}.png" if seen[stem] == 1 else f"{stem}-{seen[stem]}.png")
+    return names
 
 
 def zip_pngs(names: Sequence[str], pngs: Sequence[bytes]) -> bytes:
