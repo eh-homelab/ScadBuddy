@@ -1549,6 +1549,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
   of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
   skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
+  Phase 2: once a copy run has finished (`Catalogue._from_rows`), the catalogue's readers
+  read the rows, not the files (the list, the record, the ids, `list_summaries`,
+  `raw_metas`, the pin index, the print settings, the name check, `duplicates_of`);
+  `library_users` and `library_pins` still read the files. The thumbnail's `ETag` names
+  its source (`Catalogue.thumbnail_ref`: the cover's sha256, `"output-<id>"`,
+  `"preview-<id>"`), so a 304 reads no file (except for a row that lags its media,
+  `TemplateRow.media_newer`, which is read from the files); a 200 tags what it read.
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with

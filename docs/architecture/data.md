@@ -147,8 +147,46 @@ migration `20261124T1824Z_templates.sql`): its parsed `model.json` (`meta`, or `
 and the raw `meta_text` when it cannot be read or stored), `name`, `version` (the last
 commit that touched it), `inputs_version`, its `// color` parameters, its media files'
 sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
-The row is derived: git stays the record, and any row can be rebuilt from the tree. In
-phase 1 nothing reads the rows yet; the readers move to them in phase 2.
+The row is derived: git stays the record, and any row can be rebuilt from the tree. Once a
+copy run has finished, `Catalogue.slugs`, `list_models` and `record` read the rows
+(phase 2), and so do the pin index, the library associations (`raw_metas`), the print
+settings, the name check, `duplicates_of`, and the callers that only name or filter
+models (`list_summaries`: the activity facets, the print-import suggestions and the
+outputs' `?tag=`); before that, they read the files. `library_users` and `library_pins`
+always read the files (spec §7.4).
+
+- A row whose folder is gone (a hand removal, a delete whose row drop failed) is a 404 for
+  `record` and for its thumbnail's 200, has no print settings, holds no name in the name
+  check, is no duplicate in `duplicates_of` and is made from no library file (the
+  associations' implied `mesh_source`): each of these readers makes one
+  `Catalogue.exists` check for it (a hit is one stat; a miss also revalidates the
+  directories). A thumbnail 304 makes no check, so a client that holds the tag gets 304
+  until the next copy run drops the row. The list keeps such a row until then too
+  (spec §10).
+- A row whose `model.json` Postgres cannot store (`meta` null, `meta_error` `not storable
+  (…)`: NaN, a lone surrogate) is read from its file by every reader, the list and
+  `list_summaries` included, as before the copy.
+- A media file that the row's `files` lacks is stat'ed only while the template's media
+  changed after the row's `refreshed_at` (`TemplateRow.media_newer`, read with the row from
+  `templates.media_changed_at`): every media write (an add, a removal, a reorder, a
+  built-in's cover choice) sets that column in its own transaction, before the template's
+  row is refreshed, so a new item is on the disk first. Once the row is newer, such a file
+  is `missing` with no stat. An older pod's media write during a roll sets no
+  `media_changed_at`.
+- The catalogue thumbnail reads `Catalogue.thumbnail_ref`: the row's `cover`, else the
+  output's plate cover (`OutputStore.plate_cover_output`), else the preview
+  (`PreviewStore.preview_id`). Its `ETag` names the source: the cover's `sha256` (the hash
+  of the bytes, as before the copy), `"output-<id>"` or `"preview-<id>"`. A matching
+  `If-None-Match` is a 304 with no file read or stat, except for a row that lags its media,
+  which is read from the files. A 200 reads the source
+  (`OutputStore.plate_image`, `PreviewStore.current_image`, which reads the preview's id and
+  image from one row) and carries the tag of what it read (plan decision 12). No row is
+  one `Catalogue.exists` check: a template with files but no row (a failed refresh) is
+  read from the files, as its record is, and one with no folder either is a 404. A row
+  that lags its media is read from the files too; both are tagged by the bytes
+  (`scadbuddy/api/models.py` `get_thumbnail`). A cover that someone replaces by hand on the
+  volume keeps its row's old tag, so it is served stale until the next refresh or copy run
+  repairs the row (spec §10).
 
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,

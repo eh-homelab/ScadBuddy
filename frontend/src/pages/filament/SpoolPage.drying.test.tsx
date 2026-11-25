@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import { getSpool } from '../../api/filament'
+import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { spoolId } from '../../mocks/features/filament/seed'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
+import { rememberAdvanced } from '../../test/advanced'
 import { renderPage } from '../../test/utils'
 import { SpoolPage } from './SpoolPage'
 
@@ -14,6 +16,8 @@ const open = (number: number) =>
     </Routes>,
     { route: `/filament/spools/${spoolId(number)}` },
   )
+
+beforeEach(() => window.localStorage.clear())
 
 describe('the spool page and drying', () => {
   it('shows the badge in the header and the hours outside dry storage in Storage', async () => {
@@ -44,6 +48,8 @@ describe('the spool page and drying', () => {
   })
 
   it("overrides its type's drying temperature, which the drying form then starts from (#6856)", async () => {
+    // The spool's own drying defaults are behind Advanced.
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const { user } = open(2)
     await screen.findByRole('heading', { level: 1, name: /Spool #2\b/ })
     const own = await screen.findByLabelText('Default drying temperature (°C)')
