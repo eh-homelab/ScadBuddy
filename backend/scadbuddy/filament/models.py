@@ -1681,16 +1681,20 @@ class SpoolEvent(BaseModel):
 
 class SpoolEventAdd(_In):
     """What a person records on a spool: a weighing (``grams`` is the filament left,
-    without the empty spool), a drying (its temperature and hours) or a reset of its
-    consumed counter (``consumed_reset``, #7149 R-7149-4: no grams, the grams left stay). A
-    drying that leaves out ``temp_c`` or ``hours`` takes the spool's `DryingDefaults` for
-    it; ``null`` records none (#6720)."""
+    without the empty spool; ``reading_g`` the scale's reading with it, from which the
+    store takes the spool's effective empty weight when ``grams`` is left out, and keeps
+    the breakdown and the drift in the event's ``data``, #7682), a drying (its temperature
+    and hours) or a reset of its consumed counter (``consumed_reset``, #7149 R-7149-4: no
+    grams, the grams left stay). A drying that leaves out ``temp_c`` or ``hours`` takes
+    the spool's `DryingDefaults` for it; ``null`` records none (#6720)."""
 
     kind: Literal["weighed", "dried", "consumed_reset"]
     source: Literal["person", "scale"] = "person"
     #: When it happened, with its offset; never later than now (`FUTURE_SKEW` allowed).
     at: AwareDatetime | None = None
     grams: Grams | None = None
+    #: The scale reading with the spool, a weighing only.
+    reading_g: Grams | None = None
     temp_c: Temp | None = None
     hours: Hours | None = None
     note: Note | None = None
@@ -1700,7 +1704,11 @@ class SpoolEventAdd(_In):
         if self.at is not None and self.at > datetime.now(UTC) + FUTURE_SKEW:
             # A future reading would stay the anchor over every reading until then.
             raise ValueError("at is in the future")
-        if self.kind == "weighed" and self.grams is None:
+        if self.reading_g is not None and self.kind != "weighed":
+            raise ValueError("only a weighing has reading_g")
+        if self.reading_g is not None and self.grams is not None and self.reading_g < self.grams:
+            raise ValueError("reading_g is below grams")
+        if self.kind == "weighed" and self.grams is None and self.reading_g is None:
             raise ValueError("a weighing needs grams")
         if self.kind == "weighed" and (self.temp_c is not None or self.hours is not None):
             raise ValueError("a weighing has no temp_c or hours")
@@ -1896,6 +1904,8 @@ class SpoolDetail(Spool):
     invoice: SpoolInvoiceRef | None = None
     #: The unarchived products of unarchived suppliers for its type, by supplier name.
     type_suppliers: list[SpoolTypeSupplier] = Field(default_factory=list)
+    #: The newest ``weighed`` event; its ``data`` holds the breakdown when it has one (#7682).
+    last_weighing: SpoolEvent | None = None
 
 
 class TagRow(Tag):

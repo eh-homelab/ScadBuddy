@@ -41,6 +41,11 @@ named time, so it never pushes a physical time past a newer anchor. Three rules 
    event (`bambuddy_usage._cover`, #6598). The estimate then drops as any estimate does
    whose ref has a ``print_ended``: `basis` skips it.
 
+A ``weighed`` event sent with its scale reading keeps the breakdown in its ``data``
+(#7682): ``reading_g``, ``empty_g``, ``empty_source``, ``empty_basis``, ``empty_name``,
+``expected_g`` (the grams left just before it, `expected_before`) and ``drift_g``
+(`breakdown`); the newest one's drift is the spool's ``last_drift_g``.
+
 `refresh_derived` reads a spool's whole history, except for an event booked on top of
 it (`record` passes the event; #6263's AMS readings come one per tick). When no other
 event of the spool is later than it, it is not a delta (``source`` ``print_actual`` or
@@ -57,7 +62,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import datetime
-from typing import Any, Final, NamedTuple
+from typing import TYPE_CHECKING, Any, Final, NamedTuple
 from uuid import UUID
 
 from psycopg import Connection
@@ -68,6 +73,9 @@ from pydantic_core import to_jsonable_python
 from scadbuddy.filament import models as m
 from scadbuddy.filament.provenance import current_by
 from scadbuddy.filament.shopping import add_for_empty_on
+
+if TYPE_CHECKING:
+    from scadbuddy.filament.empty_weight import EmptyWeight
 
 Conn = Connection[DictRow]
 
@@ -312,6 +320,45 @@ def grams_left(
         assert event.delta_g is not None
         value += event.delta_g
     return max(value, 0.0)
+
+
+def expected_before(
+    events: Sequence[m.SpoolEvent],
+    at: datetime | None,
+    *,
+    weight_locked: bool,
+    label_weight_g: int | None,
+) -> float | None:
+    """The grams left the ledger gave just before a weighing at ``at`` (#7682): `grams_left`
+    over the events before it and, by rule 1, the deltas at that very instant; every event
+    when ``at`` is None (the weighing is booked now). ``None`` with no anchor by then."""
+    if at is not None:
+        events = [e for e in events if e.at < at or (e.at == at and e.source in _DELTA)]
+    return grams_left(events, weight_locked=weight_locked, label_weight_g=label_weight_g)
+
+
+def breakdown(
+    *, reading_g: float, grams: float, empty: EmptyWeight | None, expected: float | None
+) -> dict[str, Any]:
+    """A weighing's ``data`` keys (#7682): the reading, what was taken off it for the empty
+    spool and where that came from (``insert`` when it is the effective empty weight,
+    else ``person``: the client took something else off, or nothing was known), the grams
+    the ledger expected and the drift, ``grams - expected``, to 0.1 g; both null with no
+    ``expected``."""
+    empty_g = reading_g - grams
+    if empty is not None and abs(empty_g - empty.grams) < 0.05:
+        source, basis, name = empty.source, empty.basis, empty.name
+    else:
+        source, basis, name = "person", None, None
+    return {
+        "reading_g": reading_g,
+        "empty_g": empty_g,
+        "empty_source": source,
+        "empty_basis": basis,
+        "empty_name": name,
+        "expected_g": expected,
+        "drift_g": None if expected is None else round(grams - expected, 1),
+    }
 
 
 def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:
