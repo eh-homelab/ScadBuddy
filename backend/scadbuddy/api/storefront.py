@@ -224,7 +224,12 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     ``listing_media_unknown``, ``listing_material_not_allowed``,
     ``listing_locked_colours_unprintable``: no allowed material offers every locked colour
     and a choice of each offered colour,
-    ``listing_reference``, ``listing_pipeline_unsupported``,
+    ``listing_reference``; of a pipeline template's own inputs (#5701)
+    ``listing_inputs_undeclared``: the template declares no shape for them,
+    ``listing_inputs_invalid`` (with ``reason``) and ``listing_inputs_reserved`` (each
+    with ``name``, such as ``inputs.house.cols``), ``listing_inputs_migration_failed``
+    and ``listing_param_pipeline_set``: the pipeline sets that parameter itself, or
+    ``listing_inputs_unexpected``: inputs on a template with no pipeline;
     ``listing_material_unsliceable``: the shop slice profile has no filament type for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process

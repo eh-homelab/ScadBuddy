@@ -650,9 +650,9 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
     ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
     (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
-    colour of the render has no listing filament, or the render is of another design
-    than the listing's now (its slug or commit moved since, #6370 review): the price
-    is never of a design the visitor does not see."""
+    colour of the render has no listing filament, the template is a pipeline (#5701), or
+    the render is of another design than the listing's now (its slug or commit moved
+    since, #6370 review): the price is never of a design the visitor does not see."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
@@ -678,7 +678,10 @@ async def estimate_of(
     ``colours`` and ``material``, whose choices have ``variant_key``. The shop's warming of
     a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
     through the visitor's own path. ``pending`` with no ``price_key`` while its files are
-    fetched."""
+    fetched. ``none`` for a pipeline template's render, which starts no slice yet (#5701):
+    the shop prices it by hand."""
+    if listing.design[2].pipeline:
+        return NO_PRICE
     if job.slug != listing.slug or job.model_version != listing.commit:
         # The shop moved the listing since this render: the page renders again.
         return NO_PRICE

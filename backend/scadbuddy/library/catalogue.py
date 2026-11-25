@@ -540,18 +540,34 @@ def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
     return ModelMeta.model_validate({"name": default_name, **cleaned})
 
 
+def revision_meta(directory: Path, slug: str) -> ModelMeta | None:
+    """The template's model.json in ``directory`` (a revision's), read as the catalogue
+    reads it; None when it cannot be read."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+        return meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return None
+
+
+def inputs_version_in(directory: Path, pipeline: PipelineDeclaration) -> int:
+    """The ``INPUTS_VERSION`` of the pipeline a template in ``directory`` (a revision's)
+    declares, read without running it (`inputs_version_of`); 0 for a module that cannot
+    be read."""
+    try:
+        return inputs_version_of((directory / pipeline.module).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return 0
+
+
 def declares_pipeline(directory: Path, slug: str) -> bool:
     """Whether the template's model.json in ``directory`` (a revision's) declares a
     pipeline (spec 2026-09-27 §5.1), read as the catalogue reads it. A malformed
     declaration counts: the job then reaches the worker, whose `load_pipeline` names
     what is wrong with it. An unreadable model.json declares none, and the job renders
     `model.scad`'s parameters."""
-    try:
-        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
-        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
-    except (OSError, ValueError, ValidationError):
-        return False
-    return meta.pipeline is not None or meta.pipeline_raw is not None
+    meta = revision_meta(directory, slug)
+    return meta is not None and (meta.pipeline is not None or meta.pipeline_raw is not None)
 
 
 class ModelPatch(BaseModel):
@@ -983,11 +999,7 @@ class Catalogue:
     def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
         if meta.pipeline is None:
             return 0
-        path = self.paths.model_dir(slug) / meta.pipeline.module
-        try:
-            return inputs_version_of(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            return 0
+        return inputs_version_in(self.paths.model_dir(slug), meta.pipeline)
 
     def print_settings(self, slug: str) -> dict[str, ProcessValue]:
         """The template's ``print_settings`` as its model.json has them now (#770);
