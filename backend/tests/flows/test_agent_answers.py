@@ -10,6 +10,7 @@ import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.flows.answerers import ANSWER_NOT_ALLOWED
 from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.operations import (
     AGENT_ANSWER,
@@ -19,7 +20,7 @@ from scadbuddy.flows.operations import (
     decision_update_id,
     request_id,
 )
-from tests.flows.flows_support import Flows, Keys
+from tests.flows.flows_support import Flows, Keys, parent_session, script
 from tests.flows.test_flow_operations import (
     Marks,
     StoreMarks,
@@ -35,13 +36,25 @@ from tests.flows.test_flow_operations import (
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
-SESSION = "session:s1"
-OTHER = "session:s2"
+S1 = "5e551011-0000-4000-8000-000000000001"
+S2 = "5e551011-0000-4000-8000-000000000002"
+SESSION = f"session:{S1}"
+OTHER = f"session:{S2}"
+#: The browser user, as a session's owner and the author's principal.
+OWNER = "browser"
+
+
+@pytest.fixture(autouse=True)
+def sessions(flows: Flows) -> None:
+    """Both agent sessions may answer: the browser user's, not a flow's."""
+    with flows.store._pool.connection() as conn:
+        parent_session(conn, S1, OWNER)
+        parent_session(conn, S2, OWNER)
 
 
 def agent(request: dict[str, Any], responder: str = SESSION) -> dict[str, Any]:
-    """`request` as an agent's, admitted by the rule `sessions`."""
-    return {**request, "responder": responder, "admitted_by": "sessions"}
+    """`request` as an agent's, as the route makes it for a session the setting admits."""
+    return {**request, "responder": responder, "admitted_by": "setting", "principal": OWNER}
 
 
 def row_of(run: Run, call_id: str, text: str, responder: str = SESSION) -> Decision:
@@ -54,7 +67,7 @@ def row_of(run: Run, call_id: str, text: str, responder: str = SESSION) -> Decis
         outcome="answered",
         response={"answer": text},
         responder=responder,
-        admitted_by=None if responder == "browser" else "sessions",
+        admitted_by=None if responder == "browser" else "setting",
     )
 
 
@@ -110,7 +123,7 @@ async def test_an_agents_answer_reaches_the_run_and_names_it(flows: Flows) -> No
     result = await operate(flows, kinds(flows)[AGENT_ANSWER], request)
     assert result["outcome"] == "answered"
     assert (await flows.finished(run.id)).result == "result: 'ok'"
-    assert await on_record(flows, run, call_id) == ({"answer": "ok"}, SESSION, "sessions")
+    assert await on_record(flows, run, call_id) == ({"answer": "ok"}, SESSION, "setting")
 
 
 @pytest.mark.parametrize("responder", ["browser", "grant:g1"])
@@ -149,7 +162,7 @@ async def test_an_agents_task_answer_records_its_responder(
     decision = await flows.store.get_decision(request_id(run, call_id))
     assert decision is not None and (decision.responder, decision.admitted_by) == (
         SESSION,
-        "sessions",
+        "setting",
     )
 
 
@@ -183,7 +196,7 @@ async def test_an_agent_takes_over_its_own_lost_answer(flows: Flows) -> None:
     request = agent(await answering(FLOW_ANSWER, run, call_id, "two"))
     assert (await operate(flows, kinds(flows)[AGENT_ANSWER], request))["outcome"] == "answered"
     assert (await flows.finished(run.id)).result == "result: 'two'"
-    assert await on_record(flows, run, call_id) == ({"answer": "two"}, SESSION, "sessions")
+    assert await on_record(flows, run, call_id) == ({"answer": "two"}, SESSION, "setting")
 
 
 async def test_a_running_agents_answer_refuses_a_persons_take_over(flows: Flows) -> None:
@@ -220,7 +233,7 @@ async def test_putting_back_restores_the_answerer(
     with pytest.raises(ApiError) as err:
         await operate(flows, kinds(flows, marks)[FLOW_ANSWER], request)
     assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
-    assert await on_record(flows, run, call_id) == ({"answer": "one"}, SESSION, "sessions")
+    assert await on_record(flows, run, call_id) == ({"answer": "one"}, SESSION, "setting")
 
 
 async def test_withdraw_deletes_only_its_own_answerers_row(flows: Flows) -> None:
@@ -229,6 +242,71 @@ async def test_withdraw_deletes_only_its_own_answerers_row(flows: Flows) -> None
     assert await flows.store.record_decision(agents)
     for other in ("browser", OTHER):
         await flows.remote.withdraw_decision(row_of(run, call_id, "ok", other))
-        assert await on_record(flows, run, call_id) == ({"answer": "ok"}, SESSION, "sessions")
+        assert await on_record(flows, run, call_id) == ({"answer": "ok"}, SESSION, "setting")
     await flows.remote.withdraw_decision(agents)
     assert await on_record(flows, run, call_id) is None
+
+
+@pytest.mark.parametrize("flag", ["people_only=True", None])
+async def test_a_question_for_people_is_refused_in_the_operation(
+    flows: Flows, flag: str | None
+) -> None:
+    """Asked again in the check: a Reset since the route may have parked such a question.
+    `None`: an entry parked before #7471, which has no flag."""
+    run_id = await flows.start(
+        script(f"a = await wait_for_human('Q?', {flag or 'timeout_s=600'})", "return a['answer']")
+    )
+    run = await flows.row(run_id, lambda r: r.status == "waiting")
+    call_id = run.waiting_on[0].call_id
+    if flag is None:
+        with flows.store._pool.connection() as conn:
+            conn.execute(
+                "UPDATE workflow_runs SET waiting_on = (SELECT jsonb_agg(w - 'people_only')"
+                " FROM jsonb_array_elements(waiting_on) w) WHERE id = %s",
+                (run_id,),
+            )
+    request = agent(await answering(FLOW_ANSWER, run, call_id, "ok"))
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows)[AGENT_ANSWER], request)
+    assert (err.value.status, err.value.type) == (403, ANSWER_NOT_ALLOWED)
+    assert await on_record(flows, run, call_id) is None
+
+
+@pytest.mark.parametrize("change", ["archived", "flow", "turn", "owner"])
+async def test_a_session_that_may_no_longer_answer_is_refused_in_the_operation(
+    flows: Flows, change: str
+) -> None:
+    run, call_id = await parked(flows)
+    sql = {
+        "archived": "UPDATE ai_sessions SET archived_at = now() WHERE id = %s",
+        "flow": "UPDATE ai_sessions SET background_tools = false WHERE id = %s",
+        "turn": "UPDATE ai_sessions SET turn_flow = true WHERE id = %s",
+        "owner": "UPDATE ai_sessions SET owner_id = 'someone' WHERE id = %s",
+    }[change]
+    with flows.store._pool.connection() as conn:
+        conn.execute(sql, (S1,))
+    request = agent(await answering(FLOW_ANSWER, run, call_id, "ok"))
+    with pytest.raises(ApiError) as err:
+        await operate(flows, kinds(flows)[AGENT_ANSWER], request)
+    assert (err.value.status, err.value.type) == (403, ANSWER_NOT_ALLOWED)
+    assert await on_record(flows, run, call_id) is None
+
+
+async def test_a_token_without_write_is_refused(flows: Flows) -> None:
+    token = "70ce0000-0000-4000-8000-000000000001"
+    session = "5e551011-0000-4000-8000-000000000003"
+    with flows.store._pool.connection() as conn:
+        parent_session(conn, session, f"token:{token}", tier="write")
+    store = flows.store
+    assert await store.answer_token(token)
+    assert await store.answer_session(session, f"token:{token}") is not None
+    for sql in (
+        "UPDATE ai_mcp_tokens SET tier = 'read' WHERE id = %s",
+        "UPDATE ai_mcp_tokens SET tier = 'write', revoked_at = now() WHERE id = %s",
+        "UPDATE ai_mcp_tokens SET revoked_at = NULL, expires_at = now() WHERE id = %s",
+    ):
+        with flows.store._pool.connection() as conn:
+            conn.execute(sql, (token,))
+        assert not await store.answer_token(token)
+        assert await store.answer_session(session, f"token:{token}") is None
+    assert not await flows.remote.answer_allowed(f"token:{token}", None)

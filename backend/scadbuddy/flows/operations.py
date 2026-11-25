@@ -141,6 +141,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
 from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.crud.projects import RESET_REFUSED
+from scadbuddy.flows.answerers import ANSWER_NOT_ALLOWED
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
@@ -318,6 +319,27 @@ def _stale() -> ApiError:
 
 def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
+
+
+def not_allowed() -> ApiError:
+    """An answer by an agent that the setting does not let answer (#7471)."""
+    return ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "Only a person answers this flow's questions. The setting flow_answerers says who"
+        " else may.",
+        type_=ANSWER_NOT_ALLOWED,
+        setting="flow_answerers",
+    )
+
+
+def people_only() -> ApiError:
+    """An agent's answer to a question that the script asked people only (#7471)."""
+    return ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "Only a person answers this question: the flow asked it of people only.",
+        type_=ANSWER_NOT_ALLOWED,
+        people_only=True,
+    )
 
 
 def task_not_open(state: TaskState) -> ApiError:
@@ -564,6 +586,9 @@ def flow_kinds(
                 raise _resolved()
         if existing is None and entry is None:
             raise _stale()
+        if responder != "browser" and entry is not None and entry.people_only is not False:
+            # Asked again here: a Reset since the route may have parked another question.
+            raise people_only()
         return {
             "request_id": rid,
             "workflow_id": run.workflow_id,
@@ -651,6 +676,17 @@ def flow_kinds(
     async def check_answer(request: dict[str, Any]) -> dict[str, Any]:
         return await check("answer", request)
 
+    async def check_agent_answer(request: dict[str, Any]) -> dict[str, Any]:
+        """The checks of a person's answer, the question not for people only, and the
+        answerer's session or token still allowed (spec §4.4). The setting itself is read
+        at the route only."""
+        responder, _ = agent_of(request)
+        checked = await check("answer", request, responder)
+        principal = request.get("principal")
+        if not await store.answer_allowed(responder, None if principal is None else str(principal)):
+            raise not_allowed()
+        return checked
+
     def agent_of(request: dict[str, Any]) -> tuple[str, str | None]:
         """An `AGENT_ANSWER`'s answerer and the rule that admitted it."""
         responder = str(request["responder"])
@@ -658,10 +694,6 @@ def flow_kinds(
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not an agent's answer.")
         admitted = request.get("admitted_by")
         return responder, None if admitted is None else str(admitted)
-
-    async def check_agent_answer(request: dict[str, Any]) -> dict[str, Any]:
-        responder, _ = agent_of(request)
-        return await check("answer", request, responder)
 
     async def may_send(operation: CallOperation, held: Decision) -> bool:
         """Whether a running operation may still send the decision `held`."""

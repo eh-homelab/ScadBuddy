@@ -638,7 +638,7 @@ def test_an_answer_reaches_the_run_once(client: TestClient) -> None:
     assert client.post(url, json=body).status_code == 428
     refused = client.post(url, json=body, headers={"Idempotency-Key": "a0", **AGENT})
     assert refused.status_code == 403
-    assert refused.json()["type"].endswith("/flow-entry-browser-only")
+    assert refused.json()["type"].endswith("/flow-answer-not-allowed")
     answered = client.post(url, json=body, headers={"Idempotency-Key": "a1"})
     assert answered.status_code == 200, answered.text
     assert answered.json()["outcome"] == "answered"

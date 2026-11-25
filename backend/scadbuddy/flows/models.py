@@ -189,8 +189,8 @@ class Decision(BaseModel):
     #: The entry's way up before it was decided (#2482), and the decision's own step.
     hops: list[HopRecord] = []
     created_at: datetime | None = None
-    #: The rule of the setting `flow_answerers` that let an agent answer (#7471): `starter`,
-    #: `sessions` or `token:<id>`. None for a person's answer and for an approval.
+    #: What let an agent answer (#7471): `setting` (`flow_answerers`), or a run grant's id
+    #: once grants may. None for a person's answer and for an approval.
     admitted_by: str | None = None
 
 

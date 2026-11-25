@@ -26,6 +26,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
+from scadbuddy.flows.answerers import SessionOwner
 from scadbuddy.flows.grants import (
     ConsumeRequest,
     Consumption,
@@ -432,6 +433,28 @@ class FlowStore:
         escalation turn with), anyone else's `read`. None when the session is gone,
         archived, or no longer the run starter's (a handoff): it is no parent then."""
         return await asyncio.to_thread(self._parent_tiers, session, principal)
+
+    async def answer_session(self, session: str, principal: str) -> SessionOwner | None:
+        """Who owns session `session`, when it may answer a flow's question now (#7471, spec
+        §4.1.1): it is not archived, its owner is `principal`, it is not a flow's
+        (`background_tools` and not `turn_flow`), and its owner holds `write`. None
+        otherwise, and when no agent service has migrated this database."""
+        return await asyncio.to_thread(self._answer_session, session, principal)
+
+    async def answer_token(self, token_id: str) -> bool:
+        """Whether MCP token `token_id` may answer a flow's question now: it is not revoked
+        or expired, and its tier holds `write`."""
+        return await asyncio.to_thread(self._answer_token, token_id)
+
+    async def answer_allowed(self, responder: str, principal: str | None) -> bool:
+        """Whether the agent answerer `responder` (`session:<id>`, `token:<id>`) may still
+        answer, as `answer_session` and `answer_token` say."""
+        kind, _, id_ = responder.partition(":")
+        if kind == "session" and principal is not None:
+            return await self.answer_session(id_, principal) is not None
+        if kind == "token":
+            return await self.answer_token(id_)
+        return False
 
     async def approval_expiry_s(self) -> int:
         """How long a parent hop lasts when the run never times out (spec §4.6): the
@@ -1130,6 +1153,41 @@ class FlowStore:
         if held is None or held["tier"] not in TIERS:
             return []
         return list(TIERS[: TIERS.index(held["tier"]) + 1])
+
+    def _answer_session(self, session: str, principal: str) -> SessionOwner | None:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT owner_kind, owner_id FROM ai_sessions"
+                    " WHERE id::text = %s AND archived_at IS NULL"
+                    " AND background_tools AND NOT turn_flow",
+                    (session,),
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                return None
+        if row is None or author_principal(str(row["owner_id"])) != principal:
+            return None
+        if row["owner_kind"] == "browser":
+            return SessionOwner(kind="browser")
+        token = str(row["owner_id"])
+        if row["owner_kind"] != "bearer" or not token.startswith("token:"):
+            return None
+        token_id = token.removeprefix("token:")
+        if not self._answer_token(token_id):
+            return None
+        return SessionOwner(kind="token", token_id=token_id)
+
+    def _answer_token(self, token_id: str) -> bool:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT tier FROM ai_mcp_tokens WHERE id::text = %s AND revoked_at IS NULL"
+                    " AND (expires_at IS NULL OR expires_at > now())",
+                    (token_id,),
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                return False
+        return row is not None and row["tier"] in TIERS[TIERS.index("write") :]
 
     def _approval_expiry_s(self) -> int:
         with self._pool.connection() as conn:
