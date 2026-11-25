@@ -79,7 +79,7 @@ fn default_concurrency() -> usize {
 /// tracer provider `init_tracing` set, so an activity's span is a child of the workflow's.
 ///
 /// `runtime` is taken so a client is only ever made once the worker's runtime exists;
-/// temporalio-sdk 1.1.0 exposes no metric meter on `Runtime` (`Runtime::core` is
+/// temporalio-sdk 1.1.2 exposes no metric meter on `Runtime` (`Runtime::core` is
 /// `pub(crate)`), so the client records no SDK metrics.
 pub async fn connect(
     env: &WorkerEnv,

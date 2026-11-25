@@ -23,16 +23,25 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from psycopg import Connection, errors
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
+from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.registry import KIND_OF_TABLE as ENTITY_KIND_OF_TABLE
+from scadbuddy.entities.required import (
+    Marked,
+    checks_save,
+    mark_incomplete,
+    save_properties_on,
+)
 from scadbuddy.filament import models as m
 from scadbuddy.filament.bb_sync_models import forget_sync
+from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
 
@@ -238,7 +247,7 @@ def _columns(spec: CatalogSpec) -> str:
     columns = [
         f"{spec.computed[name]} AS {name}" if name in spec.computed else name
         for name in spec.out.model_fields
-        if name != "aliases"
+        if name != "aliases" and name not in m.COMPLETENESS
     ]
     if spec.names is not None:
         n = spec.names
@@ -411,11 +420,14 @@ class CatalogStore:
                 " ORDER BY sort_order, upper(name), id",
                 params,
             ).fetchall()
-        return [spec.out.model_validate(row) for row in rows]
+            found = [spec.out.model_validate(row) for row in rows]
+            mark_incomplete(conn, _entity_kind(spec), cast("list[Marked]", found))
+        return found
 
     def get(self, kind: str, row_id: UUID) -> BaseModel | None:
+        spec = _spec(kind)
         with self._pool.connection() as conn:
-            return self._read(conn, _spec(kind), row_id)
+            return _marked(conn, spec, self._read(conn, spec, row_id))
 
     def resolve(self, kind: str, name: str, material: UUID | None = None) -> BaseModel | None:
         """The row `find_by_key` finds, or ``None``."""
@@ -430,7 +442,18 @@ class CatalogStore:
         ).fetchone()
         return None if row is None else spec.out.model_validate(row)
 
-    def create(self, kind: str, body: BaseModel) -> BaseModel:
+    def create(
+        self,
+        kind: str,
+        body: BaseModel,
+        *,
+        properties: Mapping[str, JsonValue] | None = None,
+        by: Actor | None = None,
+        checked: bool = False,
+    ) -> BaseModel:
+        """A new row with its ``properties``, by ``by``; with ``checked`` (the catalog
+        route, #7703 spec 6.3b) an incomplete row is `MissingRequiredProperties` and nothing
+        is written. A row `resolve_or_add` adds on the way to another is never checked."""
         spec = _spec(kind)
         data = body.model_dump()
         if kind in _TEMPS:
@@ -445,7 +468,15 @@ class CatalogStore:
                         [data[name] for name in names],
                     ).fetchone()
                     assert row is not None
-                    made = self._read(conn, spec, row["id"])
+                    if properties or checked:
+                        save_properties_on(
+                            conn,
+                            EntityRef(_entity_kind(spec), str(row["id"])),
+                            properties,
+                            by or Actor(kind="browser"),
+                            check=checked,
+                        )
+                    made = _marked(conn, spec, self._read(conn, spec, row["id"]))
             except errors.UniqueViolation as exc:
                 if not _is_names(exc, spec):
                     raise CatalogExistsError() from None
@@ -459,8 +490,20 @@ class CatalogStore:
         assert made is not None
         return made
 
-    def update(self, kind: str, row_id: UUID, patch: BaseModel) -> BaseModel | None:
+    def update(
+        self,
+        kind: str,
+        row_id: UUID,
+        patch: BaseModel,
+        *,
+        properties: Mapping[str, JsonValue] | None = None,
+        by: Actor | None = None,
+        checked: bool = False,
+    ) -> BaseModel | None:
         """The fields ``patch`` sends (``archived`` included); ``None`` for no such row.
+        Its ``properties`` are written with it, by ``by``; with ``checked`` (the catalog
+        route, #7703 spec 6.3b) a save that leaves the row incomplete is
+        `MissingRequiredProperties`, unless it sends only ``sort_order`` or ``archived``.
         `TypeTempError` when a material's or subtype's temperature range would be
         backwards; `CatalogKeyClashError` when the new name (or a subtype's new material)
         meets a key another row holds."""
@@ -503,7 +546,19 @@ class CatalogStore:
                     ).fetchone()
                     if row is not None and archived and kind == "insert-types":
                         forget_sync(conn, "insert_type", row_id)
-                    changed = None if row is None else self._read(conn, spec, row_id)
+                    fields = set(sent) | ({"properties"} if properties is not None else set())
+                    check = checked and checks_save(fields)
+                    if row is not None and (properties or check):
+                        save_properties_on(
+                            conn,
+                            EntityRef(_entity_kind(spec), str(row_id)),
+                            properties,
+                            by or Actor(kind="browser"),
+                            check=check,
+                        )
+                    changed = (
+                        None if row is None else _marked(conn, spec, self._read(conn, spec, row_id))
+                    )
             except errors.UniqueViolation as exc:
                 if not _is_names(exc, spec):
                     raise CatalogExistsError() from None
@@ -559,11 +614,21 @@ class CatalogStore:
                     held = _holder(conn, names, spec.table, alias, scope)
                     assert held is not None
                     raise CatalogKeyClashError(names.noun, held[0], held[1], alias) from None
-            return self._read(conn, spec, row_id)
+            return _marked(conn, spec, self._read(conn, spec, row_id))
 
     def archive(self, kind: str, row_id: UUID, archived: bool) -> BaseModel | None:
         """Take a row off the lists (``True``) or put it back; ``None`` for no such row."""
         return self.update(kind, row_id, _spec(kind).patch.model_validate({"archived": archived}))
+
+
+def _entity_kind(spec: CatalogSpec) -> str:
+    return ENTITY_KIND_OF_TABLE[spec.table]
+
+
+def _marked(conn: Conn, spec: CatalogSpec, row: BaseModel | None) -> BaseModel | None:
+    if row is not None:
+        mark_incomplete(conn, _entity_kind(spec), [cast("Marked", row)])
+    return row
 
 
 def read_on(conn: Conn, kind: str, row_id: UUID) -> BaseModel | None:

@@ -929,7 +929,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   is none, `ReadingBelowEmptyError`, 422 `reading_below_empty`, when the reading is under it), `insert_weights.py` (#7280: an insert's empty weight from new spools'
   weighings, one row per spool in `filament_insert_weight_readings`, the mean of them with
   `filament_insert_types.empty_weight_basis` `derived`; routes `…/insert-weight-offer` and
-  `…/insert-weight`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  `…/insert-weight`; #7683: `check_on` answers `below_label` for a new spool read under its
+  label, with `shortfall_g`, the `resolutions` (`below_label()`: `tared`, `short`,
+  `label_wrong`, each with its `filament_g`) and the `default`; `add_event` takes a
+  weighing's `resolution` with `reading_g` alone, checks it again under the row locks,
+  `NoBelowLabelError`, 422 `no_below_label`, books `short`'s `added_full` false or
+  `label_wrong`'s own `label_weight_g` as an `edited` event before the weighing, and keeps
+  `resolution` and `shortfall_g` in its `data`, with `expected_g` but no `drift_g`; a
+  `tared` weighing's `empty_source` is `tared`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
   the BB to SB side only: it writes nothing to Bambuddy (the push is `bb_sync_*.py` below, tags go through `rfid_push.py`); each `filament_sync` data type gates what the pull takes, through `Pulls.of(sync)` (#6265 Decision 3; `weights` since #6268), and BB's suppliers and locations are read only under `pulls(suppliers)` and `pulls(locations)`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); the Schedule's pull skips when none of the six `filament_sync` data types pulls, read per run (#6262 Task 13, widened by #6265 plan Decision 3, F1; `bb_pull_apply.pull_start`); after a pull it runs `reconcile_trays`, #6713. Since #6772 (plan Decisions 172-186) the CRUD service reads no Bambuddy for the pull: `bb_pull_models.py` is the wire (`PullStart`, the bodies, `BbPullApi`, and `Pulls` and `PullReport`, which `bambuddy_pull` re-exports), `bb_pull_run.py` the print worker's reads in the old order (`run_pull`, `read_and_pull`, `read_catalog`, `read_ha_sensors`, `reconcile_trays`), and `bb_pull_apply.py` the API's apply (`LocalBbPull`, `pull_start`, `execute_pull`); `workflows/filament_pull.py` is `FilamentBbPull` on the `bambuddy` queue (AUTO_UPGRADE; one activity `filament_bb_pull_read`, run once; replays `tests/fixtures/filament_pull_histories/`, so a change to its commands goes behind `workflow.patched`). The spool refresh's `filament_bambuddy_pull` activity (`spools/activities.py`; its commands in `SpoolRefresh` unchanged) and `POST /filament/bambuddy/import` start it and wait; the worker sends what it read to the CRUD area `filament-pull` (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, `…/pull/colours`; client `crud/print.py` `RemoteBbPull`), whose bodies the app's `BodySizeGate` caps at 8 MiB (`api/limits.py` `MAX_TEXT_BODY_BYTES`, 413 on the headers; Decision 182): the five routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`), so the cap holds whatever the content type, header left out included (#6861) and name the Bambuddy instance read (409 `instance_changed` for another than the configured one) and the run's id, never an actor: the import route keeps the person under that id in `filament_pull_actors` (`remember_actor`), the routes read it there, else `bambuddy` (Decision 181); the route drops the row only once the read answered (a report or a problem); a row left behind is deleted by a later `remember_actor` once it is an hour old (`ACTOR_KEPT`, Decision 183). Tests: `tests/filament/pull_support.py` runs both halves in one process for the old pull tests, `test_bb_pull_run.py` the reads, `tests/crud/test_crud_filament_pull.py` the routes), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
@@ -1191,9 +1198,58 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
   (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
-  QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
-  /filament/labels` (the PDF as the body, at most 100 labels; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST
+  /filament/labels` (route `render_labels`: the file as the body, at most 100 labels; in
+  `NOT_NUDGED`). The labels as PNG (#7216, plan
+  `docs/superpowers/plans/2026-11-25-label-outputs.md` R-7216-5 to R-7216-8):
+  `label_output.py` `LabelOutput` (`format` `pdf` or `png`, `dpi` 203, 300 or 600, and the
+  spool label's `fields`), the stored-only setting `filament_label_output`, which a body's
+  own `format`, `dpi` and `fields` outrank. The fields (R-7216-9, R-7216-10): `LabelField`,
+  `ALL_FIELDS` (`number`, `material`, `colour`, `hex`, `brand`, `location`, `temps`, `weight`,
+  `note`, `added`, `qr`, the order the lines print; a validator puts any list in it and
+  refuses none or a repeat), `DEFAULT_FIELDS` (`number`, `material`, `colour`, `brand`, `qr`,
+  what labels printed before); `labels.py` `pdf_labels` fills each value (`temps_text`;
+  `added` is the row's `created_at` day in UTC). `label_pdf.py` `fit_lines` drops the last
+  lines while the block is taller than the label less 2 x `PAD_MM`, from line heights only
+  (`NUMBER_MM`, `CODE_MM`, `FIELD_MM`, `LEADING`, `BIG_LEADING`, `GAP_MM`; the big text
+  counted at its full size), never a chosen number or a place's code; the browser label
+  (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use the same values:
+  `test-fixtures/filament/label-fit-vectors.json` holds them and fit cases, and
+  `tests/filament/test_label_fit_vectors.py` and the frontend's `labelFitVectors.test.ts` check
+  both sides against it (R-7216-19).
+  With no `qr` the text column starts at `QUIET_MM`. Place labels ignore the fields.
+  `label_png.py` rasterises the PDF with pypdfium2, every
+  PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), a request's
+  on the one-thread executor `_PDFIUM` (`rasterise`, R-7216-20), so a request that waits for
+  PDFium holds no worker of the shared `to_thread` pool; each page a
+  greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
+  pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
+  entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`
+  counts every page before anything is drawn: past `MAX_PNG_PIXELS` (400 megapixels) the
+  route answers 422 `png_too_large`. The text (#7216 R-7216-1 to R-7216-4): `label_fonts.py`
+  draws each line as runs of one font each, DejaVu Sans (`DEJAVU`), else the first font of the
+  Noto chain `FALLBACKS` in `FALLBACK_DIR` that holds the character, else U+FFFD from DejaVu;
+  each font is loaded and registered with ReportLab once per process, when a character needs
+  it, and embedded as a subset; `label_pdf.py` measures every width through
+  `label_fonts.width_mm`. A missing DejaVu file is `LabelFontMissingError`, which the route
+  answers 503 `label_font_missing`, never Helvetica; a missing Noto file is skipped and logged
+  once. No shaping, no right-to-left order and no CJK font: #7707. The tests read the text back
+  with pypdfium2; a test that needs a Noto file skips when it is absent, and fails instead with
+  `SCADBUDDY_TEST_FONTS_REQUIRED=1`, which CI's `backend-pytest` sets (the `test` image has
+  `fonts-noto-core`). Saved sheet grids (#7216 R-7216-11 to R-7216-13): `label_sheets.py`
+  (`LabelSheetStore`, the API's own table `label_sheets`, through `Filament.label_sheets` on the
+  filament pool; `SheetLayout` holds the bounds and the fit on the page; a name is unique by
+  `name_key`, NFC then casefold, a unique index; a create counts and inserts under a
+  transaction advisory lock, at most `MAX_SAVED_SHEETS`). `LabelTemplateChoice` takes
+  `template` `saved` with `sheet_id`, and `resolve` reads the row once per labels request, so
+  the PDF and the PNG use one grid and an edit applies to the next print; a deleted sheet is
+  409 `label_sheet_gone`. Routes `POST /filament/label-sheets`, `PUT` and `DELETE
+  /filament/label-sheets/{sheet_id}` (409 `label_sheet_name_taken`, `too_many_label_sheets`;
+  in `NOT_NUDGED`); `GET /filament/label-templates` lists them as `saved`. Agent tools:
+  `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` and `filament_label_templates` (all `read`), and
+  `filament_label_sheet_upsert` and `filament_label_sheet_delete` (`write`, #7216
+  R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
@@ -2523,7 +2579,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   A pipeline template's listing (#5701, `orders/storefront/pipeline_inputs.py`, spec
   2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
   `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
-  ones on the render worker, and `listing_reference` writes the snapshot's around the
+  ones on the render worker (`RevisionSchema.pipeline`, `api/versions.py`, gives the editor the
+  same `pipeline_facts` at a revision), and `listing_reference` writes the snapshot's around the
   customer's `params`. A price, a preview and a cart line are of the listing's design while
   `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
   render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,

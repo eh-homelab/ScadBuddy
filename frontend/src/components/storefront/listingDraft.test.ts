@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import type { CustomizerSchema, Filament, MediaView, OutputPlate, SlotNeed, StorefrontListing } from '../../api/types'
 import { keychainSchema } from '../../mocks/fixtures'
+import { soldDesign } from './designInputs'
 import {
   colourProblems,
   declaredSlots,
@@ -22,11 +23,14 @@ import {
   previewListing,
   savedKey,
   sellMedia,
+  shownParams,
   storedKey,
   supportFilament,
   switchSource,
   titleColours,
+  withoutUnknown,
   withoutWords,
+  type DesignSchema,
   type ListingDraft,
 } from './listingDraft'
 
@@ -55,7 +59,20 @@ interface FileVector {
   titles: { title: string; colours: string[] }[]
 }
 
-const sharedVectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (TemplateVector | FileVector)[]
+/**
+ * #5701 — a "Sell on storefront" case: the schema as the revision answers it (`pipeline`,
+ * `pipeline_params`) and the render's whole inputs (`source`), and what the draft takes of
+ * them: the smart defaults and, for a pipeline template, its own inputs and their version.
+ */
+interface SourceVector {
+  name: string
+  schema: DesignSchema
+  filaments: Filament[]
+  source: Record<string, unknown>
+  expected: Record<string, unknown>
+}
+
+const sharedVectors = JSON.parse(readFileSync(`${import.meta.dirname}/../../../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (TemplateVector | FileVector | SourceVector)[]
 
 function filament(id: string, colour: string, colour_name: string): Filament {
   return {
@@ -131,7 +148,7 @@ describe('defaultsFor (#6131): the smart defaults', () => {
   })
 
   it('agrees with the shared vectors', () => {
-    const vectors = sharedVectors.filter((vector): vector is TemplateVector => !('file' in vector))
+    const vectors = sharedVectors.filter((vector): vector is TemplateVector => !('file' in vector) && !('source' in vector))
     expect(vectors.length).toBeGreaterThan(0)
     for (const vector of vectors) {
       const defaults = defaultsFor(vector.schema, vector.filaments, vector.values)
@@ -418,6 +435,22 @@ describe('a pipeline listing’s inputs (#5701)', () => {
     expect(savedKey(listingInput({ ...draft, inputs: { house: { cols: 3, storeys: 1 } } }, undefined, []))).not.toBe(storedKey(stored))
   })
 
+  it('agrees with the shared vectors of a render sold (#5701)', () => {
+    const vectors = sharedVectors.filter((vector): vector is SourceVector => 'source' in vector)
+    expect(vectors.length).toBeGreaterThan(0)
+    for (const vector of vectors) {
+      const { values, design } = soldDesign(vector.schema, vector.source)
+      expect({ ...defaultsFor(vector.schema, vector.filaments, values), ...design }, vector.name).toEqual(vector.expected)
+    }
+  })
+
+  it('keeps empty inputs with their version, which publish migrates from', () => {
+    const stored = listing({ inputs: {}, inputs_v: 0 })
+    const draft = draftOf(stored)
+    expect(draft).toMatchObject({ inputs: {}, inputs_v: 0 })
+    expect(savedKey(listingInput(draft, undefined, []))).toBe(storedKey(stored))
+  })
+
   it('sends none for a template with no pipeline, another template or a file', () => {
     expect(draftOf(listing({ inputs: {}, inputs_v: null }))).not.toHaveProperty('inputs')
     expect(emptyDraft('name-keychain')).not.toHaveProperty('inputs')
@@ -425,6 +458,60 @@ describe('a pipeline listing’s inputs (#5701)', () => {
     expect(file).not.toHaveProperty('inputs')
     expect(file).not.toHaveProperty('inputs_v')
     expect(listingInput(file, undefined, [])).not.toHaveProperty('inputs_v')
+  })
+})
+
+describe('the parameters a design’s pipeline sets (#5701)', () => {
+  const schema: DesignSchema = { ...keychainSchema, pipeline_params: ['text_size', 'hole_side'] }
+
+  it('have no row in the editor and no place in the smart defaults', () => {
+    expect(shownParams(schema).map((param) => param.name)).not.toContain('text_size')
+    expect(shownParams(keychainSchema).map((param) => param.name)).toContain('text_size')
+    const { params, fixed } = defaultsFor(schema, [BLUE])
+    expect({ ...params, ...fixed }).not.toHaveProperty('text_size')
+    expect({ ...params, ...fixed }).not.toHaveProperty('hole_side')
+  })
+
+  it('leave a listing that offered or locked one, but not its default, which publish takes', () => {
+    const draft: ListingDraft = {
+      ...emptyDraft('m', 'c'.repeat(40)),
+      params: { name: { kind: 'text', max_length: 20 }, text_size: { kind: 'number', min: 6, max: 28 } },
+      fixed: { hole_side: 'left', thickness: 5, gone: 1 },
+    }
+    expect(withoutUnknown(draft, schema)).toMatchObject({ params: { name: { kind: 'text', max_length: 20 } }, fixed: { hole_side: 'left', thickness: 5 } })
+    expect(withoutUnknown(draft, schema).fixed).not.toHaveProperty('gone')
+    expect(withoutUnknown({ ...draft, params: {}, fixed: { hole_side: 'right' } }, schema).fixed).toEqual({})
+    const fits: ListingDraft = { ...draft, params: {}, fixed: { hole_side: 'left' } }
+    expect(withoutUnknown(fits, schema)).toBe(fits)
+  })
+})
+
+describe('what publish refuses of a design’s inputs (#5701)', () => {
+  const type = (slug: string) => `https://scadbuddy.dev/problems/storefront/${slug}`
+
+  it.each([
+    ['listing_inputs_unexpected', 'unexpected'],
+    ['listing_inputs_undeclared', 'undeclared'],
+    ['listing_inputs_reserved', 'reserved'],
+    ['listing_inputs_invalid', 'invalid'],
+    ['listing_inputs_migration_failed', 'migration_failed'],
+  ])('reads %s', (slug, code) => {
+    expect(listingRefusal({ type: type(slug), title: 'Unprocessable Content', status: 422, detail: 'no', name: 'inputs.house.storeys', reason: 'maximum' })).toEqual({
+      kind: 'inputs',
+      code,
+      name: 'inputs.house.storeys',
+      reason: 'maximum',
+      detail: 'no',
+    })
+  })
+
+  it('reads a parameter the pipeline sets by its own name', () => {
+    expect(listingRefusal({ type: type('listing_param_pipeline_set'), title: 'Unprocessable Content', status: 422, detail: 'no', name: 'params.piece' })).toEqual({
+      kind: 'param',
+      code: 'pipeline_set',
+      name: 'piece',
+      detail: 'no',
+    })
   })
 })
 

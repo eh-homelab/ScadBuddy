@@ -600,7 +600,10 @@ opens every one and seals it again byte for byte).
     file listing, #6710 spec 2026-11-21 §11.3: the body the editor saves for a new listing of that
     file, `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`, which the vectors' file
     case pins, but `materials`, which is the offered filaments' (`draftMaterials`) where the page
-    leaves the shop's default) and
+    leaves the shop's default; for a pipeline template, #5701 spec 2026-11-17 §9, an output's own
+    inputs and their version go with the draft, `soldDesign`, which the vectors' `source` cases
+    pin, a parameter the pipeline sets is neither offered nor locked, and a draft from a model
+    sets no inputs and says in `notes` to set up the design in the editor) and
     `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry, or,
     #6935, a bare `marketplace.json` URL's entry, an archive or an npm package) live
