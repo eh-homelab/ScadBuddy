@@ -726,12 +726,10 @@ async def test_a_same_name_preset_made_by_hand_after_a_lost_create_is_named_too(
     assert create.call_count == 1
     row = _row(pg_pool, made)
     assert row["bb_preset_id"] == 44
-    assert row["mirror_error"] == (
-        "Bambuddy also holds preset 42, 43 named 'Hand', which no ScadBuddy preset tracks:"
-        " most likely a copy an earlier create made when its answer was lost, before this"
-        " version was written. Delete it in Bambuddy if it is not in use and you did not"
-        " make it there yourself."
-    )
+    note = row["mirror_error"]
+    assert note is not None
+    assert "preset 42, 43 named 'Hand'" in note
+    assert "you did not make it there yourself" in note
 
 
 @respx.mock

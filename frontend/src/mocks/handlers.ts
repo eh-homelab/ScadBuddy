@@ -2530,7 +2530,13 @@ export const handlers = [
     // revision declares what the model does now.
     const model = state.models.find((m) => m.slug === slug)
     return schema
-      ? HttpResponse.json({ ...schema, ui: model?.ui ?? null, ui_error: model?.ui_error ?? null })
+      ? HttpResponse.json({
+          ...schema,
+          ui: model?.ui ?? null,
+          ui_error: model?.ui_error ?? null,
+          pipeline: fixtures.pipelines[slug]?.declared ?? null,
+          pipeline_params: fixtures.pipelines[slug]?.sets ?? [],
+        })
       : problem(404, 'Model not found')
   }),
 
@@ -3063,8 +3069,8 @@ export const handlers = [
     return HttpResponse.json(output, { status: 201 })
   }),
 
-  // Inputs migration (spec 2026-09-27 §8.2): the mock templates have no `migrate`, so
-  // the inputs come back as they are, at the version they carry.
+  // Inputs migration (spec 2026-09-27 §8.2): a mock template with no `migrate` gives the
+  // inputs back as they are, at the version they carry; the dollhouse's adds its house.
   // A template with a pipeline but no `migrate` (#3777) refuses inputs not at its version,
   // as the agent does: 422 with the worker's message.
   http.post(`${base}/models/:slug/inputs/migrate`, async ({ params, request }) => {
@@ -3078,6 +3084,10 @@ export const handlers = [
         'Unprocessable Content',
         `inputs at version ${v} cannot be brought up to version ${current}: the template's pipeline defines no migrate`,
       )
+    }
+    const pipeline = fixtures.pipelines[slug]
+    if (pipeline && v < current) {
+      return HttpResponse.json({ inputs: { ...pipeline.fresh, ...body.inputs, v: current }, from_version: v, to_version: current })
     }
     return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
   }),

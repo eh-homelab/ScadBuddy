@@ -878,8 +878,10 @@ outside ScadBuddy. These rules hold:
   `oidc` mode, or anyone in `disabled` mode. A revoked or expired token stops reading at
   once. A change to `/mcp`'s tokens, auth mode or anonymous cap changes the feed with it
   ([operating.md §9](operating.md#the-marketplace-feed-6933)).
-- **LAN-only.** The feed has no public prefix on the SSO host (eh-homelab/clusters#4017).
-  The zip URLs follow the request's origin, because Claude Code sends a marketplace's
+- **Public.** The feed prefix, `/mcp` and `/mcp/workspace/` are reached on the public URL
+  with no sign-in at the ingress (eh-homelab/clusters#4017, merged 2026-11-25), so the
+  agent's bearer check is the only gate there. `disabled` mode then serves anyone on the
+  internet, not only the LAN. The zip URLs follow the request's origin, because Claude Code sends a marketplace's
   `headers` only to its own origin.
 - **Only approved pins.** A package is listed only at its current approved pin; a pending
   re-pin, a draft or an unapproved package is 404. A hosted zip and an archive are served
