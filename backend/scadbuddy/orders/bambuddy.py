@@ -241,7 +241,12 @@ class BambuddyIntegrations:
 # -- the quote's slice through Bambuddy's slicer (#4250) ---------------------------------
 
 
-def slice_client(settings: StoredSettings) -> AbstractAsyncContextManager[BambuddyClient]:
+#: The client's type, for ``quote_preview.py``: no other file of ``orders/`` names
+#: ``bambuddy.client``.
+type SliceClient = BambuddyClient
+
+
+def slice_client(settings: StoredSettings) -> AbstractAsyncContextManager[SliceClient]:
     """The client a quote's slice on Bambuddy's path starts with (``quote_preview.py``)."""
     return client_for(settings)
 
