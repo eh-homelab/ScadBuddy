@@ -46,7 +46,7 @@ export type LabelTemplates = Schemas['LabelTemplates']
 export type LabelTemplate = Schemas['LabelTemplate']
 export type LabelSheet = Schemas['LabelSheet']
 export type LabelTemplateChoice = Schemas['LabelTemplateChoice']
-export type LabelsPdfRequest = Schemas['LabelsPdfRequest']
+export type LabelsRequest = Schemas['LabelsRequest']
 export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -472,7 +472,7 @@ export const listLabelTemplates = () => request<LabelTemplates>(`${BASE}/label-t
  * #7157 — the labels PDF of these spools, then these places (`POST /filament/labels`), as the answer's bytes for
  * `downloadBlob`; a refusal throws `ApiError` with the sentence for the person (`no_label_base`, an unknown id).
  */
-export async function labelsPdf(body: LabelsPdfRequest): Promise<Blob> {
+export async function labelsPdf(body: LabelsRequest): Promise<Blob> {
   const response = await requestRaw(`${BASE}/labels`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/pdf' }, body: JSON.stringify(body) })
   return response.blob()
 }

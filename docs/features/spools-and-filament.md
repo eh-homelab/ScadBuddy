@@ -283,7 +283,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
   `public_url` reduced to its https origin, then the page's own origin),
   `filament_label_template` (#7157, stored only: the label template the labels page and the
-  labels PDF use; the 50 x 25 mm roll label by default).
+  labels PDF use; the 50 x 25 mm roll label by default),
+  `filament_label_output` (#7216, stored only: the labels file's format, `pdf` or `png`, the
+  PNG's dpi, 203, 300 or 600, and the spool label's fields; a PDF at 300 dpi by default).
 - Bambuddy's spool fields (#7149, plan
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
@@ -338,6 +340,14 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   The agent reads codes with `filament_code_resolve`, `filament_location_get` and
   `filament_printer_labels`, and the label sizes with `filament_label_templates`; the PDF
   route has no tool (R-7157-10).
+- Labels as PNG (#7216, plan `docs/superpowers/plans/2026-11-25-label-outputs.md`): with
+  `format` `png` (or the setting `filament_label_output`), `POST /api/v1/filament/labels`
+  gives each page of the PDF as a greyscale PNG at the chosen dpi, drawn by PDFium
+  (`backend/scadbuddy/filament/label_png.py`), so the PNG and the PDF never disagree. Each PNG
+  carries its dpi, so label printer software prints it at its size. One page is `labels.png`;
+  more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
+  a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
+  `png_too_large`: choose PDF, a lower dpi or fewer labels.
 
 ## Tests
 

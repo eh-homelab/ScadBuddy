@@ -30,6 +30,7 @@ from pydantic import (
 )
 
 from scadbuddy.filament.colour import Rgba
+from scadbuddy.filament.label_output import Dpi, OutputFormat
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
 
@@ -559,7 +560,7 @@ class PrinterLabels(BaseModel):
 MAX_LABELS = 100
 
 
-class LabelsPdfRequest(_In):
+class LabelsRequest(_In):
     """#7157: the labels of these spools, then these places, in the order sent."""
 
     spool_ids: list[UUID] = Field(default_factory=list, max_length=MAX_LABELS)
@@ -569,9 +570,12 @@ class LabelsPdfRequest(_In):
     #: A one-label template: one label a page (``roll``) or packed on Letter paper
     #: (``sheet``). A sheet template prints on its own grid either way.
     layout: Literal["roll", "sheet"] = "roll"
+    #: #7216: ``None``: the stored setting `filament_label_output`'s.
+    format: OutputFormat | None = None
+    dpi: Dpi | None = None
 
     @model_validator(mode="after")
-    def _one_to_max(self) -> LabelsPdfRequest:
+    def _one_to_max(self) -> LabelsRequest:
         count = len(self.spool_ids) + len(self.location_ids)
         if not 1 <= count <= MAX_LABELS:
             raise ValueError(f"name 1 to {MAX_LABELS} spools and places")

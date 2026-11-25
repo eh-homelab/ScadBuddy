@@ -2517,7 +2517,7 @@ export const handlers = [
   http.get(`${BASE}/label-templates`, () => HttpResponse.json(LABEL_TEMPLATES)),
   // #7157 — `POST /filament/labels`: the route's refusals, and a stand-in PDF (the real one is ReportLab's).
   http.post(`${BASE}/labels`, async ({ request }) => {
-    const body = (await request.json()) as S['LabelsPdfRequest']
+    const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
     const count = spools.length + places.length

@@ -80,20 +80,36 @@ def render_pdf(labels: Sequence[Label], template: LabelTemplate, layout: Layout)
     """The PDF of ``labels`` at ``template``'s size, in their order."""
     buffer = io.BytesIO()
     width, height = template.width_mm, template.height_mm
-    sheet = template.sheet or (_packed(width, height) if layout == "sheet" else None)
+    sheet = sheet_of(template, layout)
     page = PAGE_MM[sheet.page] if sheet else (width, height)
     canvas = Canvas(buffer, pagesize=(page[0] * mm, page[1] * mm), invariant=True)
     canvas.setTitle("ScadBuddy labels")
     canvas.setAuthor("ScadBuddy")
     per_page = sheet.cols * sheet.rows if sheet else 1
-    for at, label in enumerate(labels):
-        if at and at % per_page == 0:
+    for page_at in range(page_count(template, layout, len(labels))):
+        if page_at:
             canvas.showPage()
-        x, top = (0.0, 0.0) if sheet is None else _cell(sheet, at % per_page, width, height)
-        # ReportLab's origin is the page's bottom left.
-        _draw_label(canvas, label, x, page[1] - top - height, width, height)
+        on_page = labels[page_at * per_page : (page_at + 1) * per_page]
+        for at, label in enumerate(on_page):
+            x, top = (0.0, 0.0) if sheet is None else _cell(sheet, at, width, height)
+            # ReportLab's origin is the page's bottom left.
+            _draw_label(canvas, label, x, page[1] - top - height, width, height)
     canvas.save()
     return buffer.getvalue()
+
+
+def sheet_of(template: LabelTemplate, layout: Layout) -> LabelSheet | None:
+    """The sheet the labels are laid on: the template's own, the packed Letter sheet for the
+    `sheet` layout of a one-label template, else ``None`` (one label a page)."""
+    if template.sheet:
+        return template.sheet
+    return _packed(template.width_mm, template.height_mm) if layout == "sheet" else None
+
+
+def page_count(template: LabelTemplate, layout: Layout, count: int) -> int:
+    """How many pages ``render_pdf`` draws for ``count`` labels."""
+    sheet = sheet_of(template, layout)
+    return math.ceil(count / (sheet.cols * sheet.rows)) if sheet else count
 
 
 def _packed(width: float, height: float) -> LabelSheet:

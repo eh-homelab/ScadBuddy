@@ -1,14 +1,18 @@
 """#7157: `POST /filament/labels` (the labels PDF), `GET /filament/label-templates` and the
 setting `filament_label_template` (plan
-`docs/superpowers/plans/2026-11-23-label-templates-pdf.md`)."""
+`docs/superpowers/plans/2026-11-23-label-templates-pdf.md`). #7216: the PNG answers and the
+setting `filament_label_output` (plan `docs/superpowers/plans/2026-11-25-label-outputs.md`)."""
 
 from __future__ import annotations
 
+import io
 import re
+import zipfile
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from scadbuddy.filament import label_pdf
 from scadbuddy.filament.label_pdf import Label, Layout
@@ -215,7 +219,78 @@ def test_an_unknown_id_is_a_404_that_names_it(client: TestClient) -> None:
         {"spool_ids": [str(uuid4()) for _ in range(101)]},
         {"spool_ids": [str(uuid4())], "layout": "fan"},
         {"spool_ids": [str(uuid4())], "template": {"template": "custom", "width_mm": 30}},
+        {"spool_ids": [str(uuid4())], "format": "png", "dpi": 150},
     ],
 )
 def test_a_bad_body_is_a_422(client: TestClient, body: dict[str, object]) -> None:
     assert client.post(PDF, json=body).status_code == 422
+
+
+def test_png_of_one_label_is_labels_png(client: TestClient) -> None:
+    spool = _spool(client)
+    answer = client.post(PDF, json={"spool_ids": [spool["id"]], "format": "png"})
+    assert answer.status_code == 200, answer.text
+    assert answer.headers["content-type"] == "image/png"
+    assert answer.headers["content-disposition"] == 'attachment; filename="labels.png"'
+    assert answer.content.startswith(b"\x89PNG")
+
+
+def test_png_of_several_labels_is_a_zip(client: TestClient) -> None:
+    first, second = _spool(client), _spool(client)
+    body = {"spool_ids": [second["id"], first["id"]], "format": "png", "dpi": 203}
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 200, answer.text
+    assert answer.headers["content-type"] == "application/zip"
+    assert answer.headers["content-disposition"] == 'attachment; filename="labels.zip"'
+    with zipfile.ZipFile(io.BytesIO(answer.content)) as archive:
+        assert archive.namelist() == [
+            f"spool-{second['number']}.png",
+            f"spool-{first['number']}.png",
+        ]
+        assert all(archive.read(name).startswith(b"\x89PNG") for name in archive.namelist())
+
+
+def test_the_stored_output_choice_is_used(client: TestClient) -> None:
+    spool = _spool(client)
+    stored = {"filament_label_output": {"format": "png", "dpi": 203}}
+    assert client.put(SETTINGS, json=stored).status_code == 200
+    answer = client.post(PDF, json={"spool_ids": [spool["id"]]})
+    assert answer.status_code == 200, answer.text
+    assert answer.headers["content-type"] == "image/png"
+    image = Image.open(io.BytesIO(answer.content))
+    assert image.info["dpi"] == pytest.approx((203, 203), abs=0.5)
+    # The request's own format outranks the setting.
+    sent = client.post(PDF, json={"spool_ids": [spool["id"]], "format": "pdf"})
+    assert sent.headers["content-type"] == "application/pdf"
+
+
+def test_a_png_past_the_pixel_limit_is_a_422(
+    client: TestClient, drawn: list[tuple[list[Label], LabelTemplate, Layout]]
+) -> None:
+    body = {
+        "spool_ids": [str(uuid4()) for _ in range(100)],
+        "template": {"template": "custom", "width_mm": 190, "height_mm": 190},
+        "format": "png",
+        "dpi": 600,
+    }
+    answer = client.post(PDF, json=body)
+    assert answer.status_code == 422, answer.text
+    assert answer.json()["code"] == "png_too_large"
+    assert drawn == []
+
+
+def test_the_output_setting_round_trips(client: TestClient) -> None:
+    name = "filament_label_output"
+    default = {
+        "format": "pdf",
+        "dpi": 300,
+        "fields": ["number", "material", "colour", "brand", "qr"],
+    }
+    assert client.get(SETTINGS).json()[name] == default
+    chosen = {"format": "png", "dpi": 600, "fields": ["number", "qr"]}
+    assert client.put(SETTINGS, json={name: chosen}).status_code == 200
+    assert client.get(SETTINGS).json()[name] == chosen
+    assert client.put(SETTINGS, json={name: {"dpi": 150}}).status_code == 422
+    assert client.put(SETTINGS, json={name: {"fields": []}}).status_code == 422
+    assert client.put(SETTINGS, json={name: None}).status_code == 200
+    assert client.get(SETTINGS).json()[name] == default

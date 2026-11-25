@@ -65,6 +65,7 @@ from scadbuddy.crud.idempotency import (
 from scadbuddy.filament import (
     capture,
     label_pdf,
+    label_png,
     label_templates,
     rfid_mode,
     tags,
@@ -126,6 +127,7 @@ from scadbuddy.filament.csv_import import (
     import_rows,
 )
 from scadbuddy.filament.insert_weights import NoInsertWeightOfferError
+from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.labels import (
     LabelNotFoundError,
@@ -211,7 +213,7 @@ from scadbuddy.workflows.commands import (
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
 #: themselves; the Bambuddy import pulls and writes nothing, so it has nothing to push
-#: (Decision 163), nor has the labels PDF (#7157);
+#: (Decision 163), nor have the labels files (#7157, #7216);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
 #: too, un-nudged, and every labels-page load and agent read calls them; the presets
 #: import (#7244) takes Bambuddy's presets, which Bambuddy already holds. The phone's tag
@@ -225,7 +227,7 @@ NOT_NUDGED = frozenset(
         "reset_filament_sync_links",
         "import_bambuddy",
         "printer_labels",
-        "render_labels_pdf",
+        "render_labels",
         "import_bambuddy_presets",
         "back_up_tag",
         "tag_records",
@@ -2609,29 +2611,57 @@ async def list_label_templates() -> m.LabelTemplates:
 @router.post(
     "/labels",
     response_class=Response,
-    responses={200: {"content": {"application/pdf": {}}, "description": "The labels PDF."}},
-    summary="The labels PDF",
+    responses={
+        200: {
+            "content": {"application/pdf": {}, "image/png": {}, "application/zip": {}},
+            "description": "The labels PDF, one PNG, or a ZIP of PNGs.",
+        }
+    },
+    summary="The labels file",
     description=(
-        "A PDF of the labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the "
-        "order sent; #7157), as Bambuddy's `POST /inventory/labels` gives. Each label "
-        "carries what the Labels page draws: a spool's number, material, colour name and "
-        "brand with the QR code `scadbuddy:spool:<id>`; a place's code and name with the QR "
-        "code of `<label address>/x/L-<n>`. `template` (else the setting "
-        "`filament_label_template`) sets the size; `layout` `roll` is one label a page and "
-        "`sheet` packs them on Letter paper, while a sheet template always prints on its "
-        "own grid. It reads ScadBuddy's own rows only and writes nothing. 404 for an "
-        "unknown spool or place, 409 `no_label_base` for a place label with no label "
-        "address and no public URL, 422 for a bad body or a place address too long for "
-        "its QR code."
+        "The labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the order "
+        "sent; #7157), as Bambuddy's `POST /inventory/labels` gives. Each label carries what "
+        "the Labels page draws: a spool's number, material, colour name and brand with the "
+        "QR code `scadbuddy:spool:<id>`; a place's code and name with the QR code of "
+        "`<label address>/x/L-<n>`. `template` (else the setting `filament_label_template`) "
+        "sets the size; `layout` `roll` is one label a page and `sheet` packs them on Letter "
+        "paper, while a sheet template always prints on its own grid. `format` and `dpi` "
+        "(else the setting `filament_label_output`; #7216) choose the file: `pdf` is "
+        "`labels.pdf` (`application/pdf`); `png` is each page as a greyscale PNG at `dpi` "
+        "(203, 300 or 600), one page as `labels.png` (`image/png`) and more as `labels.zip` "
+        "(`application/zip`, stored), whose entries are `spool-<number>.png` and "
+        "`L-<n>.png` for one label a page and `sheet-<n>.png` for a sheet. It reads "
+        "ScadBuddy's own rows only and writes nothing. 404 for an unknown spool or place, "
+        "409 `no_label_base` for a place label with no label address and no public URL, 422 "
+        "for a bad body or a place address too long for its QR code, and 422 "
+        "`png_too_large` for PNGs of more than 400 megapixels in all."
     ),
 )
-async def render_labels_pdf(
-    filament: FilamentDep, store: SettingsStoreDep, body: m.LabelsPdfRequest
+async def render_labels(
+    filament: FilamentDep, store: SettingsStoreDep, body: m.LabelsRequest
 ) -> Response:
     read = await asyncio.to_thread(
-        store.read, {"filament_label_template", "filament_label_base_url", "public_url"}
+        store.read,
+        {
+            "filament_label_template",
+            "filament_label_output",
+            "filament_label_base_url",
+            "public_url",
+        },
     )
     choice = body.template or read.get("filament_label_template") or LabelTemplateChoice()
+    template = choice.resolved()
+    output = read.get("filament_label_output") or LabelOutput()
+    form = body.format or output.format
+    dpi = body.dpi or output.dpi
+    count = len(body.spool_ids) + len(body.location_ids)
+    if form == "png":
+        try:
+            label_png.check_png_size(template, body.layout, count, dpi)
+        except label_png.PngTooLargeError as exc:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="png_too_large"
+            ) from None
     try:
         labels = await asyncio.to_thread(
             pdf_labels,
@@ -2651,12 +2681,22 @@ async def render_labels_pdf(
         ) from None
     except LabelPayloadTooLongError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
-    pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, choice.resolved(), body.layout)
+    pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, template, body.layout)
+    content, media_type, name = pdf, "application/pdf", "labels.pdf"
+    if form == "png":
+        pngs = await asyncio.to_thread(label_png.render_pngs, pdf, dpi)
+        if len(pngs) == 1:
+            content, media_type, name = pngs[0], "image/png", "labels.png"
+        else:
+            sheet = label_pdf.sheet_of(template, body.layout) is not None
+            names = label_png.png_names(labels, sheet, len(pngs))
+            content = label_png.zip_pngs(names, pngs)
+            media_type, name = "application/zip", "labels.zip"
     return Response(
-        content=pdf,
-        media_type="application/pdf",
+        content=content,
+        media_type=media_type,
         headers={
-            "Content-Disposition": 'attachment; filename="labels.pdf"',
+            "Content-Disposition": f'attachment; filename="{name}"',
             "Cache-Control": "no-store",
         },
     )

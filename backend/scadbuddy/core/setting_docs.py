@@ -474,6 +474,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " a roll or box label, an AMS holder, an Avery sheet, or a custom size of 40 to"
             " 190 mm wide and 25 to 190 mm tall. The Labels page saves the last one chosen.",
         ),
+        "filament_label_output": SettingDoc(
+            "Label output",
+            "The file that the labels download gives: a PDF, or PNG images at 203, 300 or"
+            " 600 dpi for label printer software. One page is one PNG; more pages come as a"
+            " ZIP of PNGs. The Labels page saves the last choice.",
+        ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
             "On, a spool whose filament reaches 0 g, or that is archived, adds its type to the"
