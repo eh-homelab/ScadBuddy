@@ -28,9 +28,8 @@ The owner's decisions of 2026-11-25:
 ### 1.2 Goals
 
 - One Go service, `scadbuddy-core`, that holds the SQL at the end. Python holds none.
-- An area is rolled back by a setting until its Python is deleted, with no data change.
-  Its Python is deleted after Go has served it on prod for seven days. From then on the
-  rollback is the previous image.
+- An area's Python route is deleted as soon as Go serves it on prod. The rollback is then
+  the previous image. There is no soak period (the owner, 2026-11-25).
 - A Python SQL module outlives its area only while Python code of a later phase still calls
   it (§5.1).
 
@@ -152,7 +151,7 @@ code. Stop and report at the end of each phase.
 | Phase | What | Done when |
 |---|---|---|
 | 0 | The front with no ported area; the sqlc test; the contract suite's base URL | Prod runs through the front. The hop's cost is measured: p50 and p99, and the API pod's CPU |
-| 1 | Area `session-events` (`:read` first, then all). Area `session-turns` `:read` for `GET …/turn`. The held call's one-second re-read, whose route the plan takes from traffic. No new held or long-poll read | Prod runs them in Go for seven days. Their Python handlers are deleted |
+| 1 | Area `session-events` (`:read` first, then all). Area `session-turns` `:read` for `GET …/turn`. The held call's one-second re-read, whose route the plan takes from traffic. No new held or long-poll read | Their Python handlers are deleted once Go serves them on prod |
 | 2a | The crypto of the sealed columns, pinned by the existing vectors, and the KEK mounted in the Go container | The vectors pass in Go. Python keeps its KEK |
 | 2 | The rest of `/internal/crud/agent/*` (60 files, 20,251 lines today), except routes whose handler uses code of a later phase: `orders`, `activity`, `hosted_plugins`, `store.content`, `library.url_import`, `flow_triggers` | Only those routes are still forwarded. Each moves with the package it uses |
 | 3 | The other internal CRUD: render, print, projects, storefront, camera, intake, profile-fetch | |
@@ -161,10 +160,7 @@ code. Stop and report at the end of each phase.
 | 6 | Auth: people, tokens, service-credential minting | |
 | 7 | Migrations, start-up, schedules, and the SQL-holding workflows | No Python process holds the database secret. The projects worker keeps its KEK until #5342, as `ProjectWorkflow` stays in Python (§7) |
 
-**The gate after phase 1.** Compare two 24 h windows, the end of phase 0 and the end of phase 1:
-the CPU of the Python and Go containers together (never the agent's), per thousand requests
-on the polled routes, and those routes' p50 and p99. If the CPU per thousand requests falls by
-less than 20% (my number, to adjust), I report it and you choose whether phase 2 starts now.
+No gate between phases (the owner, 2026-11-25): areas are ported in parallel, and the goal is Python's routes gone as fast as possible. Latency is not a reason to wait.
 
 ## 7. Python as activities
 
