@@ -550,7 +550,7 @@ layer 3 on, `receive_line` is the one path (R-P3-30).
   billed_units`; negative is a short delivery), `cost_per_unit` (`allocated_cost /
   received_units`, 4 places); for a filament item (from layer 3, Task 9) also `billed_g` (`billed_units × label
   weight`), `received_g` (Σ the spools' `received_net_g`, None until every spool is
-  weighed), `weighed_spools`, `free_g` and `cost_per_kg` (`allocated_cost / received_g ×
+  weighed), `received_g_source` (`weighed`, or `derived` when any spool's is), `weighed_spools`, `free_g` and `cost_per_kg` (`allocated_cost / received_g ×
   1000`, else over `billed_g`) (R-P3-37, R-P3-39, R-P3-42). `ItemCandidate` gains
   `adoptable: list[AdoptableStock]` (`AdoptableStock(kind: Literal["lot","unit"], id,
   received_at, qty, note, note_match: bool, ui_path)`).
@@ -871,11 +871,13 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
   a person, the agent or the pull calls `set_unit_cost_in` with `cost_per_kg × label weight
   / 1000 × 10^exp`. A label weight change keeps `cost_minor` (what was paid; owner
   accepted) and writes the new `cost_per_kg`.
-- Produces (R-P3-39, R-P3-40): `SpoolUnits.received_net_g(conn, spool_id) -> float | None`:
-  the `grams_after` of the spool's first `weighed` event with `source` in `('scale',
-  'person')`, read with `ledger.events` (Pre-flight 8), when no use event (`print_run`,
-  `bb_usage`) comes before it; else None (a spool first weighed after use cannot say what
-  it held). `SpoolUnits.weighed_on(conn, spool_id, event)`, called by `spools.add_event`
+- Produces (R-P3-39, R-P3-40): `class ReceivedGrams(NamedTuple): grams: float; source:
+  Literal["weighed", "derived"]`; `SpoolUnits.received_net_g(conn, spool_id) ->
+  ReceivedGrams | None`: the `grams_after` of the spool's first `weighed` event with
+  `source` in `('scale', 'person')`, read with `ledger.events` (Pre-flight 8), as
+  `weighed` when no use event (`print_run`, `bb_usage`) comes before it; None with no such
+  weighing (the label weight stays). In layer 3 a weighing after a use also gives None;
+  Task 10 makes it `derived` once the `inventory_moves` view exists. `SpoolUnits.weighed_on(conn, spool_id, event)`, called by `spools.add_event`
   after it books a `weighed` event: when that event is the one `received_net_g` reads, it
   rewrites `cost_per_kg` by the rule above. No past use moves (D14); "Re-cost past uses"
   carries it to job cost.
@@ -904,9 +906,9 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
   on `spool_type:<it>` land on one entity; a property on `spool:<s>` lists under `unit:<s>`;
   `set_schema("spool_type", …)` raises `SchemaOwnedByKind` (as R-P2-5); a lot call on a
   filament item → `WrongTracking`; a spool of unit cost 2500 and label 1000 g weighed first
-  by scale at 1010 g net → `received_net_g == 1010`, `cost_per_kg == 24.7525`,
-  `cost_minor == 2500`; a spool whose first weighing follows a print → `received_net_g is
-  None`, `cost_per_kg == 25.0000`; every typed spool row has `unit_id == id`.
+  by scale at 1010 g net → `received_net_g == ReceivedGrams(1010, "weighed")`,
+  `cost_per_kg == 24.7525`, `cost_minor == 2500`; a spool with no weighing →
+  `received_net_g is None`, `cost_per_kg == 25.0000`; every typed spool row has `unit_id == id`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament tests/inventory tests/entities -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same with `-n auto` — Expected: PASS.
@@ -1007,6 +1009,10 @@ paired `print_run` event's (R-P3-28).
   attempts keep today's rule. An order in another currency never uses spool cost (R-P2-33).
   This is D7's order: the spool's unit cost, its type's cost (both in `cost_per_kg_at`), the
   quote, the price book.
+- Produces (R-P3-39, owner 2026-11-25): `SpoolUnits.received_net_g` for a spool first
+  weighed after one or more uses returns `ReceivedGrams(grams_after + Σ |qty| of the spool's
+  `spool` rows in `inventory_moves` before that weighing, "derived")`, by the counting rules
+  of R-P3-28. `weighed_on` rewrites `cost_per_kg` from it as for a `weighed` value.
 - Produces (R-P3-17): `StockStore.recost_unit` for a filament unit calls
   `SpoolUnits.recost(conn, unit_id) -> RecostResult`, which re-snapshots `cost_per_kg_at` of
   its spool's `print_run`/`bb_usage` events at the spool's cost now and gives, per order item
@@ -1024,6 +1030,10 @@ paired `print_run` event's (R-P3-28).
     spool row of −29 whose `print_run_id` is the run's.
   - `test_run_uses_counts_a_plate_once`: start 30 g est., end 28 g → 28; a paired BB row of
     29 g → 29.
+  - `test_received_grams_are_derived_after_a_print` (`tests/filament/test_spool_units.py`): a
+    1000 g label, a print that uses 120 g, then a first weighing of 900 g →
+    `received_net_g == ReceivedGrams(1020, "derived")`; the line's `received_g == 1020`,
+    `received_g_source == "derived"`, `free_g == 20`.
   - `test_spool_cost_beats_the_quote` (D7): an attempt with a run that used 100 g of a spool
     at `cost_per_kg_at` 25.0000, a quote at 0.03/g, USD → `filament_minor == 250`,
     `filament_basis == "spools"`.
@@ -1106,7 +1116,8 @@ Load `frontend-design` first.
   purchase with an optional invoice line picked from the order's linked or the supplier's
   expense lines), `frontend/src/pages/filament/SpoolPage.tsx` (the panel; "Re-cost past
   uses" through the unit route; "Label 1,000 g, received 1,010 g (first weighing), cost per
-  kg 24.75"; slice A's `drift_g` beside it when present, Pre-flight 8), `frontend/src/pages/filament/ShoppingListTab.tsx` (item
+  kg 24.75", or "received 1,020 g (derived from weighing and prints)" for a `derived`
+  value; slice A's `drift_g` beside it when present, Pre-flight 8), `frontend/src/pages/filament/ShoppingListTab.tsx` (item
   rows), `frontend/src/pages/inventory/InvoicePage.tsx` ("May be missing lines" flag;
   "Review missing lines" starts the backfill session (Task 14) and opens Amend prefilled
   from `amend_proposal`, with "Re-spread over all lines" on), `frontend/src/App.tsx`
@@ -1130,7 +1141,8 @@ Load `frontend-design` first.
   the invoice page with an `amend_proposal` opens Amend with its lines and the respread
   switch on, and nothing is sent until the person confirms; a proposed line with
   `adopt_ids` shows the lot it adopts and "no new stock"; the spool page shows "received
-  1,010 g" for a weighed spool and "not weighed" for one without.
+  1,010 g" for a weighed spool, "received 1,020 g (derived from weighing and prints)" for a
+  derived one, and "not weighed" for one without.
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/components/inventory src/pages src/components/orders/CustomerModels.test.tsx` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd frontend && pnpm lint && pnpm typecheck && pnpm test` — Expected: PASS.
@@ -1158,7 +1170,8 @@ Load `frontend-design` first.
 
 **Interfaces:**
 - Produces tools (route; risk): `supplier_list` (read), `supplier_upsert` (write),
-  `invoice_list` (read), `invoice_get` (read; lines with links, lots, units, and billed, received, free and
+  `invoice_list` (read), `invoice_get` (read; lines with links, lots, units, `received_g_source` with the words
+  "derived from weighing and prints" for `derived`, and billed, received, free and
   cost per unit or per kg, R-P3-42),
   `invoice_candidates` (read; items with their adoptable lots and units), `invoice_upsert` (write;
   lines take `item_id`, `offer_id`, `kind`, `pack_size`, `received_units`, `adopt_ids`,
@@ -1404,8 +1417,12 @@ Load `frontend-design` first.
 - **R-P3-38.** The free part is a fact of the line, read through `invoice_line_id` from its
   lots and units; no lot or unit column holds it. Reason: one place, and all units of a
   line cost the same.
-- **R-P3-39.** A spool's received grams are its measured net grams: the first `weighed`
-  event by scale or person (`grams_after`), when no use comes before it; else unknown.
+- **R-P3-39** (owner decided 2026-11-25 for a spool weighed after use). A spool's received
+  grams are its measured net grams: the first `weighed` event by scale or person
+  (`grams_after`), source `weighed`. When uses come before that weighing, received = its
+  `grams_after` plus the grams the ledger counts for those uses (R-P3-28's rules), source
+  `derived`, shown as "derived from weighing and prints". With no weighing, the label weight
+  stays.
   Billed grams are units × label weight. Phase 3 reads this from the ledger on main and
   adds no weighing column or event; slice A of #7681 is optional. Reason: #7681 owns
   weighing (session scadbuddy-53's interface).
