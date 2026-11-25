@@ -103,6 +103,7 @@ from scadbuddy.core.settings import (
     env_var,
 )
 from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
+from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
 from scadbuddy.library.catalogue import PrintSequence
@@ -529,6 +530,9 @@ class StoredSettings(BambuddyIds):
     #: #7157: the label template the Labels page and the labels PDF use (R-7157-2).
     #: ``None``: `label_templates.DEFAULT_TEMPLATE`. Stored only.
     filament_label_template: LabelTemplateChoice | None = None
+    #: #7216: the labels file's format, its PNG dpi and the spool label's fields
+    #: (R-7216-8). ``None``: `LabelOutput()`, a PDF. Stored only.
+    filament_label_output: LabelOutput | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -862,6 +866,8 @@ class SettingsPatch(BaseModel):
     filament_sync_pass_ttl_days: int | None = Field(default=None, ge=1, le=3650)
     #: #7157: the label template; ``null`` puts back the 50 x 25 mm roll label.
     filament_label_template: LabelTemplateChoice | None = None
+    #: #7216: the labels output; ``null`` puts back a PDF at 300 dpi.
+    filament_label_output: LabelOutput | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
