@@ -475,7 +475,9 @@ class LanPrinter:
         the printer may have the command, so a failure or a timeout there, no reply within
         ``wait`` seconds (or by ``until``, the event loop's time, less `CLOSE_RESERVE`),
         or a dropped connection is ``None``. The close ends by ``until`` (else within
-        `MQTT_TIMEOUT`); a close that fails or overruns keeps the reply."""
+        `MQTT_TIMEOUT`); a close that fails or overruns keeps the reply. A connect that
+        never got in (cut by `MQTT_TIMEOUT` or failed inside ``__aenter__``) is shut by
+        force, as a cut close is (`_force_close`, P31)."""
         loop = asyncio.get_running_loop()
         may_be_sent = False
         reply: dict[str, Any] | None = None
@@ -484,7 +486,13 @@ class LanPrinter:
         try:
             async with asyncio.timeout(MQTT_TIMEOUT):
                 made = await self._client()
-                client = await stack.enter_async_context(made)
+                try:
+                    client = await stack.enter_async_context(made)
+                except BaseException:
+                    # aiomqtt leaves the socket open when its wait for the CONNACK is
+                    # cancelled or times out: nothing was entered, so no close would run.
+                    _force_close(made)
+                    raise
                 await client.subscribe(self.report_topic)
                 may_be_sent = True
                 await client.publish(self.request_topic, json.dumps(command))
@@ -618,12 +626,19 @@ async def _close(stack: AsyncExitStack, client: aiomqtt.Client | None, budget: f
             extra={"error": type(error).__name__},
         )
         if isinstance(error, TimeoutError) and client is not None:
-            # A cancelled disconnect leaves the socket open for seconds, holding one of the
-            # printer's few LAN client slots; this reaches into aiomqtt's private paho client.
-            with suppress(Exception):
-                paho = client._client
-                paho.disconnect()
-                paho._sock_close()
+            _force_close(client)
+
+
+def _force_close(client: aiomqtt.Client) -> None:
+    """Shut ``client``'s socket at once. A cancelled disconnect, or a connect cut while it
+    waits for the CONNACK, leaves the socket open for seconds, holding one of the printer's
+    few LAN client slots. This reaches into aiomqtt's private paho client (aiomqtt 2.x);
+    `tests/printers/test_fake_printer.py` cuts both against a real broker, so a release that
+    renames these fails there rather than doing nothing."""
+    with suppress(Exception):
+        paho = client._client
+        paho.disconnect()
+        paho._sock_close()
 
 
 def _close_data(conn: socket.socket) -> None:

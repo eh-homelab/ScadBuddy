@@ -27,6 +27,36 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   ``FAILED``. An ACL lets ``bblp`` use only ``device/<serial>/request`` and
   ``device/<serial>/report``: mosquitto 2 grants a ``#`` subscription but delivers it
   nothing else, and drops a publish to any other topic.
+- **K-profile and AMS commands** (#7276, plan 2026-11-25 Task 3), the payloads of
+  ``backend/scadbuddy/printers/lan_commands.py``. Each reply goes on the report topic as
+  ``{"print": {"command", "sequence_id", "result": "success", ...}}`` with the command's
+  own ``command`` and ``sequence_id`` (the match a client makes, R-7276-10); a refusal is
+  ``"result": "fail"`` with a ``reason`` (as Bambuddy reads one, ``bambu_mqtt.py``
+  L7636-L7664 at ``d3be761f``). What a command changes is pushed as a whole report right
+  after its reply, and shows in every report after.
+
+  - ``extrusion_cali_get``: ``nozzle_diameter`` and ``filaments``, the K-profile table's
+    entries for that diameter (all of them, or the ``filament_id`` asked), each with
+    ``cali_idx``, ``extruder_id``, ``nozzle_id``, ``filament_id``, ``name``, ``k_value``,
+    ``n_coef`` and ``setting_id``; the diameter is the reply's only, as Bambuddy's parse
+    reads it (``_parse_kprofile_entries``, L7392-L7438). The table starts empty.
+  - ``extrusion_cali_set``: each ``filaments`` entry under its diameter. ``cali_idx`` -1
+    takes the next free index (the largest plus one, from 1; made up), any other replaces
+    the entry of that index.
+  - ``extrusion_cali_del``: removes the entry with that ``cali_idx`` and ``filament_id``.
+  - ``ams_filament_setting``: the slot's ``tray_info_idx``, ``tray_type``,
+    ``tray_sub_brands``, ``tray_color`` (and ``cols``) and temperatures take the values
+    sent; empty values (a reset) empty it. A slot this printer lacks is refused.
+  - ``extrusion_cali_sel``: the slot's ``cali_idx``.
+  - ``ams_change_filament``: ``ams.tray_now`` (and ``tray_tar``) becomes the ``target``,
+    255 on an unload; ``ams_status`` (at the top of ``print``, as the H2C reports it)
+    reads ``0x0100`` in the report the change pushes, then 0.
+  - ``ams_get_rfid``: the reply only.
+
+  A slot is addressed as ``lan_commands`` addresses it: an AMS unit's tray by
+  ``slot_id``; the external holder (``vt_tray``, id 254) by ``ams_id`` 254 or by 255 with
+  ``tray_id`` 254; ``ams_id`` 255 otherwise names a second holder, which this printer
+  does not have.
 - **Implicit FTPS** on ``FAKE_PRINTER_FTPS_PORT`` (990), user ``bblp``, with the same
   certificate (OpenBambuAPI ``ftp.md``: "TLS: implicit"). pyftpdlib speaks explicit TLS
   (``AUTH TLS``); its handler is made implicit by securing the control connection as it
@@ -38,8 +68,12 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
   ``FAKE_PRINTER_SDCARD`` (``/sdcard``), each recorded with its size and md5.
 - **Control** on ``FAKE_PRINTER_CONTROL_PORT`` (8081), plain HTTP, never a printer path:
   ``GET /__received`` answers ``{"mqtt": [<command>...], "ftps": [{"name", "size",
-  "md5"}...], "refused": [{"url", "reason"}...]}`` and ``POST /__reset`` clears it. It
-  answers once the printer is up; ``python printer.py --health`` checks that.
+  "md5"}...], "refused": [{"url", "reason"}...]}``. ``POST /__refuse`` with ``{"command":
+  "<name>", "reason": "<text>"}`` makes the next such command answer ``fail`` with that
+  reason and change nothing; ``POST /__silent`` with ``{"command": "<name>"}`` makes the
+  next one answer nothing and change nothing (it is still recorded); with both set, the
+  silence goes first. ``POST /__reset`` clears the record, both and the K-profile table.
+  It answers once the printer is up; ``python printer.py --health`` checks that.
 
 The certificate is made at the first start and kept in ``FAKE_PRINTER_STATE``, as a
 printer's is stable: a LAN client pins its SHA-256 when it is linked (3a's
@@ -188,6 +222,80 @@ class Received:
             self.refused.clear()
 
 
+#: The K-profile and AMS commands the fake answers (#7276; the module docstring).
+COMMANDS = frozenset(
+    {
+        "extrusion_cali_get",
+        "extrusion_cali_set",
+        "extrusion_cali_del",
+        "extrusion_cali_sel",
+        "ams_filament_setting",
+        "ams_change_filament",
+        "ams_get_rfid",
+    }
+)
+#: ``ams_status`` while a filament change runs: main status 1 in bits 8-15, sub status 0 in
+#: bits 0-7, as Bambuddy splits the top-level ``print.ams_status`` (``bambu_mqtt.py``
+#: L2815-L2831 at ``d3be761f``). The value is the plan's (#7276 Task 3), not measured. The
+#: fake reports it in the one report a change pushes, then 0.
+AMS_CHANGING = 0x0100
+#: A K-profile entry's fields, as an ``extrusion_cali_get`` reply lists them (Bambuddy
+#: ``_parse_kprofile_entries``, ``bambu_mqtt.py`` L7392-L7438 at ``d3be761f``): the
+#: diameter is the reply's own, not an entry's.
+K_FIELDS = (
+    "cali_idx",
+    "extruder_id",
+    "nozzle_id",
+    "filament_id",
+    "name",
+    "k_value",
+    "n_coef",
+    "setting_id",
+)
+#: The slot fields ``ams_filament_setting`` writes; the temperatures are strings in a
+#: report.
+SLOT_FIELDS = ("tray_info_idx", "tray_type", "tray_sub_brands", "tray_color")
+
+
+class RefusedError(Exception):
+    """A command the fake answers ``result: fail`` with this reason."""
+
+
+@dataclass
+class Controls:
+    """What the control port arranges and the MQTT loop reads: the next refusal or silence
+    per command, and the K-profile table, ``{nozzle_diameter: [entry...]}``, seeded
+    empty."""
+
+    refusals: dict[str, str] = field(default_factory=dict)
+    silences: set[str] = field(default_factory=set)
+    k_table: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def refuse(self, command: str, reason: str) -> None:
+        with self.lock:
+            self.refusals[command] = reason
+
+    def silence(self, command: str) -> None:
+        with self.lock:
+            self.silences.add(command)
+
+    def take(self, command: str) -> tuple[bool, str | None]:
+        """Whether the next ``command`` is silent, else the reason it is refused; each is
+        used once. A silence goes first."""
+        with self.lock:
+            if command in self.silences:
+                self.silences.discard(command)
+                return True, None
+            return False, self.refusals.pop(command, None)
+
+    def reset(self) -> None:
+        with self.lock:
+            self.refusals.clear()
+            self.silences.clear()
+            self.k_table.clear()
+
+
 def mosquitto_password(password: str, salt: bytes | None = None) -> str:
     """A mosquitto 2 password-file hash: ``$7$<iterations>$<salt>$<hash>``, PBKDF2-HMAC-
     SHA512 with a 12-byte salt and a 64-byte hash, both base64, 101 iterations (eclipse
@@ -307,7 +415,7 @@ def _ftp_server(config: Config, cert: Path, key: Path, received: Received) -> FT
         raise
 
 
-def _control_server(config: Config, received: Received) -> ThreadingHTTPServer:
+def _control_server(config: Config, received: Received, controls: Controls) -> ThreadingHTTPServer:
     class Control(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path != "/__received":
@@ -321,10 +429,24 @@ def _control_server(config: Config, received: Received) -> ThreadingHTTPServer:
             self.wfile.write(body)
 
         def do_POST(self) -> None:
-            if self.path != "/__reset":
+            if self.path not in ("/__reset", "/__refuse", "/__silent"):
                 self.send_error(404)
                 return
-            received.reset()
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                body = None
+            if self.path == "/__reset":
+                received.reset()
+                controls.reset()
+            elif not isinstance(body, dict) or not isinstance(body.get("command"), str):
+                self.send_error(400, 'a JSON body {"command": "<name>"} is needed')
+                return
+            elif self.path == "/__refuse":
+                controls.refuse(body["command"], str(body.get("reason") or "refused"))
+            else:
+                controls.silence(body["command"])
             self.send_response(204)
             self.end_headers()
 
@@ -367,8 +489,11 @@ class FakePrinter:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.received = Received()
+        self.controls = Controls()
         report = json.loads(REPORT.read_text())["print"]
         self.state: dict[str, Any] = report
+        #: The broker's process while it runs (a test stops it to cut a close, #7276 P31).
+        self.broker: asyncio.subprocess.Process | None = None
         self._printing: asyncio.Task[None] | None = None
         self._stopping = threading.Event()
 
@@ -442,6 +567,7 @@ class FakePrinter:
         (config.sdcard / config.upload_dir.strip("/")).mkdir(parents=True, exist_ok=True)
         conf, cert, key = self._broker_files()
         broker = await asyncio.create_subprocess_exec(config.mosquitto, "-c", str(conf))
+        self.broker = broker
         ftp = control = None
         ftp_thread: threading.Thread | None = None
         threads: list[threading.Thread] = []
@@ -460,7 +586,7 @@ class FakePrinter:
                 identifier=f"printer-{config.serial}",
             ) as client:
                 await client.subscribe(self.request_topic)
-                control = _control_server(config, self.received)
+                control = _control_server(config, self.received, self.controls)
                 threads.append(threading.Thread(target=control.serve_forever, daemon=True))
                 for thread in threads:
                     thread.start()
@@ -509,6 +635,9 @@ class FakePrinter:
         command = body.get("print")
         if not isinstance(command, dict):
             return
+        if command.get("command") in COMMANDS:
+            await self._command(client, command)
+            return
         if command.get("command") == "project_file":
             url = str(command.get("url") or "")
             if self.state.get("gcode_state") in BUSY_STATES:
@@ -535,6 +664,114 @@ class FakePrinter:
             self._printing = None
             self.state.update(gcode_state="FAILED", mc_remaining_time=0)
             await self._publish(client)
+
+    async def _command(self, client: aiomqtt.Client, command: dict[str, Any]) -> None:
+        """Answer a K-profile or AMS command (#7276) on the report topic, unless it is
+        silenced; a change it makes is pushed as a whole report after the reply."""
+        name = str(command["command"])
+        silent, refused = self.controls.take(name)
+        if silent:
+            return
+        reply: dict[str, Any] = {"command": name, "sequence_id": command.get("sequence_id", "")}
+        changed = False
+        try:
+            if refused is not None:
+                raise RefusedError(refused)
+            changed = self._apply(name, command, reply)
+        except RefusedError as error:
+            reply.update(result="fail", reason=str(error))
+        else:
+            reply["result"] = "success"
+        await client.publish(self.report_topic, json.dumps({"print": reply}))
+        if changed:
+            await self._publish(client)
+            self.state["ams_status"] = 0  # busy for the one report a change pushes
+
+    def _apply(self, name: str, command: dict[str, Any], reply: dict[str, Any]) -> bool:
+        """Carry out ``command``, add what its reply says to ``reply``, and say whether the
+        report changed. `RefusedError` answers ``fail``."""
+        if name == "extrusion_cali_get":
+            diameter = str(command.get("nozzle_diameter") or "")
+            wanted = str(command.get("filament_id") or "")
+            with self.controls.lock:
+                entries = list(self.controls.k_table.get(diameter, []))
+            reply["nozzle_diameter"] = diameter
+            reply["filaments"] = [e for e in entries if wanted in ("", e["filament_id"])]
+            return False
+        if name == "extrusion_cali_set":
+            self._k_set(command)
+            return False
+        if name == "extrusion_cali_del":
+            diameter = str(command.get("nozzle_diameter") or "")
+            gone = (int(command.get("cali_idx", -1)), str(command.get("filament_id") or ""))
+            with self.controls.lock:
+                table = self.controls.k_table.get(diameter, [])
+                table[:] = [e for e in table if (e["cali_idx"], e["filament_id"]) != gone]
+            return False
+        if name == "ams_filament_setting":
+            tray = self._tray(command)
+            for key in SLOT_FIELDS:
+                tray[key] = str(command.get(key) or "")
+            tray["tray_color"] = tray["tray_color"] or "00000000"
+            tray["cols"] = [tray["tray_color"]]
+            for key in ("nozzle_temp_min", "nozzle_temp_max"):
+                tray[key] = str(command.get(key) or 0)
+            return True
+        if name == "extrusion_cali_sel":
+            self._tray(command)["cali_idx"] = int(command.get("cali_idx", -1))
+            return True
+        if name == "ams_change_filament":
+            ams = self.state["ams"]
+            target = str(int(command.get("target", 255)))
+            ams.update(tray_pre=ams.get("tray_now", "255"), tray_now=target, tray_tar=target)
+            self.state["ams_status"] = AMS_CHANGING
+            return True
+        return False  # ams_get_rfid: the reply only
+
+    def _k_set(self, command: dict[str, Any]) -> None:
+        """Each ``filaments`` entry under its diameter: ``cali_idx`` -1 takes the next free
+        index (the largest plus one, from 1; made up, not measured), any other replaces the
+        entry of that index."""
+        common = str(command.get("nozzle_diameter") or "")
+        entries = command.get("filaments")
+        if not isinstance(entries, list):
+            raise RefusedError("no filaments")
+        with self.controls.lock:
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    raise RefusedError("a filament entry is not an object")
+                diameter = str(entry.get("nozzle_diameter") or common)
+                table = self.controls.k_table.setdefault(diameter, [])
+                row = {key: entry.get(key, "") for key in K_FIELDS}
+                index = int(entry.get("cali_idx", -1))
+                if index < 0:
+                    index = max((e["cali_idx"] for e in table), default=0) + 1
+                row["cali_idx"] = index
+                table[:] = [e for e in table if e["cali_idx"] != index] + [row]
+                table.sort(key=lambda e: int(e["cali_idx"]))
+
+    def _tray(self, command: dict[str, Any]) -> dict[str, Any]:
+        """The report's tray a slot command names, or `RefusedError`. An AMS unit's tray is its
+        ``slot_id``; an external holder is ``ams_id`` 254 (or 255 with ``tray_id`` 254, the
+        one-holder form), or 255 for a second holder (``lan_commands.wire_slot``,
+        ``extrusion_cali_sel``)."""
+        ams_id = int(command.get("ams_id", -1))
+        tray_id = int(command.get("tray_id", -1))
+        if ams_id in (254, 255):
+            holder = "254" if ams_id == 254 or tray_id == 254 else str(ams_id)
+            holders = [self.state.get("vt_tray"), *(self.state.get("vir_slot") or [])]
+            for tray in holders:
+                if isinstance(tray, dict) and str(tray.get("id")) == holder:
+                    return tray
+            raise RefusedError(f"no external holder {holder}")
+        slot = str(int(command.get("slot_id", 0)))
+        for unit in self.state["ams"]["ams"]:
+            if unit["id"] == str(ams_id):
+                for tray in unit["tray"]:
+                    if tray["id"] == slot:
+                        found: dict[str, Any] = tray
+                        return found
+        raise RefusedError(f"no tray {ams_id}/{slot}")
 
     def _missing(self, path: str | None) -> str | None:
         """Why ``path`` cannot be printed, or ``None`` when it can."""
