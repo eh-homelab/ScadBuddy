@@ -25,6 +25,19 @@ function facts(attempt: Fulfilment): string {
   return JSON.stringify([attempt.archive_ids ?? [], attempt.actual_seconds ?? null, attempt.actual_grams ?? null])
 }
 
+/**
+ * When the earliest timelapse still waiting at `readAt` stops waiting: its archive's
+ * completion plus `TIMELAPSE_WAIT_MS`. The row reads once more then, so the waiting text
+ * ends (#7455). Null when no timelapse waits with a known completion time.
+ */
+function timelapseWaitEnds(read: AttemptArchives | null, readAt: number): number | null {
+  const ends = (read?.archives ?? [])
+    .filter((a) => !a.timelapse && !a.timelapse_attachment_id && a.completed_at != null)
+    .map((a) => Date.parse(a.completed_at as string) + TIMELAPSE_WAIT_MS)
+    .filter((end) => end > readAt)
+  return ends.length > 0 ? Math.min(...ends) : null
+}
+
 function attachedIds(read: AttemptArchives | null): string {
   return (read?.archives ?? []).flatMap((a) => [a.finished_attachment_id ?? '', a.timelapse_attachment_id ?? '']).join(',')
 }
@@ -35,13 +48,17 @@ function attachedIds(read: AttemptArchives | null): string {
  * timelapse and answers what is attached now. No order event tells the page of an import
  * (F13), so while a medium is offered and not attached the row reads again, every
  * `ARCHIVE_READ_MS`, at most `ARCHIVE_READS` times; then it offers a copy of only what is
- * still missing. The page is told to reload when a read changed the attempt (times,
+ * still missing. The next read waits `ARCHIVE_READ_MS` after the previous answer, so a slow
+ * read is never dropped (#7455). While a timelapse waits for Bambuddy, the row reads once more
+ * when the wait ends. The page is told to reload when a read changed the attempt (times,
  * grams) or attached a file.
  */
 export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId: string; itemId: string; attempt: Fulfilment; onChanged: () => void }) {
   const [read, setRead] = useState<AttemptArchives | null>(null)
   // When the answer came: the timelapse states are as of that read.
   const [readAt, setReadAt] = useState(0)
+  // Bumped when a read answers or fails: the next re-read waits from then (#7455).
+  const [settled, setSettled] = useState(0)
   // Bumped to read again; `reads` counts the re-reads since the mount or the last copy.
   const [asked, setAsked] = useState(0)
   const [reads, setReads] = useState(0)
@@ -53,9 +70,13 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
     setRead(answer)
     setReadAt(Date.now())
     setError(null)
+    setSettled((n) => n + 1)
     if (changed) onChanged()
   })
-  const failed = useEffectEvent((err: unknown) => setError(refusalText(err)))
+  const failed = useEffectEvent((err: unknown) => {
+    setError(refusalText(err))
+    setSettled((n) => n + 1)
+  })
 
   useEffect(() => {
     let live = true
@@ -69,6 +90,7 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
   }, [orderId, itemId, attempt.id, asked])
 
   const waiting = read !== null && read.archives.some(due) && reads < ARCHIVE_READS
+  // Keyed on the answer, not on `reads`: the clock starts when the previous read answers or fails.
   useEffect(() => {
     if (!waiting) return
     const timer = setTimeout(() => {
@@ -76,12 +98,23 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
       setAsked((n) => n + 1)
     }, ARCHIVE_READ_MS)
     return () => clearTimeout(timer)
-  }, [waiting, reads])
+  }, [waiting, settled])
 
   const again = () => {
+    setError(null)
     setReads(0)
     setAsked((n) => n + 1)
   }
+
+  const waitEnds = timelapseWaitEnds(read, readAt)
+  useEffect(() => {
+    if (waitEnds === null) return
+    const timer = setTimeout(() => {
+      setReads(0)
+      setAsked((n) => n + 1)
+    }, Math.max(0, waitEnds - Date.now()))
+    return () => clearTimeout(timer)
+  }, [waitEnds])
 
   async function copy(archiveId: number, body: ArchiveCopy) {
     setBusy(true)
