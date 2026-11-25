@@ -118,7 +118,7 @@ Outside `ci.yml`:
   (`e2e-stack/run.sh --mode both`, then `--auth`) on PRs touching `e2e-stack/**` or
   `backend/**` (a `CLAUDE.md` or `AGENTS.md` aside), weekly and on dispatch
   (`.github/workflows/hot-path-e2e.yml:29-40`,
-  `:194-200`). It is not part of CI Summary. See
+  `:196-202`). It is not part of CI Summary. See
   [`e2e-stack/CLAUDE.md`](../../e2e-stack/CLAUDE.md).
 - `merge-queue-review.yml` carries the `claude-review` verdict onto a merge-queue commit.
 - `ai-evals.yml` runs the agent's live evals on dispatch only ([`docs/ai/evals.md`](../ai/evals.md)).
