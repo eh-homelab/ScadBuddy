@@ -122,10 +122,10 @@ def test_a_files_bytes_are_scriptless_gets_on_every_entity() -> None:
 
 
 def test_an_endpoint_only_a_person_may_call_is_person() -> None:
-    """`_browser_only` (api/flows.py) refuses agents today; the gate's class must too."""
+    """`browser_only` (api/flows.py) refuses agents today; the gate's class must too."""
     for route in ROUTES:
         source = inspect.getsource(route.endpoint)
-        if "_browser_only(" in source:
+        if "browser_only(" in source:
             assert route_class(route) == "person", endpoint_name(route)
 
 

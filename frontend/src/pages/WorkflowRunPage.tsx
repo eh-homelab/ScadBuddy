@@ -169,7 +169,14 @@ export function WorkflowRunPage() {
               {run?.inputs && Object.keys(run.inputs).length > 0 && <Inputs inputs={run.inputs} />}
               {view.data.grant && <GrantPanel runId={id} grant={view.data.grant} onChange={() => view.refresh()} />}
               {view.data.pending.map((entry) => (
-                <PendingCard key={entry.call_id} entry={entry} runId={id} step={steps.get(entry.call_id) ?? null} respond={respond} />
+                <PendingCard
+                  key={entry.call_id}
+                  entry={entry}
+                  runId={id}
+                  execution={run?.workflow_run_id ?? null}
+                  step={steps.get(entry.call_id) ?? null}
+                  respond={respond}
+                />
               ))}
               {children.map((entry) => (
                 <ChildCard key={entry.id} entry={entry} respond={respond} />

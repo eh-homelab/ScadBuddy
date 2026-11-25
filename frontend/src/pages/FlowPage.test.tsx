@@ -85,7 +85,7 @@ describe('FlowPage', () => {
     expect(await screen.findByRole('heading', { name: 'swap v1' })).toBeInTheDocument()
     const editor = await screen.findByRole('textbox', { name: 'Script' })
     expect((editor as HTMLTextAreaElement).value).toContain('await wait_for_human("Swap to pink?", 600)')
-    expect(await screen.findByText(/^sleep,wait_for_human,render/)).toBeInTheDocument()
+    expect(await screen.findByText(/^sleep,wait_for_human,prompt,render/)).toBeInTheDocument()
     expect(screen.getByText(/Registered by an assistant \(session sess-1\)/)).toBeInTheDocument()
   })
 

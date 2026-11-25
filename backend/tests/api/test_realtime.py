@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from fastapi import FastAPI
@@ -38,6 +38,7 @@ from scadbuddy.core.events import (
     SessionBusEvent,
     SettingsChanged,
     Subscription,
+    TaskChanged,
 )
 from scadbuddy.core.pg_events import LoggedEvent, Replay
 from scadbuddy.core.settings import Settings
@@ -420,6 +421,57 @@ def test_allowed_origins_env_is_split_on_commas() -> None:
 )
 def test_topics_of(event: Any, topics: list[str]) -> None:
     assert realtime.topics_of(event) == topics
+
+
+TASK_ID = "7b9d5c1e-2a3f-4e6b-8c0d-1f2e3a4b5c6d"
+
+
+def test_a_task_change_reaches_its_topics() -> None:
+    event = TaskChanged(task_id=TASK_ID, run_id=FLOW_RUN_ID, state="open", place="packing bench")
+    topics = ["tasks", f"task:{TASK_ID}", "tasks:packing bench"]
+    assert realtime.topics_of(event) == topics
+    assert all(realtime.valid_topic(topic) for topic in topics)
+    unplaced = TaskChanged(task_id=TASK_ID, run_id=FLOW_RUN_ID, state="answered")
+    assert realtime.topics_of(unplaced) == ["tasks", f"task:{TASK_ID}"]
+
+
+@pytest.mark.parametrize(
+    "topic",
+    [
+        "task:t1",
+        "task:",
+        f"task:{TASK_ID}\n",
+        "tasks:",
+        "tasks:" + "x" * 101,
+        "tasks:bench\n",
+        "tasks:be\nnch",
+        "tasks:be\x00nch",
+        "tasks:be\x7fnch",
+        "tasks:be\x85nch",
+    ],
+)
+def test_a_task_topic_with_a_bad_id_or_place_is_refused(topic: str) -> None:
+    assert not realtime.valid_topic(topic)
+
+
+def test_a_task_topic_place_may_be_100_characters() -> None:
+    assert realtime.valid_topic("tasks:" + "x" * 100)
+    assert realtime.valid_topic("tasks")
+    assert realtime.valid_topic(f"task:{TASK_ID}")
+
+
+def test_topics_of_handles_every_event_in_the_union() -> None:
+    members = get_args(get_args(Event)[0])
+    assert members
+    for member in members:
+        values: dict[str, Any] = {}
+        for name, field in member.model_fields.items():
+            if name == "kind" or not field.is_required():
+                continue
+            values[name] = None
+        event = member.model_construct(**values)
+        topics = realtime.topics_of(event)
+        assert isinstance(topics, list), member.__name__
 
 
 def test_every_topic_an_event_names_is_one_a_client_may_follow() -> None:
