@@ -210,6 +210,12 @@ func TestStoreErrors(t *testing.T) {
 		{"not member", 403, "not-member", fleetchat.ErrNotMember},
 		{"handle taken", 409, "handle-taken", ErrHandleTaken},
 	}
+	t.Run("seq ahead", func(t *testing.T) {
+		s, _ := newStore(t, 422, problem(422, "seq-ahead"))
+		if err := s.Rewind(ctx, sid, 99); !errors.Is(err, fleetchat.ErrBadSeq) {
+			t.Fatalf("err %v, want ErrBadSeq", err)
+		}
+	})
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := newStore(t, c.status, problem(c.status, c.reason))

@@ -59,7 +59,7 @@ type Store interface {
 	// first, and whether more are waiting. Unless peek, it moves the cursor
 	// to the last one returned.
 	Inbox(ctx context.Context, sessionID string, limit int, peek bool) ([]Message, bool, error)
-	// Rewind sets the agent's cursor back to seq.
+	// Rewind sets the agent's cursor back to seq. A seq past the cursor is ErrBadSeq.
 	Rewind(ctx context.Context, sessionID string, seq int64) error
 }
 
@@ -69,7 +69,7 @@ var (
 	ErrBadTarget    = errors.New("give exactly one of channel or agent; agent is an 8-character lower-case hex handle")
 	ErrEmptyText    = errors.New("text is empty")
 	ErrTooLong      = errors.New("text is longer than the largest message allowed")
-	ErrBadSeq       = errors.New("seq must be 0 or more")
+	ErrBadSeq       = errors.New("seq must be 0 or more, and not past your cursor")
 	ErrUnknownAgent = errors.New("no agent has that handle")
 	ErrNotMember    = errors.New("not a member of that channel")
 )

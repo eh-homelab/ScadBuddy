@@ -35,6 +35,7 @@ var reasons = map[string]error{
 	"unknown-agent": fleetchat.ErrUnknownAgent,
 	"not-member":    fleetchat.ErrNotMember,
 	"handle-taken":  ErrHandleTaken,
+	"seq-ahead":     fleetchat.ErrBadSeq,
 }
 
 type client struct {

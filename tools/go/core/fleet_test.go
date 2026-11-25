@@ -155,8 +155,16 @@ func TestTheFleetRoutesServeTheStore(t *testing.T) {
 	a.fleet("PUT", "/agents/"+bob+"/cursor", `{"seq":0}`, 200)
 	again, _ := a.inbox(bob, "")
 	expect(t, seqs(again), seqs(peeked))
-	a.fleet("PUT", "/agents/"+bob+"/cursor", `{"seq":999999}`, 200)
+	ahead := a.fleet("PUT", "/agents/"+bob+"/cursor", `{"seq":999999}`, 422)
+	expect(t, ahead.body["reason"], "seq-ahead")
 	a.fleet("PUT", "/agents/"+bob+"/cursor", `{"seq":-1}`, 422)
+	// The read above moved the cursor to the post: a rewind to it stays, one to the DM goes
+	// back, and then one to the post is past the cursor.
+	postSeq := fmt.Sprintf(`{"seq":%d}`, int64(post.body["seq"].(float64)))
+	a.fleet("PUT", "/agents/"+bob+"/cursor", postSeq, 200)
+	a.fleet("PUT", "/agents/"+bob+"/cursor", fmt.Sprintf(`{"seq":%d}`, int64(dm.body["seq"].(float64))), 200)
+	a.fleet("PUT", "/agents/"+bob+"/cursor", postSeq, 422)
+	a.inbox(bob, "")
 
 	// A DM is in the sender's inbox too.
 	mine, _ := a.inbox(ann, "")

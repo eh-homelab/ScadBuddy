@@ -28,7 +28,8 @@ over HTTP (`TestNoCoreImports` checks it).
   A problem's `reason` maps to an error that `errors.Is` finds: `unknown-agent` (404)
   to `fleetchat.ErrUnknownAgent`, `not-member` (403) to `fleetchat.ErrNotMember`, and
   `handle-taken` (409, two session ids that share their first 8 hex characters) to
-  `sbfleet.ErrHandleTaken`. Any other answer is an error that names the status. A 403
+  `sbfleet.ErrHandleTaken`, and `seq-ahead` (422, a rewind past the cursor) to
+  `fleetchat.ErrBadSeq`. Any other answer is an error that names the status. A 403
   with no `not-member` reason (the CRUD guard's refusal) is not `ErrNotMember`. Every
   request has a 30 s timeout.
 - `NewBus(coreURL, token)`: a `fleetchat.Bus`. `Publish` does nothing: core publishes

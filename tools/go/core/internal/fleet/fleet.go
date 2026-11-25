@@ -484,7 +484,8 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 	return map[string]any{"messages": out, "more": more}, nil
 }
 
-// rewind sets the agent's cursor to seq, which may be past the newest message.
+// rewind sets the agent's cursor back to seq. A seq past the cursor is a 422 (reason
+// seq-ahead): a rewind only moves the cursor back, and the inbox moves it forward.
 func (f *Fleet) rewind(r *http.Request, p crud.Params) (any, error) {
 	session, err := p.UUID("session_id")
 	if err != nil {
@@ -498,12 +499,22 @@ func (f *Fleet) rewind(r *http.Request, p crud.Params) (any, error) {
 	if err := b.Err(); err != nil {
 		return nil, err
 	}
-	tag, err := f.Pool.Exec(r.Context(), `UPDATE fleet_agents SET cursor = $2 WHERE session_id = $1`, session, seq)
+	ctx := r.Context()
+	err = pgx.BeginFunc(ctx, f.Pool, func(tx pgx.Tx) error {
+		cursor, err := cursorOf(ctx, tx, session, true)
+		if err != nil {
+			return err
+		}
+		if seq > cursor {
+			return httpx.WithReason(http.StatusUnprocessableEntity,
+				fmt.Sprintf("seq %d is past the agent's cursor (%d): a rewind only moves it back", seq, cursor),
+				"seq-ahead")
+		}
+		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2 WHERE session_id = $1`, session, seq)
+		return err
+	})
 	if err != nil {
 		return nil, err
-	}
-	if tag.RowsAffected() == 0 {
-		return nil, unknownAgent()
 	}
 	return map[string]int64{"seq": seq}, nil
 }

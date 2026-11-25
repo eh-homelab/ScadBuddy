@@ -148,9 +148,10 @@ func (f *fakeStore) Inbox(_ context.Context, sessionID string, limit int, peek b
 func (f *fakeStore) Rewind(_ context.Context, sessionID string, seq int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if seq < f.cursor[sessionID] {
-		f.cursor[sessionID] = seq
+	if seq > f.cursor[sessionID] {
+		return ErrBadSeq // as ScadBuddy's core: a rewind only moves the cursor back
 	}
+	f.cursor[sessionID] = seq
 	return nil
 }
 

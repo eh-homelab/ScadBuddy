@@ -237,7 +237,7 @@ func addTools(srv *mcp.Server, svc *Service) {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}, nil, nil
 		})
-	mcp.AddTool(srv, &mcp.Tool{Name: "fleet_rewind", Description: "Set your cursor back to a seq, so later messages are unread again."},
+	mcp.AddTool(srv, &mcp.Tool{Name: "fleet_rewind", Description: "Set your cursor back to a seq (0 up to your cursor), so later messages are unread again."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in rewindArgs) (*mcp.CallToolResult, any, error) {
 			if err := svc.Rewind(ctx, in.SessionID, in.Seq); err != nil {
 				return nil, nil, err
