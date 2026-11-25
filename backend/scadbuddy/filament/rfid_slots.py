@@ -268,8 +268,8 @@ def _run_key(ams_id: int, tray_id: int, digest: str, slot: dict[str, Any] | None
     same spool and params is joined by its kept key (``run_key``). Otherwise a new key:
     the slot, the params' digest and a nonce, since a key whose run has closed reads that
     run's outcome and never sends again (`execute_lan_commands`), and a tray the AMS reset
-    must be sent the same params again. The printer's id is in the run's workflow id
-    already (`lan_command_id`)."""
+    must be sent the same params again. The printer's id and the kind ``rfid-slot`` are in
+    the run's workflow id already (`lan_command_id`, P63)."""
     if slot is not None and slot["run_key"] and slot["params_hash"] == digest:
         return str(slot["run_key"])
     return f"slot-{ams_id}-{tray_id}-{digest[:16]}-{uuid.uuid4().hex[:12]}"
@@ -547,7 +547,7 @@ async def _send(
         if time.monotonic() >= deadline:
             report.waiting += 1
             return
-        answer = await commands.run(job.printer_id, job.run, key=job.key)
+        answer = await commands.run(job.printer_id, job.run, kind="rfid-slot", key=job.key)
     except ApiError as exc:
         label = _label(exc)
         logger.warning("could not configure an override slot", extra={**where, "error": label})

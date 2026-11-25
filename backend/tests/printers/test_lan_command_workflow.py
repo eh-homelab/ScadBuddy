@@ -12,7 +12,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 from fastapi import status
@@ -36,10 +36,12 @@ from scadbuddy.printers.lan_command_models import (
 from scadbuddy.workflows import lan_command as lan_command_module
 from scadbuddy.workflows.client import sandboxed_runner
 from scadbuddy.workflows.lan_command import (
+    LanCommandKind,
     LanCommandWorkflow,
     execute_lan_commands,
     lan_command_id,
     read_lan_commands,
+    start_lan_commands,
 )
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -52,6 +54,7 @@ from scadbuddy.workflows.print_models import (
 from tests.support.temporal import temporal_client
 
 PRINTER = "printer-1"
+KIND: LanCommandKind = "kprofile-set"
 
 
 def command(name: str, kind: str = "write", wait_s: float = 0.1) -> LanCommandInput:
@@ -98,7 +101,9 @@ async def _run(
     ):
         for _ in range(times):
             try:
-                outcome = await execute_lan_commands(client, queue, PRINTER, run, key=key)
+                outcome = await execute_lan_commands(
+                    client, queue, PRINTER, run, kind=KIND, key=key
+                )
                 if isinstance(outcome, LanCommandPending):
                     outcomes.append(outcome)
                 else:
@@ -125,34 +130,115 @@ def test_a_commands_timeout_is_connect_wait_and_margin() -> None:
     assert run_timeout(run) == command_timeout(write) + command_timeout(read)
 
 
-def test_the_id_names_the_printer_the_commands_and_the_key() -> None:
-    run = LanCommandRun(commands=[command("ams_filament_setting"), command("extrusion_cali_sel")])
+def test_the_id_names_the_printer_the_route_kind_and_the_key() -> None:
+    """P63: the id's middle part is the route's kind, never the body's commands."""
     key = hashlib.sha256(b"k1").hexdigest()[:32]
-    assert (
-        lan_command_id(PRINTER, run, "k1")
-        == f"lan-command-printer-1-ams_filament_setting+extrusion_cali_sel-{key}"
+    assert lan_command_id(PRINTER, "slot-configure", "k1") == (
+        f"lan-command-printer-1-slot-configure-{key}"
     )
-    assert lan_command_id(PRINTER, run, "k1") == lan_command_id(PRINTER, run, "k1")
-    assert lan_command_id(PRINTER, run, "k2") != lan_command_id(PRINTER, run, "k1")
-    other = LanCommandRun(commands=[command("ams_reset")])
-    assert lan_command_id(PRINTER, other, "k1") != lan_command_id(PRINTER, run, "k1")
-    assert lan_command_id(PRINTER, run, None) != lan_command_id(PRINTER, run, None)
+    assert lan_command_id(PRINTER, KIND, "k1") == lan_command_id(PRINTER, KIND, "k1")
+    assert lan_command_id(PRINTER, KIND, "k2") != lan_command_id(PRINTER, KIND, "k1")
+    assert lan_command_id(PRINTER, "kprofile-delete", "k1") != lan_command_id(PRINTER, KIND, "k1")
+    assert lan_command_id(PRINTER, KIND, None) != lan_command_id(PRINTER, KIND, None)
 
 
 #: The agent's check of a command id (`agent/src/tools/printerCommand.ts` `COMMAND_ID`).
 AGENT_COMMAND_ID = re.compile(r"^lan-command-[A-Za-z0-9_+-]{1,480}$")
 
 
+@pytest.mark.parametrize("kind", get_args(LanCommandKind))
 @pytest.mark.parametrize("key", ["a/b", "../x", "key with spaces", "\u00fc?#%", "k" * 200])
-def test_any_key_makes_an_id_the_read_route_and_the_agent_take(key: str) -> None:
+def test_any_key_makes_an_id_the_read_route_and_the_agent_take(
+    key: str, kind: LanCommandKind
+) -> None:
     """The key is hashed into the id: a `/` or another character the
-    ``GET /printers/{id}/commands/{command_id}`` path or the agent refuses never reaches it."""
-    run = LanCommandRun(commands=[command("ams_filament_setting")])
+    ``GET /printers/{id}/commands/{command_id}`` path or the agent refuses never reaches it.
+    Every route kind holds only characters the agent takes."""
     printer = "0b7a3a52-0000-4000-8000-000000000001"
-    command_id = lan_command_id(printer, run, key)
+    command_id = lan_command_id(printer, kind, key)
     assert AGENT_COMMAND_ID.match(command_id), command_id
     assert command_id.startswith(f"lan-command-{printer}-")
-    assert command_id == lan_command_id(printer, run, key)
+    assert command_id == lan_command_id(printer, kind, key)
+
+
+@pytest.mark.requires_temporal
+async def test_two_first_sends_of_one_key_with_other_commands_start_one_run(
+    client: Client,
+) -> None:
+    """P63: two first sends of one key on one route at once, whose bodies make two and three
+    commands, are one workflow: the printer gets the first run's commands once, and both
+    answer that run."""
+    two = LanCommandRun(
+        commands=[command("ams_filament_setting"), command("extrusion_cali_sel")],
+        answer={"body": "two"},
+    )
+    three = LanCommandRun(
+        commands=[
+            command("ams_filament_setting"),
+            command("extrusion_cali_sel"),
+            command("extrusion_cali_set"),
+        ],
+        answer={"body": "three"},
+    )
+    sent: list[str] = []
+    release = asyncio.Event()
+
+    @activity.defn(name=LAN_COMMAND_ACTIVITY)
+    async def lan_command(input: LanCommandInput) -> LanCommandReply:
+        await release.wait()
+        sent.append(input.name)
+        return LanCommandReply(confirmed=True)
+
+    queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[LanCommandWorkflow],
+        activities=[lan_command],
+        workflow_runner=sandboxed_runner(),
+    ):
+        key = f"race-{uuid.uuid4().hex}"
+        both = asyncio.gather(
+            start_lan_commands(client, queue, PRINTER, two, kind="slot-configure", key=key),
+            start_lan_commands(client, queue, PRINTER, three, kind="slot-configure", key=key),
+        )
+        await asyncio.sleep(0.5)
+        release.set()
+        (first, first_run), (second, second_run) = await both
+    assert first_run == second_run
+    assert first == second
+    assert sent == [c.name for c in first_run.commands]
+
+
+@pytest.mark.requires_temporal
+async def test_a_key_reused_on_another_route_is_another_run(client: Client) -> None:
+    """P9, P63: one key on two routes is two workflows, each sent once."""
+    run = LanCommandRun(commands=[command("extrusion_cali_set")])
+    other = LanCommandRun(commands=[command("extrusion_cali_del")])
+    sent: list[str] = []
+
+    @activity.defn(name=LAN_COMMAND_ACTIVITY)
+    async def lan_command(input: LanCommandInput) -> LanCommandReply:
+        sent.append(input.name)
+        return LanCommandReply(confirmed=True)
+
+    queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[LanCommandWorkflow],
+        activities=[lan_command],
+        workflow_runner=sandboxed_runner(),
+    ):
+        key = f"reused-{uuid.uuid4().hex}"
+        _, set_run = await start_lan_commands(
+            client, queue, PRINTER, run, kind="kprofile-set", key=key
+        )
+        _, delete_run = await start_lan_commands(
+            client, queue, PRINTER, other, kind="kprofile-delete", key=key
+        )
+    assert (set_run, delete_run) == (run, other)
+    assert sent == ["extrusion_cali_set", "extrusion_cali_del"]
 
 
 @pytest.mark.requires_temporal
@@ -381,9 +467,9 @@ async def test_a_run_past_the_route_wait_is_pending_then_read(
         activities=[lan_command],
         workflow_runner=sandboxed_runner(),
     ):
-        pending = await execute_lan_commands(client, queue, PRINTER, run, key="slow-1")
+        pending = await execute_lan_commands(client, queue, PRINTER, run, kind=KIND, key="slow-1")
         assert isinstance(pending, LanCommandPending)
-        assert pending.workflow_id == lan_command_id(PRINTER, run, "slow-1")
+        assert pending.workflow_id == lan_command_id(PRINTER, KIND, "slow-1")
         still, _ = await read_lan_commands(client, PRINTER, pending.workflow_id)
         assert isinstance(still, LanCommandPending)
         release.set()
@@ -399,7 +485,7 @@ async def test_a_read_of_another_printers_command_is_404(client: Client) -> None
     outcomes, _ = await _run(client, lambda _: LanCommandReply(confirmed=True), run, key="k404")
     assert outcomes
     with pytest.raises(ApiError) as raised:
-        await read_lan_commands(client, "printer-2", lan_command_id(PRINTER, run, "k404"))
+        await read_lan_commands(client, "printer-2", lan_command_id(PRINTER, KIND, "k404"))
     assert raised.value.status == status.HTTP_404_NOT_FOUND
     with pytest.raises(ApiError) as missing:
         await read_lan_commands(client, PRINTER, f"lan-command-{PRINTER}-x-none")
@@ -430,7 +516,7 @@ async def test_a_closed_run_that_ended_whole_reads_its_history_once(
         workflow_runner=sandboxed_runner(),
         graceful_shutdown_timeout=timedelta(seconds=0),
     ):
-        pending = await execute_lan_commands(client, queue, PRINTER, run, key="once-1")
+        pending = await execute_lan_commands(client, queue, PRINTER, run, kind=KIND, key="once-1")
         assert isinstance(pending, LanCommandPending)
         handle = client.get_workflow_handle(pending.workflow_id)
         await handle.terminate("test")
@@ -473,7 +559,9 @@ async def test_a_run_cancelled_or_terminated_answers_as_one_timed_out(
         workflow_runner=sandboxed_runner(),
         graceful_shutdown_timeout=timedelta(seconds=0),
     ):
-        pending = await execute_lan_commands(client, queue, PRINTER, run, key=f"{end}-{kind}")
+        pending = await execute_lan_commands(
+            client, queue, PRINTER, run, kind=KIND, key=f"{end}-{kind}"
+        )
         assert isinstance(pending, LanCommandPending)
         handle = client.get_workflow_handle(pending.workflow_id)
         if end == "cancel":

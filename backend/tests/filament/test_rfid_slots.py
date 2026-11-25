@@ -71,7 +71,7 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing.own_presets import sb_ref
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.spools.activities import filament_rfid_activity
-from scadbuddy.workflows.lan_command import LanCommandAnswer
+from scadbuddy.workflows.lan_command import LanCommandAnswer, LanCommandKind
 from scadbuddy.workflows.print_models import LAN_ROUTE_WAIT_S
 from tests.conftest import PgPool
 from tests.slicing.conftest import PROFILES
@@ -116,6 +116,7 @@ class Sender:
     def __init__(self) -> None:
         self.runs: list[tuple[str, LanCommandRun]] = []
         self.keys: list[str | None] = []
+        self.kinds: list[LanCommandKind] = []
         self.published: list[str | None] = []
         self.errors: list[Exception] = []
         self.pending = False
@@ -127,10 +128,16 @@ class Sender:
         self.most_by: dict[str, int] = {}
 
     async def run(
-        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+        self,
+        printer_id: str,
+        run: LanCommandRun,
+        *,
+        kind: LanCommandKind,
+        key: str | None = None,
     ) -> LanCommandAnswer:
         self.runs.append((printer_id, run))
         self.keys.append(key)
+        self.kinds.append(kind)
         if key is None or key not in self.published:
             self.published.append(key)
         self.open += 1
@@ -676,6 +683,7 @@ async def test_a_pending_configure_is_unconfirmed_not_done_or_failed(pg_pool: Pg
     (row,) = w.rows()
     assert row["params_hash"] and row["last_error"] == "unconfirmed"
     assert row["run_key"] == w.sender.keys[0]
+    assert w.sender.kinds == ["rfid-slot"]
 
 
 async def test_an_unacknowledged_configure_is_unconfirmed_and_not_a_repeat(
@@ -1086,9 +1094,11 @@ async def test_a_slot_not_started_by_the_deadline_waits(
     monkeypatch.setattr(rfid_slots, "MAX_CONCURRENT_RUNS", 1)
     answer = w.sender.run
 
-    async def slow(printer_id: str, run: LanCommandRun, *, key: str | None = None) -> Any:
+    async def slow(
+        printer_id: str, run: LanCommandRun, *, kind: LanCommandKind, key: str | None = None
+    ) -> Any:
         clock[0] += 10
-        return await answer(printer_id, run, key=key)
+        return await answer(printer_id, run, kind=kind, key=key)
 
     monkeypatch.setattr(w.sender, "run", slow)
 

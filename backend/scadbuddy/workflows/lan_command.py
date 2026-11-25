@@ -7,11 +7,14 @@ K-profile and AMS slot routes and the RFID override reconcile. A route waits at 
 `read_lan_commands` reads back (P27). It runs ``lan_command``
 (`printers/print_activities.py` `LanActivities`) once per command, in order, each tried
 once, and the first failure ends the run with it. The workflow id is
-``lan-command-<printer>-<commands>-<key hash>`` (P9; `KEY_HASH_CHARS` of the key's
-sha256, so a key with ``/`` or another character the command read route or the agent's
-``COMMAND_ID`` refuses still makes an id they take): a key sent again attaches to the running
-execution or reads the closed one's outcome, so the printer gets the command once, and a
-key reused for other commands is another execution. The answer is always the started
+``lan-command-<printer>-<kind>-<key hash>`` (P9, P63). The kind is the route's fixed
+`LanCommandKind`, never the body's commands: a configure sends two or three commands by its
+body, and two first sends of one key must still be one id. The key hash is `KEY_HASH_CHARS`
+of the key's sha256, so a key with ``/`` or another character the command read route or the
+agent's ``COMMAND_ID`` refuses still makes an id they take. One key on one route on one
+printer is one execution: a key sent again, or two first sends at once, attach to the
+running execution or read the closed one's outcome, so the printer gets the commands once.
+A key reused on another route is another execution. The answer is always the started
 run's (`start_lan_commands`), never a later request's own run.
 
 On the versioned print worker it is AUTO_UPGRADE (`client.print_deployment`), so a change
@@ -25,8 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
@@ -79,6 +81,22 @@ NOT_LAN_LINKED = "not_lan_linked"
 
 _ONCE = RetryPolicy(maximum_attempts=1)
 
+LanCommandKind = Literal[
+    "kprofile-read",
+    "kprofile-set",
+    "kprofile-batch",
+    "kprofile-delete",
+    "slot-configure",
+    "slot-reset",
+    "slot-refresh",
+    "slot-load",
+    "slot-unload",
+    "rfid-slot",
+]
+"""The route that runs a LAN command, the middle part of its workflow id (P63): each
+K-profile route, each AMS slot route and the RFID override reconcile has one. Each holds
+only ``[A-Za-z0-9_+-]``, which the agent's ``COMMAND_ID`` takes."""
+
 KEY_HASH_CHARS = 32
 """The hex characters of the key's sha256 in a workflow id: 128 bits, so two keys of one
 printer's command share an id only by a negligible chance."""
@@ -112,30 +130,38 @@ class LanCommandWorkflow:
 LanCommandAnswer = LanCommandOutcome | LanCommandPending
 
 
-def lan_command_id(printer_id: str, run: LanCommandRun, key: str | None) -> str:
-    """``lan-command-<printer>-<commands>-<key hash>`` (P9); a fresh id with no key."""
-    return _command_id(printer_id, [command.name for command in run.commands], key)
-
-
-def _command_id(printer_id: str, names: Sequence[str], key: str | None) -> str:
-    """The key goes in as `KEY_HASH_CHARS` hex characters of its sha256: one key always
-    makes one id, and the id holds only ``[A-Za-z0-9_+-]`` past the printer's id."""
+def lan_command_id(printer_id: str, kind: LanCommandKind, key: str | None) -> str:
+    """``lan-command-<printer>-<kind>-<key hash>`` (P9, P63); a fresh id with no key. The
+    key goes in as `KEY_HASH_CHARS` hex characters of its sha256: one key on one route
+    always makes one id, and the id holds only ``[A-Za-z0-9_+-]`` past the printer's id."""
     tail = (
         uuid.uuid4().hex if not key else hashlib.sha256(key.encode()).hexdigest()[:KEY_HASH_CHARS]
     )
-    return f"lan-command-{printer_id}-{'+'.join(names)}-{tail}"
+    return f"lan-command-{printer_id}-{kind}-{tail}"
 
 
 async def execute_lan_commands(
-    client: Client, task_queue: str, printer_id: str, run: LanCommandRun, *, key: str | None
+    client: Client,
+    task_queue: str,
+    printer_id: str,
+    run: LanCommandRun,
+    *,
+    kind: LanCommandKind,
+    key: str | None,
 ) -> LanCommandAnswer:
     """`start_lan_commands`' answer alone."""
-    answer, _ = await start_lan_commands(client, task_queue, printer_id, run, key=key)
+    answer, _ = await start_lan_commands(client, task_queue, printer_id, run, kind=kind, key=key)
     return answer
 
 
 async def start_lan_commands(
-    client: Client, task_queue: str, printer_id: str, run: LanCommandRun, *, key: str | None
+    client: Client,
+    task_queue: str,
+    printer_id: str,
+    run: LanCommandRun,
+    *,
+    kind: LanCommandKind,
+    key: str | None,
 ) -> tuple[LanCommandAnswer, LanCommandRun]:
     """Run ``run`` on ``task_queue`` (the ``bambuddy`` queue), bounded by the sum of its
     commands' timeouts (P20), and wait for it at most `LAN_ROUTE_WAIT_S` (P27): a run
@@ -145,9 +171,10 @@ async def start_lan_commands(
 
     With the answer comes the run it belongs to, which a route builds its body from. With a
     key it is the run the execution was started with, read from its first event: two first
-    sends of one key at once both start, Temporal joins the second to the first
-    (USE_EXISTING), and the second must answer the first's run, not its own body's."""
-    workflow_id = lan_command_id(printer_id, run, key)
+    sends of one key on one route at once both start, Temporal joins the second to the
+    first (USE_EXISTING, one id per ``kind`` and key, P63), and the second must answer the
+    first's run, not its own body's, which may name other commands."""
+    workflow_id = lan_command_id(printer_id, kind, key)
     try:
         handle = await client.start_workflow(
             LAN_COMMAND_WORKFLOW,
@@ -190,13 +217,13 @@ async def read_lan_commands(
 
 
 async def lan_command_exists(
-    client: Client, printer_id: str, run: LanCommandRun, key: str | None
+    client: Client, printer_id: str, kind: LanCommandKind, key: str | None
 ) -> bool:
-    """Whether ``key`` already started ``run``'s commands for ``printer_id`` (P38): a resend
-    then joins that run or reads its outcome, and is never sent again."""
+    """Whether ``key`` already started the route ``kind``'s commands for ``printer_id``
+    (P38): a resend then joins that run or reads its outcome, and is never sent again."""
     if not key:
         return False
-    handle = client.get_workflow_handle(lan_command_id(printer_id, run, key))
+    handle = client.get_workflow_handle(lan_command_id(printer_id, kind, key))
     try:
         await handle.describe()
     except RPCError as error:
@@ -207,25 +234,23 @@ async def lan_command_exists(
 
 
 async def lan_command_keyed(
-    client: Client, printer_id: str, kinds: Sequence[Sequence[str]], key: str | None
+    client: Client, printer_id: str, kind: LanCommandKind, key: str | None
 ) -> LanCommandRun | None:
-    """The run ``key`` already started for ``printer_id`` under one of ``kinds`` (each the
-    command names a route may send), as it was started; ``None`` when there is none (P41).
-    A route answers a resend from it, never from the resend's own body."""
+    """The run ``key`` already started for ``printer_id`` on the route ``kind``, as it was
+    started; ``None`` when there is none (P41, P63). A route answers a resend from it, never
+    from the resend's own body."""
     if not key:
         return None
-    for names in kinds:
-        handle = client.get_workflow_handle(
-            _command_id(printer_id, names, key), result_type=LanCommandOutcome
-        )
-        try:
-            await handle.describe()
-        except RPCError as error:
-            if error.status == RPCStatusCode.NOT_FOUND:
-                continue
-            raise
-        return await _started_run(client, handle)
-    return None
+    handle = client.get_workflow_handle(
+        lan_command_id(printer_id, kind, key), result_type=LanCommandOutcome
+    )
+    try:
+        await handle.describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return None
+        raise
+    return await _started_run(client, handle)
 
 
 async def _answer(

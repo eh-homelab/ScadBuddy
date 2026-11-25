@@ -9,6 +9,7 @@ import copy
 import json
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -932,6 +933,45 @@ def test_two_first_sends_of_one_key_answer_the_started_run(
     assert again.json() == first.json()
     assert again.json()["colour"] == "#FFFFFFFF"
     assert len(scripted.sent("ams_filament_setting")) == 1
+
+
+def test_two_first_sends_with_and_without_a_k_value_start_one_run(
+    client: TestClient, scripted: Scripted, pid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P63: a configure with a K value sends three commands and one without sends two. Two
+    first sends of one key at once, one of each, are one workflow (the route's kind, not
+    the commands, names it): the printer gets one run, and both answer that run."""
+
+    async def missed(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr(slot_routes, "_resent", missed)
+    with_k = {**BODY, "k_value": 0.02}
+    headers = {"Idempotency-Key": "race-k"}
+    with ThreadPoolExecutor(2) as pool:
+        sends = [
+            pool.submit(client.post, f"{slot(pid)}/configure", json=body, headers=headers)
+            for body in (BODY, with_k)
+        ]
+        first, second = (send.result() for send in sends)
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json() == second.json()
+    assert len(scripted.sent("ams_filament_setting")) == 1
+    assert len(scripted.sent("extrusion_cali_sel")) == 1
+
+
+def test_one_key_on_configure_then_reset_is_two_runs(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    """P9, P63: a key reused on another route is another workflow, sent again."""
+    headers = {"Idempotency-Key": "cfg-then-reset"}
+    first = client.post(f"{slot(pid)}/configure", json=BODY, headers=headers)
+    assert first.status_code == 200, first.text
+    then = client.post(f"{slot(pid)}/reset", headers=headers)
+    assert then.status_code == 200, then.text
+    assert then.json()["action"] == "reset"
+    assert len(scripted.sent("ams_filament_setting")) == 2
 
 
 def test_a_slot_preset_is_saved_and_cleared(

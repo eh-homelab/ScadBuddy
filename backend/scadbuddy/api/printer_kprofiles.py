@@ -54,6 +54,7 @@ from scadbuddy.printers.lan_commands import (
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.native import LanCommands, command_response, lan_row, live_status
 from scadbuddy.printers.store import printer_uuid
+from scadbuddy.workflows.lan_command import LanCommandKind
 from scadbuddy.workflows.print_models import LAN_REPLY_WAIT_READ, LAN_REPLY_WAIT_WRITE
 
 router = APIRouter(prefix="/printers", tags=["printers"])
@@ -106,17 +107,19 @@ async def _send(
     row: PrinterRow,
     seen: PrinterStatus,
     run: LanCommandRun,
+    kind: LanCommandKind,
     key: str | None = None,
 ) -> Response:
-    """Run ``run`` once the report is fresh (P36), and answer its view. A key that already
-    started it skips the freshness check (P38): the resend reads that run, never sends."""
-    if not seen.connected and not await commands.exists(row.id, run, key):
+    """Run ``run`` once the report is fresh (P36), and answer its view. ``kind`` is the
+    route's, which names its workflow with the key (P63). A key that already started it
+    skips the freshness check (P38): the resend reads that run, never sends."""
+    if not seen.connected and not await commands.exists(row.id, kind, key):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"{row.name} has not been heard from lately, so its {FEATURE} cannot be reached.",
             code="printer_offline",
         )
-    return command_response(*await commands.run_started(row.id, run, key=key))
+    return command_response(*await commands.run_started(row.id, run, kind=kind, key=key))
 
 
 def _write(row: PrinterRow, name: str, payload: dict[str, object]) -> LanCommandRun:
@@ -164,7 +167,7 @@ async def get_printer_kprofiles(
         ],
         answer={"extruders": len(seen.nozzles) or None},
     )
-    return await _send(commands, row, seen, run)
+    return await _send(commands, row, seen, run, "kprofile-read")
 
 
 async def _notes_owner(printers: PrintersDep, printer_id: str) -> str:
@@ -215,7 +218,8 @@ async def set_printer_kprofile(
     key = _key(idempotency_key)
     row, seen = await _reach(printers, printer_id)
     payload = extrusion_cali_set(set_rows([body]), body.nozzle_diameter, SEQ)
-    return await _send(commands, row, seen, _write(row, "extrusion_cali_set", payload), key)
+    run = _write(row, "extrusion_cali_set", payload)
+    return await _send(commands, row, seen, run, "kprofile-set", key)
 
 
 @router.post(
@@ -239,7 +243,8 @@ async def set_printer_kprofiles_batch(
     key = _key(idempotency_key)
     row, seen = await _reach(printers, printer_id)
     payload = extrusion_cali_set(set_rows(body.profiles), body.profiles[0].nozzle_diameter, SEQ)
-    return await _send(commands, row, seen, _write(row, "extrusion_cali_set", payload), key)
+    run = _write(row, "extrusion_cali_set", payload)
+    return await _send(commands, row, seen, run, "kprofile-batch", key)
 
 
 @router.post(
@@ -271,7 +276,8 @@ async def delete_printer_kprofile(
         dual_nozzle=len(seen.nozzles) > 1,
         seq=SEQ,
     )
-    return await _send(commands, row, seen, _write(row, "extrusion_cali_del", payload), key)
+    run = _write(row, "extrusion_cali_del", payload)
+    return await _send(commands, row, seen, run, "kprofile-delete", key)
 
 
 @router.put(

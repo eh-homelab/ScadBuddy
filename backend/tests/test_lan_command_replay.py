@@ -98,7 +98,7 @@ async def test_record(recording_temporal: str, name: str) -> None:
         handle = await client.start_workflow(
             LanCommandWorkflow.run,
             run,
-            id=lan_command_id("printer-1", run, queue),
+            id=lan_command_id("printer-1", "kprofile-set", queue),
             task_queue=queue,
         )
         await handle.result()

@@ -45,7 +45,7 @@ from scadbuddy.printers.lan_command_models import LanCommandRun
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.activities import filament_rfid_activity
-from scadbuddy.workflows.lan_command import LanCommandAnswer
+from scadbuddy.workflows.lan_command import LanCommandAnswer, LanCommandKind
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -117,7 +117,12 @@ class _NoLan:
     so the slot step sends nothing (`test_rfid_slots.py` covers it)."""
 
     async def run(
-        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+        self,
+        printer_id: str,
+        run: LanCommandRun,
+        *,
+        kind: LanCommandKind,
+        key: str | None = None,
     ) -> LanCommandAnswer:
         raise AssertionError("no LAN command is sent here")
 

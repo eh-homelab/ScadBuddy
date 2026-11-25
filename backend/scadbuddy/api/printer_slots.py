@@ -66,7 +66,7 @@ from scadbuddy.printers.native import LanCommands, command_response, lan_row, li
 from scadbuddy.printers.store import printer_uuid
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.component import SlicingDep
-from scadbuddy.workflows.lan_command import LanCommandAnswer
+from scadbuddy.workflows.lan_command import LanCommandAnswer, LanCommandKind
 
 router = APIRouter(prefix="/printers", tags=["printers"], dependencies=[Depends(nudge_after_write)])
 
@@ -122,25 +122,16 @@ def _wired[T](make: Callable[[], T]) -> T:
         ) from None
 
 
-#: The command names each route's run may have, which name its workflow (P9) with the
-#: route's action (`_keyed`).
-KINDS: dict[sc.Action, list[list[str]]] = {
-    "configure": [
-        ["ams_filament_setting", "extrusion_cali_sel"],
-        ["ams_filament_setting", "extrusion_cali_sel", "extrusion_cali_set"],
-    ],
-    "reset": [["ams_filament_setting"]],
-    "refresh": [["ams_get_rfid"]],
-    "load": [["ams_change_filament"]],
-    "unload": [["ams_change_filament"]],
+#: Each route's kind, which names its workflow with the key (P9, P63): one key on one
+#: route is one run whatever its body sends (a configure sends two or three commands),
+#: and a key reused on another route (load and unload send the same command) is another.
+KINDS: dict[sc.Action, LanCommandKind] = {
+    "configure": "slot-configure",
+    "reset": "slot-reset",
+    "refresh": "slot-refresh",
+    "load": "slot-load",
+    "unload": "slot-unload",
 }
-
-
-def _keyed(action: sc.Action, key: str | None) -> str | None:
-    """The run key of the route ``action`` for the request's ``key``: the action goes into
-    the run's workflow id (P9), since load and unload send the same command, so a key
-    reused for another action is a run of its own, never the first one's answer."""
-    return None if key is None else f"{action}-{key}"
 
 
 async def _resent(
@@ -149,10 +140,10 @@ async def _resent(
     """The answer of the run ``key`` already started for the route (P38, P41): joined or
     read, built from that run's own ``answer`` (not the resend's body), with no state
     check and nothing sent again; ``None`` when the key started none."""
-    run = await commands.keyed(row.id, KINDS[action], _keyed(action, key))
+    run = await commands.keyed(row.id, KINDS[action], key)
     if run is None:
         return None
-    return command_response(await commands.run(row.id, run, key=_keyed(action, key)), run)
+    return command_response(await commands.run(row.id, run, kind=KINDS[action], key=key), run)
 
 
 async def _started(
@@ -169,7 +160,7 @@ async def _started(
     run it belongs to, which is the first request's when two first sends of one key meet
     (`LanCommands.run_started`)."""
     run = build(sc.guard(status, action, ams_id, tray_id))
-    return await commands.run_started(row.id, run, key=_keyed(action, key))
+    return await commands.run_started(row.id, run, kind=KINDS[action], key=key)
 
 
 async def _send(

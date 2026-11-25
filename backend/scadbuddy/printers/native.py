@@ -5,7 +5,7 @@ P14, P27, P30). Nothing here reaches Bambuddy."""
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
@@ -29,6 +29,7 @@ from scadbuddy.printers.store import PrinterStore, printer_uuid
 from scadbuddy.workflows.lan_command import (
     NOT_LAN_LINKED,
     LanCommandAnswer,
+    LanCommandKind,
     execute_lan_commands,
     lan_command_exists,
     lan_command_keyed,
@@ -117,7 +118,12 @@ class LanCommandSender(Protocol):
     ``printer_unreachable`` and the rest)."""
 
     async def run(
-        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+        self,
+        printer_id: str,
+        run: LanCommandRun,
+        *,
+        kind: LanCommandKind,
+        key: str | None = None,
     ) -> LanCommandAnswer: ...
 
 
@@ -129,27 +135,38 @@ class LanCommands:
     task_queue: str
 
     async def run(
-        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+        self,
+        printer_id: str,
+        run: LanCommandRun,
+        *,
+        kind: LanCommandKind,
+        key: str | None = None,
     ) -> LanCommandAnswer:
         return await execute_lan_commands(
-            self.client_getter(), self.task_queue, printer_id, run, key=key
+            self.client_getter(), self.task_queue, printer_id, run, kind=kind, key=key
         )
 
     async def run_started(
-        self, printer_id: str, run: LanCommandRun, *, key: str | None = None
+        self,
+        printer_id: str,
+        run: LanCommandRun,
+        *,
+        kind: LanCommandKind,
+        key: str | None = None,
     ) -> tuple[LanCommandAnswer, LanCommandRun]:
         """`run`'s answer with the run it belongs to: under ``key``, the run the first
-        request started, which two first sends at once share (`start_lan_commands`)."""
+        request on the route ``kind`` started, which two first sends at once share
+        (`start_lan_commands`, P63)."""
         return await start_lan_commands(
-            self.client_getter(), self.task_queue, printer_id, run, key=key
+            self.client_getter(), self.task_queue, printer_id, run, kind=kind, key=key
         )
 
-    async def exists(self, printer_id: str, run: LanCommandRun, key: str | None) -> bool:
-        """Whether ``key`` already started ``run``'s commands (P38)."""
-        return await lan_command_exists(self.client_getter(), printer_id, run, key)
+    async def exists(self, printer_id: str, kind: LanCommandKind, key: str | None) -> bool:
+        """Whether ``key`` already started the route ``kind``'s commands (P38)."""
+        return await lan_command_exists(self.client_getter(), printer_id, kind, key)
 
     async def keyed(
-        self, printer_id: str, kinds: Sequence[Sequence[str]], key: str | None
+        self, printer_id: str, kind: LanCommandKind, key: str | None
     ) -> LanCommandRun | None:
-        """The run ``key`` already started under one of ``kinds``, as started (P41)."""
-        return await lan_command_keyed(self.client_getter(), printer_id, kinds, key)
+        """The run ``key`` already started on the route ``kind``, as started (P41)."""
+        return await lan_command_keyed(self.client_getter(), printer_id, kind, key)
