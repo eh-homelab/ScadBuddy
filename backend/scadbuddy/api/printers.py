@@ -418,10 +418,8 @@ async def get_printer_command(
     owner = printer_uuid(printer_id)
     if owner is None:
         raise command_not_found()
-    answer = await read_lan_commands(commands.client_getter(), str(owner), command_id)
-    if isinstance(answer, LanCommandPending):
-        return command_response(answer)
-    return command_response(answer, await commands.started(command_id))
+    answer, run = await read_lan_commands(commands.client_getter(), str(owner), command_id)
+    return command_response(answer, run)
 
 
 @router.patch("/{printer_id}", response_model=PrinterRow, summary="Rename it, or set its path")

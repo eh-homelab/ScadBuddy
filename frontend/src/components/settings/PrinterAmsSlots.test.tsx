@@ -7,6 +7,7 @@ import {
   amsPresetsSaved,
   amsSent,
   setAmsPrinting,
+  setAmsLoaded,
   setAmsTrayNow,
   setAmsUnconfirmed,
 } from '../../mocks/features/printerAmsSlots'
@@ -241,11 +242,34 @@ describe('PrinterAmsSlots (#7153)', () => {
     expect(status).toHaveClass('text-warn')
   })
 
-  it('reads the tag again when the status names no tray, as the route allows', async () => {
+  it('reads the tag again when no slot is loaded and the status names no tray, as the route allows', async () => {
+    setAmsLoaded(null)
     setAmsTrayNow(null)
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
     expect(screen.getByRole('button', { name: 'Read the tag again' })).toBeEnabled()
+    expect(screen.queryByText('Unload the hotend to read a tag again.')).not.toBeInTheDocument()
+  })
+
+  it('does not read the tag again while any slot is loaded, though the status names no tray', async () => {
+    // The other extruder is loaded: `tray_now` names only the active one's slot, and the
+    // route refuses while any extruder is loaded (`ams_slots.any_loaded`).
+    setAmsTrayNow(255)
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    expect(screen.getByRole('button', { name: 'Read the tag again' })).toBeDisabled()
+    expect(screen.getByText('Unload the hotend to read a tag again.')).toBeInTheDocument()
+  })
+
+  it('does not read the tag again when the status names a tray, though no slot shows it loaded', async () => {
+    // The report's `snow` and `tray_now` can disagree; the route refuses on either
+    // (`ams_slots.any_loaded`).
+    setAmsLoaded(null)
+    setAmsTrayNow(2)
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    expect(screen.getByRole('button', { name: 'Read the tag again' })).toBeDisabled()
+    expect(screen.getByText('Unload the hotend to read a tag again.')).toBeInTheDocument()
   })
 
   it('does not read the tag again while a tray feeds the printer', async () => {

@@ -10,6 +10,7 @@ import inspect
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
+from typing import Any
 
 import pytest
 from fastapi import status
@@ -158,6 +159,36 @@ async def test_a_refusal_stops_the_rest_and_is_409(client: Client) -> None:
 
 
 @pytest.mark.requires_temporal
+async def test_a_later_failure_names_the_commands_the_printer_confirmed(client: Client) -> None:
+    """P61: a configure whose second command is refused still changed the slot with its
+    first, so the problem says which earlier commands the printer confirmed."""
+    run = LanCommandRun(
+        commands=[
+            command("ams_filament_setting"),
+            command("ams_filament_setting"),
+            command("extrusion_cali_sel"),
+        ]
+    )
+    refused = ApplicationError(
+        "H2C refused extrusion_cali_sel: busy.", type=LAN_REFUSED, non_retryable=True
+    )
+    replies = iter([LanCommandReply(confirmed=True), LanCommandReply(confirmed=False)])
+
+    def answer(input: LanCommandInput) -> LanCommandReply:
+        if input.name == "extrusion_cali_sel":
+            raise refused
+        return next(replies)
+
+    [outcome], sent = await _run(client, answer, run)
+    assert sent == ["ams_filament_setting", "ams_filament_setting", "extrusion_cali_sel"]
+    assert isinstance(outcome, ApiError)
+    assert outcome.extensions["code"] == "printer_refused"
+    assert outcome.detail.startswith("H2C refused extrusion_cali_sel: busy.")
+    assert "confirmed ams_filament_setting" in outcome.detail
+    assert "unacknowledged: ams_filament_setting" in outcome.detail
+
+
+@pytest.mark.requires_temporal
 @pytest.mark.parametrize(
     ("kind", "code"), [(LAN_NO_ANSWER, "printer_no_answer"), (LAN_UNSURE, "printer_unreachable")]
 )
@@ -216,6 +247,13 @@ def short_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scadbuddy.printers.lan_command_models.LAN_COMMAND_MARGIN", 0.5)
 
 
+@pytest.fixture
+def long_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run's timeout well past its commands' sum, so a timed-out command's own activity
+    timeout fails the run, never the run's timeout racing it."""
+    monkeypatch.setattr(lan_command_module, "run_timeout", lambda _: timedelta(seconds=30))
+
+
 def _sleeps(seconds: float) -> Answer:
     async def answer(_: LanCommandInput) -> LanCommandReply:
         await asyncio.sleep(seconds)
@@ -240,7 +278,7 @@ async def test_a_write_timed_out_is_unconfirmed_and_the_rest_still_run(client: C
 
 
 @pytest.mark.requires_temporal
-@pytest.mark.usefixtures("short_timeouts")
+@pytest.mark.usefixtures("short_timeouts", "long_run")
 async def test_a_read_timed_out_is_no_answer(client: Client) -> None:
     run = LanCommandRun(commands=[command("extrusion_cali_get", kind="read", wait_s=0.0)])
     # Three tries of 0.1 s and two pauses: about 1.8 s.
@@ -248,6 +286,30 @@ async def test_a_read_timed_out_is_no_answer(client: Client) -> None:
     assert isinstance(outcome, ApiError)
     assert outcome.status == status.HTTP_502_BAD_GATEWAY
     assert outcome.extensions["code"] == "printer_no_answer"
+    # N3: the read that timed out is the failure itself, not a command sent before it.
+    assert "unacknowledged" not in outcome.detail
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.usefixtures("short_timeouts", "long_run")
+async def test_a_read_timed_out_after_a_write_names_only_the_write(client: Client) -> None:
+    """N3: only a timed-out write is an earlier command; the timed-out read failed the run."""
+    run = LanCommandRun(
+        commands=[
+            command("ams_filament_setting"),
+            command("ams_get_rfid", kind="read", wait_s=0.0),
+        ]
+    )
+
+    def answer(input: LanCommandInput) -> LanCommandReply | Awaitable[LanCommandReply]:
+        return _sleeps(5.0)(input)
+
+    [outcome], sent = await _run(client, answer, run)
+    assert sent[0] == "ams_filament_setting" and "ams_get_rfid" in sent
+    assert isinstance(outcome, ApiError)
+    assert outcome.extensions["code"] == "printer_no_answer"
+    assert "unacknowledged: ams_filament_setting." in outcome.detail
+    assert "ams_get_rfid" not in outcome.detail.split("unacknowledged:", 1)[1]
 
 
 @pytest.mark.requires_temporal
@@ -283,10 +345,12 @@ async def test_a_run_past_the_route_wait_is_pending_then_read(
     monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0.2)
     run = LanCommandRun(commands=[command("extrusion_cali_set")])
     queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+    # The command answers only once the test has read it pending twice: no race with a sleep.
+    release = asyncio.Event()
 
     @activity.defn(name=LAN_COMMAND_ACTIVITY)
     async def lan_command(input: LanCommandInput) -> LanCommandReply:
-        await asyncio.sleep(1.5)
+        await release.wait()
         return LanCommandReply(confirmed=True)
 
     async with Worker(
@@ -299,10 +363,11 @@ async def test_a_run_past_the_route_wait_is_pending_then_read(
         pending = await execute_lan_commands(client, queue, PRINTER, run, key="slow-1")
         assert isinstance(pending, LanCommandPending)
         assert pending.workflow_id == lan_command_id(PRINTER, run, "slow-1")
-        still = await read_lan_commands(client, PRINTER, pending.workflow_id)
+        still, _ = await read_lan_commands(client, PRINTER, pending.workflow_id)
         assert isinstance(still, LanCommandPending)
+        release.set()
         await client.get_workflow_handle(pending.workflow_id).result()
-        done = await read_lan_commands(client, PRINTER, pending.workflow_id)
+        done, _ = await read_lan_commands(client, PRINTER, pending.workflow_id)
     assert not isinstance(done, LanCommandPending)
     assert [reply.confirmed for reply in done.replies] == [True]
 
@@ -318,6 +383,50 @@ async def test_a_read_of_another_printers_command_is_404(client: Client) -> None
     with pytest.raises(ApiError) as missing:
         await read_lan_commands(client, PRINTER, f"lan-command-{PRINTER}-x-none")
     assert missing.value.status == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.requires_temporal
+async def test_a_closed_run_that_ended_whole_reads_its_history_once(
+    client: Client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The follow route answers a terminated write from the run it was started with, and
+    reads that run once (`read_lan_commands` hands it to the route's view too)."""
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0.2)
+    run = LanCommandRun(commands=[command("extrusion_cali_set")])
+    queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+    never = asyncio.Event()
+
+    @activity.defn(name=LAN_COMMAND_ACTIVITY)
+    async def lan_command(input: LanCommandInput) -> LanCommandReply:
+        await never.wait()
+        return LanCommandReply(confirmed=True)
+
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[LanCommandWorkflow],
+        activities=[lan_command],
+        workflow_runner=sandboxed_runner(),
+        graceful_shutdown_timeout=timedelta(seconds=0),
+    ):
+        pending = await execute_lan_commands(client, queue, PRINTER, run, key="once-1")
+        assert isinstance(pending, LanCommandPending)
+        handle = client.get_workflow_handle(pending.workflow_id)
+        await handle.terminate("test")
+        reads = 0
+        started_run = lan_command_module._started_run
+
+        async def counted(*args: Any) -> LanCommandRun:
+            nonlocal reads
+            reads += 1
+            return await started_run(*args)
+
+        monkeypatch.setattr(lan_command_module, "_started_run", counted)
+        outcome, started = await read_lan_commands(client, PRINTER, pending.workflow_id)
+    assert isinstance(outcome, LanCommandOutcome)
+    assert [reply.confirmed for reply in outcome.replies] == [False]
+    assert started == run
+    assert reads == 1
 
 
 @pytest.mark.requires_temporal
@@ -353,7 +462,7 @@ async def test_a_run_cancelled_or_terminated_answers_as_one_timed_out(
         for _ in range(50):
             outcome: LanCommandPending | LanCommandOutcome | ApiError
             try:
-                outcome = await read_lan_commands(client, PRINTER, pending.workflow_id)
+                outcome, _ = await read_lan_commands(client, PRINTER, pending.workflow_id)
             except ApiError as error:
                 outcome = error
             if not isinstance(outcome, LanCommandPending):

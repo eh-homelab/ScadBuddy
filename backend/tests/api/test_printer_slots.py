@@ -829,6 +829,21 @@ def test_a_resent_load_answers_the_first_and_sends_nothing(
     assert len(scripted.published) == 1
 
 
+def test_a_key_reused_for_unload_never_answers_the_load(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    """P9: load and unload send the same command, so the route's action is in the run's
+    workflow id: one key reused for the unload is a run of its own, not the load's answer."""
+    first = client.post(f"{slot(pid)}/load", headers={"Idempotency-Key": "both-k"})
+    assert first.status_code == 200, first.text
+    assert first.json()["action"] == "load"
+    printers_of(client).reports.put(pid, feeding(idle(), left=1, tray_now=1), datetime.now(UTC))
+    then = client.post(f"{slot(pid)}/unload", headers={"Idempotency-Key": "both-k"})
+    assert then.status_code == 200, then.text
+    assert then.json()["action"] == "unload"
+    assert len(scripted.published) == 2
+
+
 def test_a_resent_configure_answers_the_first_bodys_values(
     client: TestClient, scripted: Scripted, pid: str
 ) -> None:

@@ -112,9 +112,10 @@ REFRESH_EVERY = timedelta(seconds=30)
 #: The report's top-level fields some reader reads as stored: the state, the subtask and
 #: the print error (`advance_print`, `run_hours`, `progress.from_lan_report`, `lan_ended`),
 #: the card's progress fields, the trays and AMS units (`capture`'s tray projection, the
-#: AMS sensors, `rfid_slots` `_tray_temps`), the HMS errors and the nozzle fields
-#: (`status.status_from_report`), and the camera (``ipcam``, the camera relay and the
-#: watch's `printer.changed`, #7328). ``device`` is read only in part (`read_view`).
+#: AMS sensors, the trays' temperatures `rfid_slots` reads through `tray_at`), the HMS
+#: errors and the nozzle fields (`status.status_from_report`), and the camera (``ipcam``,
+#: the camera relay and the watch's `printer.changed`, #7328). ``device`` is read only in
+#: part (`read_view`).
 READ_FIELDS = (
     "gcode_state",
     "ipcam",
@@ -140,8 +141,10 @@ def read_view(report: dict[str, Any]) -> tuple[Any, ...]:
     the nozzles (``nozzle``), the active extruder (``extruder.state``), each extruder's
     loaded slot (``extruder.info[].snow``, which load and unload read, #7276) and whether a
     filament switch is fitted (`status.py`). Two reports with one view read alike, so the
-    second need not be written; the temperatures, fans and ``sequence_id`` are left out.
-    A new reader of a stored field adds it here."""
+    second need not be written; the fans and ``sequence_id`` are left out, and so are the
+    nozzle temperatures, which only the unload and the Ext-R load read, as a hint
+    (`printers/ams_slots.py` `nozzle_temps`): `REFRESH_EVERY` writes an unchanged view
+    again, so they are at most that old. A new reader of a stored field adds it here."""
     device = report.get("device")
     device = device if isinstance(device, dict) else {}
     extruder = device.get("extruder")

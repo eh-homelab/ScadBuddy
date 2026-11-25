@@ -8,7 +8,7 @@ import { printersState } from './printers'
  * printer's row: 404 for none, 409 `not_lan_linked` for one that `lan_linked` is false on
  * (`lanRefusal`). It answers 200 with its model, or, while `setPrinterCommandSlow(n)` is on,
  * 202 `LanCommandPending`, which `GET /printers/{id}/commands/{command_id}` answers 202 for
- * `n` more reads and then with the same model (P27, P37). While `latchPrinterCommands()` holds,
+ * `n` more reads and then with the same model, on every later read too (P27, P37). While `latchPrinterCommands()` holds,
  * every command is a 202 and its follow stays 202 until the test calls the release it returned.
  * Every command's `Idempotency-Key` is kept, in order (`printerCommandKeys`). A key sent again
  * joins the run it started (P38, P41): a handler asks `joined` before it changes anything, and
@@ -19,6 +19,8 @@ interface Running {
   printer: string
   reads: number
   body: JsonBodyType
+  /** Answered once: every later follow answers the same body, as the backend reads a closed run. */
+  done: boolean
 }
 
 interface Started {
@@ -63,7 +65,23 @@ export function printerCommandsPublished(): number {
   return state.published
 }
 
-const startedKey = (printer: string, key: string) => `${printer}\n${key}`
+/**
+ * What names a route's run besides its printer and key, as the backend's workflow id does
+ * (`workflows/lan_command.py` `lan_command_id`): the command names, and for a slot route the
+ * action (`api/printer_slots.py` `_keyed`). The tray is not in it, so a key reused for `load`
+ * on another tray joins the first run, and K-profile `set` and `batch` (both
+ * `extrusion_cali_set`) join each other.
+ */
+function runName(request: Request): string {
+  const path = new URL(request.url).pathname
+  const slot = /\/trays\/\d+\/\d+\/([^/]+)$/.exec(path)
+  if (slot) return `slot ${slot[1]}`
+  if (/\/kprofiles\/delete$/.test(path)) return 'extrusion_cali_del'
+  if (/\/kprofiles(\/batch)?$/.test(path)) return 'extrusion_cali_set'
+  return path
+}
+
+const startedKey = (printer: string, request: Request, key: string) => `${printer}\n${runName(request)}\n${key}`
 
 /**
  * The answer to a command whose `Idempotency-Key` already started one on `printer`: the same
@@ -71,10 +89,10 @@ const startedKey = (printer: string, key: string) => `${printer}\n${key}`
  */
 export function joined(printer: string, request: Request): Response | undefined {
   const key = request.headers.get('Idempotency-Key')
-  const first = key ? state.started.get(startedKey(printer, key)) : undefined
+  const first = key ? state.started.get(startedKey(printer, request, key)) : undefined
   if (!first) return undefined
   state.keys.push(key)
-  if (first.workflowId && state.running.has(first.workflowId)) {
+  if (first.workflowId && state.running.get(first.workflowId)?.done === false) {
     return HttpResponse.json({ workflow_id: first.workflowId } satisfies LanCommandPending, { status: 202 })
   }
   return HttpResponse.json(first.body)
@@ -122,12 +140,12 @@ export function commandAnswer(printer: string, request: Request, body: JsonBodyT
   state.keys.push(key)
   if (request.method !== 'GET') state.published += 1
   if (state.slow <= 0 && !state.latched) {
-    if (key) state.started.set(startedKey(printer, key), { body })
+    if (key) state.started.set(startedKey(printer, request, key), { body })
     return HttpResponse.json(body)
   }
   const workflow_id = `lan-command-mock-${++state.seq}`
-  state.running.set(workflow_id, { printer, reads: state.slow, body })
-  if (key) state.started.set(startedKey(printer, key), { workflowId: workflow_id, body })
+  state.running.set(workflow_id, { printer, reads: state.slow, body, done: false })
+  if (key) state.started.set(startedKey(printer, request, key), { workflowId: workflow_id, body })
   return HttpResponse.json({ workflow_id } satisfies LanCommandPending, { status: 202 })
 }
 
@@ -135,11 +153,11 @@ export const handlers = [
   http.get('/api/v1/printers/:id/commands/:command_id', ({ params }) => {
     const run = state.running.get(String(params.command_id))
     if (!run || run.printer !== params.id) return problem(404, `no command ${String(params.command_id)}`, 'command_not_found')
-    if (state.latched || run.reads > 0) {
+    if (!run.done && (state.latched || run.reads > 0)) {
       run.reads = Math.max(0, run.reads - 1)
       return HttpResponse.json({ workflow_id: String(params.command_id) } satisfies LanCommandPending, { status: 202 })
     }
-    state.running.delete(String(params.command_id))
+    run.done = true
     return HttpResponse.json(run.body)
   }),
 ]

@@ -272,11 +272,16 @@ def _dump(problem: Any) -> Any:
     return problem.model_dump() if hasattr(problem, "model_dump") else problem
 
 
-async def test_the_reply_wait_ends_a_second_before_start_to_close(pg_pool: PgPool) -> None:
+async def test_the_reply_wait_ends_a_second_before_start_to_close(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop's clock stands still, so the wait left is exact whatever the runner's
+    speed: the start-to-close timeout less one second."""
     lan = Scripted()
+    monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: 1000.0)
     await _run(pg_pool, lan, write_input(), start_to_close=timedelta(seconds=20))
     [left] = lan.left
-    assert 18.0 < left <= 19.0
+    assert left == 19.0
 
 
 async def test_a_read_stops_trying_once_its_deadline_has_passed(pg_pool: PgPool) -> None:

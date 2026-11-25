@@ -109,19 +109,22 @@ class Sender:
     """A `LanCommandSender` that records each run and answers it: every reply
     ``confirmed`` by default, `LanCommandPending` with ``pending``, or raises the next of
     ``errors``. As the ``LanCommand`` workflow does, a key sent again while its run is open
-    joins it: ``published`` lists the runs actually started. ``delay`` is how long each
-    answer takes; ``most`` is the most runs open at once."""
+    joins it: ``published`` lists the runs actually started. With ``hold`` set, each answer
+    waits until the event is set; ``open`` and ``most`` are the runs open now and at most,
+    and ``most_by`` the most open at once per printer."""
 
     def __init__(self) -> None:
         self.runs: list[tuple[str, LanCommandRun]] = []
         self.keys: list[str | None] = []
         self.published: list[str | None] = []
-        self.errors: list[ApiError] = []
+        self.errors: list[Exception] = []
         self.pending = False
         self.confirmed = True
-        self.delay = 0.0
+        self.hold: asyncio.Event | None = None
         self.open = 0
         self.most = 0
+        self.open_by: dict[str, int] = {}
+        self.most_by: dict[str, int] = {}
 
     async def run(
         self, printer_id: str, run: LanCommandRun, *, key: str | None = None
@@ -132,10 +135,16 @@ class Sender:
             self.published.append(key)
         self.open += 1
         self.most = max(self.most, self.open)
+        self.open_by[printer_id] = self.open_by.get(printer_id, 0) + 1
+        self.most_by[printer_id] = max(self.most_by.get(printer_id, 0), self.open_by[printer_id])
         try:
-            await asyncio.sleep(self.delay)
+            if self.hold is not None:
+                await self.hold.wait()
+            else:
+                await asyncio.sleep(0)
         finally:
             self.open -= 1
+            self.open_by[printer_id] -= 1
         if self.errors:
             raise self.errors.pop(0)
         if self.pending:
@@ -234,6 +243,29 @@ class World:
 
     def report(self, data: dict[str, Any]) -> None:
         self.reports.put(str(self.printer), data, datetime.now(UTC))
+
+    def another_printer(self, *tray_ids: int) -> str:
+        """A second LAN-linked printer whose AMS 0 holds an override tag of a spool of its
+        own in each of ``tray_ids``; its id."""
+        printer = uuid4()
+        with self.pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO printers (id, serial, name, lan_host, lan_cert_sha256,"
+                " access_code_sealed, access_code_dek_sealed, access_code_kek_id)"
+                " VALUES (%s, %s, 'Shed', '10.0.0.6', %s,"
+                " decode('00', 'hex'), decode('00', 'hex'), 'k1')",
+                (printer, f"SN{printer.hex[:8]}", "cd" * 32),
+            )
+        trays = []
+        for tray_id in tray_ids:
+            tag = uuid4().hex.upper()
+            spool = self.filament.spools.create(SpoolCreate(type_id=self.type_id), actor="ann").id
+            self.bind(override=True, spool=spool, tray=tag)
+            trays.append(_tray(tray_id, tag))
+        data = _report()
+        data["ams"]["ams"][0]["tray"] = trays
+        self.reports.put(str(printer), data, datetime.now(UTC))
+        return str(printer)
 
     def preset(self, nozzle: str, filament: str) -> None:
         self.filament.types.set_presets(
@@ -665,10 +697,11 @@ async def test_an_unacknowledged_configure_is_unconfirmed_and_not_a_repeat(
     # Four closed runs: each pass sent its own (no key joins a closed run).
     assert len(set(w.sender.published)) == 4
 
+    # N1: the first acknowledged configure after unacknowledged ones is not a repeat.
     w.sender.confirmed = True
     assert await w.run() == SlotReport(configured=1)
     (row,) = w.rows()
-    assert (row["last_error"], row["attempts"]) == (None, 1)
+    assert (row["last_error"], row["attempts"]) == (None, 0)
 
 
 async def test_a_spool_without_temperatures_takes_the_trays(pg_pool: PgPool) -> None:
@@ -840,53 +873,194 @@ def _four_slots(w: World) -> None:
     w.report(_report(*more))
 
 
-async def test_the_slots_runs_are_sent_together(pg_pool: PgPool) -> None:
-    """P46: one pass waits about one run's wait, not one per slot."""
-    w = World(pg_pool)
-    _four_slots(w)
-    w.sender.delay = 0.5
+async def _until(done: Callable[[], bool]) -> None:
+    """Yield to the loop until ``done`` holds (a test's latch, never a wall-time wait)."""
 
-    report = await w.run()
-
-    assert report == SlotReport(configured=4)
-    assert w.sender.most == 4  # one after another would never have more than one open
-
-
-async def test_a_run_that_raises_ends_the_others_before_the_pass_ends(pg_pool: PgPool) -> None:
-    """A run that raises cancels the other runs before the pass gives up its lock, so no
-    run is left open, or its row unwritten, while a next pass reads the rows."""
-    w = World(pg_pool)
-    _four_slots(w)
-    w.sender.delay = 30
-    answer = w.sender.run
-    first = True
-
-    async def run(
-        printer_id: str, run: LanCommandRun, *, key: str | None = None
-    ) -> LanCommandAnswer:
-        nonlocal first
-        if first:
-            first = False
+    async def spin() -> None:
+        while not done():
             await asyncio.sleep(0)
-            raise RuntimeError("the RPC broke")
-        return await answer(printer_id, run, key=key)
 
-    w.sender.run = run  # type: ignore[method-assign]
-    with pytest.raises(ExceptionGroup):
-        await asyncio.wait_for(w.run(), timeout=10)
-    assert w.sender.open == 0
+    await asyncio.wait_for(spin(), timeout=10)
+
+
+async def _settle() -> None:
+    """Give every ready task a turn, so one that could start a run has started it."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+async def test_two_printers_run_at_once_but_one_printers_slots_one_at_a_time(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P46 and P58: printers' runs are sent together, so a pass waits about one run's wait
+    per slot of its busiest printer; each run opens its own MQTT connection, so a printer
+    has at most one of the pass's runs open at once."""
+    w = World(pg_pool)
+    _four_slots(w)
+    other = w.another_printer(0, 1)
+    w.sender.hold = asyncio.Event()
+    # Count the slots that entered `_send` (on the loop) and the `_started` writes that
+    # finished (in their threads), so the check below waits until every slot let through
+    # has written its row and sent its run. With a broken per-printer lock, all six enter.
+    entered, wrote = [0], [0]
+    send, started = rfid_slots._send, rfid_slots._started
+
+    async def counted_send(*args: Any) -> None:
+        entered[0] += 1
+        await send(*args)
+
+    def counted_started(*args: Any) -> None:
+        started(*args)
+        wrote[0] += 1
+
+    monkeypatch.setattr(rfid_slots, "_send", counted_send)
+    monkeypatch.setattr(rfid_slots, "_started", counted_started)
+
+    task = asyncio.create_task(w.run())
+    # One run of each printer, at once, and no other slot between `_started` and its run.
+    await _until(lambda: w.sender.open >= 2 and entered[0] == wrote[0] == len(w.sender.runs))
+    assert w.sender.open == 2
+    w.sender.hold.set()
+    report = await asyncio.wait_for(task, timeout=10)
+
+    assert report == SlotReport(configured=6)
+    assert w.sender.most_by == {str(w.printer): 1, other: 1}
+    assert w.sender.most == 2
 
 
 async def test_at_most_so_many_runs_are_open_at_once(
     pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     w = World(pg_pool)
-    _four_slots(w)
-    w.sender.delay = 0.05
+    w.another_printer(1)
+    w.another_printer(1)
+    w.sender.hold = asyncio.Event()
     monkeypatch.setattr(rfid_slots, "MAX_CONCURRENT_RUNS", 2)
 
-    assert await w.run() == SlotReport(configured=4)
+    task = asyncio.create_task(w.run())
+    await _until(lambda: w.sender.open >= 2)
+    await _settle()
+    assert w.sender.open == 2
+    w.sender.hold.set()
+
+    assert await asyncio.wait_for(task, timeout=10) == SlotReport(configured=3)
     assert w.sender.most == 2
+
+
+async def test_a_run_that_raises_is_failed_and_the_other_slots_go_on(pg_pool: PgPool) -> None:
+    """I1: an error other than a problem (a Temporal RPC error, say) fails its slot only.
+    Its run may still be open, so the row keeps its key and the next pass joins it."""
+    w = World(pg_pool)
+    _four_slots(w)
+    w.sender.errors = [RuntimeError("the RPC broke")]
+
+    report = await w.run()
+
+    assert report == SlotReport(failed=1, configured=3)
+    broke = w.sender.keys[0]
+    (row,) = [r for r in w.rows() if r["run_key"] is not None]
+    assert (row["run_key"], row["last_error"], row["attempts"]) == (broke, "internal", 1)
+
+    await w.run()
+    assert broke in w.sender.keys[4:]
+    assert w.sender.published.count(broke) == 1
+
+
+async def test_a_cancelled_pass_leaves_each_runs_key_for_the_next_pass(pg_pool: PgPool) -> None:
+    """I1: the row takes its run's key before the run is sent, so a pass cancelled while it
+    waits for the answer (a deploy) leaves a key the next pass joins: nothing is sent twice."""
+    w = World(pg_pool)
+    w.sender.hold = asyncio.Event()
+
+    task = asyncio.create_task(w.run())
+    await _until(lambda: w.sender.open == 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    (row,) = w.rows()
+    assert row["run_key"] == w.sender.keys[0] and row["params_hash"]
+    w.sender.hold = None
+    assert await w.run() == SlotReport(configured=1)
+    assert w.sender.keys[1] == w.sender.keys[0]
+    assert len(w.sender.published) == 1
+    # N1: the joined run is the slot's first acknowledged configure, not a repeat.
+    assert w.rows()[0]["attempts"] == 0
+
+
+async def test_failed_passes_do_not_count_as_repeats(
+    pg_pool: PgPool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """N1: only acknowledged configures are repeats. Two passes that fail ``internal`` keep
+    the hash, but the configure that then lands is the slot's first."""
+    w = World(pg_pool)
+    w.sender.errors = [RuntimeError("the RPC broke"), RuntimeError("the RPC broke")]
+
+    assert await w.run() == SlotReport(failed=1)
+    assert await w.run() == SlotReport(failed=1)
+    assert w.rows()[0]["attempts"] == 2
+
+    with caplog.at_level(logging.WARNING, logger=rfid_slots.__name__):
+        assert await w.run() == SlotReport(configured=1)
+
+    assert w.rows()[0]["attempts"] == 0
+    assert not [r for r in caplog.records if "same values" in r.message]
+
+
+async def test_a_new_hash_recorded_with_no_outcome_is_not_a_repeat(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Q1: `_started` clears the last configure's time when the hash changes, so a pass
+    that records H2 and stops at its deadline leaves no acknowledged configure of H2: the
+    next pass's first acknowledged configure of H2 counts 0 and warns of nothing."""
+    w = World(pg_pool)
+    assert await w.run() == SlotReport(configured=1)  # H1, acknowledged
+    w.report(_report(tray_info_idx="GFL99"))
+    w.preset("0.4", "GFL98")  # H2
+    clock = [0.0]
+    monkeypatch.setattr(rfid_slots, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    started = rfid_slots._started
+
+    def slow(*args: Any) -> None:
+        started(*args)
+        clock[0] += 10
+
+    monkeypatch.setattr(rfid_slots, "_started", slow)
+    assert await w.run(deadline=5.0) == SlotReport(waiting=1)
+
+    monkeypatch.setattr(rfid_slots, "_started", started)
+    with caplog.at_level(logging.WARNING, logger=rfid_slots.__name__):
+        assert await w.run(deadline=clock[0] + 5.0) == SlotReport(configured=1)
+
+    assert w.rows()[0]["attempts"] == 0
+    assert not [r for r in caplog.records if "same values" in r.message]
+
+
+async def test_a_run_started_past_the_deadline_waits_and_keeps_its_key(
+    pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N2: the row's write (`_started`) can take the pass past its deadline. The run is then
+    not sent: the slot counts ``waiting``, and the next pass starts it under the stored key."""
+    w = World(pg_pool)
+    clock = [0.0]
+    monkeypatch.setattr(rfid_slots, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    started = rfid_slots._started
+
+    def slow(*args: Any) -> None:
+        started(*args)
+        clock[0] += 10
+
+    monkeypatch.setattr(rfid_slots, "_started", slow)
+
+    assert await w.run(deadline=5.0) == SlotReport(waiting=1)
+    assert w.sender.runs == []
+    (row,) = w.rows()
+    assert row["run_key"] and row["params_hash"]
+    key = row["run_key"]
+
+    monkeypatch.setattr(rfid_slots, "_started", started)
+    assert await w.run(deadline=clock[0] + 5.0) == SlotReport(configured=1)
+    assert w.sender.keys == [key]
 
 
 async def test_a_deadline_already_past_leaves_the_slots_waiting(pg_pool: PgPool) -> None:

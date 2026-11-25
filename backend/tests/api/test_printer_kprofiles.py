@@ -120,6 +120,21 @@ def test_the_list_is_the_printers_reply(client: TestClient, scripted: Scripted, 
     assert sent(scripted, "extrusion_cali_get")[0]["nozzle_diameter"] == "0.4"
 
 
+@pytest.mark.parametrize(
+    "bad", [{"cali_idx": "x"}, {"extruder_id": None}, {"ams_id": [1]}, {"tray_id": "1.5"}]
+)
+def test_an_entry_whose_numbers_do_not_parse_is_skipped(
+    client: TestClient, scripted: Scripted, pid: str, bad: dict[str, Any]
+) -> None:
+    """The reply is the printer's: a malformed entry is dropped, never a 500."""
+    scripted.reply(
+        "extrusion_cali_get", nozzle_diameter="0.4", filaments=[{**ROW_04, **bad}, ROW_04]
+    )
+    response = client.get(base(pid), params={"nozzle_diameter": "0.4"})
+    assert response.status_code == 200, response.text
+    assert [p["slot_id"] for p in response.json()["profiles"]] == [3]
+
+
 def test_the_list_says_how_many_extruders_the_printer_has(
     client: TestClient, scripted: Scripted
 ) -> None:
@@ -248,6 +263,17 @@ def test_a_refused_write_is_409_printer_refused(
     response = client.post(base(pid), json=SET, headers=press())
     assert response.status_code == 409, response.text
     assert response.json()["code"] == "printer_refused"
+
+
+def test_a_refusals_reason_is_cut_and_printable(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    scripted.refuse("extrusion_cali_set", "\x1b[31m" + "no " * 400)
+    response = client.post(base(pid), json=SET, headers=press())
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert detail.isprintable() and len(detail) < 300
+    assert "no no" in detail
 
 
 def test_a_stale_report_is_409_printer_offline(client: TestClient, scripted: Scripted) -> None:

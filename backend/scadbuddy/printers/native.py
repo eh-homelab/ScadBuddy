@@ -32,7 +32,6 @@ from scadbuddy.workflows.lan_command import (
     execute_lan_commands,
     lan_command_exists,
     lan_command_keyed,
-    lan_command_run,
 )
 
 
@@ -68,15 +67,6 @@ async def live_status(
     if report is None:
         return PrinterStatus(id=row.bambuddy_printer_id or 0, name=row.name, connected=False)
     return report_status(row, report, now=now)
-
-
-async def external_count(reports: PrinterReportStore, row: PrinterRow) -> int:
-    """How many external holders the stored report lists (``vt_tray``); 1 with no report."""
-    report = await asyncio.to_thread(reports.get, row.id)
-    if report is None:
-        return 1
-    holders = report[0].get("vt_tray")
-    return len(holders) if isinstance(holders, list) else 1
 
 
 CommandView = Callable[[LanCommandRun, LanCommandOutcome], BaseModel]
@@ -153,7 +143,3 @@ class LanCommands:
     ) -> LanCommandRun | None:
         """The run ``key`` already started under one of ``kinds``, as started (P41)."""
         return await lan_command_keyed(self.client_getter(), printer_id, kinds, key)
-
-    async def started(self, command_id: str) -> LanCommandRun:
-        """The commands the run ``command_id`` was started with."""
-        return await lan_command_run(self.client_getter(), command_id)
