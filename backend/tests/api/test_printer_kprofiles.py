@@ -5,21 +5,25 @@ print worker; Bambuddy is never called (`forbid_bambuddy`)."""
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.api import printer_kprofiles as kprofile_routes
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.kprofiles import KProfileSet, set_rows
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_commands import extrusion_cali_set
 from scadbuddy.printers.models import LanLink, PrinterCreate
-from tests.api.test_send import BASE
+from scadbuddy.workflows import lan_command as lan_command_module
+from tests.api.test_send import BASE, configure
 from tests.printers.conftest import KEK
 from tests.support.no_bambuddy import forbid_bambuddy
 from tests.support.operations import press
@@ -46,6 +50,14 @@ SET: dict[str, Any] = {
     "filament_id": "GFA00",
     "name": "High Flow_Bambu PLA Basic",
     "k_value": "0.02",
+}
+DELETE: dict[str, Any] = {
+    "slot_id": 4,
+    "extruder_id": 0,
+    "nozzle_id": "HS00-0.4",
+    "nozzle_diameter": "0.4",
+    "filament_id": "GFA00",
+    "setting_id": "PF1",
 }
 ONE_NOZZLE = {"gcode_state": "IDLE", "nozzle_type": "HS", "nozzle_diameter": "0.4"}
 TWO_NOZZLES = {
@@ -194,21 +206,16 @@ def test_a_batch_sends_every_row_in_one_command(
     assert response.status_code == 200, response.text
     [command] = sent(scripted, "extrusion_cali_set")
     assert [e["extruder_id"] for e in command["filaments"]] == [0, 1]
-    assert len({e["setting_id"] for e in command["filaments"]}) == 2
+    # Bambuddy's set_kprofiles_batch makes a new id per row (bambu_mqtt.py L7790-L7792 at
+    # d3be761f), so the two extruders' rows of one new profile do not share one.
+    ids = [e["setting_id"] for e in command["filaments"]]
+    assert all(re.fullmatch(r"PF\d{17}", i) for i in ids) and ids[0] != ids[1]
 
 
 def test_a_delete_on_one_nozzle_sends_the_full_form(
     client: TestClient, scripted: Scripted, pid: str
 ) -> None:
-    body = {
-        "slot_id": 4,
-        "extruder_id": 0,
-        "nozzle_id": "HS00-0.4",
-        "nozzle_diameter": "0.4",
-        "filament_id": "GFA00",
-        "setting_id": "PF1",
-    }
-    response = client.post(f"{base(pid)}/delete", json=body, headers=press())
+    response = client.post(f"{base(pid)}/delete", json=DELETE, headers=press())
     assert response.status_code == 200, response.text
     [command] = sent(scripted, "extrusion_cali_del")
     assert (command["cali_idx"], command["setting_id"]) == (4, "PF1")
@@ -269,10 +276,92 @@ def test_a_stale_report_is_409_printer_offline(client: TestClient, scripted: Scr
         client.get(base(pid)),
         client.post(base(pid), json=SET, headers=press()),
         client.post(f"{base(pid)}/batch", json={"profiles": [SET]}, headers=press()),
+        client.post(f"{base(pid)}/delete", json=DELETE, headers=press()),
     ):
         assert response.status_code == 409, response.text
         assert response.json()["code"] == "printer_offline"
     assert scripted.published == []
+
+
+class Later(datetime):
+    """Ten minutes on: the stored report is stale by then."""
+
+    @classmethod
+    def now(cls, tz: Any = None) -> Later:
+        return cls.fromtimestamp((datetime.now(tz) + timedelta(minutes=10)).timestamp(), tz)
+
+
+def test_a_resent_key_answers_after_the_printer_drops_off(
+    client: TestClient, scripted: Scripted, pid: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P38: a key whose command exists answers its result, whatever the report says now."""
+    first = client.post(base(pid), json=SET, headers={"Idempotency-Key": "k1"})
+    assert first.status_code == 200, first.text
+    monkeypatch.setattr(kprofile_routes, "datetime", Later)
+    again = client.post(base(pid), json=SET, headers={"Idempotency-Key": "k1"})
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    assert len(sent(scripted, "extrusion_cali_set")) == 1
+    other = client.post(base(pid), json=SET, headers={"Idempotency-Key": "k2"})
+    assert other.status_code == 409, other.text
+    assert other.json()["code"] == "printer_offline"
+    assert len(sent(scripted, "extrusion_cali_set")) == 1
+
+
+def follow(client: TestClient, pid: str, pending: httpx.Response) -> httpx.Response:
+    """The command read route's answer once the command is done."""
+    assert pending.status_code == 202, pending.text
+    url = f"/api/v1/printers/{pid}/commands/{pending.json()['workflow_id']}"
+    for _ in range(100):
+        response: httpx.Response = client.get(url)
+        if response.status_code != 202:
+            return response
+        time.sleep(0.1)
+    raise AssertionError(f"{url} is still running")
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "", None),
+        ("POST", "", SET),
+        ("POST", "/batch", {"profiles": [SET]}),
+        ("POST", "/delete", DELETE),
+    ],
+    ids=["list", "set", "batch", "delete"],
+)
+def test_a_followed_command_answers_as_its_route(
+    client: TestClient,
+    scripted: Scripted,
+    pid: str,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """P27, P37: a 202 followed to its end answers the body the route's 200 would have."""
+    rows = [{**ROW_04, "nozzle_diameter": "0.4"}, ROW_06]
+    scripted.reply("extrusion_cali_get", nozzle_diameter="0.6", filaments=rows)
+    params = {"nozzle_diameter": "0.6"} if method == "GET" else None
+
+    def send(key: str) -> httpx.Response:
+        headers = {"Idempotency-Key": key} if method == "POST" else None
+        url = f"{base(pid)}{path}"
+        response: httpx.Response = client.request(
+            method, url, json=body, params=params, headers=headers
+        )
+        return response
+
+    direct = send("direct")
+    assert direct.status_code == 200, direct.text
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0)
+    pending = send("slow")
+    monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 10.0)
+    followed = follow(client, pid, pending)
+    assert followed.status_code == 200, followed.text
+    assert followed.json() == direct.json()
+    if method == "GET":
+        assert [p["slot_id"] for p in followed.json()["profiles"]] == [5]
 
 
 def test_notes_live_in_scadbuddy(client: TestClient, scripted: Scripted, pid: str) -> None:
@@ -360,12 +449,20 @@ def test_a_bambuddy_only_printer_is_not_lan_linked(
 def test_a_printer_linked_both_ways_never_calls_bambuddy(
     client: TestClient, scripted: Scripted, spans: InMemorySpanExporter
 ) -> None:
+    """Bambuddy has a URL and the row its id, and still no route calls it."""
+    configure(client)
     pid = lan_printer(client)
     printers_of(client).store.link_bambuddy(pid, 3)
     scripted.reply("extrusion_cali_get", nozzle_diameter="0.4", filaments=[ROW_04])
     with forbid_bambuddy(spans, BASE):
-        assert client.get(base(pid)).status_code == 200
-        assert client.post(base(pid), json=SET, headers=press()).status_code == 200
-        put = client.put(f"{base(pid)}/notes", json={"setting_id": "k", "note": "n"})
-        assert put.status_code == 200
-        assert client.get(f"{base(pid)}/notes").status_code == 200
+        answers = [
+            client.get(base(pid)),
+            client.post(base(pid), json=SET, headers=press()),
+            client.post(f"{base(pid)}/batch", json={"profiles": [SET]}, headers=press()),
+            client.post(f"{base(pid)}/delete", json=DELETE, headers=press()),
+            client.put(f"{base(pid)}/notes", json={"setting_id": "k", "note": "n"}),
+            client.get(f"{base(pid)}/notes"),
+            client.delete(f"{base(pid)}/notes/k", headers=press()),
+        ]
+    for response in answers:
+        assert response.status_code == 200, response.text

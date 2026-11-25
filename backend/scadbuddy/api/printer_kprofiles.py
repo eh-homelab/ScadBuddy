@@ -5,9 +5,11 @@ routes are #7154's).
 The reads and writes are MQTT commands to the printer (`printers/lan_commands.py`), run
 by the ``LanCommand`` workflow on the ``bambuddy`` queue. Each command route takes the
 LAN row first (409 ``not_lan_linked``), refuses a printer whose stored report is not fresh
-(409 ``printer_offline``), runs its commands and answers through `command_response`: 200,
-or 202 with the run's workflow id when the printer is slow (P27; follow it at
-``GET /printers/{id}/commands/{command_id}``). A write that may have reached the printer is
+(409 ``printer_offline``) unless its ``Idempotency-Key`` already started the command (P38),
+runs its commands and answers through `command_response`: 200 with the command's view
+(`native.COMMAND_VIEWS`), or 202 with the run's workflow id when the printer is slow (P27;
+follow it at ``GET /printers/{id}/commands/{command_id}``, which answers the same view,
+P37). A write that may have reached the printer is
 ``confirmed: false``, never a failure (P30). The notes are ScadBuddy's own
 (`printers/command_data.py`); no route here calls Bambuddy.
 """
@@ -38,8 +40,6 @@ from scadbuddy.printers.kprofiles import (
     NoteKey,
     NozzleDiameter,
     set_rows,
-    table_of,
-    write_result,
 )
 from scadbuddy.printers.lan_command_models import (
     LanCommandInput,
@@ -52,9 +52,8 @@ from scadbuddy.printers.lan_commands import (
     extrusion_cali_set,
 )
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.native import command_response, lan_row, live_status
+from scadbuddy.printers.native import LanCommands, command_response, lan_row, live_status
 from scadbuddy.printers.store import printer_uuid
-from scadbuddy.workflows.lan_command import LanCommandAnswer
 from scadbuddy.workflows.print_models import LAN_REPLY_WAIT_READ, LAN_REPLY_WAIT_WRITE
 
 router = APIRouter(prefix="/printers", tags=["printers"])
@@ -73,7 +72,13 @@ COMMAND = (
 )
 WRITES = (
     " Send an `Idempotency-Key`: a key sent again joins the run it started or reads its"
-    " outcome, and the command is sent once." + COMMAND
+    " outcome, and the command is sent once, even when the printer has not been heard from"
+    " since." + COMMAND
+)
+IGNORED = (
+    " `n_coef`, `ams_id` and `tray_id` are accepted and ignored: the printer gets"
+    ' `"0.000000"`, 0 and 0, as Bambuddy sends them (single-nozzle firmware refuses a'
+    " `tray_id` of -1 while it applies the write)."
 )
 ONCE = (
     " Sent once: check the list before sending one again whose answer was lost. `confirmed` is"
@@ -90,27 +95,28 @@ def _key(idempotency_key: str | None) -> str:
     return idempotency_key
 
 
-async def _fresh(printers: PrintersDep, printer_id: str) -> tuple[PrinterRow, PrinterStatus]:
-    """The LAN row and its status from the stored report, once the report is fresh (P36)."""
+async def _reach(printers: PrintersDep, printer_id: str) -> tuple[PrinterRow, PrinterStatus]:
+    """The LAN row (404, 409 ``not_lan_linked``) and its status from the stored report."""
     row = await lan_row(printers.store, printer_id, feature=FEATURE)
-    seen = await live_status(printers.reports, row, now=datetime.now(UTC))
-    if not seen.connected:
+    return row, await live_status(printers.reports, row, now=datetime.now(UTC))
+
+
+async def _send(
+    commands: LanCommands,
+    row: PrinterRow,
+    seen: PrinterStatus,
+    run: LanCommandRun,
+    key: str | None = None,
+) -> Response:
+    """Run ``run`` once the report is fresh (P36), and answer its view. A key that already
+    started it skips the freshness check (P38): the resend reads that run, never sends."""
+    if not seen.connected and not await commands.exists(row.id, run, key):
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"{row.name} has not been heard from lately, so its {FEATURE} cannot be reached.",
             code="printer_offline",
         )
-    return row, seen
-
-
-def _written(answer: LanCommandAnswer) -> Response:
-    """A write's 200, or the run's 202."""
-    if isinstance(answer, LanCommandPending):
-        return command_response(answer)
-    return Response(
-        content=write_result(answer.replies[0]).model_dump_json(),
-        media_type="application/json",
-    )
+    return command_response(await commands.run(row.id, run, key=key), run)
 
 
 def _write(row: PrinterRow, name: str, payload: dict[str, object]) -> LanCommandRun:
@@ -144,7 +150,7 @@ async def get_printer_kprofiles(
     printer_id: str,
     nozzle_diameter: Annotated[NozzleDiameter, Query()] = "0.4",
 ) -> Response:
-    row, _ = await _fresh(printers, printer_id)
+    row, seen = await _reach(printers, printer_id)
     run = LanCommandRun(
         commands=[
             LanCommandInput(
@@ -156,11 +162,7 @@ async def get_printer_kprofiles(
             )
         ]
     )
-    answer = await commands.run(row.id, run)
-    if isinstance(answer, LanCommandPending):
-        return command_response(answer)
-    table = table_of(answer.replies[0].reply or {}, nozzle_diameter)
-    return Response(content=table.model_dump_json(), media_type="application/json")
+    return await _send(commands, row, seen, run)
 
 
 async def _notes_owner(printers: PrintersDep, printer_id: str) -> str:
@@ -198,7 +200,7 @@ async def get_printer_kprofile_notes(printers: PrintersDep, printer_id: str) -> 
     summary="Add or edit one of a printer's K-profiles",
     description=(
         "A `slot_id` of 0 adds a profile; above 0 edits the profile in that slot. `k_value`"
-        " is sent with six decimal places." + ONCE + WRITES
+        " is sent with six decimal places." + IGNORED + ONCE + WRITES
     ),
 )
 async def set_printer_kprofile(
@@ -209,9 +211,9 @@ async def set_printer_kprofile(
     idempotency_key: IdempotencyKey = None,
 ) -> Response:
     key = _key(idempotency_key)
-    row, _ = await _fresh(printers, printer_id)
+    row, seen = await _reach(printers, printer_id)
     payload = extrusion_cali_set(set_rows([body]), body.nozzle_diameter, SEQ)
-    return _written(await commands.run(row.id, _write(row, "extrusion_cali_set", payload), key=key))
+    return await _send(commands, row, seen, _write(row, "extrusion_cali_set", payload), key)
 
 
 @router.post(
@@ -221,7 +223,8 @@ async def set_printer_kprofile(
     summary="Add several K-profiles to a printer in one command",
     description=(
         "1 to 16 profiles of one nozzle diameter, sent to the printer in one command: a new"
-        " profile on both extruders of a dual-nozzle printer." + ONCE + WRITES
+        " profile on both extruders of a dual-nozzle printer; each new profile gets its own"
+        " `setting_id`, as Bambuddy's batch makes them." + IGNORED + ONCE + WRITES
     ),
 )
 async def set_printer_kprofiles_batch(
@@ -232,9 +235,9 @@ async def set_printer_kprofiles_batch(
     idempotency_key: IdempotencyKey = None,
 ) -> Response:
     key = _key(idempotency_key)
-    row, _ = await _fresh(printers, printer_id)
+    row, seen = await _reach(printers, printer_id)
     payload = extrusion_cali_set(set_rows(body.profiles), body.profiles[0].nozzle_diameter, SEQ)
-    return _written(await commands.run(row.id, _write(row, "extrusion_cali_set", payload), key=key))
+    return await _send(commands, row, seen, _write(row, "extrusion_cali_set", payload), key)
 
 
 @router.post(
@@ -255,7 +258,7 @@ async def delete_printer_kprofile(
     idempotency_key: IdempotencyKey = None,
 ) -> Response:
     key = _key(idempotency_key)
-    row, seen = await _fresh(printers, printer_id)
+    row, seen = await _reach(printers, printer_id)
     payload = extrusion_cali_del(
         cali_idx=body.slot_id,
         filament_id=body.filament_id,
@@ -266,7 +269,7 @@ async def delete_printer_kprofile(
         dual_nozzle=len(seen.nozzles) > 1,
         seq=SEQ,
     )
-    return _written(await commands.run(row.id, _write(row, "extrusion_cali_del", payload), key=key))
+    return await _send(commands, row, seen, _write(row, "extrusion_cali_del", payload), key)
 
 
 @router.put(

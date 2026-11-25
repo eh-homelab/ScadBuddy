@@ -19,7 +19,11 @@ from typing import Annotated, Any, Literal
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.bambuddy.models import KProfile, KProfileTable, KProfileWriteResult
-from scadbuddy.printers.lan_command_models import LanCommandReply
+from scadbuddy.printers.lan_command_models import (
+    LanCommandOutcome,
+    LanCommandReply,
+    LanCommandRun,
+)
 from scadbuddy.printers.lan_commands import KProfileRow
 
 #: The nozzles Bambu's printers take (R-7154-6).
@@ -102,7 +106,8 @@ class KProfileSet(_Strict):
     name: ProfileName
     k_value: KValue
     setting_id: str | None = Field(default=None, pattern=SETTING_ID)
-    #: What the printer reported on the row an edit sends back; Bambuddy's defaults else.
+    #: Accepted and ignored: every write sends ``n_coef`` "0.000000", ``ams_id`` 0 and
+    #: ``tray_id`` 0, as Bambuddy does (`set_rows`, `lan_commands.extrusion_cali_set`, P2).
     n_coef: str = Field(default="0.000000", pattern=N_COEF)
     ams_id: int = Field(default=0, ge=0, le=255)
     tray_id: int = Field(default=-1, ge=-1, le=15)
@@ -175,16 +180,19 @@ def table_of(reply: dict[str, Any], nozzle_diameter: str) -> KProfileTable:
 
 def new_setting_id() -> str:
     """``PF`` and 17 random digits, as Bambuddy makes a new profile's ``setting_id``
-    (``set_kprofile``, L7710-L7716 at the pinned commit; P23):
-    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7710-L7716
+    (``set_kprofile``, L7711-L7716 at the pinned commit; P23):
+    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7711-L7716
+    and ``set_kprofiles_batch`` makes one for each new row of a batch, so the two rows of a
+    dual-nozzle profile get two ids (L7790-L7792):
+    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7790-L7792
     """
     return "PF" + "".join(secrets.choice("0123456789") for _ in range(17))
 
 
 def set_rows(rows: Sequence[KProfileSet]) -> list[KProfileRow]:
     """The rows of one ``extrusion_cali_set``: ``cali_idx`` -1 for ``slot_id`` 0 (a new
-    profile), else ``slot_id``; a new profile with no ``setting_id`` gets one
-    (`new_setting_id`, the route's, not the builder's, P23). ``n_coef``, ``ams_id`` and
+    profile), else ``slot_id``; each new profile with no ``setting_id`` gets one of
+    its own (`new_setting_id`, the route's, not the builder's, P23). ``n_coef``, ``ams_id`` and
     ``tray_id`` are not sent as the body has them (P2: the builder sends 0 and
     ``"0.000000"``)."""
     return [
@@ -199,6 +207,17 @@ def set_rows(rows: Sequence[KProfileSet]) -> list[KProfileRow]:
         )
         for row in rows
     ]
+
+
+def kprofile_table_view(run: LanCommandRun, outcome: LanCommandOutcome) -> KProfileTable:
+    """``GET /kprofiles``'s body: the table at the nozzle diameter the command asked for."""
+    nozzle_diameter = str(run.commands[0].payload["print"]["nozzle_diameter"])
+    return table_of(outcome.replies[0].reply or {}, nozzle_diameter)
+
+
+def kprofile_write_view(run: LanCommandRun, outcome: LanCommandOutcome) -> KProfileWriteResult:
+    """A K-profile write's body (set, batch, delete): one command, one reply."""
+    return write_result(outcome.replies[0])
 
 
 def write_result(reply: LanCommandReply) -> KProfileWriteResult:
