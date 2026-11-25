@@ -95,6 +95,7 @@ from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
+    from scadbuddy.bambuddy.output_reader import TemplateSettings
     from scadbuddy.orders.storefront.held_file import HeldFile
 
 __all__ = ["FOLLOW_EVERY", "QUOTE_TIMEOUT", "OutputsRead", "Renders"]
@@ -579,9 +580,12 @@ class Slicer(Protocol):
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         """Every plate of an output. A slot in ``slot_presets`` has no spool and is
-        sliced with its filament type's preset (a storefront price, #6574)."""
+        sliced with its filament type's preset (a storefront price, #6574). With
+        ``template_settings`` (a storefront price, #7633), the slice takes those in place
+        of the template's settings as they are now."""
         ...
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
