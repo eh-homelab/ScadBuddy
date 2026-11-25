@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.print_links import (
     ImportTargetGoneError,
@@ -294,6 +295,49 @@ async def test_a_send_names_its_item_before_a_reprint_or_a_link(links: PrintLink
     job = (await links.jobs(queue_items=[80])).queue_items[80]
 
     assert (job.subject, job.run_id) == (OUT.key, "r1")
+
+
+async def test_print_links_name_slug_from_outputs(
+    links: PrintLinkStore, jobs: JobProjection
+) -> None:
+    """#7257: a send, a reprint and a link of an output name its slug from its
+    ``outputs`` row, with no ``output_index`` row (release B drops that table)."""
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO outputs (output_id, slug, meta, created_at)"
+            " VALUES (%s, 'sign', '{}', clock_timestamp())",
+            (OUTPUT,),
+        )
+        conn.execute("DELETE FROM output_index")
+    await links.record_sends(OUT, [PrintSend(queue_item_id=95, plate_id=1)])
+    await links.record_reprint(OUT, PrintReprint(queue_item_id=96, archive_id=18))
+    await links.record(OUT, link(97, queue_item_id=97))
+    matches = (await links.jobs(queue_items=[95, 96, 97])).queue_items
+    assert [matches[item].slug for item in (95, 96, 97)] == ["sign", "sign", "sign"]
+
+
+async def test_lan_jobs_name_slug_from_outputs(links: PrintLinkStore, jobs: JobProjection) -> None:
+    """#7257 (A3 review M4): a run's LAN start names its output's slug from its
+    ``outputs`` row, with no ``output_index`` row, before the run's own slug."""
+    printer = "00000000-0000-4000-8000-000000007257"
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, 'SN7257', 'P')", (printer,)
+        )
+        conn.execute(
+            "INSERT INTO outputs (output_id, slug, meta, created_at)"
+            " VALUES (%s, 'sign', '{}', clock_timestamp())",
+            (OUTPUT,),
+        )
+        conn.execute("DELETE FROM output_index")
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result, printer,"
+            " slug) VALUES ('r7257', %s, 'k7257', 'running', %s, %s, 'old-slug')",
+            (OUTPUT, Jsonb({"lan": [{"subtask_name": "scadbuddy-r7257-p1"}]}), printer),
+        )
+    matches = (await links.jobs(lan_starts=[(printer, "scadbuddy-r7257-p1")])).lan_starts
+    job = matches[(printer, "scadbuddy-r7257-p1")]
+    assert (job.run_id, job.output_id, job.slug) == ("r7257", OUTPUT, "sign")
 
 
 async def test_a_library_send_is_pending_until_its_archive_is_linked(

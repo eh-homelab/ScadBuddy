@@ -32,7 +32,9 @@ from scadbuddy.library.history import (
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.jobs import _STAGING_TRIES, export_revision, prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
+from tests.support.template_rows import open_template_rows
 
 pytestmark = pytest.mark.requires_git
 
@@ -786,12 +788,17 @@ def test_a_message_is_flattened_to_one_bounded_line() -> None:
 
 
 @pytest.fixture
-def catalogue(tmp_path: Path) -> Catalogue:
+def catalogue(tmp_path: Path, pg_pool: PgPool) -> Catalogue:
+    """With its rows, as the app wires them (#7317 phase 3: the readers read only rows)."""
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(
+        paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
+    open_template_rows(catalogue, pg_pool)
+    return catalogue
 
 
 def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> None:

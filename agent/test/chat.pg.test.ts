@@ -190,26 +190,33 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     connection.close()
   })
 
-  it("takes and ignores a chat's mode, new or existing: every session is an AgentSession (plan Step 6.3)", async () => {
+  it("takes, logs and ignores an older tab's mode, new or existing: every session is an AgentSession (#7323)", async () => {
     const out: { type: string; sessionId?: string; mode?: string; code?: string }[] = []
-    const connection = new ChatConnection(m, (e) => out.push(e as never))
+    const logged: string[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e as never), { log: (line) => logged.push(line) })
     await connection.open()
     const { clientMessage } = await frontendClientMessages()
-    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'classic' })))
+    // The panel sends no mode now; a tab of an earlier release still may, with any value.
+    await connection.receive(JSON.stringify({ ...clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' } }), mode: 'classic' }))
     await settle()
     const started = out.find((e) => e.type === 'session.started') as { sessionId: string; mode?: string; modeFallback?: string }
-    expect(started).toMatchObject({ mode: 'durable' })
+    expect(started).not.toHaveProperty('mode')
     expect(started).not.toHaveProperty('modeFallback')
     const [row] = await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${started.sessionId}`
     expect(row?.runtime).toBe('unified')
     await expect.poll(async () => (await m.get(started.sessionId, browser)).status).toBe('idle')
     await connection.receive(
       JSON.stringify(
-        clientMessage({ type: 'user.message', sessionId: started.sessionId, text: 'more', context: { route: '/' }, mode: 'classic' }),
+        { ...clientMessage({ type: 'user.message', sessionId: started.sessionId, text: 'more', context: { route: '/' } }), mode: 7 },
       ),
     )
     await settle()
     expect(out.filter((e) => e.type === 'error')).toEqual([])
+    // Once per arrival, naming no value.
+    expect(logged.filter((l) => l.includes('session mode'))).toEqual([
+      'chat: a user.message named a session mode, which is ignored (#7323)',
+      'chat: a user.message named a session mode, which is ignored (#7323)',
+    ])
     connection.close()
   })
 })

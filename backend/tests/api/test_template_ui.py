@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 UI = {"module": "ui/index.js", "slot": "panel", "api": 1}
 
@@ -94,6 +95,7 @@ def test_a_model_without_ui_has_no_module(client: TestClient, model: str) -> Non
 
 def test_a_malformed_ui_costs_only_the_ui(client: TestClient, model: str, paths: DataPaths) -> None:
     _with_ui(paths, model, {}, ui={"module": "../model.scad", "slot": "sidebar", "api": "one"})
+    sync_template_rows(client)
     record = client.get(f"/api/v1/models/{model}").json()
     assert record["ui"] is None
     assert "ui" in record["ui_error"] and "slot" in record["ui_error"]

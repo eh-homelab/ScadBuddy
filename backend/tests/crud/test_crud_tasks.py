@@ -127,6 +127,10 @@ def store(pg_pool: PgPool, events: _Events) -> TaskStore:
 
 @pytest.fixture
 def app(store: TaskStore) -> FastAPI:
+    return _app(store)
+
+
+def _app(store: TaskStore | None) -> FastAPI:
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts = {AUTH: SimpleNamespace(would_refuse=_Noted()), TASKS: SimpleNamespace(store=store)}
     app.state.scadbuddy = SimpleNamespace(

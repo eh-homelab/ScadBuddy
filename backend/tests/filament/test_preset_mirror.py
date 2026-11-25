@@ -705,6 +705,36 @@ async def test_a_lost_create_left_behind_a_newer_version_is_named_on_the_preset(
 
 
 @respx.mock
+async def test_a_same_name_preset_made_by_hand_after_a_lost_create_is_named_too(
+    pg_pool: PgPool, tmp_path: Path, client: BambuddyClient
+) -> None:
+    """#7545: Bambuddy keeps no mark of who made a preset, so a preset of the same name a
+    person made in Bambuddy after the lost create (43, another document) is named with
+    the lost create's copy (42). The note says to keep a preset made by hand."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    made = await _make(pg_pool, blobs, {"name": "Hand", "nozzle_temperature_range_low": ["200"]})
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_presets SET mirror_create_floor = 40 WHERE id = %s", (made,))
+    listed(_preset_json(42, "Hand"), _preset_json(43, "Hand"))
+    detail(42, "Hand", {"name": "Hand"})
+    detail(43, "Hand", {"name": "Hand", "filament_type": ["PLA"], "made": ["by hand"]})
+    create = respx.post(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json=_preset_json(44, "Hand"))
+    )
+    assert await mirror_with(client, pg_pool, store, HERE) == 1
+    assert create.call_count == 1
+    row = _row(pg_pool, made)
+    assert row["bb_preset_id"] == 44
+    assert row["mirror_error"] == (
+        "Bambuddy also holds preset 42, 43 named 'Hand', which no ScadBuddy preset tracks:"
+        " most likely a copy an earlier create made when its answer was lost, before this"
+        " version was written. Delete it in Bambuddy if it is not in use and you did not"
+        " make it there yourself."
+    )
+
+
+@respx.mock
 async def test_copies_of_the_document_sent_and_other_bambuddys_ids_are_named_right(
     pg_pool: PgPool, tmp_path: Path, client: BambuddyClient
 ) -> None:

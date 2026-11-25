@@ -73,6 +73,8 @@ other fail "a mode read with get" backend/scadbuddy/agent_data/x.py "if row.get(
 other fail "a subscripted mode in TypeScript" frontend/src/agent/chat/x.ts "if (row['mode'] === 'durable') run()"
 other pass "another mode" backend/scadbuddy/agent_data/x.py 'if row["mode"] == "enforce": pass'
 other fail "SessionModeSchema in the frontend" frontend/src/agent/chat/x.ts "mode: SessionModeSchema.optional()"
+expect_fail "SESSION_MODES in the agent" sessions/y.ts "export const SESSION_MODES = ['classic', 'durable'] as const"
+expect_fail "modeFallback in the agent" sessions/y.ts "return { session, modeFallback }"
 other pass "a test naming SessionModeSchema" frontend/src/agent/chat/x.test.ts "mode: SessionModeSchema.optional()"
 other pass "a comment naming SessionModeSchema" frontend/src/agent/chat/x.ts "// SessionModeSchema is gone"
 other fail "session_mode in the backend" backend/scadbuddy/agent_data/x.py 'KEY = "session_mode"'

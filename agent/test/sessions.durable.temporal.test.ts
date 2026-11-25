@@ -67,25 +67,24 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP)(`a session's mode at 
     await drop()
   })
 
-  it('is an AgentSession whatever `session_mode` says and whatever mode the caller names (plan Step 6.3)', async () => {
+  it('is an AgentSession whatever `session_mode` says (plan Step 6.3), and names no mode (#7323)', async () => {
     for (const value of [undefined, 'durable', 'classic', 'nonsense']) {
-      for (const asked of [undefined, 'classic', 'durable'] as const) {
-        const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode(value), newSessions: { max: 100, windowMs: 60_000 } })
-        const { session } = await m.start(browser, { origin: 'chat', title: 't', ...(asked ? { mode: asked } : {}) })
-        expect(session.mode).toBe('durable')
-        const [row] = await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${session.id}`
-        expect(row?.runtime).toBe('unified')
-        const [started] = await m.events.read(session.id, 0)
-        expect(started?.event).toMatchObject({ type: 'session.started', mode: 'durable' })
-        expect(started?.event).not.toHaveProperty('modeFallback')
-      }
+      const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode(value), newSessions: { max: 100, windowMs: 60_000 } })
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      expect(session).not.toHaveProperty('mode')
+      const [row] = await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${session.id}`
+      expect(row?.runtime).toBe('unified')
+      const [started] = await m.events.read(session.id, 0)
+      expect(started?.event).toMatchObject({ type: 'session.started' })
+      expect(started?.event).not.toHaveProperty('mode')
+      expect(started?.event).not.toHaveProperty('modeFallback')
     }
   })
 
   it('refuses a new session `unavailable` without Temporal or the key, and inserts nothing', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode('classic') })
     withoutTemporal(m)
-    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'classic' })).rejects.toMatchObject({
+    await expect(m.start(browser, { origin: 'chat', title: 't' })).rejects.toMatchObject({
       code: 'unavailable',
       status: 503,
     })
@@ -173,7 +172,6 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       context: '[page: /models/bracket]',
       images: [IMAGE],
     })
-    expect(session.mode).toBe('durable')
     expect(turn).toBeDefined()
     const { start, messages } = await recorded(session.id)
     expect(start).toMatchObject({
@@ -312,7 +310,6 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     // No worker polls this queue yet; the start must still be durable (5d would fall back).
     m.durableTurns!.unready = () => Promise.resolve(undefined)
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-    expect(session.mode).toBe('durable')
     // No worker on the queue: the Update is admitted with the start but never accepted.
     // Its outcome is unknown, so the claim stays and the turn is handed back.
     const turn = await m.send(session.id, browser, 'hello')
@@ -662,7 +659,6 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     m.durableTurns = new StandinTurns({ client: env.client, ...durableStores(db.sql), events: m.events, sessionQueue: QUEUE, describe: async () => 'open' })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
-    expect(session.mode).toBe('durable')
     expect(await m.interrupt(session.id, browser)).toBe(false)
     expect(await status(session.id)).toBe('running')
     expect((await m.events.read(session.id)).some((e) => e.event.type === 'error')).toBe(false)
@@ -679,7 +675,6 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     m.durableTurns = new StandinTurns({ client: env.client, ...durableStores(db.sql), events: m.events, sessionQueue: QUEUE, describe: failing })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - make_interval(mins => ${minutesAgo}) WHERE id = ${session.id}`
-    expect(session.mode).toBe('durable')
     expect(await m.interrupt(session.id, browser)).toBe(ended)
     expect(await status(session.id)).toBe(after)
     // Past the grace it is ended as not found, which the failed describe stood for.

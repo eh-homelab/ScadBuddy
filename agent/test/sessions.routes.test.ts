@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from './support/database.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -98,17 +98,22 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     expect((await m.get(id, browser)).turns).toBe(2)
   })
 
-  it("takes and ignores a new session's mode, and refuses an unknown one (plan Step 6.3)", async () => {
+  it("takes, logs and ignores an earlier client's mode, whatever its value (#7323)", async () => {
     const start = (body: unknown) =>
       app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
-    for (const mode of [undefined, 'classic', 'durable']) {
-      const res = await start({ title: 'a', ...(mode ? { mode } : {}) })
-      expect(res.status).toBe(201)
-      const body = (await res.json()) as Record<string, unknown>
-      expect(body).toMatchObject({ session: { mode: 'durable' } })
-      expect(body).not.toHaveProperty('mode_fallback')
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      for (const mode of [undefined, 'classic', 'durable', 'fast', null]) {
+        const res = await start({ title: 'a', ...(mode === undefined ? {} : { mode }) })
+        expect(res.status).toBe(201)
+        const body = (await res.json()) as { session: Record<string, unknown> }
+        expect(body.session).not.toHaveProperty('mode')
+        expect(body).not.toHaveProperty('mode_fallback')
+      }
+      expect(log.mock.calls.filter(([line]) => String(line).includes('session mode'))).toHaveLength(4)
+    } finally {
+      log.mockRestore()
     }
-    expect((await start({ title: 'd', mode: 'fast' })).status).toBe(400)
     // Without Temporal, a new session is refused, whatever mode it names (spec 2026-10-13 §10.1).
     withoutTemporal(m)
     expect((await start({ title: 'e', mode: 'classic' })).status).toBe(503)

@@ -167,6 +167,32 @@ spool (its values and its type's preset and K value for the slot's nozzle) or th
 hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
 names ScadBuddy's place of the unit. The page asks before every printer write.
 
+### Weighing breakdown (#7682)
+
+A weighing sent with the scale's reading (`POST /filament/spools/{id}/events`, `kind`
+`weighed`, `reading_g` beside `grams`, or alone) keeps what it was made of in the event's
+`data`: `reading_g`, `empty_g` (what was taken off for the empty spool), `empty_source`
+(`insert`, or `person` when the client took something else off than the spool's effective
+empty weight), `empty_basis` and `empty_name` (the insert's, null for `person`), `expected_g`
+(the grams left the ledger gave just before the weighing's time; null with no reading before)
+and `drift_g` (`grams - expected_g`; negative means the scale found less filament than the
+ledger expected). The effective empty weight is the spool's insert type's, else its type's
+(`filament/empty_weight.py`); a reading sent alone on a spool with none is refused, 422
+`no_empty_weight`, and one under the empty weight 422 `reading_below_empty`. The ledger's rules do not change: the weighing's filament anchors as
+before. The spool carries the newest weighing's drift as `last_drift_g` and `drift_notice`
+when it is at or over Settings → Filament → "Drift notice at, grams" (10 by default). The
+spool page's Weight section says it in a sentence ("Weighed 1180 g on 25 Nov 2026: filament
+980 g + spool 200 g (Plastic, placeholder). The ledger expected 992 g. The scale found 12 g
+less than the prints accounted for."), the timeline says "reading 1180 g, spool 200 g, 12 g
+less than expected", the heading and the spools list carry a Drift mark while it is a notice,
+and an added-full spool whose starting amount (its `created` event) is not a reading says
+its start gap ("Started at the label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g
+unexplained."); a later anchor (a sync, an AMS reading) follows prints and shows none. The spool page, the
+phone page and the agent's `filament_spool_add_event` send `reading_g` whenever an empty
+weight is known (the phone page sends it alone, so a decimal reading keeps the insert's
+name). Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design.md`
+§5.1, §5.2, §5.5.
+
 ### The phone page (#7273)
 
 `/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
@@ -190,7 +216,7 @@ waits for either.
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
 
-A spool and a spool type can hold properties: free key-value pairs, such as a part number,
+A spool, a spool type and a catalog row (such as an insert type) can hold properties: free key-value pairs, such as a part number,
 barcodes or a lot number. The store is generic and works for any entity, so it is not
 specific to filament. A value is a string, a number, a boolean or a list of strings. A key
 matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per string,
@@ -215,7 +241,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `schema_owned_by_item_kind` for `item` (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
-  `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
+  `#files-and-links` stays), and the same three panels under a catalog row's edit form in the
+  Catalog tab (`frontend/src/components/filament/CatalogList.tsx`). A kind's own keys are edited
+  from the panel's "Edit the kind's keys" and the Catalog tab's "Property keys"
+  (`frontend/src/components/entities/KindKeysForm.tsx`, #7656); an item's are its item kind's,
+  on `/inventory/kinds`. A list value has one field per item. A rename or an add onto a key the entity
   already has asks first, since it replaces that key's value.
 - Search: the Spools and Types tabs' search also matches property values, beside the hex
   match on a spool's tag UID and tray UUID (#7151)

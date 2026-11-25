@@ -27,7 +27,9 @@ from scadbuddy.library.history import GitError, HeadChange, ModelHistory
 from scadbuddy.library.repo_lock import PgRepoCoordinator, RepoLockError
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
+from tests.support.template_rows import open_template_rows
 
 pytestmark = pytest.mark.requires_git
 
@@ -291,10 +293,11 @@ def test_a_commit_git_reports_but_head_does_not_show_is_an_error(
 
 
 def test_a_model_another_replica_just_made_is_found_once_its_directory_is_revalidated(
-    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, pg_pool: PgPool
 ) -> None:
     catalogue = replica(paths)
     history_of(catalogue).ensure_repo()
+    open_template_rows(catalogue, pg_pool)
     catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
     source = paths.model_source("keychain")
     # This replica's NFS client cached "no such entry" under `models/`: the lookup

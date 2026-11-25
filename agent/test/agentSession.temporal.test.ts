@@ -1144,7 +1144,6 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const m = await durableManager()
       finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket', context: '[page: /]' })
-      expect(session.mode).toBe('durable')
       expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
       expect(await runtimeOf(session.id)).toBe('unified')
       expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })

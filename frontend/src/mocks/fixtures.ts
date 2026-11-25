@@ -1150,6 +1150,8 @@ export const settingsDefaults = {
   filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
   filament_low_stock_pct: 20,
   filament_default_cost_per_kg: null,
+  // #7682 — the drift notice threshold.
+  filament_weighing_drift_notice_g: 10,
   // #7156 — the drying defaults; null offers none.
   filament_drying_temp_c: null,
   filament_drying_hours: null,

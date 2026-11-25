@@ -101,7 +101,7 @@ describe('the sessions_* tools', () => {
     const seen: unknown[] = []
     const record = {
       id: S, title: 'x', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'a' }, offer: null, status: 'idle',
-      parentId: null, mode: 'durable', turns: 0, costUsd: 0, budgetUsd: 1, turnActive: false,
+      parentId: null, turns: 0, costUsd: 0, budgetUsd: 1, turnActive: false,
       createdAt: '2026-11-23T00:00:00.000Z', updatedAt: '2026-11-23T00:00:00.000Z', archivedAt: null, browser: BROWSER,
     }
     const sessions = {

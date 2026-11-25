@@ -2,7 +2,8 @@
 Postgres spec 2026-11-23 §4.5 phase 2, §6.3-§6.5): it uploads and verifies each byte
 role, changes nothing on a second run, records what it cannot copy, never undoes a live
 thumbnail, leaves no hold for a deleted output, refuses past the store's cap and on the
-`local` and `bambuddy` stores, runs on one replica at a time and stops when told."""
+`bambuddy` store, runs on `local`'s own output store (#7257), runs on one replica at a
+time and stops when told."""
 
 from __future__ import annotations
 
@@ -13,11 +14,13 @@ import time
 from collections.abc import AsyncGenerator, Iterator
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
 import pytest
 
+from scadbuddy import main
 from scadbuddy.library import output_byte_copy
 from scadbuddy.library.output_byte_copy import (
     BYTES_LOCK,
@@ -669,12 +672,9 @@ async def test_byte_copy_refuses_past_cap(
     assert _output_blobs(pool) == 0
 
 
-async def test_byte_copy_refuses_on_bambuddy_and_local(
+async def test_byte_copy_refuses_on_bambuddy(
     tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
 ) -> None:
-    result = await _run(tree, None, projection)
-    assert result is not None
-    assert result.refused == "the local store has no blob store; output bytes stay on the share"
     content.backend.backend = "bambuddy"
     result = await _run(tree, content, projection)
     assert result is not None
@@ -682,6 +682,24 @@ async def test_byte_copy_refuses_on_bambuddy_and_local(
     assert _output_blobs(pool) == 0
     last = tree.rows.last_byte_run()
     assert last is not None and last["refused"] == result.refused and last["finished_at"] is None
+
+
+async def test_byte_copy_runs_on_local(
+    tree: Tree, content: ContentStore, projection: JobProjection, pool: Pool
+) -> None:
+    """#7257 plan D7: on the `local` store (no shared content store) the start's and the
+    sweep's byte copy runs on the outputs' own store, and the run finishes."""
+    tree.store.bytes = OutputBytes(content)
+    state: Any = SimpleNamespace(
+        outputs=tree.store,
+        projection=SimpleNamespace(conninfo=projection.conninfo),
+        store=SimpleNamespace(content=None),
+    )
+    await main._copy_output_bytes_once(state, threading.Event())
+    last = tree.rows.last_byte_run()
+    assert last is not None and last["refused"] is None and last["finished_at"] is not None
+    assert tree.rows.pending_bytes() == 0
+    assert _output_blobs(pool) > 0
 
 
 async def test_byte_copy_runs_once_under_lock(

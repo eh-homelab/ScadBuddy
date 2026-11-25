@@ -1,9 +1,10 @@
 """The other readers of the templates read their rows once a copy run has finished
 (#7317 phase 2, plan Task 8): the pin index, the library associations, the activity
 facets' names, the print-import suggestions, the outputs' tag filter, the print
-settings, the name check and the duplicates. Each test reads before the copy (the
-files), runs it, then reads the same again with the `model.json` reads refused (the
-rows). `library_users` keeps the files (spec §7.4)."""
+settings, the name check and the duplicates. The app's start copies first (phase 3), so
+a test that edits files by hand runs the copy before it reads; each test reads, runs the
+copy again, then reads the same with the `model.json` reads refused (the rows).
+`library_users` keeps the files (spec §7.4)."""
 
 from __future__ import annotations
 
@@ -94,6 +95,8 @@ def test_pin_index_is_the_same_after_the_copy(
     _write_meta(paths, "unvalidated", {"name": 5, "libraries": [other]})
     # One that is not JSON pins nothing here (`library_users` counts it, §7.4).
     _write_meta(paths, "notjson", '{"libraries": [BOSL2')
+    # The hand edits reach the rows by the copy (#7317 phase 3: the lists read rows only).
+    _copy(client)
     catalogue = _catalogue(client)
     before = catalogue.library_pin_index()
     assert [slug for slug, _ in before["BOSL2"]] == ["pinned"]
@@ -160,6 +163,8 @@ def test_library_associations_are_the_same_after_the_copy(
             answers.append(response.json())
         return answers
 
+    # The hand edit reaches the rows by the copy (#7317 phase 3: the lists read rows only).
+    _copy(native_client)
     before = read()
     assert before[0]["associations"][0]["target_name"] == "Meshy"
     assert before[1]["associations"][0]["target_name"] == "Plain"
@@ -173,8 +178,8 @@ def test_library_associations_are_the_same_after_the_copy(
 def test_a_model_removed_by_hand_is_no_files_implied_source(
     native_client: TestClient, paths: DataPaths, tmp_path: Path
 ) -> None:
-    """#7631 review: a row whose folder is gone implies no `mesh_source` association,
-    as before the copy, when the walk did not find the folder."""
+    """#7631 review: a row whose folder is gone implies no `mesh_source` association:
+    the template is not there."""
     file: NativeFile = _upload(native_client, _three_mf(tmp_path / "fixed.3mf"))
     _create(native_client, "meshy", {"name": "Meshy"})
     _write_meta(
@@ -279,6 +284,8 @@ def test_print_settings_come_from_the_row(
     paths.model_source("settings").write_text(COLOUR_SOURCE, encoding="utf-8")
     _create(client, "broken", {"name": "Broken"})
     _write_meta(paths, "broken", "{not json")
+    # The hand edits reach the rows by the copy (#7317 phase 3: the lists read rows only).
+    _copy(client)
     catalogue = _catalogue(client)
     before = (catalogue.print_settings("settings"), catalogue.part_print_settings("settings"))
     assert before[0] == {"enable_support": "1"}
@@ -319,6 +326,8 @@ def test_part_print_settings_refuse_an_unknown_colour_from_the_row(
     )
     # A model.scad that is not UTF-8: no colour parameters known, so only a warning.
     paths.model_source("unread").write_bytes(b"\xff\xfe cube(1);\n")
+    # The hand edits reach the rows by the copy (#7317 phase 3: the lists read rows only).
+    _copy(client)
     catalogue = _catalogue(client)
     refusal = "'base_colour', which is not a // color"
     with pytest.raises(InvalidModelMetaError, match=refusal):

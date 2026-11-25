@@ -31,13 +31,14 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256; see [Saved outputs](#saved-outputs)) | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255), `output_files`, `output_derived`, `output_byte_runs` (`20261124T0245Z_output_bytes`, #7256), `output_cutover`, `output_claims` (`20261125T0758Z_outputs_cut_over`, #7257; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
 | Flows | `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`, `workflow_flow_states`, `workflow_run_proposals`, `workflow_run_links`, `flow_grants`, `flow_grant_uses`, `flow_triggers`, `flow_trigger_grants`, `flow_trigger_fires`, `tasks` (`20261124T0449Z_tasks`, #7364) | the API; the projects worker through `crud.projects` (`scadbuddy/api/crud_projects.py:71-73`; the tasks: `scadbuddy/api/crud_tasks.py`); the agent's run-grant check reads `flow_grants` and `flow_grant_uses` through `crud.agent` area `gate` (`agent/src/gate/crudStore.ts:13`) |
-| Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts*`, `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
+| Orders, payments, storefront | `customers*`, `orders`, `order_*` (`20261020T0446Z_orders` and later; `order_item_parts` and `model_part_rules` name `items` since `20261124T0918Z_parts_to_items`), `entity_attachments` (an order's files; `20261024T2050Z_order_attachments`, renamed by `20261122T0426Z_entities`), `parts_retired` and `part_stock_moves_retired` (the old `parts` and `part_stock_moves`, renamed by `20261124T0918Z_parts_to_items`; a follow-up drops them after a prod check, Ruling 6 of #7067), `payment_*`, `bank_*`, `printer_cost_profiles`, `storefront_*` (2026-11-07 to 2026-11-13 files) | the API; the storefront edge through `crud.storefront` (`scadbuddy/api/crud_storefront.py:208`); the intake worker through `crud.intake` (`scadbuddy/api/crud_intake.py:34`) |
 | Entities (files, links and properties on any row, #6950, #7026) | `entities`, `entity_links` (`20261122T0426Z_entities`), `entity_properties` (one row per entity and key) and `entity_property_schemas` (one row per kind, seeded for `spool_type` and `spool`; `20261123T0017Z_entity_properties`), `entity_attachments` (the old `order_attachments`, renamed there; an order's files are its rows with an `order_id`) | the API |
+| Inventory (#7067, spec 2026-11-21 §6.4-6.6) | `item_kinds`, `items`, `supplier_offers`, `offer_price_points`, `stock_lots`, `stock_units`, `stock_moves` (`20261124T0323Z_inventory_core`: also seeds the built-in kinds), and `part_item_map` (`20261124T0918Z_parts_to_items`: each old part id and its item id). `20261124T0918Z_parts_to_items` locks the four part tables `IN EXCLUSIVE MODE`, makes each `parts` row an item of kind `hardware` with an opening lot, converts `part_stock_moves` to `stock_moves`, makes an offer and a price point of each part's supplier and pack price, deletes the `part:` rows of `order_cost_entries` that the moves replace, and renames the old tables `*_retired`. The tables add foreign keys to `filament_suppliers`, `filament_locations`, `filament_invoice_lines` and `printers`, and change no filament table | the API |
 | Agent (`ai_*`) | `ai_credentials`, `ai_settings` (`20260927T2349Z_credentials_settings`), `ai_sessions`, `ai_session_entries`, `ai_session_events` (`20260928T0107Z_sessions`), `ai_approvals`, `ai_mcp_tokens`, `ai_plugins`, `ai_audit`, `ai_payload_keys`, `ai_forgotten_subjects`, `ai_session_files`, `ai_flow_blobs`, `ai_push_*`, `ai_notify_channels`, the hosted plugins and feeds (`ai_hosted_plugins`, `ai_hosted_plugin_files`, `ai_hosted_plugin_versions`, `ai_plugin_feeds`, `ai_plugin_feed_packages`) and more | the API, which serves the agent every area through `crud.agent` routes (`scadbuddy/api/crud_agent*.py`, areas listed at `scadbuddy/api/crud_areas.py:202-248`, #5299); the agent's own SQL to these tables remains only as the fallback while an area is unlisted |
 
 ### The two migration ledgers
@@ -147,13 +148,35 @@ migration `20261124T1824Z_templates.sql`): its parsed `model.json` (`meta`, or `
 and the raw `meta_text` when it cannot be read or stored), `name`, `version` (the last
 commit that touched it), `inputs_version`, its `// color` parameters, its media files'
 sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
-The row is derived: git stays the record, and any row can be rebuilt from the tree. Once a
-copy run has finished, `Catalogue.slugs`, `list_models` and `record` read the rows
-(phase 2), and so do the pin index, the library associations (`raw_metas`), the print
-settings, the name check, `duplicates_of`, and the callers that only name or filter
-models (`list_summaries`: the activity facets, the print-import suggestions and the
-outputs' `?tag=`); before that, they read the files. `library_users` and `library_pins`
-always read the files (spec §7.4).
+The row is derived: git stays the record, and any row can be rebuilt from the tree.
+`Catalogue.slugs`, `list_models` and `record` read the rows, and so do the pin index, the
+library associations (`raw_metas`), the print settings, the name check, `duplicates_of`,
+and the callers that only name or filter models (`list_summaries`: the activity facets,
+the print-import suggestions and the outputs' `?tag=`). Since phase 3 they read the rows
+always, with no walk of the folders or of the history before a copy run has finished
+(`scadbuddy/library/catalogue.py` `Catalogue._rows`). A reader with no rows open raises
+`RuntimeError`; the API opens them after its migrations, before it serves. The walk lives
+only in the copy. `library_users` and `library_pins` always read the files (spec §7.4).
+
+- A database where no copy run has finished (a fresh install, a test's database) gets its
+  first copy at the API's start, before the app serves (`scadbuddy/main.py`
+  `_first_template_copy`). When a run has finished (every start after the first), it does
+  nothing. When another replica holds the copy lock, it waits for that run up to
+  `FIRST_COPY_WAIT`, inside the startupProbe's budget, and takes the lock itself when that
+  run ends unfinished. A SIGTERM or SIGINT stops the copy and the wait. A copy that fails
+  or ends `incomplete`, or a wait that ends, is logged at error level and the app serves
+  anyway; the lists lack what the copy missed until the next copy run.
+- A template with files but no row (a failed refresh, a folder made by hand on the
+  volume, an older pod's create) is not in the list until the next copy run. `record`,
+  its print settings and its thumbnail read it from its files at once. A write's own
+  answer is read from the files too (`_fresh_record`), so it shows the write even when
+  its refresh failed.
+- These reads of the files stay by design: one template's files when it has no row, when
+  Postgres cannot store its `model.json`, or while its row lags its media; git for one
+  record's `version_pair` and `ui_version` and for every history route; the source,
+  media bytes, editing, rendering, duplicate and merge; `library_users` and
+  `library_pins`; and the output cover's fallback to the output folders, which belongs to
+  the outputs cut-over (#7257).
 
 - A row whose folder is gone (a hand removal, a delete whose row drop failed) is a 404 for
   `record` and for its thumbnail's 200, has no print settings, holds no name in the name
@@ -165,7 +188,8 @@ always read the files (spec §7.4).
   (spec §10).
 - A row whose `model.json` Postgres cannot store (`meta` null, `meta_error` `not storable
   (…)`: NaN, a lone surrogate) is read from its file by every reader, the list and
-  `list_summaries` included, as before the copy.
+  `list_summaries` included. It costs reads of its own files only, never a walk. When
+  its folder is gone, the list and `list_summaries` both leave it out (#7661).
 - A media file that the row's `files` lacks is stat'ed only while the template's media
   changed after the row's `refreshed_at` (`TemplateRow.media_newer`, read with the row from
   `templates.media_changed_at`): every media write (an add, a removal, a reorder, a
@@ -176,7 +200,7 @@ always read the files (spec §7.4).
 - The catalogue thumbnail reads `Catalogue.thumbnail_ref`: the row's `cover`, else the
   output's plate cover (`OutputStore.plate_cover_output`), else the preview
   (`PreviewStore.preview_id`). Its `ETag` names the source: the cover's `sha256` (the hash
-  of the bytes, as before the copy), `"output-<id>"` or `"preview-<id>"`. A matching
+  of the bytes, the same value as before phase 2), `"output-<id>"` or `"preview-<id>"`. A matching
   `If-None-Match` is a 304 with no file read or stat, except for a row that lags its media,
   which is read from the files. A 200 reads the source
   (`OutputStore.plate_image`, `PreviewStore.current_image`, which reads the preview's id and
@@ -209,7 +233,9 @@ always read the files (spec §7.4).
   git did not name a version, so the row keeps its stored one.
 - Each API start copies the files to rows once (`scadbuddy/library/template_copy.py`
   `copy_templates`, one replica at a time under the advisory lock `COPY_LOCK`; a run that
-  does not get it does nothing). The housekeeping sweep `housekeeping_copy_templates`
+  does not get it does nothing). It starts in the background during the lifespan, before
+  the app serves, and goes on while the app serves, except on a start whose first copy
+  (above) finished: that start does not copy again. The housekeeping sweep `housekeeping_copy_templates`
   (`workflows/housekeeping.py` `TEMPLATE_COPY_SWEEP`, directly after the activity sweep, behind
   `TEMPLATE_COPY_PATCH`) copies again on each run of the sweeps' Schedule. Each run is a
   row of `template_copy_runs`. The copy reconciles: outside the write lock it walks the
@@ -224,6 +250,11 @@ always read the files (spec §7.4).
   or whose walk of the history failed (each row then keeps its stored version, so only a
   template whose stamp changed is read again) drops no row and ends `incomplete`, with no `finished_at`. A stopped run has no
   `finished_at` either.
+- A new run deletes the runs that started more than `RUN_KEPT` (30 days) before it
+  (`scadbuddy/library/template_rows.py` `TemplateRows.start_run`). If every run ends
+  incomplete for that period, the finished runs are deleted: `TemplateRows.copied()`
+  answers false at the next start, and each start then copies before it serves (as on a
+  new database).
 - `GET /api/v1/model-records/copy-status` answers the last run: `started_at`,
   `finished_at`, `incomplete`, `added`, `refreshed`, `dropped`, and `unreadable`, each
   walked template whose row has a `meta_error`: its `model.json` is not JSON, cannot be
@@ -256,9 +287,13 @@ holds, in one transaction; then it deletes its staged keys. When the row fails (
 that another output holds, `orders/quote.py` `operation_output_id`, among the causes), the
 save fails, its folder is removed (`OutputStore._insert_row`) and its staged keys and
 their objects are deleted: no key of the other output moved, so that output keeps its
-bytes. A put into a full store is a 507. On the `local` backend (no
-content store) and on `bambuddy` (spec §6.4) no output blob is written: the bytes stay
-files. A store migration to `bambuddy` is refused while the index holds an `output` blob
+bytes. A put into a full store is a 507. On `bambuddy` (spec §6.4) no output blob is
+written: the bytes stay files. The `local` backend has no content store, so the outputs
+get one of their own under `data/output-blobs/`, with the shared index and spool (#7257,
+plan D7); the byte copy runs there too. A store switch from `local` to `s3` (no store
+migration from `local`, `workflows/store_migration_models.py`) leaves `outputs` rows whose
+keys have index rows that name `local`: release A falls back to the files, and release B
+is to answer 500 for them. This affects dev stores only. A store migration to `bambuddy` is refused while the index holds an `output` blob
 (`scadbuddy/store/migrate.py` `refuse_outputs_to_bambuddy`). A delete deletes the row
 and releases its byte holds in one transaction, then removes the folder; the content sweep
 removes the blobs after its grace (`OutputRows.delete`).
@@ -325,7 +360,15 @@ pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`. C
 its run has a `finished_at`, is not `incomplete`, and started after the last pod on the
 older build went. Until then, writes of the older pods may have no row yet.
 
-`output_index` stays as it is in this phase; #7257 drops it.
+Once a row copy run has finished, `GET /api/v1/outputs` lists from the `outputs` rows
+(#7257, release A): `name` and `source` are columns generated from `meta`, and
+`params_text` is a plain column that a save writes. A row that a pod on the phase 2 build
+saves has no `params_text`, so a text search does not find it by its params until release
+B fills them. The print links read an output's slug from `outputs` too. `output_index` and
+`output_hold_slugs` are still written, and each write to them is skipped with a warning
+when the table is gone; release B is to drop both.
+
+The copies stop at the cut-over mark (#7257, [The cut-over](#the-cut-over)).
 
 #### The byte copy
 
@@ -373,8 +416,9 @@ Refusals: before any put, the copy adds up the bytes and the count of the rows w
 `bytes_at` NULL (an output with a bad `files/` name adds nothing, as it is not copied) and checks them against `store_max_total_bytes` and `store_max_count`.
 Past a cap, the run is `refused`, names the shortfall and puts nothing. The needed bytes
 and count can be more than the copy will add, never less: blobs that a failed run already
-put are counted again until the sweep removes them. On the `local` and the `bambuddy` backends
-every run is refused.
+put are counted again until the sweep removes them. On `local` the outputs' own content
+store has no caps, as the `local` store has none, so the check never refuses there. On the
+`bambuddy` backend every run is refused.
 
 A run has a `finished_at` only when nothing was refused, failed or incomplete and it was
 not stopped. `GET /api/v1/outputs/copy-status` answers the last byte run as `bytes`
@@ -398,6 +442,86 @@ and `damaged_sample`, not the run's `damaged`: a person checks each output they 
 When `damaged_rows` is more than the sample, list the rest with
 `SELECT output_id, damaged FROM outputs WHERE damaged <> '[]' ORDER BY output_id`. An output with a refused `files/` name keeps its
 folder as the only copy of its bytes until the name is fixed.
+
+#### The cut-over
+
+Phase 3 (#7257) stops reading and writing `data/outputs/`. It ships as two releases,
+because during a roll the pods of the old build run beside the new ones (plan
+`docs/superpowers/plans/2026-11-25-outputs-cutover-phase-3.md`, D1). A phase 2 pod writes
+into an output's folder on a rename, a thumbnail upload and an attributed analysis, and
+fails when the folder is missing. So release A (3a) still writes every folder. Release B
+(3b, not built yet) is to stop the folder writes and to remove the file fallback, the
+copies, the directory scans and `output_index`.
+
+The mark is the one row of `output_cutover` (its key column is `one`). The API writes it
+(`OutputRows.try_cut_over`) in one transaction when all of these hold:
+
+- it gets both copies' advisory locks at once (`pg_try_advisory_xact_lock`), so no copy
+  runs;
+- the last row copy run has a `finished_at`;
+- the last byte run has a `finished_at`, no `refused` and an empty `failed`;
+- no `outputs` row has `bytes_at` NULL.
+
+It tries at each start, before the copies, and after each byte run that ended. Once the
+mark exists, both copies do nothing, at the start and in the sweeps: each checks the
+mark before its lock and again under it. `GET /api/v1/outputs/copy-status` names the
+mark's time as `cut_over_at` (`null` before it). Each process keeps the mark once it has
+read it. On `bambuddy` the byte copy is refused, so the mark is never written there.
+
+After the mark, release A:
+
+- writes into an output's folder as before, but a missing folder skips the file step
+  (logged at debug) and the row and blob steps run as before. This holds for a rename,
+  the storefront mark, the backfill writes, a thumbnail (uploaded or drawn), the kept
+  geometry and an attributed analysis (`OutputStore._folder_write`). Before the mark, a
+  missing folder raises, as in phase 2.
+- reaps orphan holds from the rows only: it releases the `output` holds of each holder
+  whose oldest hold is past the grace and which has no `outputs` row and no claim younger
+  than the grace. It scans no folder and reads no `output_hold_slugs`.
+
+A save that names its id (a quote's attempt, #5390) claims it in `output_claims` first,
+then makes the folder (`OutputStore.claim`). Other saves take a new id and no claim. As
+with a phase 2 pod's save, their holds are kept only while they are younger than the
+grace. A pod of release B is to claim in the table only,
+so both share one claim during release B's roll. A claim ends in one of three ways: the
+save's row deletes it in the row's transaction, a failed save releases it
+(`output_operations.py`), or the hold reaper prunes it once it is older than
+`ORPHAN_HOLD_GRACE` (1 hour). A release that fails is logged and left to the prune. So
+`ORPHAN_HOLD_GRACE` is also the claim's lease: a save that runs longer than it can lose its
+claim, and a release B pod can then claim the same id (a release A pod's row claim
+succeeds, but its `mkdir` fails on the live save's folder, and it releases the claim). Release B is to keep a live save's
+claim. A phase 2 pod that saves after the mark takes no table claim, and its holds are
+kept only while they are younger than the grace.
+
+Release B's migration is to refuse to run while the mark is missing (unless `outputs`
+and `output_index` are both empty), and while any row has `bytes_at` NULL. The migration
+runs at the API's start, so a refused release B pod does not start, and the release A
+pods go on serving. On `bambuddy` the mark is never written, so release B refuses every
+start on such an install that holds an output. This is the decision (plan D2, D7):
+outputs never go into Bambuddy's library (spec §6.4). The refusal's text names the cause
+and the remedy: move the store to `s3` or `local`, let release A run the copies until
+`cut_over_at` is set, then upgrade.
+
+Before release A's roll, read `GET /api/v1/outputs/copy-status`: the row copy's
+`not_copied` must be empty (fix or remove each folder first). Such a folder has no
+readable `meta.json` and so no row. Once the mark exists, the rows-only reaper releases
+its Parts holds past the grace, and the content sweep then removes its pieces.
+
+After release A's roll ends:
+
+1. Confirm that every API pod runs release A's image (`kubectl -n bambuddy get pods -o
+   jsonpath` on the images, as above).
+2. Read `GET /api/v1/outputs/copy-status`. `cut_over_at` must be set, and `bytes.pending`
+   must be 0.
+3. When `cut_over_at` is `null`, read `bytes` (`refused`, `failed`, `pending`) and fix
+   that first. The next start or byte sweep tries the mark again.
+4. When `cut_over_at` is set and `pending` is not 0, a phase 2 pod's row copy wrote a row
+   after the mark (an orphan folder's row, with `bytes_at` NULL). The copies of release A
+   no longer fill it, and release B's migration is to refuse it. To recover, delete the mark
+   (`DELETE FROM output_cutover`), then restart the API pods (`kubectl -n bambuddy
+   rollout restart deploy scadbuddy`), because each process keeps the mark once it has
+   read it. The starts then copy the rows and the bytes, and write the mark again when the
+   conditions hold. Read copy-status again.
 
 ## Generated API files
 
