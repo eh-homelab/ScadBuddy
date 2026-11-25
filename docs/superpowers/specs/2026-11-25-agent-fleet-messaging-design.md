@@ -44,7 +44,7 @@ raises `ValueError`, which makes `agent_changes/hub.py` resync the whole stream.
   `kind` (`^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`), with optional `topics` (a list of strings)
   and optional `retention_seconds` (§3.2).
 - `decode_event` returns the typed model for a known kind. For an unknown kind with a routable
-  envelope it returns `OpaqueEvent(id, at, kind, topics, payload)`, where `payload` is the raw
+  envelope it returns `OpaqueEvent(id, at, kind, topics, retention_seconds, payload)`, where `payload` is the raw
   JSON. A payload whose envelope is broken is still refused and logged.
 - `replay` returns an `OpaqueEvent` for such a row instead of raising.
 - Routing:

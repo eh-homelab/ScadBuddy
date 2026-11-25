@@ -22,7 +22,7 @@
 
 ## Review Focus
 
-1. A stored opaque event whose payload has extra unknown fields: decodes, replays and routes; it never resyncs a stream.
+1. A stored opaque event whose payload has extra unknown fields: decodes, replays and reaches bus subscribers and the change streams; it never resyncs a stream.
 2. An opaque event, whatever topics it declares, reaches no browser socket.
 3. A row with `retention_seconds: 0` under a per-kind rule of 1 h: kept forever (the event's own value wins).
 4. A channel post to more recipients than fit in 4000 bytes: every recipient is named in some event.
@@ -33,12 +33,14 @@
 ### Task 1: Opaque routable events (Python)
 
 **Files:**
-- Modify: `backend/scadbuddy/core/events.py` (`decode_event`, new `OpaqueEvent`)
+- Modify: `backend/scadbuddy/core/events.py` (`decode_event`, new `OpaqueEvent`, `AnyEvent`, `decode_known_event`, `InProcessEventBus.deliver`)
+- Modify: `backend/scadbuddy/core/pg_events.py` (replay and `_received` take `AnyEvent`)
+- Modify: `backend/scadbuddy/agent_changes/hub.py` (types, replay comment), `backend/scadbuddy/api/crud_print.py` (`decode_known_event`)
 - Modify: `backend/scadbuddy/api/realtime.py` (`topics_of`)
 - Test: `backend/tests/test_event_bus.py`, `backend/tests/test_pg_event_bus.py`, `backend/tests/api/test_realtime.py`
 
 **Interfaces:**
-- Produces: `class OpaqueEvent(BaseModel)` with `id: str`, `at: datetime`, `kind: str`, `topics: list[str] = []`, `retention_seconds: float | None = None`, `payload: dict[str, Any]` (the whole JSON object), `model_config = ConfigDict(frozen=True)`; `decode_event(payload) -> Event | OpaqueEvent`.
+- Produces: `class OpaqueEvent(BaseModel)` with `id: str`, `at: datetime`, `kind: str`, `topics: list[str] = []`, `retention_seconds: float | None = None`, `payload: dict[str, Any]` (the whole JSON object), `model_config = ConfigDict(frozen=True)`; `AnyEvent = Event | OpaqueEvent`; `decode_event(payload) -> AnyEvent`; `decode_known_event(payload) -> Event` (strict, for publish routes); `InProcessEventBus.deliver(event: AnyEvent)` (subscribers get opaque events; typed `add_listener` callbacks do not).
 
 - [ ] **Step 1: Failing tests:**
   - `test_decode_unknown_kind_is_opaque`: `{"id":"x","at":"2026-11-25T00:00:00Z","kind":"fleet.message","topics":["fleet:agent:54a63686"],"seq":1}` → `OpaqueEvent` with that kind, topics, and `payload["seq"] == 1`.
