@@ -65,9 +65,23 @@ export function printerCommandsPublished(): number {
   return state.published
 }
 
-/** A run is keyed by its route as well as its printer and key, as the backend puts the action in the workflow id. */
-const startedKey = (printer: string, request: Request, key: string) =>
-  `${printer}\n${new URL(request.url).pathname}\n${key}`
+/**
+ * What names a route's run besides its printer and key, as the backend's workflow id does
+ * (`workflows/lan_command.py` `lan_command_id`): the command names, and for a slot route the
+ * action (`api/printer_slots.py` `_keyed`). The tray is not in it, so a key reused for `load`
+ * on another tray joins the first run, and K-profile `set` and `batch` (both
+ * `extrusion_cali_set`) join each other.
+ */
+function runName(request: Request): string {
+  const path = new URL(request.url).pathname
+  const slot = /\/trays\/\d+\/\d+\/([^/]+)$/.exec(path)
+  if (slot) return `slot ${slot[1]}`
+  if (/\/kprofiles\/delete$/.test(path)) return 'extrusion_cali_del'
+  if (/\/kprofiles(\/batch)?$/.test(path)) return 'extrusion_cali_set'
+  return path
+}
+
+const startedKey = (printer: string, request: Request, key: string) => `${printer}\n${runName(request)}\n${key}`
 
 /**
  * The answer to a command whose `Idempotency-Key` already started one on `printer`: the same

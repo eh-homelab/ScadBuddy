@@ -21,14 +21,27 @@ describe('printer commands mock (#7276)', () => {
     expect(await again.json()).toEqual({ done: true })
   })
 
-  it('joins a key sent again to the same route only, as the backend keys a run by its action', () => {
-    const post = (action: string) =>
-      new Request(`http://x/api/v1/printers/p1/trays/0/1/${action}`, {
+  it('joins a key sent again as the backend keys a run: printer, action and key, not the tray', () => {
+    const post = (action: string, tray = 1) =>
+      new Request(`http://x/api/v1/printers/p1/trays/0/${tray}/${action}`, {
         method: 'POST',
         headers: { 'Idempotency-Key': 'k1' },
       })
     commandAnswer('p1', post('load'), { action: 'load' })
     expect(joined('p1', post('load'))).toBeDefined()
+    expect(joined('p1', post('load', 3))).toBeDefined()
     expect(joined('p1', post('unload'))).toBeUndefined()
+    expect(joined('p2', post('load'))).toBeUndefined()
+  })
+
+  it('joins K-profile set and batch, which send the same command, but not delete', () => {
+    const post = (path: string) =>
+      new Request(`http://x/api/v1/printers/p1/kprofiles${path}`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': 'k2' },
+      })
+    commandAnswer('p1', post(''), { done: true })
+    expect(joined('p1', post('/batch'))).toBeDefined()
+    expect(joined('p1', post('/delete'))).toBeUndefined()
   })
 })
