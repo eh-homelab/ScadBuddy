@@ -92,8 +92,8 @@ The change:
   with no empty weight known (`no_empty_weight`) or a reading under that empty weight
   (`reading_below_empty`), naming it.
 - The `weighed` event's `data` keeps: `reading_g`; `empty_g`; `empty_source` (`insert`,
-  or `parts` once #7278 lands, or `person` when the client subtracted something else
-  than the effective empty weight); `empty_basis` (for `insert`, the insert's
+  or `parts` once #7278 lands, or `person` when the client's `reading_g - grams` is not
+  the effective empty weight, which includes a spool with none known); `empty_basis` (for `insert`, the insert's
   `empty_weight_basis`, with `placeholder` decided by `insert_weights.is_placeholder`,
   the basis or the note; null for `person`); `empty_name` (the insert's name, null for
   `person`); `expected_g` (the grams left the ledger gave just before the event's time,

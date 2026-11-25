@@ -14,7 +14,7 @@
 
 - The grams-left rule (`ledger.py` module docstring) is unchanged: no anchor or delta moves. `expected_g` is `ledger.grams_left` over the spool's events before the weighing's `at`, plus the delta events at exactly that `at` (the ledger's rule 1: at one instant deltas come before readings).
 - Event `data` keys, exactly: `reading_g`, `empty_g`, `empty_source`, `empty_basis`, `empty_name`, `expected_g`, `drift_g`. `drift_g = grams - expected_g`, rounded to 0.1 g. `expected_g` and `drift_g` are `null` when the ledger had no anchor before the weighing.
-- `empty_source` is `insert` (this slice; `parts` is #7278's) or `person` (the client subtracted something else than the effective empty weight, or there was none). `empty_basis` is the insert's `empty_weight_basis` for `insert`, `null` for `person`.
+- `empty_source` is `insert` (this slice; `parts` is #7278's) or `person` (the client's `reading_g - grams` is not the effective empty weight, which includes a spool with none known). `empty_basis` is the insert's `empty_weight_basis` for `insert`, `null` for `person`.
 - A `bb` weighing (the pull's) records no breakdown: `bambuddy_pull.py` is not touched.
 - Settings: `filament_weighing_drift_notice_g`, int, default 10, `ge=0, le=100000`, mode `live`, section `filament`, kind `count`, doc title "Drift notice at, grams".
 - Every grams the UI shows goes through the page's `grams()` formatter (one decimal, `g`).
@@ -28,6 +28,7 @@
 3. `reading_g` sent with `grams` that disagree with the effective empty weight (an old client, or a person who subtracted an adaptor by hand): `empty_g = reading_g - grams`, `empty_source = person`, nothing refused. Task 2's `test_a_client_that_subtracted_its_own_empty_weight_is_recorded_as_person`.
 4. `reading_g` alone on a spool with no empty weight known: 422 `no_empty_weight`, nothing booked. Task 4's `test_a_reading_alone_needs_an_empty_weight`.
 5. A spool whose newest weighing has no breakdown (every weighing before this slice): `last_drift_g` null, `drift_notice` false, no sentence, the old "Measured N g on …" stays. Task 3's `test_an_old_weighing_leaves_last_drift_null`.
+6. `reading_g` alone under the effective empty weight (150 g on a 200 g insert): 422 `reading_below_empty`, nothing booked, never negative filament. Task 2's `test_a_reading_alone_under_the_empty_weight_is_refused` and Task 4's route test.
 
 ---
 
@@ -94,8 +95,8 @@ git commit -m "feat(filament): a spool's effective empty weight in one place (#7
   - `SpoolEventAdd.reading_g: Grams | None = None` ("the scale reading with the spool, a weighing only"). Validator: `reading_g` with a kind other than `weighed` is a `ValueError("only a weighing has reading_g")`; `reading_g < grams` is `ValueError("reading_g is below grams")`; a weighing with neither `grams` nor `reading_g` keeps today's "a weighing needs grams".
   - `ledger.expected_before(events: Sequence[m.SpoolEvent], at: datetime | None, *, weight_locked: bool, label_weight_g: int | None) -> float | None`: `grams_left` over the events with `e.at < at`, plus the delta events (`source` in `_DELTA`) with `e.at == at`, since rule 1 puts deltas before readings at one instant (all events when `at` is None).
   - `ledger.breakdown(*, reading_g: float, grams: float, empty: EmptyWeight | None, expected: float | None) -> dict[str, Any]`: the seven data keys of Global Constraints. `empty_source` is `insert` only when `empty is not None and abs(reading_g - grams - empty.grams) < 0.05`, else `person` with `empty_basis` null and `empty_name` null.
-  - `class NoEmptyWeightError(ValueError)` in `spools.py`: a weighing with `reading_g` and no `grams` on a spool with no effective empty weight.
-  - `add_event`: for `kind == "weighed"`, resolve `empty = effective_on(conn, spool_id)`; `grams = body.grams if body.grams is not None else body.reading_g - empty.grams` (raise `NoEmptyWeightError` when `empty` is None); when `body.reading_g` is not None, `data |= breakdown(...)` with `expected = expected_before(ledger.events(conn, spool_id), body.at, weight_locked=…, label_weight_g=…)` read from the spool's row (the same `coalesce` as `refresh_derived`). The `grams` go to `absolute_g` as today.
+  - `class NoEmptyWeightError(ValueError)` in `spools.py`: a weighing with `reading_g` and no `grams` on a spool with no effective empty weight. `class ReadingBelowEmptyError(ValueError)` (carries `empty_g`): a weighing with `reading_g` and no `grams` whose reading is under that empty weight.
+  - `add_event`: for `kind == "weighed"`, resolve `empty = effective_on(conn, spool_id)`; `grams = body.grams if body.grams is not None else body.reading_g - empty.grams` (raise `NoEmptyWeightError` when `empty` is None, `ReadingBelowEmptyError` when `body.reading_g < empty.grams`); when `body.reading_g` is not None, `data |= breakdown(...)` with `expected = expected_before(ledger.events(conn, spool_id), body.at, weight_locked=…, label_weight_g=…)` read from the spool's row (the same `coalesce` as `refresh_derived`). The `grams` go to `absolute_g` as today.
   - `SpoolDetail.last_weighing: SpoolEvent | None = None`: the newest `weighed` event, set in `detail()`.
 
 - [ ] **Step 1: Write the failing pure tests in `tests/filament/test_ledger.py`** (the `_event` helper there)
@@ -138,6 +139,10 @@ def test_a_reading_alone_takes_the_insert_off(...) -> None:
 
 def test_a_reading_alone_needs_an_empty_weight(...) -> None:   # a spool with no insert
     with pytest.raises(NoEmptyWeightError): store.add_event(...reading_g=1180...)
+
+def test_a_reading_alone_under_the_empty_weight_is_refused(...) -> None:   # 200 g insert
+    with pytest.raises(ReadingBelowEmptyError): store.add_event(...reading_g=150...)
+    assert [e.kind for e in store.events(spool)] == ["created"]
 
 def test_first_weighing_has_no_expected(...) -> None:           # a spool with no reading yet
     assert event.data["expected_g"] is None and event.data["drift_g"] is None
@@ -229,9 +234,9 @@ git commit -m "feat(filament): last_drift_g on the spool and the drift notice se
 ### Task 4: The route, the agent tool and the mocks
 
 **Files:**
-- Modify: `backend/scadbuddy/api/filament.py` (`add_spool_event` ~line 1633: map `NoEmptyWeightError` to 422 `code="no_empty_weight"`; the route's description names `reading_g`)
+- Modify: `backend/scadbuddy/api/filament.py` (`add_spool_event` ~line 1633: map `NoEmptyWeightError` to 422 `code="no_empty_weight"` and `ReadingBelowEmptyError` to 422 `code="reading_below_empty"` with `empty_g`; the route's description names `reading_g` and both refusals)
 - Modify: `agent/src/tools/filament.ts` (`filament_spool_add_event` ~line 1634: every events POST that has a `reading_g` sends `reading_g` in the body beside `grams`; the description says the breakdown is kept)
-- Modify: `frontend/src/mocks/features/filament/index.ts` (~line 2362: `FIELDS.event` admits `reading_g`; a weighing with `reading_g` computes `grams` from the spool's insert when left out, 422 `no_empty_weight` with none, and writes `data` by Task 2's `breakdown` rule with `expected_g = row.grams_left`, and sets `last_drift_g`; a weighing without one leaves `last_drift_g` null)
+- Modify: `frontend/src/mocks/features/filament/index.ts` (~line 2362: `FIELDS.event` admits `reading_g`; a weighing with `reading_g` computes `grams` from the spool's insert when left out, 422 `no_empty_weight` with none, 422 `reading_below_empty` under it, and writes `data` by Task 2's `breakdown` rule with `expected_g = row.grams_left`, and sets `last_drift_g`; a weighing without one leaves `last_drift_g` null)
 - Test: `backend/tests/api/test_filament.py`, `agent/test/filament.test.ts`, `frontend/src/mocks/features/filament/index.test.ts`
 
 - [ ] **Step 1: Write the failing tests**
@@ -247,6 +252,11 @@ def test_a_weighing_with_a_reading_answers_its_breakdown(client) -> None:
 def test_a_reading_alone_needs_an_empty_weight(client) -> None:
     refused = client.post(f"{one}/events", json={"kind": "weighed", "reading_g": 1180})   # no insert
     assert refused.status_code == 422 and refused.json()["code"] == "no_empty_weight"
+
+def test_a_reading_alone_under_the_empty_weight_is_refused(client) -> None:   # 200 g insert
+    refused = client.post(f"{one}/events", json={"kind": "weighed", "reading_g": 150})
+    assert refused.status_code == 422 and refused.json()["code"] == "reading_below_empty"
+    assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created"]
 ```
 
 Agent (`agent/test/filament.test.ts`, the existing `filament_spool_add_event` cases' style): with `reading_g: 1180` and no offer, the POST body is `{kind: 'weighed', source: 'person', reading_g: 1180, grams: 980}`.
@@ -306,7 +316,7 @@ git commit -m "feat(filament): the weigh form and the phone send the scale readi
 - Produces: `WeighingBreakdown({ event }: { event: SpoolEvent })`, a `<p>` with two sentences:
   - `Weighed {reading} on {date}: filament {grams_after} + spool {empty_g} ({empty_name}, {basis word}).` The basis word: `catalog` → "from the catalog", `placeholder` → "placeholder", `derived` → "from new spools", `weighed_empty` → "weighed empty", `person` → "by hand" (the backend already resolved `placeholder` by `is_placeholder`, so the word follows `empty_basis` alone); for `empty_source` `person`: `spool {empty_g} (taken off by hand)`.
   - When `expected_g` is not null: `The ledger expected {expected}. ` then `The scale matches the prints.` (|drift| < 1), `The scale found {|drift|} less than the prints accounted for.` (drift < 0) or `… more than …` (drift > 0).
-  - `GramsBasis` adds, before the anchor row, when `addedFull === true`, `labelWeight != null` and the anchor's source is not `scale` or `person`: `Started at the label weight {label}. {SOURCE word, capitalised} reported {anchor grams}; {label - anchor} unexplained.` ("Bambuddy reported 979.3 g; 20.7 g unexplained."). Nothing when the gap is under 0.05 g.
+  - `GramsBasis` adds, before the anchor row, when `addedFull === true`, `labelWeight != null` and the anchor is the spool's `created` event (a later AMS or sync anchor holds printed filament, so it never shows a gap): `Started at the label weight {label}. {SOURCE word, capitalised} reported {anchor grams}; {label - anchor} unexplained.` ("Bambuddy reported 979.3 g; 20.7 g unexplained."). Nothing when the gap is under 0.05 g.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -322,7 +332,7 @@ it('says more when the drift is positive', …)
 it('names a person-taken empty weight', …)                     // "(taken off by hand)"
 ```
 
-GramsBasis: `shows the unexplained start gap of an added-full spool` (anchor `created`, source `bb`, 979.3 g, label 1000 → "Started at the label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g unexplained."), `shows no gap for a scale anchor`, `shows no gap when the spool was not added full`.
+GramsBasis: `shows the unexplained start gap of an added-full spool` (anchor `created`, source `bb`, 979.3 g, label 1000 → "Started at the label weight 1000 g. Bambuddy reported 979.3 g; 20.7 g unexplained."), `shows no gap for a scale anchor`, `shows no gap when a later Bambuddy or AMS reading is the anchor` (anchor `synced_from_bb` or `ams_reading` after prints), `shows no gap when the spool was not added full`.
 
 SpoolPage: with the mocks' spool #1 given a `last_weighing` that has a breakdown (seed it in `seed.ts` as the newest event of spool 1), the Weight section shows "filament 640 g + spool"; spool #4 (added full, anchor from Bambuddy in the seed) shows "unexplained".
 
@@ -362,7 +372,8 @@ Run: `cd frontend && pnpm exec vitest run src/components/filament/SpoolTimeline.
 - [ ] **Step 5: Commit**
 
 ```bash
-git commit -am "feat(filament): drift on the timeline, the spool heading and the list (#7682)"
+git add frontend/src/components/filament/SpoolTimeline.tsx frontend/src/components/filament/SpoolTimeline.test.tsx frontend/src/pages/filament/SpoolPage.tsx frontend/src/pages/filament/SpoolPage.test.tsx frontend/src/pages/filament/SpoolsTab.tsx frontend/src/pages/filament/SpoolsTab.test.tsx
+git commit -m "feat(filament): drift on the timeline, the spool heading and the list (#7682)"
 ```
 
 ### Task 8: Docs and the full checks
