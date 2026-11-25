@@ -440,11 +440,12 @@ class FlowStore:
         return await asyncio.to_thread(self._call_operations, run_id, call_id)
 
     async def take_over_answer(
-        self, decision: Decision, *, held: Decision, seen: list[str]
+        self, decision: Decision, *, held: Decision, seen: list[str] | None
     ) -> bool:
         """Put `decision`'s answer in the row of `held` (#7575), only while the row has
         `held`'s answer and the call has no operation but those `seen`, under the row's
-        lock. True too when the row has `decision`'s answer already; False otherwise."""
+        lock. With `seen` None, whatever operations it has: `decision`'s answer is in the
+        run. True too when the row has `decision`'s answer already; False otherwise."""
         return await asyncio.to_thread(self._take_over_answer, decision, held, seen)
 
     async def withdraw_answer(self, decision: Decision) -> None:
@@ -1125,7 +1126,7 @@ class FlowStore:
             ).fetchall()
         return [CallOperation.model_validate(row) for row in rows]
 
-    def _take_over_answer(self, decision: Decision, held: Decision, seen: list[str]) -> bool:
+    def _take_over_answer(self, decision: Decision, held: Decision, seen: list[str] | None) -> bool:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "SELECT response = %s::jsonb AS same, response = %s::jsonb AS held"
@@ -1143,6 +1144,7 @@ class FlowStore:
             if row["same"]:
                 return True
             # After the lock, so it sees the operation of whoever recorded the row again.
+            # A NULL `seen` finds none.
             unseen = conn.execute(
                 f"SELECT 1 FROM operations WHERE {_ON_CALL} AND NOT id = ANY(%s::text[]) LIMIT 1",
                 (f"flow:{decision.run_id}", decision.call_id, seen),

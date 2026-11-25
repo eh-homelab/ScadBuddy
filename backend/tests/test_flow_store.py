@@ -301,6 +301,11 @@ async def test_an_answer_is_taken_over_only_as_it_was_seen(
     held = await store.get_decision(two.request_id)
     assert held is not None and held.response == {"answer": "two"}
     assert not await store.take_over_answer(answer_row("three"), held=one, seen=["a"])
+    # Put back, whatever operation started since.
+    await insert_operation(jobs, "b", {"run_id": "r1", "task_id": "c", "answer_sealed": "t"})
+    assert not await store.take_over_answer(one, held=two, seen=["a"])
+    assert await store.take_over_answer(one, held=two, seen=None)
+    assert await store.take_over_answer(two, held=one, seen=["a", "b"])
     # Only an answer's own row is withdrawn.
     await store.withdraw_answer(one)
     assert await store.get_decision(two.request_id) is not None

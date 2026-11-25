@@ -155,7 +155,7 @@ class RemoteFlowStore:
         return [CallOperation.model_validate(row) for row in response.json()]
 
     async def take_over_answer(
-        self, decision: Decision, *, held: Decision, seen: list[str]
+        self, decision: Decision, *, held: Decision, seen: list[str] | None
     ) -> bool:
         body = {
             "decision": decision.model_dump(mode="json"),

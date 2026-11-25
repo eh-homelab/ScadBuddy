@@ -91,7 +91,7 @@ class DecisionWrite(BaseModel):
 class TakeOver(BaseModel):
     decision: Decision
     held: Decision
-    seen: list[str]
+    seen: list[str] | None
 
 
 class Recorded(BaseModel):

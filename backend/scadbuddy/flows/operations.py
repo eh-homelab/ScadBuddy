@@ -9,7 +9,9 @@ and two answers never share an Update.
 
 The row lives as long as the Update may have landed (#2247):
 
-- The harness refusing the Update is definite: the row is deleted.
+- The harness refusing the Update is definite: the row is deleted. The exception is an
+  answer that a worker from before #7575 sent first, under the request id alone: it
+  landed, so the row stays and the operation succeeds.
 - Any other failure (an RPC error, a deadline, the reply lost) is settled by asking
   Temporal for the Update by its id. Completed means it landed: the row stays and the
   operation succeeds. No such Update means it never landed: the row is deleted, so a
@@ -41,6 +43,12 @@ of the two and refuses the other, which undoes its own row alone (`withdraw`). W
 attempt that took the row over is refused so, it puts the first answer back if that one
 landed.
 
+The safety against a late Update is not in the take-over's checks: the harness resolves a
+call once, so the script gets one answer, and an Update id is of one answer, so a late one
+is not taken for another's. The checks only keep the audit row right. An Update from before
+#7575, under the request id alone, names no answer: it is taken for the answer of the row, or
+for the one that the row's answer replaced.
+
 Residual window: a row kept because the Update's fate was unknown (or because the
 operation was cancelled) says `approved`, `denied` or `answered` before the harness has
 it. If no attempt ever resends it and the call is later resolved another way (the
@@ -53,8 +61,10 @@ execution: the attempt is refused as stale.
 
 The reverse is accepted, not reconciled (#2221): an Update still on its way to the
 history when Temporal answers the probe with no such Update lands after its row was
-deleted, so the call is resolved with no row recording who resolved it. Only that audit
-row is lost; the run itself is right, and a later decision for the call is refused.
+deleted, so the call is resolved with no row recording who resolved it. The same holds
+after a take-over when the attempt that took the row over stopped before it could put the
+row back, and its retry is refused. Only that audit row is lost; the run itself is right,
+and a later decision for the call is refused.
 
 The answer text never reaches the operation's history in the clear (#2221): the route
 seals it under the run's own payload key (`seal_answer`), so the operation's input and
@@ -564,12 +574,10 @@ def flow_kinds(
     async def check_answer(request: dict[str, Any]) -> dict[str, Any]:
         return await check("answer", request)
 
-    async def take_over(
-        checked: dict[str, Any], decision: Decision
-    ) -> tuple[Decision, list[str]] | None:
+    async def take_over(checked: dict[str, Any], decision: Decision) -> Decision | None:
         """Put `decision` in the call's row in place of another answer that never landed and
-        that nothing may still send (the module's rule). The answer it replaced and the
-        call's operations it looked at; None when it took nothing."""
+        that nothing may still send (the module's rule). The answer it replaced; None when
+        it took nothing."""
         held = await store.get_decision(decision.request_id)
         if held is None or (held.kind, held.responder) != ("answer", decision.responder):
             return None
@@ -588,15 +596,13 @@ def flow_kinds(
         seen = [operation.id for operation in operations]
         if not await store.take_over_answer(decision, held=held, seen=seen):
             return None
-        return held, seen
+        return held
 
-    async def put_back(
-        checked: dict[str, Any], decision: Decision, held: Decision, seen: list[str]
-    ) -> bool:
+    async def put_back(checked: dict[str, Any], decision: Decision, held: Decision) -> bool:
         """Undo a take-over whose replaced answer landed after all; never masks the failure."""
         try:
             return await answer_landed(checked, held) is True and await store.take_over_answer(
-                held, held=decision, seen=seen
+                held, held=decision, seen=None
             )
         except Exception:
             activity.logger.exception("could not put back the answer %s", held.request_id)
@@ -609,26 +615,34 @@ def flow_kinds(
         Raises `taken()` when another answer holds the call."""
         outcome, response = _wanted("answer", request, await answer_of(request))
         decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
+        update_id = await answer_update_id(run_keys(), decision)
         row = await store.get_decision(decision.request_id)
-        sent = row is not None and await answer_landed(checked, row)
+        # Another answer's row says nothing of this one.
+        sent = (
+            row is not None
+            and await answer_update_id(run_keys(), row) == update_id
+            and await answer_landed(checked, row)
+        )
         if not sent:
             await at_execution(str(checked["workflow_id"]), decision.workflow_run_id)
         replaced = None
         if not await store.record_decision(decision):
-            replaced = None if sent else await take_over(checked, decision)
+            replaced = await take_over(checked, decision)
             if replaced is None:
                 raise taken()
         if sent:
             return decision
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
-        update_id = await answer_update_id(run_keys(), decision)
         try:
             await client.provide_callback_result(
                 decision.call_id, result=response, update_id=update_id
             )
         except CallbackResultError as err:
             resolved = err.error_type == "CallbackAlreadyResolved"
-            if not (resolved and replaced and await put_back(checked, decision, *replaced)):
+            # After a take-over, an Update under the request id alone is the replaced answer's.
+            if resolved and replaced is None and await answer_landed(checked, decision):
+                return decision
+            if not (resolved and replaced and await put_back(checked, decision, replaced)):
                 await withdraw(decision)
             if err.error_type == "MalformedCallbackResult":
                 raise ApiError(

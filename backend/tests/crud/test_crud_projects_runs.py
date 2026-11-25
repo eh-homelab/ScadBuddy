@@ -334,6 +334,8 @@ async def test_an_answer_is_taken_over_and_withdrawn(
     assert await remote.take_over_answer(two, held=two, seen=[]) is False
     assert await remote.take_over_answer(two, held=one, seen=[]) is True
     assert await remote.take_over_answer(two, held=one, seen=[]) is True
+    assert await remote.take_over_answer(one, held=two, seen=None) is True
+    assert await remote.take_over_answer(two, held=one, seen=[]) is True
     held = await remote.get_decision(one.request_id)
     assert held is not None and held.response == {"answer": "two"}
     await remote.withdraw_answer(one)

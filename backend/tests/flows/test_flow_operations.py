@@ -894,16 +894,24 @@ async def test_a_send_that_comes_after_the_take_over_undoes_nothing(
 
 
 @BOTH
+@pytest.mark.parametrize("how", ["tagged", "untagged", "third"])
 async def test_an_answer_that_lands_after_its_take_over_is_on_record_again(
-    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str, how: str
 ) -> None:
+    """`untagged`: sent before #7575. `third`: while another answer's operation runs."""
     run, call_id = await parked(flows)
     first = await stuck(flows, name, run, call_id)
     original = AgentClient.provide_callback_result
+    third = await answering(name, run, call_id, "three")
 
     async def beaten(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
         one = {"answer": given(name, "one")}
-        await original(self, tool_id, result=one, update_id=await answer_update_id(Keys(), first))
+        tagged = await answer_update_id(Keys(), first)
+        await original(
+            self, tool_id, result=one, update_id=first.request_id if how == "untagged" else tagged
+        )
+        if how == "third":
+            await started(flows, name, "third", third)
         text = {"answer": given(name, "two")}
         return await original(self, tool_id, result=text, update_id=update_id)
 
@@ -915,6 +923,75 @@ async def test_an_answer_that_lands_after_its_take_over_is_on_record_again(
     assert marks.made == []
     assert (await flows.finished(run.id)).result == f"result: {given(name, 'one')!r}"
     assert await responses(flows, run, call_id) == first.response
+
+
+@BOTH
+async def test_an_answer_that_never_landed_is_not_reported_for_the_one_that_did(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    run, call_id = await two_questions(flows)
+    marks = Marks()
+    answer = kinds(flows, marks)[name]
+    env = ActivityEnvironment(client=flows.client)
+    request = await answering(name, run, call_id, "two")
+    checked = await env.run(answer.check, request)
+    first = await stuck(flows, name, run, call_id)
+    await AgentClient(flows.client, run.workflow_id).provide_callback_result(
+        call_id, result={"answer": "one"}, update_id=await answer_update_id(Keys(), first)
+    )
+    _as_text(monkeypatch)
+    record = flows.remote.record_decision
+
+    async def withdrawn_first(decision: Decision, **kwargs: Any) -> bool:
+        await flows.store.withdraw_answer(first)
+        return await record(decision, **kwargs)
+
+    monkeypatch.setattr(flows.remote, "record_decision", withdrawn_first)
+    with pytest.raises(ApiError) as err:
+        await env.run(answer.run, request, checked)
+    assert (err.value.status, err.value.type) == (409, REFUSED[name])
+    assert marks.made == []
+
+
+@BOTH
+async def test_an_answer_that_an_old_worker_sent_first_landed(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """An attempt of a worker from before #7575 sends the same answer, under the request id
+    alone, just before this one."""
+    run, call_id = await two_questions(flows)
+    row = row_of(name, run, call_id, "one")
+    request = await answering(name, run, call_id, "one")
+    await started(flows, name, "first", request)
+    assert await flows.store.record_decision(row)
+    _as_text(monkeypatch)
+    typed = AgentClient.provide_callback_result
+
+    async def beaten(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
+        await typed(self, tool_id, result=result, update_id=row.request_id)
+        return await typed(self, tool_id, result=result, update_id=update_id)
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", beaten)
+    marks = Marks()
+    result = await operate(flows, kinds(flows, marks)[name], request)
+    assert result["outcome"] == "answered"
+    assert len(marks.made) == (name == TASK_ANSWER)
+    assert await responses(flows, run, call_id) == row.response
+
+
+async def test_an_answer_whose_key_cannot_be_read_records_nothing(flows: Flows) -> None:
+    run, call_id = await parked(flows)
+
+    class NoKeys(Keys):
+        async def key_for(self, subject: str, create: bool) -> bytes:
+            raise RuntimeError("no key")
+
+    answer = {kind.name: kind for kind in flow_kinds(flows.remote, NoKeys(), HASH_KEY)}[FLOW_ANSWER]
+    # Not sealed: opening it would read the key too.
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+    with pytest.raises(RuntimeError, match="no key"):
+        await operate(flows, answer, request)
+    assert await responses(flows, run, call_id) is None
 
 
 @BOTH
