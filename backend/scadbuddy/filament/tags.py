@@ -512,15 +512,15 @@ def records_for_spool(
     defaults: FilamentDefaults,
 ) -> m.TagRecords | None:
     """The records that put the spool on the tag, in the tag's own format, else
-    ``default``; ``None`` for no such spool. The backup must cover this write: it holds
-    the records the tag holds now (R19)."""
+    ``default``; ``None`` for no such spool, before the backup is checked. The backup must
+    cover this write: it holds the records the tag holds now (R19)."""
     with spools.transaction() as conn:
+        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
+        if spool is None:
+            return None
         backup = valid_backup(conn, body.backup_id, body.uid, "spool_write")
         if not same_records(body.records, backup.records):
             raise BackupMismatchError()
-        spool = FilamentSpoolStore.read(conn, spool_id, defaults=defaults)
-    if spool is None:
-        return None
     return _encoded(spool, pick_format(body.records, default), empty_weight_g)
 
 

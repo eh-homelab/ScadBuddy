@@ -191,6 +191,16 @@ def test_tag_records_of_an_unknown_spool_are_404(client: TestClient) -> None:
     assert _records(client, uuid4()).status_code == 404
 
 
+def test_tag_records_of_an_unknown_spool_are_404_before_the_backup_is_checked(
+    client: TestClient,
+) -> None:
+    got = client.post(
+        f"{SPOOLS_URL}/{uuid4()}/tag-records",
+        json={"uid": "04BB", "records": [], "backup_id": str(uuid4())},
+    )
+    assert got.status_code == 404, got.text
+
+
 def test_tag_records_refuse_a_backup_of_another_uid(client: TestClient) -> None:
     spool = _spool(client)
     got = client.post(

@@ -19,7 +19,8 @@ type S = components['schemas']
  * tag's backups in memory, append-only; a backup covers a write for 10 minutes. `tag-records`
  * answers one OpenSpool record built from the spool; `tag-written` checks the backup, the
  * read-back and the records, then binds and gives the spool the `openspool` origin and the
- * write's time. Both check the backup before they look the spool up, as the routes do.
+ * write's time. `tag-records` looks the spool up first (404), then checks the backup;
+ * `tag-written` checks the backup first, as the routes do.
  *
  * The agents' NFC jobs (`tags.py` `claim_job`, `finish_job`, `cancel_job`) live in memory too;
  * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request, but for an
@@ -266,10 +267,10 @@ export const handlers = [
   // `records_for_spool` and `written` check the backup first, then look the spool up.
   http.post(`${BASE}/spools/:id/tag-records`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagRecordsIn']
-    const backup = covering(body, 'spool_write')
-    if (backup instanceof Response) return backup
     const spool = spoolViewOf(String(params.id))
     if (!spool) return problem(404, `no spool ${String(params.id)}`)
+    const backup = covering(body, 'spool_write')
+    if (backup instanceof Response) return backup
     return HttpResponse.json(openSpoolRecords(spool))
   }),
   http.post(`${BASE}/spools/:id/tag-written`, async ({ params, request }) => {

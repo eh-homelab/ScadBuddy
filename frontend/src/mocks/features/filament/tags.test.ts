@@ -31,8 +31,9 @@ describe('the tag mocks (#7273)', () => {
     expect(tag.last_seen_source).toBe('agent')
   })
 
-  it('checks the backup before it looks the spool up', async () => {
-    expect(await codeOf(spoolTagRecords(NOBODY, { uid: UID, records: [], backup_id: NOBODY }))).toEqual({ status: 409, code: 'backup_mismatch' })
+  it('looks the spool up before the backup for tag-records, and after it for tag-written', async () => {
+    expect(await codeOf(spoolTagRecords(NOBODY, { uid: UID, records: [], backup_id: NOBODY }))).toEqual({ status: 404, code: undefined })
+    expect(await codeOf(spoolTagRecords(spoolId(1), { uid: UID, records: [], backup_id: NOBODY }))).toEqual({ status: 409, code: 'backup_mismatch' })
     expect(await codeOf(spoolTagWritten(NOBODY, { uid: UID, records: [], backup_id: NOBODY, sent: [], read_back: [] } as never))).toEqual({ status: 409, code: 'backup_mismatch' })
     const { backup_id } = await createTagBackup({ uid: UID, records: [], reason: 'spool_write' })
     expect(await codeOf(spoolTagRecords(NOBODY, { uid: UID, records: [], backup_id }))).toEqual({ status: 404, code: undefined })
