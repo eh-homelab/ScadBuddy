@@ -274,8 +274,18 @@ back whole, the save uploads its own copy of every object it reused
 (`OutputBytes.own_copies`), and writes the transaction once more, which then reuses
 nothing. A deadlock or a serialization failure runs the transaction again whole, up to
 three attempts (`OutputRows.insert`); the last one's error fails the save, which removes its
-folder and the objects it uploaded. Until the commit no row names an uploaded object, so
-a process that dies meanwhile leaves it to the unrecorded sweep. The save then files its 3MF in
+folder and the objects it uploaded. Until the commit no row names an uploaded object. So
+from before each upload until its commit or its failure the save holds a session advisory
+lock on the object, shared (`store/index.py` `StageHold`, `object_lock_name`: one per
+backend and sha256, on one pooled connection, no transaction). Any release of an object
+(a failed save's, a replaced key's, the content sweep's) and the unrecorded sweep remove it
+only while they hold that lock exclusively, taken without waiting, and no row names it,
+checked under the lock (`ContentStore.claim_object`, `BlobIndex.claim_unnamed`): an object
+another save of the same bytes has uploaded and not indexed yet stays. A save that dies
+before its commit drops its connection and so its locks; the blob sweep's unrecorded step
+(`S3ContentBackend.sweep_unrecorded`, run with `claim` by `main._sweep_blobs_logged`) then
+removes its objects once they are older than `sweep_grace`. It lists the bucket, so it
+finds an object no row ever named. The save then files its 3MF in
 the native library from the folder it wrote, the same bytes as the model blob, so it
 does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
 own put commits once more.

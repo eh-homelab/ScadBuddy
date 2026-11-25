@@ -953,8 +953,10 @@ class OutputStore:
         named this save's objects, so its bytes stay its own (#7478 review). A cancel during the
         puts stops the save at once, with no discard: the folder stays with no ``meta.json``, and
         the hold reaper removes it and its holds later (#1007); the unrecorded sweep removes the
-        objects. A cancel during `prepare` or `commit` cannot stop their thread, which may still
-        finish the output."""
+        objects. From the first upload until the commit or the failure the save holds each
+        object's stage lock (`OutputBytes.stage_hold`), so another save's failure never removes
+        an object this one uploaded. A cancel during `prepare` or `commit` cannot stop their
+        thread, which may still finish the output."""
         prepared = await asyncio.to_thread(
             self.prepare,
             job,
@@ -970,22 +972,31 @@ class OutputStore:
             source=source,
         )
         blobs: OutputBlobs | None = None
+        staging = self.bytes is not None and self.rows is not None
+        hold = self.bytes.stage_hold() if self.bytes is not None and staging else None
         try:
-            if self.bytes is not None and self.rows is not None:
-                blobs = await self.bytes.put_folder(
-                    prepared.directory, prepared.meta.id, prepared.meta.slug
-                )
             try:
-                meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
-            except ReuseLostError:
-                assert self.bytes is not None and blobs is not None
-                blobs = await self.bytes.own_copies(blobs, prepared.meta.slug)
-                meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
-        except Exception:
-            await asyncio.to_thread(self.discard, prepared)
-            if blobs is not None and self.bytes is not None:
-                await self.bytes.drop_staged(blobs)
-            raise
+                if staging:
+                    assert self.bytes is not None
+                    blobs = await self.bytes.put_folder(
+                        prepared.directory, prepared.meta.id, prepared.meta.slug, hold
+                    )
+                try:
+                    meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
+                except ReuseLostError:
+                    assert self.bytes is not None and blobs is not None
+                    blobs = await self.bytes.own_copies(blobs, prepared.meta.slug, hold)
+                    meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
+            except Exception:
+                await asyncio.to_thread(self.discard, prepared)
+                if blobs is not None and self.bytes is not None:
+                    await self.bytes.drop_staged(blobs, hold)
+                raise
+        finally:
+            # After the commit the rows name the objects; after a failure `drop_staged`
+            # closed it already (closing is idempotent).
+            if hold is not None:
+                await asyncio.shield(asyncio.to_thread(hold.close))
         for key, previous in replaced:
             assert self.bytes is not None
             try:

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -36,6 +38,63 @@ COPIED_REFS_SQL = (
     f"SELECT {_COLUMNS} FROM store_blobs WHERE backend = %s AND migrated_backend = %s"
     " ORDER BY touched_at DESC LIMIT %s"
 )
+
+
+def object_lock_name(backend: str, sha256: str) -> str:
+    """The text whose ``hashtextextended(…, 0)`` keys the session advisory lock of the
+    objects of ``sha256`` on ``backend`` (#7477). A stager holds it shared from before its
+    upload until its rows commit (`StageHold`); a release removes such an object only
+    while it holds it exclusively (`BlobIndex.claim_unnamed`). The kind is left out, so
+    two kinds of the same bytes share one lock: that only makes a release wait for a
+    later pass. Content-addressed backends (S3, local) name the object by its sha256."""
+    return f"blob-object:{backend}:{sha256}"
+
+
+class StageHold:
+    """The shared locks a stager holds on the objects it uploaded (#7477), on one pooled
+    connection of its own, from before each upload until `close`. A session lock, so no
+    transaction stays open and nothing commits. A process that dies drops its connection
+    and so its locks. Blocking; `close` is idempotent and thread-safe."""
+
+    def __init__(self, pool: Pool) -> None:
+        self._pool = pool
+        self._conn: Connection[DictRow] | None = None
+        self._held: set[str] = set()
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def take(self, backend: str, sha256: str) -> None:
+        """Hold the objects of ``sha256`` on ``backend`` shared; it waits only while a
+        release holds them (`BlobIndex.claim_unnamed`), which never waits itself."""
+        name = object_lock_name(backend, sha256)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("this stage hold is closed")
+            if name in self._held:
+                return
+            if self._conn is None:
+                self._conn = self._pool.getconn()
+            self._conn.execute(
+                "SELECT pg_advisory_lock_shared(hashtextextended(%s, 0))", (name,)
+            ).fetchone()
+            self._held.add(name)
+
+    def close(self) -> None:
+        """Drop every lock and give the connection back."""
+        with self._lock:
+            self._closed = True
+            conn, self._conn = self._conn, None
+            self._held.clear()
+        if conn is None:
+            return
+        try:
+            conn.execute("SELECT pg_advisory_unlock_all()").fetchone()
+        except Exception:
+            # The pool checks a broken connection and replaces it; a closed session
+            # holds no lock.
+            logger.warning("could not drop a stage hold's locks", exc_info=True)
+        finally:
+            self._pool.putconn(conn)
 
 
 def _kept_copy(ref: BlobRef) -> tuple[str, ...]:
@@ -403,12 +462,40 @@ class BlobIndex:
         """Whether a row names the object, as its own or as its migrated copy: a copy
         still running across the flip is recorded only beside its row."""
         with self._pool.connection() as conn:
+            return self._names(conn, backend, backend_id)
+
+    def stage_hold(self) -> StageHold:
+        """A new `StageHold` on this index's pool."""
+        return StageHold(self._pool)
+
+    @contextlib.contextmanager
+    def claim_unnamed(self, backend: str, backend_id: str, sha256: str) -> Iterator[bool]:
+        """Whether the object may be removed now: True only when this call holds its lock
+        exclusively (`object_lock_name`, never waiting for it) and no row names it,
+        checked under that lock. The lock is held until the block ends, so a stager that
+        comes meanwhile waits for the remove and then uploads again. False: a stager holds
+        it (a save between its upload and its commit), or a row names it; leave it."""
+        name = object_lock_name(backend, sha256)
+        with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT EXISTS (SELECT 1 FROM store_blobs"
-                " WHERE (backend, backend_id) = (%s, %s)"
-                " OR (migrated_backend, migrated_backend_id) = (%s, %s)) AS shared",
-                (backend, backend_id, backend, backend_id),
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (name,)
             ).fetchone()
+            if not (row and row["got"]):
+                yield False
+                return
+            try:
+                yield not self._names(conn, backend, backend_id)
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (name,))
+
+    @staticmethod
+    def _names(conn: Connection[DictRow], backend: str, backend_id: str) -> bool:
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM store_blobs"
+            " WHERE (backend, backend_id) = (%s, %s)"
+            " OR (migrated_backend, migrated_backend_id) = (%s, %s)) AS shared",
+            (backend, backend_id, backend, backend_id),
+        ).fetchone()
         return bool(row and row["shared"])
 
     def recorded(self, backend: str, backend_id: str) -> bool:

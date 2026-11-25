@@ -17,7 +17,7 @@ import logging
 import tempfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
-from contextlib import aclosing
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
@@ -42,7 +42,7 @@ from scadbuddy.store.content_models import (
     content_index_key,
 )
 from scadbuddy.store.download_cache import DownloadCache, TooLargeError
-from scadbuddy.store.index import IndexesBlobs
+from scadbuddy.store.index import BlobIndex, IndexesBlobs, StageHold
 from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
@@ -158,19 +158,23 @@ class ContentStore:
         scope: BlobScope,
         lost_reuse: bool = False,
         digest: tuple[str, int] | None = None,
+        hold: StageHold | None = None,
     ) -> tuple[BlobRef, bool]:
         """The stored object, and whether it is an existing one reused. Its row must then
         be written with ``reuse=True``, which fails if a release freed it meanwhile.
         ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
         like the re-put it replaces, no room check. ``digest`` is ``data``'s sha256 and
         size when the caller hashed it already (a library upload, hashed while it
-        streamed in, #7373): the file is then not read to hash it."""
+        streamed in, #7373): the file is then not read to hash it. ``hold`` takes the
+        object's stage lock before the lookup and the upload (`StageHold`, #7477)."""
         if digest is None:
             # Hashes the whole file: a span of its own (#7245), with the thread wait.
             digest = await traced_thread(
                 "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
             )
         sha, size = digest
+        if hold is not None:
+            await asyncio.to_thread(hold.take, self.name, sha)
         existing = (
             None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
         )
@@ -195,9 +199,42 @@ class ContentStore:
         backend (a row left by a `store_backend` switch): its id means nothing here."""
         if ref.backend != self.name:
             raise ValueError(f"a {ref.backend} object is not this {self.name} store's to remove")
-        if not await asyncio.to_thread(self.index.shares_backend_id, ref.backend, ref.backend_id):
-            await self.backend.remove(ref.backend_id)
-            self._count("delete", "ok")
+        async with self.claim_object(ref.backend_id, ref.sha256) as free:
+            if free:
+                await self.backend.remove(ref.backend_id)
+                self._count("delete", "ok")
+
+    def claim_object(
+        self, backend_id: str, sha256: str | None = None
+    ) -> AbstractAsyncContextManager[bool]:
+        """Whether this store's object ``backend_id`` may be removed inside the block: no
+        row names it, and, over a `BlobIndex`, no stager holds it (`StageHold`): its
+        lock is held exclusively for the block (`BlobIndex.claim_unnamed`, #7477). So a
+        failed save, a release and the unrecorded sweep never remove an object that
+        another save uploaded and has not indexed yet. ``sha256`` defaults to the id's last
+        path part, which is the object's sha256 on the content-addressed backends (S3,
+        local)."""
+        return self._claim_object(backend_id, sha256 or backend_id.rsplit("/", 1)[-1])
+
+    @asynccontextmanager
+    async def _claim_object(self, backend_id: str, sha256: str) -> AsyncIterator[bool]:
+        index = self.index
+        if not isinstance(index, BlobIndex):
+            # The render worker's index over CRUD routes: no lock to take.
+            yield not await asyncio.to_thread(index.shares_backend_id, self.name, backend_id)
+            return
+        claim = index.claim_unnamed(self.name, backend_id, sha256)
+        free = await asyncio.to_thread(claim.__enter__)
+        try:
+            yield free
+        finally:
+            # Shielded: a cancel must not leave the lock held on a pooled connection.
+            await asyncio.shield(asyncio.to_thread(claim.__exit__, None, None, None))
+
+    def stage_hold(self) -> StageHold | None:
+        """A `StageHold` for a caller that stages objects (`stage`) and indexes them later;
+        None when the index takes no locks (the render worker's)."""
+        return self.index.stage_hold() if isinstance(self.index, BlobIndex) else None
 
     async def put(
         self,
@@ -246,18 +283,22 @@ class ContentStore:
         name: str,
         scope: BlobScope,
         own: bool = False,
+        hold: StageHold | None = None,
     ) -> tuple[BlobRef, bool]:
         """Upload ``data`` and write no index row: the object, and whether it is an
         existing one reused. The caller writes its rows in a transaction of its own
         (`BlobIndex.put_in` with ``reuse`` as answered), so a batch of puts commits once
-        (#7477). Until then no row names an uploaded object; a caller that writes none
-        calls `release_unindexed`. ``own`` uploads the caller's own copy with no lookup,
-        for a reuse lost to the sweep (`ReuseLostError`)."""
-        return await self._store(kind, data, name=name, scope=scope, lost_reuse=own)
+        (#7477). Until then no row names an uploaded object: ``hold`` (`stage_hold`) keeps
+        every release from removing it until the caller closes the hold, after its commit
+        or its failure. A caller that writes no row closes the hold, then calls
+        `release_unindexed`. ``own`` uploads the caller's own copy with no lookup, for a
+        reuse lost to the sweep (`ReuseLostError`)."""
+        return await self._store(kind, data, name=name, scope=scope, lost_reuse=own, hold=hold)
 
     async def release_unindexed(self, ref: BlobRef, reused: bool) -> None:
-        """Remove what `stage` uploaded when no row came to name it. A reused object is
-        another row's, and stays."""
+        """Remove what `stage` uploaded when no row came to name it, unless another stager
+        holds it (`claim_object`). A reused object is another row's, and stays. Call it
+        after closing this caller's own hold, whose lock would keep the object."""
         await self._release_unindexed(ref, reused)
 
     async def link(

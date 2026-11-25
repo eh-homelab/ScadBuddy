@@ -45,6 +45,7 @@ from scadbuddy.library.output_rows import (
 )
 from scadbuddy.render.job_models import FILE_NAME_PATTERN
 from scadbuddy.store.content import BlobData, BlobMissingError, BlobRef, BlobScope, ContentStore
+from scadbuddy.store.index import StageHold
 
 #: The folder's byte files. `library/outputs.py` imports them from here.
 MODEL_NAME = "model.3mf"
@@ -313,23 +314,34 @@ class OutputBytes:
             path, lambda data: self.replace(key, data, slug=slug, expected=expected)
         )
 
-    async def _stage_file(self, key: str, path: Path, slug: str, *, own: bool) -> StagedBlob:
+    def stage_hold(self) -> StageHold | None:
+        """The hold a save keeps from its first upload until its row commits or it fails
+        (`ContentStore.stage_hold`, #7477)."""
+        return self.content.stage_hold()
+
+    async def _stage_file(
+        self, key: str, path: Path, slug: str, *, own: bool, hold: StageHold | None
+    ) -> StagedBlob:
         ref, reused = await self._with_file(
             path,
             lambda data: self.content.stage(
-                "output", data, name=key, scope=BlobScope(slug=slug), own=own
+                "output", data, name=key, scope=BlobScope(slug=slug), own=own, hold=hold
             ),
         )
         return StagedBlob(key, ref, reused, path)
 
-    async def put_folder(self, directory: Path, output_id: str, slug: str) -> OutputBlobs:
+    async def put_folder(
+        self, directory: Path, output_id: str, slug: str, hold: StageHold | None = None
+    ) -> OutputBlobs:
         """Upload the folder's bytes for a save, a file at a time and never read whole:
         ``model.3mf`` and ``preview.glb``, ``thumbnail.png`` when there, and every
         ``files/`` entry. No index row is written (`ContentStore.stage`): the result names
         the output's keys and, in ``staged``, the object each takes when `OutputRows.insert`
         writes the row, all in that one transaction (#7477). So a save that fails on the
         id changes no blob of the output that holds it (#7478 review). Until then no row
-        names an uploaded object; a failed save calls `drop_staged`. Before any put:
+        names an uploaded object, and ``hold`` (`stage_hold`) keeps another save's failure
+        from removing it: the caller closes it once its row committed, or passes it to
+        `drop_staged` on a failure. A failure here drops what it put. Before any put:
         `FileNotFoundError` when ``model.3mf`` or ``preview.glb`` is missing, and
         `OutputFileNameError` when a ``files/`` entry is not a regular file or has a name
         an output may not hold."""
@@ -340,7 +352,7 @@ class OutputBytes:
         staged: list[StagedBlob] = []
 
         async def stage(key: str, path: Path) -> BlobRef:
-            item = await self._stage_file(key, path, slug, own=False)
+            item = await self._stage_file(key, path, slug, own=False, hold=hold)
             staged.append(item)
             return item.ref
 
@@ -359,7 +371,7 @@ class OutputBytes:
                 ref = await stage(key, directory / FILES_DIR / name)
                 files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
         except Exception:
-            await self.drop_staged(OutputBlobs(staged=tuple(staged)))
+            await self.drop_staged(OutputBlobs(staged=tuple(staged)), hold)
             raise
         return OutputBlobs(
             model=model,
@@ -369,29 +381,39 @@ class OutputBytes:
             staged=tuple(staged),
         )
 
-    async def own_copies(self, blobs: OutputBlobs, slug: str) -> OutputBlobs:
+    async def own_copies(
+        self, blobs: OutputBlobs, slug: str, hold: StageHold | None = None
+    ) -> OutputBlobs:
         """``blobs`` with the save's own copy of each object it reused: the rule for a
         reuse the sweep freed before the row's transaction held it (`ReuseLostError`,
         #7477). Every reused one is put again with no lookup, not only the lost one, so
         the next transaction reuses nothing and cannot lose again. On a failure the
-        copies made so far are removed, and the caller drops ``blobs``."""
+        copies made so far are removed (``hold`` is closed first), and the caller drops
+        ``blobs``."""
         made: list[StagedBlob] = []
         try:
             for item in blobs.staged:
                 if item.reused:
-                    made.append(await self._stage_file(item.key, item.path, slug, own=True))
+                    made.append(
+                        await self._stage_file(item.key, item.path, slug, own=True, hold=hold)
+                    )
         except Exception:
-            await self.drop_staged(OutputBlobs(staged=tuple(made)))
+            await self.drop_staged(OutputBlobs(staged=tuple(made)), hold)
             raise
         copies = {item.key: item for item in made}
         return dataclasses.replace(
             blobs, staged=tuple(copies.get(item.key, item) for item in blobs.staged)
         )
 
-    async def drop_staged(self, blobs: OutputBlobs) -> None:
-        """After a failed save: remove each object its puts uploaded (`put_folder`) that
-        no row names. A reused object is another row's and stays. A failed remove is
-        logged, and the unrecorded sweep removes the object after the grace."""
+    async def drop_staged(self, blobs: OutputBlobs, hold: StageHold | None = None) -> None:
+        """After a failed save: close its ``hold``, then remove each object its puts
+        uploaded (`put_folder`) that no row names and no other stager holds
+        (`ContentStore.release_unindexed`): one that another save of the same bytes has
+        uploaded and not indexed yet stays. A reused object is another row's and stays. A
+        failed remove is logged; an object left with no row is the unrecorded sweep's
+        after the grace."""
+        if hold is not None:
+            await asyncio.shield(asyncio.to_thread(hold.close))
         for staged in blobs.staged:
             try:
                 await self.content.release_unindexed(staged.ref, staged.reused)

@@ -539,8 +539,12 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.sweep_grace)
                     index = state.store.content.index
+                    # `claim`: an object a live save uploaded and has not indexed yet
+                    # stays (#7477); one a dead save left goes once past the grace.
                     swept = await backend.sweep_unrecorded(
-                        cutoff=cutoff, recorded=partial(index.shares_backend_id, backend.backend)
+                        cutoff=cutoff,
+                        recorded=partial(index.shares_backend_id, backend.backend),
+                        claim=state.store.content.claim_object,
                     )
                     unrecorded = swept if isinstance(swept, int) else len(swept)
             except BaseException:

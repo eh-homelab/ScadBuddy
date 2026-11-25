@@ -763,6 +763,49 @@ async def test_a_save_that_deadlocks_every_time_removes_what_it_uploaded(
     assert found == []
 
 
+async def test_a_failed_save_keeps_an_object_another_save_has_staged(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477: two saves upload the same bytes, so the same objects. One fails while the
+    other is between its uploads and its commit: the failed one leaves every object the
+    other holds (its stage lock), and the other's row reads them back."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.rows is not None
+    insert = store.rows.insert
+    kept_id, failed_id = "7" * 32, "8" * 32
+    staged = threading.Event()
+    go_on = threading.Event()
+
+    def held_or_failed(row: Any, conn: Any = None) -> Any:
+        if row.output_id == failed_id:
+            raise RuntimeError("the insert failed")
+        staged.set()
+        assert go_on.wait(30)
+        return insert(row, conn)
+
+    monkeypatch.setattr(store.rows, "insert", held_or_failed)
+    kept = asyncio.create_task(store.save(job, name="kept", files_dir=files, output_id=kept_id))
+    try:
+        assert await asyncio.to_thread(staged.wait, 30)
+        with pytest.raises(RuntimeError, match="the insert failed"):
+            await store.save(job, name="failed", files_dir=files, output_id=failed_id)
+    finally:
+        go_on.set()
+    meta = await kept
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None and row.blobs.model is not None
+    directory = store.directory(meta.id)
+    assert store.bytes is not None
+    assert await store.bytes.read(row.blobs.model) == (directory / MODEL_NAME).read_bytes()
+    assert await store.bytes.read(output_file_key(meta.id, "b.stl")) == b"b stl"
+    assert store.rows.get(failed_id) is None
+
+
 async def test_save_row_names_every_blob_and_holds_it(
     tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
 ) -> None:

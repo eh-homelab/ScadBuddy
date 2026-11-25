@@ -8,6 +8,8 @@ import hashlib
 import os
 import threading
 from collections.abc import AsyncGenerator, Iterator
+from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from types import AsyncGeneratorType
 from typing import Any
@@ -22,7 +24,13 @@ from scadbuddy.library.output_rows import (
     output_file_key,
 )
 from scadbuddy.library.settings_store import S3Settings
-from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef, ContentStore
+from scadbuddy.store.content import (
+    BlobCorruptError,
+    BlobMissingError,
+    BlobRef,
+    BlobScope,
+    ContentStore,
+)
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.s3 import S3ContentBackend
 from tests.support.store import flip_first_byte, local_content, moto_s3, record_reads, store_pool
@@ -446,3 +454,63 @@ async def test_usable_refuses_bambuddy_and_none(
     assert usable(content) is True
     monkeypatch.setattr(content.backend, "backend", "bambuddy")
     assert usable(content) is False
+
+
+async def test_the_sweep_removes_an_unindexed_object_only_past_the_grace_and_unheld(
+    s3_settings: S3Settings, pool: Pool, tmp_path: Path
+) -> None:
+    """#7477: a save that died between its upload and its commit leaves an object no row
+    names. The unrecorded sweep removes it once it is older than the grace, and never
+    while a live save holds it (`ContentStore.claim_object`)."""
+    backend = S3ContentBackend(s3_settings)
+    content = ContentStore(backend, BlobIndex(pool))
+    content.spool = tmp_path / "spool"
+    try:
+        hold = content.stage_hold()
+        assert hold is not None
+        ref, reused = await content.stage(
+            "output", b"staged", name="k", scope=BlobScope(slug="cube"), hold=hold
+        )
+        assert not reused
+
+        async def sweep(cutoff: datetime) -> int:
+            return await backend.sweep_unrecorded(
+                cutoff=cutoff,
+                recorded=partial(content.index.shares_backend_id, backend.backend),
+                claim=content.claim_object,
+            )
+
+        past_grace = datetime.now(UTC) + timedelta(minutes=1)
+        # A live save holds it: even past the grace it stays.
+        assert await sweep(past_grace) == 0
+        assert await backend.exists(ref.backend_id)
+        # The save died: its connection, and so its lock, went.
+        await asyncio.to_thread(hold.close)
+        # Within the grace it stays.
+        assert await sweep(datetime.now(UTC) - timedelta(hours=1)) == 0
+        assert await backend.exists(ref.backend_id)
+        # Past the grace it goes.
+        assert await sweep(past_grace) == 1
+        assert not await backend.exists(ref.backend_id)
+    finally:
+        await content.aclose()
+
+
+async def test_release_unindexed_leaves_an_object_another_stager_holds(
+    content: ContentStore,
+) -> None:
+    """#7477: a failed save's release never removes an object another stager holds."""
+    other = content.stage_hold()
+    assert other is not None
+    try:
+        ref, _ = await content.stage(
+            "output", b"shared", name="k", scope=BlobScope(slug="cube"), hold=other
+        )
+        mine, _ = await content.stage("output", b"shared", name="k", scope=BlobScope(slug="cube"))
+        assert mine.backend_id == ref.backend_id
+        await content.release_unindexed(mine, False)
+        assert await content.backend.exists(ref.backend_id)
+    finally:
+        await asyncio.to_thread(other.close)
+    await content.release_unindexed(ref, False)
+    assert not await content.backend.exists(ref.backend_id)
