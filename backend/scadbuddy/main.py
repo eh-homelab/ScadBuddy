@@ -129,6 +129,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_byte_copy import copy_output_bytes
 from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_copy import copy_outputs
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
@@ -714,6 +715,25 @@ async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> Non
                 "stopped": stop.is_set(),
             },
         )
+        if result.refused is None and not result.incomplete and not stop.is_set():
+            await _try_cut_over(rows)
+
+
+async def _try_cut_over(rows: OutputRows) -> bool:
+    """Write the cut-over mark (#7257, plan D2) when the copies are done, best effort:
+    whether it exists now. A new mark is logged; a failure is logged only, and the next
+    byte run or start tries again."""
+    try:
+        if await asyncio.to_thread(rows.cut_over):
+            return True
+        if not await asyncio.to_thread(rows.try_cut_over):
+            return False
+        at = await asyncio.to_thread(rows.cut_over_at)
+    except Exception:
+        logger.exception("could not write the cut-over mark; the next byte run or start retries")
+        return False
+    logger.info("the outputs are cut over (#7257)", extra={"at": at})
+    return True
 
 
 async def _copy_output_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
@@ -728,11 +748,16 @@ async def _copy_outputs_and_bytes_logged(state: AppState, *, stop: threading.Eve
     """The start's copies: the rows (#7255), then the bytes (#7256), which walk the rows
     the first copy wrote. The bytes are copied only when the last row copy run finished:
     a run that is ``incomplete`` (an outputs volume not there) or did not end leaves the
-    byte copy to the sweep `OUTPUT_BYTES_SWEEP`."""
+    byte copy to the sweep `OUTPUT_BYTES_SWEEP`.
+
+    It tries the cut-over mark first (#7257): when the copies were done before this start,
+    the mark is written now, and neither copy runs."""
+    rows = state.outputs.rows
+    if rows is not None and await _try_cut_over(rows):
+        return
     await _copy_outputs_logged(state, stop=stop)
     if stop.is_set():
         return
-    rows = state.outputs.rows
     if rows is None:
         return
     try:

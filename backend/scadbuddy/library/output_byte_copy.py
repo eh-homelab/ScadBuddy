@@ -77,6 +77,7 @@ from scadbuddy.library.output_bytes import (
     put_names,
 )
 from scadbuddy.library.output_rows import (
+    CUT_OVER_NOTHING_TO_COPY,
     ByteWrite,
     OutputBlobs,
     OutputFileBlob,
@@ -310,7 +311,14 @@ async def copy_output_bytes(
     sweep; with no bound at a start). It is not taken from the API's pool, so the pool's
     other users keep every connection during a run. It is autocommit, so it is never
     idle in a transaction and holds no row lock. Closing the connection ends its
-    session, which releases the lock, also when the run fails."""
+    session, which releases the lock, also when the run fails.
+
+    After the cut-over mark (#7257, plan D4) it does nothing and returns ``None``. It
+    checks the mark before the lock and again once it holds the lock, as the mark may
+    be written between the two."""
+    if await asyncio.to_thread(rows.cut_over):
+        logger.info(CUT_OVER_NOTHING_TO_COPY)
+        return None
     own = make_conninfo(
         conninfo,
         application_name=LOCK_APPLICATION,
@@ -324,6 +332,10 @@ async def copy_output_bytes(
         got = await cursor.fetchone()
         if got is None or not got[0]:
             logger.info("another replica copies the outputs' bytes; this one does not")
+            return None
+        # Again under the lock: a byte run that ended meanwhile may have written the mark.
+        if await asyncio.to_thread(rows.cut_over):
+            logger.info(CUT_OVER_NOTHING_TO_COPY)
             return None
         return await _Copy(store, rows, content, stop).run()
 

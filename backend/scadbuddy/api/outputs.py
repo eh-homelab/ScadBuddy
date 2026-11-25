@@ -1199,6 +1199,9 @@ class OutputCopyStatus(BaseModel):
     damaged: list[dict[str, Any]]
     #: The last run of the byte copy (#7256); ``None`` before any.
     bytes: OutputBytesStatus | None = None
+    #: When the cut-over mark was written (#7257): the copies are done and stopped, and
+    #: the files are no longer the record. ``None`` before it.
+    cut_over_at: datetime | None = None
 
 
 # Before `/outputs/{output_id}`, which would take `copy-status` for an id.
@@ -1212,7 +1215,8 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
     a housekeeping sweep: when it started and finished, what it copied, refreshed and
     dropped, the folders it could not copy and the side files it left out. 404 before any
     run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), how
-    many rows the files still hold the bytes of, and the rows that name damage now."""
+    many rows the files still hold the bytes of, and the rows that name damage now.
+    ``cut_over_at``: when the cut-over mark was written (#7257); the copies stop at it."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
     if rows is None or last is None:
@@ -1222,7 +1226,8 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
         byte_run["pending"] = await asyncio.to_thread(rows.pending_bytes)
         count, sample = await asyncio.to_thread(rows.damage, DAMAGED_SAMPLE)
         byte_run["damaged_rows"], byte_run["damaged_sample"] = count, sample
-    return OutputCopyStatus.model_validate({**last, "bytes": byte_run})
+    cut_over_at = await asyncio.to_thread(rows.cut_over_at)
+    return OutputCopyStatus.model_validate({**last, "bytes": byte_run, "cut_over_at": cut_over_at})
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")

@@ -45,7 +45,7 @@ import psycopg
 from psycopg.conninfo import make_conninfo
 
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.library.output_rows import OutputRow, OutputRows
+from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY, OutputRow, OutputRows
 from scadbuddy.library.outputs import (
     ARRANGED_NAME,
     BACKFILL_NAME,
@@ -174,7 +174,15 @@ def copy_outputs(
     whole run (up to `workflows.housekeeping.OUTPUT_COPY_TIMEOUT`, 15 minutes). It is
     not taken from the API's pool, so the pool's other users keep every connection
     during a run. Closing the connection ends its session, which releases the lock,
-    also when the run fails."""
+    also when the run fails.
+
+    After the cut-over mark (#7257, plan D4) it does nothing and returns ``None``: the
+    files are no longer the record, so a run would drop the row of a folder no write
+    made. It checks the mark before the lock and again once it holds the lock, as the
+    mark may be written between the two."""
+    if rows.cut_over():
+        logger.info(CUT_OVER_NOTHING_TO_COPY)
+        return None
     own = make_conninfo(
         conninfo,
         application_name=LOCK_APPLICATION,
@@ -187,6 +195,10 @@ def copy_outputs(
         ).fetchone()
         if got is None or not got[0]:
             logger.info("another replica copies the saved outputs; this one does not")
+            return None
+        # Again under the lock: the mark may have been written since the first check.
+        if rows.cut_over():
+            logger.info(CUT_OVER_NOTHING_TO_COPY)
             return None
         return _copy(store, rows, stop)
 

@@ -23,7 +23,9 @@ FINISHED_RUN = {"finished_at": datetime(2026, 11, 24, tzinfo=UTC), "incomplete":
 
 
 def _rows(last_run: dict[str, Any] | None = FINISHED_RUN) -> Any:
-    return SimpleNamespace(last_run=lambda: last_run)
+    return SimpleNamespace(
+        last_run=lambda: last_run, cut_over=lambda: False, try_cut_over=lambda: False
+    )
 
 
 def _state(rows: object | None = None) -> Any:

@@ -576,6 +576,9 @@ _COPY_REFRESH = (
 )
 
 
+#: What a copy logs when it does nothing because the cut-over mark exists (plan D4).
+CUT_OVER_NOTHING_TO_COPY = "the outputs are cut over (#7257); nothing to copy"
+
 #: The cut-over mark, written once (plan D2). The last byte run by id is the one judged.
 _TRY_CUT_OVER = (
     "INSERT INTO output_cutover (byte_run_id)"
