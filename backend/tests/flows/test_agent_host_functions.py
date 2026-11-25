@@ -182,7 +182,7 @@ async def test_ask_session_sends_to_a_durable_session_and_waits_for_its_turn(
     ]
 
 
-async def test_ask_session_refuses_another_persons_session_and_sends_nothing(
+async def test_ask_session_passes_on_a_refused_session_check_and_sends_nothing(
     outward: Outward, sessions: tuple[Sessions, str]
 ) -> None:
     served, queue = sessions

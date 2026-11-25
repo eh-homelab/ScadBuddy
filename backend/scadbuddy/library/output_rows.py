@@ -20,19 +20,22 @@ import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from psycopg import Connection
+from psycopg import Connection, Rollback
 from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.library.output_query import OutputQuery, query_ids
 from scadbuddy.store.content_models import BlobRef, ReuseLostError
 from scadbuddy.store.index import BlobIndex
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from scadbuddy.library.outputs import OutputMeta
 
 logger = logging.getLogger(__name__)
@@ -56,15 +59,6 @@ def staged_thumbnail_key(output_id: str, sha256: str) -> str:
     `output_blob_key` ``thumbnail`` (`OutputRows.keep_thumbnail`). Nothing holds it, so
     the sweep removes its row after the grace."""
     return f"output-{output_id}-thumbnail-{sha256}"
-
-
-def staged_save_key(key: str, attempt: str) -> str:
-    """The key a save puts the bytes of ``key`` under before its row's transaction points
-    ``key`` at them (`OutputBlobs.staged`). ``attempt`` is the save's own, so a save that
-    fails on the id writes no key the output it lost to reads. Nothing holds it: the save
-    deletes it once its row committed or failed, else the sweep removes it after the
-    grace."""
-    return f"{key}-save-{attempt}"
 
 
 def plate_cover_prefix(output_id: str) -> str:
@@ -117,12 +111,16 @@ class OutputFileBlob:
 
 @dataclass(frozen=True)
 class StagedBlob:
-    """A save's put: the object ``ref``, put under ``staged_key`` (`staged_save_key`),
-    that the output's ``key`` takes in the row's transaction."""
+    """A save's put: the object ``ref``, uploaded with no index row
+    (`ContentStore.stage`), that the output's ``key`` takes in the row's transaction.
+    ``reused``: an existing object another row names, which that transaction holds
+    (`BlobIndex.put_in` ``reuse``). ``path`` is the file it was read from, for the save's
+    own copy when the sweep freed a reused object first (`OutputBytes.own_copies`)."""
 
     key: str
-    staged_key: str
     ref: BlobRef
+    reused: bool
+    path: Path
 
 
 @dataclass(frozen=True)
@@ -186,7 +184,7 @@ class ByteWrite:
 _COLUMNS = (
     "output_id, slug, meta, params, inputs, record, manifest, bom, arranged_from,"
     " backfill, has_plate_cover, copied_at, files_stamp, model_blob, preview_blob,"
-    " thumbnail_blob, bytes_at"
+    " thumbnail_blob, bytes_at, params_text"
 )
 
 #: Release the byte holds of the rows ``holder_id = ANY(%s)``: only keys of the output's
@@ -236,6 +234,10 @@ class OutputRow:
     #: When a save or the byte copy put its blobs; ``None`` while the files hold them.
     #: The store sets it, so the value given is ignored.
     bytes_at: datetime | None = None
+    #: The parameters that differ from the template's defaults, for the list's ``q``
+    #: (`output_query.params_text`, #7257). ``None``: a row the copy or an older build
+    #: wrote, until `OutputIndex.record` or the next release's migration fills it.
+    params_text: str | None = None
 
 
 def _json(value: Any) -> Jsonb | None:
@@ -269,6 +271,7 @@ def _row(data: DictRow) -> OutputRow:
             thumbnail=data["thumbnail_blob"],
         ),
         bytes_at=data["bytes_at"],
+        params_text=data["params_text"],
     )
 
 
@@ -298,8 +301,8 @@ def _values(row: OutputRow) -> tuple[Any, ...]:
 _INSERT = (
     "INSERT INTO outputs (output_id, slug, meta, params, inputs, record, manifest, bom,"
     " arranged_from, backfill, has_plate_cover, created_at, model_blob, preview_blob,"
-    " thumbnail_blob, bytes_at)"
-    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
+    " thumbnail_blob, params_text, bytes_at)"
+    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,"
     " CASE WHEN %s THEN clock_timestamp() END)"
 )
 
@@ -318,7 +321,8 @@ _SAVE_UPSERT = (
     " arranged_from = EXCLUDED.arranged_from, backfill = EXCLUDED.backfill,"
     " has_plate_cover = EXCLUDED.has_plate_cover, created_at = EXCLUDED.created_at,"
     " model_blob = EXCLUDED.model_blob, preview_blob = EXCLUDED.preview_blob,"
-    " thumbnail_blob = EXCLUDED.thumbnail_blob, bytes_at = EXCLUDED.bytes_at,"
+    " thumbnail_blob = EXCLUDED.thumbnail_blob, params_text = EXCLUDED.params_text,"
+    " bytes_at = EXCLUDED.bytes_at,"
     " bytes_stamp = NULL, damaged = '[]', files_stamp = NULL, copied_at = clock_timestamp()"
     " WHERE outputs.files_stamp IS NOT NULL AND outputs.slug = EXCLUDED.slug"
 )
@@ -394,9 +398,9 @@ def _set_blob(conn: Connection[DictRow], output_id: str, role: Role, key: str) -
     return True
 
 
-#: What a thumbnail step runs again after, as `BlobIndex.retrying` runs an index write
-#: again: Postgres broke a deadlock with it (`BlobIndex.put_in` can still take a hold out
-#: of key order), or a serialization failure.
+#: What a thumbnail step or a save's row runs again after, as `BlobIndex.retrying` runs an
+#: index write again: Postgres broke a deadlock with it (`BlobIndex.put_in` can still take
+#: a hold out of key order), or a serialization failure.
 _RETRIED: tuple[type[Exception], ...] = (DeadlockDetected, SerializationFailure)
 _ATTEMPTS = 3
 
@@ -417,7 +421,7 @@ def _retrying[T](
                 if attempt == _ATTEMPTS:
                     raise
                 logger.warning(
-                    "retrying a thumbnail step Postgres picked as a deadlock's victim",
+                    "retrying an output step Postgres picked as a deadlock's victim",
                     extra={"output_id": output_id, "attempt": attempt},
                 )
     raise AssertionError("unreachable")
@@ -436,20 +440,24 @@ def _insert(
         blobs.model,
         blobs.preview,
         blobs.thumbnail,
+        row.params_text,
         blobs.model is not None,
     )
     if not conn.execute(_SAVE_UPSERT, values).rowcount:
         # Another row holds the id: the plain insert raises its `UniqueViolation`. (If
         # that row went meanwhile, the insert adds the save's row.)
         conn.execute(_INSERT, values)
-    # Only now, with the row the save's, do its keys take the objects it put. A key
-    # named another object before (the copy's put of the same folder) is released by the
-    # caller after the commit. `ReuseLostError`: a staged object was freed first, and the
-    # save fails.
+    # Only now, with the row the save's, do its keys take the objects it put: their index
+    # rows are written here, in this one transaction (#7477), in key order as `mark` locks
+    # them. A key named another object before (the copy's put of the same folder) is
+    # released by the caller after the commit. `ReuseLostError`: a reused object was freed
+    # first; the transaction rolls back whole and the caller puts its own copies.
     replaced: list[tuple[str, BlobRef]] = []
     index = BlobIndex(pool)
-    for staged in blobs.staged:
-        previous = index.put_in(conn, staged.key, staged.ref, slug=row.slug, meta={}, reuse=True)
+    for staged in sorted(blobs.staged, key=lambda item: item.key):
+        previous = index.put_in(
+            conn, staged.key, staged.ref, slug=row.slug, meta={}, reuse=staged.reused
+        )
         if previous is not None and previous.backend_id != staged.ref.backend_id:
             replaced.append((staged.key, previous))
     # A row the save took over from the copy keeps nothing of the copy's bytes: its
@@ -459,6 +467,8 @@ def _insert(
     _release_bytes(conn, [row.output_id])
     _write_files(conn, row.output_id, blobs.files)
     _hold_keys(conn, row.output_id, blobs.keys())
+    # The id is saved now: its claim (`OutputRows.claim`) goes with the save (#7257).
+    conn.execute("DELETE FROM output_claims WHERE output_id = %s", (row.output_id,))
     return replaced
 
 
@@ -566,10 +576,39 @@ _COPY_REFRESH = (
 )
 
 
+#: What a copy logs when it does nothing because the cut-over mark exists (plan D4).
+CUT_OVER_NOTHING_TO_COPY = "the outputs are cut over (#7257); nothing to copy"
+
+#: The row copy's advisory lock (`output_copy.copy_outputs`):
+#: ``pg_try_advisory_lock(hashtextextended(COPY_LOCK, 0))``.
+COPY_LOCK = "scadbuddy:outputs:copy"
+#: The byte copy's advisory lock (`output_byte_copy.copy_output_bytes`), the same way.
+BYTES_LOCK = "scadbuddy:outputs:bytes"
+
+#: Whether neither copy runs now: both copies' locks, taken until the transaction ends.
+_COPIES_IDLE = (
+    "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))"
+    " AND pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS idle"
+)
+
+#: The cut-over mark, written once (plan D2). The last byte run and the last row copy
+#: run, by id, are the ones judged: a run in progress has no ``finished_at``.
+_TRY_CUT_OVER = (
+    "INSERT INTO output_cutover (byte_run_id)"
+    " SELECT r.id FROM (SELECT id, finished_at, refused, failed FROM output_byte_runs"
+    " ORDER BY id DESC LIMIT 1) r"
+    " WHERE r.finished_at IS NOT NULL AND r.refused IS NULL AND r.failed = '[]'::jsonb"
+    " AND (SELECT finished_at FROM output_copy_runs ORDER BY id DESC LIMIT 1) IS NOT NULL"
+    " AND NOT EXISTS (SELECT 1 FROM outputs WHERE bytes_at IS NULL)"
+    " ON CONFLICT DO NOTHING"
+)
+
+
 class OutputRows:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
         self._copied = False
+        self._cut_over = False
         self._lock = threading.Lock()
 
     def get(self, output_id: str) -> OutputRow | None:
@@ -615,12 +654,20 @@ class OutputRows:
         has not committed yet; any other row with that id is a `UniqueViolation`, and
         then nothing is written and no key moves. With ``conn``, inside its transaction.
 
+        Without ``conn``, a deadlock or a serialization failure runs the transaction again
+        whole (`_retrying`): its index rows are the save's, all in it (#7477). The last
+        attempt's error propagates, and no key moved.
+
         Returns each key that named another object before and that object, which the
         caller releases after the commit (`OutputBytes.release_replaced`)."""
         if conn is not None:
             return _insert(conn, self._pool, row)
-        with self._pool.connection() as own, own.transaction():
-            return _insert(own, self._pool, row)
+
+        def step(own: Connection[DictRow]) -> list[tuple[str, BlobRef]]:
+            with own.transaction():
+                return _insert(own, self._pool, row)
+
+        return _retrying(self._pool, row.output_id, step)
 
     def drop_copied(self, output_id: str, slug: str) -> None:
         """Delete the row the copy wrote of the folder ``<slug>/<output_id>``, and its byte
@@ -696,7 +743,9 @@ class OutputRows:
         upload's file is there, and the key goes back), then the row names ``key`` and
         holds it. With an index row of ``key`` (an upload's, or a blob the store lost),
         the key stays and ``write`` writes the file alone, only when there is none.
-        Whether this draw is the thumbnail file now. Blocking."""
+        Whether this draw is the thumbnail file now; after the cut-over mark with no
+        folder, ``write`` writes nothing and answers True, so the answer is whether the
+        row decides for this draw (#7257). Blocking."""
 
         def step(conn: Connection[DictRow]) -> bool:
             try:
@@ -1192,6 +1241,98 @@ class OutputRows:
         with self._lock:
             self._copied = True
         return True
+
+    def try_cut_over(self) -> bool:
+        """Write the cut-over mark (#7257, plan D2) when, in one statement: the last row
+        copy run has finished; the last byte run has finished, with no refusal and no
+        failure; and no row waits for its bytes (``bytes_at`` NULL). It is written once; a
+        later call changes nothing. True only when this call wrote it (so one replica logs
+        it); `cut_over` says whether it exists.
+
+        Neither copy may run meanwhile: the transaction takes both copies' locks first and
+        writes nothing when one is held. A row copy in flight could insert a row with
+        ``bytes_at`` NULL after the mark, which no copy would fill (each copy checks the
+        mark under its lock), and release B's migration would then refuse every start."""
+        with self._pool.connection() as conn, conn.transaction():
+            idle = conn.execute(_COPIES_IDLE, (COPY_LOCK, BYTES_LOCK)).fetchone()
+            if idle is None or not idle["idle"]:
+                return False
+            wrote = conn.execute(_TRY_CUT_OVER).rowcount == 1
+        if wrote:
+            with self._lock:
+                self._cut_over = True
+        return wrote
+
+    def cut_over(self) -> bool:
+        """Whether the cut-over mark exists. Once true it stays true for this object."""
+        with self._lock:
+            if self._cut_over:
+                return True
+        if self.cut_over_at() is None:
+            return False
+        with self._lock:
+            self._cut_over = True
+        return True
+
+    def cut_over_at(self) -> datetime | None:
+        """When the cut-over mark was written, by the database's clock."""
+        with self._pool.connection() as conn:
+            found = conn.execute("SELECT at FROM output_cutover").fetchone()
+        if found is None:
+            return None
+        at: datetime = found["at"]
+        return at
+
+    def query(self, query: OutputQuery) -> tuple[list[str], int]:
+        """`OutputIndex.query` on ``outputs`` (#7257): the page's output ids, newest
+        first, and how many the filters select. ``after`` must be an id the filters
+        select, else `AfterNotListedError`."""
+        with self._pool.connection() as conn:
+            return query_ids(conn, "outputs", query)
+
+    def claim(self, output_id: str, slug: str) -> bool:
+        """Claim ``output_id`` for a save of ``slug`` (#7257, plan D6): True when this
+        call claimed it. False when a claim of it stands, or an output of that id is
+        saved. The save's row deletes the claim (`insert`).
+
+        A save that holds the claim inserts its row and deletes its claim in one
+        transaction. A claim made before that commits waits on the deleted claim row and
+        then inserts, since its snapshot saw no ``outputs`` row. So a second statement in
+        the claim's transaction looks again: under READ COMMITTED it takes a new snapshot,
+        which holds the save's row, and the claim is rolled back. (An advisory lock per id
+        would need every writer of ``outputs`` to take it, and phase 2 pods do not.)"""
+        with self._pool.connection() as conn, conn.transaction() as tx:
+            inserted = (
+                conn.execute(
+                    "INSERT INTO output_claims (output_id, slug) SELECT %s, %s"
+                    " WHERE NOT EXISTS (SELECT 1 FROM outputs WHERE output_id = %s)"
+                    " ON CONFLICT DO NOTHING",
+                    (output_id, slug, output_id),
+                ).rowcount
+                == 1
+            )
+            if not inserted:
+                return False
+            saved = conn.execute(
+                "SELECT 1 FROM outputs WHERE output_id = %s", (output_id,)
+            ).fetchone()
+            if saved is not None:
+                raise Rollback(tx)
+        return saved is None
+
+    def release_claim(self, output_id: str) -> None:
+        """Free a claim whose save failed, so another attempt can claim the id."""
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM output_claims WHERE output_id = %s", (output_id,))
+
+    def prune_claims(self, grace: timedelta) -> int:
+        """Delete the claims older than ``grace``, by the database's clock: a save that
+        died between its claim and its row. How many went."""
+        with self._pool.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM output_claims WHERE claimed_at < clock_timestamp() - %s", (grace,)
+            )
+        return cursor.rowcount
 
     def start_run(self) -> int:
         with self._pool.connection() as conn:

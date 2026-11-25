@@ -41,6 +41,13 @@ describe('the Spools tab', () => {
     expect(within(rows[0]!).queryByRole('link', { name: /Set type/ })).toBeNull()
   })
 
+  it('marks a spool whose newest weighing drifted past the notice setting, #1 (#7682)', async () => {
+    render()
+    const rows = spoolRows(await table())
+    expect(within(rows[0]!).getByText('Drift')).toBeInTheDocument()
+    expect(within(rows[1]!).queryByText('Drift')).toBeNull()
+  })
+
   it('flags a spool whose tray reports something else, naming what it reports (#6713)', async () => {
     render()
     const rows = spoolRows(await table())

@@ -65,6 +65,10 @@ KINDS: dict[str, EntityKind] = {
 }
 
 
+#: The entity kind whose rows a table holds (a catalog's rows, #7703).
+KIND_OF_TABLE: dict[str, str] = {k.table: k.name for k in KINDS.values()}
+
+
 class UnknownEntityKind(LookupError):  # noqa: N818
     """No such kind is registered."""
 

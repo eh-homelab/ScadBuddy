@@ -16,6 +16,7 @@ from scadbuddy.core.config import DEFAULT_JOB_TTL, Config
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.bambuddy import BambuddyContentBackend
 from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.s3 import S3ContentBackend
 
 
@@ -85,7 +86,8 @@ async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
 ) -> None:
     """Pieces and snapshots are a job's data on either backend, so both sweeps take
     `job_ttl`; `asset_sweep_grace` is the uploads' knob. At `job_ttl` 0 (renders kept
-    forever, #6236) they take the default day, never 0."""
+    forever, #6236) they take the default day, never 0. On `local` the outputs' own
+    content store (#7257, plan D7) is swept too, with the same grace."""
     graces: list[int] = []
 
     def sweep_blobs(blobs: Any, refs: Any, *, grace: int) -> list[str]:
@@ -106,8 +108,14 @@ async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
         refs=object(),
         config=Config(job_ttl=job_ttl, asset_sweep_grace=7 * 86400),
     )
+    # As the lifespan sets it: `local`'s own output store, else the shared content store.
+    state.outputs = SimpleNamespace(
+        bytes=SimpleNamespace(
+            content=state.store.content if content else SimpleNamespace(backend=object())
+        )
+    )
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
-    assert graces == [DEFAULT_JOB_TTL]
+    assert graces == [DEFAULT_JOB_TTL] if content else [DEFAULT_JOB_TTL, DEFAULT_JOB_TTL]
 
 
 _forgotten: list[list[str]] = []
@@ -135,6 +143,7 @@ async def test_the_blob_sweep_forgets_the_geometry_of_the_pieces_it_removes(
         blobs=object(),
         refs=SimpleNamespace(pool=object()),
         config=SimpleNamespace(sweep_grace=86400),
+        outputs=SimpleNamespace(bytes=None),
     )
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
     assert _forgotten == [["p1", "p2"]]
@@ -157,7 +166,11 @@ class _Bambuddy(BambuddyContentBackend):
         self.cutoffs: list[datetime] = []
 
     async def sweep_unrecorded(
-        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool] | None = None,
+        claim: Any = None,
     ) -> list[str]:
         self.cutoffs.append(cutoff)
         return ["600"]
@@ -178,7 +191,8 @@ async def test_the_blob_sweep_reconciles_unrecorded_uploads_on_a_sweeper_only(
     backend: Any = _Bambuddy() if on_bambuddy else object()
     state = SimpleNamespace(
         store=SimpleNamespace(
-            content=SimpleNamespace(backend=backend, index=_Index()), blobs=object()
+            content=SimpleNamespace(backend=backend, index=_Index(), claim_object=None),
+            blobs=object(),
         ),
         refs=SimpleNamespace(pool=object()),
         config=SimpleNamespace(sweep_grace=86400),
@@ -199,13 +213,20 @@ async def test_the_blob_sweep_reconciles_unrecorded_s3_objects_by_the_index(
 ) -> None:
     """On S3 too, the sweep deletes the objects no row names that are older than
     `sweep_grace`; whether a row names one is the content store's index, asked for `s3`."""
-    calls: list[tuple[datetime, Callable[[str], bool]]] = []
+    calls: list[tuple[datetime, Callable[[str], bool], Any]] = []
 
     async def sweep_unrecorded(
-        self: S3ContentBackend, *, cutoff: datetime, recorded: Callable[[str], bool]
+        self: S3ContentBackend,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool],
+        claim: Any = None,
     ) -> int:
-        calls.append((cutoff, recorded))
+        calls.append((cutoff, recorded, claim))
         return 2
+
+    def claim_object(backend_id: str) -> Any:
+        raise AssertionError("not called by this fake sweep")
 
     async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
         return []
@@ -226,14 +247,18 @@ async def test_the_blob_sweep_reconciles_unrecorded_s3_objects_by_the_index(
     index = _Index(frozenset({("s3", "p/piece/kept")}))
     state = SimpleNamespace(
         store=SimpleNamespace(
-            content=SimpleNamespace(backend=backend, index=index), blobs=object()
+            content=SimpleNamespace(backend=backend, index=index, claim_object=claim_object),
+            blobs=object(),
         ),
         refs=SimpleNamespace(pool=object()),
         config=SimpleNamespace(sweep_grace=86400),
     )
     before = datetime.now(UTC)
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
-    [(cutoff, recorded)] = calls
+    [(cutoff, recorded, claim)] = calls
+    # An object a live save staged stays: the sweep removes only what the content
+    # store's claim frees (#7477).
+    assert claim is claim_object
     ttl = timedelta(seconds=86400)
     assert before - ttl <= cutoff <= datetime.now(UTC) - ttl
     assert recorded("p/piece/kept") is True and recorded("p/piece/gone") is False
@@ -256,7 +281,11 @@ class _Unreachable(BambuddyContentBackend):
         pass
 
     async def sweep_unrecorded(
-        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool] | None = None,
+        claim: Any = None,
     ) -> list[str]:
         raise OSError("Bambuddy is down")
 
@@ -268,7 +297,11 @@ class _Reachable(BambuddyContentBackend):
         self.swept = 0
 
     async def sweep_unrecorded(
-        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool] | None = None,
+        claim: Any = None,
     ) -> list[str]:
         self.swept += 1
         return []
@@ -291,7 +324,8 @@ async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
     cache = _Cache()
     state = SimpleNamespace(
         store=SimpleNamespace(
-            content=SimpleNamespace(backend=_Unreachable(), index=_Index()), blobs=cache
+            content=SimpleNamespace(backend=_Unreachable(), index=_Index(), claim_object=None),
+            blobs=cache,
         ),
         refs=object(),
         config=SimpleNamespace(sweep_grace=86400),
@@ -314,7 +348,8 @@ class _FailingCache(CachedBlobStore):
 def _sweep_state(cache: CachedBlobStore, backend: Any) -> SimpleNamespace:
     return SimpleNamespace(
         store=SimpleNamespace(
-            content=SimpleNamespace(backend=backend, index=_Index()), blobs=cache
+            content=SimpleNamespace(backend=backend, index=_Index(), claim_object=None),
+            blobs=cache,
         ),
         refs=object(),
         config=SimpleNamespace(sweep_grace=86400),
@@ -366,3 +401,83 @@ async def test_a_cancelled_sweep_stays_cancelled_when_the_trim_also_fails(
         await main._sweep_blobs_logged(_sweep_state(_FailingCache(), _Reachable()))  # type: ignore[arg-type]
     logged = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
     assert isinstance(logged["could not trim the worker cache"], RuntimeError)
+
+
+async def test_on_local_the_blob_sweep_sweeps_the_outputs_unrecorded_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477 on `local`: the outputs have a content store of their own (#7257, plan D7),
+    whose objects a save that died before its commit left with no row. The sweep removes
+    them past `sweep_grace`, by that store's index and claim, as on S3."""
+    calls: list[tuple[datetime, Callable[[str], bool], Any]] = []
+
+    class _Outputs:
+        backend = "local"
+
+        async def sweep_unrecorded(
+            self, *, cutoff: datetime, recorded: Callable[[str], bool], claim: Any = None
+        ) -> int:
+            calls.append((cutoff, recorded, claim))
+            return 1
+
+    def claim_object(backend_id: str) -> Any:
+        raise AssertionError("not called by this fake sweep")
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(main, "sweep_blobs", lambda blobs, refs, *, grace: [])
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    index = _Index(frozenset({("local", "output/kept")}))
+    state = SimpleNamespace(
+        store=SimpleNamespace(content=None),
+        blobs=object(),
+        refs=SimpleNamespace(pool=object()),
+        config=SimpleNamespace(sweep_grace=86400),
+        outputs=SimpleNamespace(
+            bytes=SimpleNamespace(
+                content=SimpleNamespace(backend=_Outputs(), index=index, claim_object=claim_object)
+            )
+        ),
+    )
+    before = datetime.now(UTC)
+    await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
+    [(cutoff, recorded, claim)] = calls
+    assert claim is claim_object
+    assert recorded("output/kept") and not recorded("output/gone")
+    ttl = timedelta(seconds=86400)
+    assert before - ttl <= cutoff <= datetime.now(UTC) - ttl
+
+
+async def test_the_blob_sweep_sweeps_no_other_local_content_store_for_unrecorded_objects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """#7756 review: `LocalContentBackend` is an `UnrecordedSweeper` for the outputs' own
+    store on `local` only. A shared content store over one (none in prod) is not swept
+    for unrecorded objects: its plain puts take no stage hold."""
+    calls: list[datetime] = []
+
+    async def sweep_unrecorded(self: LocalContentBackend, *, cutoff: datetime, **_: Any) -> int:
+        calls.append(cutoff)
+        return 1
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(LocalContentBackend, "sweep_unrecorded", sweep_unrecorded)
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    monkeypatch.setattr(main, "GeometryIndex", _Geometry)
+    state = SimpleNamespace(
+        store=SimpleNamespace(
+            content=SimpleNamespace(
+                backend=LocalContentBackend(tmp_path / "shared"),
+                index=_Index(),
+                claim_object=None,
+            ),
+            blobs=object(),
+        ),
+        refs=SimpleNamespace(pool=object()),
+        config=SimpleNamespace(sweep_grace=86400),
+    )
+    await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
+    assert calls == []

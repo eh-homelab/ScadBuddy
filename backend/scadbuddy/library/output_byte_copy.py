@@ -40,8 +40,9 @@ there (phase 1's rule): an outputs folder that is missing or lists no slug folde
 rows exist makes the run write nothing, and an output whose folder is missing gets no
 write. Before any upload, the
 bytes and blobs still to copy are checked against the store's caps; past one, the run
-is ``refused`` and uploads nothing. On the `local` store (no content store, Ruling R1)
-and on `bambuddy` (spec §6.4) every run is refused.
+is ``refused`` and uploads nothing. On `bambuddy` (spec §6.4), and with no content store
+at all, every run is refused. On the `local` store the API passes the outputs' own
+content store (#7257, plan D7), so the run copies there.
 
 A run has ``finished_at`` only when nothing was refused, failed or incomplete and it was
 not stopped. One replica copies at a time, under a session advisory lock on a
@@ -76,7 +77,9 @@ from scadbuddy.library.output_bytes import (
     OutputFileNameError,
     put_names,
 )
+from scadbuddy.library.output_rows import BYTES_LOCK as BYTES_LOCK
 from scadbuddy.library.output_rows import (
+    CUT_OVER_NOTHING_TO_COPY,
     ByteWrite,
     OutputBlobs,
     OutputFileBlob,
@@ -92,9 +95,6 @@ from scadbuddy.store.content import ContentStore
 
 logger = logging.getLogger(__name__)
 
-#: The advisory lock's name: ``pg_try_advisory_lock(hashtextextended(BYTES_LOCK, 0))``.
-BYTES_LOCK = "scadbuddy:outputs:bytes"
-
 #: The lock connection's ``application_name``, as a pool's name is its connections'.
 LOCK_APPLICATION = "scadbuddy-output-byte-copy"
 #: Seconds to connect for the lock: a database that cannot be reached fails the run.
@@ -103,7 +103,7 @@ LOCK_CONNECT_TIMEOUT = 10
 #: Outputs per transaction: prod commits take 1-2 s, so one commit per output is too slow.
 BATCH_BYTES = 50
 
-REFUSED_LOCAL = "the local store has no blob store; output bytes stay on the share"
+REFUSED_NO_CONTENT = "there is no content store; output bytes stay on the share"
 REFUSED_BAMBUDDY = "outputs do not go into Bambuddy's library"
 #: A blob the backend does not hold whole when read back.
 NOT_WHOLE = "the blob is not whole"
@@ -309,8 +309,17 @@ async def copy_output_bytes(
     whole run (up to `workflows.housekeeping.OUTPUT_BYTES_TIMEOUT`, 30 minutes, in the
     sweep; with no bound at a start). It is not taken from the API's pool, so the pool's
     other users keep every connection during a run. It is autocommit, so it is never
-    idle in a transaction and holds no row lock. Closing the connection ends its
-    session, which releases the lock, also when the run fails."""
+    idle in a transaction and holds no row lock. The run releases the lock
+    (`pg_advisory_unlock`) before it returns, also when it fails, so
+    `OutputRows.try_cut_over` called next finds it free (#7769). Closing the connection
+    releases it too when that unlock could not run.
+
+    After the cut-over mark (#7257, plan D4) it does nothing and returns ``None``. It
+    checks the mark before the lock and again once it holds the lock, as the mark may
+    be written between the two."""
+    if await asyncio.to_thread(rows.cut_over):
+        logger.info(CUT_OVER_NOTHING_TO_COPY)
+        return None
     own = make_conninfo(
         conninfo,
         application_name=LOCK_APPLICATION,
@@ -325,7 +334,26 @@ async def copy_output_bytes(
         if got is None or not got[0]:
             logger.info("another replica copies the outputs' bytes; this one does not")
             return None
-        return await _Copy(store, rows, content, stop).run()
+        try:
+            # Again under the lock: a byte run that ended meanwhile may have written the mark.
+            if await asyncio.to_thread(rows.cut_over):
+                logger.info(CUT_OVER_NOTHING_TO_COPY)
+                return None
+            return await _Copy(store, rows, content, stop).run()
+        finally:
+            # Released here, not by the close: the server frees a closed session's locks a
+            # moment later, and `_try_cut_over`, called next, checks both (#7769).
+            # A dropped connection's unlock fails; the server freed the lock with the
+            # session, and the run's own outcome must come through.
+            try:
+                await lock.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (BYTES_LOCK,)
+                )
+            except psycopg.Error as e:
+                logger.warning(
+                    "the byte copy's lock could not be released; its closed session frees it",
+                    extra={"error": type(e).__name__},
+                )
 
 
 class _FailedError(Exception):
@@ -366,7 +394,7 @@ class _Copy:
         ended = False
         try:
             if self.content is None:
-                result.refused = REFUSED_LOCAL
+                result.refused = REFUSED_NO_CONTENT
                 return result
             if self.content.name == "bambuddy":
                 result.refused = REFUSED_BAMBUDDY

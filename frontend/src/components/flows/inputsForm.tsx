@@ -12,6 +12,12 @@ interface InputsOptions {
   answer?: boolean
   /** What the server said of the values sent; what this form says of a field comes first. */
   problems?: readonly AnswerProblem[]
+  /** #5701 — what each field starts at, by name, in place of its schema's default. */
+  values?: Readonly<Record<string, unknown>>
+  /** #5701 — false leaves each field's own name out of its label. Default true. */
+  names?: boolean
+  /** #5701 — called at each edit. */
+  onChange?: () => void
 }
 
 /**
@@ -40,8 +46,10 @@ function placed(fields: InputField[], sent: InputValues, problems: readonly Answ
  * the browser could not read (a date with no time), which are never sent as blank. `rest`
  * are the problems that are no field's.
  */
-export function useInputs(fields: InputField[], { answer = false, problems = [] }: InputsOptions = {}) {
-  const [values, setValues] = useState<InputValues>(() => initialValues(fields))
+export function useInputs(fields: InputField[], { answer = false, problems = [], values: starts, names = true, onChange }: InputsOptions = {}) {
+  const [values, setValues] = useState<InputValues>(() =>
+    initialValues(starts ? fields.map((field) => ({ ...field, default: starts[field.name] })) : fields),
+  )
   const [sent, setSent] = useState(values)
   const [errors, setErrors] = useState<Record<string, string>>(noErrors)
   const parse = (unread: readonly string[] = []): Record<string, unknown> | null => {
@@ -59,7 +67,11 @@ export function useInputs(fields: InputField[], { answer = false, problems = [] 
       value={values[field.name] ?? ''}
       error={errors[field.name] ?? said[field.name]}
       answer={answer}
-      onChange={(next) => setValues((now) => ({ ...now, [field.name]: next }))}
+      names={names}
+      onChange={(next) => {
+        onChange?.()
+        setValues((now) => ({ ...now, [field.name]: next }))
+      }}
     />
   ))
   return { parse, rendered, errors, rest }
@@ -81,12 +93,14 @@ function Field({
   value,
   error,
   answer,
+  names,
   onChange,
 }: {
   field: InputField
   value: string | boolean
   error?: string
   answer: boolean
+  names: boolean
   onChange: (next: string | boolean) => void
 }) {
   const id = useId()
@@ -112,7 +126,7 @@ function Field({
     <span className="min-w-0 break-words">
       {field.label}
       {required && <span className="text-destructive"> *</span>}
-      {field.label !== field.name && (
+      {names && field.label !== field.name && (
         <code className="ml-1.5 font-mono text-[11px] font-normal text-muted-foreground">{field.name}</code>
       )}
     </span>

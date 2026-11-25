@@ -175,7 +175,7 @@ class SessionRow(BaseModel):
     scope: dict[str, Any]
     browser: dict[str, Any] | None
     parent_id: str | None
-    runtime: str | None
+    runtime: str
     max_turns: int
     budget_usd: float
     cost_usd: float
@@ -315,6 +315,7 @@ class NewSession(_Body):
     tags: list[Annotated[str, Field(max_length=TAG_MAX)]] = Field(max_length=TAGS_MAX)
     scope: dict[str, Any]
     parent_id: str | None = Field(default=None, pattern=UUID_PATTERN)
+    #: Absent or null is ``unified``: an older agent pod may send null during a roll (#7323).
     runtime: Literal["durable", "unified"] | None = None
     max_turns: int = Field(ge=1, le=MAX_TURNS_MAX)
     budget_usd: float = Field(gt=0, le=BUDGET_MAX_USD)
@@ -348,7 +349,7 @@ async def create_session(body: NewSession, state: StateDep) -> OneSession:
             tags=body.tags,
             scope=body.scope,
             parent_id=body.parent_id,
-            runtime=body.runtime,
+            runtime=body.runtime or "unified",
             max_turns=body.max_turns,
             budget_usd=body.budget_usd,
             budget_of=body.budget_of,

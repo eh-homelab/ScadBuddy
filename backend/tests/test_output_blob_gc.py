@@ -5,8 +5,11 @@ live output's blobs stay, and the hold reaper never releases a live output's hol
 
 from __future__ import annotations
 
+import asyncio
+import shutil
 from collections.abc import AsyncGenerator, Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +31,7 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.store.backends import UnrecordedSweeper
 from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.index import Pool
 from scadbuddy.store.refs import BlobRefs
@@ -202,30 +206,46 @@ async def test_failed_save_blobs_are_swept(
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """#7477: a failed save writes no index row and removes the objects it uploaded at
+    once. When that remove fails too, the objects stay with no row, and the unrecorded
+    sweep removes them past its grace: on `local` too, whose outputs have a content store
+    of their own (#7257)."""
     store, job, files = await _with_files(tmp_path)
     _wire(store, projection, content)
+    uploaded: list[str] = []
+    upload = content.backend.upload
+
+    async def recorded(*args: Any, **kwargs: Any) -> str:
+        backend_id = await upload(*args, **kwargs)
+        uploaded.append(backend_id)
+        return backend_id
 
     def failing(*args: Any, **kwargs: Any) -> Any:
         raise OSError("the commit failed")
 
-    async def no_delete(key: str) -> None:
+    async def no_remove(backend_id: str) -> None:
         raise OSError("the store went away")
 
-    # The failed save deletes its own blobs at once; when that fails too, the sweep
-    # removes them.
+    monkeypatch.setattr(content.backend, "upload", recorded)
     monkeypatch.setattr(store, "_commit", failing)
-    monkeypatch.setattr(content, "delete", no_delete)
+    monkeypatch.setattr(content.backend, "remove", no_remove)
     output_id = "e" * 32
     with pytest.raises(OSError, match="the commit failed"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
     monkeypatch.undo()
-    keys = _keys(pool, output_id)
-    assert any(key.startswith(f"output-{output_id}-model-save-") for key in keys)
-    assert f"output-{output_id}-model" not in keys
-    assert _holds(pool, output_id) == set()
-    await sweep_content(content, BlobRefs(pool), grace=0)
+    assert uploaded
     assert _keys(pool, output_id) == {}
-    for backend_id in keys.values():
+    assert _holds(pool, output_id) == set()
+    for backend_id in uploaded:
+        assert await content.backend.exists(backend_id)
+    backend = content.backend
+    assert isinstance(backend, UnrecordedSweeper)
+    await backend.sweep_unrecorded(
+        cutoff=datetime.now(UTC) + timedelta(minutes=1),
+        recorded=partial(content.index.shares_backend_id, content.name),
+        claim=content.claim_object,
+    )
+    for backend_id in uploaded:
         assert not await content.backend.exists(backend_id)
 
 
@@ -284,3 +304,78 @@ async def test_reaper_keeps_folder_of_output_with_row_and_no_holds(
     (directory / META_NAME).unlink()
     assert reap_orphan_holds(BlobRefs(pool), store, grace=timedelta(0)) == 0
     assert directory.is_dir()
+
+
+def _mark(pool: Pool, rows: OutputRows) -> None:
+    """The cut-over mark (#7257), over a row copy run and a byte run that finished."""
+    with pool.connection() as conn:
+        conn.execute("INSERT INTO output_copy_runs (finished_at) VALUES (clock_timestamp())")
+        conn.execute("INSERT INTO output_byte_runs (finished_at) VALUES (clock_timestamp())")
+    assert rows.try_cut_over() is True
+
+
+async def test_reaper_after_cut_over_reads_rows_only(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    """#7257 plan A5: after the mark the reaper scans no folder and reads no
+    ``output_hold_slugs`` (release B drops it while release A pods run). Past the grace, a
+    deleted output's holds go; a live output's holds and a claimed id's holds stay."""
+    store, job, files = await _with_files(tmp_path)
+    _wire(store, projection, content)
+    rows = store.rows
+    assert rows is not None
+    live = await store.save(job, name="live", files_dir=files)
+    gone = await store.save(job, name="gone")
+    refs = BlobRefs(pool)
+    live_holds = _holds(pool, live.id)
+    assert live_holds
+    _mark(pool, rows)
+    await asyncio.to_thread(store.delete, gone.id)
+    # A hold taken after the delete's release (a byte copy's or a thumbnail's).
+    refs.add("piece-late", OUTPUT_HOLDER, gone.id)
+    claimed = "c" * 32
+    assert rows.claim(claimed, live.slug)
+    refs.add("piece-claimed", OUTPUT_HOLDER, claimed)
+    for output_id in (live.id, gone.id, claimed):
+        _age_holds(pool, output_id)
+    with pool.connection() as conn:
+        conn.execute("DROP TABLE output_hold_slugs")
+    # Any scan of the share raises: the outputs folder is a plain file.
+    shutil.rmtree(store.paths.outputs)
+    store.paths.outputs.write_text("not a folder")
+    assert reap_orphan_holds(refs, store, grace=timedelta(hours=1)) == 1
+    assert _holds(pool, gone.id) == set()
+    assert _holds(pool, live.id) == live_holds
+    assert _holds(pool, claimed) == {"piece-claimed"}
+
+
+async def test_reaper_after_cut_over_keeps_young_holds_and_drops_stale_claims(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    """#7257 A5 review M1. A phase 2 pod's save takes no claim: its young holds stay
+    while they are younger than the grace. A claim older than the grace no longer
+    protects its old holds: they go with it."""
+    store, job, _ = await _with_files(tmp_path)
+    _wire(store, projection, content)
+    rows = store.rows
+    assert rows is not None
+    await store.save(job, name="live")
+    _mark(pool, rows)
+    refs = BlobRefs(pool)
+    unclaimed = "d" * 32
+    refs.add("piece-phase-2", OUTPUT_HOLDER, unclaimed)
+    stale = "e" * 32
+    assert rows.claim(stale, job.slug)
+    refs.add("piece-stale", OUTPUT_HOLDER, stale)
+    _age_holds(pool, stale)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE output_claims SET claimed_at = now() - interval '1 day' WHERE output_id = %s",
+            (stale,),
+        )
+    assert reap_orphan_holds(refs, store, grace=timedelta(hours=1)) == 1
+    assert _holds(pool, unclaimed) == {"piece-phase-2"}
+    assert _holds(pool, stale) == set()
+    with pool.connection() as conn:
+        left = conn.execute("SELECT 1 FROM output_claims WHERE output_id = %s", (stale,))
+        assert left.fetchone() is None

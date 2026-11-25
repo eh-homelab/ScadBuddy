@@ -341,15 +341,13 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
   })
 
   // spec §6.6 "Two reads, two sources": the badge's read is one Postgres read of the
-  // classic stores (rows an earlier release left) and the durable projection; a durable
-  // entry past its timer is `expiring`.
-  it('lists durable entries from the projection beside classic ones, never their input, and marks an overdue one expiring', async () => {
+  // approvals' store (MCP prepares) and the durable projection; a durable entry past its
+  // timer is `expiring`.
+  it('lists durable entries from the projection beside MCP prepares, never their input, and marks an overdue one expiring', async () => {
     const { m, session, turn, ids, post } = await setUp()
-    // A classic approval an earlier release left, on a session of its own.
-    const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
-    await db.sql`UPDATE ai_sessions SET runtime = NULL, status = 'waiting_approval' WHERE id = ${old.id}`
-    const classic = await m.approvals.create({
-      sessionId: old.id,
+    // An MCP prepare (#251), which has no session.
+    const prepared = await m.approvals.create({
+      sessionId: null,
       turnId: null,
       toolUseId: 'toolu_old',
       tool: 'mcp__stub__print',
@@ -375,7 +373,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     expect(live).not.toHaveProperty('expiring')
     expect(mine.find((e) => e.id === `durable:${durable}:run-1:toolu_late`)).toMatchObject({ expiring: true })
     expect(entries.filter((e) => e.session_id === session.id)).toHaveLength(3)
-    expect(entries.filter((e) => e.session_id === old.id).map((e) => e.id)).toEqual([`approval:${classic.id}`])
+    expect(entries.filter((e) => e.session_id === null).map((e) => e.id)).toEqual([`approval:${prepared.id}`])
 
     // One session's entries: its record's, as the aggregate lists them.
     const app = createApp({

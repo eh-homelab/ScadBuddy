@@ -1,5 +1,5 @@
-"""The catalogue thumbnail's `ETag` once a copy run has finished (#7317 phase 2, plan
-Task 9): it names the source the template's row points at, so a matching
+"""The catalogue thumbnail's `ETag` (#7317 phase 2, plan Task 9; phase 3: from the
+start, which copies first): it names the source the template's row points at, so a matching
 `If-None-Match` is a 304 with no file, archive or preview read. A 200 tags what it
 read (plan decision 12)."""
 
@@ -82,7 +82,7 @@ def test_own_cover_etag_is_the_hash_of_its_bytes(world: TestClient) -> None:
 
     after = _thumbnail(world, "widget")
     assert (after.status_code, after.content) == (200, PNG_BYTES)
-    # The same value as before the copy, so the clients' copies stay valid.
+    # The same value after a copy, so the clients' copies stay valid.
     assert after.headers["etag"] == before.headers["etag"]
     assert after.headers["cache-control"] == before.headers["cache-control"]
 
@@ -185,7 +185,7 @@ def test_a_cover_the_row_does_not_know_yet_is_served(
     world: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An image added while its row's refresh failed (the row lags its media rows,
-    Task 8 review M1) is the thumbnail, from its files, as before the copy."""
+    Task 8 review M1) is the thumbnail, from its files."""
     _copy(world)
     _refresh_fails(monkeypatch)
     image = PNG_BYTES + b" plain"

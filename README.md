@@ -244,7 +244,10 @@ on shutdown.
   you would Bambuddy's slicer sidecar, or switch sign-in on and set the mode to
   `enforce` ("Signing in" below) before it is reachable by anyone you do not trust.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, downloaded fonts and caches. Back up the volume. Settings and saved presets are in the
+  outputs, downloaded fonts and caches. Back up the volume. A saved output's record is
+  in the database and its bytes are in the blob store (on the `bambuddy` store they stay
+  files); on the `local` store they are in `/data/output-blobs/` (#7257). The folders under `/data/outputs/` stay as a fallback
+  until the cut-over's second release. Settings and saved presets are in the
   database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
   (it used to be a 0600 file on the volume), so it is in every database backup;
   supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
@@ -457,11 +460,15 @@ on shutdown.
     the settings and the jobs each had a pool of this size, so twice it); the print
     worker has no pool (#5298). Watch `scadbuddy_db_pool_requests_waiting{pool="scadbuddy-api"}` for a pool
     too small. The schema is created and migrated at startup.
-    An API process's pools hold at most that plus 14 connections: the event bus's 2,
+    An API process's pools hold at most that plus 18 connections: the event bus's 2,
     the features' shared `scadbuddy-rows` 6, `scadbuddy-auth` 2, `scadbuddy-rack-usage`
-    2, the `LISTEN` connection (#5226) and `scadbuddy-preview-follows`, the one
+    2, the `LISTEN` connection (#5226), `scadbuddy-preview-follows`, the one
     connection that holds the print dialog's background-slice follow locks, so that one
-    replica follows each slice (#6158, `preview_follow/claims.py`). On top of the pools come short-lived
+    replica follows each slice (#6158, `preview_follow/claims.py`), and
+    `scadbuddy-stage-locks` 4, where a saving output holds its objects' locks from its
+    first upload to its commit (#7477; at most 3 saves upload at once per pod, the rest
+    wait) and a removal holds an object's exclusive lock through the backend's remove
+    (one at a time per pod, on the fourth connection, #7756 review). On top of the pools come short-lived
     connections of their own, one per lock or claim held at that moment: the models and
     flows repository write locks (`library/repo_lock.py`), an order's project lock
     (`orders/store.py`), a storefront publish's lock (at most 2 at once,
@@ -1100,6 +1107,12 @@ writes its row: the next housekeeping sweep (every `asset_sweep_interval`), or t
 API start. A rollback to such a build makes the same window. To end it sooner, restart
 one API pod once the roll-out is done: its start runs the copy. Then check
 `GET /api/v1/outputs/copy-status` ([Saved outputs](docs/architecture/data.md#saved-outputs)).
+Both copies stop at the cut-over mark (#7257), which `copy-status` names as
+`cut_over_at`; after the roll-out of its first release, check that `cut_over_at` is set
+and `bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
+Check too that the last row copy run (`copy-status`'s `started_at`) started after the last
+pod of a build before phase 2 (#7256) went: a start writes the mark before it runs the row
+copy, so a write such a pod made in the files only after that run is never copied.
 
 ### Render worker (#424)
 

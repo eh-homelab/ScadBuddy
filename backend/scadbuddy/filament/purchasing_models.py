@@ -182,6 +182,9 @@ class InvoiceLineIn(_In):
 
     @model_validator(mode="after")
     def _within_bounds(self) -> InvoiceLineIn:
+        if self.proposed_type is not None and self.proposed_type.properties is not None:
+            # Confirm makes the type through `create_on`, which writes no properties (#7703).
+            raise ValueError("a proposed type takes no properties; set them on the type")
         if len(self.update_spool_ids) > self.quantity:
             raise ValueError("update_spool_ids names more spools than the line's quantity")
         subtotal = self.line_subtotal

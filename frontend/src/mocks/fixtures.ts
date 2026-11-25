@@ -23,6 +23,7 @@ import type {
   TimelapseFrames,
   PrintProgress,
   PrintSummary,
+  RevisionSchema,
   Settings,
   BootstrapValue,
 } from '../api/types'
@@ -353,6 +354,9 @@ export const UI_DEMO_UI_VERSION = commit('e1d2c3b4a5f0')
 export const MAZE_SLUG = 'builtin:maze-puzzle'
 /** #1737 — the bundled dollhouse-kit, whose designer takes the whole page (slot `page`). */
 export const DOLLHOUSE_SLUG = 'builtin:dollhouse-kit'
+/** The commit the dollhouse's record is at, and the one before it. */
+export const DOLLHOUSE_VERSION = commit('7d6c5b4a3f2e')
+const DOLLHOUSE_FIRST = commit('1e2d3c4b5a6f')
 
 /** #5376 — a template with the bookmark's eight parameter groups. */
 export const BOOKMARK_SLUG = 'bookmark'
@@ -512,9 +516,10 @@ const modelsSeed: ModelSummary[] = [
     upstream: null,
     has_readme: false,
     origin: 'builtin',
-    version: commit('7d6c5b4a3f2e'),
+    version: DOLLHOUSE_VERSION,
     ui_version: commit('6c5b4a3f2e7d'),
     ui: { module: 'ui/index.js', slot: 'page', api: 1 },
+    inputs_version: 1,
   },
   {
     slug: BOOKMARK_SLUG,
@@ -551,6 +556,41 @@ const modelsSeed: ModelSummary[] = [
   },
 ]
 
+/**
+ * #5701 — what each pipeline template declares (`RevisionSchema.pipeline` and
+ * `pipeline_params`): the dollhouse's, as `models/dollhouse-kit` has it.
+ */
+export const pipelines: Record<string, { declared: NonNullable<RevisionSchema['pipeline']>; sets: string[]; fresh: Record<string, unknown> }> = {
+  [DOLLHOUSE_SLUG]: {
+    declared: {
+      inputs_version: 1,
+      inputs: {
+        type: 'object',
+        properties: {
+          house: {
+            type: 'object',
+            title: 'House',
+            properties: {
+              cols: { type: 'integer', title: 'Modules wide', minimum: 1, maximum: 4 },
+              rows: { type: 'integer', title: 'Modules deep', minimum: 1, maximum: 3 },
+              storeys: { type: 'integer', title: 'Storeys', minimum: 1, maximum: 3 },
+              windows: { type: 'integer', title: 'Windows per storey', minimum: 0, maximum: 14 },
+            },
+            required: ['cols', 'rows', 'storeys', 'windows'],
+            additionalProperties: false,
+          },
+        },
+        required: ['house'],
+        additionalProperties: false,
+      },
+      fault: '',
+    },
+    sets: ['piece', 'course', 'width_units', 'depth_units', 'preview'],
+    // What its `migrate` adds to inputs of version 0.
+    fresh: { house: { cols: 2, rows: 1, storeys: 1, windows: 2 } },
+  },
+}
+
 /** Phase 4 fields (spec 2026-09-27): inputs_version: 0. */
 export const models: ModelSummary[] = modelsSeed.map((entry) => ({ inputs_version: 0, ...entry }))
 
@@ -574,6 +614,26 @@ export const versionIds = {
 }
 
 export const versions: Record<string, ModelVersion[]> = {
+  [DOLLHOUSE_SLUG]: [
+    {
+      commit: DOLLHOUSE_VERSION,
+      short: DOLLHOUSE_VERSION.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-08-15T09:00:00Z',
+      message: 'Sync built-in templates',
+      files: [{ status: 'M', path: 'pipeline/pipeline.py' }],
+      current: true,
+    },
+    {
+      commit: DOLLHOUSE_FIRST,
+      short: DOLLHOUSE_FIRST.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-08-02T09:00:00Z',
+      message: 'Sync built-in templates',
+      files: [{ status: 'A', path: 'model.scad' }],
+      current: false,
+    },
+  ],
   'gridfinity-bin': [
     {
       commit: versionIds.binTall,
@@ -1090,6 +1150,8 @@ export const settingsDefaults = {
   filament_sync: { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' },
   filament_low_stock_pct: 20,
   filament_default_cost_per_kg: null,
+  // #7682 — the drift notice threshold.
+  filament_weighing_drift_notice_g: 10,
   // #7156 — the drying defaults; null offers none.
   filament_drying_temp_c: null,
   filament_drying_hours: null,

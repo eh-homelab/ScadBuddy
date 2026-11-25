@@ -26,7 +26,9 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.models import LoadRequest
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.verify_pipeline import declared_inputs_failures
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
+from tests.support.template_rows import open_template_rows
 
 PIPELINE = "INPUTS_VERSION = 3\n\nasync def run(ctx, inputs):\n    return None\n"
 
@@ -131,13 +133,14 @@ def test_a_bad_inputs_or_sets_params_costs_only_the_pipeline(bad: dict[str, obje
     assert meta.pipeline_error is not None and next(iter(bad)) in meta.pipeline_error
 
 
-def test_writing_model_json_keeps_a_malformed_pipeline(tmp_path: Path) -> None:
+def test_writing_model_json_keeps_a_malformed_pipeline(tmp_path: Path, pg_pool: PgPool) -> None:
     from scadbuddy.library.catalogue import Catalogue, ModelPatch
     from scadbuddy.render.solids import WRAPPER_PREFIX
 
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
     catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
     bad = {"module": "../x.py", "api": 1}
     catalogue.create(
         "demo", "cube();\n", ModelMeta.model_validate({"name": "Demo", "pipeline": bad})

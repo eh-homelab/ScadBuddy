@@ -65,7 +65,7 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1200')
     await screen.findByRole('group', { name: 'Empty spool weight from this new spool' })
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
-    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1020, source: 'scale' }]))
+    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1020, source: 'scale', reading_g: 1200 }]))
     expect(accepts).toEqual([])
     expect((await listCatalog('insert-types')).find((one) => one.id === IT.CARDBOARD)?.empty_weight_g).toBe(180)
   })
@@ -81,7 +81,7 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     expect(within(panel.querySelector('dl')!).getByText('180 g, a placeholder')).toBeInTheDocument()
     expect(within(panel).getByRole('checkbox', { name: /Save 200 g/ })).toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
-    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1000, source: 'scale' }]))
+    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1000, source: 'scale', reading_g: 1200 }]))
     expect(accepts.map((one) => one.body)).toEqual([{ reading_g: 1200 }])
     expect((await getSpool(spoolId(9))).grams_left).toBe(1000)
     const insert = (await listCatalog('insert-types')).find((one) => one.id === IT.CARDBOARD)
@@ -97,7 +97,7 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '1210')
     await user.click(await screen.findByRole('checkbox', { name: /Save 210 g/ }))
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
-    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1000, source: 'scale' }]))
+    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 1000, source: 'scale', reading_g: 1210 }]))
     expect(accepts.map((one) => one.body)).toEqual([{ reading_g: 1210 }])
   })
 
@@ -112,7 +112,7 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     await waitFor(() => expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled())
     expect(screen.queryByRole('group', { name: 'Empty spool weight from this new spool' })).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
-    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 650, source: 'scale' }]))
+    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', grams: 650, source: 'scale', reading_g: 900 }]))
     expect(accepts).toEqual([])
   })
 
@@ -128,5 +128,36 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     await screen.findByRole('group', { name: 'Empty spool weight from this new spool' })
     expect(button).toBeEnabled()
     expect(events).toEqual([])
+  })
+})
+
+describe('the weigh form asks what is up when a new spool reads under its label (#7683)', () => {
+  const GROUP = 'The reading is 100 g under the label weight. What is up?'
+
+  it('shows the three readings with the default checked and records the weighing with it', async () => {
+    const events = recorded('POST', /\/events$/)
+    const { user } = open(9)
+    await heading(9)
+    await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '900')
+    const group = await screen.findByRole('group', { name: GROUP })
+    expect(within(group).getByRole('radio', { name: 'The scale was tared on the empty spool: 900 g of filament' })).toBeChecked()
+    expect(within(group).getByRole('radio', { name: 'The spool is short: 720 g of filament, 100 g under its label' })).not.toBeChecked()
+    expect(within(group).getByRole('radio', { name: 'The label weight is wrong: 720 g of filament, and the label becomes 720 g' })).not.toBeChecked()
+    expect(screen.getByText('900 g of filament.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Record weighing' }))
+    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'tared' }]))
+    expect((await getSpool(spoolId(9))).grams_left).toBe(900)
+  })
+
+  it('records the reading the person chose', async () => {
+    const events = recorded('POST', /\/events$/)
+    const { user } = open(9)
+    await heading(9)
+    await user.type(screen.getByLabelText('Scale reading, with the spool (g)'), '900')
+    await user.click(await screen.findByRole('radio', { name: /The spool is short/ }))
+    expect(screen.getByText('720 g of filament.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Record weighing' }))
+    await waitFor(() => expect(events.map((one) => one.body)).toEqual([{ kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' }]))
+    expect(await getSpool(spoolId(9))).toMatchObject({ grams_left: 720, added_full: false })
   })
 })

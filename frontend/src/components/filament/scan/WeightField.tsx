@@ -1,8 +1,10 @@
 import { ScaleIcon } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { ApiError } from '../../../api/client'
-import { addSpoolEvent, getSpool, listCatalog, type Spool } from '../../../api/filament'
+import { addSpoolEvent, getSpool, insertWeightOffer, listCatalog, type Spool } from '../../../api/filament'
+import { BelowLabelChoice, type Resolution } from '../BelowLabelChoice'
 import { DECIMAL } from '../spoolWeight'
+import { useInsertWeightCheck } from '../useInsertWeightCheck'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
@@ -22,6 +24,8 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [saving, setSaving] = useState(false)
+  // #7683: a new spool read under its label weight: the person says what is up first.
+  const [choice, setChoice] = useState<{ reading: number; resolution: Resolution } | null>(null)
 
   useEffect(() => {
     if (!insertId) return
@@ -35,11 +39,13 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
     }
   }, [insertId])
 
-  if (empty === undefined) return <p className="text-muted-foreground">Loading…</p>
-
   const typed = text.trim()
   const value = DECIMAL.test(typed) ? Number(typed) : null
-  const net = value === null ? null : empty === null ? value : value - empty
+  const { check, pending } = useInsertWeightCheck(empty != null ? spool.id : undefined, value !== null && value > 0 ? value : null)
+  const belowLabel = check?.reason === 'below_label' ? check : null
+  const resolution: Resolution | null = belowLabel ? (choice?.reading === value ? choice.resolution : (belowLabel.default ?? 'tared')) : null
+  const chosen = belowLabel?.resolutions.find((one) => one.kind === resolution) ?? null
+  const net = chosen ? chosen.filament_g : value === null ? null : empty === null || empty === undefined ? value : value - empty
 
   async function save() {
     setSaved(false)
@@ -47,19 +53,35 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
       setError('Type the weight first.')
       return
     }
-    if (net === null) {
+    if (value === null) {
       setError('Enter the weight in grams, such as 1243.')
-      return
-    }
-    if (net < 0) {
-      setError('The weight is less than the empty spool.')
       return
     }
     setError(null)
     setSaving(true)
     try {
-      await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', grams: Math.round(net) })
+      // A save sent before the hook's check answered reads the check itself (#7683). When
+      // that check asks what is up and the person has not seen the question yet, nothing
+      // is booked: the hook's answer renders the choice, and the next Save takes it.
+      const below = pending && empty !== null ? await insertWeightOffer(spool.id, value).then((one) => (one.reason === 'below_label' ? one : null), () => null) : belowLabel
+      if (pending && below && choice?.reading !== value) return
+      const picked: Resolution | null = below ? (choice?.reading === value ? choice.resolution : (below.default ?? 'tared')) : null
+      const filament = below ? (below.resolutions.find((one) => one.kind === picked)?.filament_g ?? value) : empty == null ? value : value - empty
+      if (filament < 0) {
+        setError('The weight is less than the empty spool.')
+        return
+      }
+      // #7682: with an empty weight the reading goes alone and the server takes the insert off
+      // it, so the event keeps its breakdown and a decimal reading stays the insert's.
+      if (below && picked) {
+        await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', reading_g: value, resolution: picked })
+        // The spool is no longer new: the reading goes, so the cached question goes with it.
+        setText('')
+      } else {
+        await addSpoolEvent(spool.id, { kind: 'weighed', source: 'person', ...(empty != null ? { reading_g: value } : { grams: Math.round(filament) }) })
+      }
       setSaved(true)
+      setChoice(null)
       // The card shows the grams left: the spool read again carries the new ones.
       getSpool(spool.id).then(
         (fresh) => onSaved?.(fresh),
@@ -71,6 +93,8 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
       setSaving(false)
     }
   }
+
+  if (empty === undefined) return <p className="text-muted-foreground">Loading…</p>
 
   return (
     <form
@@ -100,7 +124,8 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
           <ScaleIcon /> Save weight
         </Button>
       </div>
-      {empty !== null && (
+      {belowLabel && resolution && <BelowLabelChoice check={belowLabel} value={resolution} disabled={saving} onChange={(next) => value !== null && setChoice({ reading: value, resolution: next })} />}
+      {empty !== null && !belowLabel && (
         <p className="tabular-nums text-muted-foreground">
           {value !== null && net !== null
             ? `${grams(value)} g − ${grams(empty)} g empty spool = ${grams(net)} g of filament`

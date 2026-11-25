@@ -186,7 +186,7 @@ def test_only_the_agent_credential_reaches_the_routes(tables: PgPool) -> None:
 
 
 def test_a_send_claims_a_free_row_and_gives_it_back(agent: Agent, tables: PgPool) -> None:
-    sid = _session(tables, status="failed", runtime=None)
+    sid = _session(tables, status="failed")
     turn = str(uuid.uuid4())
     body = {"author": BROWSER, "turn_id": turn, "tiers": ["read"], "bare": True}
     claimed = agent.post(f"/sessions/{sid}/turn/send-claim", body)["claimed"]

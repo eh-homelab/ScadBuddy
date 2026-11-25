@@ -11,8 +11,7 @@ import { browserUser } from '../auth/browserSession.js'
 // approvals of outward tool calls; the panel decides over #266's socket instead
 // (`approval.decision`, routes/chat.ts, which calls ApprovalService.decision directly).
 //
-//   GET  /api/v1/ai/approvals?session=<id>[&pending=true]  a session's approvals
-//   GET  /api/v1/ai/approvals                              every pending one (browser view)
+//   GET  /api/v1/ai/approvals                              every pending MCP prepare (browser view)
 //   POST /api/v1/ai/approvals/:id/approve                  body: optional {"input_hash": "…"}
 //   POST /api/v1/ai/approvals/:id/deny
 //
@@ -94,10 +93,8 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
     if (problem) return c.json({ detail: problem }, 403)
     const approvals = await service()
     if (typeof approvals === 'string') return c.json({ detail: approvals }, 503)
-    const session = c.req.query('session')
-    const pending = c.req.query('pending') === 'true'
     try {
-      const list = await approvals.list(browserUser(c), { ...(session ? { sessionId: session } : {}), pending })
+      const list = await approvals.listVisiblePending(browserUser(c))
       return c.json({ approvals: list.map(approvalView) })
     } catch (err) {
       if (err instanceof ApprovalError) return c.json({ detail: err.message }, err.status)
