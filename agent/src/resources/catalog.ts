@@ -365,7 +365,7 @@ export const RESOURCES: readonly ResourceDef[] = [
     name: 'session',
     title: 'Agent session',
     description:
-      "One agent session: status, owner, pending approvals and its transcript's first page. Subscribe for live " +
+      "One agent session: status, owner, the queued messages and its transcript's first page. Subscribe for live " +
       'updates; page the rest with sessions_get.',
     mimeType: JSON_TYPE,
     tool: 'sessions_get',
