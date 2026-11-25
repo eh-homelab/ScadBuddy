@@ -607,7 +607,6 @@ _TRY_CUT_OVER = (
 class OutputRows:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
-        self._copied = False
         self._cut_over = False
         self._lock = threading.Lock()
 
@@ -624,6 +623,15 @@ class OutputRows:
                 "SELECT slug FROM outputs WHERE output_id = %s", (output_id,)
             ).fetchone()
         return None if found is None else str(found["slug"])
+
+    def ids_for_slug(self, slug: str) -> list[str]:
+        """The id of every output of ``slug``, oldest first: one query (#7257)."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT output_id FROM outputs WHERE slug = %s ORDER BY created_at, output_id",
+                (slug,),
+            ).fetchall()
+        return [str(item["output_id"]) for item in found]
 
     def existing(self, output_ids: Iterable[str]) -> set[str]:
         ids = list(output_ids)
@@ -1218,21 +1226,6 @@ class OutputRows:
                 "SELECT output_id FROM outputs WHERE copied_at < %s", (before,)
             ).fetchall()
         return {str(item["output_id"]) for item in found}
-
-    def copied(self) -> bool:
-        """Whether a copy run has finished. Once true it stays true for this object."""
-        with self._lock:
-            if self._copied:
-                return True
-        with self._pool.connection() as conn:
-            found = conn.execute(
-                "SELECT 1 FROM output_copy_runs WHERE finished_at IS NOT NULL LIMIT 1"
-            ).fetchone()
-        if found is None:
-            return False
-        with self._lock:
-            self._copied = True
-        return True
 
     def try_cut_over(self) -> bool:
         """Write the cut-over mark (#7257, plan D2) when, in one statement: the last row

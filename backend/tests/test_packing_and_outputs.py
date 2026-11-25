@@ -6,6 +6,7 @@ import json
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -37,7 +38,6 @@ from scadbuddy.workflows.outputs import _materials, manifest_of
 from scadbuddy.workflows.packing import PackError, explicit_plate
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.support.openscad import install_fake_openscad
-from tests.support.saved_outputs import save_files
 
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
 
@@ -447,5 +447,5 @@ def test_a_save_that_fails_part_way_leaves_no_output_directory(tmp_path: Path) -
         ),
     )
     with pytest.raises(FileNotFoundError):
-        save_files(OutputStore(paths), job)
+        OutputStore(paths, rows=cast(Any, None), bytes=None).prepare(job)
     assert not any((paths.outputs / "demo").iterdir())

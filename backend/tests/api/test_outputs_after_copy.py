@@ -47,7 +47,6 @@ def first(client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch) -> It
     assert store.rows is not None
     rows = store.rows
     rows.finish_run(rows.start_run(), copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
-    assert rows.copied()
     real_glob = Path.glob
 
     def no_meta_glob(self: Path, pattern: str, **kwargs: object) -> Iterator[Path]:

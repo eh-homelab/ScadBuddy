@@ -59,7 +59,6 @@ def test_copy_status_shows_an_incomplete_run(client: TestClient) -> None:
     assert body["incomplete"] is True
     assert body["finished_at"] is None
     assert body["copied"] == 4
-    assert rows.copied() is False
 
 
 def test_copy_status_404_before_any_run(client: TestClient) -> None:

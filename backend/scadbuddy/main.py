@@ -128,7 +128,11 @@ from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY
-from scadbuddy.library.outputs import reap_orphan_holds
+from scadbuddy.library.outputs import (
+    OUTPUTS_NEED_A_BLOB_STORE,
+    OutputStoreUnusableError,
+    reap_orphan_holds,
+)
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
     NATIVE_LIBRARY_NOT_READY,
@@ -2482,16 +2486,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 " database, in the schema its SCADBUDDY_DATABASE_URL uses (or, when no"
                 " library_backend is stored, set SCADBUDDY_LIBRARY_BACKEND=bambuddy)."
             )
+        # #7257: the outputs are read from the blob store only, and never go into
+        # Bambuddy's library (spec §6.4), so the `bambuddy` store has none for them.
+        if state.store.backend != "local" and not usable(state.store.content):
+            await state.store.aclose()
+            raise OutputStoreUnusableError(OUTPUTS_NEED_A_BLOB_STORE)
     except BaseException:
         # A refused start (an unready store) closes the pool it opened, then propagates.
         await asyncio.to_thread(state.settings_store.close)
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
-    # #7256: the outputs' bytes are read from the blob store first, never on `bambuddy`.
-    # #7257 plan D7: `local` has no content store, so outputs get one of their own under
-    # `data/output-blobs/`, with the shared index and spool. It has no caps, as the `local`
-    # store has none.
+    # #7256, #7257: the outputs' bytes are read from the blob store only; the start
+    # refused `bambuddy` above. Plan D7: `local` has no content store, so outputs get one
+    # of their own under `data/output-blobs/`, with the shared index and spool. It has no
+    # caps, as the `local` store has none.
     #: `local`'s output store, which the bundle does not close.
     output_content: ContentStore | None = None
     if state.store.backend == "local":
@@ -2501,7 +2510,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             spool=blob_spool(state.config, state.paths),
         )
         state.outputs.bytes = OutputBytes(output_content)
-    elif usable(state.store.content):
+    else:
         assert state.store.content is not None
         state.outputs.bytes = OutputBytes(state.store.content)
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
@@ -2710,6 +2719,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_accepting_handler(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
+    outputs.install_output_handlers(app)
     # A commit made for the agent is authored as the agent (#252), and only the agent's
     # and the projects worker's credentials name an author (#4975 phase 5).
     app.add_middleware(

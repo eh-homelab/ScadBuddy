@@ -1,7 +1,6 @@
 """`OutputStore` on `OutputRows` (#7255, outputs-in-Postgres spec 2026-11-23 §4.5 phase 1,
 §6.1, §6.6): a save writes its row in one transaction, and a lookup by id reads the row.
-Before a copy run finished, a missing row falls back to the files; after it, a missing
-row is a missing output, found with no glob."""
+A missing row is a missing output, found with no glob (#7257)."""
 
 from __future__ import annotations
 
@@ -49,7 +48,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
-from tests.support.saved_outputs import save_files
+from tests.support.row_outputs import output_store
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -65,27 +64,23 @@ def projection(pg_conninfo: str) -> Iterator[JobProjection]:
 
 
 def _store(paths: DataPaths, projection: JobProjection) -> OutputStore:
-    outputs = OutputStore(paths)
-    outputs.rows = OutputRows(projection.pool)
-    return outputs
+    return output_store(paths.root.parent, projection.pool, paths=paths)
 
 
 def rows_of(store: OutputStore) -> OutputRows:
-    assert store.rows is not None
     return store.rows
 
 
-def finish_copy(store: OutputStore) -> None:
-    rows = rows_of(store)
-    run = rows.start_run()
-    rows.finish_run(run, copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+def _dir(store: OutputStore, meta: OutputMeta) -> Path:
+    """The folder the save still writes (until #7257's task B4), which no reader reads."""
+    return store.paths.output_dir(meta.slug, meta.id)
 
 
 @pytest.fixture
 async def saved(tmp_path: Path, projection: JobProjection) -> tuple[OutputStore, OutputMeta, Job]:
     paths, job, _ = await finished_job(tmp_path)
     store = _store(paths, projection)
-    meta = save_files(store, job, name="first", inputs={"v": 1, "values": {"width": 12}})
+    meta = await store.save(job, name="first", inputs={"v": 1, "values": {"width": 12}})
     return store, meta, job
 
 
@@ -97,7 +92,7 @@ async def test_create_writes_row_with_meta_params_inputs(
     assert row is not None
     assert row.slug == job.slug
     on_disk = OutputMeta.model_validate_json(
-        (store.directory(meta.id) / META_NAME).read_text(encoding="utf-8")
+        (_dir(store, meta) / META_NAME).read_text(encoding="utf-8")
     )
     assert row.meta == on_disk
     assert row.params == job.params
@@ -107,7 +102,7 @@ async def test_create_writes_row_with_meta_params_inputs(
     assert row.record is not None and row.record["output_index"] == 0
     assert row.bom is not None and row.bom[0]["piece"] == "wall"
     assert row.manifest is not None and len(row.manifest) == len(store.manifest(meta.id))
-    with zipfile.ZipFile(store.directory(meta.id) / MODEL_NAME) as archive:
+    with zipfile.ZipFile(_dir(store, meta) / MODEL_NAME) as archive:
         assert row.has_plate_cover == (PLATE_THUMBNAIL in archive.namelist())
 
 
@@ -116,7 +111,7 @@ async def test_save_writes_params_text(tmp_path: Path, projection: JobProjection
     paths, job, _ = await finished_job(tmp_path, width=30)
     job = job.model_copy(update={"params": {"width": 30}})
     store = _store(paths, projection)
-    meta = save_files(store, job)
+    meta = await store.save(job)
     row = rows_of(store).get(meta.id)
     assert row is not None
     expected = params_text(job.params, cached_defaults(store.paths, job.slug))
@@ -127,7 +122,7 @@ async def test_get_reads_row_not_meta_file(
     saved: tuple[OutputStore, OutputMeta, Job],
 ) -> None:
     store, meta, job = saved
-    directory = store.directory(meta.id)
+    directory = _dir(store, meta)
     (directory / META_NAME).unlink()
     (directory / "params.json").unlink()
     got = store.get(meta.id)
@@ -139,11 +134,10 @@ async def test_get_reads_row_not_meta_file(
     assert store.bom(meta.id)[0].piece == "wall"
 
 
-async def test_missing_row_after_copy_does_not_glob(
+async def test_missing_row_does_not_glob(
     saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, meta, job = saved
-    finish_copy(store)
 
     def no_glob(self: Path, pattern: str) -> Iterator[Path]:
         raise AssertionError(f"globbed {self} for {pattern}")
@@ -154,28 +148,11 @@ async def test_missing_row_after_copy_does_not_glob(
         store.get(unknown)
     with pytest.raises(OutputNotFoundError):
         store.name_and_slug(unknown)
-    with pytest.raises(OutputNotFoundError):
-        store.directory(unknown)
     assert store.manifest(unknown) == []
-    assert await store.provenance(unknown) is None
     # A known output is found with no glob too, and so is its model's list.
     assert store.get(meta.id).id == meta.id
     assert [m.id for m in store.list_for(job.slug)] == [meta.id]
     assert store.pending_backfills() == []
-
-
-async def test_missing_row_before_copy_falls_back_to_files(
-    saved: tuple[OutputStore, OutputMeta, Job],
-) -> None:
-    store, meta, job = saved
-    rows_of(store).delete(meta.id)
-    assert not rows_of(store).copied()
-    assert store.get(meta.id).name == "first"
-    assert store.name_and_slug(meta.id) == ("first", job.slug)
-    assert store.params(meta.id) == job.params
-    assert store.record(meta.id) is not None
-    assert [m.id for m in store.list_for(job.slug)] == [meta.id]
-    assert store.existing({meta.id, "e" * 32}) == {meta.id}
 
 
 async def test_create_fails_and_cleans_up_when_row_insert_fails(
@@ -183,14 +160,14 @@ async def test_create_fails_and_cleans_up_when_row_insert_fails(
 ) -> None:
     store, _, job = saved
     taken = "a" * 32
-    other = save_files(store, job, output_id="b" * 32)
+    other = await store.save(job, output_id="b" * 32)
     row = rows_of(store).get(other.id)
     assert row is not None
     rows_of(store).insert(
         replace(row, output_id=taken, meta=row.meta.model_copy(update={"id": taken}))
     )
     with pytest.raises(psycopg.errors.UniqueViolation):
-        save_files(store, job, output_id=taken)
+        await store.save(job, output_id=taken)
     assert not store.paths.output_dir(job.slug, taken).exists()
     # The other save's row stays: the clean-up deletes only a row the copy wrote.
     assert rows_of(store).get(taken) is not None
@@ -211,7 +188,7 @@ async def test_a_failed_save_leaves_no_row_the_copy_wrote(
     monkeypatch.setattr(rows, "insert", failing)
     output_id = "c" * 32
     with pytest.raises(psycopg.OperationalError):
-        save_files(store, job, output_id=output_id)
+        await store.save(job, output_id=output_id)
     assert not store.paths.output_dir(job.slug, output_id).exists()
     assert rows.get(output_id) is None
 
@@ -312,7 +289,7 @@ async def test_rename_updates_row(saved: tuple[OutputStore, OutputMeta, Job]) ->
     assert renamed.name == "second"
     row = rows_of(store).get(meta.id)
     assert row is not None and row.meta.name == "second"
-    on_disk = json.loads((store.directory(meta.id) / META_NAME).read_text(encoding="utf-8"))
+    on_disk = json.loads((_dir(store, meta) / META_NAME).read_text(encoding="utf-8"))
     assert on_disk["name"] == "second"
     marked = store.mark_storefront(meta.id)
     row = rows_of(store).get(meta.id)
@@ -327,9 +304,8 @@ async def test_backfill_round_trip_through_rows(
     row = rows_of(store).get(meta.id)
     assert row is not None and row.backfill == {"job_id": "rerender", "error": None}
     # The row answers, not the file.
-    (store.directory(meta.id) / BACKFILL_NAME).unlink()
+    (_dir(store, meta) / BACKFILL_NAME).unlink()
     assert store.backfill(meta.id) == BackfillState(job_id="rerender")
-    finish_copy(store)
     assert store.pending_backfills() == [(meta.id, BackfillState(job_id="rerender"))]
     store.fail_backfill(meta.id, "rerender", "boom")
     assert store.backfill(meta.id) == BackfillState(job_id="rerender", error="boom")
@@ -352,7 +328,7 @@ async def test_delete_and_forget_indexed_drop_rows(
     saved: tuple[OutputStore, OutputMeta, Job],
 ) -> None:
     store, meta, job = saved
-    other = save_files(store, job, name="other")
+    other = await store.save(job, name="other")
     store.delete(meta.id)
     assert rows_of(store).get(meta.id) is None
     assert rows_of(store).get(other.id) is not None
@@ -361,45 +337,28 @@ async def test_delete_and_forget_indexed_drop_rows(
     assert rows_of(store).get(other.id) is None
 
 
-async def test_existing_is_one_query_after_copy(
+async def test_existing_is_one_query(
     saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, meta, _ = saved
-    finish_copy(store)
 
-    def no_lookup(output_id: str) -> Path:
+    def no_lookup(output_id: str) -> OutputRow | None:
         raise AssertionError("looked an output up one by one")
 
-    monkeypatch.setattr(store, "directory", no_lookup)
-    monkeypatch.setattr(store, "_find_dir", no_lookup)
+    monkeypatch.setattr(rows_of(store), "get", no_lookup)
     assert store.existing([meta.id, "e" * 32]) == {meta.id}
     assert store.existing([]) == set()
 
 
 async def test_plate_cover_output_from_rows(
-    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
+    saved: tuple[OutputStore, OutputMeta, Job],
 ) -> None:
     store, meta, job = saved
     rows = rows_of(store)
-    row = rows.get(meta.id)
-    assert row is not None
-    # Before the copy: the scan of the files, as today.
-    before = store.plate_cover_output(job.slug)
-    assert before == (meta.id if row.has_plate_cover else None)
-    finish_copy(store)
     with rows._pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
-    store.forget_plate_cover(job.slug)
-
-    def no_scan(slug: str) -> Path | None:
-        raise AssertionError("scanned the files")
-
-    monkeypatch.setattr(store, "_scan_plate_cover", no_scan)
+    shutil.rmtree(store.paths.outputs)
     assert store.plate_cover_output(job.slug) == meta.id
-    assert (
-        store.plate_cover_archive(job.slug)
-        == store.paths.output_dir(job.slug, meta.id) / MODEL_NAME
-    )
     with rows._pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = false")
     assert store.plate_cover_output(job.slug) is None
@@ -426,7 +385,7 @@ async def test_model_delete_fails_whole_when_its_output_rows_stay(
         catalogue.delete(job.slug)
     # The model and its outputs stay whole, for a retry.
     assert store.paths.model_source(job.slug).is_file()
-    assert store.directory(meta.id).is_dir()
+    assert _dir(store, meta).is_dir()
     assert rows_of(store).get(meta.id) is not None
     monkeypatch.undo()
     catalogue.delete(job.slug)
@@ -441,8 +400,7 @@ async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
     concurrent delete), the model and its outputs stay, so their rows come back from
     the files, as the copy writes them."""
     store, meta, job = saved
-    second = save_files(store, job, name="second")
-    finish_copy(store)
+    second = await store.save(job, name="second")
     catalogue = _catalogue(store)
     model_dir = store.paths.model_dir(job.slug)
     rename = Path.rename
@@ -474,7 +432,7 @@ async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
     shutil.rmtree(store.paths.model_dir(job.slug))
     monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
     catalogue.sweep_orphans()
-    assert store.directory(meta.id).is_dir()
+    assert _dir(store, meta).is_dir()
     monkeypatch.undo()
     catalogue.sweep_orphans()
     assert rows_of(store).get(meta.id) is None
@@ -492,7 +450,7 @@ async def test_a_reused_slug_is_refused_while_its_output_rows_stay(
         catalogue.create(job.slug, "cube();\n", ModelMeta(name="Again"))
     # The claim is given back, and the earlier model's outputs stay for a retry.
     assert not store.paths.model_dir(job.slug).exists()
-    assert store.directory(meta.id).is_dir()
+    assert _dir(store, meta).is_dir()
 
 
 async def test_rename_fails_when_its_row_write_fails(
@@ -517,33 +475,10 @@ async def test_start_backfill_fails_when_its_row_write_fails(
         store.fail_backfill(meta.id, "rerender", "boom")
 
 
-async def test_lookups_after_a_row_miss_ask_the_rows_once(
+async def test_a_save_orders_by_the_rows(
     saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, meta, job = saved
-    rows = rows_of(store)
-    rows.delete(meta.id)
-
-    def no_second_ask(output_id: str) -> str | None:
-        raise AssertionError("asked the rows again after a miss")
-
-    monkeypatch.setattr(rows, "slug_of", no_second_ask)
-    assert store.get(meta.id).name == "first"
-    assert store.name_and_slug(meta.id) == ("first", job.slug)
-    assert store.params(meta.id) == job.params
-    assert store.record(meta.id) is not None
-    assert store.bom(meta.id)[0].piece == "wall"
-    assert store.manifest(meta.id)
-    assert store.inputs(meta.id)["v"] == 1
-    assert store.arranged_from(meta.id) == []
-    assert store.backfill(meta.id) is None
-
-
-async def test_a_save_orders_by_the_rows_after_a_copy(
-    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store, meta, job = saved
-    finish_copy(store)
     real_glob = Path.glob
 
     def no_meta_glob(self: Path, pattern: str) -> Iterator[Path]:
@@ -552,7 +487,7 @@ async def test_a_save_orders_by_the_rows_after_a_copy(
         return real_glob(self, pattern)
 
     monkeypatch.setattr(Path, "glob", no_meta_glob)
-    later = save_files(store, job, name="second")
+    later = await store.save(job, name="second")
     assert later.created_at > meta.created_at
     assert [m.id for m in store.list_for(job.slug)] == [later.id, meta.id]
 
@@ -573,27 +508,18 @@ def _counting_connections(monkeypatch: pytest.MonkeyPatch, store: OutputStore) -
 async def test_an_output_detail_reads_its_row_once(
     saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`detail` answers the params, inputs, bom, record, files, manifest, sources and
-    backfill of one output from one read of its row, not one query each."""
+    """`detail` answers the params, inputs, bom, record, manifest, sources and backfill
+    of one output from one read of its row, not one query each; its files are one more."""
     store, meta, job = saved
-    finish_copy(store)
-    assert rows_of(store).copied()
+    # The blob versions and sizes are the index's reads, on this test's one pool too;
+    # only the rows' are counted here.
+    monkeypatch.setattr(store, "_indexed", lambda output_id, role: None)
     expected = detail(store, meta, [])
     taken = _counting_connections(monkeypatch, store)
     got = detail(store, meta, [])
-    assert len(taken) == 1
+    # The row, and its `output_files` rows (#7256): a save names its files as blobs.
+    assert len(taken) == 2
     assert got == expected
     assert got.params == job.params
     assert got.record is not None and got.manifest and got.bom
     assert got.inputs["v"] == 1
-
-
-async def test_an_output_detail_falls_back_to_its_files_before_a_copy(
-    saved: tuple[OutputStore, OutputMeta, Job],
-) -> None:
-    store, meta, job = saved
-    with_row = detail(store, meta, [])
-    rows_of(store).delete(meta.id)
-    from_files = detail(store, meta, [])
-    assert from_files == with_row
-    assert from_files.params == job.params and from_files.record is not None

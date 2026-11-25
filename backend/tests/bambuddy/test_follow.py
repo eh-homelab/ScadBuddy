@@ -44,7 +44,13 @@ from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
-from scadbuddy.library.outputs import META_NAME, LanPlateSend, OutputMeta, OutputStore
+from scadbuddy.library.outputs import (
+    META_NAME,
+    LanPlateSend,
+    OutputMeta,
+    OutputNotFoundError,
+    OutputStore,
+)
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.progress import lan_last_print
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore, lan_settle_hook
@@ -67,7 +73,7 @@ def write_output(paths: DataPaths, output_id: str = OUTPUT, **extra: Any) -> Out
         queue_item_id=51,
         **extra,
     )
-    directory = paths.outputs / "demo" / output_id
+    directory = paths.root / "outputs" / "demo" / output_id
     directory.mkdir(parents=True, exist_ok=True)
     (directory / META_NAME).write_text(json.dumps(meta.model_dump(mode="json")), encoding="utf-8")
     return meta
@@ -99,7 +105,22 @@ class Script:
         return answer
 
 
-class FlakyOutputs(OutputStore):
+class FileOutputs(OutputStore):
+    """The outputs `write_output` wrote, read back by id: a stand-in for the rows, which
+    the follow only asks for an output's meta."""
+
+    def __init__(self, paths: DataPaths) -> None:
+        super().__init__(paths, rows=cast(Any, None), bytes=None)
+
+    def get(self, output_id: str) -> OutputMeta:
+        try:
+            text = (self.paths.root / "outputs" / "demo" / output_id / META_NAME).read_text()
+        except FileNotFoundError:
+            raise OutputNotFoundError(output_id) from None
+        return OutputMeta.model_validate_json(text)
+
+
+class FlakyOutputs(FileOutputs):
     """An output store whose disk drops out for the first ``failures`` reads."""
 
     def __init__(self, paths: DataPaths, failures: int) -> None:
@@ -129,7 +150,7 @@ def follower_for(
     seen: list[Event] = []
     bus.add_listener(seen.append)
     follower = Follower(
-        outputs=LocalOutputs(options.pop("outputs", OutputStore(paths)), cast(Any, None)),
+        outputs=LocalOutputs(options.pop("outputs", FileOutputs(paths)), cast(Any, None)),
         observer=ProgressObserver(bus),
         read=read,
         events=bus,

@@ -34,6 +34,7 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows import pipeline_activities
 from scadbuddy.workflows.models import OutputRequest
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.conftest import PgPool
 from tests.support.arrange import saved_output
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
@@ -840,12 +841,13 @@ def test_a_real_arrange_a_delete_cancels_settles_in_time_and_the_model_goes(
     client: TestClient,
     paths: DataPaths,
     tmp_path: Path,
+    pg_pool: PgPool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#3263: an arrange of the model's outputs, on the app's own worker, is held in
     its write step; the delete's `handle.cancel()` reaches it, and its run settles the
     row `cancelled` within the delete's wait, as a render's does."""
-    _, meta, written = asyncio.run(saved_output(tmp_path))
+    _, meta, written = asyncio.run(saved_output(tmp_path, pg_pool))
     started, release = asyncio.Event(), tmp_path / "release"
 
     async def held(req: OutputRequest, *_: object, **__: object) -> NoReturn:

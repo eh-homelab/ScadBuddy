@@ -103,7 +103,7 @@ def test_a_renamed_output_writes_meta_json_as_a_save_does(
     assert created.status_code == 201, created.text
     output_id = created.json()["id"]
     state: AppState = getattr(app.state, STATE_ATTR)
-    meta = state.outputs.directory(output_id) / "meta.json"
+    meta = state.outputs.paths.output_dir(model, output_id) / "meta.json"
     saved = meta.read_bytes()
     for name in ("Twice", "Once"):
         renamed = client.patch(f"/api/v1/outputs/{output_id}", json={"name": name}, headers=press())

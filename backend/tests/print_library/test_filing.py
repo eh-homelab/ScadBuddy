@@ -4,6 +4,7 @@ Task 8): one top-level folder per template title, one copy per output."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +16,8 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta
+from scadbuddy.library.output_rows import ByteWrite
+from scadbuddy.library.outputs import MODEL_NAME, OutputBytesLostError, OutputMeta
 from scadbuddy.print_library.filing import (
     file_output,
     put_in_folder,
@@ -88,7 +90,8 @@ async def test_filing_uploads_blob_bytes(
     native: NativeLibrary, tmp_path: Path, pg_conninfo: str
 ) -> None:
     """#7256: a saved output's put in a chosen folder reads its 3MF from the model blob,
-    with the NFS file gone; with neither it is the 404."""
+    with the NFS file gone. A lost blob raises `OutputBytesLostError` (#7257, plan D9);
+    a row that names no model blob is the 404."""
     async with blob_output(tmp_path / "output", pg_conninfo) as output:
         model = output.directory / MODEL_NAME
         data = model.read_bytes()
@@ -98,8 +101,16 @@ async def test_filing_uploads_blob_bytes(
             native, output.store, output.meta, gifts, "Demo"
         )
         assert created and placed.sha256 == hashlib.sha256(data).hexdigest()
-        assert output.store.rows is not None
-        output.store.rows.set_blob(output.meta.id, "model", "output-gone-model")
+        rows = output.store.rows
+        rows.set_blob(output.meta.id, "model", "output-gone-model")
+        with pytest.raises(OutputBytesLostError):
+            await put_saved_in_folder(
+                native, output.store, output.meta, native.rows.create_folder("A", None).id, "x"
+            )
+        row = rows.get(output.meta.id)
+        assert row is not None
+        blobs = dataclasses.replace(row.blobs, model=None)
+        rows.write_byte_copy([ByteWrite(output.meta.id, blobs, "stamp", [])])
         with pytest.raises(ApiError) as refused:
             await put_saved_in_folder(
                 native, output.store, output.meta, native.rows.create_folder("B", None).id, "x"

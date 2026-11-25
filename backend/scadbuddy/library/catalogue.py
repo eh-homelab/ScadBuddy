@@ -1148,7 +1148,7 @@ class Catalogue:
         etag = f'"output-{output_id}"'
 
         async def read() -> ThumbnailRead | None:
-            # Blob first, else the file, as `read_plate_cover` (#7256).
+            # The kept cover blob, else the model blob, as `read_plate_cover` (#7256).
             image = await outputs.plate_image(slug, output_id)
             return None if image is None else (image, "image/png", etag)
 
@@ -1882,15 +1882,8 @@ class Catalogue:
         covers = self.media_store.covers_for(builtins) if builtins else {}
         output_covers: dict[str, str] = {}
         if self.outputs is not None:
-            output_rows = self.outputs.rows
-            if output_rows is not None and output_rows.copied():
-                output_covers = output_rows.plate_covers_for(ids)
-            else:
-                # Until the outputs are copied, their folders, as today (plan decision 13).
-                for template_id in ids:
-                    found = self.outputs.plate_cover_output(template_id)
-                    if found is not None:
-                        output_covers[template_id] = found
+            # One query for the listing (#7257: the rows are the outputs' record).
+            output_covers = self.outputs.rows.plate_covers_for(ids)
         previews: dict[str, str] = {}
         if self.previews is not None and self.serve_previews:
             previews = self.previews.preview_ids(ids)
@@ -3565,8 +3558,6 @@ class Catalogue:
         # outputs (NOT in the repository: a 3MF is a build artefact, not source)
         # -- and any an earlier delete failed to clear or a race wrote since.
         self.sweep_orphans()
-        # Whether or not the sweep got to its outputs: the model is gone either way.
-        self._forget_cover(slug)
         self._drop_preview(slug)
         # Its media rows (#274). Best-effort as the rest: a create or duplicate at
         # this slug clears any left behind (`_clear_media_rows`).
@@ -3673,8 +3664,6 @@ class Catalogue:
                     continue
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
-                if path.parent == self.paths.outputs:
-                    self._forget_cover(slug)
         # The saved presets are not derived, but they are keyed and orphaned the same
         # way: a template that is gone takes its presets with it.
         if self.presets is not None:
@@ -3817,19 +3806,12 @@ class Catalogue:
         # Under the model's preview lock: a render of the previous model finishing
         # now is either dropped here or discarded by its own "still wanted?" check.
         self._drop_preview(slug)
-        self._forget_cover(slug)
         # Not derived, but the previous model's: its saved presets.
         if self.presets is not None:
             try:
                 self.presets.forget(slug)
             except psycopg.Error:
                 logger.exception("could not forget saved presets", extra={"slug": slug})
-
-    def _forget_cover(self, slug: str) -> None:
-        """Drop the output store's resolved fallback cover for ``slug``, whose
-        outputs are gone -- so a removed model leaves nothing behind in memory."""
-        if self.outputs is not None:
-            self.outputs.forget_plate_cover(slug)
 
     def _forget_outputs(self, slug: str) -> None:
         """Drop the rows of ``slug``'s outputs and their rows in the cross-model list

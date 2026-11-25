@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from typing import Any, NoReturn
@@ -10,8 +11,9 @@ from fastapi.testclient import TestClient
 from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.outputs import OutputStoreUnusableError
 from scadbuddy.library.settings_store import StoreNotReadyError
-from scadbuddy.store.factory import StoreBundle
+from scadbuddy.store.factory import StoreBundle, build_store
 
 
 def test_store_usage_reports_the_local_backend(client: TestClient) -> None:
@@ -120,3 +122,19 @@ def test_healthz_never_waits_for_a_settings_read(
             assert time.monotonic() - started < 2
     finally:
         release.set()
+
+
+def test_start_on_bambuddy_store_refuses(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outputs live only in the blob store (#7257): a `bambuddy` store, which holds
+    none, stops the start."""
+
+    def on_bambuddy(**kwargs: object) -> StoreBundle:
+        bundle = build_store(**kwargs)  # type: ignore[arg-type]
+        return dataclasses.replace(bundle, backend="bambuddy", content=None)
+
+    monkeypatch.setattr(main, "build_store", on_bambuddy)
+    app = main.create_app(settings)
+    with pytest.raises(OutputStoreUnusableError, match="bambuddy store"), TestClient(app):
+        pass

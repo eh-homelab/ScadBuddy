@@ -27,8 +27,8 @@ from scadbuddy.api.jobs import draw_view
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
-from scadbuddy.library.output_rows import OutputRows
-from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.library.output_rows import ByteWrite, OutputRows
+from scadbuddy.library.outputs import THUMBNAIL_NAME, OutputMeta, OutputStore
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
@@ -39,10 +39,10 @@ from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, files_only, wait_for_job
+from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
-from tests.support.saved_outputs import save_files
+from tests.support.saved_outputs import rewrite_model
 from tests.test_geometry import carrot
 
 
@@ -315,7 +315,10 @@ def test_a_replaced_thumbnail_has_a_new_version(client: TestClient, model: str) 
         ]
         return cast("str | None", detail["thumbnail_version"])
 
-    assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is True
+    portal = client.portal
+    assert portal is not None
+    drawn_png = b"\x89PNG\r\n\x1a\ndrawn"
+    assert portal.call(store.put_drawn_thumbnail, created["id"], drawn_png) is True
     drawn = version()
     assert drawn is not None
     put = client.put(
@@ -354,8 +357,9 @@ def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, 
     # The browser's upload landed while the server was drawing.
     store.write_thumbnail(created["id"], PNG_BYTES)
     assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is False
-    assert store.thumbnail_path(created["id"]).read_bytes() == PNG_BYTES
-    assert list(store.thumbnail_path(created["id"]).parent.glob(".thumbnail.png.*")) == []
+    thumbnail = store.paths.output_dir(model, created["id"]) / THUMBNAIL_NAME
+    assert thumbnail.read_bytes() == PNG_BYTES
+    assert list(thumbnail.parent.glob(".thumbnail.png.*")) == []
 
 
 def test_an_upload_replaces_a_thumbnail_whole(client: TestClient, model: str) -> None:
@@ -369,7 +373,7 @@ def test_an_upload_replaces_a_thumbnail_whole(client: TestClient, model: str) ->
     store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
     drawn = b"\x89PNG\r\n\x1a\ndrawn"
     assert store.write_drawn_thumbnail(created["id"], drawn) is True
-    thumbnail = store.thumbnail_path(created["id"])
+    thumbnail = store.paths.output_dir(model, created["id"]) / THUMBNAIL_NAME
     held = thumbnail.with_name("held.png")
     os.link(thumbnail, held)
 
@@ -766,31 +770,20 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
     }
 
 
-def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
+def test_the_edit_target_of_an_output_with_no_row_is_a_404(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    """#7257: the row is the record; its 3MF's provenance is not read in its place."""
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model), "name": "Reagan"},
         headers=press(),
     ).json()
-    directory = paths.output_dir(model, created["id"])
-    (directory / "meta.json").unlink()
-    (directory / "params.json").unlink()
     _record_gone(client, created["id"])
+    assert (paths.output_dir(model, created["id"]) / "model.3mf").is_file()
 
     assert client.get(f"/api/v1/outputs/{created['id']}").status_code == 404
-    body = client.get(f"/api/v1/outputs/{created['id']}/edit").json()
-    assert body == {
-        "output_id": created["id"],
-        "slug": model,
-        "name": None,
-        "params": {"width": 12, "label": "hi"},
-        "inputs": {"params": {"width": 12, "label": "hi"}, "v": 0},
-        "model_version": created["model_version"],
-        "source": "3mf",
-        "arranged_from": [],
-    }
+    assert client.get(f"/api/v1/outputs/{created['id']}/edit").status_code == 404
 
 
 def test_an_edit_link_to_nothing_at_all_is_a_404(client: TestClient, model: str) -> None:
@@ -869,13 +862,15 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
 def test_the_geometry_of_an_output_without_a_3mf_is_404(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
         headers=press(),
     ).json()
-    (paths.output_dir(model, created["id"]) / "model.3mf").unlink()
+    rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
+    row = rows.get(created["id"])
+    blobs = dataclasses.replace(row.blobs, model=None)
+    rows.write_byte_copy([ByteWrite(created["id"], blobs, "stamp", [])])
 
     response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
     assert response.status_code == 404
@@ -887,20 +882,22 @@ def test_the_geometry_of_a_damaged_3mf_is_422(
 ) -> None:
     """A truncated object entry raises ``ET.ParseError`` -- a ``SyntaxError``, not a
     ``ValueError`` -- which must still come back as the documented 422, not a 500."""
-    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
         headers=press(),
     ).json()
-    path = paths.output_dir(model, created["id"]) / "model.3mf"
-    with zipfile.ZipFile(path) as archive:
-        entries = [(info, archive.read(info)) for info in archive.infolist()]
-    with zipfile.ZipFile(path, "w") as archive:
-        for info, payload in entries:
-            if info.filename == "3D/Objects/object_1.model":
-                payload = payload[: len(payload) // 2]
-            archive.writestr(info, payload)
+
+    def truncate(path: Path) -> None:
+        with zipfile.ZipFile(path) as archive:
+            entries = [(info, archive.read(info)) for info in archive.infolist()]
+        with zipfile.ZipFile(path, "w") as archive:
+            for info, payload in entries:
+                if info.filename == "3D/Objects/object_1.model":
+                    payload = payload[: len(payload) // 2]
+                archive.writestr(info, payload)
+
+    rewrite_model(client, created["id"], truncate)
 
     response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
     assert response.status_code == 422, response.text
@@ -910,20 +907,22 @@ def test_the_geometry_of_a_damaged_3mf_is_422(
 def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
-    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
         headers=press(),
     ).json()
-    directory = paths.output_dir(model, created["id"])
     small = ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 10)))
     big = ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(30, 30, 30)))
-    write_plates_3mf(
-        [PlateParts((small,), (1,)), PlateParts((big,), (1,))],
-        ["#FF0000"],
-        directory / "model.3mf",
-        thumbnails=None,
+    rewrite_model(
+        client,
+        created["id"],
+        lambda path: write_plates_3mf(
+            [PlateParts((small,), (1,)), PlateParts((big,), (1,))],
+            ["#FF0000"],
+            path,
+            thumbnails=None,
+        ),
     )
     url = f"/api/v1/outputs/{created['id']}/geometry"
 
@@ -932,7 +931,14 @@ def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
 
     assert (first["plate"], first["plates"], first["height_mm"]) == (1, 2, 10)
     assert (second["plate"], second["plates"], second["height_mm"]) == (2, 2, 30)
-    assert json.loads((directory / "geometry-plate-2.json").read_text(encoding="utf-8")) == second
+    assert (
+        json.loads(
+            (paths.output_dir(model, created["id"]) / "geometry-plate-2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        == second
+    )
     missing = client.get(url, params={"plate": 3})
     assert missing.status_code == 404
     assert "no plate 3" in missing.json()["detail"]
@@ -1099,25 +1105,9 @@ def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     job = state.render.store.read(job_id)
     with pytest.raises(InputsError):
-        save_files(state.outputs, job, inputs={"params": {"width": "12"}})
+        state.outputs.prepare(job, inputs={"params": {"width": "12"}})
     output_dir = paths.outputs / model
     assert not output_dir.exists() or not any(output_dir.iterdir())
-
-
-def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    job_id = _rendered(client, model, {"inputs": {"params": {"width": 12}, "ui": {"tab": "a"}}})
-    output = client.post(
-        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
-    ).json()
-    inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
-    inputs_path.write_text("{not json", encoding="utf-8")
-    # Only a record kept in files has a side file to damage: one with no row (#7255).
-    _rows(client).delete(output["id"])
-    expected = {"params": {"width": 12, "label": "hi"}, "v": 0}
-    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
-    assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
 
 
 def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:
@@ -1262,18 +1252,18 @@ def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: b
         source = (directory / "model.scad").read_text()
         stamped = built.model_copy(update={"generated_sha256": text_sha256(source)})
         (directory / SCENE_NAME).write_text(dump_scene(stamped))
-    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
         headers=press(),
     ).json()
     part = ColourPart(1, "Body", "#F08A24", carrot())
-    write_plates_3mf(
-        [PlateParts((part,), (1,))],
-        ["#F08A24"],
-        paths.output_dir(model, created["id"]) / "model.3mf",
-        thumbnails=None,
+    rewrite_model(
+        client,
+        created["id"],
+        lambda path: write_plates_3mf(
+            [PlateParts((part,), (1,))], ["#F08A24"], path, thumbnails=None
+        ),
     )
     return str(created["id"])
 

@@ -25,8 +25,7 @@ from scadbuddy.bambuddy.library_objects import (
     publish_library_pieces,
 )
 from scadbuddy.bambuddy.prime_tower_choice import PrimeTowerChoice
-from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
+from scadbuddy.library.outputs import hold_parts, release_parts
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     PROJECT_SETTINGS_NAME,
@@ -58,20 +57,23 @@ from scadbuddy.workflows.models import (
 )
 from scadbuddy.workflows.outputs import manifest_of, placement_matrix
 from scadbuddy.workflows.pipeline_activities import PipelineActivities, pack_layout
+from tests.conftest import PgPool
 from tests.support.arrange import finished_job, saved_output
-from tests.support.saved_outputs import save_files
+from tests.support.row_outputs import output_store
 from tests.test_objects3mf import at, bambu_project
 from tests.test_packing_and_outputs import _deps, _record, _render
 
 
-async def test_a_packed_output_lists_each_object_once_with_its_count(tmp_path: Path) -> None:
-    paths, meta, written = await saved_output(tmp_path, count=3)
+async def test_a_packed_output_lists_each_object_once_with_its_count(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    store, meta, written = await saved_output(tmp_path, pg_pool, count=3)
     [obj] = written.manifest
     assert obj.count == 3
     assert obj.slug == "demo" and obj.file == "model.scad" and obj.revision is None
     assert obj.bom_piece == "wall"
     assert obj.footprint == (obj.bbox.size[0], obj.bbox.size[1])
-    assert OutputStore(paths).manifest(meta.id) == written.manifest
+    assert store.manifest(meta.id) == written.manifest
 
 
 async def test_an_output_of_one_piece_as_rendered_has_a_manifest_too(tmp_path: Path) -> None:
@@ -129,17 +131,20 @@ async def test_provenance_from_an_earlier_output_is_carried(tmp_path: Path) -> N
     assert obj.count == 1  # the count is this layout's, never the source's
 
 
-def test_an_unknown_output_reads_as_none(tmp_path: Path) -> None:
-    assert OutputStore(DataPaths(tmp_path)).manifest("never-written") == []
+def test_an_unknown_output_reads_as_none(tmp_path: Path, pg_pool: PgPool) -> None:
+    assert output_store(tmp_path, pg_pool).manifest("never-written") == []
 
 
-async def test_an_output_saved_before_manifests_reads_as_none(tmp_path: Path) -> None:
-    """A job without pipeline outputs (one saved before phase 5) writes no manifest.json."""
+async def test_an_output_saved_before_manifests_reads_as_none(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
+    """A job without pipeline outputs (one saved before phase 5) records no manifest."""
     paths, job, _ = await finished_job(tmp_path)
     legacy = job.model_copy(update={"outputs": []})
-    store = OutputStore(paths)
-    meta = save_files(store, legacy, name="old")
-    assert not (store.directory(meta.id) / "manifest.json").exists()
+    store = output_store(tmp_path, pg_pool, paths=paths)
+    meta = await store.save(legacy, name="old")
+    row = store.rows.get(meta.id)
+    assert row is not None and row.manifest is None
     assert store.manifest(meta.id) == []
     assert store.arranged_from(meta.id) == []
 
@@ -150,14 +155,14 @@ async def test_a_saved_output_keeps_its_parts_after_the_job_is_pruned(
 ) -> None:
     from tests.support.store import store_pool
 
-    paths, meta, written = await saved_output(tmp_path)
-    key = written.manifest[0].part
     with store_pool(pg_conninfo) as pool:
+        store, meta, written = await saved_output(tmp_path, pool)
+        key = written.manifest[0].part
         refs = BlobRefs(pool)
         refs.add(key, "job", "j1")
         hold_parts(refs, meta.id, written.manifest, meta.slug)
         refs.drop_holder("job", "j1")  # what JobProjection.prune does
-        blobs = LocalBlobStore(paths.blobs)
+        blobs = LocalBlobStore(store.paths.blobs)
         assert key not in sweep_blobs(blobs, refs, grace=0, now=10**12)
         assert blobs.exists(key)
         release_parts(refs, meta.id)

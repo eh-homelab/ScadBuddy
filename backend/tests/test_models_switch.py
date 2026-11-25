@@ -137,9 +137,7 @@ class World:
     @contextmanager
     def outputs(self) -> Iterator[tuple[OutputStore, PgPool]]:
         with self.pool() as pool:
-            store = OutputStore(self.paths)
-            store.rows = OutputRows(pool)
-            yield store, pool
+            yield OutputStore(self.paths, rows=OutputRows(pool), bytes=None), pool
 
 
 def head(root: Path) -> str:

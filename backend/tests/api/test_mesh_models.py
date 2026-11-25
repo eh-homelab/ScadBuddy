@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import print_source
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.output_rows import ByteWrite, OutputBlobs, output_blob_key
 from scadbuddy.library.presets import ParamPresetCreate
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
@@ -29,6 +30,7 @@ from tests.api.test_print_library import library_file
 from tests.api.test_send import configure, make_output
 from tests.support.fixtures import makerworld_path
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -432,11 +434,16 @@ def test_a_details_patch_keeps_the_mesh_source(client: TestClient, paths: DataPa
 
 def test_an_output_opens_as_a_scene_model(client: TestClient, paths: DataPaths) -> None:
     output_id = "ab" * 16
-    directory = paths.outputs / "somewhere" / output_id
-    directory.mkdir(parents=True)
-    # Only the 3MF is read; the record just has to be there for the output to be found.
-    (directory / "meta.json").write_text("{}", encoding="utf-8")
-    (directory / "model.3mf").write_bytes(stl_3mf(stl(carrot()), model_name="carrot"))
+    # Only the 3MF is read; the row just has to be there for the output to be found.
+    outputs = app_outputs(client)
+    insert_row(outputs, output_meta(output_id, "somewhere"))
+    model_3mf = paths.root / "carrot.3mf"
+    model_3mf.write_bytes(stl_3mf(stl(carrot()), model_name="carrot"))
+    key = output_blob_key(output_id, "model")
+    blobs = outputs.bytes
+    assert blobs is not None and client.portal is not None
+    client.portal.call(lambda: blobs.put_file(key, model_3mf, slug="somewhere"))
+    outputs.rows.write_byte_copy([ByteWrite(output_id, OutputBlobs(model=key), "stamp", [])])
     created = client.post(
         "/api/v1/models/from-mesh",
         json={"name": "From Output", "output_id": output_id},

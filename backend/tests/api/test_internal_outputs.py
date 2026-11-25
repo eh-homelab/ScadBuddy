@@ -49,7 +49,7 @@ def test_the_routes_answer_the_record_the_stored_3mf_and_the_naming(
     meta = client.get(f"/api/v1/internal/outputs/{output_id}")
     assert meta.status_code == 200 and meta.json()["id"] == output_id
     stored = client.get(f"/api/v1/internal/outputs/{output_id}/model.3mf")
-    path = state(client).outputs.directory(output_id) / MODEL_NAME
+    path = state(client).outputs.paths.output_dir(model, output_id) / MODEL_NAME
     assert stored.status_code == 200 and stored.content == path.read_bytes()
     naming = client.get(f"/api/v1/internal/outputs/{output_id}/naming").json()
     assert naming["stem"] and naming["invalid_meta"] is None
@@ -69,7 +69,7 @@ def test_the_routes_are_not_in_the_schema(client: TestClient) -> None:
 @pytest.mark.parametrize("reader", [local, remote])
 def test_both_readers_read_the_same_output(client: TestClient, model: str, reader: Any) -> None:
     output_id = make_output(client, model)
-    path = state(client).outputs.directory(output_id) / MODEL_NAME
+    path = state(client).outputs.paths.output_dir(model, output_id) / MODEL_NAME
     outputs: OutputReader = reader(client)
 
     async def read() -> None:

@@ -334,11 +334,9 @@ def test_attach_backfill_keeps_a_record_and_clears_the_backfill(rows: OutputRows
     assert got.manifest == [{"part": "q"}]
 
 
-def test_copied_false_until_a_run_finishes_then_stays_true(rows: OutputRows) -> None:
-    assert rows.copied() is False
+def test_last_run_names_a_finished_run(rows: OutputRows) -> None:
     assert rows.last_run() is None
     run_id = rows.start_run()
-    assert rows.copied() is False
     rows.finish_run(
         run_id,
         copied=2,
@@ -347,7 +345,6 @@ def test_copied_false_until_a_run_finishes_then_stays_true(rows: OutputRows) -> 
         not_copied=["x"],
         damaged=[{"id": "y", "why": "bad"}],
     )
-    assert rows.copied() is True
     last = rows.last_run()
     assert last is not None
     assert last["copied"] == 2

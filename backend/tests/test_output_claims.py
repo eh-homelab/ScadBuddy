@@ -35,9 +35,7 @@ def pool(pg_conninfo: str) -> Iterator[Pool]:
 
 
 def _store(paths: DataPaths, pool: Pool) -> OutputStore:
-    store = OutputStore(paths)
-    store.rows = OutputRows(pool)
-    return store
+    return OutputStore(paths, rows=OutputRows(pool), bytes=None)
 
 
 def _claims(pool: Pool) -> dict[str, str]:
@@ -48,8 +46,7 @@ def _claims(pool: Pool) -> dict[str, str]:
 
 def test_claim_takes_row_then_folder(tmp_path: Path, pool: Pool) -> None:
     """One claim wins across two pods. A row claim that fails makes no folder. A folder
-    that is there after the row claim succeeded releases the row claim. With no rows,
-    the folder only."""
+    that is there after the row claim succeeded releases the row claim."""
     paths = DataPaths(root=tmp_path)
     one, two = _store(paths, pool), _store(paths, pool)
     first, second, third = "a" * 32, "b" * 32, "c" * 32
@@ -70,10 +67,6 @@ def test_claim_takes_row_then_folder(tmp_path: Path, pool: Pool) -> None:
     assert two.claim(SLUG, third) is False
     assert third not in _claims(pool)
 
-    files_only = OutputStore(DataPaths(root=tmp_path / "files"))
-    assert files_only.claim(SLUG, first) is True
-    assert files_only.paths.output_dir(SLUG, first).is_dir()
-    assert files_only.claim(SLUG, first) is False
     assert _claims(pool) == {first: SLUG, second: SLUG}
 
 
@@ -106,8 +99,7 @@ def test_failed_release_in_claim_is_logged_not_raised(
     reaper's prune. A folder that is there still answers False, so a quote takes a fresh
     id. Another mkdir error raises as that error, not as the database's."""
     paths = DataPaths(root=tmp_path)
-    store = OutputStore(paths)
-    store.rows = _ReleaseFails(pool)
+    store = OutputStore(paths, rows=_ReleaseFails(pool), bytes=None)
     taken = "d" * 32
     paths.output_dir(SLUG, taken).mkdir(parents=True)
     with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):

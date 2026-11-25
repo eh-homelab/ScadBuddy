@@ -809,7 +809,7 @@ def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | 
         return None
     if not shows_design(listing, meta.slug, meta.model_version, inputs):
         return None
-    # A preview blob in the index, else its file (#7256).
+    # A preview blob in the index (#7256, #7257).
     if not state.outputs.has_role(row.output_id, "preview"):
         return None
     return meta

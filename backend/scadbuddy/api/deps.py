@@ -362,8 +362,9 @@ def _build_core(settings: Settings) -> AppState:
     # Job events commit with the job change that they describe.
     projection.events = events
     preview_store = PreviewStore(pool.connection)
-    outputs = OutputStore(paths, prints=OutputPrintStore(pool))
-    outputs.rows = OutputRows(pool)
+    # The outputs' blob store is the store's, which the lifespan builds: it sets
+    # `outputs.bytes` there, or refuses to start (`OutputStoreUnusableError`, #7257).
+    outputs = OutputStore(paths, rows=OutputRows(pool), bytes=None, prints=OutputPrintStore(pool))
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))

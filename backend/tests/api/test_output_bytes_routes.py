@@ -1,7 +1,7 @@
 """The output routes read an output's bytes through `OutputStore` (#7256, outputs-in-
-Postgres spec 2026-11-23 §4.4): the blob the row names first, the NFS file when the row
-names none or the blob is lost. A stream sets its length, and one that breaks off past
-the verified prefetch ends short, never clean."""
+Postgres spec 2026-11-23 §4.4): the blob the row names, and since #7257 nothing else. A
+lost blob is a 500 (plan D9), never a file read. A stream sets its length, and one that
+breaks off past the verified prefetch ends short, never clean."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import asyncio
 import hashlib
 import logging
 import os
+import shutil
+import tempfile
 from collections.abc import AsyncGenerator, Iterator, MutableMapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +45,9 @@ from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
 
+#: The text of a lost blob's 500 (#7257, plan D9).
+LOST = "the blob store has lost this output's {}; the old outputs share may still hold a copy"
+
 
 @pytest.fixture
 def pool(pg_conninfo: str) -> Iterator[Pool]:
@@ -73,7 +78,6 @@ def _state(client: TestClient) -> AppState:
 def outputs(client: TestClient, content: ContentStore) -> OutputStore:
     """The app's store, with a `local_content` blob store for the outputs' bytes."""
     store = _state(client).outputs
-    assert store.rows is not None
     store.bytes = OutputBytes(content)
     return store
 
@@ -89,17 +93,19 @@ def _saved(client: TestClient, model: str) -> str:
     return output_id
 
 
-def _copy(client: TestClient, outputs: OutputStore, output_id: str) -> None:
-    """What the byte copy does: put the folder, then name every blob in the row."""
-    assert outputs.bytes is not None and outputs.rows is not None
-    directory = outputs.directory(output_id)
-    slug = outputs.get(output_id).slug
+def _blob(client: TestClient, outputs: OutputStore, output_id: str, role: str) -> bytes:
+    """The bytes of the blob the row names for ``role``."""
     portal = client.portal
     assert portal is not None
-    blobs = portal.call(put_folder_at_keys, outputs.bytes, directory, output_id, slug)
-    assert outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])[0] == {
-        output_id
-    }
+
+    async def read() -> bytes:
+        stream = await outputs.open_role(output_id, role)  # type: ignore[arg-type]
+        assert stream is not None
+        async with stream:
+            return b"".join([chunk async for chunk in stream.chunks])
+
+    data: bytes = portal.call(read)
+    return data
 
 
 def _copied(
@@ -110,17 +116,26 @@ def _copied(
     thumbnail: bool = True,
     model_bytes: bytes | None = None,
 ) -> str:
-    """A saved output with a thumbnail and two extra files, its bytes all blobs."""
+    """A saved output with a thumbnail and two extra files, its bytes all blobs: the
+    saved model and preview with them, put as one folder and named in the row."""
     output_id = _saved(client, model)
-    directory = outputs.directory(output_id)
-    if thumbnail:
-        (directory / THUMBNAIL_NAME).write_bytes(PNG_BYTES)
-    (directory / FILES_DIR).mkdir(exist_ok=True)
-    (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
-    (directory / FILES_DIR / "b.svg").write_bytes(b"<svg/>")
-    if model_bytes is not None:
-        (directory / MODEL_NAME).write_bytes(model_bytes)
-    _copy(client, outputs, output_id)
+    assert outputs.bytes is not None
+    slug = outputs.get(output_id).slug
+    with tempfile.TemporaryDirectory() as folder:
+        directory = Path(folder)
+        model_data = model_bytes or _blob(client, outputs, output_id, "model")
+        (directory / MODEL_NAME).write_bytes(model_data)
+        (directory / PREVIEW_NAME).write_bytes(_blob(client, outputs, output_id, "preview"))
+        if thumbnail:
+            (directory / THUMBNAIL_NAME).write_bytes(PNG_BYTES)
+        (directory / FILES_DIR).mkdir()
+        (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
+        (directory / FILES_DIR / "b.svg").write_bytes(b"<svg/>")
+        portal = client.portal
+        assert portal is not None
+        blobs = portal.call(put_folder_at_keys, outputs.bytes, directory, output_id, slug)
+    written, _ = outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
+    assert written == {output_id}
     return output_id
 
 
@@ -133,6 +148,11 @@ def _lose(client: TestClient, content: ContentStore, key: str) -> None:
     portal.call(content.backend.remove, found.ref.backend_id)
 
 
+def _no_share(outputs: OutputStore) -> None:
+    """The old outputs share gone: a read of it would raise."""
+    shutil.rmtree(outputs.paths.root / "outputs", ignore_errors=True)
+
+
 def _spooled(spool: Path) -> list[str]:
     return sorted(os.listdir(spool)) if spool.is_dir() else []
 
@@ -141,9 +161,8 @@ def test_download_streams_blob_with_length_and_etag(
     client: TestClient, model: str, outputs: OutputStore
 ) -> None:
     output_id = _copied(client, model, outputs)
-    path = outputs.directory(output_id) / MODEL_NAME
-    data = path.read_bytes()
-    path.unlink()
+    data = _blob(client, outputs, output_id, "model")
+    _no_share(outputs)
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
     assert response.status_code == 200, response.text
     assert response.content == data
@@ -155,86 +174,86 @@ def test_download_streams_blob_with_length_and_etag(
     assert response.headers["content-disposition"] == f'attachment; filename="{filename}"'
 
 
-@pytest.mark.parametrize("blob", ["lost", "none"])
-def test_download_falls_back_to_file_when_blob_missing(
+def test_download_of_lost_blob_is_500(
     client: TestClient,
     model: str,
     outputs: OutputStore,
     content: ContentStore,
     caplog: pytest.LogCaptureFixture,
-    blob: str,
 ) -> None:
-    if blob == "lost":
-        output_id = _copied(client, model, outputs)
-        _lose(client, content, output_blob_key(output_id, "model"))
-    else:
-        # Saved with no blob store: the row names no blob, the file holds the bytes.
-        outputs.bytes = None
-        output_id = _saved(client, model)
-        outputs.bytes = OutputBytes(content)
-    # The file's own bytes, so a read of the blob cannot pass as one of the file.
-    (outputs.directory(output_id) / MODEL_NAME).write_bytes(b"file bytes")
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+    """Review Focus 3 (#7257): the store lost the model blob. The answer is a 500 that
+    names it, logged at error level, and no file is read in its place."""
+    output_id = _copied(client, model, outputs)
+    _lose(client, content, output_blob_key(output_id, "model"))
+    _no_share(outputs)
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
         response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
-    assert response.status_code == 200, response.text
-    assert response.content == b"file bytes"
-    assert response.headers["content-length"] == str(len(b"file bytes"))
-    # A file has no recorded sha256: a weak validator from its size and mtime.
-    info = (outputs.directory(output_id) / MODEL_NAME).stat()
-    assert response.headers["etag"] == f'W/"{info.st_size:x}-{info.st_mtime_ns:x}"'
-    if blob == "lost":
-        assert "blob is lost" in caplog.text
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"] == LOST.format("model")
+    assert any(
+        record.levelno == logging.ERROR and "lost" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.parametrize("role", ["preview", "thumbnail"])
-def test_preview_and_thumbnail_fall_back_to_file_when_blob_lost(
+def test_preview_and_thumbnail_of_lost_blob_are_500(
     client: TestClient, model: str, outputs: OutputStore, content: ContentStore, role: str
 ) -> None:
     output_id = _copied(client, model, outputs)
     _lose(client, content, output_blob_key(output_id, role))  # type: ignore[arg-type]
-    name, url = {
-        "preview": (PREVIEW_NAME, "preview.glb"),
-        "thumbnail": (THUMBNAIL_NAME, "thumbnail"),
-    }[role]
-    data = b"\x89PNG\r\n\x1a\nfile " + role.encode()
-    (outputs.directory(output_id) / name).write_bytes(data)
+    url = {"preview": "preview.glb", "thumbnail": "thumbnail"}[role]
     response = client.get(f"/api/v1/outputs/{output_id}/{url}")
-    assert response.status_code == 200, response.text
-    assert response.content == data
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"] == LOST.format(role)
 
 
-def test_download_404_when_neither_blob_nor_file(
+def test_view_of_lost_model_blob_is_500(
     client: TestClient, model: str, outputs: OutputStore, content: ContentStore
 ) -> None:
+    """The routes that read a blob through a temporary file answer the same 500: the
+    view (its preview), the plates and a plate's cover (its model)."""
     output_id = _copied(client, model, outputs)
+    _lose(client, content, output_blob_key(output_id, "preview"))
     _lose(client, content, output_blob_key(output_id, "model"))
-    (outputs.directory(output_id) / MODEL_NAME).unlink()
+    view = client.get(f"/api/v1/outputs/{output_id}/views/iso.png")
+    assert view.status_code == 500, view.text
+    assert view.json()["detail"] == LOST.format("preview")
+    for url in ("plates", "plates/1/thumbnail"):
+        plates = client.get(f"/api/v1/outputs/{output_id}/{url}")
+        assert plates.status_code == 500, plates.text
+        assert plates.json()["detail"] == LOST.format("model")
+
+
+def test_download_404_when_the_row_names_no_blob(
+    client: TestClient, model: str, outputs: OutputStore
+) -> None:
+    output_id = _copied(client, model, outputs)
+    outputs.rows.write_byte_copy([ByteWrite(output_id, _no_model(outputs, output_id), "s", [])])
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
     assert response.status_code == 404
     assert response.json()["detail"] == f"output {output_id!r} has no 3MF"
 
 
+def _no_model(outputs: OutputStore, output_id: str) -> Any:
+    row = outputs.rows.get(output_id)
+    assert row is not None
+    return type(row.blobs)(preview=row.blobs.preview, thumbnail=row.blobs.thumbnail)
+
+
 def test_preview_streams_blob(client: TestClient, model: str, outputs: OutputStore) -> None:
     output_id = _copied(client, model, outputs)
-    path = outputs.directory(output_id) / PREVIEW_NAME
-    data = path.read_bytes()
-    path.unlink()
+    data = _blob(client, outputs, output_id, "preview")
+    _no_share(outputs)
     response = client.get(f"/api/v1/outputs/{output_id}/preview.glb")
     assert response.status_code == 200, response.text
     assert response.content == data
     assert response.headers["content-type"] == GLB_MEDIA_TYPE
-    # The blob and its file both gone: the 404 text stays.
-    outputs.bytes = None
-    response = client.get(f"/api/v1/outputs/{output_id}/preview.glb")
-    assert response.status_code == 404
-    assert response.json()["detail"] == f"output {output_id!r} has no preview mesh"
 
 
 def test_output_file_streams_blob(client: TestClient, model: str, outputs: OutputStore) -> None:
     output_id = _copied(client, model, outputs)
-    files = outputs.directory(output_id) / FILES_DIR
-    (files / "a.stl").unlink()
-    (files / "b.svg").unlink()
+    _no_share(outputs)
     stl = client.get(f"/api/v1/outputs/{output_id}/files/a.stl")
     assert stl.status_code == 200, stl.text
     assert stl.content == b"a stl"
@@ -253,22 +272,21 @@ def test_output_file_streams_blob(client: TestClient, model: str, outputs: Outpu
     assert missing.json()["detail"] == f"no file 'c.stl' on output {output_id}"
 
 
-def test_output_file_falls_back_to_file_when_blob_lost(
+def test_output_file_of_lost_blob_is_500(
     client: TestClient, model: str, outputs: OutputStore, content: ContentStore
 ) -> None:
     output_id = _copied(client, model, outputs)
     _lose(client, content, output_file_key(output_id, "a.stl"))
-    (outputs.directory(output_id) / FILES_DIR / "a.stl").write_bytes(b"file stl")
     response = client.get(f"/api/v1/outputs/{output_id}/files/a.stl")
-    assert response.status_code == 200, response.text
-    assert response.content == b"file stl"
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"] == LOST.format("files/a.stl")
 
 
 def test_thumbnail_streams_blob_and_draws_from_preview_blob(
     client: TestClient, model: str, outputs: OutputStore, spool: Path
 ) -> None:
     output_id = _copied(client, model, outputs)
-    (outputs.directory(output_id) / THUMBNAIL_NAME).unlink()
+    _no_share(outputs)
     response = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
     assert response.status_code == 200, response.text
     assert response.content == PNG_BYTES
@@ -277,10 +295,12 @@ def test_thumbnail_streams_blob_and_draws_from_preview_blob(
     assert detail["has_thumbnail"] is True
     assert detail["thumbnail_version"] == hashlib.sha256(PNG_BYTES).hexdigest()[:16]
 
-    # One with no thumbnail, whose preview is only a blob: drawn from that blob.
+    # One with no thumbnail: drawn from its preview blob.
     outputs.draw_thumbnails = True
     drawn = _copied(client, model, outputs, thumbnail=False)
-    (outputs.directory(drawn) / PREVIEW_NAME).unlink()
+    # The folder stays for the drawn file the write still makes (until #7257's task B4,
+    # which needs the cut-over mark); its preview is gone, so only the blob answers.
+    (outputs.paths.output_dir(model, drawn) / PREVIEW_NAME).unlink()
     detail = client.get(f"/api/v1/outputs/{drawn}").json()
     assert detail["has_thumbnail"] is True
     assert detail["thumbnail_version"] is None
@@ -291,30 +311,14 @@ def test_thumbnail_streams_blob_and_draws_from_preview_blob(
     assert _spooled(spool) == []
 
 
-def test_thumbnail_drawn_when_its_blob_is_lost_and_no_file(
-    client: TestClient, model: str, outputs: OutputStore, content: ContentStore
-) -> None:
-    # The index still names the thumbnail blob, but the store lost it and no file holds
-    # it: the thumbnail is drawn from the preview, not counted as drawn meanwhile.
-    outputs.draw_thumbnails = True
-    output_id = _copied(client, model, outputs)
-    _lose(client, content, output_blob_key(output_id, "thumbnail"))
-    (outputs.directory(output_id) / THUMBNAIL_NAME).unlink()
-    response = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
-    assert response.status_code == 200, response.text
-    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
-    assert response.content != PNG_BYTES
-
-
 def test_thumbnail_404_without_preview(
     client: TestClient, model: str, outputs: OutputStore, content: ContentStore
 ) -> None:
     outputs.draw_thumbnails = True
     output_id = _copied(client, model, outputs, thumbnail=False)
     _lose(client, content, output_blob_key(output_id, "preview"))
-    (outputs.directory(output_id) / PREVIEW_NAME).unlink()
     # The index still names the lost blob, so the detail may offer a thumbnail; the
-    # read finds no preview to draw from and answers 404, never 500.
+    # draw cannot read the preview, and the read answers 404.
     response = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
     assert response.status_code == 404
     assert response.json()["detail"] == f"output {output_id!r} has no thumbnail"
@@ -324,9 +328,7 @@ def test_view_and_plates_read_blob_through_temp_file(
     client: TestClient, model: str, outputs: OutputStore, spool: Path
 ) -> None:
     output_id = _copied(client, model, outputs)
-    directory = outputs.directory(output_id)
-    (directory / PREVIEW_NAME).unlink()
-    (directory / MODEL_NAME).unlink()
+    _no_share(outputs)
     view = client.get(f"/api/v1/outputs/{output_id}/views/iso.png")
     assert view.status_code == 200, view.text
     assert view.content.startswith(b"\x89PNG\r\n\x1a\n")
@@ -339,22 +341,6 @@ def test_view_and_plates_read_blob_through_temp_file(
     assert cover.content.startswith(b"\x89PNG\r\n\x1a\n")
     # Each temporary file went when its reader was done.
     assert _spooled(spool) == []
-
-
-def test_view_and_plates_404_without_bytes(
-    client: TestClient, model: str, outputs: OutputStore
-) -> None:
-    output_id = _copied(client, model, outputs)
-    directory = outputs.directory(output_id)
-    (directory / PREVIEW_NAME).unlink()
-    (directory / MODEL_NAME).unlink()
-    outputs.bytes = None
-    view = client.get(f"/api/v1/outputs/{output_id}/views/iso.png")
-    assert view.status_code == 404
-    assert view.json()["detail"] == f"the preview for output {output_id!r} is gone"
-    plates = client.get(f"/api/v1/outputs/{output_id}/plates")
-    assert plates.status_code == 404
-    assert plates.json()["detail"] == f"output {output_id!r} has no 3MF"
 
 
 def test_download_of_corrupt_large_blob_ends_short(
@@ -518,7 +504,7 @@ def test_conditional_get_of_a_blob_is_304_with_no_blob_read(
 
 
 @pytest.mark.parametrize(("url", "role"), _BYTE_ROUTES)
-def test_conditional_get_of_a_lost_blob_gets_the_file(
+def test_conditional_get_of_a_lost_blob_is_500(
     client: TestClient,
     model: str,
     outputs: OutputStore,
@@ -526,8 +512,8 @@ def test_conditional_get_of_a_lost_blob_gets_the_file(
     url: str,
     role: str,
 ) -> None:
-    # The client holds the blob's tag; the store lost the blob, and the file that serves
-    # now has other bytes: they are sent, never a 304 from the index (#7478 review).
+    # The client holds the blob's tag; the store lost the blob: never a 304 from the
+    # index (#7478 review), and no file in its place (#7257).
     output_id = _copied(client, model, outputs)
     first = client.get(f"/api/v1/outputs/{output_id}/{url}")
     assert first.status_code == 200, first.text
@@ -537,20 +523,11 @@ def test_conditional_get_of_a_lost_blob_gets_the_file(
         else output_blob_key(output_id, role)  # type: ignore[arg-type]
     )
     _lose(client, content, key)
-    name = {
-        "model": MODEL_NAME,
-        "preview": PREVIEW_NAME,
-        "thumbnail": THUMBNAIL_NAME,
-        "file-0": f"{FILES_DIR}/a.stl",
-    }[role]
-    data = PNG_BYTES if role == "thumbnail" else b"file bytes"
-    (outputs.directory(output_id) / name).write_bytes(data)
     again = client.get(
         f"/api/v1/outputs/{output_id}/{url}",
         headers={"accept-encoding": "identity", "if-none-match": first.headers["etag"]},
     )
-    assert again.status_code == 200, again.text
-    assert again.content == data
+    assert again.status_code == 500, again.text
 
 
 def test_conditional_get_of_the_gzipped_preview_is_304(
@@ -568,54 +545,11 @@ def test_conditional_get_of_the_gzipped_preview_is_304(
     assert again.status_code == 304, again.text
 
 
-@pytest.mark.parametrize(("url", "role"), _BYTE_ROUTES)
-def test_conditional_get_of_a_file_is_304_by_its_weak_tag(
-    client: TestClient,
-    model: str,
-    outputs: OutputStore,
-    content: ContentStore,
-    url: str,
-    role: str,
-) -> None:
-    # Saved with no blob store: the files hold the bytes.
-    outputs.bytes = None
-    output_id = _saved(client, model)
-    directory = outputs.directory(output_id)
-    (directory / THUMBNAIL_NAME).write_bytes(PNG_BYTES)
-    (directory / FILES_DIR).mkdir(exist_ok=True)
-    (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
-    outputs.bytes = OutputBytes(content)
-    first = client.get(
-        f"/api/v1/outputs/{output_id}/{url}", headers={"accept-encoding": "identity"}
-    )
-    assert first.status_code == 200, first.text
-    etag = first.headers["etag"]
-    assert etag.startswith('W/"')
-    again = client.get(
-        f"/api/v1/outputs/{output_id}/{url}",
-        headers={"accept-encoding": "identity", "if-none-match": etag},
-    )
-    assert again.status_code == 304, again.text
-    assert again.headers["etag"] == etag
-
-
-@pytest.mark.parametrize("blob", [True, False])
 @pytest.mark.parametrize("role", ["thumbnail", "preview"])
 def test_versioned_thumbnail_and_preview_are_immutable(
-    client: TestClient,
-    model: str,
-    outputs: OutputStore,
-    content: ContentStore,
-    role: str,
-    blob: bool,
+    client: TestClient, model: str, outputs: OutputStore, role: str
 ) -> None:
-    if blob:
-        output_id = _copied(client, model, outputs)
-    else:
-        outputs.bytes = None
-        output_id = _saved(client, model)
-        (outputs.directory(output_id) / THUMBNAIL_NAME).write_bytes(PNG_BYTES)
-        outputs.bytes = OutputBytes(content)
+    output_id = _copied(client, model, outputs)
     url = f"/api/v1/outputs/{output_id}/{'thumbnail' if role == 'thumbnail' else 'preview.glb'}"
     version = outputs.role_version(output_id, role)  # type: ignore[arg-type]
     assert version is not None

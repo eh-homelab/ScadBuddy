@@ -23,7 +23,6 @@ from scadbuddy.library.output_rows import (
     plate_cover_prefix,
 )
 from scadbuddy.library.outputs import (
-    META_NAME,
     OutputMeta,
     OutputStore,
     reap_orphan_holds,
@@ -68,20 +67,17 @@ async def content(tmp_path: Path, pool: Pool) -> AsyncGenerator[ContentStore]:
         await store.aclose()
 
 
-async def _with_files(tmp_path: Path) -> tuple[OutputStore, Job, Path]:
+async def _with_files(
+    tmp_path: Path, projection: JobProjection, content: ContentStore
+) -> tuple[OutputStore, Job, Path]:
     """A store with rows and a blob store, and a finished job whose output has a file."""
     paths, job, written = await finished_job(tmp_path / "data")
     files = tmp_path / "extra" / "files"
     files.mkdir(parents=True)
     (files / "a.stl").write_bytes(b"a stl")
     job = job.model_copy(update={"outputs": [written.model_copy(update={"files": ["a.stl"]})]})
-    store = OutputStore(paths)
+    store = OutputStore(paths, rows=OutputRows(projection.pool), bytes=OutputBytes(content))
     return store, job, files
-
-
-def _wire(store: OutputStore, projection: JobProjection, content: ContentStore) -> None:
-    store.rows = OutputRows(projection.pool)
-    store.bytes = OutputBytes(content)
 
 
 async def _saved(
@@ -93,8 +89,7 @@ async def _saved(
     """A saved output with every kind of output blob: its roles and ``files/`` (the
     save), its plate cover (the first read of the model's fallback cover) and a drawn
     thumbnail (its staged key and its role key)."""
-    store, job, files = await _with_files(tmp_path)
-    _wire(store, projection, content)
+    store, job, files = await _with_files(tmp_path, projection, content)
     meta = await store.save(job, name="first", files_dir=files)
     with projection.pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
@@ -204,8 +199,7 @@ async def test_failed_save_blobs_are_swept(
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, job, files = await _with_files(tmp_path)
-    _wire(store, projection, content)
+    store, job, files = await _with_files(tmp_path, projection, content)
 
     def failing(*args: Any, **kwargs: Any) -> Any:
         raise OSError("the commit failed")
@@ -238,17 +232,16 @@ async def test_reaper_keeps_holds_of_output_with_row_and_no_meta(
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An output whose row stands is live, whatever its folder holds (phase 3 removes the
-    folders): the reaper never releases its holds because its ``meta.json`` is gone."""
+    """An output whose row stands is live, whatever its folder holds (#7257): the reaper
+    never releases its holds because its folder is gone."""
     store, meta = await _saved(tmp_path, projection, content, monkeypatch)
     refs = BlobRefs(pool)
     outputs_module.hold_parts(refs, meta.id, [], meta.slug)
     held = _holds(pool, meta.id)
-    (store.directory(meta.id) / META_NAME).unlink()
+    shutil.rmtree(store.paths.output_dir(meta.slug, meta.id))
     _age_holds(pool, meta.id)
     assert reap_orphan_holds(refs, store, grace=timedelta(0)) == 0
     assert _holds(pool, meta.id) == held
-    assert store.directory(meta.id).is_dir()
 
 
 async def test_reaper_still_releases_holds_of_output_with_no_row(
@@ -264,28 +257,11 @@ async def test_reaper_still_releases_holds_of_output_with_no_row(
     refs = BlobRefs(pool)
     outputs_module.hold_parts(refs, meta.id, [], meta.slug)
     refs.add("piece-part", OUTPUT_HOLDER, meta.id)
-    (store.directory(meta.id) / META_NAME).unlink()
-    assert store.rows is not None
     with projection.pool.connection() as conn:
         conn.execute("DELETE FROM outputs WHERE output_id = %s", (meta.id,))
     _age_holds(pool, meta.id)
     assert reap_orphan_holds(refs, store, grace=timedelta(0)) == 1
     assert _holds(pool, meta.id) == set()
-
-
-async def test_reaper_keeps_folder_of_output_with_row_and_no_holds(
-    tmp_path: Path, projection: JobProjection, pool: Pool
-) -> None:
-    """A row with no holds (a save on a store with no blob store) and no ``meta.json`` is
-    still live: the unheld-directory pass leaves its folder."""
-    store, job, files = await _with_files(tmp_path)
-    store.rows = OutputRows(projection.pool)
-    meta = await store.save(job, name="first", files_dir=files)
-    assert _holds(pool, meta.id) == set()
-    directory = store.directory(meta.id)
-    (directory / META_NAME).unlink()
-    assert reap_orphan_holds(BlobRefs(pool), store, grace=timedelta(0)) == 0
-    assert directory.is_dir()
 
 
 def _mark(pool: Pool, rows: OutputRows) -> None:
@@ -302,8 +278,7 @@ async def test_reaper_after_cut_over_reads_rows_only(
     """#7257 plan A5: after the mark the reaper scans no folder and reads no
     ``output_hold_slugs`` (release B's migration dropped it). Past the grace, a
     deleted output's holds go; a live output's holds and a claimed id's holds stay."""
-    store, job, files = await _with_files(tmp_path)
-    _wire(store, projection, content)
+    store, job, files = await _with_files(tmp_path, projection, content)
     rows = store.rows
     assert rows is not None
     live = await store.save(job, name="live", files_dir=files)
@@ -335,8 +310,7 @@ async def test_reaper_after_cut_over_keeps_young_holds_and_drops_stale_claims(
     """#7257 A5 review M1. A phase 2 pod's save takes no claim: its young holds stay
     while they are younger than the grace. A claim older than the grace no longer
     protects its old holds: they go with it."""
-    store, job, _ = await _with_files(tmp_path)
-    _wire(store, projection, content)
+    store, job, _ = await _with_files(tmp_path, projection, content)
     rows = store.rows
     assert rows is not None
     await store.save(job, name="live")

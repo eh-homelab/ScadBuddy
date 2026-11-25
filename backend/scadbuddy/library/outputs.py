@@ -9,14 +9,12 @@ import logging
 import os
 import re
 import shutil
-import stat
 import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import (
-    AsyncGenerator,
     AsyncIterator,
     Callable,
     Iterable,
@@ -28,7 +26,7 @@ from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from botocore.exceptions import ClientError
 from fastapi import status
@@ -52,8 +50,6 @@ from scadbuddy.library.output_bytes import (
     OutputBytes,
     OutputStream,
     blob_version,
-    file_version,
-    in_thread_closing,
     server_error,
 )
 from scadbuddy.library.output_rows import OUTPUT_HOLDER as OUTPUT_HOLDER
@@ -79,7 +75,6 @@ from scadbuddy.render.job_models import (
 )
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
-from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef
 
@@ -123,16 +118,17 @@ ROLE_FILES: dict[Role, str] = {
     "preview": PREVIEW_NAME,
     "thumbnail": THUMBNAIL_NAME,
 }
-#: A blob the row names that the store cannot give whole: the reader takes the file. A
-#: stream raises it before its first chunk only for a missing blob, a corrupt blob of at
-#: most `output_bytes._PREFETCH` bytes, or a transport error during that prefetch; a larger
-#: corrupt blob, or a transport error past the prefetch, raises it mid-stream. An S3 5xx
-#: answer counts as a transport error (`output_bytes.server_error`); a 4xx does not.
+#: A blob the row names that the store cannot give whole: the reader raises
+#: `OutputBytesLostError` (#7257, plan D9). A stream raises it before its first chunk only
+#: for a missing blob, a corrupt blob of at most `output_bytes._PREFETCH` bytes, or a
+#: transport error during that prefetch; a larger corrupt blob, or a transport error past
+#: the prefetch, raises it mid-stream. An S3 5xx answer counts as a transport error
+#: (`output_bytes.server_error`); a 4xx does not.
 _LOST: tuple[type[Exception], ...] = (BlobMissingError, BlobCorruptError, *TRANSPORT_ERRORS)
 
 
-#: What a plate cover's read of the model blob can raise past `local_role`'s fallback: the
-#: spool's errors, an S3 answer, and the transport's.
+#: What a plate cover's read of the model blob can raise besides a lost blob
+#: (`OutputBytesLostError`): the spool's errors, an S3 answer, and the transport's.
 _COVER_READ_ERRORS: tuple[type[Exception], ...] = (OSError, ClientError, *TRANSPORT_ERRORS)
 
 
@@ -142,9 +138,8 @@ _MISSING_CODES = frozenset({"404", "NoSuchKey", "NotFound"})
 
 @dataclass(frozen=True)
 class RoleRead:
-    """What `OutputStore.read_role` read: a path that holds the role's bytes (``None``
-    when there are none) and the sha256 of the blob it came from (``None`` for the
-    file)."""
+    """What `OutputStore.read_role` read: a path that holds the role's bytes and the
+    sha256 of the blob it came from; both ``None`` when the row names no blob."""
 
     path: Path | None
     sha256: str | None
@@ -153,8 +148,8 @@ class RoleRead:
 def _object_missing(error: Exception) -> bool:
     """Whether ``error`` says that the object is not there: a 404 or ``NoSuchKey``
     answer. A guard only: both backends raise `BlobMissingError` for a missing object
-    (`store/s3.py` `_missing`, `store/local.py` `download`), which `local_role` takes as
-    a lost blob and answers from the file. A 401, 403 or other refusal is not one,
+    (`store/s3.py` `_missing`, `store/local.py` `download`), which `read_role` takes as
+    a lost blob (`OutputBytesLostError`). A 401, 403 or other refusal is not one,
     because a key rotation can heal it. A local disk error (a ``FileNotFoundError`` of
     the spool or the download cache) is not one either: it is transient."""
     if not isinstance(error, ClientError):
@@ -164,12 +159,9 @@ def _object_missing(error: Exception) -> bool:
 
 
 def _lost(error: Exception) -> bool:
-    """Whether a reader takes the file in place of the blob after ``error``."""
+    """Whether ``error`` says the store has lost the blob (`OutputBytesLostError`)."""
     return isinstance(error, _LOST) or server_error(error)
 
-
-#: How much of a file a stream reads at a time.
-_FILE_CHUNK = 1024 * 1024
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -208,10 +200,31 @@ class OutputNotFoundError(KeyError):
     pass
 
 
-#: How long `name_and_slug` does not look again for an output it found gone (#3856):
-#: each look globs the outputs volume, and the Activity page refetches its facets often.
-GONE_OUTPUT_SECONDS = 60.0
-_GONE_OUTPUTS_KEPT = 1000
+class OutputBytesLostError(Exception):
+    """The output's row names a blob that the blob store has lost (#7257, plan D9). There
+    is no file to read in its place, so a route answers 500, not 404: the output exists."""
+
+    def __init__(self, output_id: str, role: str, key: str) -> None:
+        super().__init__(f"the blob store has lost output {output_id}'s {role} ({key})")
+        self.output_id = output_id
+        self.role = role
+        self.key = key
+
+
+class OutputStoreUnusableError(RuntimeError):
+    """The outputs have no blob store: the store is `bambuddy`, where outputs never go
+    (spec §6.4, #7257 plan D2)."""
+
+
+#: What a plate cover's derive from the model blob logs and answers no cover for.
+_COVER_DERIVE_ERRORS: tuple[type[Exception], ...] = (OutputBytesLostError, *_COVER_READ_ERRORS)
+
+
+#: Why the API refuses to start on the `bambuddy` store (#7257).
+OUTPUTS_NEED_A_BLOB_STORE = (
+    "the outputs are kept only in the blob store (#7257), and the bambuddy store holds"
+    " none (spec 6.4). Move the store to s3 or local (store_backend), then start again"
+)
 
 
 class PlateSend(BaseModel):
@@ -410,95 +423,19 @@ def _with_last_print(meta: OutputMeta, row: LastPrint | None) -> OutputMeta:
     return meta.model_copy(update={**fields, "sent_to_bambuddy": sent})
 
 
-@dataclass(frozen=True)
-class _ResolvedCover:
-    """Which 3MF holds a model's fallback cover, as of one state of its outputs."""
-
-    #: ``st_mtime_ns`` of ``outputs/<slug>/`` when this was resolved. Adding or
-    #: removing an output directory moves it, which catches a change made by
-    #: anything other than this store -- the orphan sweep, a model delete.
-    stamp: int
-    archive: Path | None
-
-
-def thumbnail_file_version(path: Path) -> str | None:
-    """The file's identity: every write puts a new file in place (a new inode, by a
-    rename or a link), and its time and size tell apart an inode used again."""
-    try:
-        info = path.stat()
-    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
-        return None
-    return file_version(info.st_ino, info.st_mtime_ns, info.st_size)
-
-
-async def _file_chunks(file: BinaryIO) -> AsyncGenerator[bytes]:
-    """The open file's bytes. It does not close the file: the stream's close does."""
-    while chunk := await asyncio.to_thread(file.read, _FILE_CHUNK):
-        yield chunk
-
-
-def _open_regular(path: Path) -> tuple[BinaryIO, os.stat_result] | None:
-    """The file open for reading and its stat from its own descriptor, so the size and
-    the validator are those of the file that is read. ``None`` when there is no regular
-    file. Blocking."""
-    try:
-        file = path.open("rb")
-    except OSError:
-        return None
-    try:
-        info = os.fstat(file.fileno())
-    except OSError:
-        file.close()
-        return None
-    if not stat.S_ISREG(info.st_mode):
-        file.close()
-        return None
-    return file, info
-
-
-async def _file_stream(path: Path) -> OutputStream | None:
-    """The file's bytes as a stream, ``None`` when there is no regular file. The file is
-    opened in a thread before this returns; a cancel meanwhile closes it once the thread
-    returns. The stream's close closes it: in a thread, which a cancelled caller's close
-    runs only when that close is shielded (Task 6's routes shield their ``aclose``)."""
-    opened = await in_thread_closing(lambda: _open_regular(path), _close_regular)
-    if opened is None:
-        return None
-    file, info = opened
-    return OutputStream(
-        size=info.st_size,
-        sha256=None,
-        chunks=_file_chunks(file),
-        _on_close=lambda: asyncio.to_thread(file.close),
-        identity=(info.st_ino, info.st_mtime_ns, info.st_size),
-    )
-
-
-def _close_regular(opened: tuple[BinaryIO, os.stat_result] | None) -> None:
-    if opened is not None:
-        opened[0].close()
-
-
-def _warn_lost(output_id: str, role: str, key: str, error: Exception) -> None:
-    logger.warning(
-        "an output's blob is lost; reading its file",
+def _lost_blob(output_id: str, role: str, key: str, error: Exception) -> OutputBytesLostError:
+    """The error a reader raises for a lost blob, logged at error level (plan D9)."""
+    logger.error(
+        "the blob store has lost an output's blob",
         extra={"output_id": output_id, "role": role, "key": key, "error": str(error)},
     )
+    return OutputBytesLostError(output_id, role, key)
 
 
 class OutputFiles(Protocol):
     async def model_3mf(self, output_id: str) -> bytes | None:
         """The output's stored ``model.3mf``; ``None`` when it has none (or is gone)."""
         ...
-
-
-def _read_if_there(path: Path) -> str | None:
-    """The file's text, or None when there is none: read once, so a file cleared between
-    a check and the read is not an error. A directory there is none, as `is_file` said."""
-    try:
-        return path.read_text(encoding="utf-8")
-    except (FileNotFoundError, IsADirectoryError):
-        return None
 
 
 def _object(value: Any) -> dict[str, Any]:
@@ -545,6 +482,41 @@ _SIDE_FILES: dict[str, Callable[[Any], Any]] = {
 }
 
 
+def _row_from_folder(directory: Path, slug: str) -> OutputRow | None:
+    """The output's row from its folder alone, for `OutputStore.restore_rows` only, which
+    #7257's task B5 removes with this. ``None`` for a folder whose ``meta.json`` is
+    missing, unreadable or names another output. A side file that cannot be read is left
+    out of the row. Blocking."""
+    from scadbuddy.library.output_rows import OutputRow
+
+    try:
+        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if meta.id != directory.name or meta.slug != slug:
+        return None
+    values: dict[str, Any] = {}
+    for name, check in _SIDE_FILES.items():
+        values[name] = None
+        # Missing, undecodable, a directory, an I/O error, or JSON the readers refuse.
+        with contextlib.suppress(OSError, ValueError):
+            values[name] = check(json.loads((directory / name).read_text(encoding="utf-8")))
+    return OutputRow(
+        output_id=meta.id,
+        slug=slug,
+        meta=meta,
+        params=values[PARAMS_NAME] or {},
+        inputs=values[INPUTS_NAME],
+        record=values[RECORD_NAME],
+        manifest=values[MANIFEST_NAME],
+        bom=values[BOM_NAME],
+        arranged_from=values[ARRANGED_NAME],
+        backfill=values[BACKFILL_NAME],
+        has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
+        copied_at=meta.created_at,
+    )
+
+
 @dataclass
 class PreparedOutput:
     """An output `OutputStore.prepare` wrote, all but its ``meta.json`` and its row."""
@@ -559,42 +531,30 @@ class PreparedOutput:
 
 
 class OutputStore:
-    """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
+    """The saved outputs (#7257): each one's record is its ``outputs`` row, and its bytes
+    are the blobs the row names. Nothing is read from ``data/outputs/``."""
 
-    def __init__(self, paths: DataPaths, *, prints: OutputPrintStore | None = None) -> None:
+    def __init__(
+        self,
+        paths: DataPaths,
+        *,
+        rows: OutputRows,
+        bytes: OutputBytes | None,
+        prints: OutputPrintStore | None = None,
+    ) -> None:
         self.paths = paths
-        #: The last print of each output (#1060), laid over what ``meta.json`` says.
+        #: The last print of each output (#1060), laid over the row's meta.
         self.prints = prints
-        #: Every output as a row of ``outputs`` (#7255), the record a lookup by id reads.
-        #: ``None`` keeps the files as the only record (tests and tools with no database).
-        self.rows: OutputRows | None = None
-        #: The outputs' bytes as blobs (#7256), read before the files. ``None``: the
-        #: files only, as on the `bambuddy` store (`output_bytes.usable`). On `local` the
-        #: API sets the outputs' own store (#7257, plan D7).
-        self.bytes: OutputBytes | None = None
-        # The fallback-cover resolution per slug (#179). Finding it means reading
-        # every output record and opening 3MFs, and the catalogue asks on every
-        # listing, so it is done once per state of the model's outputs.
-        self._covers: dict[str, _ResolvedCover] = {}
-        #: Bumped by every `forget_plate_cover`. Store-wide rather than per slug, so
-        #: forgetting a slug leaves no key behind -- a deleted model's slug must not
-        #: stay in memory for the life of the process -- while a scan that was in
-        #: flight across a forget still knows not to store what it found.
-        self._cover_epoch = 0
-        self._covers_lock = threading.Lock()
-        #: Outputs `name_and_slug` found gone, each until it looks again; facets read it
-        #: from worker threads.
-        self._gone: dict[str, float] = {}
-        self._gone_lock = threading.Lock()
+        #: Every output as a row of ``outputs`` (#7255): the record.
+        self.rows = rows
+        #: The outputs' bytes as blobs (#7256). ``None`` only until the API's start sets
+        #: it from the store, which refuses `bambuddy` (`OutputStoreUnusableError`). On
+        #: `local` the outputs have a store of their own (#7257, plan D7).
+        self.bytes = bytes
         #: Called with a model's id when one of its outputs is saved or deleted --
         #: which moves the catalogue's fallback cover, and with it whether the
         #: default-render preview is needed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
-        #: #2755 — where each output's directory was last found. Finding one by id means
-        #: globbing every model's directory (~90 ms on the NAS share in production),
-        #: and a listing's details asked about ten times per output. A hit is checked
-        #: with one stat, so a moved or deleted output is looked for again.
-        self._dirs: dict[str, Path] = {}
         #: #4775 — whether an output with no thumbnail gets one drawn from its preview
         #: mesh on first read; `preview_renders`, set at boot as the model previews are.
         self.draw_thumbnails = False
@@ -611,6 +571,12 @@ class OutputStore:
         #: The row `reading` read for this thread, as ``(output_id, row)``.
         self._held = threading.local()
 
+    def _blobs(self) -> OutputBytes:
+        """The outputs' blob store; `OutputStoreUnusableError` before the start set one."""
+        if self.bytes is None:
+            raise OutputStoreUnusableError("the outputs have no blob store")
+        return self.bytes
+
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
             return
@@ -623,44 +589,37 @@ class OutputStore:
     def reading(self, output_id: str) -> Iterator[None]:
         """Within it, on this thread, every read of ``output_id`` uses one read of its row
         (#7255): a detail asks for about ten parts of one output, which would otherwise
-        be one query each. With no row (before a copy run finished), each part reads its
-        files, as before. Raises `OutputNotFoundError` as `get` does."""
+        be one query each. A nested block of another output holds that one's row and
+        gives the outer one back on exit (#7463). Raises `OutputNotFoundError` as `get`
+        does."""
         row = self._row_of(output_id)
+        outer: tuple[str, OutputRow] | None = getattr(self._held, "row", None)
         self._held.row = (output_id, row)
         try:
             yield
         finally:
-            del self._held.row
+            self._held.row = outer
 
-    def _held_row(self, output_id: str) -> tuple[bool, OutputRow | None]:
-        """Whether `reading` holds ``output_id`` on this thread, and its row."""
-        held: tuple[str, OutputRow | None] | None = getattr(self._held, "row", None)
-        if held is None or held[0] != output_id:
-            return False, None
-        return True, held[1]
-
-    def _row_of(self, output_id: str) -> OutputRow | None:
-        """The output's row (#7255). ``None`` when the store has no rows, or when a copy
-        run has not finished and the output has no row: the caller then reads the files.
-        Once a copy run finished, an output with no row is gone."""
-        if self.rows is None:
-            return None
-        held, row = self._held_row(output_id)
-        if held:
-            return row
+    def _row_of(self, output_id: str) -> OutputRow:
+        """The output's row (#7255): the one `reading` holds on this thread, else one
+        query. `OutputNotFoundError` when there is none."""
+        held: tuple[str, OutputRow] | None = getattr(self._held, "row", None)
+        if held is not None and held[0] == output_id:
+            return held[1]
         row = self.rows.get(output_id)
-        if row is None and self.rows.copied():
+        if row is None:
             raise OutputNotFoundError(output_id)
         return row
-
-    def _copied(self) -> bool:
-        """Whether the rows hold every output: a copy run finished (#7255)."""
-        return self.rows is not None and self.rows.copied()
 
     def _cut_over(self) -> bool:
         """Whether the cut-over mark exists (#7257, plan D2): the rows and the blobs are
         the record, and an output's folder may be missing (a release B pod saved it)."""
-        return self.rows is not None and self.rows.cut_over()
+        return self.rows.cut_over()
+
+    def _folder(self, output_id: str) -> Path:
+        """The output's folder as its row names it, for the file steps the writes still
+        take (`_folder_write`, until #7257's task B4). No read of the share finds it."""
+        return self.paths.output_dir(self._row_of(output_id).slug, output_id)
 
     def _folder_write[T](
         self,
@@ -670,13 +629,13 @@ class OutputStore:
         missing: T,
         directory: Path | None = None,
     ) -> T:
-        """Run ``write`` on the output's folder (``directory``, else `_find_dir`): a file
+        """Run ``write`` on the output's folder (``directory``, else `_folder`): a file
         step beside the row's. After the cut-over mark a missing folder is no error
         (#7257, plan D1): the step is logged at debug and skipped, and ``missing`` is the
         answer; the row step runs as before. Before the mark, a missing folder raises
         `FileNotFoundError`, as in phase 2. Blocking."""
         if directory is None:
-            directory = self._find_dir(output_id)
+            directory = self._folder(output_id)
         try:
             return write(directory)
         except FileNotFoundError:
@@ -690,213 +649,49 @@ class OutputStore:
         )
         return missing
 
-    def _find_dir(self, output_id: str) -> Path:
-        held, row = self._held_row(output_id)
-        if held:
-            if row is not None:
-                return self.paths.output_dir(row.slug, output_id)
-            return self._files_dir(output_id)
-        if self.rows is not None:
-            # One indexed read, no glob (#7255).
-            slug = self.rows.slug_of(output_id)
-            if slug is not None:
-                return self.paths.output_dir(slug, output_id)
-            if self.rows.copied():
-                raise OutputNotFoundError(output_id)
-        return self._files_dir(output_id)
-
-    def _files_dir(self, output_id: str) -> Path:
-        """The output's folder found from the files alone, for a caller that already
-        asked the rows and found none (`_row_of`), so they are not asked again."""
-        known = self._dirs.get(output_id)
-        if known is not None and (known / META_NAME).is_file():
-            return known
-        # The glob reads every model's directory (0.2 to 0.4 s on prod's NFS share, and a
-        # miss is never remembered): a span of its own (#7245). A hit above is one stat
-        # and gets none, as a listing asks about each output many times.
-        with span(
-            "outputs.find_dir",
-            attributes={
-                "scadbuddy.output_id": output_id,
-                "scadbuddy.remembered": known is not None,
-            },
-        ) as current:
-            for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
-                self._dirs[output_id] = meta_path.parent
-                current.set_attribute("scadbuddy.found", True)
-                return meta_path.parent
-            current.set_attribute("scadbuddy.found", False)
-        self._dirs.pop(output_id, None)
-        raise OutputNotFoundError(output_id)
-
-    def directory(self, output_id: str) -> Path:
-        return self._find_dir(output_id)
-
-    def directory_from_files(self, output_id: str) -> Path:
-        """The output's folder found from the files alone, asking no row: for a caller
-        whose row read just failed."""
-        return self._files_dir(output_id)
-
-    def row_from_files(
-        self, directory: Path, slug: str
-    ) -> tuple[OutputRow | None, list[dict[str, Any]]]:
-        """The output's row from its files alone, for the copy into rows (#7255), and the
-        side files left out of it as ``{output_id, slug, file, error}``. ``None`` for a
-        folder whose ``meta.json`` is missing, unreadable or names another output."""
-        from scadbuddy.library.output_rows import OutputRow
-
-        output_id = directory.name
-        try:
-            meta = OutputMeta.model_validate_json(
-                (directory / META_NAME).read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            return None, []
-        if meta.id != output_id or meta.slug != slug:
-            return None, []
-        values: dict[str, Any] = {}
-        damaged: list[dict[str, Any]] = []
-        for name, check in _SIDE_FILES.items():
-            values[name] = None
-            try:
-                values[name] = check(json.loads((directory / name).read_text(encoding="utf-8")))
-            except FileNotFoundError:
-                continue
-            # Undecodable, a directory, an I/O error, or JSON the readers refuse: the
-            # row goes without the file, and the run names it.
-            except (OSError, ValueError) as error:
-                damaged.append(
-                    {
-                        "output_id": output_id,
-                        "slug": slug,
-                        "file": name,
-                        "error": type(error).__name__,
-                    }
-                )
-        row = OutputRow(
-            output_id=output_id,
-            slug=slug,
-            meta=meta,
-            params=values[PARAMS_NAME] or {},
-            inputs=values[INPUTS_NAME],
-            record=values[RECORD_NAME],
-            manifest=values[MANIFEST_NAME],
-            bom=values[BOM_NAME],
-            arranged_from=values[ARRANGED_NAME],
-            backfill=values[BACKFILL_NAME],
-            has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
-            copied_at=meta.created_at,
-        )
-        return row, damaged
-
     def existing(self, output_ids: Iterable[str]) -> set[str]:
-        """Those of ``output_ids`` the store still has: one query once a copy run
-        finished (#7255), else one lookup each."""
-        if self.rows is not None and self.rows.copied():
-            return self.rows.existing(output_ids)
-        found: set[str] = set()
-        for output_id in output_ids:
-            try:
-                self.directory(output_id)
-            except OutputNotFoundError:
-                continue
-            found.add(output_id)
-        return found
+        """Those of ``output_ids`` the store still has: one query (#7255)."""
+        return self.rows.existing(output_ids)
 
     def get(self, output_id: str) -> OutputMeta:
-        row = self._row_of(output_id)
-        if row is not None:
-            meta = row.meta
-        else:
-            directory = self._files_dir(output_id)
-            meta = OutputMeta.model_validate_json(
-                (directory / META_NAME).read_text(encoding="utf-8")
-            )
-        [meta] = self._with_last_prints([meta])
+        [meta] = self._with_last_prints([self._row_of(output_id).meta])
         return meta
 
     def name_and_slug(self, output_id: str) -> tuple[str | None, str]:
-        """The output's own name and its model, from its row (#7255), else its
-        ``meta.json``: `get` without the last-print read, for a caller that only labels
-        it (#3856). One found gone in the files is not looked for again for
-        `GONE_OUTPUT_SECONDS`; one found gone once a copy run finished costs one query."""
+        """The output's own name and its model, from its row (#7255): `get` without the
+        last-print read, for a caller that only labels it (#3856)."""
         row = self._row_of(output_id)
-        if row is not None:
-            return row.meta.name, row.slug
-        with self._gone_lock:
-            gone = self._gone.get(output_id, 0.0) > time.monotonic()
-        if gone:
-            raise OutputNotFoundError(output_id)
-        try:
-            directory = self._files_dir(output_id)
-        except OutputNotFoundError:
-            with self._gone_lock:
-                if len(self._gone) >= _GONE_OUTPUTS_KEPT:
-                    self._gone.clear()
-                self._gone[output_id] = time.monotonic() + GONE_OUTPUT_SECONDS
-            raise
-        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
-        return meta.name, meta.slug
+        return row.meta.name, row.slug
 
     def _with_last_prints(self, metas: list[OutputMeta]) -> list[OutputMeta]:
-        """Each output's recorded last print (#1060) over its file's; one with no row
-        keeps what an older release wrote into its ``meta.json``."""
+        """Each output's recorded last print (#1060) over its row's meta; one with no
+        print row keeps what an older release wrote into its meta."""
         if self.prints is None:
             return metas
         rows = self.prints.for_outputs([meta.id for meta in metas])
         return [_with_last_print(meta, rows.get(meta.id)) for meta in metas]
 
     async def model_3mf(self, output_id: str) -> bytes | None:
-        """The output's ``model.3mf``: the blob, else the file (#7256)."""
+        """The output's ``model.3mf`` blob (#7256). ``None`` when there is no such output
+        or its row names no model; `OutputBytesLostError` when the blob is lost."""
         try:
             key = await asyncio.to_thread(self._blob_key, output_id, "model")
         except OutputNotFoundError:
             return None
-        if key is not None:
-            assert self.bytes is not None
+        if key is None:
+            return None
+        with span("outputs.read_3mf", attributes={"scadbuddy.output_id": output_id}) as current:
             try:
-                return await self.bytes.read(key)
+                data = await self._blobs().read(key)
             except Exception as error:
                 if not _lost(error):
                     raise
-                _warn_lost(output_id, "model", key, error)
-        return await asyncio.to_thread(self._model_3mf, output_id)
-
-    def _model_3mf(self, output_id: str) -> bytes | None:
-        with span("outputs.read_3mf", attributes={"scadbuddy.output_id": output_id}) as current:
-            try:
-                data = (self._find_dir(output_id) / MODEL_NAME).read_bytes()
-            except (OutputNotFoundError, FileNotFoundError):
-                current.set_attribute("scadbuddy.found", False)
-                return None
+                raise _lost_blob(output_id, "model", key, error) from error
             current.set_attribute("scadbuddy.bytes", len(data))
             return data
 
-    async def provenance(self, output_id: str) -> Provenance | None:
-        """What the 3MF itself says produced it — the fallback when the record is gone.
-        Its one caller asks only when the output has no row and no record, so it has no
-        blob either: the tree is searched for a folder that holds only a ``model.3mf``,
-        and only before a copy run finished (#7255), in a thread."""
-        with span("outputs.provenance", attributes={"scadbuddy.output_id": output_id}):
-            return await asyncio.to_thread(self._provenance_in_tree, output_id)
-
-    def _provenance_in_tree(self, output_id: str) -> Provenance | None:
-        """`provenance` of a ``model.3mf`` found by a search of the tree. Blocking."""
-        if self._copied():
-            return None
-        for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
-            return read_provenance(path)
-        return None
-
     def params(self, output_id: str) -> dict[str, ParamValue]:
-        row = self._row_of(output_id)
-        if row is not None:
-            return dict(row.params)
-        text = _read_if_there(self._files_dir(output_id) / PARAMS_NAME)
-        if text is None:
-            return {}
-        loaded: dict[str, ParamValue] = json.loads(text)
-        return loaded
+        return dict(self._row_of(output_id).params)
 
     def inputs(
         self, output_id: str, params: Mapping[str, ParamValue] | None = None
@@ -904,62 +699,20 @@ class OutputStore:
         """The output's inputs; one from before them reads as its params at ``v`` 0.
         A caller that already read :meth:`params` passes them, so they are read once."""
         row = self._row_of(output_id)
-        if row is not None:
-            if row.inputs is None:
-                return legacy_inputs(row.params if params is None else params)
-            return dict(row.inputs)
-        path = self._files_dir(output_id) / INPUTS_NAME
-        try:
-            text = _read_if_there(path)
-        except OSError:
-            text = ""  # unreadable: as damaged, below
-        if text is None:
-            return legacy_inputs(self.params(output_id) if params is None else params)
-        try:
-            loaded = json.loads(text)
-        except ValueError:
-            loaded = None
-        if not isinstance(loaded, dict):
-            # The record itself (meta, files, params) is intact: read it as one from
-            # before inputs rather than lose it to a damaged side file.
-            logger.warning("outputs: %s of %s is unreadable; using params", INPUTS_NAME, output_id)
-            return legacy_inputs(self.params(output_id) if params is None else params)
-        checked: dict[str, Any] = loaded
-        return checked
+        if row.inputs is None:
+            return legacy_inputs(row.params if params is None else params)
+        return dict(row.inputs)
 
     def list_for(self, slug: str) -> list[OutputMeta]:
         with span("outputs.list_for", attributes={"scadbuddy.slug": slug}) as current:
-            if self._copied():
-                assert self.rows is not None
-                # Newest first already; one query, no glob (#7255).
-                rows = [row.meta for row in self.rows.for_slug(slug)]
-                current.set_attribute("scadbuddy.outputs", len(rows))
-                return self._with_last_prints(rows)
-            directory = self.paths.outputs / slug
-            if not directory.is_dir():
-                current.set_attribute("scadbuddy.outputs", 0)
-                return []
-            metas = []
-            for path in directory.glob(f"*/{META_NAME}"):
-                meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
-                # Found by the listing's own glob: the details read next need no search.
-                if meta.id == path.parent.name:
-                    self._dirs[meta.id] = path.parent
-                metas.append(meta)
+            # Newest first already; one query (#7255).
+            metas = [row.meta for row in self.rows.for_slug(slug)]
             current.set_attribute("scadbuddy.outputs", len(metas))
-        return sorted(self._with_last_prints(metas), key=lambda meta: meta.created_at, reverse=True)
+            return self._with_last_prints(metas)
 
     def ids_for(self, slug: str) -> list[str]:
-        """The id of every output directory of ``slug``, readable record or not."""
-        try:
-            entries = list((self.paths.outputs / slug).iterdir())
-        except OSError:
-            return []
-        return [
-            entry.name
-            for entry in entries
-            if entry.is_dir() and re.fullmatch(OUTPUT_ID_PATTERN, entry.name)
-        ]
+        """The id of every output of ``slug``: one query of the rows (#7257)."""
+        return self.rows.ids_for_slug(slug)
 
     def claim(self, slug: str, output_id: str) -> bool:
         """Make the output's directory, only if it is not there yet (#5390): whether this
@@ -968,13 +721,13 @@ class OutputStore:
         holds the claim, so it never writes into, or removes on a failure, a directory
         another save made.
 
-        With rows, the id's ``output_claims`` row comes first (#7257, plan D6), so a pod
+        The id's ``output_claims`` row comes first (#7257, plan D6), so a pod
         that claims in the table only (release B) and this pod share one claim. A row
         claim that fails makes no folder. A folder that is there after the row claim
         succeeded (a phase 2 pod's claim) releases the row claim. The save's row deletes
         the row claim (`OutputRows.insert`); a failed save releases it
         (`output_operations.py`); the hold reaper prunes one past `ORPHAN_HOLD_GRACE`."""
-        if self.rows is not None and not self.rows.claim(output_id, slug):
+        if not self.rows.claim(output_id, slug):
             return False
         try:
             self.paths.output_dir(slug, output_id).mkdir(parents=True, exist_ok=False)
@@ -989,8 +742,6 @@ class OutputStore:
     def _release_row_claim(self, output_id: str) -> None:
         """A release that fails is logged and left to the hold reaper's prune, so the
         claim's own answer (False, or the folder's error) stands (#7257)."""
-        if self.rows is None:
-            return
         try:
             self.rows.release_claim(output_id)
         except PsycopgError:
@@ -1014,8 +765,8 @@ class OutputStore:
         """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob store
         under keys of the save's own (`OutputBytes.put_folder`), then `commit` (#7256, spec
         §6.6), so the row, its keys taking those objects, its ``output_files`` rows and the holds
-        of its keys are one transaction. With no blob store (`bambuddy`) or no rows, it
-        puts nothing. The staged keys go after the commit; the output's keys name their objects.
+        of its keys are one transaction. The staged keys go after the commit; the output's keys
+        name their objects.
         A failed put or commit removes the folder (`discard`) and the blobs it put, and raises
         again, a `StoreFullError` and a `UniqueViolation` on an id another output holds among
         them; that output's keys never named this save's objects, so its bytes stay its own
@@ -1023,6 +774,7 @@ class OutputStore:
         folder stays with no ``meta.json``, and no code removes it (#7257, D10). The output has
         no row, so the hold reaper releases its holds later (#1007). A cancel during `prepare`
         or `commit` cannot stop their thread, which may still finish the output."""
+        store = self._blobs()
         prepared = await asyncio.to_thread(
             self.prepare,
             job,
@@ -1039,26 +791,21 @@ class OutputStore:
         )
         blobs: OutputBlobs | None = None
         try:
-            if self.bytes is not None and self.rows is not None:
-                blobs = await self.bytes.put_folder(
-                    prepared.directory, prepared.meta.id, prepared.meta.slug
-                )
+            blobs = await store.put_folder(prepared.directory, prepared.meta.id, prepared.meta.slug)
             meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
         except Exception:
             await asyncio.to_thread(self.discard, prepared)
-            if blobs is not None and self.bytes is not None:
-                await self.bytes.drop_staged(blobs)
+            if blobs is not None:
+                await store.drop_staged(blobs)
             raise
         for key, previous in replaced:
-            assert self.bytes is not None
             try:
-                await self.bytes.release_replaced(key, previous)
+                await store.release_replaced(key, previous)
             except Exception:
                 # The save stands; the object stays on the backend with no row.
                 logger.exception("could not release a replaced output blob", extra={"key": key})
-        if blobs is not None and self.bytes is not None:
-            # The output's keys name the objects now; the staged keys only go.
-            await self.bytes.drop_staged(blobs)
+        # The output's keys name the objects now; the staged keys only go.
+        await store.drop_staged(blobs)
         return meta
 
     def prepare(
@@ -1203,12 +950,7 @@ class OutputStore:
         directory = prepared.directory
         meta = prepared.meta
         self._write_meta(directory, meta)
-        replaced: list[tuple[str, BlobRef]] = []
-        if self.rows is not None:
-            replaced = self._insert_row(prepared, blobs)
-        # After the record is complete: a lookup racing the writes above may have
-        # resolved against a half-written output.
-        self.forget_plate_cover(meta.slug)
+        replaced = self._insert_row(prepared, blobs)
         self._changed(meta.slug)
         return meta, replaced
 
@@ -1216,7 +958,6 @@ class OutputStore:
         """Remove a prepared output's folder: a save that failed after `prepare`.
         Blocking."""
         shutil.rmtree(prepared.directory, ignore_errors=True)
-        self._dirs.pop(prepared.meta.id, None)
 
     def _insert_row(
         self, prepared: PreparedOutput, blobs: OutputBlobs | None
@@ -1229,7 +970,6 @@ class OutputStore:
         from scadbuddy.library.output_query import params_text
         from scadbuddy.library.output_rows import OutputRow
 
-        assert self.rows is not None
         directory = prepared.directory
         meta = prepared.meta
         chosen = prepared.chosen
@@ -1264,7 +1004,6 @@ class OutputStore:
             return self.rows.insert(row)
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
-            self._dirs.pop(meta.id, None)
             # A copy run (the start's or a sweep's) may have read this folder and written
             # its row before the insert failed: with the folder gone, that row would name
             # no output. Only a row with the copy's stamp goes (`OutputRows.drop_copied`).
@@ -1292,55 +1031,34 @@ class OutputStore:
         return now
 
     def bom(self, output_id: str) -> list[BomEntry]:
-        row = self._row_of(output_id)
-        if row is not None:
-            return [BomEntry.model_validate(e) for e in row.bom or []]
-        text = _read_if_there(self._files_dir(output_id) / BOM_NAME)
-        if text is None:
-            return []
-        return [BomEntry.model_validate(e) for e in json.loads(text)]
+        return [BomEntry.model_validate(e) for e in self._row_of(output_id).bom or []]
 
     def manifest(self, output_id: str) -> list[ManifestObject]:
         """Empty for an output saved before manifests (phase 5): it cannot be arranged."""
         try:
             row = self._row_of(output_id)
-            if row is not None:
-                return [ManifestObject.model_validate(m) for m in row.manifest or []]
-            text = _read_if_there(self._files_dir(output_id) / MANIFEST_NAME)
         except OutputNotFoundError:
             return []
-        if text is None:
-            return []
-        return [ManifestObject.model_validate(m) for m in json.loads(text)]
+        return [ManifestObject.model_validate(m) for m in row.manifest or []]
 
     def arranged_from(self, output_id: str) -> list[str]:
         """For an arranged output, the outputs its objects came from, and each library
         file ScadBuddy did not make as `library:<id>` (#2284)."""
         try:
             row = self._row_of(output_id)
-            if row is not None:
-                return _ID_LIST.validate_python(row.arranged_from or [])
-            text = _read_if_there(self._files_dir(output_id) / ARRANGED_NAME)
         except OutputNotFoundError:
             return []
-        if text is None:
-            return []
-        return _ID_LIST.validate_json(text)
+        return _ID_LIST.validate_python(row.arranged_from or [])
 
     def backfill(self, output_id: str) -> BackfillState | None:
         """The re-render queued to give this output a manifest (#902), if any."""
         try:
             row = self._row_of(output_id)
-            if row is not None:
-                if row.backfill is None:
-                    return None
-                return BackfillState.model_validate(row.backfill)
-            text = _read_if_there(self._files_dir(output_id) / BACKFILL_NAME)
         except OutputNotFoundError:
             return None
-        if text is None:  # none, or the attach just cleared it
+        if row.backfill is None:
             return None
-        return BackfillState.model_validate_json(text)
+        return BackfillState.model_validate(row.backfill)
 
     def start_backfill(self, output_id: str, job_id: str) -> None:
         self._write_backfill(output_id, BackfillState(job_id=job_id))
@@ -1354,45 +1072,32 @@ class OutputStore:
         self._folder_write(
             output_id, lambda directory: _replace(directory / BACKFILL_NAME, text), missing=None
         )
-        if self.rows is not None:
-            self.rows.set_backfill(output_id, state.model_dump(mode="json"))
+        self.rows.set_backfill(output_id, state.model_dump(mode="json"))
 
     def clear_backfill(self, output_id: str) -> None:
-        directory = self.directory(output_id)
+        directory = self._folder(output_id)
         (directory / BACKFILL_NAME).unlink(missing_ok=True)
-        if self.rows is not None:
-            self.rows.set_backfill(output_id, None)
+        self.rows.set_backfill(output_id, None)
         self._changed(directory.parent.name)
 
     def pending_backfills(self) -> list[tuple[str, BackfillState]]:
-        """Every output waiting on a re-render that has not failed."""
+        """Every output waiting on a re-render that has not failed: one query (#7255)."""
         pending: list[tuple[str, BackfillState]] = []
         with span("outputs.pending_backfills") as current:
-            if self._copied():
-                assert self.rows is not None
-                # One query, no glob (#7255).
-                for output_id, data in self.rows.pending_backfills():
-                    try:
-                        state = BackfillState.model_validate(data)
-                    except ValidationError:
-                        continue
-                    if state.error is None:
-                        pending.append((output_id, state))
-            else:
-                for path in self.paths.outputs.glob(f"*/*/{BACKFILL_NAME}"):
-                    try:
-                        state = BackfillState.model_validate_json(path.read_text(encoding="utf-8"))
-                    except (OSError, ValidationError):
-                        continue  # deleted under us, or half written: the next pass reads it
-                    if state.error is None:
-                        pending.append((path.parent.name, state))
+            for output_id, data in self.rows.pending_backfills():
+                try:
+                    state = BackfillState.model_validate(data)
+                except ValidationError:
+                    continue
+                if state.error is None:
+                    pending.append((output_id, state))
             current.set_attribute("scadbuddy.outputs", len(pending))
         return pending
 
     def attach_backfill(self, output_id: str, chosen: PipelineOutput) -> None:
         """Give the output what a new one records (§7, §8.4) from its re-render, keeping
         its id, name and files. Run again, it writes the same files."""
-        directory = self.directory(output_id)
+        directory = self._folder(output_id)
         manifest = [m.model_dump(mode="json") for m in chosen.manifest]
 
         def write(folder: Path) -> None:
@@ -1402,126 +1107,76 @@ class OutputStore:
             (folder / BACKFILL_NAME).unlink(missing_ok=True)
 
         self._folder_write(output_id, write, missing=None, directory=directory)
-        if self.rows is not None:
-            # The record it has stays, as the file's does: one statement.
-            self.rows.attach_backfill(output_id, chosen.record.model_dump(mode="json"), manifest)
+        # The record it has stays, as the file's does: one statement.
+        self.rows.attach_backfill(output_id, chosen.record.model_dump(mode="json"), manifest)
         self._changed(directory.parent.name)
 
     def record(self, output_id: str) -> OutputRecord | None:
         row = self._row_of(output_id)
-        if row is not None:
-            return None if row.record is None else OutputRecord.model_validate(row.record)
-        text = _read_if_there(self._files_dir(output_id) / RECORD_NAME)
-        if text is None:
-            return None
-        return OutputRecord.model_validate_json(text)
+        return None if row.record is None else OutputRecord.model_validate(row.record)
 
     def files(self, output_id: str) -> list[str]:
-        """The names of the output's ``files/``: its ``output_files`` rows once its bytes
-        are blobs (#7256), else the folder's."""
-        if self.bytes is not None and self.rows is not None:
-            row = self._row_of(output_id)
-            if row is not None and row.bytes_at is not None:
-                return [item.name for item in self.rows.files(output_id)]
-        directory = self.directory(output_id) / FILES_DIR
-        if not directory.is_dir():
-            return []
-        return sorted(p.name for p in directory.iterdir() if p.is_file())
-
-    def file_path(self, output_id: str, name: str) -> Path:
-        """An extra file of the output; its name is a plain file name, never a path."""
-        if not re.fullmatch(FILE_NAME_PATTERN, name):
-            raise OutputNotFoundError(name)
-        path = self.directory(output_id) / FILES_DIR / name
-        if not path.is_file():
-            raise OutputNotFoundError(name)
-        return path
+        """The names of the output's ``files/``: its ``output_files`` rows (#7256)."""
+        self._row_of(output_id)
+        return [item.name for item in self.rows.files(output_id)]
 
     async def open_file(self, output_id: str, name: str) -> OutputStream:
-        """An extra file of the output: its blob once its bytes are blobs (#7256), else
-        the file (`file_path`). The name is checked before anything is read. A missing
-        blob, or a corrupt blob of at most `output_bytes._PREFETCH` bytes, is logged, and
-        the file is read; a larger corrupt blob raises `BlobCorruptError` mid-stream, as
-        in `open_role`. Raises `OutputNotFoundError` as `file_path` does. The caller
-        closes the stream."""
+        """An extra file of the output: its blob (#7256). The name is checked before
+        anything is read. `OutputNotFoundError` for no such output or file;
+        `OutputBytesLostError` for a missing blob, or a corrupt blob of at most
+        `output_bytes._PREFETCH` bytes; a larger corrupt blob raises `BlobCorruptError`
+        mid-stream, as in `open_role`. The caller closes the stream."""
         if not re.fullmatch(FILE_NAME_PATTERN, name):
             raise OutputNotFoundError(name)
         key = await asyncio.to_thread(self._file_key, output_id, name)
-        if key is not None:
-            assert self.bytes is not None
-            try:
-                return await self.bytes.stream(key)
-            except Exception as error:
-                if not _lost(error):
-                    raise
-                _warn_lost(output_id, "files", key, error)
-        path = await asyncio.to_thread(self.file_path, output_id, name)
-        stream = await _file_stream(path)
-        if stream is None:
+        if key is None:
             raise OutputNotFoundError(name)
-        return stream
+        try:
+            return await self._blobs().stream(key)
+        except Exception as error:
+            if not _lost(error):
+                raise
+            raise _lost_blob(output_id, f"files/{name}", key, error) from error
 
     def _file_key(self, output_id: str, name: str) -> str | None:
-        """The blob key of the ``files/`` entry ``name``; ``None`` while the files hold
-        it. Blocking."""
-        if self.bytes is None or self.rows is None:
-            return None
-        row = self._row_of(output_id)
-        if row is None or row.bytes_at is None:
-            return None
+        """The blob key of the ``files/`` entry ``name``; ``None`` when there is none.
+        Blocking."""
+        self._row_of(output_id)
         found = self.rows.file(output_id, name)
         return None if found is None else found.blob_key
 
     def _blob_key(self, output_id: str, role: Role) -> str | None:
-        """The blob key the output's row names for ``role``; ``None`` when the store has
-        no blobs, the row has no ``bytes_at`` yet or the row names none: the file then
-        holds the bytes. One read of the
-        row, and no glob once a copy run finished (`_row_of`). Blocking."""
-        if self.bytes is None:
-            return None
-        row = self._row_of(output_id)
-        if row is None or row.bytes_at is None:
-            # The files hold the bytes until the row is copied, as in `_file_key`.
-            return None
-        key: str | None = getattr(row.blobs, role)
+        """The blob key the output's row names for ``role``; ``None`` when it names none.
+        One read of the row (`_row_of`). Blocking."""
+        key: str | None = getattr(self._row_of(output_id).blobs, role)
         return key
 
-    def _role_file(self, output_id: str, role: Role) -> Path | None:
-        """The role's NFS file; ``None`` when there is no such file or no output.
-        Blocking."""
-        try:
-            path = self._find_dir(output_id) / ROLE_FILES[role]
-        except OutputNotFoundError:
-            return None
-        return path if path.is_file() else None
-
     async def open_role(self, output_id: str, role: Role) -> OutputStream | None:
-        """The role's bytes: the blob the row names, else the file (#7256). A missing
-        blob, or a corrupt blob of at most `output_bytes._PREFETCH` bytes, is logged, and
-        the file is read. A larger corrupt blob raises `BlobCorruptError` from the
-        stream's chunks after its last chunk but one, so the response ends short.
-        ``None`` when neither exists. The caller closes the stream
+        """The role's bytes: the blob the row names (#7256). ``None`` when there is no
+        such output or the row names no blob. `OutputBytesLostError` for a missing blob,
+        or a corrupt blob of at most `output_bytes._PREFETCH` bytes (#7257, plan D9). A
+        larger corrupt blob raises `BlobCorruptError` from the stream's chunks after its
+        last chunk but one, so the response ends short. The caller closes the stream
         (`OutputStream.aclose`), read or not."""
         try:
             key = await asyncio.to_thread(self._blob_key, output_id, role)
         except OutputNotFoundError:
             return None
-        if key is not None:
-            assert self.bytes is not None
-            try:
-                return await self.bytes.stream(key)
-            except Exception as error:
-                if not _lost(error):
-                    raise
-                _warn_lost(output_id, role, key, error)
-        path = await asyncio.to_thread(self._role_file, output_id, role)
-        return None if path is None else await _file_stream(path)
+        if key is None:
+            return None
+        try:
+            return await self._blobs().stream(key)
+        except Exception as error:
+            if not _lost(error):
+                raise
+            raise _lost_blob(output_id, role, key, error) from error
 
     def local_role(self, output_id: str, role: Role) -> AbstractAsyncContextManager[Path | None]:
         """A path that holds the role's bytes while the block runs: the blob's temporary
-        file (removed on exit), else the NFS file itself (never copied), else ``None``.
-        A sync reader runs on it in a thread (Ruling R6): ``async with
-        outputs.local_role(id, role) as path: await asyncio.to_thread(reader, path)``."""
+        file (removed on exit), or ``None`` when there is no such blob. A lost blob
+        raises `OutputBytesLostError`. A sync reader runs on it in a thread (Ruling R6):
+        ``async with outputs.local_role(id, role) as path: await asyncio.to_thread(reader,
+        path)``."""
         return self._local_role(output_id, role)
 
     @contextlib.asynccontextmanager
@@ -1530,39 +1185,34 @@ class OutputStore:
             yield read.path
 
     def read_role(self, output_id: str, role: Role) -> AbstractAsyncContextManager[RoleRead]:
-        """`local_role`, with the sha256 of the blob it read (``None`` for the file). A
-        reader that keeps what it derived passes that sha256 to the write
-        (`OutputRows.write_derived`), so it writes nothing once the key names other
-        bytes."""
+        """`local_role`, with the sha256 of the blob it read. A reader that keeps what it
+        derived passes that sha256 to the write (`OutputRows.write_derived`), so it writes
+        nothing once the key names other bytes."""
         return self._read_role(output_id, role)
 
     @contextlib.asynccontextmanager
     async def _read_role(self, output_id: str, role: Role) -> AsyncIterator[RoleRead]:
         async with AsyncExitStack() as stack:
-            path: Path | None = None
-            sha256: str | None = None
             try:
                 key = await asyncio.to_thread(self._blob_key, output_id, role)
             except OutputNotFoundError:
                 key = None
-            if key is not None:
-                assert self.bytes is not None
-                suffix = Path(ROLE_FILES[role]).suffix
-                try:
-                    path, ref = await stack.enter_async_context(self.bytes.local_blob(key, suffix))
-                    sha256 = ref.sha256
-                except Exception as error:
-                    if not _lost(error):
-                        raise
-                    _warn_lost(output_id, role, key, error)
-            if path is None:
-                path = await asyncio.to_thread(self._role_file, output_id, role)
+            if key is None:
+                yield RoleRead(None, None)
+                return
+            suffix = Path(ROLE_FILES[role]).suffix
+            try:
+                path, ref = await stack.enter_async_context(self._blobs().local_blob(key, suffix))
+            except Exception as error:
+                if not _lost(error):
+                    raise
+                raise _lost_blob(output_id, role, key, error) from error
             # Outside the `try` above: an error of the caller's block is never a lost blob.
-            yield RoleRead(path, sha256)
+            yield RoleRead(path, ref.sha256)
 
     def model_sha(self, output_id: str) -> str | None:
         """The sha256 a reader of the model reads now: the index's of the model blob the
-        row names, ``None`` when the file holds the bytes. Blocking."""
+        row names, ``None`` when there is none. Blocking."""
         try:
             indexed = self._indexed(output_id, "model")
         except OutputNotFoundError:
@@ -1575,58 +1225,43 @@ class OutputStore:
         key = self._blob_key(output_id, role)
         if key is None:
             return None
-        assert self.bytes is not None
-        ref = self.bytes.ref(key)
+        ref = self._blobs().ref(key)
         return None if ref is None else (ref.size, ref.sha256)
 
     def role_size(self, output_id: str, role: Role) -> int | None:
-        """The role's size: the blob's from the index, else the file's. ``None`` when
-        neither exists. Blocking."""
+        """The role's size: the blob's from the index. ``None`` when there is none.
+        Blocking."""
         try:
             indexed = self._indexed(output_id, role)
         except OutputNotFoundError:
             return None
-        if indexed is not None:
-            return indexed[0]
-        path = self._role_file(output_id, role)
-        if path is None:
-            return None
-        try:
-            return path.stat().st_size
-        except OSError:
-            return None
+        return None if indexed is None else indexed[0]
 
     def has_role(self, output_id: str, role: Role) -> bool:
-        """Whether the role has bytes: a blob in the index, or a file. Blocking."""
+        """Whether the role has bytes: a blob in the index. Blocking."""
         try:
-            indexed = self._indexed(output_id, role)
+            return self._indexed(output_id, role) is not None
         except OutputNotFoundError:
             return False
-        return indexed is not None or self._role_file(output_id, role) is not None
 
     def thumbnail_version(self, output_id: str) -> str | None:
         """What changes when the thumbnail changes (`role_version`). Blocking."""
         return self.role_version(output_id, "thumbnail")
 
     def role_version(self, output_id: str, role: Role) -> str | None:
-        """What changes when the role's bytes change: the blob's sha256 prefix, else the
-        file's identity (`thumbnail_file_version`); the ``v`` a client may cache the
-        role's URL under for good. ``None``: no such bytes. Blocking."""
+        """What changes when the role's bytes change: the blob's sha256 prefix; the ``v`` a
+        client may cache the role's URL under for good. ``None``: no such bytes.
+        Blocking."""
         try:
             indexed = self._indexed(output_id, role)
-            if indexed is not None:
-                return blob_version(indexed[1])
-            return thumbnail_file_version(self._find_dir(output_id) / ROLE_FILES[role])
         except OutputNotFoundError:
             return None
+        return None if indexed is None else blob_version(indexed[1])
 
     def blob_versions(self, output_ids: Sequence[str]) -> dict[tuple[str, Role], str]:
         """`role_version` of every role whose blob the rows name, for a whole listing, in
         one query of the rows and the index (`OutputRows.blob_shas`). A role left out
-        takes `role_version` (its file, or its row's key when the index lost it).
-        Blocking."""
-        if self.rows is None or self.bytes is None:
-            return {}
+        takes `role_version`. Blocking."""
         return {
             key: blob_version(sha256) for key, sha256 in self.rows.blob_shas(output_ids).items()
         }
@@ -1634,15 +1269,14 @@ class OutputStore:
     async def blob_sha(self, output_id: str, role: Role) -> str | None:
         """The sha256 of the blob the row names for ``role``, while the backend holds it
         (`OutputBytes.held_sha`, no read of the bytes): a conditional GET's tag. ``None``:
-        no such blob, or a lost one, whose file then serves with its own tag."""
+        no such blob, or a lost one, whose read then raises `OutputBytesLostError`."""
         try:
             key = await asyncio.to_thread(self._blob_key, output_id, role)
         except OutputNotFoundError:
             return None
         if key is None:
             return None
-        assert self.bytes is not None
-        return await self.bytes.held_sha(key)
+        return await self._blobs().held_sha(key)
 
     async def file_blob_sha(self, output_id: str, name: str) -> str | None:
         """`blob_sha` of the ``files/`` entry ``name``."""
@@ -1654,8 +1288,7 @@ class OutputStore:
             return None
         if key is None:
             return None
-        assert self.bytes is not None
-        return await self.bytes.held_sha(key)
+        return await self._blobs().held_sha(key)
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
         """Give the output ``name``, or none (#2288). Only its meta changes, in
@@ -1674,8 +1307,7 @@ class OutputStore:
             missing=None,
             directory=directory,
         )
-        if self.rows is not None:
-            self.rows.update_meta(output_id, renamed)
+        self.rows.update_meta(output_id, renamed)
         return self.get(output_id)
 
     def mark_storefront(self, output_id: str) -> OutputMeta:
@@ -1692,130 +1324,32 @@ class OutputStore:
             missing=None,
             directory=directory,
         )
-        if self.rows is not None:
-            self.rows.update_meta(output_id, marked)
+        self.rows.update_meta(output_id, marked)
         return marked
 
     def _stored_meta(self, output_id: str) -> tuple[OutputMeta, Path]:
-        """The output's meta as it is stored, with no last-print overlay (its row's, else
-        its ``meta.json``), and its folder."""
+        """The output's meta as its row stores it, with no last-print overlay, and its
+        folder (`_folder`)."""
         row = self._row_of(output_id)
-        if row is not None:
-            return row.meta, self.paths.output_dir(row.slug, output_id)
-        directory = self._files_dir(output_id)
-        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
-        return meta, directory
+        return row.meta, self.paths.output_dir(row.slug, output_id)
 
     def delete(self, output_id: str) -> None:
-        directory = self._find_dir(output_id)
-        if self.rows is not None:
-            self.rows.delete(output_id)
+        directory = self._folder(output_id)
+        self.rows.delete(output_id)
         shutil.rmtree(directory, ignore_errors=True)
-        # A long-lived process would otherwise keep every deleted id's entry (#2909).
-        self._dirs.pop(output_id, None)
-        self.forget_plate_cover(directory.parent.name)
         self._changed(directory.parent.name)
 
     def _oldest_first(self, slug: str) -> list[OutputMeta]:
-        """The model's outputs, oldest first, skipping any record that cannot be read.
-
-        Unlike `list_for`, this feeds the catalogue listing, so one unreadable or
-        half-deleted output must cost only itself -- never the whole page. Once a copy
-        run finished, the rows answer: one query, no glob (#7255).
-        """
-        if self._copied():
-            assert self.rows is not None
-            return [row.meta for row in reversed(self.rows.for_slug(slug))]
-        directory = self.paths.outputs / slug
-        metas: list[OutputMeta] = []
-        try:
-            candidates = sorted(directory.glob(f"*/{META_NAME}"))
-        except OSError:
-            return []
-        for path in candidates:
-            try:
-                metas.append(OutputMeta.model_validate_json(path.read_text(encoding="utf-8")))
-            except (OSError, ValidationError):
-                logger.warning("skipped an unreadable output record", extra={"path": str(path)})
-        return sorted(metas, key=lambda meta: meta.created_at)
-
-    def _scan_plate_cover(self, slug: str) -> Path | None:
-        """The 3MF of the first generated output that carries a plate cover image.
-
-        An output whose cover render timed out or failed has none (see
-        `render.jobs.plate_thumbnails`), so the next one is tried rather than
-        giving up on the model.
-        """
-        # Reads every output's record and opens 3MFs on the NFS share: one span for
-        # the scan (#7245), with how many records and archives it read.
-        with span("outputs.scan_plate_cover", attributes={"scadbuddy.slug": slug}) as current:
-            metas = self._oldest_first(slug)
-            current.set_attribute("scadbuddy.outputs", len(metas))
-            opened = 0
-            try:
-                for meta in metas:
-                    archive_path = self.paths.output_dir(slug, meta.id) / MODEL_NAME
-                    opened += 1
-                    if _holds_plate_cover(archive_path):
-                        current.set_attribute("scadbuddy.found", True)
-                        return archive_path
-                current.set_attribute("scadbuddy.found", False)
-                return None
-            finally:
-                current.set_attribute("scadbuddy.archives", opened)
-
-    def plate_cover_archive(self, slug: str) -> Path | None:
-        """:meth:`_scan_plate_cover`, resolved once per state of the model's outputs.
-
-        The common case -- nothing changed since the last ask -- costs one `stat`
-        of ``outputs/<slug>/`` and opens nothing. A write through this store
-        (`create`, `delete`) forgets the entry outright, as the catalogue does when
-        it removes a model's outputs; anything else that adds or removes an output
-        moves the directory's mtime, which the entry is keyed on. A resolution
-        that raced any forget is not stored: the epoch it started under is stale
-        by the time it finishes. That can discard a good result for another slug,
-        which costs only one rescan.
-
-        Once a copy run finished, the rows answer (#7255): one query, nothing kept.
-        """
-        if self._copied():
-            assert self.rows is not None
-            output_id = self.rows.oldest_with_plate_cover(slug)
-            if output_id is None:
-                return None
-            return self.paths.output_dir(slug, output_id) / MODEL_NAME
-        try:
-            stamp = (self.paths.outputs / slug).stat().st_mtime_ns
-        except OSError:
-            # No outputs at all (or none readable): nothing to resolve or keep.
-            with self._covers_lock:
-                self._covers.pop(slug, None)
-            return None
-        with self._covers_lock:
-            cached = self._covers.get(slug)
-            epoch = self._cover_epoch
-        if cached is not None and cached.stamp == stamp:
-            return cached.archive
-        archive = self._scan_plate_cover(slug)
-        with self._covers_lock:
-            if self._cover_epoch == epoch:
-                self._covers[slug] = _ResolvedCover(stamp=stamp, archive=archive)
-        return archive
-
-    def forget_plate_cover(self, slug: str) -> None:
-        """Drop everything held for ``slug``; the next ask scans again."""
-        with self._covers_lock:
-            self._covers.pop(slug, None)
-            self._cover_epoch += 1
+        """The model's outputs, oldest first: one query of the rows (#7255)."""
+        return [row.meta for row in reversed(self.rows.for_slug(slug))]
 
     def restore_rows(self, slug: str) -> None:
         """Write the rows of ``slug``'s outputs again from their files (#7255), in one
         transaction guarded by a mark taken first: a model delete that dropped them and
         then failed keeps its outputs, so they get their rows back. Each row takes a
         ``files_stamp``, as the retired copy's did (#7257), so a later save of its id
-        may write over it. A folder that cannot be listed is skipped."""
-        if self.rows is None:
-            return
+        may write over it. A folder that cannot be listed is skipped. The one reader of the
+        folders left, until #7257's task B5 removes it with the model delete's restore."""
         mark = self.rows.clock()
         read: list[OutputRow] = []
         try:
@@ -1825,7 +1359,7 @@ class OutputStore:
         for directory in entries:
             if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or not directory.is_dir():
                 continue
-            row, _ = self.row_from_files(directory, slug)
+            row = _row_from_folder(directory, slug)
             if row is not None:
                 read.append(dataclasses.replace(row, files_stamp="restored"))
         known = self.rows.existing(row.output_id for row in read)
@@ -1839,28 +1373,18 @@ class OutputStore:
         """Drop the rows of ``slug``'s outputs with their model, before their directory
         goes (spec §6.2). Their output rows are the record (#7255), so a failure to drop
         them raises, and the caller keeps the directory for a retry."""
-        if self.rows is not None:
-            self.rows.delete_slug(slug)
-
-    def remembers_plate_cover(self, slug: str) -> bool:
-        """Whether anything is held for ``slug`` -- for tests of the cache's lifetime."""
-        with self._covers_lock:
-            return slug in self._covers
+        self.rows.delete_slug(slug)
 
     def has_plate_cover(self, slug: str) -> bool:
         """Whether :meth:`read_plate_cover` has an image to give, without reading it."""
         return self.plate_cover_output(slug) is not None
 
     def plate_cover_output(self, slug: str) -> str | None:
-        """The id of the output whose plate image :meth:`read_plate_cover` gives, from the
-        same cached resolution -- so the catalogue can tell when the fallback moves to
-        another output, which is no commit and so no change of the model's version."""
-        if self._copied():
-            assert self.rows is not None
-            return self.rows.oldest_with_plate_cover(slug)
-        archive = self.plate_cover_archive(slug)
-        # outputs/<slug>/<output-id>/model.3mf
-        return archive.parent.name if archive is not None else None
+        """The id of the output whose plate image :meth:`read_plate_cover` gives: the
+        oldest whose 3MF holds a plate cover, one query (#7255). The catalogue tells by it
+        when the fallback moves to another output, which is no commit and so no change of
+        the model's version."""
+        return self.rows.oldest_with_plate_cover(slug)
 
     async def read_plate_cover(self, slug: str) -> bytes | None:
         """The first generated output's ``plate_1.png``: the catalogue thumbnail of a
@@ -1872,8 +1396,7 @@ class OutputStore:
         blob (`plate_cover_key`, held by the output), and "this 3MF has no cover" as an
         ``output_derived`` row, so neither is read out of the 3MF again. The 3MF is read
         only when neither is kept: from the output's model blob through a temporary
-        file, else from its NFS file. With no blob store or no rows, the NFS file, read
-        in place."""
+        file."""
         output_id = await asyncio.to_thread(self.plate_cover_output, slug)
         if output_id is None:
             return None
@@ -1883,15 +1406,14 @@ class OutputStore:
         """The ``plate_1.png`` of ``slug``'s output ``output_id``, or None when it is gone
         or has none: the catalogue thumbnail's output source (#7317). Read as
         `read_plate_cover` reads it: the kept cover blob first, else out of the output's
-        3MF (its model blob, else its file), then kept."""
+        model blob, then kept."""
         kept = await asyncio.to_thread(self._kept_plate_cover, output_id)
         if kept is not None:
             key = kept.get("key")
             if not isinstance(key, str):
                 return None  # this 3MF has no cover
-            assert self.bytes is not None
             try:
-                return await self.bytes.read(key)
+                return await self._blobs().read(key)
             except Exception as error:
                 if not _lost(error):
                     if not isinstance(error, _COVER_READ_ERRORS):
@@ -1903,14 +1425,16 @@ class OutputStore:
                         extra={"output_id": output_id, "error": str(error)},
                     )
                     return None
-                _warn_lost(output_id, PLATE_COVER_KIND, key, error)
+                # The cover is derived again from the model blob, and kept again.
+                logger.warning(
+                    "an output's kept plate cover is lost; deriving it again",
+                    extra={"output_id": output_id, "key": key, "error": str(error)},
+                )
         return await self._derive_plate_cover(slug, output_id)
 
     def _kept_plate_cover(self, output_id: str) -> dict[str, Any] | None:
         """The output's kept plate cover (``{"key": str | None}``), or ``None`` when it
-        is not kept yet or cannot be. Blocking."""
-        if self.bytes is None or self.rows is None:
-            return None
+        is not kept yet. Blocking."""
         found = self.rows.derived(output_id, PLATE_COVER_KIND, 0)
         if found is None or found[0] != PLATE_COVER_VERSION or not isinstance(found[1], dict):
             return None
@@ -1918,13 +1442,12 @@ class OutputStore:
 
     async def _derive_plate_cover(self, slug: str, output_id: str) -> bytes | None:
         """The cover read out of the output's 3MF, then kept (`_keep_plate_cover`).
-        A file that fails to read was deleted or replaced since it was
-        resolved, and the next ask resolves again. An error of the blob read is logged
-        once. Only a missing object (`_object_missing`) is kept as no cover, so it is not
-        asked again. A refusal (401, 403, other 4xx), a full spool or a transport error is
-        not kept, so the next ask reads again (a key rotation heals). What is kept names
-        the sha256 of the model it was read from, so nothing is kept once the model key
-        names other bytes (`OutputRows.keep_plate_cover`)."""
+        An error of the blob read, a lost blob among them, is logged once. Only a missing
+        object (`_object_missing`) is kept as no cover, so it is not asked again. A
+        refusal (401, 403, other 4xx), a full spool or a transport error is not kept, so
+        the next ask reads again (a key rotation heals). What is kept names the sha256
+        of the model it was read from, so nothing is kept once the model key names other
+        bytes (`OutputRows.keep_plate_cover`)."""
         # The model the read below asks for: a blob read that fails has no sha256 of its
         # own.
         expected = await asyncio.to_thread(self.model_sha, output_id)
@@ -1932,7 +1455,6 @@ class OutputStore:
             async with self.read_role(output_id, "model") as read:
                 path = read.path
                 if path is None:
-                    await asyncio.to_thread(self.forget_plate_cover, slug)
                     return None
                 try:
                     png = await asyncio.to_thread(_read_plate_cover, path)
@@ -1940,9 +1462,8 @@ class OutputStore:
                     await self._keep_plate_cover(slug, output_id, None, read.sha256)
                     return None
                 except OSError:
-                    await asyncio.to_thread(self.forget_plate_cover, slug)
                     return None
-        except _COVER_READ_ERRORS as error:
+        except _COVER_DERIVE_ERRORS as error:
             logger.warning(
                 "could not read an output's 3MF for its plate cover",
                 extra={"output_id": output_id, "error": str(error)},
@@ -1957,16 +1478,14 @@ class OutputStore:
         self, slug: str, output_id: str, png: bytes | None, model_sha: str | None
     ) -> None:
         """Keep the cover as its blob and row, or "no cover" as a row alone, read from
-        the model of ``model_sha`` (``None``: the file). A failure is logged: the cover
-        read is still the answer, and the next ask derives again."""
-        if self.bytes is None or self.rows is None:
-            return
+        the model of ``model_sha``. A failure is logged: the cover read is still the
+        answer, and the next ask derives again."""
         rows = self.rows
         try:
             key: str | None = None
             if png is not None:
                 key = plate_cover_key(output_id, hashlib.sha256(png).hexdigest())
-                await self.bytes.put(key, png, slug=slug)
+                await self._blobs().put(key, png, slug=slug)
             await asyncio.to_thread(
                 rows.keep_plate_cover, output_id, PLATE_COVER_VERSION, key, model_sha=model_sha
             )
@@ -1980,52 +1499,58 @@ class OutputStore:
     async def plate_names(self, output_id: str) -> dict[int, str]:
         """Each plate's name in the output's 3MF, derived once (#7256): kept in
         ``output_derived`` (kind ``plate_names``) on the first read, which reads the 3MF
-        from its blob through a temporary file, else from its file, in a thread.
-        Advisory: an unreadable 3MF names nothing, and nothing is kept."""
+        from its blob through a temporary file, in a thread. Advisory: an unreadable or
+        lost 3MF names nothing, and nothing is kept."""
         rows = self.rows
-        if rows is not None:
-            found = await asyncio.to_thread(rows.derived, output_id, PLATE_NAMES_KIND, 0)
-            if found is not None and found[0] == PLATE_NAMES_VERSION:
-                with contextlib.suppress(ValidationError):
-                    return _PLATE_NAMES.validate_python(found[1])
+        found = await asyncio.to_thread(rows.derived, output_id, PLATE_NAMES_KIND, 0)
+        if found is not None and found[0] == PLATE_NAMES_VERSION:
+            with contextlib.suppress(ValidationError):
+                return _PLATE_NAMES.validate_python(found[1])
         try:
             async with self.read_role(output_id, "model") as read:
                 if read.path is None:
                     return {}
                 plates = await asyncio.to_thread(plates_of, read.path)
-        except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError, ClientError):
+        except (
+            OutputBytesLostError,
+            OSError,
+            KeyError,
+            ValueError,
+            zipfile.BadZipFile,
+            ET.ParseError,
+            ClientError,
+        ):
             return {}
         names = {plate.index: plate.name for plate in plates if plate.name}
-        if rows is not None:
-            try:
-                await asyncio.to_thread(
-                    rows.write_derived,
-                    output_id,
-                    PLATE_NAMES_KIND,
-                    0,
-                    PLATE_NAMES_VERSION,
-                    {str(index): name for index, name in names.items()},
-                    model_sha=read.sha256,
-                )
-            except Exception:
-                logger.warning(
-                    "could not keep an output's plate names",
-                    extra={"output_id": output_id},
-                    exc_info=True,
-                )
+        try:
+            await asyncio.to_thread(
+                rows.write_derived,
+                output_id,
+                PLATE_NAMES_KIND,
+                0,
+                PLATE_NAMES_VERSION,
+                {str(index): name for index, name in names.items()},
+                model_sha=read.sha256,
+            )
+        except Exception:
+            logger.warning(
+                "could not keep an output's plate names",
+                extra={"output_id": output_id},
+                exc_info=True,
+            )
         return names
 
     async def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
         """The mesh analysis of one plate of the output's 3MF (#284, #289), computed
-        once and cached: in ``output_derived`` (#7256), else in the file cache beside
-        the output.
+        once and cached in ``output_derived`` (#7256).
 
         ``model.3mf`` is not rewritten after a save stamps it -- a send re-places
         a copy in memory -- so the cache only goes stale when the analysis itself
         changes, which :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION` tracks.
-        A miss reads the 3MF from its blob through a temporary file, else from its
-        file, in a thread. Raises `FileNotFoundError` when there is no 3MF to analyse
-        and `~scadbuddy.render.geometry.NoSuchPlateError` when it has no such plate.
+        A miss reads the 3MF from its blob through a temporary file, in a thread. Raises
+        `FileNotFoundError` when there is no 3MF to analyse, `OutputBytesLostError` when
+        its blob is lost, and `~scadbuddy.render.geometry.NoSuchPlateError` when it has
+        no such plate.
         """
         cached = await asyncio.to_thread(self._cached_geometry, output_id, plate)
         if cached is not None:
@@ -2040,38 +1565,27 @@ class OutputStore:
         await asyncio.to_thread(self._keep_geometry, output_id, plate, analysis, read.sha256)
         return analysis
 
-    def _geometry_path(self, output_id: str, plate: int) -> Path:
-        return self._find_dir(output_id) / _geometry_name(plate)
-
     def _cached_geometry(self, output_id: str, plate: int) -> GeometryAnalysis | None:
-        """The row's analysis of this `ANALYSIS_VERSION`, else the file cache's.
-        Blocking."""
-        if self.rows is not None:
-            found = self.rows.derived(output_id, GEOMETRY_KIND, plate)
-            if found is not None and found[0] == str(ANALYSIS_VERSION):
-                with contextlib.suppress(ValidationError):
-                    return GeometryAnalysis.model_validate(found[1])
-        cache = self._geometry_path(output_id, plate)
-        try:
-            cached = GeometryAnalysis.model_validate_json(cache.read_text(encoding="utf-8"))
-        except (OSError, ValidationError):
-            return None
-        return cached if cached.version == ANALYSIS_VERSION else None
+        """The row's analysis of this `ANALYSIS_VERSION`. Blocking."""
+        found = self.rows.derived(output_id, GEOMETRY_KIND, plate)
+        if found is not None and found[0] == str(ANALYSIS_VERSION):
+            with contextlib.suppress(ValidationError):
+                return GeometryAnalysis.model_validate(found[1])
+        return None
 
     def _keep_geometry(
         self, output_id: str, plate: int, analysis: GeometryAnalysis, model_sha: str | None
     ) -> None:
-        """The analysis of the model of ``model_sha`` (``None``: the file) in its row,
-        and in the file cache until #7257. Blocking."""
-        if self.rows is not None:
-            self.rows.write_derived(
-                output_id,
-                GEOMETRY_KIND,
-                plate,
-                str(ANALYSIS_VERSION),
-                analysis.model_dump(mode="json"),
-                model_sha=model_sha,
-            )
+        """The analysis of the model of ``model_sha`` in its row, and in the file cache
+        until #7257's task B4. Blocking."""
+        self.rows.write_derived(
+            output_id,
+            GEOMETRY_KIND,
+            plate,
+            str(ANALYSIS_VERSION),
+            analysis.model_dump(mode="json"),
+            model_sha=model_sha,
+        )
         # Written aside and renamed, so a concurrent reader never sees half a file. A
         # failed write (no folder: the bytes are only blobs) loses only that cache; the
         # analysis is still the answer.
@@ -2090,18 +1604,13 @@ class OutputStore:
 
     def attributed(self, output_id: str, plate: int, model_version: str) -> GeometryAnalysis | None:
         """The cached analysis whose weak joints name their scene objects at
-        ``model_version`` (see :meth:`geometry`): its ``output_derived`` row, else its
-        file. None when there is none, or it was made by another
+        ``model_version`` (see :meth:`geometry`): its ``output_derived`` row. None when
+        there is none, or it was made by another
         :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION`. Blocking."""
-        if self.rows is not None:
-            found = self.rows.derived(output_id, ATTRIBUTED_KIND, plate)
-            if found is not None and found[0] == str(ANALYSIS_VERSION):
-                return _attributed_of(found[1], model_version)
-        try:
-            stored = json.loads(self._attributed_path(output_id, plate).read_text("utf-8"))
-        except (OSError, ValueError):
-            return None
-        return _attributed_of(stored, model_version)
+        found = self.rows.derived(output_id, ATTRIBUTED_KIND, plate)
+        if found is not None and found[0] == str(ANALYSIS_VERSION):
+            return _attributed_of(found[1], model_version)
+        return None
 
     def write_attributed(
         self,
@@ -2113,27 +1622,20 @@ class OutputStore:
         model_sha: str | None,
     ) -> None:
         """The attributed analysis of the model of ``model_sha`` (`model_sha`, read
-        before the analysis; ``None``: the file) in its row, and in its file until
-        #7257. Blocking."""
+        before the analysis) in its row, and in its file until #7257's task B4.
+        Blocking."""
         body = {"model_version": model_version, "analysis": analysis.model_dump(mode="json")}
-        if self.rows is not None:
-            self.rows.write_derived(
-                output_id,
-                ATTRIBUTED_KIND,
-                plate,
-                str(ANALYSIS_VERSION),
-                body,
-                model_sha=model_sha,
-            )
+        self.rows.write_derived(
+            output_id,
+            ATTRIBUTED_KIND,
+            plate,
+            str(ANALYSIS_VERSION),
+            body,
+            model_sha=model_sha,
+        )
         name = _attributed_name(plate)
         text = json.dumps(body, indent=2) + "\n"
         self._folder_write(output_id, lambda folder: _replace(folder / name, text), missing=None)
-
-    def _attributed_path(self, output_id: str, plate: int) -> Path:
-        return self._find_dir(output_id) / _attributed_name(plate)
-
-    def thumbnail_path(self, output_id: str) -> Path:
-        return self._find_dir(output_id) / THUMBNAIL_NAME
 
     def write_thumbnail(self, output_id: str, png: bytes) -> None:
         """Whole, by a rename: a reader of the old file never gets half of this one.
@@ -2151,19 +1653,16 @@ class OutputStore:
         them). A failed file write raises too and leaves the old key and the old file,
         which still agree; the new blob is held by nothing, and the sweep removes it.
         After the cut-over mark a missing folder does not raise: the file step is skipped
-        and the key and the row take the blob (#7257). With no blob store or no row yet,
-        the file only, under the same lock when there is a database
-        (`OutputRows.write_thumbnail_file`); no copy puts it in the blob store since the
-        copies were retired (#7257)."""
-        slug = await asyncio.to_thread(self._blob_slug, output_id)
-        if slug is None:
-            await asyncio.to_thread(self._write_thumbnail_file, output_id, png)
-            return
-        assert self.bytes is not None and self.rows is not None
+        and the key and the row take the blob (#7257). `OutputNotFoundError` when the
+        output has no row."""
         rows = self.rows
+        slug = await asyncio.to_thread(rows.slug_of, output_id)
+        if slug is None:
+            raise OutputNotFoundError(output_id)
+        store = self._blobs()
         key = output_blob_key(output_id, "thumbnail")
         sha256 = hashlib.sha256(png).hexdigest()
-        staged = await self.bytes.put(staged_thumbnail_key(output_id, sha256), png, slug=slug)
+        staged = await store.put(staged_thumbnail_key(output_id, sha256), png, slug=slug)
         _, previous = await asyncio.to_thread(
             rows.keep_thumbnail,
             output_id,
@@ -2173,22 +1672,7 @@ class OutputStore:
             write=lambda: self.write_thumbnail(output_id, png),
         )
         if previous is not None and previous.backend_id != staged.backend_id:
-            await self.bytes.release_replaced(key, previous)
-
-    def _write_thumbnail_file(self, output_id: str, png: bytes) -> None:
-        """`write_thumbnail` under the output's thumbnail lock when there are rows.
-        Blocking."""
-        if self.rows is None:
-            self.write_thumbnail(output_id, png)
-            return
-        self.rows.write_thumbnail_file(output_id, lambda: self.write_thumbnail(output_id, png))
-
-    def _blob_slug(self, output_id: str) -> str | None:
-        """The output's slug when its bytes go to the blob store too; ``None`` with no
-        blob store, no rows or no row. Blocking."""
-        if self.bytes is None or self.rows is None:
-            return None
-        return self.rows.slug_of(output_id)
+            await store.release_replaced(key, previous)
 
     def drawable_thumbnail(self, output_id: str) -> bool:
         """True when the output has no thumbnail and the server may draw one from its
@@ -2242,40 +1726,37 @@ class OutputStore:
         (`write_drawn_thumbnail`) and names the key in the row, only when neither the key
         nor the file is there; with the key there (a lost blob's), the file alone. A
         failed put is logged, and the file alone is written
-        under the lock (True when it was this draw's): the row names no new blob, so
-        readers take the file; no copy puts it later (#7257). After the cut-over mark
+        under the lock (True when it was this draw's): the row names no new blob, so a
+        reader finds no thumbnail and draws one again; no copy puts the file later and no
+        reader reads it (#7257). After the cut-over mark
         with no folder, a failed put writes no file, so the drawn thumbnail is lost
-        (#7257); the answer is still True. With no blob store or no row, the file alone,
-        under the lock when there are rows."""
-        slug = await asyncio.to_thread(self._blob_slug, output_id)
-        if slug is not None:
-            assert self.bytes is not None and self.rows is not None
-            rows = self.rows
-            sha256 = hashlib.sha256(png).hexdigest()
-            try:
-                staged = await self.bytes.put(
-                    staged_thumbnail_key(output_id, sha256), png, slug=slug
-                )
-            except Exception:
-                logger.warning(
-                    "could not put a drawn thumbnail's blob; its file stays",
-                    extra={"output_id": output_id},
-                    exc_info=True,
-                )
-            else:
-                return await asyncio.to_thread(
-                    rows.draw_thumbnail,
-                    output_id,
-                    output_blob_key(output_id, "thumbnail"),
-                    staged,
-                    slug=slug,
-                    write=lambda: self.write_drawn_thumbnail(output_id, png),
-                )
-        if self.rows is None:
-            return await asyncio.to_thread(self.write_drawn_thumbnail, output_id, png)
-        file_rows = self.rows
+        (#7257); the answer is still True. False when the output has no row."""
+        rows = self.rows
+        slug = await asyncio.to_thread(rows.slug_of, output_id)
+        if slug is None:
+            return False
+        sha256 = hashlib.sha256(png).hexdigest()
+        try:
+            staged = await self._blobs().put(
+                staged_thumbnail_key(output_id, sha256), png, slug=slug
+            )
+        except Exception:
+            logger.warning(
+                "could not put a drawn thumbnail's blob; its file stays",
+                extra={"output_id": output_id},
+                exc_info=True,
+            )
+        else:
+            return await asyncio.to_thread(
+                rows.draw_thumbnail,
+                output_id,
+                output_blob_key(output_id, "thumbnail"),
+                staged,
+                slug=slug,
+                write=lambda: self.write_drawn_thumbnail(output_id, png),
+            )
         return await asyncio.to_thread(
-            file_rows.write_thumbnail_file,
+            rows.write_thumbnail_file,
             output_id,
             lambda: self.write_drawn_thumbnail(output_id, png),
         )

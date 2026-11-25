@@ -87,16 +87,9 @@ def _output(client: TestClient, slug: str) -> str:
 
 
 def _copy(client: TestClient) -> None:
-    """A finished outputs copy run first (so the output covers read rows on both sides;
-    release B retired the copy, #7257, so the run is recorded as release A left it), then
-    the templates; after it the catalogue reads rows."""
+    """The templates' copy; after it the catalogue reads rows. The outputs need no copy:
+    their rows are their only record (#7257)."""
     state = _state(client)
-    outputs = state.outputs.rows
-    assert outputs is not None
-    if not outputs.copied():
-        outputs.finish_run(
-            outputs.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[]
-        )
     refresh = state.catalogue.refresh
     assert refresh is not None
     assert not state.catalogue._from_rows()

@@ -591,7 +591,7 @@ def _plan_files(paths: DataPaths, found: Found) -> dict[str, tuple[str, str | No
             meta = OutputMeta.model_validate_json(data)
         except ValidationError:
             meta = None
-        # As `OutputStore.row_from_files` reads one.
+        # As `outputs._row_from_folder` reads one.
         if meta is None or (meta.slug, meta.id) != (slug, key):
             found.reports.append(f"outputs/{slug}/{key}: its {META_NAME} cannot be read; left")
             continue

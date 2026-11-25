@@ -174,7 +174,7 @@ def test_variant_preview_streams_blob(
         outputs.bytes = OutputBytes(local_content(tmp_path / "remote", pool))
         try:
             output_id = row["output_id"]
-            directory = outputs.directory(output_id)
+            directory = outputs.paths.output_dir(listing["slug"], output_id)
             glb = (directory / PREVIEW_NAME).read_bytes()
             portal = crud.api.portal
             assert portal is not None

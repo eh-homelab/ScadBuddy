@@ -65,11 +65,13 @@ async def saved(
 ) -> tuple[OutputStore, list[OutputMeta]]:
     """Two outputs saved with their rows and their bytes in the blob store."""
     paths, job, _ = await finished_job(tmp_path / "data")
-    store = OutputStore(paths)
-    store.rows = OutputRows(projection.pool)
-    store.bytes = OutputBytes(content)
+    store = OutputStore(paths, rows=OutputRows(projection.pool), bytes=OutputBytes(content))
     metas = [await store.save(job, name="first"), await store.save(job, name="second")]
     return store, metas
+
+
+def _folder(store: OutputStore, meta: OutputMeta) -> Path:
+    return store.paths.output_dir(meta.slug, meta.id)
 
 
 def _rows(store: OutputStore) -> OutputRows:
@@ -128,7 +130,7 @@ async def test_copy_sweeps_do_nothing(
     touch no table: no run is added, and no row changes, though a folder is gone."""
     store, metas = saved
     before = (_runs(pool), _outputs(pool))
-    shutil.rmtree(store.directory(metas[0].id))
+    shutil.rmtree(_folder(store, metas[0]))
     state = SimpleNamespace(
         outputs=store,
         projection=SimpleNamespace(conninfo=projection.conninfo),
@@ -152,7 +154,7 @@ async def _without_folder(
     folder is gone, as for an output that a release B pod saved."""
     store, metas = saved
     _mark(_rows(store))
-    directory = store.directory(metas[0].id)
+    directory = _folder(store, metas[0])
     shutil.rmtree(directory)
     return store, metas[0], directory
 
@@ -247,7 +249,7 @@ async def test_missing_folder_raises_before_cut_over(
     """With no mark, a missing folder fails the write, as in phase 2."""
     store, metas = saved
     assert _rows(store).cut_over_at() is None
-    shutil.rmtree(store.directory(metas[0].id))
+    shutil.rmtree(_folder(store, metas[0]))
     with pytest.raises(FileNotFoundError):
         store.rename(metas[0].id, "renamed")
     with pytest.raises(FileNotFoundError):

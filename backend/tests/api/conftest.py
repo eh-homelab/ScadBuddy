@@ -270,14 +270,6 @@ def app_run_holds_sweep_off(
     return real
 
 
-def files_only(client: TestClient) -> None:
-    """The app saves as a build before #7256 did: files and rows, no blobs. On `local` the
-    outputs have a blob store of their own (#7257, plan D7); a test that rewrites or
-    removes an output's files after its save calls this first, so reads take the files."""
-    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    state.outputs.bytes = None
-
-
 @pytest.fixture(autouse=True)
 def filament_nudges(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     """#6265 Task 8: the app's filament sync nudges are recorded (each one's ``full``),
