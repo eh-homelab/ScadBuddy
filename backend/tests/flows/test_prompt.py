@@ -15,6 +15,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError
 from temporalio.testing import ActivityEnvironment
 
+from scadbuddy.core import input_schema
 from scadbuddy.crud.client import CrudRefusedError, CrudUnavailableError
 from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.flows.models import HOST_FN, TERMINAL, Run
@@ -404,6 +405,35 @@ async def test_the_open_activity_checks_the_task_itself() -> None:
         )
     assert err.value.type == "TaskRefused" and "default does not fit" in err.value.message
     assert err.value.non_retryable and tasks.calls == []
+
+
+SLOW = {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64, "default": "a" * 60 + "!"}
+
+
+async def test_the_open_activity_tries_a_pattern_timeout_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7437: a busy pod is not a refusal, so the activity fails as one Temporal retries."""
+    monkeypatch.setattr(input_schema, "PATTERNS_BUDGET_S", 0)
+    tasks = Tasks()
+    schema = {"type": "object", "properties": {"x": SLOW}}
+    with pytest.raises(input_schema.PatternsTimedOutError):
+        await ActivityEnvironment().run(FlowTaskActivities(tasks).open, {**OPEN, "schema": schema})
+    assert tasks.calls == []
+
+
+async def test_the_open_activity_refuses_a_timed_out_schema_with_another_problem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(input_schema, "PATTERNS_BUDGET_S", 0)
+    wrong = {"type": "string", "maxLength": 5, "default": 3}
+    schema = {"type": "object", "properties": {"x": SLOW, "y": wrong}}
+    with pytest.raises(ApplicationError) as err:
+        await ActivityEnvironment().run(
+            FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
+        )
+    assert err.value.type == "TaskRefused" and err.value.non_retryable
+    assert err.value.message == "schema: y: default does not fit: 3 is not of type 'string'"
 
 
 @pytest.mark.parametrize(

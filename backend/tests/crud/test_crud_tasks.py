@@ -24,6 +24,7 @@ from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import SESSION_COOKIE, AuthGate
 from scadbuddy.auth.models import AuthSession, Service
 from scadbuddy.auth.service_credentials import ServiceAuth
+from scadbuddy.core import input_schema
 from scadbuddy.core.events import Event, TaskChanged
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.crud.client import CrudClient, CrudRefusedError
@@ -127,6 +128,10 @@ def store(pg_pool: PgPool, events: _Events) -> TaskStore:
 
 @pytest.fixture
 def app(store: TaskStore) -> FastAPI:
+    return _app(store)
+
+
+def _app(store: TaskStore | None) -> FastAPI:
     app = FastAPI(dependencies=[Depends(auth_check)])
     parts = {AUTH: SimpleNamespace(would_refuse=_Noted()), TASKS: SimpleNamespace(store=store)}
     app.state.scadbuddy = SimpleNamespace(
@@ -352,6 +357,37 @@ async def test_an_id_that_is_not_a_uuid_is_422(
     )
     assert shut.status_code == answered.status_code == 422
     assert store.list(state=None) == []
+
+
+async def test_a_default_whose_pattern_times_out_is_503_to_send_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7437: the client tries a 5xx again; a real refusal is still 422. The body is refused
+    as it is read, so no store is reached."""
+    monkeypatch.setattr(input_schema, "PATTERNS_BUDGET_S", 0)
+    slow: dict[str, Any] = {
+        "type": "string",
+        "pattern": "^(a|aa)+$",
+        "maxLength": 64,
+        "default": "a" * 60 + "!",
+    }
+    wrong = {"type": "string", "maxLength": 5, "default": 3}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=_app(None)),
+        base_url="http://api",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as http:
+        timed_out = await http.post(
+            BASE, json={**_wire(T1), "schema": {"type": "object", "properties": {"x": slow}}}
+        )
+        refused = await http.post(
+            BASE,
+            json={**_wire(T1), "schema": {"type": "object", "properties": {"x": slow, "y": wrong}}},
+        )
+    assert timed_out.status_code == 503, timed_out.text
+    assert timed_out.headers["X-ScadBuddy-Crud"] == "1"
+    assert slow["default"] not in timed_out.text
+    assert refused.status_code == 422
 
 
 async def test_a_nul_never_reaches_postgres(http: httpx.AsyncClient, store: TaskStore) -> None:
