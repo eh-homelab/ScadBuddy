@@ -233,4 +233,13 @@ describe('the schema’s own form (#5701 §5.2)', () => {
       rooms: [{ name: 'hall' }],
     })
   })
+
+  it('lays a top-level field over the inputs it opened on', () => {
+    const base = { house: { cols: 2, storeys: 1 }, finish: 'gloss', rooms: [{ name: 'hall' }] }
+    expect(fieldInputs(groups, { 'house.cols': 2, 'house.storeys': 1, finish: 'matte' }, base)).toEqual({
+      house: { cols: 2, storeys: 1 },
+      finish: 'matte',
+      rooms: [{ name: 'hall' }],
+    })
+  })
 })

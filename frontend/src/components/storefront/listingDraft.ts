@@ -232,12 +232,8 @@ export function withoutUnknown(draft: ListingDraft, schema: DesignSchema): Listi
   const set = schema.pipeline_params ?? []
   const byName = new Map((schema.parameters ?? []).map((param) => [param.name, param]))
   const offered = (name: string) => byName.has(name) && !set.includes(name)
-  // As publish compares a lock with the default: a colour in any case.
-  const atDefault = (param: Param, value: ParamValue) => (param.type === 'color' ? sameColour(value, param.initial) : value === param.initial)
-  const locked = (name: string, value: ParamValue) => {
-    const param = byName.get(name)
-    return param !== undefined && (!set.includes(name) || atDefault(param, value))
-  }
+  // Exactly, as publish compares a lock with the default (`same_value`): a colour in another case is not it.
+  const locked = (name: string, value: ParamValue) => byName.has(name) && (!set.includes(name) || value === byName.get(name)?.initial)
   const { params, fixed } = draft
   if (Object.keys(params).every(offered) && Object.entries(fixed).every(([name, value]) => locked(name, value))) return draft
   return {
