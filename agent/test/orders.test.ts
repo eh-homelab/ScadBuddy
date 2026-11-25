@@ -383,7 +383,7 @@ describe('order tools (#4249)', () => {
       { path: 'list', query: '?low=true' },
       { path: 'order' },
       { path: 'stock', body: { packs: 1, note: '' } },
-      { path: 'item', body: { parts: [{ part_id: 'p1', per_unit: 2 }] } },
+      { path: 'item', body: { parts: [{ item_id: 'p1', per_unit: 2 }] } },
     ])
     expect(() => tool('part_stock_add').execute({ part_id: 'p1', packs: 0 }, ctx())).toThrow('packs')
   })

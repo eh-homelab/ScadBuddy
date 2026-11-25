@@ -12,7 +12,7 @@ import { refusalSlug, refusalText } from './refusal'
 
 type MarginView = Pick<Costs, 'margin_minor' | 'margin_percent' | 'margin_state' | 'estimated' | 'unknown'>
 
-const PART: Record<string, string> = { prints: 'prints', labour: 'labour' }
+const PART: Record<string, string> = { prints: 'prints', labour: 'labour', parts: 'parts' }
 const FIGURE: Record<string, string> = { grams: 'grams', seconds: 'time', filament: 'filament price', machine: 'machine rate' }
 
 /** A loss row is red, a thin one amber; an unknown one is never tinted as safe. */
@@ -171,6 +171,8 @@ function ItemParts({ costs, item, money, onChanged }: { costs: Costs; item: Item
           {money(item.labour_minor ?? 0)}
           {item.labour_default ? ' (default, no time logged)' : ''}
         </dd>
+        <dt className="text-muted-foreground">Parts</dt>
+        <dd className="sb-num">{money(item.parts_minor ?? 0)}</dd>
         <dt className="text-muted-foreground">Other</dt>
         <dd className="sb-num">{money(item.other_minor ?? 0)}</dd>
       </dl>

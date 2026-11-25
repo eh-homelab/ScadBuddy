@@ -817,6 +817,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'GET /api/v1/inventory/lots/{lot_id}',
       'PATCH /api/v1/inventory/lots/{lot_id}',
       'POST /api/v1/inventory/lots/{lot_id}/adjust',
+      'POST /api/v1/inventory/lots/{lot_id}/recost',
       'POST /api/v1/inventory/items/{item_id}/use',
       'POST /api/v1/inventory/items/{item_id}/count',
       'GET /api/v1/inventory/items/{item_id}/units',

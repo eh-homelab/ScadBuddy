@@ -12,16 +12,18 @@ is the cost part that most exceeded what the items' own accepted quotes priced f
 filament and machine time of the production attempts that did not fail (against the
 quote's ``filament`` and ``machine_time`` lines), labour (against its ``labour`` and
 ``setup`` lines), and in full the parts a quote never prices: failed attempts, test
-prints and cost entries. A job whose accepted quote has no per-part lines (a ``manual``
-quote, a quote with a ``manual`` line, or no accepted quote) priced filament, machine time
-and labour together, if at all, so those three parts are left out of its comparison: only
-its failed prints, test prints and other costs can be its reason. Its price is never split
-across parts. The **suggested unit price** is the unit cost marked up by
-``pricing_markup_percent``; with no markup, the lowest price whose margin is not thin.
+prints, cost entries and the parts taken from stock (``ItemCost.parts_minor``). A job
+whose accepted quote has no per-part lines (a ``manual`` quote, a quote with a ``manual``
+line, or no accepted quote) priced filament, machine time and labour together, if at all,
+so those three parts are left out of its comparison: only its failed prints, test prints
+and other costs can be its reason. Its price is never split across parts. The **suggested
+unit price** is the unit cost marked up by ``pricing_markup_percent``; with no markup, the
+lowest price whose margin is not thin.
 
-**Parts** (§11, #5543). Given ``parts_unit_minor`` (the quoted item's parts at today's unit
-costs), each job's own ``part:`` cost entries leave its cost and ``parts_unit_minor`` per unit
-takes their place, in the unit cost, the ``other`` part and the suggestion, so the suggestion
+**Parts** (§11, #5543; #7067). Given ``parts_unit_minor`` (the quoted item's parts at what a
+FIFO take would cost now), each job's own parts cost (``ItemCost.parts_minor``: its ``use``
+and ``return`` stock moves, R-P2-27) leaves its cost and ``parts_unit_minor`` per unit takes
+its place, in the unit cost, the ``other`` part and the suggestion, so the suggestion
 carries this item's parts once, at today's prices.
 
 Advice only: nothing is stored and nothing is refused. With no history ``jobs`` and
@@ -87,9 +89,12 @@ class UnitCostHistory(BaseModel):
     main_reason: CostReason | None = None
     #: How much it exceeded them by, per unit.
     main_reason_minor: Money | None = None
-    #: This item's parts per unit at today's unit costs, in the unit cost; None when not
-    #: asked about an item.
+    #: This item's parts per unit at what a FIFO take would cost now, in the unit cost; None
+    #: when not asked about an item.
     parts_unit_minor: Money | None = None
+    #: Some of those parts would be taken at an unknown cost, left out of
+    #: ``parts_unit_minor`` (R-P2-29).
+    parts_unknown: bool = False
     #: The settings the figures use.
     markup_percent: str
     thin_margin_percent: str
@@ -135,20 +140,9 @@ def _parts(item: ItemCost) -> dict[CostReason, int]:
             parts["filament"] += attempt.filament_minor or 0
             parts["machine"] += attempt.machine_minor or 0
     parts["labour"] = item.labour_minor
-    parts["other"] = item.other_minor
+    # A quote never prices the parts taken from stock: they count in full, as entries do.
+    parts["other"] = item.other_minor + item.parts_minor
     return parts
-
-
-#: The ``source`` prefix of a cost entry a fulfilment's parts wrote (``lifecycle._use_parts``).
-PART_SOURCE = "part:"
-
-
-def _part_entries(item: ItemCost) -> int:
-    return sum(
-        e.amount_minor
-        for e in item.cost_entries
-        if e.source is not None and e.source.startswith(PART_SOURCE)
-    )
 
 
 def _per_unit(total: int | Decimal, units: int) -> Money:
@@ -228,7 +222,7 @@ def unit_cost_history(
                 continue
             over[part] += amount - _quoted(quote, part, item.quantity)
         if parts_unit_minor is not None:
-            swap = parts_unit_minor * item.quantity - _part_entries(item)
+            swap = parts_unit_minor * item.quantity - item.parts_minor
             cost += swap
             over["other"] += swap
     reason = max(REASONS, key=lambda part: over[part])
@@ -238,7 +232,10 @@ def unit_cost_history(
     answer.jobs = len(history)
     answer.units = units
     answer.unit_cost_minor = _per_unit(cost, units)
-    answer.estimated = any(item.estimated or item.unknown for item, _ in history)
+    # The parts at today's prices replace each job's own, so its unknown parts do not
+    # make the answer estimated.
+    swapped = {"parts"} if parts_unit_minor is not None else set()
+    answer.estimated = any(item.estimated or set(item.unknown) - swapped for item, _ in history)
     if over[reason] > 0:
         answer.main_reason = reason
         answer.main_reason_minor = _per_unit(over[reason], units)

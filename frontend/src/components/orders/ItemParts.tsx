@@ -22,8 +22,9 @@ export function PartsShort({ parts }: { parts: OrderParts }) {
 
 /**
  * An item's parts per unit (#5543): filled from its model's rule when it was added, changed
- * here by hand. They leave stock as a material cost when the item is fulfilled, so a
- * fulfilled item's are fixed (unfulfil it to change them).
+ * here by hand. They leave the inventory lots when the item is fulfilled, and job cost
+ * counts them as its `parts_minor` (#7067), so a fulfilled item's are fixed (unfulfil it to
+ * change them).
  */
 export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { orderId: string; item: Pick<OrderItem, 'id' | 'quantity' | 'status'>; rows: ItemPartRow[]; editable: boolean; onChanged: () => void }) {
   const inventory = useAsync(() => api.parts(), [])
@@ -58,8 +59,8 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
           ) : (
             <ul className="flex flex-col gap-1" aria-label="The item's parts">
               {rows.map((r) => (
-                <li key={r.part_id}>
-                  {r.per_unit} × {name(r.part_id)} a unit
+                <li key={r.item_id}>
+                  {r.per_unit} × {name(r.item_id)} a unit
                   {r.used > 0 ? <span className="text-muted-foreground"> ({r.used} taken from stock)</span> : <span className="text-muted-foreground"> ({r.per_unit * item.quantity} for this item)</span>}
                 </li>
               ))}
@@ -67,7 +68,7 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
           )}
           {editable ? (
             <div>
-              <Button size="xs" variant="outline" onClick={() => setDraft(rows.map(({ part_id, per_unit }) => ({ part_id, per_unit })))}>
+              <Button size="xs" variant="outline" onClick={() => setDraft(rows.map(({ item_id, per_unit }) => ({ item_id, per_unit })))}>
                 Edit parts
               </Button>
             </div>
@@ -86,7 +87,7 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
                 value={String(row.per_unit)}
                 onChange={(e) => setDraft(draft.map((r, i) => (i === index ? { ...r, per_unit: Math.max(1, Number(e.target.value) || 1) } : r)))}
               />
-              <PartSelect parts={parts} value={row.part_id || null} onChange={(id) => id && setDraft(draft.map((r, i) => (i === index ? { ...r, part_id: id } : r)))} label={`Part ${index + 1}`} />
+              <PartSelect parts={parts} value={row.item_id || null} onChange={(id) => id && setDraft(draft.map((r, i) => (i === index ? { ...r, item_id: id } : r)))} label={`Part ${index + 1}`} />
               <Button size="xs" variant="ghost" aria-label={`Remove part ${index + 1}`} onClick={() => setDraft(draft.filter((_, i) => i !== index))}>
                 Remove
               </Button>
@@ -96,10 +97,10 @@ export function ItemPartsEditor({ orderId, item, rows, editable, onChanged }: { 
             <Button
               size="xs"
               variant="outline"
-              disabled={parts.every((p) => draft.some((r) => r.part_id === p.id))}
+              disabled={parts.every((p) => draft.some((r) => r.item_id === p.id))}
               onClick={() => {
-                const free = parts.find((p) => !draft.some((r) => r.part_id === p.id))
-                if (free) setDraft([...draft, { part_id: free.id, per_unit: 1 }])
+                const free = parts.find((p) => !draft.some((r) => r.item_id === p.id))
+                if (free) setDraft([...draft, { item_id: free.id, per_unit: 1 }])
               }}
             >
               Add part

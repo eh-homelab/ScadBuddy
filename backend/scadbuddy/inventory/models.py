@@ -505,22 +505,41 @@ class UnitStatusInput(BaseModel):
     note: Text = Field(default="", max_length=4000)
 
 
-class RecostedItem(BaseModel):
+class RecostedItem(_Decimals):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str | None
     order_item_id: str
-    #: The order item's parts cost (`-sum(amount_minor)` of its `use` and `return` moves),
-    #: before and after the re-cost.
+    #: The order item's parts cost as job cost reads it (`-sum(amount_minor)` of its
+    #: known-cost `use` and `return` moves, `stock.parts_moved`), before and after.
     before_minor: Decimal
     after_minor: Decimal
-    #: Some of those moves were of unknown cost, before and after.
+    #: A `use` not given back was of unknown cost, before and after.
     before_unknown: bool = False
     after_unknown: bool = False
 
+    @field_serializer("before_minor", "after_minor")
+    def _decimals(self, value: Decimal) -> str | None:
+        return self._decimal(value)
 
-class RecostResult(BaseModel):
+
+class RecostResult(_Decimals):
+    #: The lot's item, and the lot's cost now (and whether it is unknown), which every
+    #: re-costed move took.
+    item_id: UUID
+    unit_cost_minor: Decimal
+    cost_unknown: bool
+    #: The distinct unit costs the changed moves had before, lowest first.
+    before_unit_costs_minor: list[Decimal]
     #: The moves whose snapshot changed.
     moves: int
     #: The order items whose parts cost or its unknown flag changed.
     orders: list[RecostedItem]
+
+    @field_serializer("unit_cost_minor")
+    def _cost(self, value: Decimal) -> str | None:
+        return self._decimal(value)
+
+    @field_serializer("before_unit_costs_minor")
+    def _costs(self, values: list[Decimal]) -> list[str | None]:
+        return [self._decimal(v) for v in values]

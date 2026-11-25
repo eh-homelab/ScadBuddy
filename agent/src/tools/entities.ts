@@ -13,13 +13,13 @@ const entity = z
   .string()
   .min(1)
   .max(200)
-  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `part:<id>`, `customer:<id>`, `order:<id>`')
+  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `customer:<id>`, `order:<id>`')
 /** An order's files change only on its order page (order_attachment_update/_delete). */
 const fileOwner = z
   .string()
   .min(1)
   .max(200)
-  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `part:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
+  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
 const attachmentId = z.string().min(1).max(100).describe("An attachment's id, as entity_attachment_list gives it")
 const linkId = z.string().min(1).max(100).describe("A link's id, as entity_link_list gives it")
 const role = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text: `reference`, `issue`, `finished`, `packed`, `receipt`, `invoice`, `manual`, `photo`, `label`, `other`')
