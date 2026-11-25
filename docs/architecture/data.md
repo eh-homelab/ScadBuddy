@@ -148,13 +148,35 @@ migration `20261124T1824Z_templates.sql`): its parsed `model.json` (`meta`, or `
 and the raw `meta_text` when it cannot be read or stored), `name`, `version` (the last
 commit that touched it), `inputs_version`, its `// color` parameters, its media files'
 sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
-The row is derived: git stays the record, and any row can be rebuilt from the tree. Once a
-copy run has finished, `Catalogue.slugs`, `list_models` and `record` read the rows
-(phase 2), and so do the pin index, the library associations (`raw_metas`), the print
-settings, the name check, `duplicates_of`, and the callers that only name or filter
-models (`list_summaries`: the activity facets, the print-import suggestions and the
-outputs' `?tag=`); before that, they read the files. `library_users` and `library_pins`
-always read the files (spec §7.4).
+The row is derived: git stays the record, and any row can be rebuilt from the tree.
+`Catalogue.slugs`, `list_models` and `record` read the rows, and so do the pin index, the
+library associations (`raw_metas`), the print settings, the name check, `duplicates_of`,
+and the callers that only name or filter models (`list_summaries`: the activity facets,
+the print-import suggestions and the outputs' `?tag=`). Since phase 3 they read the rows
+always, with no walk of the folders or of the history before a copy run has finished
+(`scadbuddy/library/catalogue.py` `Catalogue._rows`). A reader with no rows open raises
+`RuntimeError`; the API opens them after its migrations, before it serves. The walk lives
+only in the copy. `library_users` and `library_pins` always read the files (spec §7.4).
+
+- A database where no copy run has finished (a fresh install, a test's database) gets its
+  first copy at the API's start, before the app serves (`scadbuddy/main.py`
+  `_first_template_copy`). When a run has finished (every start after the first), it does
+  nothing. When another replica holds the copy lock, it waits for that run up to
+  `FIRST_COPY_WAIT`, inside the startupProbe's budget, and takes the lock itself when that
+  run ends unfinished. A SIGTERM or SIGINT stops the copy and the wait. A copy that fails
+  or ends `incomplete`, or a wait that ends, is logged at error level and the app serves
+  anyway; the lists lack what the copy missed until the next copy run.
+- A template with files but no row (a failed refresh, a folder made by hand on the
+  volume, an older pod's create) is not in the list until the next copy run. `record`,
+  its print settings and its thumbnail read it from its files at once. A write's own
+  answer is read from the files too (`_fresh_record`), so it shows the write even when
+  its refresh failed.
+- These reads of the files stay by design: one template's files when it has no row, when
+  Postgres cannot store its `model.json`, or while its row lags its media; git for one
+  record's `version_pair` and `ui_version` and for every history route; the source,
+  media bytes, editing, rendering, duplicate and merge; `library_users` and
+  `library_pins`; and the output cover's fallback to the output folders, which belongs to
+  the outputs cut-over (#7257).
 
 - A row whose folder is gone (a hand removal, a delete whose row drop failed) is a 404 for
   `record` and for its thumbnail's 200, has no print settings, holds no name in the name
@@ -166,8 +188,8 @@ always read the files (spec §7.4).
   (spec §10).
 - A row whose `model.json` Postgres cannot store (`meta` null, `meta_error` `not storable
   (…)`: NaN, a lone surrogate) is read from its file by every reader, the list and
-  `list_summaries` included, as before the copy. When its folder is gone, the list and
-  `list_summaries` both leave it out (#7661).
+  `list_summaries` included. It costs reads of its own files only, never a walk. When
+  its folder is gone, the list and `list_summaries` both leave it out (#7661).
 - A media file that the row's `files` lacks is stat'ed only while the template's media
   changed after the row's `refreshed_at` (`TemplateRow.media_newer`, read with the row from
   `templates.media_changed_at`): every media write (an add, a removal, a reorder, a
@@ -178,7 +200,7 @@ always read the files (spec §7.4).
 - The catalogue thumbnail reads `Catalogue.thumbnail_ref`: the row's `cover`, else the
   output's plate cover (`OutputStore.plate_cover_output`), else the preview
   (`PreviewStore.preview_id`). Its `ETag` names the source: the cover's `sha256` (the hash
-  of the bytes, as before the copy), `"output-<id>"` or `"preview-<id>"`. A matching
+  of the bytes, the same value as before phase 2), `"output-<id>"` or `"preview-<id>"`. A matching
   `If-None-Match` is a 304 with no file read or stat, except for a row that lags its media,
   which is read from the files. A 200 reads the source
   (`OutputStore.plate_image`, `PreviewStore.current_image`, which reads the preview's id and
@@ -211,7 +233,8 @@ always read the files (spec §7.4).
   git did not name a version, so the row keeps its stored one.
 - Each API start copies the files to rows once (`scadbuddy/library/template_copy.py`
   `copy_templates`, one replica at a time under the advisory lock `COPY_LOCK`; a run that
-  does not get it does nothing). The housekeeping sweep `housekeeping_copy_templates`
+  does not get it does nothing). It runs in the background after the app serves, except
+  on a start whose first copy (above) finished: that start does not copy again. The housekeeping sweep `housekeeping_copy_templates`
   (`workflows/housekeeping.py` `TEMPLATE_COPY_SWEEP`, directly after the activity sweep, behind
   `TEMPLATE_COPY_PATCH`) copies again on each run of the sweeps' Schedule. Each run is a
   row of `template_copy_runs`. The copy reconciles: outside the write lock it walks the
