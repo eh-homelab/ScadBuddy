@@ -128,6 +128,11 @@ export function setAmsTrayNow(value: number | null | undefined): void {
   state.trayNow = value
 }
 
+/** Marks only AMS-A's tray `tray` loaded, or none with `null`. */
+export function setAmsLoaded(tray: number | null): void {
+  state.units.forEach((u) => u.slots.forEach((s) => (s.loaded = u.ams_id === 0 && s.tray_id === tray)))
+}
+
 /** Every printer write answers that the printer did not acknowledge it in time. */
 export function setAmsUnconfirmed(on: boolean): void {
   state.unconfirmed = on
@@ -254,6 +259,9 @@ export const handlers = [
     if (action === 'unload') {
       if (!target.loaded) return problem(409, `H2C is not loaded from ${label}`, 'not_loaded')
       target.loaded = false
+    }
+    if (action === 'refresh' && state.units.some((u) => u.slots.some((s) => s.loaded))) {
+      return problem(409, 'H2C has filament loaded; unload it before the AMS can read a tag again', 'filament_loaded')
     }
     if (action === 'reset') {
       Object.assign(target, { material: null, colour: null, preset_id: null, preset_name: null, saved_preset: null })
