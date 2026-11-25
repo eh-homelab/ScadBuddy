@@ -369,7 +369,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   is off), draws its labels with the same fields and fit (`labelSheet.ts` `spoolLines`,
   `fitLines`), sends them with "Download", and saves each change in
   `filament_label_output`. A change of the fields keeps the format and dpi, and a change of
-  the format or dpi keeps the fields.
+  the format or dpi keeps the fields. A tick changes one box only (R-7216-18): a tick made
+  before the settings arrive is applied to the stored fields, not to the default the page
+  showed.
 - What the labels file prints (#7216, R-7216-1 to R-7216-4): the text is DejaVu Sans, embedded,
   so a name in Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic or Lao prints as
   itself, not as `?`. A character DejaVu lacks takes the first Noto font of a fixed chain that

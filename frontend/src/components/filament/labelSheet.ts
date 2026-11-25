@@ -119,6 +119,24 @@ function utcDay(iso: string | null | undefined): string | null {
 /** Python's `str.splitlines` breaks. */
 // eslint-disable-next-line no-control-regex -- \x1c to \x1e break a line in Python too.
 const LINE_BREAK = /\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/
+// The characters where Python's `str.isspace()` is true, which `str.strip()` removes. JavaScript's
+// `trim()` differs: it keeps \x1c to \x1f and \x85, and it removes \ufeff.
+const PY_SPACE = '[\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]'
+const PY_STRIP = new RegExp(`^${PY_SPACE}+|${PY_SPACE}+$`, 'g')
+
+/** The note's first line, as `labels.py` `pdf_labels` makes it: `strip()`, `splitlines()`, then `[0].strip()`. */
+export function noteLine(note: string | null | undefined): string | null {
+  return (note ?? '').replace(PY_STRIP, '').split(LINE_BREAK)[0]?.replace(PY_STRIP, '') || null
+}
+
+/**
+ * R-7216-18: the fields with one box changed, in `ALL_FIELDS` order. A label prints at least one
+ * field, so a change that would leave no field is not applied.
+ */
+export function tickField(fields: readonly LabelField[], field: LabelField, on: boolean): LabelField[] {
+  const next = ALL_FIELDS.filter((one) => (one === field ? on : fields.includes(one)))
+  return next.length > 0 ? next : [...fields]
+}
 
 /** Each field's text, as `labels.py` `pdf_labels` makes it; null makes no line. */
 function fieldText(spool: SpoolDetail, field: LabelField): string | null {
@@ -141,7 +159,7 @@ function fieldText(spool: SpoolDetail, field: LabelField): string | null {
     case 'weight':
       return effective?.label_weight_g != null ? `${effective.label_weight_g} g` : null
     case 'note':
-      return (spool.note ?? '').trim().split(LINE_BREAK)[0]?.trim() || null
+      return noteLine(spool.note)
     case 'added':
       return utcDay(spool.created_at)
     case 'qr':

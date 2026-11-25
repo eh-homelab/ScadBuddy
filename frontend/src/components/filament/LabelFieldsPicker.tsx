@@ -19,11 +19,10 @@ const NAMES: Record<LabelField, string> = {
 
 /**
  * #7216 — the fields a spool label prints (R-7216-9): a checkbox for each, in the order the lines
- * print. A change gives the fields in `ALL_FIELDS` order. A label prints at least one field, so the
- * last box that is checked is disabled.
+ * print. A change is one box (R-7216-18): `onTick` gets the field and whether it is now on. A label
+ * prints at least one field, so the last box that is checked is disabled.
  */
-export function LabelFieldsPicker({ value, onChange }: { value: readonly LabelField[]; onChange(next: LabelField[]): void }) {
-  const toggle = (field: LabelField, on: boolean) => onChange(ALL_FIELDS.filter((one) => (one === field ? on : value.includes(one))))
+export function LabelFieldsPicker({ value, onTick }: { value: readonly LabelField[]; onTick(field: LabelField, on: boolean): void }) {
   return (
     <fieldset className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-border px-3 py-2">
       <legend className="px-1 text-[13px] font-medium">Spool label prints</legend>
@@ -32,7 +31,7 @@ export function LabelFieldsPicker({ value, onChange }: { value: readonly LabelFi
         const id = `label-field-${field}`
         return (
           <span key={field} className="flex items-center gap-1.5">
-            <Checkbox id={id} checked={checked} disabled={checked && value.length === 1} onCheckedChange={(on) => toggle(field, on === true)} />
+            <Checkbox id={id} checked={checked} disabled={checked && value.length === 1} onCheckedChange={(on) => onTick(field, on === true)} />
             <FieldLabel htmlFor={id} className="text-[13px] font-normal">
               {NAMES[field]}
             </FieldLabel>

@@ -420,8 +420,8 @@ describe('the label output (#7216)', () => {
     expect(puts).toHaveLength(1)
   })
 
-  // R-7216-17: a field pick keeps the stored format and dpi, and a format pick keeps the picked fields.
-  it('saves a field pick and a format pick made before the settings arrive once, over the stored rest', async () => {
+  // R-7216-17, R-7216-18: a field tick changes one box of the stored fields, and a format pick keeps the stored dpi.
+  it('saves a field tick and a format pick made before the settings arrive once, over the stored rest', async () => {
     serve()
     const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
     let answer: () => void = () => {}
@@ -433,17 +433,35 @@ describe('the label output (#7216)', () => {
       }),
     )
     const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
-    await user.click(await screen.findByRole('checkbox', { name: 'Weight' }))
+    await user.click(await screen.findByRole('checkbox', { name: 'Colour code' }))
     await user.click(screen.getByRole('radio', { name: 'PNG' }))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(puts).toEqual([])
     answer()
-    // The fields picked are the default set and the weight; the dpi is the stored one.
-    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 600, fields: ['number', 'material', 'colour', 'brand', 'weight', 'qr'] } }]))
+    // The stored fields with the one box ticked; the dpi is the stored one.
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 600, fields: ['number', 'hex', 'weight', 'qr'] } }]))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(puts).toHaveLength(1)
+    expect(screen.getByRole('checkbox', { name: 'Colour code' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'Weight' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'Brand' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Brand' })).not.toBeChecked()
+  })
+
+  it('saves no field tick when the settings cannot be read, and downloads the fields shown', async () => {
+    serve()
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
+    server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ detail: 'no' }, { status: 500 })))
+    const bodies = serveLabels('application/pdf')
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('checkbox', { name: 'Weight' }))
+    expect(await screen.findByText('The file choice could not be saved. It holds on this page only.')).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Weight' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ format: 'pdf', fields: ['number', 'material', 'colour', 'brand', 'weight', 'qr'] })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toEqual([])
   })
 
   it('keeps the stored fields under a format pick', async () => {

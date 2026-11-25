@@ -18,7 +18,7 @@ import {
 import { Label, LocationLabel } from '../../components/filament/Label'
 import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
 import { LabelFieldsPicker } from '../../components/filament/LabelFieldsPicker'
-import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg } from '../../components/filament/labelSheet'
+import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, type LabelField, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg, tickField } from '../../components/filament/labelSheet'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label as FieldLabel } from '@/components/ui/label'
@@ -207,10 +207,17 @@ export function LabelsPage() {
   const [output, setOutput] = useState<LabelOutput>(DEFAULT_OUTPUT)
   const outputSaver = useSettingSaver('filament_label_output')
   const fields = output.fields ?? DEFAULT_FIELDS
-  // R-7216-17: a pick saves only the part it picked (the format, the dpi or the fields), with
+  // R-7216-17: a pick saves only the part it picked (the format, the dpi or one field's box), with
   // the other parts read from the setting. `value` is the stored output with every pick since the
-  // read. Until the read answers, the picked parts wait here; after a failed read, no pick is saved.
-  const outputRead = useRef<{ state: 'reading' | 'read' | 'failed'; value: LabelOutput; waiting: Partial<LabelOutput> | null }>({ state: 'reading', value: DEFAULT_OUTPUT, waiting: null })
+  // read. Until the read answers, the picked format and dpi wait in `waiting` and the field ticks in
+  // `ticks` (R-7216-18: one box each, applied in order to the stored fields); after a failed read,
+  // no pick is saved.
+  const outputRead = useRef<{ state: 'reading' | 'read' | 'failed'; value: LabelOutput; waiting: Partial<LabelOutput> | null; ticks: { field: LabelField; on: boolean }[] }>({
+    state: 'reading',
+    value: DEFAULT_OUTPUT,
+    waiting: null,
+    ticks: [],
+  })
   const [outputUnsaved, setOutputUnsaved] = useState(false)
   const picker = useRef<HTMLButtonElement>(null)
   const pickerList = useRef<HTMLDivElement>(null)
@@ -229,12 +236,17 @@ export function LabelsPage() {
         const read = outputRead.current
         const stored = settings.filament_label_output ?? DEFAULT_OUTPUT
         read.state = 'read'
-        // The parts picked before the read are kept (R-7216-16), and saved now over the stored rest.
+        // The parts picked before the read are kept (R-7216-16), and saved now over the stored rest:
+        // the format and dpi picked, and each field tick applied to the stored fields (R-7216-18).
         const picked = read.waiting
+        const ticks = read.ticks
         read.waiting = null
-        read.value = { ...stored, ...picked }
-        setOutput(read.value)
-        if (picked) outputSaver.save(read.value)
+        read.ticks = []
+        let value: LabelOutput = { ...stored, ...picked }
+        for (const { field, on } of ticks) value = { ...value, fields: tickField(value.fields ?? DEFAULT_FIELDS, field, on) }
+        read.value = value
+        setOutput(value)
+        if (picked || ticks.length > 0) outputSaver.save(value)
         const template = settings.filament_label_template
         if (!template || templateSaver.savedBeforeRead) return
         setChoice(cleanChoice(template))
@@ -245,8 +257,9 @@ export function LabelsPage() {
         // The page cannot know the stored output, so it saves no pick; a pick holds on this page only.
         const read = outputRead.current
         read.state = 'failed'
-        if (read.waiting) setOutputUnsaved(true)
+        if (read.waiting || read.ticks.length > 0) setOutputUnsaved(true)
         read.waiting = null
+        read.ticks = []
       })
     return () => {
       live = false
@@ -261,16 +274,32 @@ export function LabelsPage() {
   }
 
   /**
-   * One saver for the whole output: a pick changes only the part it picked (the format, the dpi or the
-   * fields) and keeps the other parts, stored or picked.
+   * One saver for the whole output: a pick changes only the part it picked (the format or the dpi)
+   * and keeps the other parts, stored or picked.
    */
-  const pickOutput = (part: Partial<LabelOutput>) => {
+  const pickOutput = (part: Pick<LabelOutput, 'format'> | Pick<LabelOutput, 'dpi'>) => {
     setOutput((was) => ({ ...was, ...part }))
     const read = outputRead.current
     if (read.state === 'read') {
       read.value = { ...read.value, ...part }
       outputSaver.save(read.value)
     } else if (read.state === 'reading') read.waiting = { ...read.waiting, ...part }
+    else setOutputUnsaved(true)
+  }
+
+  /**
+   * R-7216-18: a field tick changes one box of the fields the page has (the stored ones, or the
+   * default before the read). Before the read it waits as a change, and the read applies it to the
+   * stored fields.
+   */
+  const pickField = (field: LabelField, on: boolean) => {
+    const tick = (was: LabelOutput): LabelOutput => ({ ...was, fields: tickField(was.fields ?? DEFAULT_FIELDS, field, on) })
+    setOutput(tick)
+    const read = outputRead.current
+    if (read.state === 'read') {
+      read.value = tick(read.value)
+      outputSaver.save(read.value)
+    } else if (read.state === 'reading') read.ticks.push({ field, on })
     else setOutputUnsaved(true)
   }
 
@@ -559,7 +588,7 @@ export function LabelsPage() {
         {placeMode ? (
           <p className="mb-5 text-[13px] text-muted-foreground">A place label prints its code, its name and its QR code.</p>
         ) : (
-          <LabelFieldsPicker value={fields} onChange={(next) => pickOutput({ fields: next })} />
+          <LabelFieldsPicker value={fields} onTick={pickField} />
         )}
         {templateSaver.failed && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The label choice could not be saved. It holds on this page only.</p>}
         {(outputSaver.failed || outputUnsaved) && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The file choice could not be saved. It holds on this page only.</p>}

@@ -1,7 +1,7 @@
 import QRCode from 'qrcode'
 import { describe, expect, it } from 'vitest'
 import type { SpoolDetail } from '../../api/filament'
-import { ALL_FIELDS, DEFAULT_FIELDS, fitLines, labelBase, labelPayload, locationPayload, parseLabelPayload, QR_MM, qrSvg, spoolLines } from './labelSheet'
+import { ALL_FIELDS, DEFAULT_FIELDS, fitLines, labelBase, labelPayload, locationPayload, noteLine, parseLabelPayload, QR_MM, qrSvg, spoolLines } from './labelSheet'
 
 describe('the label payload', () => {
   it('is the spool id behind a fixed prefix, with no host', () => {
@@ -98,6 +98,20 @@ describe('the spool label lines (#7216)', () => {
       ['note', 2.6, false],
       ['added', 2.6, false],
     ])
+  })
+})
+
+// The expected values are Python's `(note or "").strip().splitlines()`, then `[0].strip()` (`labels.py`), run with python3.
+describe("the note's first line (#7216)", () => {
+  it('strips and splits as Python does', () => {
+    expect(noteLine('\x1cDry first')).toBe('Dry first')
+    expect(noteLine(' a b ')).toBe('a b')
+    expect(noteLine('﻿x')).toBe('﻿x')
+    expect(noteLine('line one\r\nline two')).toBe('line one')
+    expect(noteLine('\x1fpad\x1f')).toBe('pad')
+    expect(noteLine('\x85　y')).toBe('y')
+    expect(noteLine('  ')).toBeNull()
+    expect(noteLine(null)).toBeNull()
   })
 })
 
