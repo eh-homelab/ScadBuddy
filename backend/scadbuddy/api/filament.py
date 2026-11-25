@@ -2076,8 +2076,10 @@ def _no_job(job_id: UUID) -> ApiError:
     description=(
         "Queues a tag read or write for the /filament/scan page (#7273 G4). `kind` is `read` "
         "(no `records`) or `write` (the NDEF `records` to write, 888 bytes at most). The job "
-        "waits `ttl_s` seconds (default and most 600) for a person to arm it and tap a tag, "
-        "then it is `expired`."
+        "waits `ttl_s` seconds (default and most 600) for a person to arm it, then it is "
+        "`expired`. Arming gives the run 60 seconds (`expires_at` moves). A write whose backup "
+        "exists (`write_begun`) never expires: it ends with its result, or `failed` with "
+        "`result.code` `no_read_back` once the backup is over 10 minutes old."
     ),
 )
 async def create_nfc_job(filament: FilamentDep, caller: CallerDep, body: m.NfcJobIn) -> m.NfcJob:
@@ -2103,7 +2105,8 @@ async def list_nfc_jobs(filament: FilamentDep, state: Literal["pending"]) -> lis
     summary="Read an NFC job",
     description=(
         "One job: its `state` (`pending`, `armed`, `done`, `failed`, `expired` or "
-        "`cancelled`) and, once it ended, its `result`. 404 for none."
+        "`cancelled`), whether its write has begun (`write_begun`) and, once it ended, its "
+        "`result`. 404 for none."
     ),
 )
 async def get_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
@@ -2153,7 +2156,8 @@ async def claim_nfc_job(
         "The agent that asked for a job stops waiting for it (#7273): a `pending` or `armed` "
         "job becomes `cancelled`, so no page can arm it or post its result. A job that has "
         "ended already (`done`, `failed`, `expired` or `cancelled`) is answered as it is, "
-        "unchanged. 404 for no job."
+        "unchanged. 409 `write_begun` for a write whose backup exists: the tag may hold the "
+        "new records, so only its result ends it. 404 for no job."
     ),
 )
 async def cancel_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
@@ -2161,6 +2165,8 @@ async def cancel_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
         return await asyncio.to_thread(tags.cancel_job, filament.spools, job_id)
     except tags.NfcJobNotFoundError:
         raise _no_job(job_id) from None
+    except tags.WriteBegunError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
 
 
 @router.post(
@@ -3331,8 +3337,3 @@ async def run_filament_sync(state: StateDep) -> SyncRun:
             code=reason,
         )
     return SyncRun(requested_at=requested_at)
-
-
-async def _spool_or_404(filament: Filament, spool_id: UUID) -> None:
-    if await asyncio.to_thread(filament.spools.get, spool_id) is None:
-        raise _no_spool(spool_id)

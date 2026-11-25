@@ -947,7 +947,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py` and after a
   settings save that changes `filament_sync`; capture, `sync_ams_weights` and the worker's
   CRUD `filament` writes are not nudged and reach Bambuddy on the timer, and the Bambuddy
-  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push, and the printer
+  import (`api/filament.py` `NOT_NUDGED`) has nothing to push, nor have the phone's tag routes
+  (#7273, also in `NOT_NUDGED`: the backups, `tag-records`, the restore and the NFC job
+  routes), and `POST /tags/reads` nudges only when it binds (`SKIP_NUDGE` otherwise), and the printer
   labels (#6955, also in `NOT_NUDGED`) make only places capture makes too. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
