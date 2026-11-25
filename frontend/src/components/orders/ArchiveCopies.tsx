@@ -1,5 +1,5 @@
 import { CheckIcon } from 'lucide-react'
-import { useEffect, useEffectEvent, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useState } from 'react'
 import { api } from '../../api/client'
 import type { ArchiveCopy, ArchiveOffer, AttemptArchives, Fulfilment } from '../../api/types'
 import { Button } from '@/components/ui/button'
@@ -54,8 +54,9 @@ function attachedIds(read: AttemptArchives | null): string {
  * `ARCHIVE_READ_MS`, at most `ARCHIVE_READS` times; then it offers a copy of only what is
  * still missing. The next read waits `ARCHIVE_READ_MS` after the previous answer, so a slow
  * read is never dropped (#7455). While a timelapse waits for Bambuddy, the row reads once more
- * when the wait ends; that read starts the re-reads again only when it brings a newly offered
- * timelapse. A read the row starts by hand or at the wait's end drops a pending re-read. The page is told to reload when a read changed the attempt (times,
+ * when the wait ends. Any answer that newly offers a timelapse starts the re-reads again (a
+ * change, spec §4.4). A read the row starts by hand or at the wait's end drops a pending
+ * re-read. The page is told to reload when a read changed the attempt (times,
  * grams) or attached a file.
  */
 export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId: string; itemId: string; attempt: Fulfilment; onChanged: () => void }) {
@@ -69,8 +70,6 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
   const [reads, setReads] = useState(0)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Set when the timelapse wait ends; the answer of that read sees it once.
-  const waitEndRead = useRef(false)
 
   const readAgain = () => {
     setReading(true)
@@ -79,12 +78,12 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
 
   const answered = useEffectEvent((answer: AttemptArchives) => {
     const changed = facts(answer.attempt) !== facts(attempt) || (read !== null && attachedIds(answer) !== attachedIds(read))
-    // A timelapse the wait-end read newly offers is a change: the re-reads start again (spec §4.4).
-    if (waitEndRead.current) {
+    // A newly offered timelapse is a change: the re-reads start again (spec §4.4), whichever
+    // read brought it (#7632).
+    if (read !== null) {
       const before = offeredTimelapses(read)
       if ([...offeredTimelapses(answer)].some((id) => !before.has(id))) setReads(0)
     }
-    waitEndRead.current = false
     setRead(answer)
     setReadAt(Date.now())
     setError(null)
@@ -92,7 +91,6 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
     if (changed) onChanged()
   })
   const failed = useEffectEvent((err: unknown) => {
-    waitEndRead.current = false
     setError(refusalText(err))
     setReading(false)
   })
@@ -130,7 +128,6 @@ export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId
   useEffect(() => {
     if (waitEnds === null) return
     const timer = setTimeout(() => {
-      waitEndRead.current = true
       readAgain()
     }, Math.max(0, waitEnds - Date.now()))
     return () => clearTimeout(timer)

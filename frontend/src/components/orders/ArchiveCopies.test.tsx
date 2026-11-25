@@ -314,6 +314,50 @@ describe('ArchiveCopies', () => {
     expect(await within(archives).findByRole('button', { name: 'Copy timelapse' })).toBeEnabled()
   })
 
+  it('reads again when a re-read after a failed wait-end read newly offers a timelapse', async () => {
+    const attempt = printedAttempt()
+    // The wait ends 55 s after the page opens, after the fifth 10 s re-read.
+    const completed = new Date(Date.now() - 60 * 60_000 + 55_000).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        const n = ++reads
+        // The wait-end read fails; the re-read after it is the first to offer the timelapse.
+        if (n === 7) return HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              timelapse: n > 7,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    for (let n = 1; n <= 5; n++) {
+      await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+      await waitFor(() => expect(reads).toBe(1 + n))
+    }
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS / 2))
+    await within(archives).findByRole('alert')
+    expect(reads).toBe(7)
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await waitFor(() => expect(reads).toBe(8))
+    // A newly offered timelapse is a change: it gets its own re-reads, not a copy at once.
+    await waitFor(() => expect(archives).toHaveTextContent('Importing timelapse'))
+    expect(within(archives).queryByRole('button', { name: 'Copy timelapse' })).toBeNull()
+  })
+
   it('drops the pending re-read when the read at the end of the timelapse wait starts', async () => {
     const attempt = printedAttempt()
     // The wait ends 5 s after the page opens, while the 10 s re-read is pending.
