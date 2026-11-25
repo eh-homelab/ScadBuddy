@@ -89,9 +89,10 @@ rulings R-P2-1 to R-P2-44 (comment on #7067).
 - Only the API process holds SQL. Agent tools and the frontend call CRUD routes (root
   CLAUDE.md "Database access (#5295)"). Add no database client, role or grant.
 - Migrations: new files only, `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql`, later than every file
-  on main when made. Never edit a merged one (root CLAUDE.md "Migrations (#491)"). A
-  migration that converts prod data has a Pre-flight of read-only prod queries that the
-  owner runs (Pre-flight 6).
+  on main when made. Never edit a merged one (root CLAUDE.md "Migrations (#491)"). The
+  layer-3 data migration ships like any other PR: no owner-run gate and no deploy window
+  (owner, 2026-11-25; R-P3-29). It handles every data case itself, each with a test, and
+  old pods keep working through views during the rollout.
 - Never commit `backend/openapi.json` or any `schema.d.ts`.
 - Print and slicer settings take no per-key allowlist (decision on #2998). Phase 3 adds
   none.
@@ -149,9 +150,11 @@ rulings R-P2-1 to R-P2-44 (comment on #7067).
 5. **Coverage.** Each new route is a tool or a `coverage.ts` entry, or
    `agent/test/coverage.test.ts` fails (`agent/CLAUDE.md` l.397). Layer 2 adds temporary
    entries that name the layer-6 tools; layer 6 drops them.
-6. **Prod measures before layer 3 merges** (`deploy/CLAUDE.md` "Prod checks", read only;
-   not measured for this plan). The owner runs them and records the answers in the layer-3
-   PR body:
+6. **Data cases the migration handles** (R-P3-29). Each query below names a case that
+   Task 7 handles in SQL and pins with a seeded-row test; none stops the migration except a
+   true invariant (step 1). The control session runs them read only on prod
+   (`deploy/CLAUDE.md` "Prod checks") as a cross-check when it can, and records the answers
+   in the layer-3 PR body. They are not a merge gate:
    - counts of `filament_supplier_products`, `filament_price_points`, `filament_spool_types`,
      `filament_spools`, `invoices` by `status`, and `filament_spool_events` by `ref_kind`
      where `ref_kind IN ('print_run','bb_usage')`;
@@ -167,7 +170,9 @@ rulings R-P2-1 to R-P2-44 (comment on #7067).
    - `SELECT currency, count(*) FROM filament_price_points GROUP BY 1`;
    - `SELECT count(*) FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id WHERE i.status = 'confirmed' AND l.supplier_product_id IS NULL` (expect 0);
    - `SELECT schema FROM entity_property_schemas WHERE kind = 'spool_type'`.
-   If an "expect" fails, stop and ask the owner before merge.
+   Where an "expect" does not hold, Task 7 must already convert that case (for example:
+   cut a SKU to 128, store a bad URL as no URL, suffix a clashing name, leave a typeless
+   spool without a unit, price a costless use as unknown).
 7. **Job cost before and after** (layer 4, R-P3-18). Just before layer 4 deploys, the owner
    saves `GET /api/v1/orders/reports/profit?from=<now − 30 days>` and `GET
    /api/v1/orders/{id}/costs` for each order accepted in that range. Right after the deploy,
@@ -546,7 +551,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 - [ ] **Step 4: Run** the tests, `uv run --frozen pytest tests/auth -q`, and `cd agent && pnpm exec vitest run test/coverage.test.ts` — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(inventory): supplier, invoice, amend and link routes (#7068, 2/7)`
 
-## Layer 3 — `feat/7068-3-purchasing-to-generic` (on layer 2; Pre-flight 6 first)
+## Layer 3 — `feat/7068-3-purchasing-to-generic` (on layer 2; ships like any PR, R-P3-29)
 
 ### Task 7: Migrate filament purchasing onto the generic tables
 
@@ -559,8 +564,9 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 The migration, in one file, in this order (actor `{"kind": "provider", "principal":
 "purchasing_migration"}`):
 0. `LOCK TABLE filament_supplier_products, filament_price_points, filament_spool_types,
-   filament_spools, invoices, invoice_lines IN EXCLUSIVE MODE` (R-P2-20). The layer-3 PR body
-   names the deploy window: an old pod fails on a product or price read after the rename.
+   filament_spools, invoices, invoice_lines IN EXCLUSIVE MODE` (R-P2-20). No deploy window
+   (R-P3-29): every table an old pod reads keeps a view under its old name, so an old pod's
+   product or price read still answers during the rollout.
 1. If an `items` row has a spool type's id, RAISE (Pre-flight 6, as R-P2-24).
 2. `items` from `filament_spool_types`: `id` = the type's id, `kind_id = 'filament'`,
    `name = code`, `manufacturer` = its brand's name (else `''`), `archived_at`,
@@ -937,13 +943,13 @@ Load `frontend-design` first.
 - **R-P3-6.** A spool's unit stores no cost and no moves; reads take cost from the spool, and
   its status follows archive. A typeless spool has no unit until it is typed. Reason:
   `cost_per_kg` is the one cost source (spec §6.4).
-- **R-P3-7.** Filament lines count spools, as today. Item lines count packs: units received =
+- **R-P3-7** (owner accepted, 2026-11-25). Filament lines count spools, as today. Item lines count packs: units received =
   quantity × the offer's pack size (1 with no offer), for lot and unit items; price per
   pack = line total / quantity. Reason: receipts list packs; spec §6.7 says this for lots
   and is silent on packs of units.
 - **R-P3-8.** `asset` lines are for unit items and receive units `in_service`; a `none` item
   goes on `expense` lines only. Reason: the spec names the kind but not its effect.
-- **R-P3-9.** Only links on confirmed `expense` lines write consumer rows; links on `stock`
+- **R-P3-9** (owner accepted, 2026-11-25). Only links on confirmed `expense` lines write consumer rows; links on `stock`
   and `asset` lines are references. Reason: a received lot or unit already carries the cost,
   and a second consumer would count it twice.
 - **R-P3-10.** A line links to one order and one printer at most, and serves one purchase per
@@ -989,3 +995,8 @@ Load `frontend-design` first.
 - **R-P3-28.** The `inventory_moves` view applies the ledger's counting rules, and job cost
   reads spool uses from it. Reason: one implementation of "a plate counts once" serves
   reports and job cost.
+
+- **R-P3-29** (owner, 2026-11-25). The layer-3 data migration ships like any other PR: no
+  owner-run gate and no deploy window. It handles every data case itself, with a test for
+  each, and keeps views under the old table names for old pods during the rollout.
+  Reason: the owner's ruling ("use a migration ... it should ship like any other pr").
