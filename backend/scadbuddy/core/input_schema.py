@@ -22,7 +22,11 @@ pipelines.
 The API runs every ``pattern`` on the values it checks, so a pattern is bounded
 (`MAX_PATTERN`), its counted repeats too (`MAX_PATTERN_SIZE`, #7394), needs a ``maxLength``
 (`MAX_PATTERNED_LENGTH`) and runs with a deadline (`PATTERN_TIMEOUT_S`, `PATTERNS_BUDGET_S`;
-#2661).
+#2661). A run started through the API (`api/flows.py`) checks the stored schema again
+(``stored=True``): a pattern over `MAX_PATTERN` or `MAX_PATTERN_SIZE` fails each such start
+until the flow is registered again within them, while a missing or larger ``maxLength`` is
+capped as the pattern runs. A trigger's fire (`flow_triggers/fire.py`) checks the schema as
+a registration does.
 """
 
 from __future__ import annotations
