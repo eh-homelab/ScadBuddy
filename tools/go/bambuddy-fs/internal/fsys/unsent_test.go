@@ -1244,3 +1244,35 @@ func TestARetryWhoseLostUploadWasRenamedIsNotSentAgainUnderAFreeName(t *testing.
 		lib.locked(func() { t.Fatalf("files: %+v", lib.files) })
 	}
 }
+
+// A node shows its entry's record size while the entry is queued and after its upload
+// finished, but not once the library refused it: the node then shows its own (#7572).
+func TestAQueuedEntrysSizeEndsWithARefusal(t *testing.T) {
+	q := newQueue(t.TempDir())
+	writeQueued(t, filepath.Dir(q.dir), 1, record{Name: "a.3mf", Size: 3}, "abc")
+	writeQueued(t, filepath.Dir(q.dir), 2, record{Name: "b.3mf", Size: 4}, "abcd")
+	q.load()
+	due := q.due()
+	if len(due) != 2 {
+		t.Fatalf("due: %d", len(due))
+	}
+	refused, sent := due[0], due[1]
+	if refused.rec.Name != "a.3mf" {
+		refused, sent = sent, refused
+	}
+	for _, e := range due {
+		if size, ok := q.size(e); !ok || size != e.rec.Size {
+			t.Fatalf("queued %s: %d %v", e.rec.Name, size, ok)
+		}
+	}
+	if _, err := q.moveRefused(refused, errors.New("refused")); err != nil {
+		t.Fatal(err)
+	}
+	if size, ok := q.size(refused); ok {
+		t.Errorf("refused: %d %v, want no size", size, ok)
+	}
+	q.finish(sent)
+	if size, ok := q.size(sent); !ok || size != 4 {
+		t.Errorf("sent: %d %v, want 4 true", size, ok)
+	}
+}
