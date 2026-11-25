@@ -730,7 +730,8 @@ export function SpoolPage() {
       grams = accepted.filament_g
       setLists((was) => (was ? { ...was, insertTypes: was.insertTypes.map((one) => (one.id === accepted.insert_type.id ? accepted.insert_type : one)) } : was))
     }
-    await addSpoolEvent(spoolKey, { kind: 'weighed', grams, source: 'scale' })
+    // #7682: with an empty weight the reading goes too, so the event keeps its breakdown.
+    await addSpoolEvent(spoolKey, { kind: 'weighed', grams, source: 'scale', ...(empty ? { reading_g: scale } : {}) })
     setReading('')
     setOfferChoice(null)
     await reload(true)
