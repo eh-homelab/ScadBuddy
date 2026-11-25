@@ -445,6 +445,29 @@ def test_a_meta_postgres_cannot_store_is_read_from_its_file(
     assert read() == before
 
 
+def test_a_not_storable_row_whose_folder_is_gone_is_in_neither_list(
+    world: TestClient, paths: DataPaths
+) -> None:
+    """#7661: a not-storable row whose folder was removed by hand is left out of the
+    summaries, as the list leaves it out."""
+    _create(world, "nan", {"name": "Not a number"})
+    paths.model_meta("nan").write_text(
+        '{"name": "Not a number", "tags": ["odd"], "ratio": NaN}', encoding="utf-8"
+    )
+    _copy(world)
+    row = _rows(world).get("nan")
+    assert row is not None and row.meta is None
+    shutil.rmtree(paths.model_dir("nan"))
+    catalogue = _state(world).catalogue
+
+    listed = [record.slug for record in catalogue.list_models()]
+    assert "nan" not in listed
+    assert [summary.slug for summary in catalogue.list_summaries()] == listed
+    assert [summary.slug for summary in catalogue.list_summaries(["nan", "widget"])] == [
+        record.slug for record in catalogue.list_models(["nan", "widget"])
+    ]
+
+
 def test_list_and_record_agree_on_upstream_state_with_no_row_version(world: TestClient) -> None:
     """Review M3: a duplicate whose row has no version (git failed at its refresh) is
     judged against its upstream in the list as in its record."""
