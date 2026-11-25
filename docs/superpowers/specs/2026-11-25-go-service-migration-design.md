@@ -1,6 +1,6 @@
 # The Python backend moves to Go, Python stays as activities
 
-Status: draft for the owner's approval (epic #7667). Nothing is built.
+Status: approved by the owner (epic #7667), 2026-11-25. Building: `tools/go/core` serves the first areas (#7680); the CRUD port and the client address are in #7702; the other agent CRUD areas are in their own PRs. Nothing is deployed yet.
 
 Sources: counts and file references are from `main` at `1f9bf6962` (2026-11-25), read by
 two surveys of the tree. "Inferred" marks what was not read or run. Prod figures name
@@ -78,27 +78,26 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
  └──────────────────────────────────────────────────────────────┘
 ```
 
-- **Ports.** Go listens on 8080 and, for CRUD callers, on 8082, with 8082's path filter
-  (`crud/listener.py`). Python listens on two Unix sockets in a shared `emptyDir`
-  mounted in these two containers only.
-- **Why a socket.** Python believes `X-Forwarded-For` only from trusted peers
-  (`core/proxies.py`) and refuses uvicorn's own proxy headers, so that a caller in the pod
-  cannot name a client. A loopback port would make every caller, the agent sidecar
-  included, look like the front. Over the socket the front sends the real peer in a
-  header it overwrites, and Python reads it only on that socket.
-- **The socket checks its peer.** `openscad-lsp` runs in the Python container as the API's uid,
-  and its seccomp filter allows `AF_UNIX` (`editor/nonet.py`). So mounting the socket in
-  two containers does not keep it out. The Go container runs under its own uid, and
-  Python closes a connection whose `SO_PEERCRED` uid is another. Phase 0 tests that a
-  process with the API's uid is refused. Without that test, phase 0 does not ship.
+- **Ports.** Go listens on 8080 and, for CRUD callers, on 8082 (`SCADBUDDY_CORE_CRUD_LISTEN`),
+  with 8082's path filter (`crud/listener.py` `serves`: a path `posixpath.normpath` changes is
+  refused, not only a wrong prefix). Python listens on `127.0.0.1:8090`; its own CRUD listener
+  moves to a free port (`SCADBUDDY_CRUD_PORT=0`) that no Service or policy names.
+- **The client address.** Go applies the trusted proxies (`SCADBUDDY_CORE_TRUSTED_PROXIES`, as
+  `core/proxies.py`) and sends Python the client it finds as the one `X-Forwarded-For` value.
+  Python trusts only `127.0.0.1`.
+- **Why loopback, not a socket** (changed 2026-11-25, to ship faster). `openscad-lsp` in
+  Python's container may open `AF_UNIX` sockets but no TCP ones (`editor/nonet.py`), so it
+  cannot reach 8090. Another process in the pod (the agent sidecar) can reach 8090 and name
+  any client there. The client address only picks a rate-limit bucket and the address a login
+  records (`api/auth.py`, `storefront/`, `telemetry/admission.py`); the same is already
+  accepted for callers that reach 8080 directly (clusters#1760). Accepted.
 - **Forwarding** passes WebSockets (`/ws`, the LSP routes), SSE (`flush` at once), large
   and streamed bodies, and headers unchanged. It buffers nothing.
 - **Switch.** `SCADBUDDY_CORE_AREAS` lists what Go answers: `<area>` for all its routes, or
   `<area>:read` for its GETs. The names are those of `api/crud_areas.py`. A route not
   listed is forwarded. Python keeps answering `/areas` with every name.
-- **Front rollback.** Python listens either on the sockets or on 8080 and 8082, by one
-  setting, never both. Going back is a Deployment change that drops the Go container.
-- **Packaging.** `tools/go/scadbuddy-core`, its own image through `build-go-image.yml`, so the
+- **Front rollback.** Python's container gets back the image's own command and ports. Going back is a Deployment change that drops the Go container.
+- **Packaging.** `tools/go/core` (image `scadbuddy-core`), its own image through `build-go-image.yml`, so the
   Go CI needs no new wiring. The pod's two images have different commits; `/healthz` names
   both. The pod manifest is a change in eh-homelab/clusters.
 - **Database.** Go uses the API's database role. A role per process is not a boundary
@@ -118,7 +117,7 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
 | Before the route: compression, the cross-site gate, the auth gate, the body-size gate (413, no CRUD headers), the event cursor, agent authorship | `main.py` middlewares, in that order | |
 | In the route: malformed JSON is 422 before auth; then auth; then length (411); then path, query and body | FastAPI `routing.py` | |
 | Problem JSON; `title` is `Error` for some statuses; a 422's `errors[].loc` | `core/problems.py` | The agent reads `loc`, not the text |
-| `event_seq` is bumped in the statement that inserts the events, the row locked to the commit | `agent_data/events.py` | Other Python writers share it: `gate.py`, `turns.py`, `workspace.py` |
+| `event_seq` is bumped in the statement that inserts the events, the row locked to the commit | `agent_data/events.py` | Other Python writers share it: `gate.py`, `turns.py`, `workspace.py`; `sessions.py` reads it under `FOR UPDATE` in the fork check |
 | Advisory lock keys and their order | Appendix A, a start the first plan completes | `hashtext` and `hashtextextended` run in Postgres, so the SQL carries over |
 | Metric `scadbuddy_http_requests_total` labels and the `scadbuddy-api` trace name | `core/metrics.py`, `core/tracing.py` | The dashboard lint reads `core/metrics.py` |
 | JSON text parity | pydantic | Known traps: NaN and lone surrogates accepted by Python's `json`, `\u0000` in an event's JSON, lax integers, a bad UUID that must reach Postgres to be 422 |
@@ -210,7 +209,7 @@ type check, and the profile-fetch and intake code until someone ports it.
 
 ## 10. Left to the builder
 
-The Go HTTP router, package layout under `tools/go/scadbuddy-core`, the error type, the pool's exact
+The Go HTTP router, package layout under `tools/go/core` (chosen: `internal/crud`, `internal/<area>`), the error type, the pool's exact
 size, and how the area switch is parsed.
 
 ## Appendix A. Locks and channels
