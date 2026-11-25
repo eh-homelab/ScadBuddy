@@ -481,6 +481,10 @@ describe('the parameters a design’s pipeline sets (#5701)', () => {
     expect(withoutUnknown(draft, schema)).toMatchObject({ params: { name: { kind: 'text', max_length: 20 } }, fixed: { hole_side: 'left', thickness: 5 } })
     expect(withoutUnknown(draft, schema).fixed).not.toHaveProperty('gone')
     expect(withoutUnknown({ ...draft, params: {}, fixed: { hole_side: 'right' } }, schema).fixed).toEqual({})
+    // A colour at its default in another case is the default, as publish reads it.
+    const colours: DesignSchema = { ...keychainSchema, pipeline_params: ['body_color'] }
+    const lower: ListingDraft = { ...draft, params: {}, fixed: { body_color: '#1b6ca8' } }
+    expect(withoutUnknown(lower, colours)).toBe(lower)
     const fits: ListingDraft = { ...draft, params: {}, fixed: { hole_side: 'left' } }
     expect(withoutUnknown(fits, schema)).toBe(fits)
   })
