@@ -4,7 +4,7 @@ import { parseRgba } from '../../../lib/rgba'
 // `same_records`'s rule is the page's own `sameRecords`.
 import { recordsSha256, sameRecords } from '../../../lib/webNfc'
 import { newId } from '../../newId'
-import { bindOn, cleanTagUid, findByKey, holderOf, seenTag, setOrigin, spoolViewOf, tagOf, tagRowOf } from './index'
+import { bindOn, cleanTagUid, findByKey, holderOf, resolveCodeText, resolvedSpool, seenTag, setOrigin, spoolRowOf, spoolViewOf, tagOf, tagRowOf } from './index'
 
 type S = components['schemas']
 
@@ -12,8 +12,11 @@ type S = components['schemas']
  * #7273 — `POST /api/v1/filament/tags/reads` (`backend/scadbuddy/filament/tags.py` `read_on`)
  * over the seeded tags, which `index.ts` owns. A read with a UID finds or makes its tag; with
  * `bind_spool_id` it binds it there, through the tag route's own `bindOn`. `next` is
- * `open_spool` when a spool holds the tag, `bind_or_create` for a tag no spool holds, and
- * `none` with no UID. Only OpenSpool's JSON is decoded here; an OpenTag3D record reads as no format.
+ * `open_spool` when a spool holds the tag; `open_code`, with `resolved`, when no spool holds it
+ * and its records name a row (`tag_codes.py`: a `url` record whose path ends `/x/<code>`, a
+ * `text` record that is a code or `scadbuddy:spool:<id>`; the first that names a row);
+ * `bind_or_create` for a tag no spool holds, and `none` with no UID. Only OpenSpool's JSON is
+ * decoded here; an OpenTag3D record reads as no format.
  *
  * The write routes (`back_up`, `records_for_spool`, `written`, `restore_records`) keep each
  * tag's backups in memory, append-only; a backup covers a write for 10 minutes. `tag-records`
@@ -191,11 +194,45 @@ function covering(body: { uid: string; backup_id: string; records?: S['NdefRecor
   return backup
 }
 
+/**
+ * `tag_codes.resolve_records`: the row the records name, or null. Text records are read as UTF-8
+ * only: the real route also reads UTF-16 (`tag_codes.decode_text`), which no mock case needs.
+ */
+function resolveRecords(records: readonly S['NdefRecord'][]): S['Resolved'] | null {
+  for (const record of records) {
+    const decoded = utf8(record.data_hex)
+    if (decoded === null) continue
+    if (record.record_type === 'url') {
+      let path: string
+      try {
+        path = new URL(decoded).pathname
+      } catch {
+        continue
+      }
+      const segments = path.split('/').filter(Boolean)
+      if (segments.length < 2 || segments[segments.length - 2] !== 'x') continue
+      const found = resolveCodeText(segments[segments.length - 1]!)
+      if (found) return found
+    } else if (record.record_type === 'text') {
+      const trimmed = decoded.trim()
+      const found = resolveCodeText(trimmed)
+      if (found) return found
+      const spool = /^scadbuddy:spool:([0-9a-f-]{36})$/i.exec(trimmed)
+      const row = spool ? spoolRowOf(spool[1]!.toLowerCase()) : null
+      if (row) return resolvedSpool(row)
+    }
+  }
+  return null
+}
+
 /** `read_on`: a reading's answer. A read with a UID finds or makes its tag, marked seen by `source`; with `bindSpoolId` it binds it there. */
 function readOn(uid: string | null, records: readonly S['NdefRecord'][], source: 'phone' | 'agent', bindSpoolId?: string | null): S['TagReadResult'] | Response {
   const decoded = decodeOpenSpool(records)
   if (bindSpoolId && uid === null) return problem(422, 'a tag with no UID cannot be bound', 'no_uid')
-  if (uid === null) return { tag: null, spool: null, decoded, draft: decoded ? draftOf(decoded) : null, next: 'none' }
+  if (uid === null) {
+    const resolved = resolveRecords(records)
+    return { tag: null, spool: null, decoded, draft: decoded ? draftOf(decoded) : null, resolved, next: resolved ? 'open_code' : 'none' }
+  }
   const kind = decoded ? 'ntag_openspool' : null
   const tag = seenTag(uid, kind, source)
   if (bindSpoolId) {
@@ -203,7 +240,16 @@ function readOn(uid: string | null, records: readonly S['NdefRecord'][], source:
     if (bound instanceof Response) return bound
   }
   const spool = holderOf(tag.id)
-  return { tag: tagRowOf(tag), spool, decoded, draft: decoded && !spool ? draftOf(decoded) : null, next: spool ? 'open_spool' : 'bind_or_create' }
+  // A tag a spool holds opens the spool, whatever its records say: the binding is the stronger claim.
+  const resolved = spool ? null : resolveRecords(records)
+  return {
+    tag: tagRowOf(tag),
+    spool,
+    decoded,
+    draft: decoded && !spool ? draftOf(decoded) : null,
+    resolved,
+    next: spool ? 'open_spool' : resolved ? 'open_code' : 'bind_or_create',
+  }
 }
 
 export const handlers = [
