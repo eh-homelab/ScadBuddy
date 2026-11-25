@@ -31,7 +31,7 @@ fi
 # The names of the session mode the classic runtime left (#7323), each added here by the PR
 # that removed it. A TypeScript test file, in any tree, may name one: it sends an older peer's
 # message, to show it is dropped.
-retired=(SessionModeSchema)
+retired=(SessionModeSchema SESSION_MODES modeFallback)
 if [ "${#retired[@]}" -gt 0 ] && code "\\b($(IFS='|'; echo "${retired[*]}"))\\b" --exclude='*.test.ts' --exclude='*.test.tsx'; then
   echo "a session mode is back: every session is an AgentSession" >&2
   fail=1

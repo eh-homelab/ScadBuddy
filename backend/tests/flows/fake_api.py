@@ -17,6 +17,8 @@ from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
 from scadbuddy.crud.projects import RemoteFlowStore
 from scadbuddy.flows.grants import GrantSpec
+from scadbuddy.flows.models import Decision
+from scadbuddy.flows.operations import request_id
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities, FlowTaskActivities
@@ -250,7 +252,20 @@ class Outward(Flows):
         raise AssertionError("the harness never parked the call")
 
     async def decide(self, run_id: str, approved: bool) -> str:
+        """Decide the parked call, on record first, as `flow_decide` does."""
         call_id = await self.approval(run_id)
+        run = await self.store.get_run(run_id)
+        assert run is not None
+        decision = Decision(
+            request_id=request_id(run, call_id),
+            run_id=run_id,
+            workflow_run_id=run.workflow_run_id,
+            call_id=call_id,
+            kind="approval",
+            outcome="approved" if approved else "denied",
+            responder="browser",
+        )
+        assert await self.store.record_decision(decision)
         await AgentClient(self.client, f"flow-{run_id}").approve_tool(call_id, approved=approved)
         return call_id
 

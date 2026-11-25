@@ -279,6 +279,14 @@ OUTPUT_BYTES_PATCH = "housekeeping-copy-output-bytes"
 #: starts nothing.
 ATTEMPT_MEDIA_SWEEP = "housekeeping_import_attempt_media"
 ATTEMPT_MEDIA_PATCH = "housekeeping-import-attempt-media"
+#: #7665: the default price run of each published listing whose default choices have no
+#: price (`orders.storefront.prepare.warm_unpriced`): one published before #6922, a start
+#: that failed, a run that ended with no price. Temporal's record of each listing's run
+#: bounds it to one try per version of the listing. Last, behind its own patch; on the
+#: prune Schedule too, so a listing has its price within a few intervals. With
+#: ``storefront_warm_prices`` off it does nothing.
+WARM_LISTINGS_SWEEP = "housekeeping_warm_listings"
+WARM_LISTINGS_PATCH = "housekeeping-warm-listings"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -317,6 +325,7 @@ SWEEPS = (
     AUTO_IMPORT_SWEEP,
     RUN_HOLDS_SWEEP,
     ATTEMPT_MEDIA_SWEEP,
+    WARM_LISTINGS_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -347,7 +356,8 @@ SWEEPS = (
 #: behind `AUTO_IMPORT_PATCH`: a print ScadBuddy did not start shows within the
 #: interval; with ``print_auto_import`` off it calls nothing. And the LAN runs' holds an
 #: end left (#6122), behind `RUN_HOLDS_PATCH`. And the order attempts' missed media
-#: (#7234), behind `ATTEMPT_MEDIA_PATCH`: imported within the hour.
+#: (#7234), behind `ATTEMPT_MEDIA_PATCH`: imported within the hour. And the published
+#: listings with no price (#7665), behind `WARM_LISTINGS_PATCH`.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -367,6 +377,7 @@ PRUNE_SWEEPS = (
     AUTO_IMPORT_SWEEP,
     RUN_HOLDS_SWEEP,
     ATTEMPT_MEDIA_SWEEP,
+    WARM_LISTINGS_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -469,6 +480,10 @@ ATTEMPT_MEDIA_TIMEOUT = timedelta(minutes=5)
 #: One walk of every template folder (a few stats each), one walk of the models history,
 #: and a read and a write per batch of templates whose stamp or version changed.
 TEMPLATE_COPY_TIMEOUT = timedelta(minutes=15)
+#: One price read per published listing (a file listing's also plans its slice), then one
+#: Temporal read per listing with none and at most `prepare.WARM_SWEEP_BATCH` starts; the
+#: renders and slices run in each listing's own ``PrepareListing``, not here.
+WARM_LISTINGS_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -533,6 +548,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return ATTEMPT_MEDIA_TIMEOUT
     if sweep == TEMPLATE_COPY_SWEEP:
         return TEMPLATE_COPY_TIMEOUT
+    if sweep == WARM_LISTINGS_SWEEP:
+        return WARM_LISTINGS_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -609,6 +626,8 @@ class Housekeeping:
             if sweep == ATTEMPT_MEDIA_SWEEP and not workflow.patched(ATTEMPT_MEDIA_PATCH):
                 continue
             if sweep == TEMPLATE_COPY_SWEEP and not workflow.patched(TEMPLATE_COPY_PATCH):
+                continue
+            if sweep == WARM_LISTINGS_SWEEP and not workflow.patched(WARM_LISTINGS_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

@@ -47,7 +47,7 @@ import {
   type OfferState,
   type TreeNode,
 } from './hostedDraft'
-import { announcePackagesChanged } from './packagesChanged'
+import { announcePackagesChanged, usePackagesTopic } from './packagesChanged'
 
 const HostedFileEditor = lazy(() => import('./HostedFileEditor'))
 
@@ -138,6 +138,20 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
       live = false
     }
   }, [name])
+
+  // #7460 — a publish made elsewhere (the assistant, another tab) moves the latest version: read
+  // the draft against it and the versions again, so Publish and the draft's state follow.
+  usePackagesTopic(() => {
+    Promise.all([hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]).then(
+      ([d, v]) => {
+        setDiff(d)
+        setVersions(v)
+      },
+      // As a list's background read: a failed one keeps what is shown (a plugin deleted
+      // elsewhere closes the editor when the list is read again).
+      () => {},
+    )
+  })
 
   async function act(what: string, run: () => Promise<void>) {
     setBusy(what)

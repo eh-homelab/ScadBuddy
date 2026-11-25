@@ -324,8 +324,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
   }, 300_000)
 
   it('ask_session() sends to a session the starter owns and answers with its turn', async () => {
-    const { session } = await sessions.start(browser, { origin: 'chat', title: 'window', mode: 'durable' })
-    expect(session.mode).toBe('durable')
+    const { session } = await sessions.start(browser, { origin: 'chat', title: 'window' })
     const run = await flow(`return await ask_session(${JSON.stringify(session.id)}, ${JSON.stringify(WINDOW_PROMPT)})`)
     expect([run.status, run.result]).toEqual(['succeeded', "result: 'The window is 60 wide.'"])
     expect(run.steps.map((s) => [s.fn, s.status, s.session_id])).toEqual([['ask_session', 'succeeded', session.id]])

@@ -11,7 +11,7 @@ import pytest
 import regex
 from pydantic import ValidationError
 
-from scadbuddy.core.input_schema import patterns_deadline, schema_problems
+from scadbuddy.core.input_schema import PatternsTimedOutError, patterns_deadline, schema_problems
 from scadbuddy.core.json_values import MAX_DEPTH
 from scadbuddy.tasks.models import AnswerProblem, Task, TaskOpen
 from scadbuddy.tasks.validate import prompt_schema_problems, validate_answer
@@ -443,7 +443,7 @@ def test_an_answer_does_not_run_its_questions_defaults_again() -> None:
     token = patterns_deadline.set(time.monotonic() - 1)
     try:
         assert validate_answer(schema, {"y": "ok"}) == []
-        with pytest.raises(ValidationError):
+        with pytest.raises(PatternsTimedOutError):
             TaskOpen(id="t", run_id="r", title="x", schema=schema)
     finally:
         patterns_deadline.reset(token)

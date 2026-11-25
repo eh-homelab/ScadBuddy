@@ -148,6 +148,39 @@ opens or moves to another state publishes `task.changed` on the realtime topics 
 `task:<id>` and, with a place, `tasks:<place>` (`backend/scadbuddy/api/realtime.py`
 `topics_of`). No page lists tasks by place, and nothing reads `ui`.
 
+## Decisions on an outward call
+
+A person approves or denies a waiting call with `POST /api/v1/workflow-runs/{run_id}/decide`,
+operation kind `flow_decide` (`backend/scadbuddy/flows/operations.py`). The decision is
+written to the call's `workflow_run_decisions` row, and then sent to the run.
+
+**The row is what counts.** The Update that the run gets says only yes or no. A print, an
+arrange and a tool of ScadBuddy's agent read the row before they act (`flow_decision` in
+`backend/scadbuddy/workflows/flow_grants.py`). The agent reads it too before it runs one of
+its tools or a plugin's. The call does not run when the row is not an approval, or when there
+is no row (#7588). It runs the input that the row approves: the call as it was parked, or the
+narrowed input, which must match the row's hash. A run that made an approved call before
+#2482 reads the row from its next call on, by a marker of the call's own.
+
+So a call stops, and its step fails, when its approval reached the run but its row is gone.
+That happens when the row was undone because Temporal said that the Update never arrived and
+it then arrived, when a grant's approval was withdrawn and its Update then arrived, or when a
+Reset falls between the decision and the call. In the last case the person was told
+"approved" for the execution that the Reset replaced.
+
+**Two decisions.** The first one on the row wins, and another one is refused with a 409. The
+exception is a person's row whose decision never reached the run and that nothing may still
+send, while the call still waits: a later decision of a person takes it over (`take_over`,
+#7588). Two approvals are two decisions when they approve another input or were shown
+another printer or draft. An approval of a call that names no printer or draft takes no
+`bound_hash` (422 `flow-call-not-bound`). The row of a grant or of the starter session is never
+taken over (#7675), and a grant's use is never given back (`RuleUse` in
+`backend/scadbuddy/flows/grants.py`).
+
+**A late Update.** When a replaced denial reaches the run first, the call is denied and the
+denial is on the row again. When a replaced approval reaches the run first, the row does not
+change: the call does what the new decision says.
+
 ## Code
 
 - UI: `frontend/src/pages/WorkflowsPage.tsx`, `FlowPage.tsx`, `WorkflowRunPage.tsx`,
@@ -185,7 +218,8 @@ opens or moves to another state publishes `task.changed` on the realtime topics 
 
 - Backend: `backend/tests/flows/`, `backend/tests/test_flow_store.py`,
   `test_flow_trigger_*.py`, `backend/tests/api/test_flows.py`, `test_flow_grants.py`,
-  `test_projects_worker_nodb.py`. Prompts and tasks: `backend/tests/flows/test_prompt.py`,
+  `test_projects_worker_nodb.py`. Two decisions on one call:
+  `backend/tests/flows/test_decision_take_over.py`. Prompts and tasks: `backend/tests/flows/test_prompt.py`,
   `backend/tests/tasks/`, `backend/tests/api/test_tasks.py`, `test_flow_prompt.py`,
   `backend/tests/crud/test_crud_tasks.py`, and the histories that
   `backend/tests/flows/test_project_replay.py` replays.

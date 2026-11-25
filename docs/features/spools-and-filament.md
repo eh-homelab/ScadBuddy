@@ -190,7 +190,7 @@ waits for either.
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
 
-A spool and a spool type can hold properties: free key-value pairs, such as a part number,
+A spool, a spool type and a catalog row (such as an insert type) can hold properties: free key-value pairs, such as a part number,
 barcodes or a lot number. The store is generic and works for any entity, so it is not
 specific to filament. A value is a string, a number, a boolean or a list of strings. A key
 matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per string,
@@ -215,7 +215,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `schema_owned_by_item_kind` for `item` (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
-  `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
+  `#files-and-links` stays), and the same three panels under a catalog row's edit form in the
+  Catalog tab (`frontend/src/components/filament/CatalogList.tsx`). A kind's own keys are edited
+  from the panel's "Edit the kind's keys" and the Catalog tab's "Property keys"
+  (`frontend/src/components/entities/KindKeysForm.tsx`, #7656); an item's are its item kind's,
+  on `/inventory/kinds`. A list value has one field per item. A rename or an add onto a key the entity
   already has asks first, since it replaces that key's value.
 - Search: the Spools and Types tabs' search also matches property values, beside the hex
   match on a spool's tag UID and tray UUID (#7151)

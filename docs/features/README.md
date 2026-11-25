@@ -22,6 +22,7 @@ the [user guide](../user-guide.md).
 | Print library, search, copies and batches | [print-library.md](print-library.md) | `frontend/src/pages/LibraryPage.tsx`, `backend/scadbuddy/api/library_print.py:196` |
 | Prints, history and the print watcher | [print-history-and-watcher.md](print-history-and-watcher.md) | `frontend/src/pages/PrintsPage.tsx:38`, `backend/scadbuddy/print_watch/sweep.py` |
 | Spools and filament | [spools-and-filament.md](spools-and-filament.md) | `backend/scadbuddy/api/filament.py:173`, `frontend/src/pages/filament/FilamentPage.tsx:45` |
+| Inventory: kinds, items, offers, lots, units and moves | [inventory.md](inventory.md) | `backend/scadbuddy/inventory/stock.py:171`, `frontend/src/pages/inventory/InventoryPage.tsx` |
 | Versions and history | [versions-and-history.md](versions-and-history.md) | `frontend/src/pages/VersionsPage.tsx`, `backend/scadbuddy/api/versions.py:54` |
 | Orders, quotes, pricing and job cost | [orders-and-quotes.md](orders-and-quotes.md) | `backend/scadbuddy/api/orders.py:187`, `backend/scadbuddy/orders/lifecycle.py:627` |
 | Storefront and payments | [storefront-and-payments.md](storefront-and-payments.md) | `backend/scadbuddy/storefront/__main__.py`, `backend/scadbuddy/api/payment_webhooks.py:58` |
