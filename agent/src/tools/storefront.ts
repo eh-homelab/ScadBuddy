@@ -205,17 +205,17 @@ export const storefrontTools: Tool[] = [
       // A name the schema does not have would be dropped and leave the template's default, so
       // it is refused, as `lock` refuses one; so is one the pipeline sets, which would be dropped too.
       for (const name of Object.keys(values ?? {})) {
-        if (!(schema.parameters ?? []).some((p) => p.name === name)) throw new ToolError(`${name} is not a parameter of ${record.name}`)
         if (pipelineSet.includes(name)) throw new ToolError(`${name} is set by the design itself, so a listing cannot set it`)
+        if (!(schema.parameters ?? []).some((p) => p.name === name)) throw new ToolError(`${name} is not a parameter of ${record.name}`)
       }
       // #5701: an output's whole inputs are its values (`params`) and, for a pipeline template, its own inputs.
       const sold = output ? soldDesign(schema, { ...output.inputs, params: output.params ?? {} }) : { values: (values ?? {}) as Record<string, Value>, design: {} }
       const given = sold.values
       const listing = defaultsFor(schema, filaments, given)
       for (const name of lock ?? []) {
+        if (pipelineSet.includes(name)) throw new ToolError(`${name} is set by the design itself, so a listing cannot lock it`)
         const param = (schema.parameters ?? []).find((p) => p.name === name)
         if (!param) throw new ToolError(`${name} is not a parameter of ${record.name}`)
-        if (pipelineSet.includes(name)) throw new ToolError(`${name} is set by the design itself, so a listing cannot lock it`)
         const locked = given[name] ?? param.initial
         delete listing.params[name]
         if (locked !== undefined && locked !== null) listing.fixed[name] = locked

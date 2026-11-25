@@ -210,7 +210,9 @@ describe('storefront tools (#6131)', () => {
     })
     expect(posted?.fixed).toEqual(owl.expected.fixed)
     expect(posted?.colours).toEqual(owl.expected.colours)
-    // No render, so no render-time note; no colour in the title, so none taken out.
+    // No render, so no render-time note; no colour in the title, so none taken out; no pipeline
+    // (#5701), so no design to set up and no inputs.
+    expect(posted).not.toHaveProperty('inputs')
     expect(result['notes']).toEqual([])
     await expect(tool('storefront_listing_draft').execute({ slug: 'owl', values: { bodyy: '#000000' } }, ctx())).rejects.toThrow('bodyy is not a parameter')
   })
@@ -295,6 +297,17 @@ describe('storefront tools (#6131)', () => {
       )
       await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', values: { piece: 'roof' } }, ctx())).rejects.toThrow(
         'piece is set by the design itself, so a listing cannot set it',
+      )
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', lock: ['piece'] }, ctx())).rejects.toThrow(
+        'piece is set by the design itself, so a listing cannot lock it',
+      )
+      // The pipeline's own reason, even for a name its schema's parameters leave out.
+      serveDollhouse(house.source, () => {}, { ...house.schema, pipeline_params: ['piece', 'storeys'] })
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', values: { storeys: 2 } }, ctx())).rejects.toThrow(
+        'storeys is set by the design itself, so a listing cannot set it',
+      )
+      await expect(tool('storefront_listing_draft').execute({ slug: 'dollhouse', lock: ['storeys'] }, ctx())).rejects.toThrow(
+        'storeys is set by the design itself, so a listing cannot lock it',
       )
     })
   })
