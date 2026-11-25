@@ -4,12 +4,15 @@ finished (#7317 phase 2, plan Task 7). Each test reads through one app before th
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import shutil
 import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -242,6 +245,9 @@ def test_list_models_makes_no_file_or_git_call_after_the_copy(
     def refused(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a file or git call")
 
+    # The listing asks once whether git is there (`_has_history`, review M3): the
+    # one stat of `.git` a listing makes, answered here without the disk.
+    monkeypatch.setattr(ModelHistory, "available", property(lambda self: True))
     for name in ("stat", "is_file", "iterdir", "read_text", "read_bytes"):
         monkeypatch.setattr(Path, name, refused)
     monkeypatch.setattr(ModelHistory, "_run", refused)
@@ -319,3 +325,152 @@ def test_the_catalogue_reads_rows_only_once_copied(world: TestClient) -> None:
     catalogue: Catalogue = _state(world).catalogue
     assert catalogue.rows is _rows(world)
     assert not catalogue._from_rows()
+
+
+def _refresh_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every refresh fails: the files and the media rows change, the `templates` row
+    does not (the HEAD transaction's read, and the no-commit path's put)."""
+
+    def failing(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("the row write failed")
+
+    monkeypatch.setattr(TemplateRefresh, "read", failing)
+    monkeypatch.setattr(TemplateRows, "put", failing)
+
+
+def test_media_the_row_does_not_know_yet_is_not_missing(
+    world: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review I1: the media rows commit before the template's row; an item the row's
+    `files` lacks is read from the disk, not shown as missing."""
+    _copy(world)
+    _refresh_fails(monkeypatch)
+    added = world.post(
+        "/api/v1/models/plain/media",
+        files={"file": ("first.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert added.status_code == 200, added.text
+    row = _rows(world).get("plain")
+    assert row is not None and not any(key.startswith("media/") for key in row.files)
+
+    [item] = world.get("/api/v1/models/plain").json()["media"]
+    assert (item["missing"], item["size"]) == (False, len(PNG_BYTES))
+    listed = {model["slug"]: model for model in world.get("/api/v1/models").json()}
+    [item] = listed["plain"]["media"]
+    assert (item["missing"], item["size"]) == (False, len(PNG_BYTES))
+    assert listed["plain"]["thumbnail_source"] == "model"
+
+
+def test_a_row_whose_folder_is_gone_is_not_found(world: TestClient, paths: DataPaths) -> None:
+    """Review M1: a hand removal leaves the row; the record and the source are 404."""
+    _copy(world)
+    shutil.rmtree(paths.model_dir("plain"))
+    assert _rows(world).get("plain") is not None
+
+    assert world.get("/api/v1/models/plain").status_code == 404
+    assert world.get("/api/v1/models/plain/source").status_code == 404
+
+
+def test_a_meta_postgres_cannot_store_is_read_from_its_file(
+    world: TestClient, paths: DataPaths
+) -> None:
+    """Review M2: a `model.json` jsonb refuses (NaN) has no `meta` in its row; its
+    record is read from the file, as before the copy."""
+    _create(world, "nan", {"name": "Not a number"})
+    paths.model_meta("nan").write_text('{"name": "Not a number", "ratio": NaN}', encoding="utf-8")
+    before = world.get("/api/v1/models/nan")
+    assert before.status_code == 200, before.text
+
+    _copy(world)
+
+    row = _rows(world).get("nan")
+    assert row is not None and row.meta is None
+    assert row.meta_error is not None and row.meta_error.startswith("not storable")
+    after = world.get("/api/v1/models/nan")
+    assert (after.status_code, after.json()) == (200, before.json())
+
+
+def test_list_and_record_agree_on_upstream_state_with_no_row_version(world: TestClient) -> None:
+    """Review M3: a duplicate whose row has no version (git failed at its refresh) is
+    judged against its upstream in the list as in its record."""
+    _copy(world)
+    rows = _rows(world)
+    row = rows.get("widget-copy")
+    assert row is not None
+    rows.put([dataclasses.replace(row, version=None)], [])
+
+    record = world.get("/api/v1/models/widget-copy").json()
+    listed = {model["slug"]: model for model in world.get("/api/v1/models").json()}
+    assert record["upstream_state"] == "update"
+    assert listed["widget-copy"]["upstream_state"] == record["upstream_state"]
+
+
+def _statements(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Every statement sent from here on, as its text."""
+    sent: list[str] = []
+    execute = psycopg.Cursor.execute
+    executemany = psycopg.Cursor.executemany
+
+    def counted(self: psycopg.Cursor[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
+        sent.append(str(query))
+        return execute(self, query, *args, **kwargs)
+
+    def counted_many(self: psycopg.Cursor[Any], query: Any, *args: Any, **kwargs: Any) -> Any:
+        sent.append(str(query))
+        return executemany(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(psycopg.Cursor, "execute", counted)
+    monkeypatch.setattr(psycopg.Cursor, "executemany", counted_many)
+    return sent
+
+
+def test_a_listing_from_rows_sends_a_fixed_number_of_statements(
+    world: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M4 (spec §5.4): the statements of a list do not grow with the templates."""
+    _copy(world)
+    catalogue = _state(world).catalogue
+    catalogue.list_models()  # `copied()` is remembered from here on
+
+    def count(slugs: list[str] | None) -> int:
+        with pytest.MonkeyPatch.context() as patch:
+            sent = _statements(patch)
+            catalogue.list_models(slugs)
+        return len(sent)
+
+    templates = len(catalogue.slugs())
+    small = (count(None), count(catalogue.slugs()))
+    for index in range(4):
+        _create(world, f"more-{index}", {"name": f"More {index}", "tags": ["box"]})
+        added = world.post(
+            f"/api/v1/models/more-{index}/media",
+            files={"file": ("cover.png", PNG_BYTES, "image/png")},
+            headers=press(),
+        )
+        assert added.status_code == 200, added.text
+    duplicated = world.post(
+        "/api/v1/models/more-0/duplicate", json={"name": "More copy"}, headers=press()
+    )
+    assert duplicated.status_code == 201, duplicated.text
+
+    assert len(catalogue.slugs()) == templates + 5
+    assert (count(None), count(catalogue.slugs())) == small
+
+
+def test_a_window_of_the_list_reads_only_its_rows(
+    world: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review M5: a page's chunk loads its own rows (and its upstreams'), never the table."""
+    _copy(world)
+    catalogue = _state(world).catalogue
+    whole = {record.slug: record for record in catalogue.list_models()}
+
+    def refused(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("the whole table was read")
+
+    monkeypatch.setattr(TemplateRows, "all", refused)
+
+    [copy] = catalogue.list_models(["widget-copy"])
+    assert copy == whole["widget-copy"]
+    assert copy.upstream_state == "update"

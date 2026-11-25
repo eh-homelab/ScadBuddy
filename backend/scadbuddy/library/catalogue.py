@@ -137,6 +137,10 @@ DUPLICATE_STAGING_MAX_AGE = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 #: How many times a merge is worked out again when the template or its upstream
 #: moves between planning and writing it, before it is refused.
 MERGE_ATTEMPTS = 3
+#: How a row's ``meta_error`` starts when its ``model.json`` is JSON that Postgres's
+#: jsonb refuses (NaN, Infinity, a lone surrogate, a NUL in a key): `record` then reads
+#: the file (#7317 Task 7 review M2).
+NOT_STORABLE = "not storable"
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -1041,15 +1045,24 @@ class Catalogue:
         """The template's record. From its row once the rows are copied, with its
         revision pair and ``ui_version`` still read from git; a template with no row
         but files (a failed refresh, an older pod's create) is read from its files
-        (plan decision 11)."""
+        (plan decision 11). A row whose folder is gone (a hand removal, a delete whose
+        row drop failed) is :class:`ModelNotFoundError`, as before the copy. A row whose
+        ``model.json`` Postgres cannot store (NaN, a lone surrogate) is read from its
+        file too, as before the copy."""
         if not self._from_rows():
             return self._fresh_record(slug)
         assert self.rows is not None
         row = self.rows.get(slug)
+        if not self.exists(slug):
+            raise ModelNotFoundError(slug)
         if row is None:
-            if not self.exists(slug):
-                raise ModelNotFoundError(slug)
             logger.warning("a template has no row; read its files", extra={"slug": slug})
+            return self._fresh_record(slug)
+        if row.meta is None and (row.meta_error or "").startswith(NOT_STORABLE):
+            logger.warning(
+                "a template's model.json cannot be stored in its row; read its files",
+                extra={"slug": slug},
+            )
             return self._fresh_record(slug)
         version, previous = self.version_pair(slug)
         upstreams: dict[str, TemplateRow | None] = {}
@@ -1136,7 +1149,12 @@ class Catalogue:
 
     def _row_sizes(self, row: TemplateRow) -> Callable[[Path], int | None]:
         """A file's size as ``row.files`` records it, or None: what `_file_size`
-        answers from the disk, read from the row (`template_row` keys it so)."""
+        answers from the disk, read from the row (`template_row` keys it so).
+
+        A media file the row does not record is stat'ed: the media rows, read live,
+        commit before the template's row, so a new item is on the disk and in
+        `template_media` before its row knows it (Task 7 review I1). Only such an item,
+        or one really missing, costs a stat."""
         directory = self.paths.model_dir(row.template_id)
         added = self.paths.builtin_media_dir(row.template_id)
 
@@ -1147,7 +1165,11 @@ class Catalogue:
                 key = f"builtin-media/{path.relative_to(added).as_posix()}"
             else:
                 return None
-            return row.files.get(key)
+            if key in row.files:
+                return row.files[key]
+            if key.startswith((f"{MEDIA_DIR}/", "builtin-media/")):
+                return _file_size(path)
+            return None
 
         return sizes
 
@@ -1349,7 +1371,7 @@ class Catalogue:
             meta = {} if data is None else _raw_meta_of(template_id, data)
             if (problem := _unstorable(meta)) is not None:
                 # Kept as if not JSON: Postgres refuses the dict (review I1).
-                raise InvalidModelMetaError(template_id, f"not storable ({problem})")
+                raise InvalidModelMetaError(template_id, f"{NOT_STORABLE} ({problem})")
         except InvalidModelMetaError as error:
             assert data is not None
             meta = None
@@ -1550,11 +1572,25 @@ class Catalogue:
 
     def _list_rows(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
         """:meth:`list_models` from the rows: a fixed number of queries, and no file or
-        git call (#7317, spec §5.4). A template with no row is not listed (§7.6)."""
+        git call (#7317, spec §5.4). A template with no row is not listed (§7.6).
+        ``slugs`` (a page's window) loads only their rows and their upstreams' (Task 7
+        review M5), so a page that takes several chunks never reads the whole table."""
         assert self.rows is not None
-        every = self.rows.all()
-        by_id = {row.template_id: row for row in every}
-        listed = every if slugs is None else [by_id[slug] for slug in slugs if slug in by_id]
+        if slugs is None:
+            listed = self.rows.all()
+            by_id = {row.template_id: row for row in listed}
+        else:
+            by_id = {row.template_id: row for row in self.rows.many(slugs)}
+            listed = [by_id[slug] for slug in slugs if slug in by_id]
+            upstreams = {
+                upstream_id
+                for row in listed
+                if (upstream_id := _upstream_id(row)) is not None and upstream_id not in by_id
+            }
+            if upstreams:
+                by_id.update({row.template_id: row for row in self.rows.many(sorted(upstreams))})
+        # Judged once for the listing, as `record` judges it (Task 7 review M3).
+        history = self._has_history
         ids = [row.template_id for row in listed]
         current.set_attribute("scadbuddy.models", len(ids))
         media = self.media_store.items_for(ids)
@@ -1582,9 +1618,7 @@ class Catalogue:
                         self._row_record(
                             row,
                             version=row.version,
-                            # Upstreams are judged only with git (`_record`); a row has a
-                            # version only when git answered for it.
-                            history=self.history is not None and row.version is not None,
+                            history=history,
                             upstream_row=by_id.get,
                             media=media.get(row.template_id, []),
                             cover=covers.get(row.template_id),
@@ -3715,6 +3749,16 @@ def _unstorable(meta: dict[str, Any]) -> str | None:
     if _has_nul(meta):
         return "a NUL character"
     return None
+
+
+def _upstream_id(row: TemplateRow) -> str | None:
+    """The upstream a row of mine's ``model.json`` names, if any (a built-in's is
+    dropped on read, `_as_recorded`)."""
+    if is_builtin(row.template_id) or row.meta is None:
+        return None
+    upstream = row.meta.get("upstream")
+    found = upstream.get("id") if isinstance(upstream, dict) else None
+    return found if isinstance(found, str) else None
 
 
 def _as_recorded(slug: str, raw: dict[str, Any]) -> dict[str, Any]:

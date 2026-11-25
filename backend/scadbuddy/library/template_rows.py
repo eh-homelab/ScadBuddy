@@ -194,6 +194,15 @@ class TemplateRows:
             found = conn.execute(f"SELECT {', '.join(_COLUMNS)} FROM templates{_ORDER}").fetchall()
         return [_row_of(row) for row in found]
 
+    def many(self, template_ids: Sequence[str]) -> list[TemplateRow]:
+        """The rows of ``template_ids`` that exist, in one query, in the walk's order."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                f"SELECT {', '.join(_COLUMNS)} FROM templates WHERE template_id = ANY(%s){_ORDER}",
+                (list(template_ids),),
+            ).fetchall()
+        return [_row_of(row) for row in found]
+
     def ids(self) -> list[str]:
         with self._pool.connection() as conn:
             found = conn.execute(f"SELECT template_id FROM templates{_ORDER}").fetchall()
