@@ -10,6 +10,7 @@ from fastapi import status
 from scadbuddy.core.problems import ApiError
 from scadbuddy.entities.attachments import ORDER_KINDS, PRINT_ARCHIVE
 from scadbuddy.entities.links import is_web_url
+from scadbuddy.entities.properties import MissingRequiredProperties
 from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import KINDS
 
@@ -126,4 +127,17 @@ def schema_owned_by_item_kind() -> ApiError:
         "schema_owned_by_item_kind",
         "an item's properties follow its item kind's attribute_schema, so set the schema "
         "on the kind",
+    )
+
+
+def missing_required(exc: MissingRequiredProperties) -> ApiError:
+    """422 `missing_required_properties` (spec 6.3b): every required key with no value in
+    `missing`, every defined key whose value does not fit in `invalid`."""
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        str(exc),
+        type_=PROBLEMS + "missing_required_properties",
+        code="missing_required_properties",
+        missing=list(exc.missing),
+        invalid=[{"key": key, "reason": reason} for key, reason in exc.invalid],
     )

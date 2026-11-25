@@ -1,4 +1,4 @@
-import type { CustomizerSchema, Filament, ListingBound, MediaView, OutputPlate, Param, ParamValue, SlotNeed, StorefrontListing, StorefrontListingInput } from '../../api/types'
+import type { CustomizerSchema, Filament, ListingBound, MediaView, OutputPlate, Param, ParamValue, RevisionSchema, SlotNeed, StorefrontListing, StorefrontListingInput } from '../../api/types'
 import type { Listing as PublicListing, PublicParam } from '../../storefront/api/client'
 import { customerFilaments, shownLabel, valueProblem } from '../../storefront/params'
 
@@ -32,13 +32,17 @@ export interface ListingDraft {
   /** #6710 — the file a `library_file` listing sells; null until one is picked. */
   library_file?: DraftFile | null
   /**
-   * #5701 — a pipeline template's own inputs and the version they were made at. The editor
-   * does not set them yet: it sends back the ones the listing has, since a save replaces
-   * the whole listing. Another template starts with none (`emptyDraft`).
+   * #5701 — a pipeline template's own inputs and the version they were made at, which the
+   * shop sets in "Set up the design" (`designInputs.ts`) or by "Sell on storefront". A save
+   * replaces the whole listing, so both go with every one. Another template starts with none
+   * (`emptyDraft`).
    */
   inputs?: Record<string, unknown>
   inputs_v?: number | null
 }
+
+/** A design's schema at a commit, with what that revision declares of its UI and its pipeline. */
+export type DesignSchema = CustomizerSchema & Partial<Pick<RevisionSchema, 'ui' | 'ui_error' | 'pipeline' | 'pipeline_params'>>
 
 /**
  * #6710 §4.1 — the library file a draft sells. `pinned` is the sha256 of the version the
@@ -100,7 +104,10 @@ export function draftOf(listing: StorefrontListing): ListingDraft {
     // A listing stored before #6258 has none: the shop's default.
     materials: (listing.materials as string[] | undefined) ?? [],
     // #5701. A listing stored before it has none, as a template with no pipeline has none.
-    ...(Object.keys((listing.inputs as StorefrontListing['inputs'] | undefined) ?? {}).length > 0 ? { inputs: listing.inputs, inputs_v: listing.inputs_v } : {}),
+    // Inputs with no key still count with their version: publish migrates them from it.
+    ...(Object.keys((listing.inputs as StorefrontListing['inputs'] | undefined) ?? {}).length > 0 || listing.inputs_v != null
+      ? { inputs: listing.inputs, inputs_v: listing.inputs_v }
+      : {}),
   }
 }
 
@@ -152,7 +159,7 @@ export type ListingRefusal =
    * one it starts at, is no listing filament's) or `listing_support_offered` (it sets support,
    * so it cannot be offered).
    */
-  | { kind: 'param'; code: 'default_invalid' | 'colour_unknown' | 'support_offered'; name: string; detail: string }
+  | { kind: 'param'; code: ParamRefusalCode; name: string; detail: string }
   /** 422 `listing_colour_unknown` naming no parameter: a filament on the listing is no longer in the price book. */
   | { kind: 'filament_unknown'; detail: string }
   /**
@@ -161,8 +168,18 @@ export type ListingRefusal =
    * `name` (the field) says.
    */
   | { kind: 'file'; code: string; name: string; detail: string }
+  /**
+   * #5701 — a refusal about the design's own inputs (422 `listing_inputs_*`), said in the
+   * Design block: `name` is `inputs` or one input's path, `reason` the check it failed
+   * (`designInputs.ts` `inputsRefusalText`).
+   */
+  | { kind: 'inputs'; code: InputsRefusalCode; name: string; reason: string | null; detail: string }
 
+/** `pipeline_set` (#5701): 422 `listing_param_pipeline_set`, a parameter the design's pipeline sets itself. */
+type ParamRefusalCode = 'default_invalid' | 'colour_unknown' | 'support_offered' | 'pipeline_set'
 const PARAM_REFUSALS = ['default_invalid', 'colour_unknown', 'support_offered'] as const
+const INPUTS_REFUSALS = ['unexpected', 'undeclared', 'reserved', 'invalid', 'migration_failed'] as const
+type InputsRefusalCode = (typeof INPUTS_REFUSALS)[number]
 
 const STOREFRONT_PROBLEMS = 'https://scadbuddy.dev/problems/storefront/'
 
@@ -183,6 +200,11 @@ export function listingRefusal(problem: { type?: string; detail?: string; title:
   if (slug.startsWith('listing_file_') || slug === 'listing_source_invalid') {
     return { kind: 'file', code: slug, name: typeof problem['name'] === 'string' ? problem['name'] : '', detail }
   }
+  const name = typeof problem['name'] === 'string' ? problem['name'] : ''
+  const inputs = INPUTS_REFUSALS.find((found) => slug === `listing_inputs_${found}`)
+  if (inputs !== undefined) return { kind: 'inputs', code: inputs, name: name || 'inputs', reason: typeof problem['reason'] === 'string' ? problem['reason'] : null, detail }
+  // Its `name` is the field's path, `params.<name>`.
+  if (slug === 'listing_param_pipeline_set' && name) return { kind: 'param', code: 'pipeline_set', name: name.replace(/^params\./, ''), detail }
   return null
 }
 
@@ -190,12 +212,34 @@ export function listingRefusal(problem: { type?: string; detail?: string; title:
 export function refusalText(refusal: Extract<ListingRefusal, { kind: 'param' }>, label: string): string {
   if (refusal.code === 'default_invalid') return `Not published: “${label}” starts at a value these choices do not allow. Set “Starts at” to one they allow.`
   if (refusal.code === 'colour_unknown') return `Not published: “${label}” uses a colour that no colour on offer has. Pick a colour on offer, or tick a filament of that colour under “Colours on offer”.`
+  if (refusal.code === 'pipeline_set') return `Not published: the design sets “${label}” itself, so a listing cannot.`
   return `Not published: “${label}” sets support, which stays yours and a customer never sees. Turn off “Customer can change”.`
 }
 
-/** The parameters a listing can name: every one outside the hidden group. */
-export function shownParams(schema: CustomizerSchema | undefined): Param[] {
-  return (schema?.parameters ?? []).filter((param) => param.group !== HIDDEN_GROUP)
+/** The parameters a listing can name: every one outside the hidden group that the pipeline does not set itself (#5701). */
+export function shownParams(schema: DesignSchema | undefined): Param[] {
+  const set = schema?.pipeline_params ?? []
+  return (schema?.parameters ?? []).filter((param) => param.group !== HIDDEN_GROUP && !set.includes(param.name))
+}
+
+/**
+ * `draft`'s bounds and locks that `schema` takes: none of a parameter it does not have (a
+ * version without it), and none of one its pipeline sets itself (#5701) but a lock at the
+ * default, which publish takes. The editor shows no row for either, so a person could not
+ * undo what publish would refuse. `draft` itself when every one fits.
+ */
+export function withoutUnknown(draft: ListingDraft, schema: DesignSchema): ListingDraft {
+  const set = schema.pipeline_params ?? []
+  const byName = new Map((schema.parameters ?? []).map((param) => [param.name, param]))
+  const offered = (name: string) => byName.has(name) && !set.includes(name)
+  const locked = (name: string, value: ParamValue) => byName.has(name) && (!set.includes(name) || value === byName.get(name)?.initial)
+  const { params, fixed } = draft
+  if (Object.keys(params).every(offered) && Object.entries(fixed).every(([name, value]) => locked(name, value))) return draft
+  return {
+    ...draft,
+    params: Object.fromEntries(Object.entries(params).filter(([name]) => offered(name))),
+    fixed: Object.fromEntries(Object.entries(fixed).filter(([name, value]) => locked(name, value))),
+  }
 }
 
 /** Whether a customer can be offered `param` at all: a font or a file never is. */
@@ -262,7 +306,7 @@ export function offeredFilaments(colourValues: readonly ParamValue[], filaments:
  * them (the assistant's tool, design §6) can be checked against the same cases.
  */
 export function defaultsFor(
-  schema: CustomizerSchema,
+  schema: DesignSchema,
   filaments: readonly Filament[],
   values: Readonly<Record<string, ParamValue>> = {},
 ): Pick<ListingDraft, 'params' | 'fixed' | 'colours'> {
@@ -314,7 +358,7 @@ export interface ColourProblem {
  * offered colour's default is the listing's `default`, else the template's, as publish
  * checks it (`effective_default`, #6144).
  */
-export function colourProblems(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): ColourProblem[] {
+export function colourProblems(draft: ListingDraft, schema: DesignSchema | undefined, filaments: readonly Filament[]): ColourProblem[] {
   const listed = filaments.filter((filament) => draft.colours.includes(filament.id))
   return shownParams(schema).flatMap((param) => {
     if (param.type !== 'color') return []
@@ -363,7 +407,7 @@ function wordPattern(word: string): RegExp {
  * body offers (`listingInput`'s choices): every listing filament's colour but a support-only
  * filament's (`withoutSupport`), which no customer can choose.
  */
-export function titleColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
+export function titleColours(draft: ListingDraft, schema: DesignSchema | undefined, filaments: readonly Filament[]): string[] {
   // #6710: a file listing's every part takes any colour on offer.
   const offered = isFileDraft(draft)
     ? pickableColours(draft, undefined, filaments)
@@ -459,7 +503,7 @@ export function fittedDefault(param: Param, bound: ListingBound, colours: readon
 }
 
 /** The colours a customer can pick on `draft`: `listingInput`'s colour choices (the listing's filaments but support-only ones and support materials). */
-export function pickableColours(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): string[] {
+export function pickableColours(draft: ListingDraft, schema: DesignSchema | undefined, filaments: readonly Filament[]): string[] {
   const { supportOnly } = withoutSupport(draft, schema, filaments)
   return filamentColours(draft, customerFilaments(filaments)).filter((colour) => !supportOnly.some((support) => sameColour(support, colour)))
 }
@@ -478,7 +522,7 @@ function filamentColours(draft: ListingDraft, filaments: readonly Filament[]): s
  * whatever a support setting uses. No offered colour takes a colour every listing filament of
  * which is support-only (`listingInput`), and the editor marks them (`isSupportOnly`).
  */
-function withoutSupport(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]) {
+function withoutSupport(draft: ListingDraft, schema: DesignSchema | undefined, filaments: readonly Filament[]) {
   const byName = new Map((schema?.parameters ?? []).map((param) => [param.name, param]))
   const fixed = { ...draft.fixed }
   const params: Record<string, ListingBound> = {}
@@ -511,7 +555,7 @@ function withoutSupport(draft: ListingDraft, schema: CustomizerSchema | undefine
 }
 
 /** Whether `filament` is on the listing only for a support colour (`withoutSupport`): there for publish's check, never offered to a customer. */
-export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): boolean {
+export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: DesignSchema | undefined, filaments: readonly Filament[]): boolean {
   return withoutSupport(draft, schema, filaments).supportOnlyFilaments.some((other) => other.id === filament.id)
 }
 
@@ -524,7 +568,7 @@ export function isSupportOnly(filament: Filament, draft: ListingDraft, schema: C
  * filaments (backend `checked_fixed`, 422 `listing_colour_unknown`), and the support colour
  * is locked.
  */
-export function listingInput(draft: ListingDraft, schema: CustomizerSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
+export function listingInput(draft: ListingDraft, schema: DesignSchema | undefined, filaments: readonly Filament[]): StorefrontListingInput {
   if (isFileDraft(draft)) return fileInput(draft)
   const { byName, params, fixed } = withoutSupport(draft, schema, filaments)
   // #6152: never the colour of a support material (`customerFilaments`), which publish
@@ -672,7 +716,7 @@ export function supportFilament(slot: DraftSlot, colours: readonly string[], fil
  * often a colour parameter with every filament unchecked), which the backend refuses as
  * 422 `listing_choice_empty`.
  */
-export function unsaveable(body: StorefrontListingInput, schema?: CustomizerSchema): string | null {
+export function unsaveable(body: StorefrontListingInput, schema?: DesignSchema): string | null {
   for (const [name, bound] of Object.entries(body.params ?? {})) {
     if (bound.kind === 'choice' && bound.choices.length === 0) {
       const label = schema?.parameters?.find((param) => param.name === name)?.caption || name
@@ -685,7 +729,7 @@ export function unsaveable(body: StorefrontListingInput, schema?: CustomizerSche
 /** The listing as a visitor would see it now, for the live preview. */
 export function previewListing(
   draft: ListingDraft,
-  schema: CustomizerSchema | undefined,
+  schema: DesignSchema | undefined,
   filaments: readonly Filament[],
   media: readonly MediaView[],
   mediaUrl: (item: MediaView) => string,

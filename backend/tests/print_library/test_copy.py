@@ -671,9 +671,18 @@ async def test_a_wait_that_does_not_cancel_closes_the_locks_connection(
             await asyncio.sleep(0.05)
         await asyncio.sleep(0.2)  # the lock query is on the server, waiting
         assert not waiting.done()
-        started = time.monotonic()
-        await asyncio.to_thread(waiter.release_all)
-        assert time.monotonic() - started < 10
+        # The wait for the cancelled `acquire` to end times out at once, as it does
+        # after `TARGET_LOCK_CONNECT_TIMEOUT` in production. No wall-clock bound: a
+        # loaded runner once took 11 s over a 5 s wait (#7781).
+        waits: list[float | None] = []
+
+        def gave_up(timeout: float | None = None) -> bool:
+            waits.append(timeout)
+            return False
+
+        monkeypatch.setattr(waiter._idle, "wait", gave_up)
+        await asyncio.wait_for(asyncio.to_thread(waiter.release_all), 10)
+        assert waits == [copy_store.TARGET_LOCK_CONNECT_TIMEOUT]
         assert waiter._conn is None
         with pytest.raises(psycopg.Error):
             await asyncio.wait_for(waiting, 10)

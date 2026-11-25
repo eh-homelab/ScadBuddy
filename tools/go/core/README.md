@@ -10,6 +10,7 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `SCADBUDDY_CORE_AREAS` | none | What Go answers, comma-separated (below). An unknown name stops the start |
 | `SCADBUDDY_CORE_LISTEN` | `:8080` | The address it listens on |
 | `SCADBUDDY_CORE_CRUD_LISTEN` | none | The CRUD port (`:8082`): only the CRUD routes, the service-token exchange and `/healthz`, as `crud/listener.py` |
+| `SCADBUDDY_CORE_CRUD_UPSTREAM` | required with the CRUD port | Python's own CRUD listener (`http://127.0.0.1:<SCADBUDDY_CRUD_PORT>`): what the CRUD port does not answer goes there, never to the full API |
 | `SCADBUDDY_CORE_TRUSTED_PROXIES` | none | Proxies whose `X-Forwarded-For` is believed, as `SCADBUDDY_TRUSTED_PROXIES` reads them |
 | `SCADBUDDY_AUTH_MODE` | `off` | Only `enforce` changes a refusal's words |
 | `SCADBUDDY_SECRET_KEY_FILE` | none | The KEK, read as Python reads it. A sealed area (†) does not start without it; a file that is set and cannot be read stops the start |
@@ -98,10 +99,12 @@ open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's va
 `pending-input-vectors.json` and `response-hash-vectors.json`, and the `gate` area's routes.
 
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
-proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`,
-listens on loopback only, and its own CRUD port moves out of the way (`SCADBUDDY_CRUD_PORT=0`).
-That CRUD listener still binds `0.0.0.0`, on a random port; the NetworkPolicy, which admits only
-8080 and 8082, is what keeps other pods off it.
+proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
+(and `SCADBUDDY_CORE_UPSTREAM` names the literal `127.0.0.1`, not `localhost`, which may connect over
+`::1`, which Python would not trust),
+listens on loopback only, and its own CRUD listener moves to a fixed port Go forwards the CRUD
+port to (`SCADBUDDY_CRUD_PORT=8092`). That listener binds `0.0.0.0`; the NetworkPolicy, which
+admits only 8080 and 8082, is what keeps other pods off it.
 Loopback, not a Unix socket: `openscad-lsp` in Python's container may open `AF_UNIX` sockets but
 no TCP ones (`editor/nonet.py`). Over a `unix://` upstream uvicorn gives Python no client
 address, so `core/proxies.py` ignores the `X-Forwarded-For` the front sets: use TCP.

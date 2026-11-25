@@ -66,7 +66,9 @@ interface FileVector {
 }
 
 const shared = JSON.parse(readFileSync(`${import.meta.dirname}/../../test-fixtures/storefront/sell-draft-vectors.json`, 'utf8')) as (Vector | FileVector)[]
-const vectors = shared.filter((vector): vector is Vector => !('file' in vector))
+// The `source` cases are a pipeline listing's (#5701): the editor's until this tool takes a design's
+// inputs (spec 2026-11-17 §11 item 7), which then drops this filter.
+const vectors = shared.filter((vector): vector is Vector => !('file' in vector) && !('source' in vector))
 const fileVectors = shared.filter((vector): vector is FileVector => 'file' in vector)
 const owl = vectors[0] as Vector
 

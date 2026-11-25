@@ -24,6 +24,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StringConstraints,
     field_validator,
     model_validator,
@@ -32,6 +33,9 @@ from pydantic import (
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
+
+#: The fields a read computes from a row's properties (#7703, spec 6.3b): no column.
+COMPLETENESS: Final = ("missing_properties", "invalid_properties")
 
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 
@@ -97,7 +101,15 @@ class _Catalog(_Row):
     archived_at: datetime | None
 
 
-class _Aliased(_Catalog):
+class _Checked(_Catalog):
+    """A catalog row a read marks (#7703, spec 6.3b): the keys its required properties
+    leave missing, and those whose stored value no longer fits."""
+
+    missing_properties: list[str] = Field(default_factory=list)
+    invalid_properties: list[str] = Field(default_factory=list)
+
+
+class _Aliased(_Checked):
     """A row of a catalog with aliases (#6706): its other names, canonical name aside,
     each a key no other name or alias of the catalog has (`filament/catalog.py`)."""
 
@@ -158,7 +170,7 @@ class InsertMaterialCreate(_NamedCreate): ...
 class InsertMaterialPatch(_NamedPatch): ...
 
 
-class InsertMaterial(_Catalog): ...
+class InsertMaterial(_Checked): ...
 
 
 # -- material and subtype -------------------------------------------------------------
@@ -306,7 +318,7 @@ class InsertTypePatch(_Patch):
     archived: bool | None = None
 
 
-class InsertType(_Catalog):
+class InsertType(_Checked):
     empty_weight_g: int
     insert_material_id: UUID | None
     note: str | None
@@ -319,16 +331,32 @@ class InsertType(_Catalog):
     derived_count: int = 0
 
 
-#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2).
+#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2). ``below_label``
+#: (#7683): a new spool read under its label weight, and `InsertWeightCheck` names the
+#: shortfall and the resolutions.
 NoOfferReason = Literal[
     "archived",
     "no_insert",
     "no_label_weight",
     "used",
     "not_full",
+    "below_label",
     "not_above_label",
     "derived_too_heavy",
 ]
+
+#: How a new spool's reading under its label weight is read (#7683, spec §5.3): the
+#: scale was tared on the empty spool, the spool is short, or the label weight is wrong.
+BelowLabelResolutionKind = Literal["tared", "short", "label_wrong"]
+
+
+class BelowLabelResolution(BaseModel):
+    """One reading of a new spool's shortfall, with the filament it means."""
+
+    kind: BelowLabelResolutionKind
+    filament_g: float
+    #: For ``label_wrong``: ``filament_g`` rounded half up, at least 1.
+    new_label_weight_g: int | None = None
 
 
 class InsertWeightOffer(BaseModel):
@@ -363,6 +391,12 @@ class InsertWeightCheck(BaseModel):
     empty_weight_g: int | None
     #: ``reading_g - empty_weight_g``; ``None`` without an insert.
     filament_g: float | None
+    #: For ``below_label`` (#7683): ``label_weight_g - reading_g``, the resolutions in the
+    #: order ``tared``, ``short``, ``label_wrong`` (the last two only when the reading is
+    #: at least the empty weight) and the one chosen by default.
+    shortfall_g: float | None = None
+    resolutions: list[BelowLabelResolution] = []
+    default: BelowLabelResolutionKind | None = None
 
 
 class InsertWeightAccept(_In):
@@ -409,7 +443,7 @@ class ColourPatch(_Patch):
 ColourSource = Literal["bambuddy", "filamentcolors", "bambu"]
 
 
-class Colour(_Catalog):
+class Colour(_Checked):
     manufacturer: str | None
     rgba: Rgba
     material_id: UUID | None
@@ -448,7 +482,7 @@ class LocationKindPatch(_Patch):
     archived: bool | None = None
 
 
-class LocationKind(_Catalog):
+class LocationKind(_Checked):
     dry_storage: bool
     ams: bool
     printer: bool
@@ -817,6 +851,7 @@ class SpoolTypeCreate(_In):
     safety_margin_days: Days | None = None
     tdfp_id: TdfpId | None = None
     note: Note | None = None
+    properties: dict[str, JsonValue] | None = None
 
 
 class SpoolTypePatch(_Patch):
@@ -847,6 +882,7 @@ class SpoolTypePatch(_Patch):
     tdfp_id: TdfpId | None = None
     note: Note | None = None
     archived: bool | None = None
+    properties: dict[str, JsonValue] | None = None
 
 
 class SpoolType(_Row):
@@ -877,6 +913,14 @@ class SpoolType(_Row):
     tdfp_id: int | None
     note: str | None
     archived_at: datetime | None
+    missing_properties: list[str] = Field(default_factory=list)
+    invalid_properties: list[str] = Field(default_factory=list)
+
+
+class TypeCost(_In):
+    """`PUT /filament/types/{type_id}/cost-per-kg` (#7703): only the cost, not checked."""
+
+    cost_per_kg: Cost | None
 
 
 class TypePresetCreate(_In):
@@ -1177,6 +1221,9 @@ class SpoolCreate(_In):
     grams_left: Grams | None = None
     #: Whether the spool was added full (#7149 R-7149-2); ``None`` is not known.
     added_full: bool | None = None
+    #: #7703 (spec 6.3b): its properties, written with it; a key set to ``null`` is none.
+    #: Only the spool routes take it (`create_on` refuses it).
+    properties: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def _typed(self) -> SpoolCreate:
@@ -1240,6 +1287,8 @@ class SpoolPatch(_Patch):
     note: Note | None = None
     added_full: bool | None = None
     archived: bool | None = None
+    #: #7703 (spec 6.3b): properties to set with the save (`null` removes a key).
+    properties: dict[str, JsonValue] | None = None
 
 
 class SpoolNames(BaseModel):
@@ -1318,6 +1367,10 @@ class Spool(_Row):
     #: Server-computed (#7682): ``last_drift_g`` is at or over the setting
     #: ``filament_weighing_drift_notice_g``, either way.
     drift_notice: bool = False
+    #: #7703 (spec 6.3b): the required keys it has no value for, and its defined keys
+    #: whose value does not fit; both empty for an archived spool.
+    missing_properties: list[str] = Field(default_factory=list)
+    invalid_properties: list[str] = Field(default_factory=list)
 
 
 # -- the trays (`filament/inventory.py`) ----------------------------------------------
@@ -1691,7 +1744,9 @@ class SpoolEventAdd(_In):
     the breakdown and the drift in the event's ``data``, #7682), a drying (its temperature
     and hours) or a reset of its consumed counter (``consumed_reset``, #7149 R-7149-4: no
     grams, the grams left stay). A drying that leaves out ``temp_c`` or ``hours`` takes
-    the spool's `DryingDefaults` for it; ``null`` records none (#6720)."""
+    the spool's `DryingDefaults` for it; ``null`` records none (#6720). A new spool's
+    weighing under its label weight sends ``resolution`` with ``reading_g`` alone (#7683):
+    what the check `GET …/insert-weight-offer` offered for it."""
 
     kind: Literal["weighed", "dried", "consumed_reset"]
     source: Literal["person", "scale"] = "person"
@@ -1700,6 +1755,8 @@ class SpoolEventAdd(_In):
     grams: Grams | None = None
     #: The scale reading with the spool, a weighing only.
     reading_g: Grams | None = None
+    #: How a reading under a new spool's label weight is read (#7683).
+    resolution: BelowLabelResolutionKind | None = None
     temp_c: Temp | None = None
     hours: Hours | None = None
     note: Note | None = None
@@ -1711,6 +1768,10 @@ class SpoolEventAdd(_In):
             raise ValueError("at is in the future")
         if self.reading_g is not None and self.kind != "weighed":
             raise ValueError("only a weighing has reading_g")
+        if self.resolution is not None and self.reading_g is None:
+            raise ValueError("a resolution needs reading_g")
+        if self.resolution is not None and self.grams is not None:
+            raise ValueError("a resolution takes reading_g alone")
         if self.reading_g is not None and self.grams is not None and self.reading_g < self.grams:
             raise ValueError("reading_g is below grams")
         if self.kind == "weighed" and self.grams is None and self.reading_g is None:
@@ -1762,6 +1823,8 @@ class SpoolBulkUpdate(SpoolIds):
     def _fields(self) -> SpoolBulkUpdate:
         if "archived" in self.patch.model_fields_set:
             raise ValueError("a bulk edit does not archive; use bulk-archive or bulk-restore")
+        if "properties" in self.patch.model_fields_set:
+            raise ValueError("a bulk edit sets no properties; set them on each spool")
         if not self.patch.model_fields_set:
             raise ValueError("the patch sets no field")
         return self

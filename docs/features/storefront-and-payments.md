@@ -51,7 +51,7 @@ sequenceDiagram
   (`listings.py:230`, `file_listings.py`, `renders.py`, `drafts.py`, `submit.py:138`, `accounts.py`,
   `mail.py`, `turnstile.py`, `prepare.py`, `intake.py`).
 - Back office: `backend/scadbuddy/api/storefront.py:51`, `frontend/src/pages/StorefrontPage.tsx`,
-  `frontend/src/components/storefront/ListingEditor.tsx:826`.
+  `frontend/src/components/storefront/ListingEditor.tsx:927`.
 - Public UI: `frontend/src/storefront/` (router `App.tsx:86-97`, client
   `api/client.ts:67`); its OpenAPI is exported by
   `backend/scadbuddy/tools/export_openapi.py` `--storefront`.

@@ -117,7 +117,17 @@ func run(ctx context.Context, env func(string) string) error {
 		if crudAddress == address {
 			return errors.New("SCADBUDDY_CORE_CRUD_LISTEN is the main address; the CRUD port needs its own")
 		}
-		servers[crudAddress] = front.CRUDOnly(router)
+		// What Go does not answer goes to Python's own CRUD listener, never to the full API, so
+		// Python's path filter still stands behind Go's.
+		crudUpstream, err := newUpstream(env("SCADBUDDY_CORE_CRUD_UPSTREAM"), trusted)
+		if err != nil {
+			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
+		}
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+		if err != nil {
+			return err
+		}
+		servers[crudAddress] = front.CRUDOnly(crudRouter)
 	}
 	return serve(ctx, servers)
 }
