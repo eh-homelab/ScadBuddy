@@ -294,9 +294,12 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   does not need it; `CI Summary` re-derives the lanes from its own checkout, so a skip
   where the lane was needed is a failure. A push, the schedule, a dispatch, the
   Dockerfile, `ci.yml` or the selector selects every lane. A new cross-tree read (a test
-  that opens a file outside its tree) needs its path in that lane's pattern.
+  that opens a file outside its tree) needs its path in that lane's pattern; a test that
+  reads a doc also needs it in `select-lanes.sh` `read_by_tests` and in `ci.yml`'s push
+  `paths`, or a docs-only change skips the test (#7792).
 - Docs-only changes: when every changed path is `docs/**/*.md`, or a `CLAUDE.md` or
-  `AGENTS.md` in any directory but a `vendor/` tree (these select no lane), `select-lanes.sh` prints
+  `AGENTS.md` in any directory but a `vendor/` tree (these select no lane), and none is
+  in `read_by_tests` (the design spec, which `agent/test/evalScoring.test.ts` reads), `select-lanes.sh` prints
   `docs_only=true`, and the `lint`, `frontend*`, `agent`, `models`, `freshness`,
   `go-select` and `go` jobs skip too; `CI Summary` re-derives it. The `markdown` job
   (markdownlint-cli2 0.20.0 over those files outside `vendor/`, config
