@@ -316,6 +316,7 @@ class SettingsView(BaseModel):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = 20
     filament_default_cost_per_kg: Decimal | None = None
+    filament_weighing_drift_notice_g: int = 10
     filament_drying_temp_c: int | None = None
     filament_drying_hours: Decimal | None = None
     filament_label_base_url: str | None = None

@@ -20,6 +20,7 @@ from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_git
 
@@ -44,6 +45,14 @@ def bundled(seed_dir: Path) -> Path:
 def client(app: FastAPI, bundled: Path) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def model(client: TestClient, model: str) -> str:
+    """The template written on the volume by hand, copied to its row: the list reads
+    the rows only (#7317 phase 3)."""
+    sync_template_rows(client)
+    return model
 
 
 def _finished_job(client: TestClient, model_id: str) -> str:

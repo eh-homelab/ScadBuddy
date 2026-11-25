@@ -1,5 +1,5 @@
-import { useEffect, useRef } from 'react'
-import { useSubscription } from '../../lib/realtime'
+import { useEffect } from 'react'
+import { useSubscription, type Confirmation, type RealtimeSignal } from '../../lib/realtime'
 import { useLatest } from '../../lib/useLatest'
 
 /**
@@ -25,22 +25,28 @@ export function announcePackagesChanged(from: PackagesPanel): void {
 }
 
 /**
- * Calls `onChange` for each server change on {@link PACKAGES_TOPIC}, and when the subscription
- * comes back after a gap (a later `resync`); not for the first confirmation, which only says the
- * topic is live and follows the mount's own read.
+ * Calls `onChange` for each server change on {@link PACKAGES_TOPIC} and each resync after lost
+ * events. The subscription's confirmation calls it only when `stale` says the panel's last read
+ * may have missed a change (#7672: a change between the mount's read and the confirmation;
+ * `useAsync` `staleFor`, or `readAgain` over a `recordRead`).
  */
-export function usePackagesTopic(onChange: () => void): void {
-  const confirmed = useRef(false)
-  useSubscription(PACKAGES_TOPIC, (signal) => {
-    if (signal === 'resync' && !confirmed.current) {
-      confirmed.current = true
-      return
-    }
-    onChange()
+export function usePackagesTopic(
+  onChange: (signal: RealtimeSignal) => void,
+  stale: (confirmation: Confirmation) => Promise<boolean>,
+): void {
+  useSubscription(PACKAGES_TOPIC, (signal, confirmation) => {
+    if (!confirmation) return onChange(signal)
+    void stale(confirmation).then((again) => {
+      if (again) onChange(signal)
+    })
   })
 }
 
-export function usePackagesChanged(self: PackagesPanel, onChange: () => void): void {
+export function usePackagesChanged(
+  self: PackagesPanel,
+  onChange: () => void,
+  stale: (confirmation: Confirmation) => Promise<boolean>,
+): void {
   const latest = useLatest({ onChange })
   useEffect(() => {
     const listener = (event: Event) => {
@@ -49,5 +55,5 @@ export function usePackagesChanged(self: PackagesPanel, onChange: () => void): v
     window.addEventListener(EVENT, listener)
     return () => window.removeEventListener(EVENT, listener)
   }, [self, latest])
-  usePackagesTopic(() => latest.current.onChange())
+  usePackagesTopic(() => latest.current.onChange(), stale)
 }

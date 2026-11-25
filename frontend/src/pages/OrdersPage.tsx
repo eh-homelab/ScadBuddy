@@ -298,7 +298,7 @@ export function OrdersPage() {
       cell: (order) => (order.customer_id ? (names.get(order.customer_id) ?? order.customer_id) : <span className="text-muted-foreground">Visitor</span>),
     },
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
-    { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
+    { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.submitted_at ?? order.created_at) },
     { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? formatDueDate(order.due_at) : '') },
     {
       key: 'margin',

@@ -211,3 +211,16 @@ def test_copy_status_damage_sample_is_bounded(client: TestClient) -> None:
     byte_run = client.get("/api/v1/outputs/copy-status").json()["bytes"]
     assert byte_run["damaged_rows"] == DAMAGED_SAMPLE + 1
     assert [item["output_id"] for item in byte_run["damaged_sample"]] == ids[:DAMAGED_SAMPLE]
+
+
+def test_copy_status_reports_cut_over_at(client: TestClient) -> None:
+    """#7257: when the cut-over mark was written; ``None`` before it."""
+    rows = _rows(client)
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    _end_byte_run(rows, [])
+    assert client.get("/api/v1/outputs/copy-status").json()["cut_over_at"] is None
+    assert rows.try_cut_over() is True
+    at = rows.cut_over_at()
+    assert at is not None
+    body = client.get("/api/v1/outputs/copy-status").json()
+    assert datetime.fromisoformat(body["cut_over_at"]) == at

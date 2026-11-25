@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,15 +16,13 @@ import type { Database } from './support/database.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
-import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 import { respond } from '../src/routes/pendingInput.js'
 import { sqlSettings } from './support/sql/settings.js'
-import { sqlAuditLog, TEST_HASH_KEY } from './support/sql/audit.js'
+import { TEST_HASH_KEY } from './support/sql/audit.js'
 import { type BeforeAppend, SqlApprovals } from './support/sql/approvals.js'
 
 // The approval store and its rules without the SDK (#258): ai_approvals in
@@ -129,15 +127,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await drop()
   })
 
-  /** A session with a pending approval an earlier release's turn left (none parks on one now). */
+  /** A pending MCP prepare of `owner`'s (#251): no session, as every approval now (#7323). */
   async function orphan(owner = agentA, input: Record<string, unknown> = { job: 'box.3mf' }) {
+    const approval = await m.approvals.create({
+      sessionId: null,
+      turnId: null,
+      toolUseId: 'toolu_1',
+      tool: 'mcp__stub__print',
+      input,
+      tier: 'outward',
+      requestedBy: owner,
+    })
+    return { approval }
+  }
+
+  /** A pending approval of a session an earlier release's turn left (none is written now). */
+  async function sessionRow(owner = agentA) {
     const { session } = await m.start(owner, { origin: 'mcp', title: 't' })
     const approval = await m.approvals.create({
       sessionId: session.id,
       turnId: null,
       toolUseId: 'toolu_1',
       tool: 'mcp__stub__print',
-      input,
+      input: { job: 'box.3mf' },
       tier: 'outward',
       requestedBy: owner,
     })
@@ -220,8 +232,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   // #2382: while one row throws, no other due approval must stay unexpired.
   it('expires every other due approval when one of them fails, and reports the failure', async () => {
-    const first = await orphan()
-    const second = await orphan(agentB)
+    // The fault is in a session row's events, so these are rows an earlier release left.
+    const first = await sessionRow()
+    const second = await sessionRow(agentB)
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second'`
     const boom = new Error('invalid input syntax for type uuid: "f"')
     let failed = false
@@ -245,8 +258,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
 
   // #2382: a page of rows that keep failing never holds back the ones after it.
   it('pages past due approvals that keep failing to the ones after them', async () => {
-    const stuck = [await orphan(), await orphan(agentB)]
-    const later = await orphan()
+    const stuck = [await sessionRow(), await sessionRow(agentB)]
+    const later = await sessionRow()
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id IN ${db.sql(stuck.map((o) => o.approval.id))}`
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
     const failing = new Set(stuck.map((o) => o.session.id))
@@ -285,51 +298,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     }
   })
 
-  it('expires an orphan that nobody decided', async () => {
-    const { session, approval } = await orphan()
+  it('expires an approval that nobody decided', async () => {
+    const { approval } = await orphan()
     expect(await m.approvals.expireDue()).toBe(0)
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${approval.id}`
     expect(await m.approvals.expireDue()).toBe(1)
     expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'expired', reason: 'no decision before it expired' })
     await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'expired' })
-    const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
-    await expectPanelAccepts(events)
-    expect(events.filter((e) => !e.type.startsWith('input.')).slice(-1)).toEqual([
-      // Says it expired, not just that it was not approved (#979).
-      { v: 1, type: 'approval.resolved', sessionId: session.id, id: approval.id, approved: false, decision: 'expired', reason: 'no decision before it expired' },
-    ])
-  })
-
-  // spec 2026-10-01 §6.6 Notifications: one input.requested and one input.resolved per entry, never the input.
-  it('logs input.requested after approval.required, and input.resolved after its decision', async () => {
-    const { session, approval } = await orphan(agentA, { job: 'box.3mf', password: 'hunter2-long-secret' })
-    await m.approvals.decide(browser, approval.id, false)
-    const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
-    const types = events.map((e) => e.type)
-    expect(types.indexOf('input.requested')).toBe(types.indexOf('approval.required') + 1)
-    expect(types.indexOf('input.resolved')).toBe(types.indexOf('approval.resolved') + 1)
-    expect(events.filter((e) => e.type.startsWith('input.'))).toEqual([
-      {
-        v: 1,
-        type: 'input.requested',
-        sessionId: session.id,
-        entry: {
-          id: `approval:${approval.id}`,
-          kind: 'approval',
-          session_id: session.id,
-          tool: 'mcp__stub__print',
-          summary: approval.inputSummary,
-          input_hash: approval.inputHash,
-          prompt: '',
-          requested_by: agentA,
-          responders: ['browser', 'grant'],
-          created_at: approval.createdAt,
-          expires_at: approval.expiresAt,
-        },
-      },
-      { v: 1, type: 'input.resolved', sessionId: session.id, id: `approval:${approval.id}`, kind: 'approval', outcome: 'denied' },
-    ])
-    expect(JSON.stringify(events)).not.toContain('hunter2-long-secret')
   })
 
   it('an approval decided just as it expires cannot be approved', async () => {
@@ -340,73 +315,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect((await m.approvals.get(approval.id, browser)).decision).toBe('expired')
   })
 
-  it('denying an orphan runs no turn', async () => {
-    const { session, approval } = await orphan()
-    expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ decision: 'denied', decidedBy: browser })
-    expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turns: 0 })
-  })
-
-  // #1122: like an answer over the socket (questions.pg.test.ts), a decision records where it came from.
-  it('a decision made over the chat socket is audited with the socket client address', async () => {
-    const audit = sqlAuditLog(db.sql)
-    const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
-    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, audit })
-    const { session, approval } = await orphan(browser)
-    const chat = new ChatConnection(m, () => {}, { snapshotMs: 60_000, clientIp: '198.51.100.4' })
-    try {
-      await chat.receive(JSON.stringify({ v: 1, type: 'approval.decision', sessionId: session.id, id: approval.id, approve: false }))
-    } finally {
-      chat.close()
-    }
-    expect((await m.approvals.get(approval.id, browser)).decision).toBe('denied')
-    expect(await db.sql`SELECT action, surface, client_ip FROM ai_audit WHERE kind = 'approval'`).toEqual([
-      { action: 'denied', surface: 'http', client_ip: '198.51.100.4' },
-    ])
-  })
-
-  it('a decision racing create cannot log approval.resolved before approval.required', async () => {
-    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    // Routes that try to decide the approval just before `approval.required` is
-    // written in the create's transaction: the fastest possible decision.
-    let raced: unknown
-    const routes = new SqlApprovals(db.sql, {
-      beforeAppend: async (_sessionId, batch) => {
-        const required = batch.find((e) => e.type === 'approval.required')
-        if (required && 'id' in required) {
-          raced = await service.decide(browser, String(required.id), false).catch((err: unknown) => err)
-        }
-      },
-    })
-    const service = new ApprovalService({ routes, events: m.events, hashKey: () => TEST_HASH_KEY })
-    const approval = await service.create({
-      sessionId: session.id,
-      turnId: null,
-      toolUseId: 'toolu_1',
-      tool: 'mcp__stub__print',
-      input: { job: 'box.3mf' },
-      tier: 'outward',
-      requestedBy: agentA,
-    })
-    // The row is not there to decide until it commits with its event.
-    expect(raced).toMatchObject({ code: 'not_found' })
-    await service.decide(browser, approval.id, false)
-    const types = (await m.events.read(session.id, 0, 1000)).map((e) => e.event.type)
-    expect(types.filter((t) => t.startsWith('approval.'))).toEqual(['approval.required', 'approval.resolved'])
-  })
-
-  it('lists by visibility: the browser sees all, an agent only its own sessions', async () => {
+  it('lists by visibility: the browser sees all, an agent only its own', async () => {
     const mine = await orphan(agentA)
     const theirs = await orphan(agentB)
-    expect((await m.approvals.list(browser, { pending: true })).map((a) => a.id).sort()).toEqual([mine.approval.id, theirs.approval.id].sort())
-    expect((await m.approvals.list(agentA, { sessionId: mine.session.id })).map((a) => a.id)).toEqual([mine.approval.id])
-    await expect(m.approvals.list(agentA, { sessionId: theirs.session.id })).rejects.toMatchObject({ code: 'not_found' })
-    await expect(m.approvals.list(agentA)).rejects.toMatchObject({ code: 'invalid' })
+    expect((await m.approvals.listVisiblePending(browser)).map((a) => a.id).sort()).toEqual([mine.approval.id, theirs.approval.id].sort())
+    expect((await m.approvals.listVisiblePending(agentA)).map((a) => a.id)).toEqual([mine.approval.id])
     await expect(m.approvals.get(theirs.approval.id, agentA)).rejects.toMatchObject({ code: 'not_found' })
     await expect(m.approvals.decide(browser, 'not-a-uuid', true)).rejects.toMatchObject({ code: 'not_found' })
-    // The panel's decision names its session; a mismatched one is not found.
+    // The panel's old decision frame names a session, which no approval has.
     await expect(
-      m.approvals.decision(browser, { v: 1, type: 'approval.decision', sessionId: theirs.session.id, id: mine.approval.id, approve: true }),
+      m.approvals.decision(browser, { v: 1, type: 'approval.decision', sessionId: randomUUID(), id: mine.approval.id, approve: true }),
     ).rejects.toMatchObject({ code: 'not_found' })
+  })
+
+  // #7323: a session's rows are its history. Nothing parks on one now (prod had none pending
+  // on 2026-11-23); one left is not listed, read or decided, and the sweep expires it.
+  it("never lists, shows or decides a session's row, and still expires it", async () => {
+    const { approval } = await sessionRow(agentA)
+    expect(await m.approvals.listVisiblePending(browser)).toEqual([])
+    expect(await m.approvals.listVisiblePending(agentA)).toEqual([])
+    await expect(m.approvals.get(approval.id, browser)).rejects.toMatchObject({ code: 'not_found' })
+    await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'not_found' })
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${approval.id}`
+    expect(await m.approvals.expireDue()).toBe(1)
+    expect((await db.sql<{ decision: string }[]>`SELECT decision FROM ai_approvals WHERE id = ${approval.id}`)[0]?.decision).toBe('expired')
   })
 
   it('a sessionless approval (#251 prepare/confirm) is visible to the browser and its requester, and consumed once by its requester', async () => {
@@ -477,25 +409,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
       expect((await m.approvals.get(approval.id, browser)).decision).toBeNull()
     })
 
-    it('lists a session’s approvals to the UI, or 404 for an unknown session', async () => {
-      const { session, approval } = await orphan()
+    it('lists the pending approvals to the UI', async () => {
+      const { approval } = await orphan()
       // A same-origin GET carries no Origin: the Host (via the trusted ingress) decides.
       const read = { host: UI.host, 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
-      const res = await app().request(`/api/v1/ai/approvals?session=${session.id}`, { headers: read })
+      const res = await app().request('/api/v1/ai/approvals', { headers: read })
       expect(res.status).toBe(200)
       expect(await res.json()).toEqual({
-        approvals: [
-          expect.objectContaining({ id: approval.id, session_id: session.id, tool: 'mcp__stub__print', decision: null, used: false, voided: false }),
-        ],
+        approvals: [expect.objectContaining({ id: approval.id, session_id: null, tool: 'mcp__stub__print', decision: null, used: false, voided: false })],
       })
-      expect((await app().request(`/api/v1/ai/approvals?session=${session.id}`, { headers: UI })).status).toBe(200)
-      expect((await app().request('/api/v1/ai/approvals?session=00000000-0000-4000-8000-000000000000', { headers: read })).status).toBe(404)
+      expect((await app().request('/api/v1/ai/approvals', { headers: UI })).status).toBe(200)
       expect((await app(false).request('/api/v1/ai/approvals', { headers: read })).status).toBe(503)
     })
 
     it('guards the reads with the same transport and origin rules', async () => {
-      const { session } = await orphan()
-      const url = `/api/v1/ai/approvals?session=${session.id}`
+      await orphan()
+      const url = '/api/v1/ai/approvals'
       const refused = [
         {}, // no ingress, not loopback
         { host: UI.host, 'x-forwarded-proto': 'http' }, // plain HTTP

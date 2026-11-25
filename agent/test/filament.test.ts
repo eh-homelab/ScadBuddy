@@ -870,7 +870,7 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     )
     expect(res.isError).toBeFalsy()
     expect(order).toEqual(['offer 1150', 'event'])
-    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', reading_g: 1150, grams: 950 }])
     const out = firstText(res) as Record<string, unknown>
     expect(out.filament_g).toBe(950)
     expect(out.event).toEqual({ kind: 'weighed' })
@@ -884,8 +884,63 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1150 }, ctx())
     expect(res.isError).toBeFalsy()
     expect(order).toEqual(['offer 1150', 'event'])
-    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', grams: 950 }])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', reading_g: 1150, grams: 950 }])
     expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
+  })
+
+  const BELOW = {
+    offer: null,
+    reason: 'below_label',
+    insert_type_id: ROW,
+    empty_weight_g: 200,
+    filament_g: 700,
+    shortfall_g: 100,
+    resolutions: [
+      { kind: 'tared', filament_g: 900, new_label_weight_g: null },
+      { kind: 'short', filament_g: 700, new_label_weight_g: null },
+      { kind: 'label_wrong', filament_g: 700, new_label_weight_g: 700 },
+    ],
+    default: 'tared',
+  }
+
+  it('with a reading under the label and no resolution, names the choices and books nothing (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 900 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 900'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.below_label).toMatchObject({ shortfall_g: 100, default: 'tared' })
+    expect(String(out.next)).toContain('resolution')
+  })
+
+  it('with a resolution, posts it with the reading alone (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' }])
+    expect((firstText(res) as Record<string, unknown>).event).toEqual({ kind: 'weighed' })
+    expect(tool('filament_spool_add_event').description).toContain('below_label')
+  })
+
+  it('sends the reading beside the grams, so the event keeps its breakdown (#7682)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock({ offer: null, reason: 'used', insert_type_id: ROW, empty_weight_g: 200, filament_g: 980 }, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 1180 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'person', reading_g: 1180, grams: 980 }])
+    expect(tool('filament_spool_add_event').description).toContain('drift')
   })
 
   it('says a retry is safe when the booking fails after the accept', async () => {
@@ -914,7 +969,7 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     )
     expect(res.isError).toBeFalsy()
     expect(order).toEqual(['offer 1150', 'accept', 'event'])
-    expect(bodies).toEqual([{ reading_g: 1150 }, { kind: 'weighed', source: 'person', grams: 1000 }])
+    expect(bodies).toEqual([{ reading_g: 1150 }, { kind: 'weighed', source: 'person', reading_g: 1150, grams: 1000 }])
     const out = firstText(res) as Record<string, { empty_weight_g: number }>
     expect(out.insert_weight_accepted?.empty_weight_g).toBe(150)
   })

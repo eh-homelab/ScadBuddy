@@ -29,8 +29,18 @@ from scadbuddy.print_watch.store import FLOOR_LOCK, MODEL_GONE, AutoImportStore
 from scadbuddy.print_watch.sweep import LOOKBACK, NO_MATCH
 from tests.api.test_print_history import archive, state
 from tests.api.test_send import API, configure
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
+
+
+@pytest.fixture
+def model(client: TestClient, model: str) -> str:
+    """The template written on the volume by hand, copied to its row: the watcher's
+    matches read the rows only (#7317 phase 3)."""
+    sync_template_rows(client)
+    return model
+
 
 HASH = "c0ffee" * 10 + "abcd"
 STARTED = "2026-11-10T20:00:00"

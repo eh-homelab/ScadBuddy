@@ -166,7 +166,8 @@ same way, `vite.config.ts`).
   no colour on offer has starts at one that is, `fittedDefault`, #6144), pinned by
   `test-fixtures/storefront/sell-draft-vectors.json`, which the agent's copy
   (`agent/src/tools/storefrontDraft.ts`) is tested against too (its case with `file` is a new
-  file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`); a
+  file listing's body, #6710: `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`; its
+  cases with `source` are a pipeline design's, #5701, `designInputs.ts` `soldDesign`, whose agent copy is `storefrontDraft.ts` `soldDesign`); a
   colour no listing filament has is `colourProblems`. e2e `e2e/storefront-sell.spec.ts`.
 
 - The Storefront back office (#6157): `pages/StorefrontPage.tsx` is the list, a table the
@@ -204,6 +205,17 @@ same way, `vite.config.ts`).
   dialog has "Storefront…" per image (`components/storefront/StorefrontPicture.tsx`),
   which sets the image on each listing of that template through `PUT
   /storefront/listings/{id}/media`; a published listing is published again at once.
+  Pipeline listings (#5701, spec 2026-11-17 §5): `components/storefront/designInputs.ts` is the
+  rules and `DesignBlock.tsx` the block under the Design line, for a commit whose schema has
+  `pipeline` (`RevisionSchema`). "Set up the design" (`DesignDialog.tsx`) mounts the template's
+  UI over a working copy at the commit's `INPUTS_VERSION` (`designStart`, through
+  `inputs/migrate`), or the form of the inputs' own schema; only "Use this design" writes the
+  draft (`withDesign`), and it saves no output, preset or print. A save always sends `inputs`
+  with their `inputs_v`. `shownParams` leaves out `pipeline_params`; `withoutUnknown` takes
+  them off a listing. A refusal `listing_inputs_*` (`listingRefusal` kind `inputs`) is said in
+  the block by the schema's titles (`inputsRefusalText`), never by its path. The mocks'
+  pipeline template is the dollhouse (`mocks/fixtures.ts` `pipelines`). e2e
+  `e2e/storefront-design.spec.ts`.
   File listings (#6710, spec 2026-11-21 §9): the editor's Source block chooses a design or a
   library file (`ListingDraft.source`, `switchSource`); a file comes from `LibraryFilePicker`
   with `types` (3MF and STL). `components/storefront/listedFile.ts` `useListedFile` reads the

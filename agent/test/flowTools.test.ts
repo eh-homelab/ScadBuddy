@@ -72,6 +72,41 @@ describe("a flow's tool tiers (#2704)", () => {
     ])
   })
 
+  it('reads the overrides once for the whole list, not once per tool (#7731)', async () => {
+    const { access, reads } = memoryAccess()
+    const many = Array.from({ length: 40 }, (_, i) => tool(`t${i}`, 'read'))
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: many.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const svc = services({ toolOverrides: new BuiltInTools(access, sets).registryOverrides() })
+    await access.setItem(BUILTIN_SOURCES.scadbuddy, 't3', 'outward')
+    await access.setItem(BUILTIN_SOURCES.scadbuddy, 't7', 'off')
+    reads.n = 0
+    const listed = await flowToolTiers(many, svc)
+    expect(reads.n).toBe(1)
+    expect(listed.find((t) => t.name === 't3')).toEqual({ name: 't3', tier: 'outward', disabled: false })
+    expect(listed.find((t) => t.name === 't7')).toEqual({ name: 't7', tier: 'read', disabled: true })
+  })
+
+  it("answers each tool as the per-tool read does, the browser's switch included (#7731)", async () => {
+    const own = [tool('look', 'read'), tool('change', 'write'), tool('send', 'outward'), tool('browser_click', 'write'), tool('browser_type', 'write')]
+    const { access } = memoryAccess()
+    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: own.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })) }]
+    const overrides = new BuiltInTools(access, sets).registryOverrides()
+    await access.setItem(BUILTIN_SOURCES.scadbuddy, 'look', 'outward')
+    await access.setItem(BUILTIN_SOURCES.scadbuddy, 'change', 'off')
+    await access.setItem(BUILTIN_SOURCES.browser, 'browser_click', 'outward')
+    const names = [...own.map((t) => t.name), 'not_a_tool']
+    const each = async () => Promise.all(names.map((n) => overrides.of(n)))
+    const snap = async () => {
+      const s = await overrides.snapshot!()
+      return Promise.all(names.map((n) => s.of(n)))
+    }
+    expect(await snap()).toEqual(await each())
+    expect([...(await (await overrides.snapshot!()).disabled())].sort()).toEqual([...(await overrides.disabled())].sort())
+    await access.setEnabled(BUILTIN_SOURCES.browser, false)
+    expect(await snap()).toEqual(await each())
+    expect((await (await overrides.snapshot!()).of('browser_type')).disabled).toBe(true)
+  })
+
   it('flow_tool_tier answers the camera off as disabled', async () => {
     const { access } = memoryAccess([{ source: BUILTIN_SOURCES.scadbuddy, item: 'get_printer_camera', access: 'off', updated_by: 'browser:browser' }])
     const camera = [tool('get_printer_camera', 'read')]

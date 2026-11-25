@@ -2,7 +2,8 @@
 2026-10-09-durable-phase-6-flows.md Task C1): the decision is recorded, then the
 harness is told. A decision the harness refuses, or whose Update Temporal never had, is
 deleted again; one whose Update landed stands, even when its reply was lost (#2247).
-An answer that never landed does not block another one (#7575)."""
+An answer that never landed does not block another one (#7575); nor does an approval or
+a denial (#7588, `test_decision_take_over.py`)."""
 
 import asyncio
 import json
@@ -27,7 +28,7 @@ from scadbuddy.flows.operations import (
     STALE_ENTRY,
     TASK_ANSWER,
     TASK_NOT_OPEN,
-    answer_update_id,
+    decision_update_id,
     flow_kinds,
     request_id,
     seal_answer,
@@ -267,9 +268,7 @@ async def test_an_answer_whose_update_failed_leaves_no_row_and_can_be_given_agai
     assert (await flows.finished(run.id)).result == "result: 'ok'"
 
 
-async def test_a_row_left_unsent_lets_the_same_decision_resend_and_refuses_another(
-    flows: Flows,
-) -> None:
+async def test_a_row_left_unsent_lets_the_same_decision_resend(flows: Flows) -> None:
     run, call_id = await _gated(flows)
     decide = kinds(flows)[FLOW_DECIDE]
     rid = request_id(run, call_id)
@@ -284,10 +283,6 @@ async def test_a_row_left_unsent_lets_the_same_decision_resend_and_refuses_anoth
         responder="browser",
     )
     assert await flows.store.record_decision(left)
-    other = {"run_id": run.id, "call_id": call_id, "approved": False}
-    with pytest.raises(ApiError) as err:
-        await ActivityEnvironment(client=flows.client).run(decide.check, other)
-    assert (err.value.status, err.value.type) == (409, ALREADY_RESOLVED)
     same = {"run_id": run.id, "call_id": call_id, "approved": True}
     assert (await operate(flows, decide, same))["outcome"] == "approved"
     assert (await AgentClient(flows.client, run.workflow_id).get_status()).pending_approvals == []
@@ -807,7 +802,7 @@ async def test_an_answer_that_landed_is_never_taken_over(
     # Its check found the call waiting.
     checked = await env.run(answer.check, request)
     first = await stuck(flows, name, run, call_id)
-    update_id = first.request_id if before else await answer_update_id(Keys(), first)
+    update_id = first.request_id if before else await decision_update_id(Keys(), first)
     client = AgentClient(flows.client, run.workflow_id)
     await client.provide_callback_result(call_id, result={"answer": "one"}, update_id=update_id)
     sent = _as_text(monkeypatch)
@@ -908,7 +903,7 @@ async def test_an_answer_that_lands_after_its_take_over_is_on_record_again(
 
     async def beaten(self: AgentClient, tool_id: str, *, result: Any, update_id: Any) -> Any:
         one = {"answer": given(name, "one")}
-        tagged = await answer_update_id(Keys(), first)
+        tagged = await decision_update_id(Keys(), first)
         await original(
             self, tool_id, result=one, update_id=first.request_id if how == "untagged" else tagged
         )
@@ -938,13 +933,13 @@ async def test_an_answer_that_never_landed_is_not_reported_for_the_one_that_did(
     checked = await env.run(answer.check, request)
     first = await stuck(flows, name, run, call_id)
     await AgentClient(flows.client, run.workflow_id).provide_callback_result(
-        call_id, result={"answer": "one"}, update_id=await answer_update_id(Keys(), first)
+        call_id, result={"answer": "one"}, update_id=await decision_update_id(Keys(), first)
     )
     _as_text(monkeypatch)
     record = flows.remote.record_decision
 
     async def withdrawn_first(decision: Decision, **kwargs: Any) -> bool:
-        await flows.store.withdraw_answer(first)
+        await flows.store.withdraw_decision(first)
         return await record(decision, **kwargs)
 
     monkeypatch.setattr(flows.remote, "record_decision", withdrawn_first)
@@ -996,7 +991,7 @@ async def test_an_answer_that_lands_first_and_ends_the_run_is_on_record(
     else:
         await stuck(flows, name, run, call_id)
         request = await answering(name, run, call_id, "two")
-        update_id = await answer_update_id(Keys(), first)
+        update_id = await decision_update_id(Keys(), first)
     _as_text(monkeypatch)
     typed = AgentClient.provide_callback_result
 
@@ -1103,7 +1098,7 @@ async def test_two_answers_share_no_update_and_one_answer_keeps_its_own(flows: F
         row = row_of(FLOW_ANSWER, run, call_id, "x").model_copy(
             update={"response": {"answer": answer}}
         )
-        return await answer_update_id(Keys(), row)
+        return await decision_update_id(Keys(), row)
 
     one = await update_id({"a": 1e23, "b": [1.5, 2]})
     # As jsonb gives it back.

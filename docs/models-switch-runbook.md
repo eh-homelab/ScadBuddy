@@ -255,10 +255,15 @@ kubectl -n bambuddy scale deployment scadbuddy --replicas=1
 kubectl -n bambuddy rollout status deployment scadbuddy --timeout=10m
 ```
 
+The one replica copies every template to rows before it serves (`run` emptied
+`template_copy_runs`). If that takes longer than the startupProbe's budget, the pod restarts
+and the next start continues the copy (each batch keeps its rows); raise the startupProbe's
+`failureThreshold` for this step when the pod restarts.
+
 | Check | Expected |
 |---|---|
 | `GET /api/v1/model-records/copy-status` | `finished_at` is set and after the start; `incomplete` is false; `added` is the number of templates; `unreadable` is empty |
-| `GET /api/v1/outputs/copy-status` | `finished_at` is set; `incomplete` is false; `copied` and `dropped` are 0; `refreshed` is the number of `meta.json` files that were written |
+| `GET /api/v1/outputs/copy-status` | `finished_at` is set; `incomplete` is false; `copied` and `dropped` are 0; `refreshed` is the number of `meta.json` files that were written (`run` prints it; the copy sees them by their new time) |
 | The model list and one mesh model | Each template is there. The mesh model opens, and it renders |
 | The approved item | Its saved output is still its output. Its quote stands: the item page asks for no new one |
 | The listing | The page shows it with the prices that it had |

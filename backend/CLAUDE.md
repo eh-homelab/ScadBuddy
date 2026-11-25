@@ -156,7 +156,12 @@ tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
 A test's result must not depend on runner speed or the date. A retry budget gets an
 injected clock (`CrudClient(clock=..., sleep=...)`, a fake `sleep` that advances it):
-on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294). A
+on the real clock a slow runner spent a 0.5 s budget in one try (#6252, #6294).
+A call from a test to a server the test runs on a thread of its own (moto, a uvicorn
+`_remote`) may take a longer timeout than the default or the production bound, because
+that thread shares the GIL with the test on a loaded runner: set it in the test or a test
+helper, cite the issue, and keep one test on the production bound where the bound is what
+it checks (the owner's decision of 2026-11-25; #7503, #7556, #7619). A
 "today" is read at each call, never at import: a shard that loads before midnight UTC
 and makes orders after it dated every fake deposit a day early (#6307). A shard builds
 in 2 to 3 minutes. With six shards it tested in 27 to 46, and slow runners hit
@@ -299,9 +304,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   second run at once do nothing. The byte copy (#7256, `OUTPUT_BYTES_SWEEP`, after
   `OUTPUT_COPY_SWEEP`, behind `OUTPUT_BYTES_PATCH`, timeout `OUTPUT_BYTES_TIMEOUT`, 30
   min) runs `library/output_byte_copy.py` `copy_output_bytes` the same way, after the
-  row copy at start: it puts the files' bytes as `output` blobs, refuses on `local`,
-  `bambuddy` or a store past its caps, and its session advisory lock holds one autocommit
-  connection of its own for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
+  row copy at start: it puts the files' bytes as `output` blobs (on `local` into the
+  outputs' own store, `data/output-blobs/`, #7257), refuses on `bambuddy` or a store past
+  its caps, and its session advisory lock holds one autocommit
+  connection of its own for the run (docs/architecture/data.md "The byte copy"). Both
+  copies do nothing once the cut-over mark `output_cutover` exists (#7257), which the API
+  writes at a start or after a byte run that ended, when both copies are done
+  (`OutputRows.try_cut_over`; data.md "The cut-over"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -356,7 +365,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never). `operations.py` has the answers: `flow_answer` (a text) and `task_answer` (a
-  prompt's, #7364). `store.py` moves a run's tasks in the transaction of the run's own write:
+  prompt's, #7364), and the decisions: `flow_decide` (a person's) and `flow_escalate` (the
+  starter session's). A print, an arrange or a ScadBuddy tool runs only on an approval on
+  record (`flow_decision`, #7588); the agent checks the row for its own tools and a plugin's. `store.py` moves a run's tasks in the transaction of the run's own write:
   an end cancels the open ones, a Reset makes them match (`TaskStore.cancel_for_run_in`,
   `match_waiting_in`, `reopen_in`).
 - Tasks (#7364): `backend/scadbuddy/tasks/`, the typed questions that flows ask (`prompt`);
@@ -904,10 +915,28 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
   ordered by `(at, delta before reading, seq)` (a paired plate's `print_run` is skipped for its `bb_usage` row); a time-less event gets a clock-step guard because the WSL clock
-  steps back), `insert_weights.py` (#7280: an insert's empty weight from new spools'
+  steps back; #7682: a `weighed` event sent with `reading_g` keeps its breakdown in `data`,
+  `reading_g`, `empty_g`, `empty_source` (`insert`, or `person` when the client took something
+  else off), `empty_basis`, `empty_name`, `expected_g` (`expected_before`: `grams_left` over the
+  events before the weighing's `at`, plus the deltas at that instant) and `drift_g`
+  (`breakdown`), and `refresh_derived` copies the newest weighing's `drift_g` to
+  `filament_spools.last_drift_g`, from which `_hydrate` sets `drift_notice` against the live
+  setting `filament_weighing_drift_notice_g`; `bb` weighings record none),
+  `empty_weight.py` (#7682: `effective_on`, the one resolver of a spool's effective empty
+  weight, today the spool's insert type's, else its type's, with `placeholder` decided by
+  `is_placeholder`; #7278's parts join there, callers do not change; `add_event` takes it off
+  a `reading_g` sent without `grams`, `NoEmptyWeightError`, 422 `no_empty_weight`, when there
+  is none, `ReadingBelowEmptyError`, 422 `reading_below_empty`, when the reading is under it), `insert_weights.py` (#7280: an insert's empty weight from new spools'
   weighings, one row per spool in `filament_insert_weight_readings`, the mean of them with
   `filament_insert_types.empty_weight_basis` `derived`; routes `…/insert-weight-offer` and
-  `…/insert-weight`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
+  `…/insert-weight`; #7683: `check_on` answers `below_label` for a new spool read under its
+  label, with `shortfall_g`, the `resolutions` (`below_label()`: `tared`, `short`,
+  `label_wrong`, each with its `filament_g`) and the `default`; `add_event` takes a
+  weighing's `resolution` with `reading_g` alone, checks it again under the row locks,
+  `NoBelowLabelError`, 422 `no_below_label`, books `short`'s `added_full` false or
+  `label_wrong`'s own `label_weight_g` as an `edited` event before the weighing, and keeps
+  `resolution` and `shortfall_g` in its `data`, with `expected_g` but no `drift_g`; a
+  `tared` weighing's `empty_source` is `tared`), `locations.py` (a spool moves only through `move()`; AMS trays are keyed by
   printer, AMS and tray, never by name), `bambuddy_pull.py` (import and the scheduled pull,
   the BB to SB side only: it writes nothing to Bambuddy (the push is `bb_sync_*.py` below, tags go through `rfid_push.py`); each `filament_sync` data type gates what the pull takes, through `Pulls.of(sync)` (#6265 Decision 3; `weights` since #6268), and BB's suppliers and locations are read only under `pulls(suppliers)` and `pulls(locations)`; it skips a BB spool whose tag an open binding of an SB spool linked elsewhere holds, warned once, and remembers it in `filament_bb_ignored` (the push clears its tag later, and the next pull would otherwise make a second SB spool; nothing un-ignores a row, so a person deletes it by hand, plan Decision 29); it never changes a held binding's `override` (`bind_on` with `override=None`); the Schedule's pull skips when none of the six `filament_sync` data types pulls, read per run (#6262 Task 13, widened by #6265 plan Decision 3, F1; `bb_pull_apply.pull_start`); after a pull it runs `reconcile_trays`, #6713. Since #6772 (plan Decisions 172-186) the CRUD service reads no Bambuddy for the pull: `bb_pull_models.py` is the wire (`PullStart`, the bodies, `BbPullApi`, and `Pulls` and `PullReport`, which `bambuddy_pull` re-exports), `bb_pull_run.py` the print worker's reads in the old order (`run_pull`, `read_and_pull`, `read_catalog`, `read_ha_sensors`, `reconcile_trays`), and `bb_pull_apply.py` the API's apply (`LocalBbPull`, `pull_start`, `execute_pull`); `workflows/filament_pull.py` is `FilamentBbPull` on the `bambuddy` queue (AUTO_UPGRADE; one activity `filament_bb_pull_read`, run once; replays `tests/fixtures/filament_pull_histories/`, so a change to its commands goes behind `workflow.patched`). The spool refresh's `filament_bambuddy_pull` activity (`spools/activities.py`; its commands in `SpoolRefresh` unchanged) and `POST /filament/bambuddy/import` start it and wait; the worker sends what it read to the CRUD area `filament-pull` (`…/print/filament/pull`, `…/pull/usage`, `…/pull/ha-states`, `…/pull/trays`, `…/pull/colours`; client `crud/print.py` `RemoteBbPull`), whose bodies the app's `BodySizeGate` caps at 8 MiB (`api/limits.py` `MAX_TEXT_BODY_BYTES`, 413 on the headers; Decision 182): the five routes carry their own `RouteLimit` (`api/crud_print.py` `PULL_ROUTE_LIMIT`), so the cap holds whatever the content type, header left out included (#6861) and name the Bambuddy instance read (409 `instance_changed` for another than the configured one) and the run's id, never an actor: the import route keeps the person under that id in `filament_pull_actors` (`remember_actor`), the routes read it there, else `bambuddy` (Decision 181); the route drops the row only once the read answered (a report or a problem); a row left behind is deleted by a later `remember_actor` once it is an hour old (`ACTOR_KEPT`, Decision 183). Tests: `tests/filament/pull_support.py` runs both halves in one process for the old pull tests, `test_bb_pull_run.py` the reads, `tests/crud/test_crud_filament_pull.py` the routes), `csv_import.py` (the spools CSV import, #6262 Task 15:
   rows the caller parsed, as text cells; a dry run reads only, so it adds no catalog row and
@@ -1540,7 +1569,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `thumbnail.png`, `files/`) are blobs of kind `output` held by `(output, <id>)`
   (`output_bytes.py` `OutputBytes`, #7256). The folder `data/outputs/<slug>/<id>/` stays
   the fallback until #7257: a save still writes it, and a reader reads the file when the
-  row names no blob (`bytes_at` NULL) or the blob is lost. A reader that needs a path
+  row names no blob (`bytes_at` NULL) or the blob is lost. #7257 cuts over in two
+  releases (data.md "The cut-over"). Release A: the cut-over mark `output_cutover`
+  stops both copies; after the mark a write into an output's folder skips a missing
+  folder (`OutputStore._folder_write`) and the hold reaper reads rows only; a save that
+  names its id (a quote's attempt, #5390) claims it in `output_claims` before its folder
+  (other saves take a new id and no claim, and their holds are kept only while they are
+  younger than the grace), and a claim older than `ORPHAN_HOLD_GRACE` is pruned, so a save longer than that can lose its claim (release B is to keep a live
+  save's claim). Release B (not built yet) is to remove the folders, the fallback and
+  `output_index`, and its migration is to refuse to run without the mark. A reader that needs a path
   opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
   file under `ContentStore.spool`, #7316, else the NFS file) and runs its sync reader in a thread; there
   is no blocking helper for sync callers. What a reader derives of the model is kept in `output_derived`, and
@@ -1556,12 +1593,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   counted in `scadbuddy_template_refresh_failures_total`, never raised) and
   `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
   `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
-  of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
-  skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
-  Phase 2: once a copy run has finished (`Catalogue._from_rows`), the catalogue's readers
-  read the rows, not the files (the list, the record, the ids, `list_summaries`,
-  `raw_metas`, the pin index, the print settings, the name check, `duplicates_of`);
-  `library_users` and `library_pins` still read the files. The thumbnail's `ETag` names
+  of the write lock; `GET /model-records/copy-status` answers its last run).
+  Phase 3: the catalogue's readers read only the rows, with no walk of the files before
+  a copy run has finished (the list, the record, the ids, `list_summaries`, `raw_metas`,
+  the pin index, the print settings, the name check, `duplicates_of`; `Catalogue._rows`,
+  which raises `RuntimeError` when no rows are open). One template's files are still
+  read when it has no row, when Postgres cannot store its `model.json`, or while its row
+  lags its media; `library_users` and `library_pins` still read the files. A database
+  where no run has finished gets its first copy before the app serves
+  (`main._first_template_copy`). A test's app runs that first copy too, but skips the
+  background start copy unless the test is marked `template_copy` (`tests/conftest.py`).
+  A test that writes template files by hand after its app started calls
+  `tests/support/template_rows.py` `sync_template_rows` (or `copy_template_rows` for a
+  catalogue it made itself), or the lists do not show the edit. The thumbnail's `ETag` names
   its source (`Catalogue.thumbnail_ref`: the cover's sha256, `"output-<id>"`,
   `"preview-<id>"`), so a 304 reads no file (except for a row that lags its media,
   `TemplateRow.media_newer`, which is read from the files); a 200 tags what it read.
@@ -2284,7 +2328,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Recent renders (#4777, order operations spec 2026-11-07 §3.1): `GET /outputs` lists every
   model's saved outputs, newest first, as `OutputDetail`s, filtered by `from`/`to`, `slug`,
   `tag` (the model's catalogue tags), `q` (name, or the params that differ from the cached
-  schema's defaults as `name=value`) and `ordered`; 50 a page by default. It reads the
+  schema's defaults as `name=value`) and `ordered`; 50 a page by default. Once a row copy
+  run has finished it reads the `outputs` rows (`OutputRows.query`, #7257: `name` and
+  `source` generated from `meta`, `params_text` written by a save; both lists share
+  `output_query.py` `query_ids`), and forgets nothing. Before that it reads the
   `output_index` table (`library/output_index.py` `OutputIndex`), which `OutputStore`
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
   with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
@@ -2304,7 +2351,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   cost) finds either. An output saved before the mark is marked by the start's sync, once:
   the migration `20261115T2118Z_output_index_source.sql` drops the rows named
   "Storefront: …", and the sync marks one only when its id is `storefront_output_id` of
-  its own render key (`output_index.py` `saved_by_storefront_run`). `POST /orders/{id}/items/batch` and
+  its own render key (`output_query.py` `saved_by_storefront_run`). `POST /orders/{id}/items/batch` and
   `…/items/after-acceptance/batch` (`ItemBatch`, at most `MAX_BATCH_ITEMS` 50) add
   `ItemCreate`s through `Lifecycle.add_items`, the one transaction every single add now
   uses (`NewModelItem`, `NewLibraryItem`, `NewCustomItem`, `NewRequestItem`); a body
@@ -2483,7 +2530,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   A pipeline template's listing (#5701, `orders/storefront/pipeline_inputs.py`, spec
   2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
   `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
-  ones on the render worker, and `listing_reference` writes the snapshot's around the
+  ones on the render worker (`RevisionSchema.pipeline`, `api/versions.py`, gives the editor the
+  same `pipeline_facts` at a revision), and `listing_reference` writes the snapshot's around the
   customer's `params`. A price, a preview and a cart line are of the listing's design while
   `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
   render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,

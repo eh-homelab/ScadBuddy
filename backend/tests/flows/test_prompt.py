@@ -446,7 +446,7 @@ async def test_the_open_activity_refuses_a_budget_timeout_on_its_last_attempt(
             FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
         )
     assert err.value.type == "TaskRefused" and err.value.non_retryable
-    assert "to check together" in err.value.message
+    assert "took too long to check" in err.value.message
 
 
 async def test_the_open_activity_refuses_the_apis_pattern_timeout_on_its_last_attempt() -> None:
@@ -463,15 +463,22 @@ async def test_the_open_activity_refuses_the_apis_pattern_timeout_on_its_last_at
     assert err.value.type == "TaskRefused" and err.value.non_retryable
 
 
-async def test_the_open_activity_refuses_a_pattern_that_always_times_out() -> None:
-    """A pattern that uses its whole `PATTERN_TIMEOUT_S` times out on every pod, so it is
-    the script's to mend: a final refusal, not a retry without end (#7437)."""
-    tasks = Tasks()
+async def test_the_open_activity_tries_a_full_deadline_timeout_again_then_refuses() -> None:
+    """A pattern that uses its whole `PATTERN_TIMEOUT_S` may be a starved pod, so it is
+    tried again; one that times out on every pod (`^(a|aa)+$`) is refused at the last
+    attempt, a final refusal and not a retry without end (#7437, #7688)."""
     schema = {"type": "object", "properties": {"x": SLOW}}
+    with pytest.raises(input_schema.PatternsTimedOutError):
+        await ActivityEnvironment().run(
+            FlowTaskActivities(Tasks()).open, {**OPEN, "schema": schema}
+        )
+    tasks = Tasks()
     with pytest.raises(ApplicationError) as err:
-        await ActivityEnvironment().run(FlowTaskActivities(tasks).open, {**OPEN, "schema": schema})
+        await _at_attempt(PATTERN_TIMEOUT_ATTEMPTS).run(
+            FlowTaskActivities(tasks).open, {**OPEN, "schema": schema}
+        )
     assert err.value.type == "TaskRefused" and err.value.non_retryable
-    assert f"its pattern took over {input_schema.PATTERN_TIMEOUT_S}s" in err.value.message
+    assert "took too long to check" in err.value.message
     assert tasks.calls == []
 
 

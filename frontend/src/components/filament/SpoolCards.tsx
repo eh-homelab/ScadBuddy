@@ -6,7 +6,7 @@ import { SpoolLink } from './SpoolLink'
 import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
 import { RgbaSwatch } from './RgbaSwatch'
-import { NeedsType } from './SpoolsTable'
+import { DriftNotice, NeedsType } from './SpoolsTable'
 import { grams, type SpoolGroup } from './spoolsQuery'
 
 interface Props {
@@ -62,6 +62,7 @@ export function SpoolCards({ groups, selected, onSelect, checks }: Props) {
                       {spool.grams_left == null ? 'Weight not known' : `${grams(spool.grams_left)} g${label ? ` of ${grams(label)}` : ''}`}
                     </p>
                     <NeedsType spool={spool} />
+                    <DriftNotice spool={spool} />
                     <NeedsDrying spool={spool} />
                     <CheckTray check={checks?.get(spool.id)} />
                   </div>
