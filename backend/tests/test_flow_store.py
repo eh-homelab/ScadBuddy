@@ -3,6 +3,7 @@ versions, and the run rows only a run's own workflow writes."""
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,13 +11,22 @@ from typing import Any
 import pytest
 from psycopg import Connection
 
-from scadbuddy.core.events import Event, FlowRunEvent
+from scadbuddy.core.events import Event, FlowRunEvent, TaskChanged
 from scadbuddy.flows import store as flow_store
-from scadbuddy.flows.models import RESULT_MAX
+from scadbuddy.flows.models import RESULT_MAX, Decision
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
+from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
+from scadbuddy.tasks.models import TaskOpen
+from scadbuddy.tasks.store import TaskStore
+from scadbuddy.workflows.flow_models import (
+    FlowRecord,
+    FlowStep,
+    FlowWaiting,
+    HopRecord,
+    ProjectionWrite,
+)
 from tests.flows.flows_support import define
 
 pytestmark = pytest.mark.requires_postgres
@@ -231,6 +241,113 @@ async def test_delete_run(store: FlowStore) -> None:
     assert await store.delete_run("r1")
     assert await store.get_run("r1") is None
     assert not await store.delete_run("r1")
+
+
+def answer_row(text: str, **update: Any) -> Decision:
+    row = Decision(
+        request_id="flow:r1:wr1:c",
+        run_id="r1",
+        workflow_run_id="wr1",
+        call_id="c",
+        kind="answer",
+        outcome="answered",
+        response={"answer": text},
+        responder="browser",
+    )
+    return row.model_copy(update=update)
+
+
+async def insert_operation(jobs: JobProjection, op_id: str, request: dict[str, Any]) -> None:
+    await OperationStore(jobs.pool).insert(
+        op_id,
+        kind="task_answer",
+        subject="flow:r1",
+        operation_key=op_id,
+        request=request,
+        workflow_id=op_id,
+        workflow_run_id=op_id,
+        retention=None,
+    )
+
+
+async def test_call_operations_are_the_calls_own_and_a_request_only_while_it_runs(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    await insert_operation(jobs, "a", {"run_id": "r1", "task_id": "c", "answer_sealed": "s"})
+    await insert_operation(jobs, "b", {"run_id": "r1", "call_id": "c", "answer_sealed": "t"})
+    await insert_operation(jobs, "c", {"run_id": "r1", "call_id": "other"})
+    await insert_operation(jobs, "d", {"run_id": "r1", "event_id": 1})
+    await OperationStore(jobs.pool).finish("a", result={})
+    found = {op.id: op.request for op in await store.call_operations("r1", "c")}
+    assert found == {"a": None, "b": {"run_id": "r1", "call_id": "c", "answer_sealed": "t"}}
+    assert await store.call_operations("r2", "c") == []
+
+
+async def test_an_answer_is_taken_over_only_as_it_was_seen(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    await started(store)
+    one, two = answer_row("one"), answer_row("two")
+    assert not await store.take_over_answer(two, held=one, seen=[])  # no row
+    assert await store.record_decision(one)
+    await insert_operation(jobs, "a", {"run_id": "r1", "task_id": "c", "answer_sealed": "s"})
+    # An operation nobody looked at may be the one that sends.
+    assert not await store.take_over_answer(two, held=one, seen=[])
+    # The row moved on since it was read.
+    assert not await store.take_over_answer(two, held=answer_row("three"), seen=["a"])
+    assert await store.take_over_answer(two, held=one, seen=["a"])
+    # Sent again after a lost reply.
+    assert await store.take_over_answer(two, held=one, seen=["a"])
+    held = await store.get_decision(two.request_id)
+    assert held is not None and held.response == {"answer": "two"}
+    assert not await store.take_over_answer(answer_row("three"), held=one, seen=["a"])
+    # Put back, whatever operation started since.
+    await insert_operation(jobs, "b", {"run_id": "r1", "task_id": "c", "answer_sealed": "t"})
+    assert not await store.take_over_answer(one, held=two, seen=["a"])
+    assert await store.take_over_answer(one, held=two, seen=None)
+    assert await store.take_over_answer(two, held=one, seen=["a", "b"])
+    # Only an answer's own row is withdrawn.
+    await store.withdraw_answer(one)
+    assert await store.get_decision(two.request_id) is not None
+    await store.withdraw_answer(two)
+    await store.withdraw_answer(two)
+    assert await store.get_decision(two.request_id) is None
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"kind": "approval", "outcome": "approved", "response": {}},
+        {"responder": "grant:g1"},
+    ],
+    ids=["approval", "grant"],
+)
+async def test_only_a_persons_answer_is_taken_over(store: FlowStore, update: Any) -> None:
+    await started(store)
+    held = answer_row("one", **update)
+    assert await store.record_decision(held)
+    assert not await store.take_over_answer(answer_row("two"), held=held, seen=[])
+
+
+async def test_an_answer_recorded_again_waits_for_a_take_over_under_way(
+    store: FlowStore, jobs: JobProjection
+) -> None:
+    await started(store)
+    one, two = answer_row("one"), answer_row("two")
+    assert await store.record_decision(one)
+    with jobs.pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "SELECT 1 FROM workflow_run_decisions WHERE request_id = %s FOR UPDATE",
+            (two.request_id,),
+        )
+        again = asyncio.ensure_future(store.record_decision(one))
+        await asyncio.sleep(0.5)
+        assert not again.done()
+        conn.execute(
+            "UPDATE workflow_run_decisions SET response = %s::jsonb WHERE request_id = %s",
+            ('{"answer": "two"}', two.request_id),
+        )
+    assert await again is False
 
 
 def parked(call_id: str, at: int) -> FlowWaiting:
@@ -452,3 +569,173 @@ async def test_resolved_entries_are_capped_and_a_reset_before_the_cut_is_refused
     # Event 26 does again from 25 on: q2 (answered at 25) waits again; q0 and q1 stay done.
     run = await store.reset_run("r1", replaced="wr1", point=26, request_id="op1", reset=reset)
     assert run is not None and [w.call_id for w in run.waiting_on] == ["q2"]
+
+
+# -- tasks (#7364) ----------------------------------------------------------------
+
+
+def waits(call_id: str, at: int = 10) -> FlowWaiting:
+    return FlowWaiting(
+        call_id=call_id, kind="answer", fn="prompt", prompt="q", since=NOW, history_length=at
+    )
+
+
+def opened(store: FlowStore, *ids: str, run_id: str = "r1") -> TaskStore:
+    tasks = TaskStore(store._pool)
+    for task_id in ids:
+        tasks.open(TaskOpen(id=task_id, run_id=run_id, title="q", schema={"type": "object"}))
+    return tasks
+
+
+def states(tasks: TaskStore, run_id: str = "r1") -> dict[str, str]:
+    return {t.id: t.state for t in tasks.list(state=None) if t.run_id == run_id}
+
+
+async def park(store: FlowStore, call_id: str, at: int = 10, execution: str = "wr1") -> None:
+    await store.project(
+        ProjectionWrite(run_id="r1", workflow_run_id=execution, waiting_add=waits(call_id, at))
+    )
+
+
+async def answer(store: FlowStore, call_id: str, at: int) -> None:
+    await store.project(
+        ProjectionWrite(
+            run_id="r1", workflow_run_id="wr1", waiting_remove=call_id, history_length=at
+        )
+    )
+
+
+async def end(store: FlowStore, how: str) -> None:
+    if how == "terminated":
+        assert await store.mark_terminated("r1") is not None
+    else:
+        await store.project(
+            ProjectionWrite.model_validate(
+                {"run_id": "r1", "workflow_run_id": "wr1", "status": how}
+            )
+        )
+
+
+async def to_wr2() -> str:
+    return "wr2"
+
+
+@pytest.mark.parametrize("how", ["succeeded", "failed", "terminated"])
+async def test_a_run_that_ends_cancels_its_open_tasks_before_its_own_event(
+    store: FlowStore, events: Events, how: str
+) -> None:
+    await started(store)
+    tasks = opened(store, "a", "b", "done")
+    tasks.mark_answered("done", {}, None, "wr1")
+    events.published.clear()
+    await end(store, how)
+    assert states(tasks) == {"a": "cancelled", "b": "cancelled", "done": "answered"}
+    *first, last = events.published
+    assert sorted(e.task_id for e in first if isinstance(e, TaskChanged)) == ["a", "b"]
+    assert len(first) == 2 and isinstance(last, FlowRunEvent)
+
+
+async def test_a_reset_matches_the_runs_tasks_before_its_own_event(
+    store: FlowStore, events: Events
+) -> None:
+    await started(store)
+    tasks = opened(store, "early", "parked", "late")
+    await park(store, "early", 4)
+    await answer(store, "early", 6)
+    await park(store, "parked", 10)
+    await answer(store, "parked", 20)
+    await park(store, "late", 22)
+    for task_id in ("early", "parked"):
+        tasks.mark_answered(task_id, {}, None, "wr1")
+    events.published.clear()
+    # After the first answer, before the second.
+    await store.reset_run("r1", replaced="wr1", point=15, request_id="q", reset=to_wr2)
+    assert states(tasks) == {"early": "answered", "parked": "open", "late": "cancelled"}
+    *first, last = events.published
+    assert sorted((e.task_id, e.state) for e in first if isinstance(e, TaskChanged)) == [
+        ("late", "cancelled"),
+        ("parked", "open"),
+    ]
+    assert isinstance(last, FlowRunEvent)
+
+
+@pytest.mark.parametrize("was", ["cancelled", "answered", "expired"])
+async def test_a_call_that_parks_opens_its_task_again(
+    store: FlowStore, events: Events, was: str
+) -> None:
+    """A Reset to a point after the task opened and before its call parked: the Reset
+    cannot tell that the call will park, so the parking says it."""
+    await started(store)
+    tasks = opened(store, "a")
+    with store._pool.connection() as conn:
+        conn.execute("UPDATE tasks SET state = %s", (was,))
+    events.published.clear()
+    await park(store, "a")
+    assert states(tasks) == {"a": "open"}
+    first, last = events.published
+    assert isinstance(first, TaskChanged) and isinstance(last, FlowRunEvent)
+
+
+async def test_a_repeated_park_leaves_the_task_as_it_stands(store: FlowStore) -> None:
+    await started(store)
+    tasks = opened(store, "a")
+    await park(store, "a")
+    tasks.mark_answered("a", {}, None, "wr1")
+    await park(store, "a")
+    assert states(tasks) == {"a": "answered"}
+
+
+async def ends_step(store: FlowStore, call_id: str, execution: str = "wr1") -> None:
+    await store.project(
+        ProjectionWrite(
+            run_id="r1",
+            workflow_run_id=execution,
+            step=step(call_id, 1, "succeeded").model_copy(update={"ended_at": NOW}),
+            history_length=20,
+        )
+    )
+
+
+@pytest.mark.parametrize("by", ["step", "done"])
+async def test_a_late_park_of_a_call_that_ended_opens_nothing(store: FlowStore, by: str) -> None:
+    """A park sent twice, its first copy late. The call has ended in this execution, so
+    nothing would ever answer the task again."""
+    await started(store)
+    tasks = opened(store, "a")
+    if by == "step":
+        await ends_step(store, "a")
+    else:
+        await park(store, "a")
+        await answer(store, "a", 20)
+    tasks.mark_answered("a", {"ok": True}, None, "wr1")
+    await park(store, "a")
+    held = tasks.get("a")
+    assert held is not None and (held.state, held.answer) == ("answered", {"ok": True})
+
+
+async def test_a_park_of_a_call_another_execution_ended_opens_its_task(store: FlowStore) -> None:
+    """A Reset made in Temporal leaves the old execution's end of the call on the row."""
+    await started(store)
+    tasks = opened(store, "a")
+    await ends_step(store, "a")
+    tasks.mark_answered("a", {}, None, "wr1")
+    await store.follow_run("r1", "wr9")
+    await park(store, "a", execution="wr9")
+    assert states(tasks) == {"a": "open"}
+
+
+async def test_a_replaced_executions_park_opens_nothing(store: FlowStore) -> None:
+    await started(store)
+    tasks = opened(store, "a")
+    await store.reset_run("r1", replaced="wr1", point=5, request_id="q", reset=to_wr2)
+    await park(store, "a")
+    assert states(tasks) == {"a": "cancelled"}
+
+
+async def test_a_moved_hop_and_a_followed_run_touch_no_task(store: FlowStore) -> None:
+    await started(store)
+    tasks = opened(store, "a")
+    await store.follow_run("r1", "wr9")
+    record = HopRecord(hop="parent", action="timeout", actor="system", at=NOW)
+    await store.move_hop("r1", "a", record)
+    assert states(tasks) == {"a": "open"}

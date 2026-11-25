@@ -63,6 +63,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
@@ -70,6 +71,8 @@ from scadbuddy.library.repo_lock import PgRepoCoordinator
 from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.library.template_refresh import TemplateRefresh
+from scadbuddy.library.template_rows import TemplateRows
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
 from scadbuddy.printers.progress import LanProgress, lan_last_print
 from scadbuddy.printers.reports import PrinterReportStore
@@ -360,6 +363,7 @@ def _build_core(settings: Settings) -> AppState:
     preview_store = PreviewStore(pool.connection)
     outputs = OutputStore(paths, prints=OutputPrintStore(pool))
     outputs.index = OutputIndex(pool, paths)
+    outputs.rows = OutputRows(pool)
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))
@@ -389,6 +393,12 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
+    # The history gets it only after the migrations (`main._start_render`, #7317).
+    catalogue.refresh = TemplateRefresh(
+        catalogue,
+        TemplateRows(pool),
+        on_failure=lambda path: metrics.template_refresh_failures.labels(path).inc(),
+    )
     follower.catalogue = catalogue
     # Lazy, so the API boots while Temporal is down: a render is then refused with
     # `temporal-unavailable` (#1053) until it is back.

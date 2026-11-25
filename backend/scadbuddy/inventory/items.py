@@ -14,7 +14,7 @@ from psycopg.rows import DictRow
 
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.kinds import KindArchived, KindNotFound
-from scadbuddy.inventory.models import Item, ItemInput, ItemPatch
+from scadbuddy.inventory.models import InventoryItemPatch, Item, ItemInput
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
@@ -33,8 +33,9 @@ class FilamentItemRefused(ValueError):  # noqa: N818
     """Items of a `filament` kind wait for phase 3 (#7068; the plan's Ruling 9)."""
 
 
-#: Every item with its kind's figures and its stock. A lot counts at its `on_hand`; its
-#: value and unknown cost only while it holds stock. A unit counts while `in_stock`.
+#: Every item with its kind's figures, its stock and its unarchived offers' count (R-P2-37).
+#: A lot counts at its `on_hand`; its value and unknown cost only while it holds stock. A
+#: unit counts while `in_stock`.
 _ITEMS = """
 SELECT i.id, i.kind_id, k.tracking, k.uom, i.name, i.manufacturer, i.compatible_with,
     i.low_stock, i.life_hours, i.life_months, i.saleable,
@@ -45,7 +46,8 @@ SELECT i.id, i.kind_id, k.tracking, k.uom, i.name, i.manufacturer, i.compatible_
     CASE k.tracking WHEN 'lot' THEN l.value WHEN 'unit' THEN u.value ELSE 0 END
         AS stock_value_minor,
     CASE k.tracking WHEN 'lot' THEN l.unknown WHEN 'unit' THEN u.unknown ELSE false END
-        AS cost_unknown
+        AS cost_unknown,
+    o.offer_count
 FROM items i
 JOIN item_kinds k ON k.id = i.kind_id
 CROSS JOIN LATERAL (
@@ -59,6 +61,10 @@ CROSS JOIN LATERAL (
         coalesce(bool_or(cost_unknown), false) AS unknown
     FROM stock_units WHERE item_id = i.id AND status = 'in_stock'
 ) u
+CROSS JOIN LATERAL (
+    SELECT count(*) AS offer_count FROM supplier_offers
+    WHERE item_id = i.id AND archived_at IS NULL
+) o
 """
 
 #: `low_stock > 0 and on_hand <= low_stock`; never for a kind that is not counted.
@@ -101,11 +107,12 @@ class ItemStore:
         low: bool = False,
         include_archived: bool = False,
         compatible: str | None = None,
+        limit: int = 1000,
     ) -> builtins.list[Item]:
         """Items by name. `kind` with its descendants unless `descendants` is false; `q`
         matches the name, the manufacturer or any property value, in any case; `low` only
         those at or below their `low_stock`; `compatible` those that name the printer
-        model code."""
+        model code. Up to `limit` of them."""
         where: builtins.list[str] = []
         params: builtins.list[Any] = []
         if not include_archived:
@@ -140,8 +147,8 @@ class ItemStore:
         clause = f" WHERE {' AND '.join(where)}" if where else ""
         with self.pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT s.* FROM ({_ITEMS}) s{clause} ORDER BY lower(s.name), s.id",
-                params,
+                f"SELECT s.* FROM ({_ITEMS}) s{clause} ORDER BY lower(s.name), s.id LIMIT %s",
+                [*params, limit],
             ).fetchall()
             paths = self._paths(conn)
         return [self._of(r, paths) for r in rows]
@@ -194,7 +201,7 @@ class ItemStore:
         assert made is not None
         return made
 
-    def update(self, item_id: UUID, patch: ItemPatch, by: Actor) -> Item:
+    def update(self, item_id: UUID, patch: InventoryItemPatch, by: Actor) -> Item:
         """The fields `patch` names. On an imported item (`source` not `manual`) each
         field whose value changes joins `edited_fields`, which a later import skips."""
         fields = patch.model_dump(exclude_unset=True)

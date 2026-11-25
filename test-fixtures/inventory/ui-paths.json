@@ -1,0 +1,8 @@
+[
+  { "kind": "item", "keys": ["ab700000-0000-4000-8000-000000000001"], "path": "/inventory/items/ab700000-0000-4000-8000-000000000001" },
+  { "kind": "unit", "keys": ["ab710000-0000-4000-8000-000000000001"], "path": "/inventory/units/ab710000-0000-4000-8000-000000000001" },
+  { "kind": "lot", "keys": ["ab720000-0000-4000-8000-000000000001"], "path": "/inventory/lots/ab720000-0000-4000-8000-000000000001" },
+  { "kind": "kind", "keys": ["hardware"], "path": "/inventory?kind=hardware" },
+  { "kind": "offer", "keys": ["ab700000-0000-4000-8000-000000000001", "ab730000-0000-4000-8000-000000000001"], "path": "/inventory/items/ab700000-0000-4000-8000-000000000001#offer-ab730000-0000-4000-8000-000000000001" },
+  { "kind": "item", "keys": ["a b/c"], "path": "/inventory/items/a%20b%2Fc" }
+]

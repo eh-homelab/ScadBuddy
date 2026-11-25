@@ -11,6 +11,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 import zipfile
@@ -37,6 +38,7 @@ from psycopg_pool import ConnectionPool
 from temporalio.worker import _workflow as temporal_workflow_worker
 
 from scadbuddy import main as scadbuddy_main
+from scadbuddy.api.deps import AppState
 from scadbuddy.api.jobs import forget_unreadable_notes_logs
 from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.bambuddy.print_run import forget_out_of_memory_logs
@@ -107,6 +109,18 @@ def _patient_workflow_worker_init(self: Any, *args: Any, **kwargs: Any) -> None:
 temporal_workflow_worker._WorkflowWorker.__init__ = _patient_workflow_worker_init  # type: ignore[method-assign]
 
 
+@pytest.fixture
+def sdk_deadlock_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every worker the test builds keeps the SDK's 2 s bound, its own or one a helper
+    builds (`verify_pipeline.verify`): a test whose activation never yields needs the
+    detector to fire as in production. With the session's 30 s, the worker's shutdown
+    waited for the stuck activation until the detector fired (#7522). The bound is read
+    when a worker is built, so a worker built in a fixture that pytest sets up before
+    this one keeps the 30 s bound: build it in the test, or in a fixture that takes this
+    one (#7539)."""
+    monkeypatch.setitem(globals(), "TEST_DEADLOCK_SECONDS", SDK_DEADLOCK_SECONDS)
+
+
 @pytest.fixture(autouse=True)
 def _agent_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """The API applies the agent's migrations at start (#5299 D6), about a second per
@@ -115,6 +129,21 @@ def _agent_migrations(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     (`tests/api/test_agent_migrations_at_start.py`)."""
     if request.node.get_closest_marker("agent_migrations") is None:
         monkeypatch.setattr(scadbuddy_main, "_migrate_agent_at_start", lambda state: None)
+
+
+@pytest.fixture(autouse=True)
+def app_template_copy_off(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#7317: the app's start copy of the templates' files to rows does nothing, unless
+    the test is marked `template_copy`. It walks every template and writes their rows at
+    a time the test does not choose, beside the writes the test makes itself, and holds
+    the per-database copy lock that a test calling `copy_templates` takes too."""
+    if request.node.get_closest_marker("template_copy") is not None:
+        return
+
+    async def off(state: AppState, *, stop: threading.Event) -> None:
+        return None
+
+    monkeypatch.setattr(scadbuddy_main, "_copy_templates_logged", off)
 
 
 @pytest.fixture(autouse=True)

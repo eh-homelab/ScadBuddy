@@ -22,6 +22,7 @@ amd64 only:
 | `slicer` (`Dockerfile:555`) | `ghcr.io/eh-homelab/scadbuddy-slicer` | `scadbuddy-slicer` (`Dockerfile:609`) | `slicer` (`build-image.yml:544`) |
 | `profile-fetch` (`Dockerfile:654`) | `ghcr.io/eh-homelab/scadbuddy-profile-fetch` | `tini` then the browser service by default (`Dockerfile:728-729`); the worker's Deployment runs `python -m scadbuddy.profile_fetch` ([processes.md](processes.md#profile-fetch-worker-and-browser)) | `profile-fetch` (`build-image.yml:657`) |
 | `playwright-mcp` (#7027; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` | `tini -s -- node /opt/scadbuddy-playwright-mcp/server.mjs`: `@playwright/mcp` with each MCP session's context built from the `X-ScadBuddy-Browser` header (`workers/playwright-mcp/`) | `playwright-mcp` (`build-image.yml:542` after `67d7ff6`) |
+| `camera-relay`, `camera-recorder` (after `67d7ff6`, #7328) | `ghcr.io/eh-homelab/scadbuddy-camera-relay`, `ghcr.io/eh-homelab/scadbuddy-camera-recorder` | `tini` then the controller; each pod runs the image a second time as `mediamtx` ([processes.md](processes.md#camera-relay-and-recorders)) | `camera` (one leg per image) |
 
 `openscad-lsp` (`Dockerfile:767`) and `libraries` (`Dockerfile:829`) are internal stages
 copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gates the
@@ -47,7 +48,7 @@ sequenceDiagram
     BI-->>DM: workflow_run completed (main only)
     DM->>GHCR: digest of scadbuddy:sha-<7>
     DM->>DR: digest, version, revision
-    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch digests
+    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp digests
     DR->>CL: PR on deploy/scadbuddy, image@sha256 pins, auto-merge armed
     CL->>Argo: merge (after clusters' own checks)
     Argo->>Argo: sync the scadbuddy Application
@@ -68,7 +69,8 @@ sequenceDiagram
    rewrites each image line to `image@sha256:digest`, plus the version, revision and
    source annotations (`:666-672`), in the API manifest (required) and, where they exist,
    the render, print, projects, storefront, intake, agent-worker, agent-durable, slicer,
-   sandbox and profile-fetch manifests (`:116-158`, `:924-1030`). Where clusters keeps a
+   sandbox, profile-fetch and playwright-mcp manifests (`:116-158`, `:924-1030`; the
+   playwright-mcp pin in `applications/scadbuddy/playwright-mcp.yaml` since #7546). Where clusters keeps a
    copy of `deploy/grafana`, it replaces that copy with the files at the deployed revision
    and writes the revision into its `.revision` file (`:818-831`, `:997`). It fails on any `ghcr.io/eh-homelab/scadbuddy*` reference
    it did not pin (`:1044-1071`), then opens or replaces the PR on the fixed branch
@@ -106,6 +108,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 | go | `go-select` (`:1941`), `go` (`:1964`, calls `go-module-ci.yml`) | gofmt, vet, build, `test -race`, vendor drift, CLI images | [`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md) |
 | rust | `rust` (`:1976`), `slicer-image` (`:2053`) | the Rust workspace and the `slicer` target | [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md) |
 | profile-fetch | `profile-fetch-image` (`:2112`) | the profile-fetch site tests in the `test` stage | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |
+| image | `camera-image` (after `67d7ff6`, #7328) | builds the `camera-relay` and `camera-recorder` targets, checks MediaMTX, `curl`, `TZ`, the refusals and the relay's read user | [`docs/features/printer-cameras.md`](../features/printer-cameras.md) |
 | freshness | `freshness` (`:2255`), `go-client` (`:2642`) | the generated API files ([data.md](data.md#generated-api-files)) and the Go client | root `CLAUDE.md` "Generated API files" |
 | review | `dispatch-review` (`:2837`) | dispatches `claude-code-review.yml`, which posts the `claude-review` status | root `CLAUDE.md` "PR conventions" |
 

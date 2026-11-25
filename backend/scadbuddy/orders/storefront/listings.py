@@ -7,13 +7,14 @@ published listing unpublishes it: a change is not live until the shop publishes 
 
 ``publish`` checks the listing against its commit's schema and captures what a visitor's
 render needs without git (plan point 2): the schema, the template's name and library
-pins, and its source snapshot. A pipeline template is refused for now (422
-``listing_pipeline_unsupported``): its inputs need not be ``model.scad``'s parameters,
-which are all a listing can bound. It copies each chosen media file into the content
-store. The snapshot and the media are held in ``blob_refs`` under (:data:`HOLDER`,
-listing id) while the listing is published; unpublishing, an edit and a delete drop that
-hold in the same transaction as the row, and a failed publish drops every hold the row
-does not name. Publishes of one listing never overlap (``begin_publish``), so a failing
+pins, and its source snapshot. A pipeline template's own inputs (``inputs``) are the
+shop's (#5701, `pipeline_inputs.py`): publish checks them against the shape the template
+declares, and the snapshot keeps them. A listing bounds ``model.scad``'s parameters only.
+It copies each chosen media file into the content store. The snapshot and the media are
+held in ``blob_refs`` under (:data:`HOLDER`, listing id) while the listing is published;
+unpublishing, an edit and a delete drop that hold in the same transaction as the row, and
+a failed publish drops every hold the row does not name. Publishes of one listing never
+overlap (``begin_publish``), so a failing
 one cannot drop the holds a running one took.
 
 ``public_listing`` is a published listing as the public site sees it (Task 6): its bounds
@@ -28,6 +29,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import tarfile
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -42,14 +44,16 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import TypeAdapter
+from pydantic import JsonValue, TypeAdapter
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.paths import model_path
 from scadbuddy.core.pg_pool import record_connection
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.wire import NOT_CONFIGURED
-from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError, declares_pipeline
+from scadbuddy.library.catalogue import MediaNotFoundError, ModelNotFoundError
 from scadbuddy.library.libraries import CheckoutFetcher
+from scadbuddy.library.slugs import is_model_id
 from scadbuddy.orders.models import Filament
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.storefront.closest_colour import Swatch, closest_colour
@@ -67,6 +71,14 @@ from scadbuddy.orders.storefront.inputs import (
     value_reason,
 )
 from scadbuddy.orders.storefront.inputs import sets_support as _sets_support
+from scadbuddy.orders.storefront.pipeline_inputs import (
+    PipelineFacts,
+    check_set_params,
+    check_shape,
+    check_unexpected,
+    pipeline_facts,
+    settled_inputs,
+)
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile, missing_materials
 from scadbuddy.orders.storefront.wire import (
     FILE_PICTURE_ID,
@@ -97,7 +109,7 @@ from scadbuddy.orders.storefront.wire import (
     is_support,
     shown_label,
 )
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import SnapshotUnavailableError, resolve_source, source_directory
 from scadbuddy.render.runner import OpenSCADError, cached_schema, format_scad_value
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.store.content_models import BlobScope
@@ -147,8 +159,8 @@ _needs_s3_warned: float | None = None
 
 _COLUMNS = (
     "id, source, slug, commit, library_file, title, description, position, published, params,"
-    " fixed, colours, media_ids, materials, snapshot, media, published_at, created_at,"
-    " updated_at"
+    " fixed, inputs, inputs_v, colours, media_ids, materials, snapshot, media, published_at,"
+    " created_at, updated_at"
 )
 _NUMBERS = frozenset({"number", "integer", "slider"})
 #: Each sort's columns, the last of each the id, so a page boundary never splits ties.
@@ -256,21 +268,27 @@ def _source_invalid(name: str, detail: str) -> ApiError:
 
 def check_source(body: ListingInput) -> None:
     """422 ``listing_source_invalid`` (with ``name``, the field) for a body whose fields
-    do not fit its ``source`` (#6710 §4.1): a template needs ``slug`` and ``commit`` and no
-    ``library_file``; a file listing needs ``library_file``, no ``slug``, ``commit``,
-    ``params`` or ``fixed``, and only `FILE_PICTURE_ID`s in ``media_ids``."""
+    do not fit its ``source`` (#6710 §4.1): a template needs ``slug``, a template's id whole,
+    and ``commit``, and no ``library_file``; a file listing needs ``library_file``, no
+    ``slug``, ``commit``, ``params``, ``fixed``, ``inputs`` or ``inputs_v``, and only
+    `FILE_PICTURE_ID`s in ``media_ids``. The slug is checked here and not by the model,
+    which a stored row is read by too."""
     if body.source == "template":
         for name in ("slug", "commit"):
             if getattr(body, name) is None:
                 raise _source_invalid(name, f"a template listing needs its {name}")
+        if not is_model_id(body.slug or ""):
+            raise _source_invalid("slug", f"{body.slug!r} is not a template's id")
         if body.library_file is not None:
             raise _source_invalid("library_file", "a template listing names no library file")
         return
     if body.library_file is None:
         raise _source_invalid("library_file", "a file listing needs its library file")
-    for name in ("slug", "commit", "params", "fixed"):
+    for name in ("slug", "commit", "params", "fixed", "inputs"):
         if getattr(body, name):
             raise _source_invalid(name, f"a file listing has no {name}")
+    if body.inputs_v is not None:
+        raise _source_invalid("inputs_v", "a file listing has no inputs_v")
     for media_id in body.media_ids:
         if FILE_PICTURE_ID.fullmatch(media_id) is None:
             raise _source_invalid(
@@ -355,18 +373,20 @@ class ListingStore:
 
     def create(self, body: ListingInput) -> Listing:
         """A new listing, unpublished, after every other one; 422
-        ``listing_choice_empty`` for a choice with nothing to choose."""
+        ``listing_choice_empty`` for a choice with nothing to choose, and `check_shape`'s
+        for its ``inputs``."""
         check_source(body)
         _check_choices(body)
+        check_shape(body.inputs)
         with self.pool.connection() as conn, conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (POSITION_LOCK,))
             row = conn.execute(
                 "INSERT INTO storefront_listings"
                 " (source, library_file, slug, commit, title, description, position, params,"
-                " fixed, colours, media_ids, materials)"
+                " fixed, inputs, inputs_v, colours, media_ids, materials)"
                 " VALUES (%s, %s, %s, %s, %s, %s,"
                 " (SELECT coalesce(max(position) + 1, 0) FROM storefront_listings),"
-                f" %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
+                f" %s, %s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
                 (body.source, _stored_file(body), *self._fields(body)),
             ).fetchone()
         assert row is not None
@@ -382,6 +402,8 @@ class ListingStore:
             body.description,
             Jsonb(dumped["params"]),
             Jsonb(dumped["fixed"]),
+            Jsonb(dumped["inputs"]),
+            body.inputs_v,
             body.colours,
             body.media_ids,
             body.materials,
@@ -393,15 +415,14 @@ class ListingStore:
         """The listing replaced by ``body``, and unpublished; 409 ``listing_changed``
         when it changed after ``expected_updated_at`` was read, 404 when it is gone, 422
         ``listing_choice_empty`` for a choice with nothing to choose, 422
-        ``listing_source_invalid`` for a body that does not fit its source. A file
+        ``listing_source_invalid`` for a body that does not fit its source, and
+        `check_shape`'s for its ``inputs``. A file
         listing's pin stays unless the save picks another file (`_saved_file`); then the
         hold on its held copy goes in the same transaction. An uploaded picture
         ``media_ids`` no longer names loses its hold (`_drop_kept_pictures`)."""
         check_source(body)
         _check_choices(body)
-        slug, commit, title, description, params, fixed, colours, media_ids, materials = (
-            self._fields(body)
-        )
+        check_shape(body.inputs)
         with self.pool.connection() as conn, conn.transaction():
             stored = conn.execute(
                 "SELECT library_file FROM storefront_listings WHERE id = %s AND updated_at = %s"
@@ -414,23 +435,15 @@ class ListingStore:
             row = conn.execute(
                 "UPDATE storefront_listings SET source = %s, library_file = %s,"
                 " slug = %s, commit = %s, title = %s,"
-                " description = %s, params = %s, fixed = %s, colours = %s, media_ids = %s,"
-                " materials = %s, published = false, snapshot = NULL, media = '[]',"
-                " published_at = NULL,"
+                " description = %s, params = %s, fixed = %s, inputs = %s, inputs_v = %s,"
+                " colours = %s, media_ids = %s, materials = %s, published = false,"
+                " snapshot = NULL, media = '[]', published_at = NULL,"
                 " updated_at = clock_timestamp()"
                 f" WHERE id = %s AND updated_at = %s RETURNING {_COLUMNS}",
                 (
                     body.source,
                     library_file,
-                    slug,
-                    commit,
-                    title,
-                    description,
-                    params,
-                    fixed,
-                    colours,
-                    media_ids,
-                    materials,
+                    *self._fields(body),
                     listing_id,
                     expected_updated_at,
                 ),
@@ -1051,10 +1064,52 @@ def check_locked_colours(
     )
 
 
-async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
+async def with_inputs_version(core: Core, body: ListingInput) -> ListingInput:
+    """``body`` as a save keeps it: a pipeline template's inputs with no version are of its
+    commit's ``INPUTS_VERSION`` (#5701), which the row keeps, so a publish at a later commit
+    migrates them. Unchanged for a template or a revision that cannot be read: publish
+    refuses those. `check_source`'s 422 comes first, so no path is made of a slug that is
+    not a template's id; and the commit is one of the template's in the history, as
+    `resolve_reference` asks, whatever export of it is on the volume."""
+    check_source(body)
+    slug, commit = body.slug, body.commit
+    if not body.inputs or body.inputs_v is not None or slug is None or commit is None:
+        return body
+
+    def known() -> bool:
+        return (
+            core.catalogue.exists(slug)
+            and core.history.available
+            and core.history.touched(core.history.resolve(commit), model_path(slug))
+        )
+
+    try:
+        if not await asyncio.to_thread(known):
+            return body
+        directory, _ = await source_directory(slug, commit, paths=core.paths, history=core.history)
+    except (
+        GitError,
+        RevisionNotFoundError,
+        SnapshotUnavailableError,
+        tarfile.TarError,
+        OSError,
+    ) as error:
+        logger.warning(
+            "the inputs version of %s@%s was not read: %s", slug, commit, type(error).__name__
+        )
+        return body
+    facts = await asyncio.to_thread(pipeline_facts, directory, slug)
+    if facts is None or facts.inputs_version is None:
+        return body
+    return body.model_copy(update={"inputs_v": facts.inputs_version})
+
+
+async def _commit_facts(
+    core: Core, slug: str, commit: str
+) -> tuple[ListingSnapshot, PipelineFacts | None]:
     """The commit's schema, pipeline flag, name and library pins, without the snapshot
-    key; 422 ``listing_reference`` for a slug or commit that is not a revision of a
-    template, 422 ``listing_pipeline_unsupported`` for a pipeline template."""
+    key and the inputs, and what it declares of its pipeline (None with no pipeline); 422
+    ``listing_reference`` for a slug or commit that is not a revision of a template."""
     fetcher = CheckoutFetcher(core.libraries, core.installs, core.checkouts)
     try:
         resolved = await resolve_reference(
@@ -1084,22 +1139,16 @@ async def _commit_facts(core: Core, slug: str, commit: str) -> ListingSnapshot:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, f"the schema could not be built: {error}"
         ) from None
-    directory = source.scad.parent
-    if await asyncio.to_thread(declares_pipeline, directory, slug):
-        # A pipeline's inputs need not be `model.scad`'s parameters, which is all a
-        # listing can bound yet.
-        raise _unprocessable(
-            "listing_pipeline_unsupported",
-            f"{slug!r} is a pipeline template; the storefront cannot list one yet",
-        )
+    pipeline = await asyncio.to_thread(pipeline_facts, source.scad.parent, slug)
     reference = resolved.reference
-    return ListingSnapshot(
+    snapshot = ListingSnapshot(
         schema=schema,
-        pipeline=False,
+        pipeline=pipeline is not None,
         template_name=reference.template_name,
         libraries=list(reference.libraries),
         snapshot_key="",
     )
+    return snapshot, pipeline
 
 
 def _sha256(path: Path) -> str:
@@ -1177,10 +1226,11 @@ async def publish(core: AppState, store: ListingStore, listing_id: str) -> Listi
     ``listing_default_invalid``, ``listing_colour_unknown``, ``listing_media_unknown``,
     ``listing_material_not_allowed`` (`check_materials`, #6258),
     ``listing_locked_colours_unprintable`` (`check_locked_colours`, #6302 review),
-    ``listing_reference`` or ``listing_pipeline_unsupported`` for a listing its commit or
-    the price book does not back, ``listing_material_unsliceable`` for a material the shop
-    slice profile has no filament type for (#6153); 409 ``listing_changed`` when it was
-    edited while it was being published; 409 ``listing_publishing`` while another
+    ``listing_reference`` for a listing its commit or the price book does not back,
+    `pipeline_inputs.py`'s for a pipeline template's inputs (#5701),
+    ``listing_material_unsliceable`` for a material the shop slice profile has no filament
+    type for (#6153); 409 ``listing_changed`` when it was edited while it was being
+    published; 409 ``listing_publishing`` while another
     publish of it runs (it is refused, not queued); 503 ``listing_publish_busy`` while
     :data:`PUBLISH_LOCKS_MAX` other publishes run. A file listing is checked and kept as
     `file_listings.py` `publish_file` says (#6710 §5)."""
@@ -1208,7 +1258,17 @@ async def _publish(
 
         return await publish_file(core, store, listing)
     assert listing.slug is not None and listing.commit is not None
-    facts = await _commit_facts(core, listing.slug, listing.commit)
+    facts, pipeline = await _commit_facts(core, listing.slug, listing.commit)
+    inputs: dict[str, JsonValue] = {}
+    if pipeline is None:
+        check_unexpected(listing)
+    else:
+        inputs = await settled_inputs(
+            core.render, listing, listing.slug, listing.commit, pipeline, facts.schema_
+        )
+        check_set_params(listing, facts.schema_, pipeline.sets_params)
+        # `settled_inputs` refuses a pipeline whose version cannot be read.
+        assert pipeline.inputs_version is not None
     colours = await asyncio.to_thread(store.filament_colours)
     supports = await asyncio.to_thread(store.support_filaments)
     fixed = checked_fixed(facts.schema_, listing, colours, supports)
@@ -1227,7 +1287,14 @@ async def _publish(
         return await asyncio.to_thread(
             store.mark_published,
             listing.id,
-            snapshot=facts.model_copy(update={"snapshot_key": key, "fixed": fixed}),
+            snapshot=facts.model_copy(
+                update={
+                    "snapshot_key": key,
+                    "fixed": fixed,
+                    "inputs": inputs,
+                    "inputs_version": 0 if pipeline is None else pipeline.inputs_version,
+                }
+            ),
             media=media,
             expected_updated_at=listing.updated_at,
         )
@@ -1503,6 +1570,31 @@ def _offered_file(
     )
 
 
+def page_colours(
+    listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
+) -> dict[int, str] | None:
+    """The filament of each part a visitor's page of the published file ``listing`` opens
+    on (#7523): the page knows a part by its colour (`fileParts.ts` `partFilaments`), so it
+    takes the first filament of the part's default colour in the default's material. None
+    when a part has none: the listing cannot be ordered."""
+    snapshot = listing.file_snapshot
+    assert snapshot is not None
+    shown = _offered_file(listing, snapshot, filaments, shop_materials)
+    by_id = {f.id: f for f in shown.filaments}
+    colours: dict[int, str] = {}
+    for part in shown.slots:
+        if part.default is None:
+            return None
+        start = by_id[part.default]
+        colours[part.slot] = next(
+            f.id
+            for f in shown.filaments
+            if f.colour.casefold() == start.colour.casefold()
+            and material_key(f.material) == material_key(start.material)
+        )
+    return colours
+
+
 def _offered(
     listing: Listing, filaments: Mapping[str, Filament], shop_materials: Sequence[str]
 ) -> _Offered:
@@ -1616,14 +1708,25 @@ def published_listing(
 ) -> Listing:
     """The listing, when it is published and sells ``source`` (either, for None); 404
     ``listing_not_found`` for an unpublished or unknown one alike, so a visitor cannot tell
-    them apart, and for an id that is not one, before any lookup. A template's render and
-    its prepare run take a template listing only; the public page takes either (#6710)."""
+    them apart, and for an id that is not one, before any lookup. A published one that
+    sells the other source is 409 ``listing_changed``: the shop switched it since the
+    page read it, and the page loads it again (#6710). The public page takes either."""
     listing = store.get(listing_id) if LISTING_ID.fullmatch(listing_id) else None
-    if (
-        listing is None
-        or not listing.published
-        or listing.snapshot is None
-        or (source is not None and listing.source != source)
-    ):
-        raise problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+    if listing is None or not listing.published or listing.snapshot is None:
+        raise no_such_listing()
+    if source is not None and listing.source != source:
+        raise page_outdated()
     return listing
+
+
+def no_such_listing() -> ApiError:
+    """404 ``listing_not_found``, as a visitor reads it."""
+    return problem(status.HTTP_404_NOT_FOUND, "listing_not_found", "There is no such listing.")
+
+
+def page_outdated() -> ApiError:
+    """409 ``listing_changed``, as a visitor reads it: the listing moved since its page
+    read it."""
+    return problem(
+        status.HTTP_409_CONFLICT, "listing_changed", "This listing has changed. Load it again."
+    )

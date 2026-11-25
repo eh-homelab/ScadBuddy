@@ -16,6 +16,8 @@ RESULT_MAX = 4096
 #: The host function behind a harness callback or gated tool, by the tool's name.
 HOST_FN = {
     "human_answer": "wait_for_human",
+    "human_answer_open": "wait_for_human",
+    "task_answer": "prompt",
     "approved_print": "queue_print",
     "approved_arrange": "arrange",
     "approved_tool": "tool",
@@ -186,3 +188,11 @@ class Decision(BaseModel):
     #: The entry's way up before it was decided (#2482), and the decision's own step.
     hops: list[HopRecord] = []
     created_at: datetime | None = None
+
+
+class CallOperation(BaseModel):
+    """An operation on one parked call, as its record has it (`operations`, #7575)."""
+
+    id: str
+    #: Its request while it runs, an answer sealed in it; None once it has ended.
+    request: dict[str, Any] | None = None

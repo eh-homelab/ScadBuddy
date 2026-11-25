@@ -6,12 +6,14 @@ previews as edge paths. A support slot, an unused slot and a support filament ne
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from scadbuddy.orders.models import Filament
-from scadbuddy.orders.storefront.listings import public_card, public_listing
+from scadbuddy.orders.storefront.listings import page_colours, public_card, public_listing
 from scadbuddy.orders.storefront.wire import FileSlot, FileSnapshot, Listing, PublicListing
 from scadbuddy.store.content import ContentStore
 from tests.orders.storefront.test_inputs import NOW, filament
@@ -124,6 +126,37 @@ def test_a_part_with_no_colour_on_offer_is_unavailable() -> None:
         public_card(cast(ContentStore, None), file_listing(colours=[PVA]), FILAMENTS, SHOP)
     )
     assert not card.available
+
+
+#: The page's own test reads them too (`frontend/src/storefront/fileParts.test.ts`).
+PAGE_COLOURS = json.loads(
+    (
+        Path(__file__).resolve().parents[4] / "test-fixtures/storefront/file-page-colours.json"
+    ).read_text()
+)
+
+
+@pytest.mark.parametrize("vector", PAGE_COLOURS, ids=lambda v: v["case"])
+def test_the_shop_prices_the_colours_the_page_opens_on(vector: dict[str, Any]) -> None:
+    """#7523: `page_colours` and the page's `partFilaments` with no pick, on one vector."""
+    book = {
+        f["id"]: filament(f["id"], f["colour"], f["material"]).model_copy(
+            update={"alpha": f["alpha"]}
+        )
+        for f in vector["filaments"]
+    }
+    listing = file_listing(colours=list(book), materials=vector["materials"])
+    assert listing.file_snapshot is not None
+    slots = [slot(s["slot"], s["colour"]) for s in vector["slots"]]
+    pinned = listing.file_snapshot.model_copy(update={"slots": slots})
+    listing = listing.model_copy(update={"snapshot": pinned})
+    assert [s.default for s in shown(listing, book).slots] == [
+        s["default"] for s in vector["slots"]
+    ]
+    want = vector["want"]
+    assert page_colours(listing, book, SHOP) == (
+        None if want is None else {int(n): chosen for n, chosen in want.items()}
+    )
 
 
 def test_a_file_listing_with_no_preview_has_none() -> None:

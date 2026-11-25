@@ -8,7 +8,15 @@ from typing import Literal
 
 #: The callers with CRUD routes; `auth/routes.py` `CRUD_CLASSES` has the same keys.
 CrudCaller = Literal[
-    "projects", "render", "print", "storefront", "agent", "intake", "profile-fetch"
+    "projects",
+    "render",
+    "print",
+    "storefront",
+    "agent",
+    "intake",
+    "profile-fetch",
+    "camera",
+    "camera-relay",
 ]
 CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}

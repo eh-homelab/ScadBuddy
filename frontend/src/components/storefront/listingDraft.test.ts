@@ -388,6 +388,46 @@ describe('savedKey (#6290): a null field is an absent one, and nothing else is',
   })
 })
 
+describe('a pipeline listing’s inputs (#5701)', () => {
+  const listing = (over: Partial<StorefrontListing> = {}): StorefrontListing =>
+    ({
+      ...emptyDraft('dollhouse-kit', 'c'.repeat(40)),
+      id: 'l1',
+      title: 'Dollhouse',
+      inputs: { house: { cols: 2, storeys: 1 } },
+      inputs_v: 0,
+      ...over,
+    }) as StorefrontListing
+
+  it('keeps the inputs and their version when the editor saves another field', () => {
+    const stored = listing()
+    const draft = draftOf(stored)
+    expect(savedKey(listingInput(draft, undefined, []))).toBe(storedKey(stored))
+    const body = listingInput({ ...draft, title: 'A house' }, undefined, [])
+    expect(body).toMatchObject({ title: 'A house', inputs: { house: { cols: 2, storeys: 1 } }, inputs_v: 0 })
+  })
+
+  it('keeps both at another version of the template, so publish migrates them', () => {
+    const body = listingInput({ ...draftOf(listing()), commit: 'd'.repeat(40) }, undefined, [])
+    expect(body).toMatchObject({ commit: 'd'.repeat(40), inputs: { house: { cols: 2, storeys: 1 } }, inputs_v: 0 })
+  })
+
+  it('reads other inputs as a change', () => {
+    const stored = listing()
+    const draft = draftOf(stored)
+    expect(savedKey(listingInput({ ...draft, inputs: { house: { cols: 3, storeys: 1 } } }, undefined, []))).not.toBe(storedKey(stored))
+  })
+
+  it('sends none for a template with no pipeline, another template or a file', () => {
+    expect(draftOf(listing({ inputs: {}, inputs_v: null }))).not.toHaveProperty('inputs')
+    expect(emptyDraft('name-keychain')).not.toHaveProperty('inputs')
+    const file = switchSource(draftOf(listing()), 'library_file')
+    expect(file).not.toHaveProperty('inputs')
+    expect(file).not.toHaveProperty('inputs_v')
+    expect(listingInput(file, undefined, [])).not.toHaveProperty('inputs_v')
+  })
+})
+
 describe('isSupportMaterial (#7195 review): the shared vectors', () => {
   it('reads a support material as the backend and the assistant do', () => {
     // `test-fixtures/storefront/support-materials.json`, which the backend's

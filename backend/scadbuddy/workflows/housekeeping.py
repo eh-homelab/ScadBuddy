@@ -109,6 +109,16 @@ LOST_SLICES_PATCH = "housekeeping-sweep-lost-slices"
 #: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
 GIT_SWEEP = "housekeeping_maintain_models_git"
 GIT_PATCH = "housekeeping-maintain-models-git"
+#: #7317: copy the templates' files to their `templates` rows and reconcile the rows
+#: with the folders (`library.template_copy.copy_templates`), as the API's start does
+#: once. It repairs what no refresh wrote: a pod on an older build, a failed refresh, a
+#: commit or a file edit made by hand on the volume, a restored volume. Its advisory
+#: lock keeps one run at a time: a run that does not get it (another replica's, or the
+#: start's copy) does nothing. Directly after `ACTIVITY_SWEEP` (which must stay right
+#: after `GIT_SWEEP`: prod runs it there), behind its own patch; on the sweeps' Schedule
+#: only, so it obeys their switch.
+TEMPLATE_COPY_SWEEP = "housekeeping_copy_templates"
+TEMPLATE_COPY_PATCH = "housekeeping-copy-templates"
 #: Activity retention and repair (spec 2026-10-09 §6). Last: it reads what the sweeps
 #: before it settled.
 ACTIVITY_SWEEP = "housekeeping_activity"
@@ -244,6 +254,22 @@ AUTO_IMPORT_PATCH = "housekeeping-auto-import-prints"
 #: the Prints page for at most `PRUNE_INTERVAL` too.
 RUN_HOLDS_SWEEP = "housekeeping_reap_print_run_holds"
 RUN_HOLDS_PATCH = "housekeeping-reap-print-run-holds"
+#: #7255: copy the saved outputs' files to their `outputs` rows and reconcile the rows
+#: with the folders (`library.output_copy.copy_outputs`), as the API's start does once.
+#: It catches the saves, deletes, renames and backfill changes that pods on an older
+#: build wrote to the files only, during a roll-out or after a rollback. Its advisory
+#: lock keeps one run at a time: a run that does not get it (another replica's, or the
+#: start's copy) does nothing. After the output holds' reaper, behind its own patch; on
+#: the sweeps' Schedule only, so it obeys their switch.
+OUTPUT_COPY_SWEEP = "housekeeping_copy_outputs"
+OUTPUT_COPY_PATCH = "housekeeping-copy-outputs"
+#: #7256: copy the saved outputs' bytes to the blob store and reconcile the rows' blob
+#: keys with the files (`library.output_byte_copy.copy_output_bytes`), as the API's start
+#: does once after the row copy. It catches the files that pods on an older build wrote
+#: only to the share (a thumbnail upload, a save). Its advisory lock keeps one run at a
+#: time. After the row copy, behind its own patch; on the sweeps' Schedule only.
+OUTPUT_BYTES_SWEEP = "housekeeping_copy_output_bytes"
+OUTPUT_BYTES_PATCH = "housekeeping-copy-output-bytes"
 #: #7234 (spec 2026-11-05 §4.6): one step of ``AttemptMedia`` for each order attempt of
 #: the last 14 days that still lacks its finish photo or timelapse and was not read for
 #: media in the last hour (`orders.archives.sweep_media`). It catches what the triggers
@@ -262,11 +288,14 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
+    OUTPUT_COPY_SWEEP,
+    OUTPUT_BYTES_SWEEP,
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     LOST_SLICES_SWEEP,
     GIT_SWEEP,
     ACTIVITY_SWEEP,
+    TEMPLATE_COPY_SWEEP,
     ATTACHMENTS_SWEEP,
     ENTITY_ORPHANS_SWEEP,
     LIBRARY_SWEEP,
@@ -428,9 +457,18 @@ AUTO_IMPORT_TIMEOUT = timedelta(minutes=15)
 #: bounded by its `SEQUENCE_CHECK_TIMEOUT`, 10 s, and the pass by half of this), then one
 #: delete.
 RUN_HOLDS_TIMEOUT = timedelta(minutes=2)
+#: One walk of every output folder: about ten stats each, a read of each folder whose
+#: stamp changed, and a batched write per batch of folders.
+OUTPUT_COPY_TIMEOUT = timedelta(minutes=15)
+#: The byte copy: a stat of each output's byte files, and on its first runs an upload and
+#: a read back of every byte not yet in the store.
+OUTPUT_BYTES_TIMEOUT = timedelta(minutes=30)
 #: One read of the attempts, then one Temporal start per attempt; the downloads run in
 #: each attempt's own ``AttemptMedia`` step, not here.
 ATTEMPT_MEDIA_TIMEOUT = timedelta(minutes=5)
+#: One walk of every template folder (a few stats each), one walk of the models history,
+#: and a read and a write per batch of templates whose stamp or version changed.
+TEMPLATE_COPY_TIMEOUT = timedelta(minutes=15)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -487,8 +525,14 @@ def sweep_timeout(sweep: str) -> timedelta:
         return AUTO_IMPORT_TIMEOUT
     if sweep == RUN_HOLDS_SWEEP:
         return RUN_HOLDS_TIMEOUT
+    if sweep == OUTPUT_COPY_SWEEP:
+        return OUTPUT_COPY_TIMEOUT
+    if sweep == OUTPUT_BYTES_SWEEP:
+        return OUTPUT_BYTES_TIMEOUT
     if sweep == ATTEMPT_MEDIA_SWEEP:
         return ATTEMPT_MEDIA_TIMEOUT
+    if sweep == TEMPLATE_COPY_SWEEP:
+        return TEMPLATE_COPY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -558,7 +602,13 @@ class Housekeeping:
                 continue
             if sweep == RUN_HOLDS_SWEEP and not workflow.patched(RUN_HOLDS_PATCH):
                 continue
+            if sweep == OUTPUT_COPY_SWEEP and not workflow.patched(OUTPUT_COPY_PATCH):
+                continue
+            if sweep == OUTPUT_BYTES_SWEEP and not workflow.patched(OUTPUT_BYTES_PATCH):
+                continue
             if sweep == ATTEMPT_MEDIA_SWEEP and not workflow.patched(ATTEMPT_MEDIA_PATCH):
+                continue
+            if sweep == TEMPLATE_COPY_SWEEP and not workflow.patched(TEMPLATE_COPY_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
@@ -696,10 +746,12 @@ async def _action_changed(
 ) -> bool:
     """Whether ``action`` starts another workflow, or passes it other arguments, than
     the ``previous`` action the Schedule held (described, so its arguments encoded).
-    Deliberately ignores ``execution_timeout`` and ``task_queue``: every caller's
-    timeout is either fixed or a deterministic function of the ``args`` already
-    compared, so it never changes without ``args`` changing too, and a queue rename
-    is not new work for the sweeps to converge."""
+    Deliberately ignores ``execution_timeout``, ``task_timeout`` and ``task_queue``:
+    every caller's execution timeout is either fixed or a deterministic function of the
+    ``args`` already compared, so it never changes without ``args`` changing too. A task
+    timeout (`SensorNotifyPass` sets `SHORT_TASK_TIMEOUT`, #7288) and a queue rename are
+    not new work for the sweeps to converge. The update in `ensure_workflow_schedule`
+    writes all three to the Schedule either way (#7531)."""
     if not isinstance(previous, ScheduleActionStartWorkflow):
         return True
     if previous.workflow != action.workflow:

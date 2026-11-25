@@ -63,7 +63,12 @@ from scadbuddy.orders.storefront.line_prices import (
     price_of,
     variant_at_add,
 )
-from scadbuddy.orders.storefront.listings import PUBLIC_MEDIA_TTL, problem, public_content
+from scadbuddy.orders.storefront.listings import (
+    PUBLIC_MEDIA_TTL,
+    page_outdated,
+    problem,
+    public_content,
+)
 from scadbuddy.orders.storefront.model_requests import (
     checked_purchase_links,
     draft_sources,
@@ -425,11 +430,7 @@ def _still_pinned(conn: Any, listing_id: str, sha256: str | None) -> None:
         (listing_id, sha256),
     ).fetchone()
     if row is None:
-        raise problem(
-            status.HTTP_409_CONFLICT,
-            "listing_changed",
-            "This listing has changed. Load it again.",
-        )
+        raise page_outdated()
 
 
 def _sells_file(orders: OrdersComponent, listing_id: str) -> bool:
@@ -475,7 +476,12 @@ async def add_listing_item(
         variant = (
             None
             if filaments is None
-            else Variant(listing.id, file.snapshot.sha256, tuple(f.id for f in filaments))
+            else Variant(
+                listing.id,
+                file.snapshot.sha256,
+                tuple(f.id for f in filaments),
+                every_output=True,
+            )
         )
         price = None if variant is None else await price_of(state, library_file(file), variant)
         entry = NewLibraryItem(

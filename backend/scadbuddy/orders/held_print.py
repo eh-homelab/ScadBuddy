@@ -30,10 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import tempfile
-from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, aclosing
-from typing import TYPE_CHECKING, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import psycopg
 from fastapi import status
@@ -43,91 +41,17 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.orders.models import Actor, OrderItem
 from scadbuddy.orders.projects import held_across_awaits
 from scadbuddy.orders.quote import library_file_gone
+from scadbuddy.orders.served_library import Shelf
 
 if TYPE_CHECKING:
     from scadbuddy.orders.lifecycle import Lifecycle
-    from scadbuddy.print_library.native import NativeLibrary
     from scadbuddy.store.content import ContentStore
 
 logger = logging.getLogger(__name__)
 
-#: The top-level folder a held copy is put back into.
-STOREFRONT_FOLDER = "Storefront"
-
-
-class Shelved(NamedTuple):
-    """A file of the shelf: its id, and the name the library gave it."""
-
-    id: int
-    filename: str
-
-
-class Shelf(Protocol):
-    """The library that serves, as the restore writes it."""
-
-    async def storefront_folder(self) -> int:
-        """The top-level folder :data:`STOREFRONT_FOLDER`, found or made."""
-        ...
-
-    async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
-        """A live file in ``folder_id`` whose bytes hash to ``sha256``, or None."""
-        ...
-
-    async def stands(self, file_id: int, sha256: str) -> bool:
-        """Whether the live file ``file_id`` still holds the bytes of ``sha256``. A
-        Bambuddy file whose row states no hash stands while it is there: the print's own
-        check reads its bytes (§10.2 step 1) and answers ``restore`` when they are others."""
-        ...
-
-    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
-        """``chunks`` uploaded into ``folder_id`` as ``filename``; the new file."""
-        ...
-
 
 class ChoicesCopy(Protocol):
     def copy_library_choices(self, from_id: int, to_id: int) -> bool: ...
-
-
-class NativeShelf:
-    """ScadBuddy's own library."""
-
-    def __init__(self, native: NativeLibrary) -> None:
-        self.native = native
-
-    async def storefront_folder(self) -> int:
-        return (await self.native.template_folder(STOREFRONT_FOLDER)).id
-
-    async def find(self, folder_id: int, sha256: str, size: int) -> Shelved | None:
-        rows = await self.native.library_listing(folder_id=folder_id)
-        return next(
-            (
-                Shelved(row.id, row.filename)
-                for row in rows
-                # A run's per-print copy is its sweep's to trash (#4337).
-                if not row.per_print and (row.file_hash or "").lower() == sha256
-            ),
-            None,
-        )
-
-    async def stands(self, file_id: int, sha256: str) -> bool:
-        try:
-            found = await self.native.library_file(file_id)
-        except ApiError as error:
-            if error.status == 404:
-                return False
-            raise
-        # A native row always states its sha256, so one with none is not the pinned file.
-        # A Bambuddy row may state none, and stands (`BambuddyShelf.stands`).
-        return (found.file_hash or "").lower() == sha256
-
-    async def upload(self, filename: str, chunks: AsyncIterator[bytes], folder_id: int) -> Shelved:
-        # The native upload reads a file: the chunks are spooled to one first.
-        with await asyncio.to_thread(tempfile.TemporaryFile, "w+b") as spool:
-            async for chunk in chunks:
-                await asyncio.to_thread(spool.write, chunk)
-            await asyncio.to_thread(spool.seek, 0)
-            made = await self.native.upload(filename, spool, folder_id)
-        return Shelved(made.id, made.name)
 
 
 async def restore_held(

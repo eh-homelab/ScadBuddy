@@ -123,7 +123,7 @@ class SlotPresetBody(_Strict):
     preset_source: PresetSource = "cloud"
     #: The filament id the slot was configured with, so Bambuddy notices a later
     #: configure from elsewhere (``routes/printers.py`` line 2745, v1.3.1).
-    tray_info_idx: str | None = Field(default=None, max_length=32, pattern=PRESET_ID)
+    tray_info_idx: str | None = Field(default=None, pattern=PRESET_ID)
 
 
 class SavedSlotPreset(BaseModel):
@@ -136,13 +136,14 @@ class AmsLabelBody(_Strict):
     label: Label
 
 
-PlaceProblem = Literal["no_ams_kind"]
+PlaceProblem = Literal["no_ams_kind", "no_printer"]
 
 
 class AmsLabelSaved(BaseModel):
     """Bambuddy's label, then SB's place of the unit (R-7153-8). ``place_problem`` says
     why the place was not named: ``no_ams_kind`` (no location kind is marked AMS, so the
-    unit has no place). Two units may share a name: a printer's places are outside the
+    unit has no place) or ``no_printer`` (the printer was deleted after Bambuddy's label
+    was written). Two units may share a name: a printer's places are outside the
     name index."""
 
     ams_id: int

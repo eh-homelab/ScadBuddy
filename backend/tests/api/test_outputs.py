@@ -27,6 +27,7 @@ from scadbuddy.api.jobs import draw_view
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
@@ -41,6 +42,7 @@ from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
+from tests.support.saved_outputs import save_files
 from tests.test_geometry import carrot
 
 
@@ -774,6 +776,7 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
     directory = paths.output_dir(model, created["id"])
     (directory / "meta.json").unlink()
     (directory / "params.json").unlink()
+    _record_gone(client, created["id"])
 
     assert client.get(f"/api/v1/outputs/{created['id']}").status_code == 404
     body = client.get(f"/api/v1/outputs/{created['id']}/edit").json()
@@ -807,6 +810,7 @@ def test_an_unreadable_stamp_404s_rather_than_500s(
     directory = paths.output_dir(model, created["id"])
     (directory / "meta.json").unlink()
     (directory / "params.json").unlink()
+    _record_gone(client, created["id"])
 
     path = directory / "model.3mf"
     with zipfile.ZipFile(path) as archive:
@@ -844,8 +848,20 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
 
     cache = paths.output_dir(model, created["id"]) / "geometry.json"
     assert json.loads(cache.read_text(encoding="utf-8")) == body
-    # Served from the cache from then on: a doctored cache comes back as written.
-    cache.write_text(json.dumps({**body, "height_mm": 42}), encoding="utf-8")
+    # Served from the cache from then on: its row in `output_derived` (#7256), so a
+    # doctored row comes back as written.
+    rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
+    found = rows.derived(created["id"], "geometry", 1)
+    assert found is not None and found[1] == body
+    outputs = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
+    rows.write_derived(
+        created["id"],
+        "geometry",
+        1,
+        found[0],
+        {**body, "height_mm": 42},
+        model_sha=outputs.model_sha(created["id"]),
+    )
     assert client.get(f"/api/v1/outputs/{created['id']}/geometry").json()["height_mm"] == 42
 
 
@@ -1079,7 +1095,7 @@ def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     job = state.render.store.read(job_id)
     with pytest.raises(InputsError):
-        state.outputs.create(job, inputs={"params": {"width": "12"}})
+        save_files(state.outputs, job, inputs={"params": {"width": "12"}})
     output_dir = paths.outputs / model
     assert not output_dir.exists() or not any(output_dir.iterdir())
 
@@ -1093,6 +1109,8 @@ def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
     ).json()
     inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
     inputs_path.write_text("{not json", encoding="utf-8")
+    # Only a record kept in files has a side file to damage: one with no row (#7255).
+    _rows(client).delete(output["id"])
     expected = {"params": {"width": 12, "label": "hi"}, "v": 0}
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
@@ -1184,13 +1202,13 @@ def test_a_result_swept_while_it_is_copied_is_a_404(
     job_id = _finished_job(client, model)
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     result = state.render.store.read(job_id).result
-    create = state.outputs.create
+    create = state.outputs.prepare
 
     def swept_first(*args: Any, **kwargs: Any) -> Any:
         (paths.root / getattr(result, swept)).unlink()
         return create(*args, **kwargs)
 
-    monkeypatch.setattr(state.outputs, "create", swept_first)
+    monkeypatch.setattr(state.outputs, "prepare", swept_first)
     response = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     )
@@ -1258,12 +1276,27 @@ def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: b
 COMMIT = "c" * 40
 
 
-def _recorded_at(paths: DataPaths, model: str, output: str, version: str | None) -> None:
-    """The output's meta.json as if it had been rendered at ``version``."""
+def _rows(client: TestClient) -> OutputRows:
+    """The app's output rows (#7255): the record a read by id answers from."""
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    assert store.rows is not None
+    return store.rows
+
+
+def _record_gone(client: TestClient, output_id: str) -> None:
+    """The output's record is gone: its row too, as the files' ``meta.json`` (#7255)."""
+    _rows(client).delete(output_id)
+
+
+def _recorded_at(
+    client: TestClient, paths: DataPaths, model: str, output: str, version: str | None
+) -> None:
+    """The output's record, file and row, as if it had been rendered at ``version``."""
     path = paths.output_dir(model, output) / "meta.json"
     meta = json.loads(path.read_text(encoding="utf-8"))
     meta["model_version"] = version
     path.write_text(json.dumps(meta), encoding="utf-8")
+    _rows(client).update_meta(output, OutputMeta.model_validate(meta))
 
 
 def _live_directory(monkeypatch: pytest.MonkeyPatch, paths: DataPaths, model: str) -> None:
@@ -1288,7 +1321,7 @@ def test_a_mesh_models_weak_joint_names_its_scene_object(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = _carrot_output(client, model, paths, scene=True)
-    _recorded_at(paths, model, output, COMMIT)
+    _recorded_at(client, paths, model, output, COMMIT)
     _live_directory(monkeypatch, paths, model)
     [joint] = client.get(f"/api/v1/outputs/{output}/geometry").json()["weak_joints"]
     assert joint["suggestion"]["object"] == "o1"
@@ -1302,11 +1335,15 @@ def test_a_weak_joint_names_no_object_outside_a_mesh_models_render(
     frame): the joint is reported, with no object rather than a wrong one."""
     _live_directory(monkeypatch, paths, model)
     plain = _carrot_output(client, model, paths, scene=False)
-    _recorded_at(paths, model, plain, COMMIT)
+    _recorded_at(client, paths, model, plain, COMMIT)
     assert _joint_object(client, plain) is None
     arranged = _carrot_output(client, model, paths, scene=True)
-    _recorded_at(paths, model, arranged, COMMIT)
+    _recorded_at(client, paths, model, arranged, COMMIT)
     (paths.output_dir(model, arranged) / "arranged_from.json").write_text(json.dumps([plain]))
+    row = _rows(client).get(arranged)
+    assert row is not None
+    _rows(client).delete(arranged)
+    _rows(client).insert(dataclasses.replace(row, arranged_from=[plain]))
     assert _joint_object(client, arranged) is None
 
 
@@ -1321,7 +1358,7 @@ def test_a_weak_joint_names_no_object_when_the_render_recorded_no_commit(
         "model_version"
     ] == source_version(paths.model_dir(model))
     assert _joint_object(client, output) is None
-    _recorded_at(paths, model, output, None)
+    _recorded_at(client, paths, model, output, None)
     assert _joint_object(client, output) is None
 
 
@@ -1329,7 +1366,7 @@ def test_a_weak_joint_names_no_object_when_its_revision_or_model_is_gone(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     output = _carrot_output(client, model, paths, scene=True)
-    _recorded_at(paths, model, output, COMMIT)
+    _recorded_at(client, paths, model, output, COMMIT)
     # No such revision to export: the answer is still the analysis.
     assert _joint_object(client, output) is None
     _live_directory(monkeypatch, paths, model)
@@ -1359,7 +1396,7 @@ def test_a_weak_joint_is_unattributed_when_the_revision_cannot_be_read(
     """Everything `source_directory` raises for a deleted model or a missing revision
     costs the object name, never the geometry read."""
     output = _carrot_output(client, model, paths, scene=True)
-    _recorded_at(paths, model, output, COMMIT)
+    _recorded_at(client, paths, model, output, COMMIT)
 
     async def refuse(*_: Any, **__: Any) -> tuple[Any, str | None]:
         raise error
@@ -1374,7 +1411,7 @@ def test_an_attributed_analysis_is_cached_beside_the_geometry(
     """The second ask reads the cache: no export of the revision, no scene and meshes
     loaded again, and the same body."""
     output = _carrot_output(client, model, paths, scene=True)
-    _recorded_at(paths, model, output, COMMIT)
+    _recorded_at(client, paths, model, output, COMMIT)
     asked: list[str] = []
 
     async def live(slug: str, requested: str | None, **_: Any) -> tuple[Any, str | None]:
@@ -1394,7 +1431,7 @@ def test_an_unattributed_analysis_is_not_cached(
 ) -> None:
     """A failure to read the revision may pass: once it can be read, the joint is named."""
     output = _carrot_output(client, model, paths, scene=True)
-    _recorded_at(paths, model, output, COMMIT)
+    _recorded_at(client, paths, model, output, COMMIT)
 
     async def refuse(*_: Any, **__: Any) -> tuple[Any, str | None]:
         raise OSError("disk")
@@ -1403,3 +1440,20 @@ def test_an_unattributed_analysis_is_not_cached(
     assert _joint_object(client, output) is None
     _live_directory(monkeypatch, paths, model)
     assert _joint_object(client, output) == "o1"
+
+
+@pytest.mark.output_copy
+def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
+    """#7255: the app's start runs one copy, which finishes."""
+    rows = _rows(client)
+    deadline = time.monotonic() + 30
+    while not rows.copied():
+        assert time.monotonic() < deadline, "the start's copy did not finish"
+        time.sleep(0.1)
+    last = rows.last_run()
+    assert last is not None and last["finished_at"] is not None
+
+
+def test_local_store_keeps_output_bytes_in_files(client: TestClient) -> None:
+    # #7256, Ruling R1: the `local` store has no content store, so no output blobs.
+    assert getattr(client.app.state, STATE_ATTR).outputs.bytes is None  # type: ignore[attr-defined]

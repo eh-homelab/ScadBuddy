@@ -143,6 +143,22 @@ def test_break_glass(client: TestClient, app: FastAPI, settings: Settings) -> No
     assert client.get("/api/v1/auth/break-glass", params={"code": code}).status_code == 400
 
 
+def test_the_break_glass_command_prints_a_url_that_signs_in(
+    client: TestClient,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``python -m scadbuddy.auth.break_glass`` reads the public URL through a pool it
+    opens itself, and its code signs in (#7592: it failed with PoolClosed)."""
+    monkeypatch.setattr("scadbuddy.core.settings.Settings", lambda: settings)
+    assert break_glass.main() == 0
+    [url] = [line for line in capsys.readouterr().out.splitlines() if "?code=" in line]
+    assert url.startswith(PUBLIC + break_glass.PATH)
+    code = url.split("?code=", 1)[1]
+    assert client.get(break_glass.PATH, params={"code": code}).status_code == 200
+
+
 def test_the_break_glass_url() -> None:
     assert (
         break_glass.url_for("https://sb.test/app", "c")

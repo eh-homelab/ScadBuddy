@@ -86,5 +86,8 @@ sequenceDiagram
   [#6133](https://github.com/eh-homelab/ScadBuddy/issues/6133)).
 - Venmo's pay page is off (`backend/scadbuddy/payments/venmo.py:48`;
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
-- Listings refuse pipeline templates
-  ([#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).
+- A pipeline template is listed only when it declares its inputs (`model.json`
+  `pipeline.inputs`). The shop sets them through the API only, the customer never sets
+  them, and a render of several outputs has no slice price yet: the shop prices that line
+  by hand (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`;
+  [#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).

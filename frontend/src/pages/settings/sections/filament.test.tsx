@@ -50,6 +50,22 @@ describe('Filament (#6262)', () => {
     await waitFor(() => expect(mockSettings()).toMatchObject({ filament_burn_window_days: 14, filament_lead_time_days: 21, filament_safety_margin_days: 10 }))
   })
 
+  it('saves the tag format for new tags', async () => {
+    const { user } = renderSettingsSection(<Filament />, { route: '/settings/printing' })
+    await seeded()
+    const filament = region('Filament')
+    const format = within(filament).getByRole('combobox', { name: 'Tag format for new tags' })
+    expect(format).toHaveTextContent('OpenSpool')
+    await choose(user, format, 'OpenTag3D')
+    await user.click(within(filament).getByRole('button', { name: 'Save Filament' }))
+    await waitFor(() => expect(mockSettings().filament_tag_format).toBe('opentag3d'))
+  })
+
+  it('refuses a tag format that is neither OpenSpool nor OpenTag3D, as the API does', async () => {
+    await expect(api.putSettings({ filament_tag_format: 'tigertag' as 'openspool' })).rejects.toMatchObject({ status: 422 })
+    expect(mockSettings().filament_tag_format).toBe('openspool')
+  })
+
   const DEFAULT_SYNC = { spools: 'bb_to_sb', weights: 'bb_to_sb', tags: 'bb_to_sb', presets: 'bb_to_sb', suppliers: 'off', locations: 'off' } as const
 
   it('offers the four directions for each of the six data types', async () => {
@@ -424,6 +440,8 @@ describe('Filament (#6262)', () => {
       const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
       const items = within(within(dialog).getByRole('list', { name: 'What the reset deletes' })).getAllByRole('listitem')
       expect(items.map((item) => item.textContent)).toEqual(['3 filament preset links'])
+      // #7343: a delete of preset links copies each preset again; on the same Bambuddy that is twice.
+      expect(dialog).toHaveTextContent('it then holds those presets twice')
       await user.click(within(dialog).getByRole('button', { name: 'Reset links' }))
       expect(await within(filament).findByText('3 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
     })
@@ -434,6 +452,7 @@ describe('Filament (#6262)', () => {
       await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
       const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
       expect(dialog).toHaveTextContent('a spool with no tag can end up twice')
+      expect(dialog).not.toHaveTextContent('holds those presets twice')
     })
 
     it('keeps the links when the Bambuddy set up now is the same one at a new address (#6845)', async () => {
@@ -482,7 +501,7 @@ describe('Filament (#6262)', () => {
       await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
       const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
       expect(dialog).toHaveTextContent(
-        'Every linked spool ScadBuddy could compare (a time on both sides) changed in Bambuddy since the last pull, so ScadBuddy cannot prove this is the same Bambuddy.',
+        'Every linked spool (or, with no spool linked, filament preset) ScadBuddy could compare (a time on both sides) changed in Bambuddy since ScadBuddy last saw it, so ScadBuddy cannot prove this is the same Bambuddy.',
       )
       expect(dialog).not.toHaveTextContent('could not be read')
       expect(within(dialog).queryByRole('button', { name: 'Keep links' })).toBeNull()
@@ -494,7 +513,7 @@ describe('Filament (#6262)', () => {
       const { user, filament } = await withSync()
       await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
       const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
-      expect(dialog).not.toHaveTextContent('changed in Bambuddy since the last pull')
+      expect(dialog).not.toHaveTextContent('changed in Bambuddy since')
     })
 
     it('answers a kept reset with the instance the links belong to now (#6845)', async () => {

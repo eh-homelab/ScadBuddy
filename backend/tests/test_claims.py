@@ -73,7 +73,12 @@ async def test_the_housekeeping_sweep_removes_old_claims(
         return Pruned(count=2, pending=["b7"])
 
     batches = SimpleNamespace(prune=prune)
-    state = SimpleNamespace(paths=paths, components=SimpleNamespace(get=lambda key: batches))
+    state = SimpleNamespace(
+        paths=paths,
+        # #7373: no blob store, so no upload blobs to sweep.
+        store=SimpleNamespace(content=None),
+        components=SimpleNamespace(get=lambda key: batches),
+    )
     sweeps = {fn.__temporal_activity_definition.name: fn for fn in _housekeeping_activities(state)}  # type: ignore[arg-type, attr-defined]
     await sweeps["housekeeping_sweep_claims"]()
     assert "housekeeping_sweep_claims" in SWEEPS

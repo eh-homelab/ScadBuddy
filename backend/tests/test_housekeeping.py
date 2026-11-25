@@ -54,6 +54,8 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     NATIVE_SLICES_TIMEOUT,
+    OUTPUT_COPY_SWEEP,
+    OUTPUT_COPY_TIMEOUT,
     PAYMENT_CAPTURES_SWEEP,
     PAYMENT_CAPTURES_TIMEOUT,
     PAYMENT_CLOSES_SWEEP,
@@ -69,6 +71,7 @@ from scadbuddy.workflows.housekeeping import (
     PRUNE_TIMEOUT,
     QUOTE_HOLDS_SWEEP,
     QUOTE_HOLDS_TIMEOUT,
+    REAP_SWEEP,
     RUN_HOLDS_SWEEP,
     RUN_HOLDS_TIMEOUT,
     STOREFRONT_DRAFTS_SWEEP,
@@ -77,6 +80,8 @@ from scadbuddy.workflows.housekeeping import (
     STOREFRONT_MAIL_TIMEOUT,
     SWEEP_TIMEOUT,
     SWEEPS,
+    TEMPLATE_COPY_SWEEP,
+    TEMPLATE_COPY_TIMEOUT,
     TRANSFER_PUTS_SWEEP,
     TRANSFER_PUTS_TIMEOUT,
     Housekeeping,
@@ -177,7 +182,9 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         STOREFRONT_MAIL_SWEEP: STOREFRONT_MAIL_TIMEOUT,
         AUTO_IMPORT_SWEEP: AUTO_IMPORT_TIMEOUT,
         RUN_HOLDS_SWEEP: RUN_HOLDS_TIMEOUT,
+        OUTPUT_COPY_SWEEP: OUTPUT_COPY_TIMEOUT,
         ATTEMPT_MEDIA_SWEEP: ATTEMPT_MEDIA_TIMEOUT,
+        TEMPLATE_COPY_SWEEP: TEMPLATE_COPY_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -226,11 +233,31 @@ def test_the_run_holds_reaper_is_on_both_schedules() -> None:
     assert sweep_timeout(RUN_HOLDS_SWEEP) == RUN_HOLDS_TIMEOUT
 
 
+def test_the_output_copy_follows_the_output_holds_reaper_on_the_sweeps_schedule() -> None:
+    """#7255: the copy of the saved outputs' files to rows runs in each sweep run, behind
+    its own patch, so the writes of pods on an older build reach the rows by the next
+    sweep. Sweeps off (`asset_sweep_interval` 0) turns it off, as every sweep."""
+    assert SWEEPS[SWEEPS.index(REAP_SWEEP) + 1] == OUTPUT_COPY_SWEEP
+    assert OUTPUT_COPY_SWEEP not in PRUNE_SWEEPS
+    assert sweep_timeout(OUTPUT_COPY_SWEEP) == OUTPUT_COPY_TIMEOUT
+
+
 def test_the_attempt_media_sweep_is_last_on_both_schedules() -> None:
     """#7234 (spec 2026-11-05 §4.6): an attempt's media the triggers missed is imported
     within the hour, even with the sweeps off, behind its own patch."""
     assert SWEEPS[-1] == PRUNE_SWEEPS[-1] == ATTEMPT_MEDIA_SWEEP
     assert sweep_timeout(ATTEMPT_MEDIA_SWEEP) == ATTEMPT_MEDIA_TIMEOUT
+
+
+def test_the_template_copy_follows_the_activity_sweep_on_the_sweeps_schedule() -> None:
+    """#7317 (plan decision 9): the copy of the templates' files to rows runs in each
+    sweep run, right after the activity sweep (which stays right after the models
+    repository's gc, as prod runs it), behind its own patch. Sweeps off
+    (`asset_sweep_interval` 0) turns it off, as every sweep."""
+    assert SWEEPS[SWEEPS.index(GIT_SWEEP) + 1] == ACTIVITY_SWEEP
+    assert SWEEPS[SWEEPS.index(ACTIVITY_SWEEP) + 1] == TEMPLATE_COPY_SWEEP
+    assert TEMPLATE_COPY_SWEEP not in PRUNE_SWEEPS
+    assert sweep_timeout(TEMPLATE_COPY_SWEEP) == timedelta(minutes=15)
 
 
 def test_the_git_sweeps_timeout_covers_its_gc_and_no_more() -> None:

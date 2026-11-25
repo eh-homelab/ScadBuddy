@@ -105,7 +105,11 @@ same way, `vite.config.ts`).
   price is `store.price` (`POST /listings/{id}/price`), the add sends `values` empty and
   `colours` by slot. A `last` price shows marked as updating while the page reads again; a
   read that ends with no price (a limit, a failure, too slow) keeps it on screen as `Estimate`
-  `held` ("This was our last price…"), neither updating nor firm. The mock lists `FILE` (`l4`) and every file listing the back office's
+  `held` ("This was our last price…"), neither updating nor firm; "We confirm the price before
+  you pay" only while the design can be ordered (`orderable`, #7523). Over a limit (429
+  `render_limited`, or a `last` with a wait over `LIMIT_WAIT_MS`) the page reads once more on
+  its own after the wait (at most `timing.limitMs`), then offers "Try again" once the wait is
+  over; a colour change drops the wait. The mock lists `FILE` (`l4`) and every file listing the back office's
   mock published in the tab (`storefront.ts` `publishedFiles`, from `sessionStorage`); e2e
   `e2e/storefront-sell.spec.ts` sells a library file, publishes it and opens its public page.
   The bot check (#5283): `turnstile.ts` reads the site key (`GET /api/store/v1/turnstile`)
@@ -315,10 +319,9 @@ same way, `vite.config.ts`).
   `components/filament/purchasing/` (`priceFormat.ts`).
   `/filament/spools/:id` (`SpoolPage`: sections, a "Go to section" select below
   1024 px, `OverrideField` with "Reset to type", `RgbaColourField` with Opaque, Translucent and
-  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Scan a tag"
-  button (`scanTag`, 30 s), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
-  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind; `NtagPanel` writes an NTAG through a SpoolBuddy
-  reader and polls `confirmNtag` every 2 s for 60 s, says `Bound tag <uid>`, offers Cancel after the 60 s too and drops a queued write when the page unmounts, #6264) and `/filament/types/:id`
+  Clear presets, `TagPanel` with "Tag is on spool #N — Move it here", which sends `override: false`, a "Read or write with a phone"
+  link to the scan page (#7273), the "Override" mark of an open override binding, the weight-lock line (from `weight_locked`), and
+  the override checkbox, on with a tray UUID and any kind but `ntag*` (ticking it sets the kind to `bambu_mifare`; the bind sends the flag only with that kind), and the Override mark, which is read again after every bind, #6264) and `/filament/types/:id`
   (`TypePage`; its Drying section, the temperature and hours a spool's drying form starts
   from unless the spool overrides them in Storage, the spool page saying where they came from
   and that a profile's are the AMS HT's (#6720, R-6714-18); its K table says who set each saved
@@ -357,13 +360,21 @@ same way, `vite.config.ts`).
   `linkOtherBambuddy` sets that state; with the dry run's `same_bambuddy` the dialog is "Keep the
   Bambuddy links?" and the reset sends `expect_kept` and deletes nothing, #6845,
   `linkOtherBambuddy(id, { same: true })`; a 409 `proof_changed` reads the dry run again and
-  says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool with a time on both sides changed since the last pull and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
+  says why, `loseSameBambuddy`; a dry run with `changed_since_pull` says every linked spool (or, with no spool linked, every linked filament preset) ScadBuddy could compare (a time on both sides) changed in Bambuddy since ScadBuddy last saw it, and offers the delete, `linkOtherBambuddy(id, { changed: true })`; a dry run that cannot read Bambuddy notes it and offers the
   delete, `linkOtherBambuddy(id, { unreadable: true })`). It also has the "RFID override mode" switch with "Apply now", #6264, and above it the stored switch `filament_auto_add_unknown_rfid` (#7156; the mode's status line says when that setting holds Bambuddy's auto-add off, and both statuses are read again after "Save Filament"), and the drying defaults `filament_drying_temp_c` and `filament_drying_hours` (empty offers none; the spool page then says "the default in Settings");
   the mocks for the sync routes are `src/mocks/features/filament/sync.ts`, the e2e is
   `e2e/filament-sync.spec.ts`; the old anchors `#native-spools` and
   `#inventory` land on it. Colour is `#RRGGBBAA` (`lib/rgba.ts`). Mocks:
   `src/mocks/features/filament/` (`seed.ts` has 12 spools that cover the cases; `rfid.ts` owns
-  `/filament/rfid/*` and `…/ntag/*`). e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
+  `/filament/rfid/*`; `tags.ts` owns the phone page's routes, `/filament/tags/reads`, the backups,
+  `tag-records`, `tag-written` and the restore, and the agents' `/filament/nfc-jobs`, with
+  `seedNfcJob`; its test `tags.test.ts` holds it to the real routes' order and answers).
+  `/filament/scan` (`pages/filament/ScanPage.tsx`, #7273, spec
+  `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`) is the phone page: Web NFC
+  (`lib/webNfc.ts`, `NfcSession`; Chrome on Android, top level only), one tap's read posted to
+  `POST /tags/reads`, a spool's "Write tag" and a backup's restore through `lib/tagWrite.ts`
+  `writeWithBackup` (backup, write, read back), and an agent's NFC job in `NfcJobBanner`
+  (`components/filament/scan/`); tests stub Web NFC with `src/test/ndefStub.ts`. e2e: `e2e/filament.spec.ts`, `e2e/filament-rfid.spec.ts`,
   `e2e/filament-sensors.spec.ts` (a place's sensor, its limit and history, #6268) and
   `e2e/filament-purchasing.spec.ts` (a supplier, a price, an invoice confirmed into spools, and a
   total that cannot be confirmed), plus `hot-path.spec.ts` (SB spool numbers in the trays, no Bambuddy
@@ -372,6 +383,15 @@ same way, `vite.config.ts`).
   and the Spools tab button "Sync weights from AMS". Type proposals (#6701): `TypeProposals` ("Create types") shows on the Needs-type filter, over
   `GET /filament/type-proposals` and its confirm; the mocks group the seed's untyped spools (#6 is one
   group, #7 lacks a label weight).
+- A flow run's questions (#7364): `components/flows/PendingCard.tsx` draws `TaskCard` for an
+  entry with a `task` (a `prompt`) and the text answer for a `wait_for_human`, on the run's
+  page and the order's (`OrderFlowRuns`). The card's key is the run's execution and the task's
+  id, so a Reset gives a new form. `TaskCard` reads the task again on `task:<id>`
+  (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer
+  forms are `USER_ONLY`. `SchemaForm` draws a form from a schema, for an answer (`answer`) and
+  for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
+  an answer leaves out a blank field, Start run sends a cleared text. Mocks:
+  `src/mocks/features/tasks.ts` (the task of `run-prompt`). e2e `e2e/workflows.spec.ts`.
 - "Needs you" (#6399): `lib/needsYou.ts` is every request that waits on the person in one list
   (the agent's pending input, `attention.ts` `WaitingEntry`; the flow grants of
   `GET /api/v1/flow-grant-requests`; the tab's pairing requests, from `AgentLink`'s

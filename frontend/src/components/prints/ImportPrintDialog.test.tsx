@@ -406,10 +406,10 @@ describe('ImportPrintDialog', () => {
       nativeLibrary()
       const { dialog, user } = await chooseLibraryFile()
       const replies: ((files: { id: number; filename: string; folder_id: number | null }[]) => void)[] = []
+      let asked = 0
       const real = api.getPrintSources.bind(api)
       vi.spyOn(api, 'getPrintSources').mockImplementation((...args) => {
-        const at = replies.length
-        replies.push(() => undefined)
+        const at = asked++
         return new Promise((resolve) => {
           void real(...args).then((sources) => {
             replies[at] = (files) => resolve({ ...sources, suggested_library_files: files })
@@ -426,8 +426,7 @@ describe('ImportPrintDialog', () => {
       act(() => {
         window.dispatchEvent(new Event('focus'))
       })
-      await waitFor(() => expect(replies).toHaveLength(2))
-      await new Promise((r) => setTimeout(r, 50))
+      await waitFor(() => expect([replies[0], replies[1]].every(Boolean)).toBe(true))
       // The newer read lands first, the older one last.
       await act(async () => {
         replies[1]?.([{ id: 1_000_000_503, filename: 'newer.3mf', folder_id: null }])
@@ -436,6 +435,120 @@ describe('ImportPrintDialog', () => {
       const group = await within(dialog).findByRole('group', { name: 'Suggested library files' })
       expect(within(group).getByText('newer.3mf')).toBeInTheDocument()
       expect(within(group).queryByText('older.3mf')).not.toBeInTheDocument()
+    })
+
+    const STANDS = { id: 1_000_000_501, filename: 'benchy_hull.3mf', folder_id: null }
+
+    it('says on focus that the chosen file cannot be a target', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      vi.spyOn(api, 'checkImportTarget').mockRejectedValue(new ApiError(422, "library file 1000000501 is a print's own copy"))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
+    })
+
+    it('drops what the check on focus said once a later check passes', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      const check = vi.spyOn(api, 'checkImportTarget').mockRejectedValueOnce(new ApiError(422, "library file 1000000501 is a print's own copy"))
+      check.mockRejectedValueOnce(new ApiError(503, 'the library did not answer'))
+      check.mockResolvedValue(STANDS)
+      const focus = () =>
+        act(async () => {
+          window.dispatchEvent(new Event('focus'))
+        })
+      await focus()
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
+      // Another failure says nothing of the file.
+      await focus()
+      expect(check).toHaveBeenCalledTimes(2)
+      expect(within(dialog).getByRole('alert')).toHaveTextContent("a print's own copy")
+      await focus()
+      await waitFor(() => expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument())
+    })
+
+    it("keeps an import's refusal when a later check on focus passes", async () => {
+      nativeLibrary()
+      const { dialog, user } = await chooseLibraryFile()
+      vi.spyOn(api, 'importPrint').mockRejectedValue(new ApiError(502, 'the printer did not answer'))
+      await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('the printer did not answer')
+      const check = vi.spyOn(api, 'checkImportTarget').mockRejectedValueOnce(new ApiError(422, "library file 1000000501 is a print's own copy"))
+      check.mockResolvedValue(STANDS)
+      const focus = () =>
+        act(async () => {
+          window.dispatchEvent(new Event('focus'))
+        })
+      await focus()
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
+      await focus()
+      await waitFor(() => expect(within(dialog).getByRole('alert')).toHaveTextContent('the printer did not answer'))
+    })
+
+    it('keeps the chosen file when an older check on focus says late that it is gone', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      let fail: (problem: ApiError) => void = () => undefined
+      const older = new Promise<typeof STANDS>((_, reject) => {
+        fail = reject
+      })
+      const check = vi.spyOn(api, 'checkImportTarget').mockReturnValueOnce(older).mockResolvedValue(STANDS)
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(check).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        fail(goneProblem(null))
+        await older.catch(() => undefined)
+      })
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Import' })).toBeEnabled()
+    })
+
+    it('keeps the answer of an older check on focus when the newer one did not answer', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      let fail: (problem: ApiError) => void = () => undefined
+      const older = new Promise<typeof STANDS>((_, reject) => {
+        fail = reject
+      })
+      vi.spyOn(api, 'checkImportTarget')
+        .mockReturnValueOnce(older)
+        .mockRejectedValue(new ApiError(503, 'the library did not answer'))
+      await act(async () => {
+        window.dispatchEvent(new Event('focus'))
+        window.dispatchEvent(new Event('focus'))
+      })
+      await act(async () => {
+        fail(new ApiError(422, "library file 1000000501 is a print's own copy"))
+        await older.catch(() => undefined)
+      })
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
+    })
+
+    it('drops the reply of an older check on focus when a newer one was sent', async () => {
+      nativeLibrary()
+      const { dialog } = await chooseLibraryFile()
+      let passOlder: () => void = () => undefined
+      const older = new Promise<typeof STANDS>((resolve) => {
+        passOlder = () => resolve(STANDS)
+      })
+      vi.spyOn(api, 'checkImportTarget')
+        .mockReturnValueOnce(older)
+        .mockRejectedValueOnce(new ApiError(422, "library file 1000000501 is a print's own copy"))
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+        window.dispatchEvent(new Event('focus'))
+      })
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent("a print's own copy")
+      await act(async () => {
+        passOlder()
+        await older
+      })
+      expect(within(dialog).getByRole('alert')).toHaveTextContent("a print's own copy")
     })
 
     it('keeps the chosen file when the check on focus fails for another reason', async () => {

@@ -377,15 +377,34 @@ describe('order tools (#4249)', () => {
     await tool('part_list').execute({ order_id: ORDER }, ctx())
     const stock = await tool('part_stock_add').execute({ part_id: 'p1', packs: 1 }, ctx())
     await tool('order_item_parts_set').execute({ order_id: ORDER, item_id: ITEM, parts: [{ part_id: 'p1', per_unit: 2 }] }, ctx())
+    await tool('order_item_parts_set').execute({ order_id: ORDER, item_id: ITEM, parts: [{ item_id: 'p2', per_unit: 1 }] }, ctx())
 
-    expect(firstText(stock)).toEqual({ id: 'p1', on_hand: 102 })
+    expect(firstText(stock)).toEqual({ id: 'p1', on_hand: 102, ui_path: '/inventory/items/p1' })
     expect(sent).toEqual([
       { path: 'list', query: '?low=true' },
       { path: 'order' },
       { path: 'stock', body: { packs: 1, note: '' } },
-      { path: 'item', body: { parts: [{ part_id: 'p1', per_unit: 2 }] } },
+      { path: 'item', body: { parts: [{ item_id: 'p1', per_unit: 2 }] } },
+      { path: 'item', body: { parts: [{ item_id: 'p2', per_unit: 1 }] } },
     ])
     expect(() => tool('part_stock_add').execute({ part_id: 'p1', packs: 0 }, ctx())).toThrow('packs')
+    const both = { order_id: ORDER, item_id: ITEM, parts: [{ item_id: 'p1', part_id: 'p1', per_unit: 1 }] }
+    expect(() => tool('order_item_parts_set').parse(both)).toThrow('item_id')
+    expect(() => tool('order_item_parts_set').parse({ order_id: ORDER, item_id: ITEM, parts: [{ per_unit: 1 }] })).toThrow('item_id')
+  })
+
+  it('answers each part in its old shape with its item page, and names the part tools as aliases (#7067)', async () => {
+    server.use(http.get(`${BACKEND}/api/v1/parts`, () => HttpResponse.json([{ id: 'p1', name: 'Hook', pack_size: 100, on_hand: 2, low: true }])))
+    expect(firstText(await tool('part_list').execute({}, ctx()))).toEqual([
+      { id: 'p1', name: 'Hook', pack_size: 100, on_hand: 2, low: true, ui_path: '/inventory/items/p1' },
+    ])
+    const orderParts = { order_id: ORDER, items: [{ item_id: ITEM, parts: [{ item_id: 'p1', per_unit: 2 }] }], needs: [], short: [] }
+    server.use(http.get(`${BACKEND}/api/v1/orders/${ORDER}/parts`, () => HttpResponse.json(orderParts)))
+    expect(firstText(await tool('part_list').execute({ order_id: ORDER }, ctx()))).toEqual(orderParts)
+    expect(tool('part_list').description).toContain('Without `order_id`, each part has `ui_path`')
+    expect(tool('part_list').description).toContain('Alias of inventory_item_list; goes after one release')
+    expect(tool('part_stock_add').description).toContain('Alias of inventory_lot_receive; goes after one release')
+    expect(tool('order_item_parts_set').description).toContain('inventory_item_list')
   })
 
   it('passes the list filters and the cursor through to the backend', async () => {

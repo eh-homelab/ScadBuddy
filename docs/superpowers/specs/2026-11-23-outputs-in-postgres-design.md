@@ -15,7 +15,8 @@ request.
 
 Measured on 2026-11-23, prod:
 
-- One glob miss on the share took 0.2–0.4 s (158 model folders), in an API pod.
+- One glob miss on the share took 0.2–0.4 s, in an API pod. That is the cost of one glob
+  over every model's folder (158 of them), not of one file operation.
 - The mount's `GET /api/v1/print/library` took 1.5–13 s, against 0.1 s for other
   routes. Some traces had a 4–7 s gap with no span after the last SQL query, where
   `api/outputs.py` `_existing` globs once per output id.
@@ -106,11 +107,29 @@ Anti-goals (a failure even if it works)
   geometry caches. A version mismatch is a miss, as today.
 - `outputs` replaces `output_index`. Its readers move to `outputs`, and the last
   phase drops `output_index` (new migration file; merged migrations are never edited).
+- As built in phase 1 (#7255, `migrations/20261124T0053Z_outputs_records.sql`):
+  `outputs` has the record columns (`output_id`, `slug`, `meta`, `params`, `inputs`,
+  `record`, `manifest`, `bom`, `arranged_from`, `backfill`, `has_plate_cover`,
+  `created_at`), plus `copied_at` and `files_stamp` for the copy (§6.5). `name`,
+  `source` and `params_text` stay in `output_index` until #7257. The blob key columns,
+  `output_files` and `output_derived` come with #7256, the phase whose code writes them.
+  Its indexes are `(slug, created_at)` and one on the rows with a `backfill`. Each run
+  of the copy is a row of `output_copy_runs`.
+- As built in phase 2 (#7256, `migrations/20261124T0245Z_output_bytes.sql`): `outputs`
+  gains `model_blob`, `preview_blob`, `thumbnail_blob` (NULL when the role has no blob),
+  `bytes_stamp` (the byte copy's stamp of the byte files), `bytes_at` (set when the
+  blobs hold the bytes; NULL while only the files do) and `damaged` (jsonb, `[]` when
+  none), with an index on the rows whose `bytes_at` is NULL. `output_files` is as above.
+  `output_derived` holds, per `(output_id, kind, plate)`, the kinds `geometry`,
+  `attributed`, `asset_ids`, `plate_names` and `plate_cover` (plate 0 is the whole
+  output; a plate cover row names the key of a small blob, or none). Each run of the
+  byte copy is a row of `output_byte_runs`.
 
 ### 4.3 Blobs
 
 - A new `BlobKind` `output` (`store/content_models.py`). Key
-  `output-<output_id>-<role>` (and `output-<output_id>-file-<n>` for `files/`).
+  `output-<output_id>-<role>` (and `output-<output_id>-file-<hash>` for `files/`: the
+  first 32 hex digits of the name's sha256, so a name added or gone moves no other key).
 - Each output holds its blobs in `blob_refs` as `(OUTPUT_HOLDER, output_id)`, the same
   holder its manifest parts already use (`hold_parts`). Delete releases them. The
   sweep removes unheld blobs only for kinds in `SWEPT_KINDS`
@@ -139,20 +158,64 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
 
 ### 4.5 Phases
 
-1. **Records** (#7255). Create `outputs`, `output_files`, `output_derived`. A create writes
+1. **Records** (#7255). Create `outputs` (`output_files` and `output_derived` are
+   deferred to #7256, which writes them). A create writes
    the row in one transaction (today `OutputIndex.record` writes `output_index` on its
    own connection and only logs a failure; see §6.6), and still writes the files. Lookups by id, `list_for`, `name_and_slug`, `_existing`, the cover
-   choice and `pending_backfills` read rows. A copy operation fills a row for every
-   existing output from its `meta.json` and the other small files (idempotent,
-   resumable, an operation kind like `store_migrate`). Until it finishes, a missing
-   row falls back to the files. This phase removes the glob from the hot path.
+   choice and `pending_backfills` read rows. A copy fills a row for every
+   existing output from its `meta.json` and the other small files (idempotent). It is
+   not an operation kind: it runs as a task at each API start, and as the housekeeping
+   sweep `housekeeping_copy_outputs` (`workflows/housekeeping.py` `OUTPUT_COPY_SWEEP`)
+   on the sweeps' Schedule, under an advisory lock (`library/output_copy.py`,
+   `main.py` `_copy_outputs_logged`). Until a run finishes, a missing row falls back to
+   the files. This phase removes the glob from the hot path.
 2. **Bytes** (#7256). Creates also put the 3MF, preview, thumbnail and `files/` as blobs. Move
    each path-based reader (downloads, preview, thumbnail, `files/`, `analyze_3mf`,
    `read_provenance`, `stamp`, `plates_of`, `analyzers/gather.py`,
    `print_library/filing.py`, `library/backfill.py`, the asset sweep's 3MF scan) to
-   bytes or the temporary-file helper. The copy operation also uploads existing
+   bytes or the temporary-file helper. The copy also uploads existing
    outputs' bytes and checks each 3MF's sha256 against the file.
-3. **Cut over** (#7257). When the copy operation reports every output copied and verified,
+
+   As built (#7256): a save writes the folder, puts its bytes under keys of its own
+   (`<key>-save-<attempt>`), then inserts the row, points the output's keys at those
+   objects, and writes its `output_files` rows and its `blob_refs` holds, in one
+   transaction; then it deletes its staged keys. A save that fails on the row (an id
+   another output holds) moved no key of that output, so it keeps its bytes (#7478
+   review). A put into a full store is a 507 and leaves no folder, row or hold. The keys
+   are `output-<id>-<role>` and `output-<id>-file-<hash>` (the first 32 hex digits of the
+   name's sha256), held by `(output, <id>)`. A thumbnail upload puts its blob first,
+   under `output-<id>-thumbnail-<sha256>`, then names it under a Postgres advisory lock
+   per output. Readers read the blob first and the file when the row names none or the
+   blob is lost (`library/outputs.py` `read_role`); a reader that needs a path gets a
+   temporary file and runs in a thread. What readers derive of the model is kept once in
+   `output_derived`; the plate cover is a blob under `output-<id>-plate_cover-<sha256>`.
+   The byte copy (`library/output_byte_copy.py` `copy_output_bytes`) runs after the row
+   copy at each API start and in the housekeeping sweep `housekeeping_copy_output_bytes`
+   (`OUTPUT_BYTES_SWEEP`), under a session advisory lock that holds one autocommit
+   connection of its own (not a pool's) for the whole run (in the sweep up to its timeout, 30 min,
+   `OUTPUT_BYTES_TIMEOUT`; at a start with no bound). It compares
+   each byte file with its blob by sha256, puts a changed one with a compare-and-swap,
+   reads back what it put (and every blob of a row not copied before), and names the
+   keys in batches. Before any put it checks the store's caps against the bytes and
+   count of the rows still in files; past one it is `refused` and names the shortfall.
+   That count can be more than it adds, never less: blobs a failed run already put are
+   counted again until the sweep removes them. It is refused on `local` (no content store, plan
+   Ruling R1) and on `bambuddy` (§6.4); a store migration to `bambuddy` is refused while
+   any `output` blob exists. `GET /outputs/copy-status` answers its last run as `bytes`,
+   with `pending`, the rows whose bytes the files still hold, and the rows' damage from
+   every run (`damaged_rows`, `damaged_sample`). A missing file never drops a key the row
+   names: it is `damaged`. An outputs folder that is missing or lists no slug folder
+   while rows exist, or an output's missing folder, makes the run `incomplete`, and those
+   rows get no write; a start copies the bytes only after a row copy run that finished.
+
+   Derived rows are written only while the model sha256 the reader read is still the
+   row's (or the files hold the bytes). When the copy moves a copied row's model key, it
+   deletes that output's derived rows (`OutputRows.drop_derived`). A copied row whose
+   model blob is lost keeps no derived rows: readers fall back to the file and derive
+   again until the blob is back. One window is accepted: an attributed analysis made
+   from a cached geometry row read between the model swap and `drop_derived` can stay
+   stale. It needs a hand-edited `model.3mf` and two reads within about one commit.
+3. **Cut over** (#7257). When the copy reports every output copied and verified,
    remove the file fallback, the NFS writes, `meta.json` handling, the orphan and hold
    reapers' directory scans (they read rows), `OutputIndex.sync`'s glob, and
    `output_index`. The NFS folder is left in place, unread, as a backup; deleting it is
@@ -163,7 +226,7 @@ Each phase ships as one or more PRs, each releasable on its own.
 ### 4.6 Tests
 
 - Each phase runs the existing output tests against the row-backed store.
-- The copy operation: a fixture tree of outputs (including a deleted output named by a
+- The copy: a fixture tree of outputs (including a deleted output named by a
   library file, an arranged output, one with `files/`, one with a backfill) copies to
   rows and blobs, a second run changes nothing, and a corrupted 3MF fails the
   verification.
@@ -183,16 +246,18 @@ Each phase ships as one or more PRs, each releasable on its own.
 
 ## 6. Decisions from the builder check (author's calls; the owner may change them)
 
-1. **The phase 1 fallback ends when the copy ends, not at phase 3.** The copy operation
-   records "outputs copied" in a settings row when it finishes. Every replica reads it.
+1. **The phase 1 fallback ends when the copy ends, not at phase 3.** A copy run that
+   walked every folder records its end in `output_copy_runs.finished_at`. Every replica
+   reads it (`OutputRows.copied`). A run whose walk may have missed folders (a listing
+   failed, or the outputs folder read empty while rows exist) records `incomplete` and
+   no `finished_at`, so it does not end the fallback.
    After that, a missing row is a missing output: a deleted output that a listing names
    costs one SQL read and no glob. Until then, a miss falls back to the files, as
-   today. The copy runs as the first step after phase 1 deploys, so the speed gain
-   lands in phase 1.
+   today. The copy runs at each API start, so the speed gain lands in phase 1.
 2. **Outputs still die with their model, as today.** This work changes no product
-   behaviour. Where `catalogue.py` deletes `outputs/<slug>` today (`sweep_orphans`,
-   `_clear_derived`), the same code path deletes the slug's rows and releases their
-   blobs. Whether outputs that an order names should outlive their model is a separate
+   behaviour. Where `catalogue.py` deletes `outputs/<slug>` today (`delete`, `sweep_orphans`,
+   `_clear_derived`), the same code path deletes the slug's rows first
+   (`Catalogue._forget_outputs`), and from phase 2 releases their blobs. Whether outputs that an order names should outlive their model is a separate
    product question, outside this work.
 3. **Damaged outputs do not block the cut-over.** The copy copies what it can read.
    A folder with no readable `meta.json` gets no row and goes on a "not copied" list.
@@ -200,8 +265,10 @@ Each phase ships as one or more PRs, each releasable on its own.
    marked `damaged` with the missing roles named. The copy checks the sha256 of every
    byte file it uploads: 3MF, preview, thumbnail and each `files/` entry. The cut-over
    needs every readable byte verified. The owner reviews the "not copied" list.
-   Nothing is deleted from NFS by this work, so nothing is lost.
-4. **Quota and backends.** Output blobs count against the store's caps like every other
+   Nothing is deleted from NFS by this work, so nothing is lost. In phase 1, which
+   copies no bytes, `damaged` names each record side file (such as `bom.json`) that
+   could not be read and was left out of its row.
+4. **Quota and backends** (phase 2 and the cut-over). Output blobs count against the store's caps like every other
    kind. Before it starts, the copy measures the bytes it will add and refuses to
    start, naming the shortfall, if that would pass `store_max_total_bytes` or
    `store_max_count`. Raising a cap is then a settings change before the run.
@@ -209,11 +276,29 @@ Each phase ships as one or more PRs, each releasable on its own.
    go into Bambuddy's library (owner direction, 2026-11-23). `local` is allowed for
    development and tests. Prod runs `s3`.
 5. **The copy reconciles; it does not only fill.** Each run compares every folder with
-   its row and overwrites the row when the folder's `meta.json` (or another record
-   file) is newer than the row's `copied_at`. It runs again after each phase's
-   roll-out, when no old pod remains (check the pod images first), so a rename or a
-   backfill change that an old pod wrote during the roll-out reaches the row. "A second
-   run changes nothing" holds only when no folder changed between runs.
+   its row. It reads the folder again and refreshes the row when the folder's
+   `files_stamp` differs from the row's. The stamp is a sha256 of the sorted name, size
+   and `mtime_ns` of the record files (`meta.json`, `params.json`, `inputs.json`,
+   `record.json`, `manifest.json`, `bom.json`, `arranged_from.json`, `backfill.json`;
+   `library/output_copy.py` `files_stamp`), so no NFS clock is compared with the
+   database's. A save writes no stamp, so the next run reads that folder once. Live
+   writers (a save, a rename, a backfill change) set `copied_at` to the database's
+   clock. Before it reads a batch, the copy takes a mark from that clock. Its writes are
+   guarded by the mark (`OutputRows.write_copy`): a refresh is `UPDATE … WHERE copied_at
+   < mark`, and a new row is `INSERT … ON CONFLICT DO NOTHING`, so a live write wins.
+   After each batch commits, `undo_copy` deletes each row it wrote at that mark whose
+   `meta.json` is gone; the run's end checks the rows it inserted once more. A row whose
+   folder the walk did not see is dropped only when its `copied_at` is before the run's
+   start. When a listing or a stat fails (ESTALE, EIO), the run drops nothing and is
+   `incomplete`. The copy runs at every start and in every housekeeping sweep
+   (`OUTPUT_COPY_SWEEP`, on the sweeps' Schedule; sweeps off, `asset_sweep_interval` 0,
+   leaves only the start's run). That sweep, not a manual re-run, is what catches the
+   writes of old pods: a save, a delete, a rename or a backfill change that a pod on the
+   older build wrote during the roll-out, or after a rollback, reaches the rows at the
+   next housekeeping sweep. After a roll-out, confirm the pod images, then read
+   `GET /outputs/copy-status` and check that a finished run started after the last old
+   pod went. "A second run changes nothing" holds only when no folder changed between
+   runs.
 6. **The row is the record, so a failed row write fails the save.** The write order in
    `create` is: put the blobs (phase 2), then one transaction that inserts the row and
    its `blob_refs` holds. In phase 1 the files are still written first. If the
@@ -225,6 +310,6 @@ Each phase ships as one or more PRs, each releasable on its own.
 ## 7. Left to the builder
 
 - Column names and jsonb shapes beyond what §4.2 fixes.
-- How the copy operation batches and reports progress.
+- How the copy batches and reports progress.
 - The temporary-file helper's location and cleanup.
 - PR boundaries inside each phase.

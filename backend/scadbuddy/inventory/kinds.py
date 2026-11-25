@@ -86,6 +86,24 @@ def item_schema(conn: Conn, item_id: str) -> dict[str, Any]:
     return empty_schema() if row is None else merged_schema(conn, row["kind_id"])
 
 
+def keys_in_use(conn: Conn, kind_id: str) -> list[tuple[str, int]]:
+    """Each property key the items of the kind and its descendants have (archived items
+    too, as `EntityPropertyStore.keys_in_use`), with how many have it, by key."""
+    rows = conn.execute(
+        "WITH RECURSIVE down (id, depth) AS ("
+        " SELECT id, 0 FROM item_kinds WHERE id = %s UNION ALL"
+        " SELECT k.id, down.depth + 1 FROM item_kinds k"
+        " JOIN down ON k.parent_id = down.id WHERE down.depth < 100)"
+        " SELECT p.key, count(*) AS n FROM entity_properties p"
+        " JOIN entities e ON e.id = p.entity_id AND e.kind = 'item'"
+        " JOIN items i ON i.id::text = e.ref"
+        " WHERE i.kind_id IN (SELECT id FROM down)"
+        ' GROUP BY p.key ORDER BY p.key COLLATE "C"',
+        (kind_id,),
+    ).fetchall()
+    return [(r["key"], int(r["n"])) for r in rows]
+
+
 class KindStore:
     def __init__(self, pool: Any) -> None:
         self.pool = pool
@@ -221,6 +239,22 @@ class KindStore:
             kind = self._get(conn, kind_id)
         assert kind is not None
         return kind
+
+    def keys_in_use(self, kind_id: str) -> builtins.list[tuple[str, int]]:
+        with self.pool.connection() as conn:
+            return keys_in_use(conn, kind_id)
+
+    def schema_of(
+        self, kind_id: str
+    ) -> tuple[ItemKind, dict[str, Any], builtins.list[tuple[str, int]]] | None:
+        """The kind, its merged schema and its keys in use, from one snapshot; None for
+        no such kind."""
+        with self.pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            kind = self._get(conn, kind_id)
+            if kind is None:
+                return None
+            return kind, merged_schema(conn, kind_id), keys_in_use(conn, kind_id)
 
     @staticmethod
     def _has_items(conn: Conn, kind_id: str, *, archived_too: bool) -> bool:

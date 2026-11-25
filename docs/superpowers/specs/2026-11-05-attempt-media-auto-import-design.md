@@ -158,7 +158,7 @@ queue's worker, which runs in the API (F3, F12). No new process reads or writes 
 no CRUD route is needed (repo `CLAUDE.md` "Database access"). The agent only calls the
 routes it calls today.
 
-### 4.1 One step, three triggers, one workflow per attempt
+### 4.1 One step, four starters, one workflow per attempt
 
 `orders/archives.py` gains `mirror_media(lifecycle, integrations, blobs, claims,
 attempt, facts, *, limit) -> list[Attachment]`: for each archive in `facts`, the
@@ -179,6 +179,7 @@ sweep (§4.6) catches the attempt.
 | hand attempt with `archive_id` (`record_fulfilment`, `update_fulfilment` routes) | `_with_archive_facts` copies the facts in the request, the read timed at 5 s (F1); media wait for a click | after `_with_archive_facts`, the route starts `AttemptMedia` (retries on, §4.6). The request never waits on a download. The agent's `order_item_fulfil` is a separate TypeScript process that only POSTs the route (`agent/src/tools/orders.ts:2130-2150`); it changes its text, nothing else |
 | `print.outcome` heard | `mirror_run` → `mirror_archives` | `mirror_run` → `mirror_archives`, then starts `AttemptMedia` (retries on). Every replica hears the outcome (F8); the workflow id makes it one run |
 | `GET …/archives` | `attempt_archives` → `mirror_archives` | `attempt_archives` → `mirror_archives`, then starts `AttemptMedia` (one step, no retries) **only** when a medium is missing that the facts offer, and answers with what is attached now (§4.4). The read never waits on a download |
+| housekeeping sweep `housekeeping_import_attempt_media` (§4.6, #7234) | none | `sweep_media` starts `AttemptMedia` (one step, no retries) for each attempt still missing a medium and not checked in the last hour |
 
 ### 4.2 What "missing" means, without downloading
 
@@ -325,8 +326,14 @@ which says whose bytes they are.) My call; §7 lists it.
   its own patch (F12). It starts a one-step `AttemptMedia` for every attempt of the last
   14 days that names an archive, lacks a medium, and was last checked more than an hour
   ago. Each step stamps `media_checked_at` on the attempt, so each attempt costs at most
-  one Bambuddy read an hour (an archive with no timelapse at all costs that for its 14
-  days). The draft's `BusResync` trigger goes: the sweep catches a missed outcome within
+  one Bambuddy read an hour. **As built (#7453):** one pass starts at most `SWEEP_BATCH`
+  (40) attempts, least lately checked first, as each start may wait `START_TIMEOUT` (5 s)
+  inside the sweep's 5 min. A medium that an archive past `FRESH` does not offer (a printer
+  with timelapse off) is recorded by the step in `order_attempt_media_not_offered`, which
+  each step rewrites, and the sweep leaves it out; so such an archive no longer costs a read
+  an hour for its 14 days. A timelapse Bambuddy offers later still comes in through the
+  read of the attempt's archives. A settled run with no archive yet is still read each hour.
+  The draft's `BusResync` trigger goes: the sweep catches a missed outcome within
   the hour, and a periodic pass belongs in the housekeeping sweeps, not in the API (F12).
 - **Replicas.** Every replica hears `print.outcome` (F8); the workflow id makes their
   three starts one run, so one step imports, not three. The manual copy operation can

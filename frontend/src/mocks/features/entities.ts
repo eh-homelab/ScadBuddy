@@ -3,6 +3,7 @@ import type { EntityAttachment, EntityLink, EntityLinkInput, EntityLinkPatch, En
 import { ORDER_KINDS, PRINT_ARCHIVE, entityParts } from '../../components/entities/api'
 import { THUMBNAILED } from '../../components/entities/attachmentMedia'
 import { parts, sha256, sniff } from './orders/attachments'
+import { itemSchemaOf, itemsTypedLike } from './inventory'
 import { BROWSER, newId, now, problem, state as orders } from './orders/state'
 
 /**
@@ -129,7 +130,7 @@ const PROPERTY_TYPES: Record<string, (value: unknown) => boolean> = {
 const characters = (text: string) => [...text].length
 
 /** `entities/properties.py`'s checks, in short: the reason a value is refused, else null. */
-function propertyRefusal(kind: string, key: string, value: unknown): string | null {
+function propertyRefusal(entity: string, key: string, value: unknown): string | null {
   if (!PROPERTY_KEY.test(key)) return 'a key is `^[a-z][a-z0-9_]{0,63}$`'
   // Postgres's jsonb holds no U+0000, so the backend refuses it in any string.
   if ([value].flat().some((text) => typeof text === 'string' && text.includes('\u0000'))) return 'a string may not hold U+0000'
@@ -139,12 +140,31 @@ function propertyRefusal(kind: string, key: string, value: unknown): string | nu
     typeof value === 'boolean' ||
     (Array.isArray(value) && value.length <= 50 && value.every((item) => typeof item === 'string' && characters(item) <= 500))
   if (!shaped) return 'a value is a string (up to 2000 characters), a finite number, a boolean or a list of up to 50 strings of up to 500 characters'
-  const known = (entityMock.schemas[kind]?.properties as Record<string, { type?: string | string[] }> | undefined)?.[key]
+  const known = (schemaOf(entity)?.properties as Record<string, { type?: string | string[] }> | undefined)?.[key]
   const types = known?.type === undefined ? [] : ([] as string[]).concat(known.type).filter((type) => PROPERTY_TYPES[type])
   if (types.length && !types.some((type) => PROPERTY_TYPES[type]!(value))) {
     return `must be ${types.map((type) => (type === 'array' || type === 'integer' ? `an ${type}` : `a ${type}`)).join(' or ')}`
   }
   return null
+}
+
+/** `schema_for`: an item's is its item kind's merged `attribute_schema` (#7067); any other entity's is its kind's. */
+function schemaOf(entity: string): Record<string, unknown> | undefined {
+  const { kind, ref } = entityParts(entity)
+  return kind === ITEM ? itemSchemaOf(ref) : entityMock.schemas[kind]
+}
+
+/** The keys entities typed by `entity`'s schema have: for an item, the items of its kind and of its descendants. */
+function keysTypedLike(entity: string) {
+  const { kind, ref } = entityParts(entity)
+  if (kind !== ITEM) return keysInUse(kind)
+  const items = new Set(itemsTypedLike(ref).map((id) => `${ITEM}:${id}`))
+  const counts = new Map<string, number>()
+  for (const [other, list] of entityMock.properties) {
+    if (!items.has(other)) continue
+    for (const p of list) counts.set(p.key, (counts.get(p.key) ?? 0) + 1)
+  }
+  return [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([key, count]) => ({ key, count }))
 }
 
 function keysInUse(kind: string) {
@@ -240,7 +260,7 @@ function keyProblem(sub: unknown, where: string, item: boolean): string | null {
   return null
 }
 
-function schemaProblem(schema: Record<string, unknown> | undefined): string | null {
+export function schemaProblem(schema: Record<string, unknown> | undefined): string | null {
   if (!schema || typeof schema !== 'object') return 'a schema is a JSON object'
   for (const k of Object.keys(schema)) if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
   if (schema.type !== 'object') return 'a schema\'s "type" is "object"'
@@ -364,7 +384,7 @@ export const handlers = [
     entityMock.propertyPatches.push({ entity, set })
     for (const [key, value] of Object.entries(set)) {
       if (value === null) continue
-      const reason = propertyRefusal(kind, key, value)
+      const reason = propertyRefusal(entity, key, value)
       if (reason) return coded(request, 422, 'bad_property_value', `property '${key}': ${reason}`)
     }
     const before = entityMock.properties.get(entity) ?? []
@@ -378,6 +398,14 @@ export const handlers = [
     }
     entityMock.properties.set(entity, kept.sort((a, b) => a.key.localeCompare(b.key)))
     return HttpResponse.json({ properties: entityMock.properties.get(entity) })
+  }),
+  http.get('/api/v1/entities/:ref/property-schema', ({ request, params }) => {
+    const entity = refOf(params)
+    const { kind } = entityParts(entity)
+    if (kind === PRINT_ARCHIVE) return noProperties(request, kind)
+    const schema = schemaOf(entity)
+    if (kind === ITEM && !schema) return coded(request, 404, 'entity_not_found', `no entity '${entity}'`)
+    return HttpResponse.json({ kind, schema: schema ?? { type: 'object' }, keys_in_use: keysTypedLike(entity) })
   }),
   http.get('/api/v1/entity-kinds/:kind/properties', ({ request, params }) => {
     const kind = String(params.kind)

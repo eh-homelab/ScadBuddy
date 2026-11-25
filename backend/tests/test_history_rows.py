@@ -1,0 +1,452 @@
+"""Template rows move with the models HEAD (#7317, model records spec §5.2, §6).
+
+A commit's rows are written in the transaction that records the HEAD, after the HEAD
+and before the NOTIFY, so a replica that hears the commit reads rows that show it. A
+change that commits nothing refreshes the rows of its paths under the same lock.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import threading
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from functools import partial
+from pathlib import Path
+from typing import Any, Literal
+
+import psycopg
+import pytest
+
+from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.library.repo_lock import (
+    HEAD_CHANNEL,
+    PgRepoCoordinator,
+    RepoLockError,
+    _PgHold,
+    decode_change,
+)
+from scadbuddy.library.template_rows import TemplateRow, write_rows
+from scadbuddy.render.pg_store import migrate
+from scadbuddy.render.solids import WRAPPER_PREFIX
+
+pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
+
+NOW = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+
+def _row(template_id: str, version: str) -> TemplateRow:
+    return TemplateRow(
+        template_id=template_id,
+        origin="builtin" if template_id.startswith("builtin:") else "mine",
+        meta={"name": template_id},
+        meta_error=None,
+        meta_text=None,
+        name=template_id,
+        version=version,
+        updated_at=NOW,
+        has_readme=False,
+        inputs_version=0,
+        colour_params=None,
+        files={},
+        cover=None,
+        files_stamp="stamp",
+        refreshed_head=version,
+    )
+
+
+@dataclass
+class FakeHook:
+    """A `TemplateRowsHook` that writes a plain row per model, and notes its calls."""
+
+    history: ModelHistory | None = None
+    mode: Literal["rows", "fails", "raises", "unreadable", "hook_raises"] = "rows"
+    commits: list[tuple[list[str], str]] = field(default_factory=list)
+    refreshes: list[tuple[list[str], str, bool]] = field(default_factory=list)
+    #: What the HEAD row read on the transaction's own connection, when it ran.
+    seen_head: list[str | None] = field(default_factory=list)
+    #: Each failed refresh the history counted, by path.
+    failures: list[str] = field(default_factory=list)
+
+    def for_commit(self, models: list[str], commit: str) -> Callable[[Any], None] | None:
+        self.commits.append((list(models), commit))
+        if self.mode == "unreadable":
+            return None
+        if self.mode == "fails":
+            return lambda conn: conn.execute("SELECT * FROM no_such_table")
+        if self.mode == "raises":
+
+            def encode(conn: Any) -> None:
+                # As psycopg's own UnicodeEncodeError for a lone surrogate: not a
+                # psycopg.Error.
+                "\ud800".encode()
+
+            return encode
+        if self.mode == "hook_raises":
+            raise RuntimeError("the hook broke")
+        write = partial(write_rows, rows=[_row(model, commit) for model in models], gone=[])
+
+        def run(conn: Any) -> None:
+            found = conn.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
+            self.seen_head.append(None if found is None else found[0])
+            write(conn)
+
+        return run
+
+    def refresh_locked(
+        self, models: list[str], *, path: Literal["commit", "no_commit", "no_git"]
+    ) -> None:
+        assert self.history is not None
+        held = self.history._lock.locked() and (
+            self.history.coordinator is None or self.history._hold is not None
+        )
+        self.refreshes.append((list(models), path, held))
+        if self.mode == "hook_raises":
+            raise RuntimeError("the hook broke")
+
+    def count_failure(self, path: str) -> None:
+        self.failures.append(path)
+
+
+@pytest.fixture
+def conninfo(pg_conninfo: str) -> str:
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        migrate(conn)
+    return pg_conninfo
+
+
+def _history(root: Path, conninfo: str | None, hook: FakeHook | None) -> ModelHistory:
+    history = ModelHistory(
+        root,
+        wrapper_prefix=WRAPPER_PREFIX,
+        timeout=10.0,
+        coordinator=None if conninfo is None else PgRepoCoordinator(conninfo),
+    )
+    root.mkdir(parents=True, exist_ok=True)
+    history.ensure_repo()
+    if hook is not None:
+        hook.history = history
+        history.template_rows = hook
+    return history
+
+
+def _write(root: Path, slug: str, text: str = "cube(1);") -> None:
+    (root / slug).mkdir(parents=True, exist_ok=True)
+    (root / slug / "model.scad").write_text(text)
+
+
+def _head(conninfo: str) -> str | None:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        found = conn.execute("SELECT head FROM models_repo_head WHERE id").fetchone()
+    return None if found is None else str(found[0])
+
+
+def _version(conninfo: str, template_id: str) -> str | None:
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        found = conn.execute(
+            "SELECT version FROM templates WHERE template_id = %s", (template_id,)
+        ).fetchone()
+    return None if found is None else str(found[0])
+
+
+def _heads_announced(conn: psycopg.Connection[Any], timeout: float) -> list[str]:
+    return [
+        decode_change(notice.payload).commit
+        for notice in conn.notifies(timeout=timeout, stop_after=None)
+    ]
+
+
+def _seeded(tmp_path: Path, conninfo: str, hook: FakeHook) -> tuple[ModelHistory, str]:
+    """A repository whose first commit (``other``) was made before the hook was set."""
+    root = tmp_path / "models"
+    history = _history(root, conninfo, None)
+    _write(root, "other")
+    first = history.commit("Add other", "other")
+    assert first is not None
+    hook.history = history
+    history.template_rows = hook
+    return history, first
+
+
+def test_rows_commit_with_the_head_and_before_the_notify(tmp_path: Path, conninfo: str) -> None:
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    seen: dict[str, str | None] = {}
+    with psycopg.connect(conninfo, autocommit=True) as listener:
+        listener.execute(f"LISTEN {HEAD_CHANNEL}")
+        created: list[str | None] = []
+        worker = threading.Thread(target=lambda: created.append(history.commit("Add demo", "demo")))
+        worker.start()
+        heard = listener.notifies(timeout=10.0)
+        notice = next(heard)
+        # The generator holds the connection's lock until it is closed.
+        heard.close()
+        # Read at once on the listening connection: the rows must already be there.
+        found = listener.execute(
+            "SELECT version FROM templates WHERE template_id = 'demo'"
+        ).fetchone()
+        seen[decode_change(notice.payload).commit] = None if found is None else found[0]
+        worker.join()
+    assert created and created[0] is not None
+    commit = created[0]
+    assert seen == {commit: commit}
+    assert _head(conninfo) == commit
+    assert hook.commits == [(["demo"], commit)]
+    # The rows run after the HEAD upsert, in its transaction.
+    assert hook.seen_head == [commit]
+
+
+@pytest.mark.parametrize("mode", ["fails", "raises"])
+def test_a_failing_row_write_still_records_the_head_and_its_notify(
+    tmp_path: Path, conninfo: str, mode: Literal["fails", "raises"]
+) -> None:
+    """Review B-I1, B-M1 (#7317): the rows run in a savepoint. A write that fails, with a
+    psycopg error or any other, loses the rows only; the copy repairs them."""
+    hook = FakeHook(mode=mode)
+    history, first = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    with psycopg.connect(conninfo, autocommit=True) as listener:
+        listener.execute(f"LISTEN {HEAD_CHANNEL}")
+        created = history.commit("Add demo", "demo")
+        announced = _heads_announced(listener, 0.5)
+    assert created is not None and created != first
+    assert history.head() == created
+    assert _head(conninfo) == created
+    assert _version(conninfo, "demo") is None
+    assert created in announced
+
+
+def test_a_hook_that_cannot_read_still_records_the_head(tmp_path: Path, conninfo: str) -> None:
+    hook = FakeHook(mode="unreadable")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    created = history.commit("Add demo", "demo")
+    assert created is not None
+    assert _head(conninfo) == created
+    assert _version(conninfo, "demo") is None
+    assert hook.commits == [(["demo"], created)]
+
+
+def test_a_commit_with_nothing_staged_refreshes_its_ids_under_the_lock(
+    tmp_path: Path, conninfo: str
+) -> None:
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    assert history.commit("Touch other", "other") is None
+    assert hook.refreshes == [(["other"], "no_commit", True)]
+    assert hook.commits == []
+
+
+def test_a_failed_commit_refreshes_its_ids_then_raises(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo", "sphere(1);")
+
+    def refuse(*_args: object, **_kwargs: object) -> str | None:
+        raise GitError("git commit failed")
+
+    monkeypatch.setattr(history, "_commit_locked", refuse)
+    with pytest.raises(GitError):
+        history.commit("Add demo", "demo", "_builtin/tag")
+    assert hook.refreshes == [(["demo", "builtin:tag"], "no_commit", True)]
+
+
+def test_an_identical_restore_refreshes_its_id(tmp_path: Path, conninfo: str) -> None:
+    hook = FakeHook()
+    history, first = _seeded(tmp_path, conninfo, hook)
+    answered = history.restore("other", first)
+    assert answered == first
+    assert hook.refreshes == [(["other"], "no_commit", True)]
+
+
+def test_the_builtin_dir_alone_refreshes_nothing(tmp_path: Path, conninfo: str) -> None:
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    assert history.commit("Sync the built-in models", "_builtin") is None
+    assert hook.refreshes == []
+
+
+def test_without_a_coordinator_the_rows_follow_the_commit(tmp_path: Path) -> None:
+    hook = FakeHook()
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root, "demo")
+    created = history.commit("Add demo", "demo")
+    assert created is not None
+    assert hook.refreshes == [(["demo"], "commit", True)]
+    assert hook.commits == []
+
+
+def test_last_commits_since_names_only_the_later_commits(tmp_path: Path) -> None:
+    root = tmp_path / "models"
+    history = _history(root, None, None)
+    _write(root, "demo")
+    _write(root, "early")
+    base = history.commit("Add demo and early", "demo", "early")
+    assert base is not None
+    _write(root, "other")
+    second = history.commit("Add other", "other")
+    _write(root, "demo", "sphere(2);")
+    third = history.commit("Edit demo", "demo")
+    _write(root / "_builtin", "tag")
+    fourth = history.commit("Sync", "_builtin")
+    assert None not in (second, third, fourth)
+    ids: Sequence[str] = ["demo", "other", "early", "absent", "builtin:tag"]
+    assert history.last_commits_since(base, ids) == {
+        "demo": third,
+        "other": second,
+        "builtin:tag": fourth,
+    }
+    assert history.last_commits_since(fourth or "", ids) == {}
+
+
+def test_a_hook_that_raises_for_a_commit_never_fails_it(tmp_path: Path, conninfo: str) -> None:
+    """Review B-M2 (#7317): the commit has landed, so a hook bug is logged, never raised."""
+    hook = FakeHook(mode="hook_raises")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    created = history.commit("Add demo", "demo")
+    assert created is not None and history.head() == created
+    assert _head(conninfo) == created
+
+
+def test_a_hook_that_raises_without_a_coordinator_never_fails_the_commit(tmp_path: Path) -> None:
+    hook = FakeHook(mode="hook_raises")
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root, "demo")
+    created = history.commit("Add demo", "demo")
+    assert created is not None and history.head() == created
+
+
+def test_a_hook_that_raises_with_no_commit_keeps_the_answer(tmp_path: Path, conninfo: str) -> None:
+    hook = FakeHook(mode="hook_raises")
+    history, first = _seeded(tmp_path, conninfo, hook)
+    assert history.commit("Touch other", "other") is None
+    assert history.restore("other", first) == first
+
+
+def test_a_hook_that_raises_keeps_a_failed_commits_own_error(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook(mode="hook_raises")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo", "sphere(1);")
+
+    def refuse(*_args: object, **_kwargs: object) -> str | None:
+        raise GitError("the commit failed")
+
+    monkeypatch.setattr(history, "_commit_locked", refuse)
+    with pytest.raises(GitError, match="the commit failed"):
+        history.commit("Add demo", "demo")
+
+
+def _unlisted(*_args: object) -> list[str]:
+    raise GitError("git diff-tree failed")
+
+
+def test_a_commit_git_cannot_list_refreshes_the_ids_it_named(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #7484 (non-blocking 1): when git cannot list what a commit touched, the
+    HEAD's NOTIFY names no templates, and the rows written with it are those of the
+    templates the write named, so the write's own answer shows it."""
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    _write(history.root / "_builtin", "tag")
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    created = history.commit("Add demo", "demo", "_builtin/tag")
+    assert created is not None
+    assert hook.commits == [(["demo", "builtin:tag"], created)]
+    assert _head(conninfo) == created
+    assert _version(conninfo, "demo") == created
+
+
+def test_a_restore_git_cannot_list_refreshes_its_id(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook()
+    history, first = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "other", "sphere(1);")
+    assert history.commit("Edit other", "other") is not None
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    created = history.restore("other", first)
+    assert hook.commits[-1] == (["other"], created)
+
+
+def _unrecorded(run_also: bool) -> Callable[..., None]:
+    """A `_PgHold.record` whose HEAD write fails, as when Postgres drops the connection:
+    the transaction rolls back, and with it the rows. With ``run_also``, the rows' write
+    runs first, and its failure is swallowed as the savepoint swallows it."""
+
+    def record(self: Any, change: Any, also: Callable[[Any], None] | None = None) -> None:
+        if run_also and also is not None:
+            with contextlib.suppress(Exception):
+                also(None)
+        raise RepoLockError(f"could not record {change.commit[:7]} as the HEAD")
+
+    return record
+
+
+def test_a_head_that_cannot_be_recorded_logs_and_counts_its_rows(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review of db7ef61 (Blocking 2): a HEAD record that fails rolls back the rows
+    written with it. The miss is logged with the template ids and counted under
+    ``commit``, and the commit stands."""
+    hook = FakeHook()
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    monkeypatch.setattr(_PgHold, "record", _unrecorded(run_also=False))
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.history"):
+        created = history.commit("Add demo", "demo")
+    assert created is not None and history.head() == created
+    assert hook.failures == ["commit"]
+    assert any(getattr(r, "templates", None) == ["demo"] for r in caplog.records)
+    assert _version(conninfo, "demo") is None
+
+
+def test_a_head_that_cannot_be_recorded_after_its_rows_failed_counts_once(
+    tmp_path: Path, conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rows' own write failed and the hook counted it (`TemplateRefresh.for_commit`):
+    the failed HEAD record does not count it again."""
+    hook = FakeHook(mode="raises")
+    history, _ = _seeded(tmp_path, conninfo, hook)
+    _write(history.root, "demo")
+    monkeypatch.setattr(_PgHold, "record", _unrecorded(run_also=True))
+    assert history.commit("Add demo", "demo") is not None
+    assert hook.failures == []
+
+
+def test_a_commit_git_cannot_list_and_named_no_template_is_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of db7ef61 (non-blocking 2): with no coordinator, a commit git cannot
+    list and whose write named no template refreshes nothing; the miss is counted."""
+    hook = FakeHook()
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root / "_builtin", "tag")
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    assert history.commit("Sync the built-in models", "_builtin") is not None
+    assert hook.refreshes == []
+    assert hook.failures == ["commit"]
+
+
+def test_a_commit_git_cannot_list_without_a_coordinator_refreshes_the_ids_it_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = FakeHook()
+    root = tmp_path / "models"
+    history = _history(root, None, hook)
+    _write(root, "demo")
+    monkeypatch.setattr(history, "_changed_models", _unlisted)
+    assert history.commit("Add demo", "demo") is not None
+    assert hook.refreshes == [(["demo"], "commit", True)]

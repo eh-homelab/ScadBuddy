@@ -22,6 +22,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.settings import Settings
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.filament import dry_hours, ledger, metrics
 from scadbuddy.filament import models as m
 from scadbuddy.filament import presets as p
@@ -138,7 +139,7 @@ class TagUnnamedError(ValueError):
         super().__init__("the tag has no tag_uid or tray_uuid once cleaned")
 
 
-class _NoSpoolError(Exception):
+class NoSpoolError(Exception):
     """The spool a tag is bound to does not exist; raised to roll back the bind."""
 
 
@@ -1131,7 +1132,7 @@ class FilamentSpoolStore:
         try:
             with self._pool.connection() as conn, conn.transaction():
                 return self.bind_on(conn, spool_id, uid, tray, kind, override, actor, marks_origin)
-        except _NoSpoolError:
+        except NoSpoolError:
             return None
 
     @staticmethod
@@ -1145,7 +1146,7 @@ class FilamentSpoolStore:
         actor: str,
         marks_origin: bool = False,
     ) -> m.TagBinding:
-        """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `_NoSpoolError`
+        """`bind_tag` on ``conn``'s transaction, its keys already cleaned; `NoSpoolError`
         when the spool does not exist, and `OverrideKindError`, which the caller rolls back
         on. ``override=None`` keeps a held binding's flag as it is (what the Bambuddy pull
         and a tray link pass: they never change one); a new binding then takes False."""
@@ -1153,7 +1154,7 @@ class FilamentSpoolStore:
             conn.execute("SELECT 1 FROM filament_spools WHERE id = %s", (spool_id,)).fetchone()
             is None
         ):
-            raise _NoSpoolError()
+            raise NoSpoolError()
         tag_id, tag_kind = FilamentSpoolStore._tag(conn, uid, tray, kind)
         if override and tag_kind != "bambu_mifare":
             raise OverrideKindError()
@@ -1168,7 +1169,7 @@ class FilamentSpoolStore:
         ).fetchall()
         if spool_id not in {row["id"] for row in locked}:
             # Deleted since the first look: roll back the tag this may have made.
-            raise _NoSpoolError()
+            raise NoSpoolError()
         held = conn.execute(
             f"SELECT {_BINDING_COLUMNS} FROM filament_tag_bindings"
             " WHERE tag_id = %s AND spool_id = %s AND unbound_at IS NULL",
@@ -1289,8 +1290,9 @@ class FilamentSpoolStore:
     @contextmanager
     def transaction(self) -> Iterator[Conn]:
         """A connection in a transaction, for a caller that writes a spool, its tags and
-        its events as one (`filament/bambuddy_pull.py`)."""
-        with self._pool.connection() as conn, conn.transaction():
+        its events as one (`filament/bambuddy_pull.py`). Its COMMIT is a span
+        (`core/tracing.py` `traced_transaction`, #7389)."""
+        with self._pool.connection() as conn, traced_transaction(conn):
             yield conn
 
     @staticmethod
@@ -1523,6 +1525,18 @@ class FilamentSpoolStore:
             f"SELECT {_SPOOL_COLUMNS} FROM filament_spools WHERE id = %s", (spool_id,)
         ).fetchone()
         return None if row is None else _hydrate(conn, [row], defaults, now, hours)[0]
+
+    @staticmethod
+    def tag_row_on(conn: Conn, tag_id: UUID) -> m.TagRow | None:
+        """The tag with its open binding and its spool's number, on ``conn``."""
+        row = conn.execute(
+            f"SELECT {_TAG_COLUMNS_T}, {_BINDING_COLUMNS_B}, s.number AS spool_number"
+            " FROM filament_tags t LEFT JOIN filament_tag_bindings b"
+            " ON b.tag_id = t.id AND b.unbound_at IS NULL"
+            " LEFT JOIN filament_spools s ON s.id = b.spool_id WHERE t.id = %s",
+            (tag_id,),
+        ).fetchone()
+        return None if row is None else FilamentSpoolStore._tag_row(row)
 
     @staticmethod
     def _tag_row(row: Row) -> m.TagRow:

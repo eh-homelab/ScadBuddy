@@ -17,13 +17,17 @@
 Locks: the item `FOR SHARE` (the parent), then the rows being changed `FOR UPDATE`. A take
 locks all of the item's lots in FIFO order, so takes, give-backs and counts of one item run
 one after another. A caller that takes or gives back several items in one transaction (an
-order's parts, the plan's Task 7) takes them in `item_id` order, and locks its own rows
-(the order and its items) before any lot, so two such callers cannot deadlock."""
+order's parts, the plan's Task 7) locks its own rows (the order and its items) first, then
+every item it will touch with `lock_items` (in `item_id` order: each item, the lock that
+adds a lot, then its lots), before the first take, so two such callers cannot deadlock
+(R-P2-28). Every lot insert (`receive_in`, the first `adjustment` lot of `_open_lots`) and
+`count_item` take that same lock before the lots, so no lot appears under a caller that
+holds `lock_items` (R-P2-32)."""
 
 from __future__ import annotations
 
 import builtins
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal, NamedTuple
@@ -34,12 +38,13 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
-from scadbuddy.entities.refs import EntityRef
+from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import EntityStore
 from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound
 from scadbuddy.inventory.models import (
     AdjustInput,
     Lot,
+    LotPatch,
     Move,
     MoveKind,
     ReceiveLot,
@@ -47,6 +52,7 @@ from scadbuddy.inventory.models import (
     RecostedItem,
     RecostResult,
     Unit,
+    UnitPatch,
     UnitStatusInput,
     UseInput,
 )
@@ -81,7 +87,9 @@ class ItemNotCounted(ValueError):  # noqa: N818
 
 
 class BadQuantity(ValueError):  # noqa: N818
-    """Not above 0, more than six decimal places, or a fraction of an `each` item."""
+    """A quantity or a cost out of range: below 0 (or 0 where a move needs one), more than
+    six decimal places, a fraction of an `each` item, or past what `numeric(20,6)` holds
+    (a quantity, a lot's stock, or a move's amount)."""
 
 
 class UnitInstalled(ValueError):  # noqa: N818
@@ -93,6 +101,8 @@ class SerialExists(ValueError):  # noqa: N818
 
 
 _SIX = Decimal("0.000001")
+#: `numeric(20,6)` holds an absolute value below this.
+_LIMIT = Decimal(10) ** 14
 #: The kinds of move "Re-cost past uses" re-snapshots (the plan's Task 4).
 _RECOST_KINDS = ("use", "return", "adjust")
 #: A unit's move when it leaves `in_stock` for this status.
@@ -103,6 +113,18 @@ def _six(value: Decimal) -> Decimal:
     """Six places, half away from zero, as Postgres `round` (the `stock_moves_amount`
     CHECK)."""
     return value.quantize(_SIX, rounding=ROUND_HALF_UP)
+
+
+def _amount(qty: Decimal, unit_cost: Decimal) -> Decimal:
+    """`round(qty * unit_cost, 6)` (the `stock_moves_amount` CHECK), with `qty` and the
+    amount inside `numeric(20,6)`; else `BadQuantity`."""
+    exact = qty * unit_cost
+    if abs(qty) >= _LIMIT or abs(exact) >= _LIMIT:
+        raise BadQuantity(str(exact))
+    amount = _six(exact)
+    if abs(amount) >= _LIMIT:
+        raise BadQuantity(str(amount))
+    return amount
 
 
 def _whole(uom: str, qty: Decimal) -> None:
@@ -215,9 +237,12 @@ class StockStore:
         return [Move.model_validate(dict(r)) for r in rows]
 
     def estimate_unit_cost(self, conn: Conn, item_id: UUID, qty: Decimal) -> tuple[Decimal, bool]:
-        """What `take` of `qty` would charge per unit now, and whether any of it is of
-        unknown cost. Reads only. An item with no lot is `(0, True)`, as `take` would open
-        a zero-cost lot of unknown cost."""
+        """What `take` of `qty` would charge per unit now for the part of it of known cost
+        (the known lots' amounts over `qty`), and whether any of it is of unknown cost
+        (R-P2-29). Reads only. An item with no lot is `(0, True)`, as `take` would open a
+        zero-cost lot of unknown cost. `BadQuantity` where `take` would refuse it: a
+        quantity, or a part of it at its lot's cost, past what `numeric(20,6)` holds
+        (R-P2-16)."""
         item = _item(conn, item_id, "lot", lock=False)
         _positive(item["uom"], qty)
         lots = conn.execute(
@@ -226,8 +251,15 @@ class StockStore:
         if not lots:
             return Decimal(0), True
         plan = _fifo([dict(r) for r in lots], qty, None)
-        total = sum((_six(part * lot["unit_cost_minor"]) for lot, part, _ in plan), Decimal(0))
-        return _six(total / qty), any(lot["cost_unknown"] for lot, _, _ in plan)
+        total = Decimal(0)
+        unknown = False
+        for lot, part, _ in plan:
+            amount = _amount(part, lot["unit_cost_minor"])
+            if lot["cost_unknown"]:
+                unknown = True
+            else:
+                total += amount
+        return _six(total / qty), unknown
 
     # -- lots ----------------------------------------------------------------------------
 
@@ -238,6 +270,14 @@ class StockStore:
         with no cost opens at 0 with its cost unknown too."""
         # The shop's currency is a settings read on a connection of its own: take it first.
         shop = self._shop_currency()
+        with self.pool.connection() as conn, conn.transaction():
+            return self.receive_in(conn, item_id, body, by, shop=shop)
+
+    def receive_in(
+        self, conn: Conn, item_id: UUID, body: ReceiveLot, by: Actor, *, shop: str
+    ) -> Lot:
+        """`receive_lot` in the caller's transaction, with the shop's currency read by the
+        caller (`shop`)."""
         currency = body.currency or shop
         given: Decimal | None = body.unit_cost_minor
         if given is None and body.total_cost_minor is not None:
@@ -250,10 +290,13 @@ class StockStore:
             cost, unknown = given, False
         else:
             cost, unknown = Decimal(0), True
-        with self.pool.connection() as conn, conn.transaction():
-            item = _item(conn, item_id, "lot", lock=True)
-            _positive(item["uom"], body.qty)
-            try:
+        item = _item(conn, item_id, "lot", lock=True)
+        _positive(item["uom"], body.qty)
+        # Every lot insert takes the item's open lock first, so no lot appears under a
+        # caller that holds `lock_items` (R-P2-32).
+        _open_lock(conn, item_id)
+        try:
+            with conn.transaction():
                 row = conn.execute(
                     "INSERT INTO stock_lots (item_id, location_id, received_qty, on_hand,"
                     " unit_cost_minor, cost_unknown, cost_currency, foreign_unit_cost_minor,"
@@ -273,21 +316,22 @@ class StockStore:
                         Jsonb(by.model_dump(mode="json")),
                     ),
                 ).fetchone()
-            except psycopg.errors.ForeignKeyViolation:
-                raise LocationNotFound(str(body.location_id)) from None
-            assert row is not None
-            _move(
-                conn,
-                item_id=item_id,
-                lot_id=row["id"],
-                kind="receive",
-                qty=body.qty,
-                unit_cost=cost,
-                cost_unknown=unknown,
-                by=by,
-                at=row["received_at"],
-            )
-            return _lot(conn, row["id"])
+        except psycopg.errors.ForeignKeyViolation:
+            raise LocationNotFound(str(body.location_id)) from None
+        assert row is not None
+        _move(
+            conn,
+            item_id=item_id,
+            lot_id=row["id"],
+            kind="receive",
+            qty=body.qty,
+            unit_cost=cost,
+            cost_unknown=unknown,
+            reason=body.note,
+            by=by,
+            at=row["received_at"],
+        )
+        return _lot(conn, row["id"])
 
     def adjust_lot(self, lot_id: UUID, body: AdjustInput, by: Actor) -> Lot:
         """A count of one lot: one `adjust` move of the difference at the lot's cost,
@@ -326,6 +370,8 @@ class StockStore:
             if on_hand < 0:
                 raise BadQuantity(str(on_hand))
             _whole(item["uom"], on_hand)
+            # The lock order of `lock_items`: the open lock, then the lots (R-P2-32).
+            _open_lock(conn, item_id)
             lots = _lock_lots(conn, item_id)
             change = {lot["id"]: -lot["on_hand"] for lot in lots if lot["on_hand"] < 0}
             delta = on_hand - sum(
@@ -358,25 +404,50 @@ class StockStore:
         """The lot's cost now, known. No move changes (D14); `recost_lot` re-snapshots.
         `cost_currency` and `foreign_unit_cost_minor` stay: what it was bought in and at
         (R-P2-12)."""
-        if unit_cost_minor < 0 or unit_cost_minor != _six(unit_cost_minor):
-            raise BadQuantity(str(unit_cost_minor))
+        with self.pool.connection() as conn, conn.transaction():
+            _set_cost(conn, self._lock_lot(conn, lot_id), unit_cost_minor)
+            return _lot(conn, lot_id)
+
+    def update_lot(self, lot_id: UUID, patch: LotPatch) -> Lot:
+        """The fields `patch` names, in one transaction: a cost as `set_lot_cost` sets it
+        (no past move changes, D14), the location (null clears it) and the note.
+        `LotNotFound`, `LocationNotFound` or `BadQuantity`."""
+        fields = patch.model_dump(exclude_unset=True)
+        cost = fields.get("unit_cost_minor")
         with self.pool.connection() as conn, conn.transaction():
             lot = self._lock_lot(conn, lot_id)
-            conn.execute(
-                "UPDATE stock_lots SET unit_cost_minor = %s, cost_unknown = false WHERE id = %s",
-                (unit_cost_minor, lot["id"]),
-            )
+            if cost is not None:
+                _set_cost(conn, lot, cost)
+            if "location_id" in fields:
+                try:
+                    conn.execute(
+                        "UPDATE stock_lots SET location_id = %s WHERE id = %s",
+                        (fields["location_id"], lot_id),
+                    )
+                except psycopg.errors.ForeignKeyViolation:
+                    raise LocationNotFound(str(fields["location_id"])) from None
+            if fields.get("note") is not None:
+                conn.execute(
+                    "UPDATE stock_lots SET note = %s WHERE id = %s", (fields["note"], lot_id)
+                )
             return _lot(conn, lot_id)
 
     def recost_lot(self, conn: Conn, lot_id: UUID) -> RecostResult:
         """ "Re-cost past uses" (spec §6.6), in the caller's transaction: every `use`,
         `return` and `adjust` move of the lot takes the lot's cost now. Names each order
-        item whose parts cost (`-sum(amount_minor)` of its `use` and `return` moves) or
-        unknown flag changed, with both before and after. The after figure is the before
-        figure plus what this update changed (`RETURNING old.*, new.*`), so a move another
-        transaction writes meanwhile on another lot does not count as a change."""
+        item whose parts cost or unknown flag changed, as job cost reads them
+        (`parts_moved`: the known-cost moves, and a `use` not given back of unknown cost),
+        with both before and after (R-P2-31). The after figure is the moves read before
+        with this update's changes (`RETURNING new.*`), so a move another transaction
+        writes meanwhile on another lot does not count as a change."""
         lot = self._lock_lot(conn, lot_id)
         cost, unknown = lot["unit_cost_minor"], lot["cost_unknown"]
+        largest = conn.execute(
+            "SELECT max(abs(qty)) AS qty FROM stock_moves WHERE lot_id = %s AND kind = ANY(%s)",
+            (lot_id, list(_RECOST_KINDS)),
+        ).fetchone()
+        if largest is not None and largest["qty"] is not None:
+            _amount(largest["qty"], cost)
         touched = [
             r["order_item_id"]
             for r in conn.execute(
@@ -385,37 +456,59 @@ class StockStore:
                 (lot_id, list(_RECOST_KINDS)),
             ).fetchall()
         ]
-        before = _parts_costs(conn, touched, lot_id)
+        moves = parts_moves(conn, touched)
         rows = conn.execute(
             "UPDATE stock_moves SET unit_cost_minor = %s, amount_minor = round(qty * %s, 6),"
             " cost_unknown = %s WHERE lot_id = %s AND kind = ANY(%s)"
             " AND (unit_cost_minor <> %s OR cost_unknown <> %s)"
-            " RETURNING order_item_id, kind, old.amount_minor AS old_amount,"
-            " new.amount_minor AS new_amount",
+            " RETURNING id, old.unit_cost_minor AS old_cost, new.amount_minor AS amount_minor,"
+            " new.cost_unknown AS cost_unknown",
             (cost, cost, unknown, lot_id, list(_RECOST_KINDS), cost, unknown),
         ).fetchall()
-        delta: dict[str, Decimal] = {}
-        for r in rows:
-            if r["order_item_id"] is not None and r["kind"] in ("use", "return"):
-                oi = r["order_item_id"]
-                delta[oi] = delta.get(oi, Decimal(0)) + r["new_amount"] - r["old_amount"]
+        changed = {r["id"]: r for r in rows}
+        after_moves = [
+            {**m, **{k: changed[m["id"]][k] for k in ("amount_minor", "cost_unknown")}}
+            if m["id"] in changed
+            else m
+            for m in moves
+        ]
+        before, after = parts_moved(moves), parts_moved(after_moves)
+        order_of: dict[str, str | None] = {}
+        for m in moves:
+            order_of[m["order_item_id"]] = order_of.get(m["order_item_id"]) or m["order_id"]
         orders: builtins.list[RecostedItem] = []
-        for oi in sorted(before, key=lambda oi: (before[oi].order_id or "", oi)):
-            was = before[oi]
-            # The lot's `use` and `return` moves now all carry its flag.
+        for oi in sorted(before, key=lambda oi: (order_of[oi] or "", oi)):
             item = RecostedItem(
-                order_id=was.order_id,
+                order_id=order_of[oi],
                 order_item_id=oi,
-                before_minor=was.cost,
-                after_minor=was.cost - delta.get(oi, Decimal(0)),
-                before_unknown=was.unknown,
-                after_unknown=was.others_unknown or (was.on_lot and unknown),
+                before_minor=before[oi].cost,
+                after_minor=after[oi].cost,
+                before_unknown=before[oi].unknown,
+                after_unknown=after[oi].unknown,
             )
             if (item.before_minor, item.before_unknown) != (item.after_minor, item.after_unknown):
                 orders.append(item)
-        return RecostResult(moves=len(rows), orders=orders)
+        return RecostResult(
+            item_id=lot["item_id"],
+            unit_cost_minor=cost,
+            cost_unknown=unknown,
+            before_unit_costs_minor=sorted({r["old_cost"] for r in rows}),
+            moves=len(rows),
+            orders=orders,
+        )
 
     # -- takes ---------------------------------------------------------------------------
+
+    def lock_items(self, conn: Conn, item_ids: Iterable[UUID]) -> None:
+        """Every item's locks a take of it takes, in the caller's transaction, item by item
+        in `item_id` order: the item `FOR SHARE`, the lock that every lot insert takes
+        (`_open_lock`), then its lots `FOR UPDATE` in FIFO order. A caller that then takes
+        several items takes no lock out of this order (R-P2-28), and no receive or count
+        adds a lot to an item it holds until it ends (R-P2-32)."""
+        for item_id in sorted(set(item_ids)):
+            _item(conn, item_id, "lot", lock=True)
+            _open_lock(conn, item_id)
+            _lock_lots(conn, item_id)
 
     def take(
         self,
@@ -603,12 +696,48 @@ class StockStore:
         assert row is not None
         return Unit.model_validate(dict(row))
 
+    def update_unit(self, unit_id: UUID, patch: UnitPatch) -> Unit:
+        """The fields `patch` names, in one transaction: the name, the serial (null or
+        blank clears it) and the location (null clears it). No move. `UnitNotFound`,
+        `SerialExists` or `LocationNotFound`."""
+        fields = patch.model_dump(exclude_unset=True)
+        with self.pool.connection() as conn, conn.transaction():
+            self._lock_unit(conn, unit_id)
+            if fields.get("name") is not None:
+                conn.execute(
+                    "UPDATE stock_units SET name = %s WHERE id = %s", (fields["name"], unit_id)
+                )
+            if "serial" in fields:
+                raw = fields["serial"]
+                serial = raw.strip() if raw is not None and raw.strip() else None
+                try:
+                    conn.execute(
+                        "UPDATE stock_units SET serial = %s WHERE id = %s", (serial, unit_id)
+                    )
+                except psycopg.errors.UniqueViolation:
+                    raise SerialExists(str(serial)) from None
+            if "location_id" in fields:
+                try:
+                    conn.execute(
+                        "UPDATE stock_units SET location_id = %s WHERE id = %s",
+                        (fields["location_id"], unit_id),
+                    )
+                except psycopg.errors.ForeignKeyViolation:
+                    raise LocationNotFound(str(fields["location_id"])) from None
+            row = conn.execute("SELECT * FROM stock_units WHERE id = %s", (unit_id,)).fetchone()
+        assert row is not None
+        return Unit.model_validate(dict(row))
+
     # -- helpers -------------------------------------------------------------------------
 
     def _entity(self, conn: Conn, text: str | None) -> UUID | None:
-        """The registry row of `kind:ref`, made on first use; `BadEntityRef`,
-        `UnknownEntityKind` or `EntityNotFound`."""
-        return None if text is None else self.entities.ensure(conn, EntityRef.parse(text))
+        """The registry row of `kind:ref`, made on first use; `BadEntityRef` (a NUL byte
+        too, which Postgres `text` refuses), `UnknownEntityKind` or `EntityNotFound`."""
+        if text is None:
+            return None
+        if "\x00" in text:
+            raise BadEntityRef(text)
+        return self.entities.ensure(conn, EntityRef.parse(text))
 
     @staticmethod
     def _lock_lot(conn: Conn, lot_id: UUID) -> dict[str, Any]:
@@ -673,10 +802,7 @@ def _open_lots(conn: Conn, item_id: UUID, by: Actor) -> builtins.list[dict[str, 
     """For an item that had no lot: a zero-cost `adjustment` lot of unknown cost. Two
     callers that both found none wait on one lock, and the second takes the lot the first
     opened."""
-    conn.execute(
-        "SELECT pg_advisory_xact_lock(hashtext('stock_lots_open'), hashtext(%s))",
-        (str(item_id),),
-    )
+    _open_lock(conn, item_id)
     lots = _lock_lots(conn, item_id)
     if lots:
         return lots
@@ -688,6 +814,15 @@ def _open_lots(conn: Conn, item_id: UUID, by: Actor) -> builtins.list[dict[str, 
     ).fetchone()
     assert row is not None
     return [dict(row)]
+
+
+def _open_lock(conn: Conn, item_id: UUID) -> None:
+    """The transaction's lock on adding a lot to the item: every lot insert
+    (`receive_in`, `_open_lots`) takes it first, and so does `lock_items`."""
+    conn.execute(
+        "SELECT pg_advisory_xact_lock(hashtext('stock_lots_open'), hashtext(%s))",
+        (str(item_id),),
+    )
 
 
 def _move(
@@ -723,7 +858,7 @@ def _move(
             kind,
             qty,
             unit_cost,
-            _six(qty * unit_cost),
+            _amount(qty, unit_cost),
             cost_unknown,
             needs_review,
             reverses,
@@ -736,8 +871,27 @@ def _move(
     ).fetchone()
     assert row is not None
     if lot_id is not None:
-        conn.execute("UPDATE stock_lots SET on_hand = on_hand + %s WHERE id = %s", (qty, lot_id))
+        moved = conn.execute(
+            "UPDATE stock_lots SET on_hand = on_hand + %s WHERE id = %s"
+            " AND abs(on_hand + %s) < %s RETURNING id",
+            (qty, lot_id, qty, _LIMIT),
+        ).fetchone()
+        if moved is None:
+            raise BadQuantity(str(qty))
     return Move.model_validate(dict(row))
+
+
+def _set_cost(conn: Conn, lot: dict[str, Any], unit_cost_minor: Decimal) -> None:
+    """The locked lot's cost now, known. `BadQuantity` for a cost below 0, with more than
+    six places, or at which the lot's stock (received or on hand) is worth more than an
+    amount holds."""
+    if unit_cost_minor < 0 or unit_cost_minor != _six(unit_cost_minor):
+        raise BadQuantity(str(unit_cost_minor))
+    _amount(max(abs(lot["on_hand"]), lot["received_qty"]), unit_cost_minor)
+    conn.execute(
+        "UPDATE stock_lots SET unit_cost_minor = %s, cost_unknown = false WHERE id = %s",
+        (unit_cost_minor, lot["id"]),
+    )
 
 
 def _lot(conn: Conn, lot_id: UUID) -> Lot:
@@ -746,33 +900,40 @@ def _lot(conn: Conn, lot_id: UUID) -> Lot:
     return Lot.model_validate(dict(row))
 
 
-class _Parts(NamedTuple):
-    order_id: str | None
-    #: `-sum(amount_minor)` of the order item's `use` and `return` moves.
+class PartsMoved(NamedTuple):
+    """An order item's parts as its stock moves say (#7067): what job cost reads
+    (`OrderStore.cost_rows`) and what a re-cost compares (R-P2-31)."""
+
+    #: `-sum(amount_minor)` of its known-cost `use` and `return` moves.
     cost: Decimal
-    #: Any of them of unknown cost.
+    #: A `use` that no `return` names is of unknown cost.
     unknown: bool
-    #: Any of them, on another lot or a unit, of unknown cost.
-    others_unknown: bool
-    #: Any of them on the lot.
-    on_lot: bool
+    #: Some `use` is not given back.
+    open: bool
 
 
-def _parts_costs(conn: Conn, order_item_ids: builtins.list[str], lot_id: UUID) -> dict[str, _Parts]:
-    """Each order item's parts cost, as job cost reads it (the plan's Task 8), with what
-    `recost_lot` needs to know of `lot_id`."""
+def parts_moves(conn: Conn, order_item_ids: Iterable[str]) -> builtins.list[dict[str, Any]]:
+    """The order items' `use` and `return` moves, each with `open`: a `use` that no
+    `return` names (`reverses_move_id`, `give_back`). `parts_moved` sums them."""
     rows = conn.execute(
-        "SELECT order_item_id, max(order_id) AS order_id, -sum(amount_minor) AS cost,"
-        " bool_or(cost_unknown) AS unknown,"
-        " coalesce(bool_or(cost_unknown) FILTER (WHERE lot_id IS DISTINCT FROM %s), false)"
-        " AS others_unknown, coalesce(bool_or(lot_id = %s), false) AS on_lot"
-        " FROM stock_moves WHERE order_item_id = ANY(%s) AND kind IN ('use', 'return')"
-        " GROUP BY order_item_id",
-        (lot_id, lot_id, order_item_ids),
+        "SELECT m.id, m.order_id, m.order_item_id, m.kind, m.amount_minor, m.cost_unknown,"
+        " m.kind = 'use' AND NOT EXISTS"
+        "  (SELECT 1 FROM stock_moves r WHERE r.reverses_move_id = m.id) AS open"
+        " FROM stock_moves m WHERE m.order_item_id = ANY(%s) AND m.kind IN ('use', 'return')",
+        (list(order_item_ids),),
     ).fetchall()
-    return {
-        r["order_item_id"]: _Parts(
-            r["order_id"], r["cost"], r["unknown"], r["others_unknown"], r["on_lot"]
+    return [dict(r) for r in rows]
+
+
+def parts_moved(moves: Iterable[dict[str, Any]]) -> dict[str, PartsMoved]:
+    """Each order item's parts from its moves (`parts_moves`): the one reading of job
+    cost and of a re-cost's before and after (R-P2-31)."""
+    found: dict[str, PartsMoved] = {}
+    for m in moves:
+        was = found.get(m["order_item_id"], PartsMoved(Decimal(0), False, False))
+        found[m["order_item_id"]] = PartsMoved(
+            was.cost - (Decimal(0) if m["cost_unknown"] else m["amount_minor"]),
+            was.unknown or (m["open"] and m["cost_unknown"]),
+            was.open or m["open"],
         )
-        for r in rows
-    }
+    return found

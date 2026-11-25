@@ -37,6 +37,7 @@ from scadbuddy.workflows.outputs import _materials, manifest_of
 from scadbuddy.workflows.packing import PackError, explicit_plate
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.support.openscad import install_fake_openscad
+from tests.support.saved_outputs import save_files
 
 PLATE = PlateSize(key="default", width=256.0, depth=256.0)
 
@@ -429,7 +430,7 @@ async def test_an_own_layout_must_name_one_of_the_parts(tmp_path: Path) -> None:
 
 
 def test_a_save_that_fails_part_way_leaves_no_output_directory(tmp_path: Path) -> None:
-    """`OutputStore.create` copies all or nothing (final review I2): a source gone from
+    """A save copies all or nothing (final review I2): a source gone from
     the store fails the save and removes what it had written."""
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
@@ -446,5 +447,5 @@ def test_a_save_that_fails_part_way_leaves_no_output_directory(tmp_path: Path) -
         ),
     )
     with pytest.raises(FileNotFoundError):
-        OutputStore(paths).create(job)
+        save_files(OutputStore(paths), job)
     assert not any((paths.outputs / "demo").iterdir())

@@ -134,20 +134,54 @@ def temporal_server(db_file: Path | None = None) -> Iterator[str]:
         yield address
 
 
+#: What keeps the dev server small over a session (#7527, #7549). Every api test adds
+#: task queues, and the server kept each one: it grew about 3 MiB a queue, to 1.5-2 GiB
+#: per xdist worker by the end of a CI shard, and four of them took the shard's
+#: container to its 13 GiB cap. Measured on the spark with temporal CLI 1.10.1
+#: (`grow.py` in #7527: a versioned worker on a new queue per step, one workflow each),
+#: the server's RSS after 400 queues was 1327 MiB with the defaults and 581 MiB with a
+#: 10 s idle time and `DEV_SERVER_GOGC`. One partition per queue held 373 MiB, but real
+#: servers keep four, and the tests must meet their multi-partition reads (`queue_pollers`,
+#: #7350) and a non-root partition's lag (`routes_to`, #4255), so the partitions stay.
+#: In CI (#7552, run 45513638953) the eight shards' containers peaked at 8.2-10.3 GiB.
+#: If a shard nears the cap again, lower the idle time first, then `DEV_SERVER_GOGC`,
+#: then add a shard; keep the four partitions (#7565).
+DEV_SERVER_DYNAMIC_CONFIG = ('matching.maxTaskQueueIdleTime="10s"',)
+DEV_SERVER_GOGC = "25"
+
+
+@contextmanager
+def _go_gc(value: str) -> Iterator[None]:
+    """``GOGC`` set while the dev server starts (it inherits the environment), then put back."""
+    before = os.environ.get("GOGC")
+    os.environ["GOGC"] = value
+    try:
+        yield
+    finally:
+        if before is None:
+            del os.environ["GOGC"]
+        else:
+            os.environ["GOGC"] = before
+
+
 @contextmanager
 def _dev_server(db_file: Path) -> Iterator[str]:
     loop = asyncio.new_event_loop()
-    env = loop.run_until_complete(
-        WorkflowEnvironment.start_local(
-            dev_server_existing_path=TEST_TEMPORAL_DEV_SERVER or shutil.which("temporal"),
-            data_converter=pydantic_data_converter,
-            dev_server_database_filename=str(db_file),
-            dev_server_extra_args=[
-                "--dynamic-config-value",
-                f"matching.maxTaskQueuesInDeploymentVersion={MAX_TASK_QUEUES_PER_VERSION}",
-            ],
-        )
+    dynamic = (
+        f"matching.maxTaskQueuesInDeploymentVersion={MAX_TASK_QUEUES_PER_VERSION}",
+        *DEV_SERVER_DYNAMIC_CONFIG,
     )
+    with _go_gc(DEV_SERVER_GOGC):
+        env = loop.run_until_complete(
+            WorkflowEnvironment.start_local(
+                dev_server_existing_path=TEST_TEMPORAL_DEV_SERVER or shutil.which("temporal"),
+                data_converter=pydantic_data_converter,
+                dev_server_database_filename=str(db_file),
+                dev_server_extra_args=[
+                    arg for value in dynamic for arg in ("--dynamic-config-value", value)
+                ],
+            )
+        )
     try:
         yield current_address(env.client)
     finally:
@@ -155,15 +189,44 @@ def _dev_server(db_file: Path) -> Iterator[str]:
         loop.close()
 
 
-async def cancel_recorded(handle: WorkflowHandle[Any, Any]) -> None:
+#: How long `cancel_recorded` waits for the cancel request in the history (#7500).
+CANCEL_RECORDED_WITHIN = 10.0
+
+
+async def cancel_recorded(
+    handle: WorkflowHandle[Any, Any],
+    *,
+    gate: asyncio.Event | None = None,
+    pending: asyncio.Task[Any] | None = None,
+) -> None:
     """Cancel ``handle``'s workflow and return once its history holds the cancel request,
-    so a recorder (#7433) opens its gate only after the server recorded the cancel."""
+    so a recorder (#7433) opens its gate only after the server recorded the cancel. A
+    cancel not recorded within `CANCEL_RECORDED_WITHIN` raises `TimeoutError` (#7500).
+    On any failure, the recorder's ``gate`` is opened and its ``pending`` start is
+    cancelled first, so no pending task's warning buries the error (#7554)."""
+    try:
+        await _cancel_recorded(handle)
+    except BaseException:
+        if gate is not None:
+            gate.set()
+        if pending is not None:
+            pending.cancel()
+        raise
+
+
+async def _cancel_recorded(handle: WorkflowHandle[Any, Any]) -> None:
     await handle.cancel()
-    while not any(
-        event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
-        for event in (await handle.fetch_history()).events
-    ):
-        await asyncio.sleep(0.05)
+    try:
+        async with asyncio.timeout(CANCEL_RECORDED_WITHIN):
+            while not any(
+                event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_CANCEL_REQUESTED
+                for event in (await handle.fetch_history()).events
+            ):
+                await asyncio.sleep(0.05)
+    except TimeoutError:
+        raise TimeoutError(
+            f"no cancel request in {handle.id}'s history after {CANCEL_RECORDED_WITHIN} s"
+        ) from None
 
 
 async def terminate_open_workflows(client: Client, task_queue: str) -> None:

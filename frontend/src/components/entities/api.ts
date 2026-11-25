@@ -76,6 +76,8 @@ export const entityApi = {
       (body) => body.properties,
     ),
   propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
+  /** #7067 — the schema that types one entity's properties: an item's is its item kind's, merged down the kind tree. */
+  entityPropertySchema: (entity: string) => request<KindPropertySchema>(`${base(entity)}/property-schema`),
 }
 
 /** #7026 — every entity of `kind`'s property values as search text (`propertyTexts`), by ref. A failed read throws. */

@@ -6,7 +6,7 @@ import { PriceSheet } from './PriceSheet'
 import { changeLabel } from './priceFormat'
 import type { ShopMoney } from './useMoney'
 
-const money: ShopMoney = { currency: 'USD', exponent: 2, format: (amount, currency = 'USD') => `${currency} ${amount}` }
+const money: ShopMoney = { currency: 'USD', exponent: 2, error: null, format: (amount, currency = 'USD') => `${currency} ${amount}` }
 
 const point = (price: string, per_kg: string, on_date: string): PricePoint => ({
   id: `p-${price}`,

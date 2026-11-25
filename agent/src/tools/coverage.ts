@@ -27,6 +27,42 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
   },
   {
+    operation: 'POST /api/v1/filament/tags/reads',
+    reason:
+      "The phone page's own Web NFC reading (#7273): the browser reads the tag. An agent reads a tag through nfc_read, which queues a job that the phone page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/backups',
+    reason:
+      "The phone page backs a tag up right before it writes, in the same tap (#7273 G7). An agent's write is backed up by the page when it runs the nfc_write job.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-records',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-written',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/{tag_id}/backups/{backup_id}/restore',
+    reason:
+      "One step of the phone page's restore of a tag backup (#7273 G7): the records to write back, after a fresh backup. The browser holds the tag and the page checks the read-back itself (R6), so an agent writes through nfc_write, which the page runs.",
+  },
+  ...(
+    [
+      'GET /api/v1/filament/nfc-jobs',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/claim',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/result',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The phone page's side of an agent's NFC job (#7273 G4): it lists the pending jobs, arms one when the person taps Arm, and posts what the tag held. The agent creates and waits on jobs with nfc_read and nfc_write.",
+  })),
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },
@@ -93,27 +129,29 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   {
     operation: 'POST /api/v1/parts',
-    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+    reason:
+      'Alias of POST /inventory/items with its offer and price (#7067, spec §6.11); it goes after one release. The assistant adds an item with inventory_item_upsert, its offer with inventory_offer_upsert and its stock with inventory_lot_receive.',
   },
   {
     operation: 'PATCH /api/v1/parts/{part_id}',
-    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+    reason:
+      'Alias of PATCH /inventory/items/{item_id} and its offer (#7067, spec §6.11); it goes after one release. The assistant edits an item with inventory_item_upsert and its offer with inventory_offer_upsert.',
   },
   {
     operation: 'POST /api/v1/parts/{part_id}/adjust',
-    reason: "A person's count of the shelf (#5543, job cost spec §11), with a note why it differs; the assistant cannot count stock.",
+    reason: 'Alias of POST /inventory/items/{item_id}/count (#7067, spec §6.11); it goes after one release. The assistant records a count with inventory_move_count.',
   },
   {
     operation: 'GET /api/v1/parts/{part_id}/moves',
-    reason: "The Parts page's stock line (#5543); part_list gives each part's stock now.",
+    reason: 'Alias of GET /inventory/moves?item_id= (#7067, spec §6.11); it goes after one release. The assistant reads moves with inventory_move_list.',
   },
   {
     operation: 'GET /api/v1/parts/rules/{slug}',
-    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'PUT /api/v1/parts/rules/{slug}',
-    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'GET /api/v1/print/library-copies',
@@ -349,6 +387,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Ruling 6); the route refuses an agent-authored request.',
   },
   {
+    operation: 'POST /api/v1/tasks/{task_id}/answer',
+    reason:
+      "A flow prompt's typed answer (#7364) is the browser user's, as a flow's other answers are; the route " +
+      'refuses an agent-authored request.',
+  },
+  ...(['GET /api/v1/tasks', 'GET /api/v1/tasks/{task_id}'] as const).map((operation) => ({
+    operation,
+    reason:
+      "The questions flows ask a person (#7364), for the screens that show and answer them; the list has no answers, " +
+      'and one task has its own. The assistant reads what a run waits on with get_flow_run, and only a person answers.',
+  })),
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
     reason:
       "A flow's outward calls are approved by the browser user on the Workflows page only (spec §6.6, plan 6 " +
@@ -427,6 +477,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'The same UI files at a pinned revision, for the browser (#425).',
   },
   {
+    operation: 'GET /api/v1/model-records/copy-status',
+    reason:
+      "The last run of the copy of the templates' files to rows (#7317), at an API start or in a " +
+      "housekeeping sweep: an operator's check after a deploy. The copy runs by itself, so an agent has " +
+      'nothing to act on; the templates it copied are in the model tools.',
+  },
+  {
     operation: 'PUT /api/v1/settings',
     reason:
       'The one write path for every stored setting (#322): the Bambuddy URL and API key and the Google Fonts ' +
@@ -465,6 +522,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'GET /api/v1/outputs/{output_id}/files/{name}',
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
+  },
+  {
+    operation: 'GET /api/v1/outputs/copy-status',
+    reason:
+      "The last run of the copy of the outputs' files to rows (#7255), at an API start or in a housekeeping " +
+      "sweep: an operator's check after a deploy. The copy runs by itself, so an agent has nothing to act " +
+      'on; the outputs it copied are in the output tools.',
   },
   {
     operation: 'POST /api/v1/outputs/{output_id}/backfill',

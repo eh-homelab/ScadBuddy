@@ -5,7 +5,9 @@
 A flow is a short script that chains ScadBuddy's actions: render, save an output, queue a
 print, arrange, call a tool, or ask the assistant. Flows are registered and edited under
 Workflows, started by hand, on a schedule or on an event (for example an order change),
-and pause for a person's approval where a grant does not cover an outward step.
+and pause for a person's approval where a grant does not cover an outward step. A flow can
+also ask a person a question, as free text or as a form with typed fields
+([Questions to a person](#questions-to-a-person)).
 
 ## How it works
 
@@ -27,16 +29,144 @@ sequenceDiagram
     PJ->>API: flow_route_send → /api/v1/models/{slug}/render, /print/…
     PJ->>AG: tool(...) / agent_session(...)
     PJ->>API: flow_grant_check (or wait for approval)
+    PJ->>API: flow_task_open (prompt)
+    UI->>API: POST /api/v1/tasks/{id}/answer
+    API->>PJ: Operation task_answer, which answers the run's callback
+    PJ->>API: flow_task_answered
 ```
+
+## Questions to a person
+
+A script asks with a host function (`backend/scadbuddy/workflows/flow_tools.py`):
+
+| | `wait_for_human(question, timeout_s=None)` | `prompt(title, schema, context=None, place=None, ui=None, timeout_s=None)` |
+|---|---|---|
+| The question | a text | a title and a form |
+| The answer | `{answer}`, a text | a dict by field name |
+| Row in `tasks` | none | one, opened before the call waits |
+| Answer route | `POST /api/v1/workflow-runs/{run_id}/answer` | `POST /api/v1/tasks/{task_id}/answer` |
+| Operation kind | `flow_answer` | `task_answer` |
+| Harness callback | `human_answer_open` (`human_answer` in a replay of an older call) | `task_answer` |
+
+The text route refuses a prompt's call with 409 `flow-answer-is-a-task`
+(`backend/scadbuddy/api/flows.py` `ANSWER_IS_A_TASK`).
+
+**No default limit.** Both wait with no limit unless `timeout_s` sets one (`_wait_s`). The
+floor is 10 seconds (`MIN_WAIT_S`): less raises `ValueError`, and a literal that is too
+short is refused when the script is checked (`backend/scadbuddy/flows/typecheck.py`
+`_literal_ranges`). When a `timeout_s` is up the script gets `TimeoutError`. The ceiling is ten
+years (`OPEN_WAIT`): a longer `timeout_s` is ten years. The callbacks declare the same ten
+years to the harness, which ends a call with no `timeout_s` then. The script does not get
+`TimeoutError` for that. It gets the harness's `CallbackToolError`, which a script sees as a
+plain `Exception`, and the prompt's task is `cancelled`.
+
+**Old runs keep their timer.** A `wait_for_human` that a run called before this change
+replays with the old callback, its default of an hour and its range of 10 to 86400 seconds
+(`WAIT_OPEN_PATCH`, a patch id per call). The next call of the same run has no default
+limit.
+
+**The schema.** A prompt's `schema` is the subset of a flow's `inputs.json`
+(`backend/scadbuddy/core/input_schema.py` `schema_problems`,
+`backend/scadbuddy/tasks/schema.py` `prompt_schema_problems`). A string, or an array's string
+items, may also have a `format`: `email`, `date` or `date-time` (`FORMATS`). A `date-time`
+is RFC 3339 with an offset, and a leap second is refused. An `email` has one `@`, a local
+part before it and a domain with a dot after it, no empty part between dots in the domain,
+no whitespace, no control character, none of `,;<>()[]\"` and at most 254 characters. A
+letter need not be ASCII. A `default` must fit its field, its `format` included. The inputs of a flow and of a
+pipeline refuse `format`.
+
+**Sizes.** `backend/scadbuddy/tasks/models.py` `TaskOpen` checks them. The title has 1 to
+500 characters. The context has at most 16 KiB of JSON (`MAX_JSON_BYTES`), `ui` at most 200
+characters, and `place` 1 to 100 characters with no control character. The schema has the
+limits of an inputs schema. What Postgres cannot store is refused
+(`backend/scadbuddy/core/json_values.py` `unstorable`). An answer has at most 16 KiB of
+JSON (413).
+
+**What the script gets.** The answer, as the schema types it
+(`backend/scadbuddy/flows/inputs.py` `filled`). A field left out is its default. With no
+default, a boolean is `False` and any other field is `None`. A field in `required` must be
+in the answer, also when it has a default. `prompt` raises `ValueError` for a schema,
+title, context, place, `ui` or `timeout_s` it does not take, and for an answer that fits
+the schema and not the field's type (a huge number). It raises `RouteRefusedError` when the
+run takes no task, because it ended or is gone.
+
+**Who answers.** A person, in the browser. Both answer routes refuse a request that an agent
+authored, a service credential, and a delegated session such as the agent's headless
+browser (`backend/scadbuddy/api/flows.py` `browser_only`,
+`backend/scadbuddy/core/authorship.py` `by_a_person`). In `enforce` they are person-only
+routes (`backend/scadbuddy/auth/routes.py` `PERSON_ENDPOINTS`). The forms on the page are
+user-only (`USER_ONLY`): the assistant cannot press or fill them, and cannot read the text
+typed in them ([browser-bridge.md](../ai/browser-bridge.md#data-agent-user-only)).
+
+**The answer's way.** The route checks the answer against the task's schema
+(`backend/scadbuddy/tasks/validate.py` `validate_answer`). A problem names a field and
+never quotes a value (422 `invalid-answer`). The answer goes to the `task_answer` operation
+sealed under the run's payload key (`backend/scadbuddy/flows/operations.py` `seal_answer`).
+So no operation record and no Temporal history holds it in the clear. The operation's result
+names the task, and `GET /api/v1/tasks/{task_id}` has the answer.
+
+**Two answers.** The run's `workflow_run_decisions` row picks the winner
+(`FlowStore.record_decision`), and the other answer is refused with a 409. The exception
+is a row whose answer never reached the run and that nothing may still send: a later answer
+takes it over (`backend/scadbuddy/flows/operations.py` `take_over`, #7575). The task's row is
+marked after the run has the answer. So for a moment an answered task can read `open`, and
+so can the `state` of a 409 `not-open`. The operation's mark is best effort. The run's own
+mark (`flow_task_answered`, `final`) is of the answer that the script gets. It replaces
+another answer on the row and leaves an expired task as it is.
+
+**A task's life** (`backend/scadbuddy/tasks/store.py` `TaskStore`):
+
+| State | When |
+|---|---|
+| `open` | the prompt asked, and the run waits or soon will |
+| `answered` | a person's answer reached the run |
+| `expired` | the prompt's time was up (`flow_task_close`) |
+| `cancelled` | the run ended, the call ended with no answer, or a Reset went back to before the prompt |
+
+- **Reset.** A Reset through ScadBuddy makes the tasks match the run
+  (`TaskStore.match_waiting_in`). A task that the run waits for again opens again, with no
+  answer. An open task of a call that the run no longer has is cancelled. Any other task
+  stays as it is. When the point is between the prompt's open and its wait, the task is
+  cancelled, and opens again as the call waits (`TaskStore.reopen_in`): it keeps its first
+  `expires_at`, and the prompt's timer starts anew.
+- **Executions.** Each write by the run names the execution that makes it
+  (`backend/scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). An execution that
+  a Reset replaced opens, marks and closes nothing. The run's own mark or close from an
+  execution that the row of an open run does not know yet is refused (503 `run-behind`) and
+  tried again. From one that the row of an ended run does not know, the write changes
+  nothing and returns the task as it stands, so it is not tried again.
+- **Retries.** The task activities (`flow_task_open`,
+  `flow_task_answered`, `flow_task_close`) are tried without limit. Only `flow_task_open` has final
+  refusals: a task that is refused (422), a run that has ended and a run that is gone.
+- **Forget.** Forgetting a run deletes its tasks (`ON DELETE CASCADE`).
+
+**Reads.** `GET /api/v1/tasks` lists tasks by `state` and `place`, without their answers or
+who gave them (`TaskQuestion`). `GET /api/v1/tasks/{task_id}` reads one with both
+(`backend/scadbuddy/api/tasks.py`). A run's page gets
+the question, without its answer, in its pending entry (`PendingEntry.task`). A task that
+opens or moves to another state publishes `task.changed` on the realtime topics `tasks`,
+`task:<id>` and, with a place, `tasks:<place>` (`backend/scadbuddy/api/realtime.py`
+`topics_of`). No page lists tasks by place, and nothing reads `ui`.
 
 ## Code
 
 - UI: `frontend/src/pages/WorkflowsPage.tsx`, `FlowPage.tsx`, `WorkflowRunPage.tsx`,
-  `frontend/src/components/flows/FlowEditor.tsx:106`.
-- Routes: `backend/scadbuddy/api/flows.py:123` (register `:454`, run `:715`),
-  `backend/scadbuddy/api/flow_triggers.py:65`, `backend/scadbuddy/api/flow_script.py:18`.
+  `frontend/src/components/flows/FlowEditor.tsx:106`. A question:
+  `frontend/src/components/flows/PendingCard.tsx`, `TaskCard.tsx` (a prompt's card),
+  `SchemaForm.tsx` (the form, which Start run also uses), `inputsForm.tsx` and
+  `frontend/src/lib/flowInputs.ts`.
+- Routes: `backend/scadbuddy/api/flows.py` (`register_flow`, `start_flow_run`),
+  `backend/scadbuddy/api/flow_triggers.py:65`, `backend/scadbuddy/api/flow_script.py:18`,
+  `backend/scadbuddy/api/tasks.py`. The projects worker's task routes:
+  `backend/scadbuddy/api/crud_tasks.py`, client `backend/scadbuddy/crud/tasks.py`
+  `RemoteTasks`.
 - Runs: `backend/scadbuddy/flows/launch.py:54`, `backend/scadbuddy/workflows/project.py:126`,
-  `flow_tools.py:1426-1444`, `flow_routes.py:192`, `flow_grants.py`.
+  `flow_tools.py` (`FLOW_TOOLS`, `SCRIPT_TOOLS`), `flow_activities.py`, `flow_routes.py:192`,
+  `flow_grants.py`.
+- Tasks: `backend/scadbuddy/tasks/` (`models.py`, `schema.py`, `validate.py`, `store.py`,
+  `component.py`).
+- What a flow's author reads of the host functions: the description of the agent's
+  `register_flow` tool (`agent/src/tools/flows.ts`).
 - Definitions in git under `data/flows` (`backend/scadbuddy/flows/repository.py`).
 - Triggers: `backend/scadbuddy/flow_triggers/fire.py:113`, `events.py:170`,
   `backend/scadbuddy/workflows/flow_triggers.py:55`.
@@ -46,17 +176,28 @@ sequenceDiagram
 
 - Tables: `workflow_definitions`, `workflow_runs`, `workflow_run_decisions`,
   `workflow_flow_states`, `flow_grants`, `flow_grant_uses`, `flow_triggers`,
-  `flow_trigger_fires`, `flow_trigger_grants`; `ai_flow_blobs` for a run's images; flow
-  payloads sealed per subject (`ai_payload_keys`).
+  `flow_trigger_fires`, `flow_trigger_grants`, `tasks` (`20261124T0449Z_tasks`);
+  `ai_flow_blobs` for a run's images; flow payloads sealed per subject (`ai_payload_keys`).
+- Only the API has SQL on these tables. The projects worker writes a task through its CRUD
+  area `tasks`. A `tasks` row holds the question and the answer as plain `jsonb`.
 
 ## Tests
 
 - Backend: `backend/tests/flows/`, `backend/tests/test_flow_store.py`,
   `test_flow_trigger_*.py`, `backend/tests/api/test_flows.py`, `test_flow_grants.py`,
-  `test_projects_worker_nodb.py`.
+  `test_projects_worker_nodb.py`. Prompts and tasks: `backend/tests/flows/test_prompt.py`,
+  `backend/tests/tasks/`, `backend/tests/api/test_tasks.py`, `test_flow_prompt.py`,
+  `backend/tests/crud/test_crud_tasks.py`, and the histories that
+  `backend/tests/flows/test_project_replay.py` replays.
+- Frontend: `frontend/src/components/flows/PendingCard.test.tsx`, `SchemaForm.test.tsx`,
+  `frontend/src/lib/flowInputs.test.ts`.
 - e2e: `frontend/e2e/workflows.spec.ts`.
 
 ## Limits and known issues
 
 - Grant checks do not follow the inherited chain
   ([#5685](https://github.com/eh-homelab/ScadBuddy/issues/5685)).
+- Some rare Resets can leave a task row behind its run: one made by hand in Temporal, and one
+  through ScadBuddy whose commit was lost and which was then tried again
+  ([#7413](https://github.com/eh-homelab/ScadBuddy/issues/7413)).
+- `wait_for_human` opens no task yet.

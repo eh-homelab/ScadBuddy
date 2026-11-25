@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -27,6 +28,18 @@ LifeBasis = Literal["none", "hours", "months"]
 #: The column CHECKs of `item_kinds` (migration `20261124T0323Z_inventory_core.sql`).
 KIND_ID = r"^[a-z][a-z0-9_]{0,39}$"
 UOM = r"^[a-z]{1,8}$"
+#: The longest `kind:ref` a use or a status change names.
+MAX_ENTITY_REF = 200
+
+
+def _no_nul(text: str) -> str:
+    if "\x00" in text:
+        raise ValueError("a text holds no NUL byte")
+    return text
+
+
+#: Every free text of an inventory input: Postgres `text` takes no NUL byte (R-P2-16).
+Text = Annotated[str, AfterValidator(_no_nul)]
 
 
 def empty_schema() -> dict[str, Any]:
@@ -52,8 +65,8 @@ class KindInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(pattern=KIND_ID)
-    name: str = Field(min_length=1, max_length=100)
-    parent_id: str | None = None
+    name: Text = Field(min_length=1, max_length=100)
+    parent_id: str | None = Field(default=None, pattern=KIND_ID)
     tracking: Tracking
     uom: str = Field(default="each", pattern=UOM)
     attribute_schema: dict[str, Any] = Field(default_factory=empty_schema)
@@ -67,8 +80,8 @@ class KindPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, min_length=1, max_length=100)
-    parent_id: str | None = None
+    name: Text | None = Field(default=None, min_length=1, max_length=100)
+    parent_id: str | None = Field(default=None, pattern=KIND_ID)
     tracking: Tracking | None = None
     uom: str | None = Field(default=None, pattern=UOM)
     attribute_schema: dict[str, Any] | None = None
@@ -76,7 +89,16 @@ class KindPatch(BaseModel):
     saleable: bool | None = None
 
 
-class Item(BaseModel):
+class _Decimals(BaseModel):
+    """Decimals on the wire as plain strings with their fraction (as `orders/parts.py`
+    `InventoryPart` writes `unit_cost_minor`)."""
+
+    @staticmethod
+    def _decimal(value: Decimal | None) -> str | None:
+        return None if value is None else format(value.normalize(), "f")
+
+
+class Item(_Decimals):
     id: UUID
     kind_id: str
     #: The kind's ancestors and the kind, root first.
@@ -105,39 +127,53 @@ class Item(BaseModel):
     #: Some lot with stock on hand, or some unit in stock, has no known cost.
     cost_unknown: bool
     low: bool
+    #: Its unarchived supplier offers (R-P2-37).
+    offer_count: int
+
+    @field_serializer("low_stock", "life_hours", "on_hand", "stock_value_minor")
+    def _decimals(self, value: Decimal | None) -> str | None:
+        return self._decimal(value)
+
+
+#: A printer model code an item fits (`compatible_with`), as the item list's `compatible`
+#: filter takes it.
+ModelCode = Annotated[Text, Field(min_length=1, max_length=100)]
+MAX_COMPATIBLE = 100
+#: A hundred years.
+MAX_LIFE_MONTHS = 1200
 
 
 class ItemInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind_id: str = Field(pattern=KIND_ID)
-    name: str = Field(min_length=1, max_length=200)
-    manufacturer: str = ""
-    compatible_with: list[str] = Field(default_factory=list)
+    name: Text = Field(min_length=1, max_length=200)
+    manufacturer: Text = Field(default="", max_length=200)
+    compatible_with: list[ModelCode] = Field(default_factory=list, max_length=MAX_COMPATIBLE)
     low_stock: Decimal = Field(default=Decimal(0), ge=0, max_digits=20, decimal_places=6)
     life_hours: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
-    life_months: int | None = Field(default=None, gt=0)
+    life_months: int | None = Field(default=None, gt=0, le=MAX_LIFE_MONTHS)
     saleable: bool | None = None
-    source: str = Field(default="manual", min_length=1)
+    source: Text = Field(default="manual", min_length=1, max_length=100)
     #: A blank one is stored as null.
-    source_ref: str | None = None
-    note: str = Field(default="", max_length=4000)
+    source_ref: Text | None = Field(default=None, max_length=200)
+    note: Text = Field(default="", max_length=4000)
 
 
-class ItemPatch(BaseModel):
+class InventoryItemPatch(BaseModel):
     """The fields a person changes; an absent field keeps its value. `life_hours`,
     `life_months` and `saleable` null clear it."""
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, min_length=1, max_length=200)
-    manufacturer: str | None = None
-    compatible_with: list[str] | None = None
+    name: Text | None = Field(default=None, min_length=1, max_length=200)
+    manufacturer: Text | None = Field(default=None, max_length=200)
+    compatible_with: list[ModelCode] | None = Field(default=None, max_length=MAX_COMPATIBLE)
     low_stock: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
     life_hours: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
-    life_months: int | None = Field(default=None, gt=0)
+    life_months: int | None = Field(default=None, gt=0, le=MAX_LIFE_MONTHS)
     saleable: bool | None = None
-    note: str | None = Field(default=None, max_length=4000)
+    note: Text | None = Field(default=None, max_length=4000)
 
 
 #: The ISO code of `offer_price_points.currency`.
@@ -148,7 +184,12 @@ def _blank_none(text: str | None) -> str | None:
     return None if text is None or not text.strip() else text
 
 
-class PricePoint(BaseModel):
+def _plain(value: Decimal) -> str:
+    """A decimal with no trailing zeros, as `_Decimals` writes one (R-P2-40): `"5.99"`."""
+    return format(value.normalize(), "f")
+
+
+class OfferPricePoint(BaseModel):
     id: UUID
     #: The price of one pack, in `currency`.
     price: Decimal
@@ -156,6 +197,10 @@ class PricePoint(BaseModel):
     on_date: date
     source: Literal["invoice", "manual"]
     invoice_line_id: UUID | None
+
+    @field_serializer("price")
+    def _price(self, value: Decimal) -> str:
+        return _plain(value)
 
 
 class Offer(BaseModel):
@@ -171,7 +216,11 @@ class Offer(BaseModel):
     note: str | None
     archived_at: datetime | None
     #: The newest price point by date.
-    latest_price: PricePoint | None
+    latest_price: OfferPricePoint | None
+
+    @field_serializer("pack_size")
+    def _pack_size(self, value: Decimal) -> str:
+        return _plain(value)
 
 
 class OfferInput(BaseModel):
@@ -181,11 +230,11 @@ class OfferInput(BaseModel):
 
     supplier_id: UUID
     item_id: UUID
-    sku: str = Field(min_length=1, max_length=100)
-    url: str | None = None
+    sku: Text = Field(min_length=1, max_length=100)
+    url: Text | None = None
     pack_size: Decimal = Field(default=Decimal(1), gt=0, max_digits=20, decimal_places=6)
-    pack_uom: str = Field(default="each", min_length=1)
-    note: str | None = None
+    pack_uom: Text = Field(default="each", min_length=1, max_length=100)
+    note: Text | None = Field(default=None, max_length=4000)
 
     @field_validator("pack_uom")
     @classmethod
@@ -209,11 +258,11 @@ class OfferPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    sku: str | None = Field(default=None, min_length=1, max_length=100)
-    url: str | None = None
+    sku: Text | None = Field(default=None, min_length=1, max_length=100)
+    url: Text | None = None
     pack_size: Decimal | None = Field(default=None, gt=0, max_digits=20, decimal_places=6)
-    pack_uom: str | None = Field(default=None, min_length=1)
-    note: str | None = None
+    pack_uom: Text | None = Field(default=None, min_length=1, max_length=100)
+    note: Text | None = Field(default=None, max_length=4000)
 
     @field_validator("pack_uom")
     @classmethod
@@ -272,15 +321,6 @@ UnitStatus = Literal["in_stock", "in_service", "retired", "scrapped", "sold"]
 MoveKind = Literal[
     "receive", "use", "return", "adjust", "produce", "transfer", "sell", "retire", "scrap"
 ]
-
-
-class _Decimals(BaseModel):
-    """Decimals on the wire as plain strings with their fraction (as `orders/parts.py`
-    `InventoryPart` writes `unit_cost_minor`)."""
-
-    @staticmethod
-    def _decimal(value: Decimal | None) -> str | None:
-        return None if value is None else format(value.normalize(), "f")
 
 
 class Lot(_Decimals):
@@ -381,7 +421,7 @@ class ReceiveLot(BaseModel):
     total_cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
     currency: str | None = Field(default=None, pattern=CURRENCY)
     location_id: UUID | None = None
-    note: str = Field(default="", max_length=4000)
+    note: Text = Field(default="", max_length=4000)
     received_at: datetime | None = None
 
     @model_validator(mode="after")
@@ -399,9 +439,9 @@ class ReceiveUnits(BaseModel):
 
     count: int = Field(ge=1, le=100)
     cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
-    serials: list[str] | None = None
+    serials: list[Annotated[Text, Field(max_length=200)]] | None = None
     location_id: UUID | None = None
-    name: str = Field(default="", max_length=200)
+    name: Text = Field(default="", max_length=200)
 
     @model_validator(mode="after")
     def _serials(self) -> ReceiveUnits:
@@ -417,8 +457,8 @@ class UseInput(BaseModel):
     #: Taken first; FIFO for the rest (D2).
     lot_id: UUID | None = None
     #: What it was used on, `kind:ref` (a printer, say).
-    entity: str | None = None
-    reason: str = Field(default="", max_length=4000)
+    entity: Text | None = Field(default=None, max_length=MAX_ENTITY_REF)
+    reason: Text = Field(default="", max_length=4000)
 
 
 class AdjustInput(BaseModel):
@@ -427,7 +467,7 @@ class AdjustInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     on_hand: Decimal = Field(ge=0, max_digits=20, decimal_places=6)
-    note: str = Field(min_length=1, max_length=4000)
+    note: Text = Field(min_length=1, max_length=4000)
 
     @field_validator("note")
     @classmethod
@@ -441,7 +481,7 @@ class CountInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     on_hand: Decimal = Field(ge=0, max_digits=20, decimal_places=6)
-    note: str = Field(min_length=1, max_length=4000)
+    note: Text = Field(min_length=1, max_length=4000)
 
     @field_validator("note")
     @classmethod
@@ -449,31 +489,72 @@ class CountInput(BaseModel):
         return _stripped(note, "a note")
 
 
+class LotPatch(BaseModel):
+    """The fields to change; an absent field keeps its value. `unit_cost_minor` makes the
+    lot's cost known now and moves no past move (D14); `location_id` null clears it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    unit_cost_minor: Decimal | None = Field(default=None, ge=0, max_digits=20, decimal_places=6)
+    location_id: UUID | None = None
+    note: Text | None = Field(default=None, max_length=4000)
+
+
+class UnitPatch(BaseModel):
+    """The fields to change; an absent field keeps its value. `serial` null or blank
+    clears it, as `location_id` null does."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Text | None = Field(default=None, max_length=200)
+    serial: Text | None = Field(default=None, max_length=200)
+    location_id: UUID | None = None
+
+
 class UnitStatusInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: UnitStatus
     #: What it went into or to, `kind:ref` (the printer a nozzle went into).
-    entity: str | None = None
-    note: str = Field(default="", max_length=4000)
+    entity: Text | None = Field(default=None, max_length=MAX_ENTITY_REF)
+    note: Text = Field(default="", max_length=4000)
 
 
-class RecostedItem(BaseModel):
+class RecostedItem(_Decimals):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str | None
     order_item_id: str
-    #: The order item's parts cost (`-sum(amount_minor)` of its `use` and `return` moves),
-    #: before and after the re-cost.
+    #: The order item's parts cost as job cost reads it (`-sum(amount_minor)` of its
+    #: known-cost `use` and `return` moves, `stock.parts_moved`), before and after.
     before_minor: Decimal
     after_minor: Decimal
-    #: Some of those moves were of unknown cost, before and after.
+    #: A `use` not given back was of unknown cost, before and after.
     before_unknown: bool = False
     after_unknown: bool = False
 
+    @field_serializer("before_minor", "after_minor")
+    def _decimals(self, value: Decimal) -> str | None:
+        return self._decimal(value)
 
-class RecostResult(BaseModel):
+
+class RecostResult(_Decimals):
+    #: The lot's item, and the lot's cost now (and whether it is unknown), which every
+    #: re-costed move took.
+    item_id: UUID
+    unit_cost_minor: Decimal
+    cost_unknown: bool
+    #: The distinct unit costs the changed moves had before, lowest first.
+    before_unit_costs_minor: list[Decimal]
     #: The moves whose snapshot changed.
     moves: int
     #: The order items whose parts cost or its unknown flag changed.
     orders: list[RecostedItem]
+
+    @field_serializer("unit_cost_minor")
+    def _cost(self, value: Decimal) -> str | None:
+        return self._decimal(value)
+
+    @field_serializer("before_unit_costs_minor")
+    def _costs(self, values: list[Decimal]) -> list[str | None]:
+        return [self._decimal(v) for v in values]

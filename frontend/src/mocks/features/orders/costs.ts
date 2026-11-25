@@ -15,6 +15,7 @@ import type {
 } from '../../../api/types'
 import { mockSettings } from '../../handlers'
 import { machineRateFor } from './machineRates'
+import { partsCostOf } from './parts'
 import { event, itemOf, lock, refused } from './orders'
 import { BROWSER, Refused, fieldProblem, minorExponent, newId, now, problem, state } from './state'
 
@@ -29,7 +30,7 @@ import { BROWSER, Refused, fieldProblem, minorExponent, newId, now, problem, sta
  */
 
 type Plate = { print_seconds: number; filaments: { slot: number; used_g: string }[] }
-type Part = 'prints' | 'labour'
+type Part = 'prints' | 'labour' | 'parts'
 type Figure = AttemptCost['estimated'] extends (infer F)[] | undefined ? F : never
 
 class Unit {
@@ -215,6 +216,10 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
   if (labourUnknown) unknown.push('labour')
   const prints = attempts.reduce((s, a) => s + (a.cost_minor ?? 0), 0)
   const others = other.reduce((s, e) => s + e.amount_minor, 0)
+  // #7067: the parts taken from stock, as `costs.py` reads the item's moves.
+  const taken = partsCostOf(item.id)
+  const stock = taken.minor
+  if (taken.unknown) unknown.push('parts')
   return margin(
     {
       item_id: item.id,
@@ -242,7 +247,8 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
       machine_minor: attempts.reduce((s, a) => s + (a.machine_minor ?? 0), 0),
       labour_minor: labour,
       other_minor: others,
-      cost_minor: prints + labour + others,
+      parts_minor: stock,
+      cost_minor: prints + labour + others + stock,
       revenue_minor: item.status === 'cancelled' || order.status === 'cancelled' ? 0 : accepted ? accepted.total_minor : null,
       estimated,
       unknown,
@@ -285,7 +291,8 @@ export function costsOf(orderId: string): OrderCosts | null {
   const labour = items.reduce((s, i) => s + (i.labour_minor ?? 0), 0) + ownLabour
   const others = items.reduce((s, i) => s + (i.other_minor ?? 0), 0) + ownOther.reduce((s, e) => s + e.amount_minor, 0)
   const prints = items.reduce((s, i) => s + (i.prints_minor ?? 0), 0)
-  const parts: Part[] = ['prints', 'labour']
+  const stock = items.reduce((s, i) => s + (i.parts_minor ?? 0), 0)
+  const parts: Part[] = ['prints', 'labour', 'parts']
   const unknown = parts.filter((p) => items.some((i) => (i.unknown ?? []).includes(p)) || (p === 'labour' && ownUnknown))
   return margin(
     {
@@ -306,9 +313,10 @@ export function costsOf(orderId: string): OrderCosts | null {
       machine_minor: items.reduce((s, i) => s + (i.machine_minor ?? 0), 0),
       labour_minor: labour,
       other_minor: others + shipping,
+      parts_minor: stock,
       shipping_minor: shipping,
       charges_minor: charges,
-      cost_minor: prints + labour + others + shipping,
+      cost_minor: prints + labour + others + shipping + stock,
       revenue_minor: revenue,
       estimated: parts.filter((p) => items.some((i) => (i.estimated ?? []).includes(p))),
       unknown,

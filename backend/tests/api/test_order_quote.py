@@ -24,7 +24,6 @@ import trimesh
 from fastapi.testclient import TestClient
 from temporalio.exceptions import ApplicationError
 
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.outputs import OutputNotFoundError
 from scadbuddy.library.settings_store import S3Settings
@@ -52,6 +51,7 @@ from tests.api.test_versions import SLUG, upload
 from tests.conftest import write_openscad_3mf
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.saved_outputs import rewrite_model
 from tests.support.sb_rows import seed_app_sb_spools
 from tests.support.sliced3mf import sliced_3mf
 from tests.test_bambu3mf import add_plate
@@ -145,9 +145,7 @@ class Shop:
         else:
             output_id = make_output(client, SLUG)
             if plates == 2:
-                paths: DataPaths = _state(client).paths
-                [model_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-                add_plate(model_3mf, 2)
+                rewrite_model(client, output_id, lambda model_3mf: add_plate(model_3mf, 2))
             self.item = add_item(client, self.order["id"], output_id=output_id, quantity=2)
         self.path = f"/api/v1/orders/{self.order['id']}/items/{self.item['id']}"
 

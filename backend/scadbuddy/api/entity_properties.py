@@ -10,6 +10,7 @@ runtime (``api/components.py``).
 
 import asyncio
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Path
 from pydantic import BaseModel, ConfigDict, Field
@@ -24,15 +25,18 @@ from scadbuddy.entities.problems import (
     schema_owned_by_item_kind,
 )
 from scadbuddy.entities.properties import (
+    ITEM,
     BadPropertySchema,
     BadPropertyValue,
     EntityProperty,
     PropertyPatch,
     PropertyValue,
     SchemaOwnedByKind,
+    schema_for,
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import KINDS, EntityNotFound
+from scadbuddy.inventory.component import InventoryDep
 from scadbuddy.orders.actor import current_actor
 
 router = APIRouter(tags=["entities"])
@@ -121,6 +125,45 @@ async def list_entity_properties(ref: RefPath, entities: EntitiesDep) -> EntityP
     entity = _entity(ref)
     await _exists(entities, entity)
     return EntityPropertyList(properties=await asyncio.to_thread(entities.properties.list, entity))
+
+
+@router.get(
+    "/entities/{ref}/property-schema",
+    response_model=KindPropertySchema,
+    summary="The property schema of one entity",
+    description=(
+        "The schema that types this entity's properties, for every kind: an item's is its "
+        "item kind's `attribute_schema` merged down the kind tree (each ancestor's keys, the "
+        "kind's own last); any other entity's is its kind's schema. `kind` is the entity's "
+        "kind. `keys_in_use` lists each key entities typed by the same schema have, with "
+        "how many: for an item, the items of its item kind and of its descendants."
+    ),
+    responses={
+        404: {"description": "No such entity (`entity_not_found`)"},
+        422: {"description": _CODES},
+    },
+)
+async def get_entity_property_schema(
+    ref: RefPath, entities: EntitiesDep, inventory: InventoryDep
+) -> KindPropertySchema:
+    entity = _entity(ref)
+    await _exists(entities, entity)
+
+    def schema() -> dict[str, Any]:
+        with entities.opened().connection() as conn:
+            return schema_for(conn, entity)
+
+    found = await asyncio.to_thread(schema)
+    if entity.kind == ITEM:
+        item = await asyncio.to_thread(inventory.items.get, UUID(entity.ref))
+        if item is None:
+            raise entity_not_found(entity)
+        keys = await asyncio.to_thread(inventory.kinds.keys_in_use, item.kind_id)
+    else:
+        keys = await asyncio.to_thread(entities.properties.keys_in_use, entity.kind)
+    return KindPropertySchema(
+        kind=entity.kind, schema=found, keys_in_use=[KeyInUse(key=k, count=n) for k, n in keys]
+    )
 
 
 @router.patch(

@@ -26,7 +26,8 @@ one commit.
 
 ## Data
 
-- The models git repository; outputs in `output_index`; pushes in `git_remote_pushes`.
+- The models git repository; each output's record is its `outputs` row (#7255), and
+  `output_index` lists them across models until #7257; pushes in `git_remote_pushes`.
 - Settings: `SCADBUDDY_GIT_REMOTE_URL`, `_USERNAME`, `_TOKEN`.
 
 ## Tests

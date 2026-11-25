@@ -45,13 +45,14 @@ from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import open_runs_on_copies, trash_copies
-from scadbuddy.print_library.filing import file_output, put_in_folder, trash_filed
+from scadbuddy.print_library.filing import file_output, put_saved_in_folder, trash_filed
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.render.inputs import InputsDisagreeError, InputsError, normalize_inputs
 from scadbuddy.render.job_models import Job, PipelineOutput
 from scadbuddy.render.runner import OpenSCADError, with_defaults
-from scadbuddy.store.cache import materialize_result
+from scadbuddy.store.cache import materialize_result, result_file
 from scadbuddy.store.content import template_title
+from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.workflows.models import ArrangeInputs
 from scadbuddy.workflows.operation_models import PRELUDE_REQUESTED
 
@@ -168,12 +169,13 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # A piece the store no longer has (aged out, or the Bambuddy store unreachable)
         # is not fetched, and the copy would fail with a server path in its message.
         files = (result.model_3mf, result.preview_glb)
-        if not all((state.outputs.paths.root / name).is_file() for name in files):
+        root = state.outputs.paths.root
+        if not all(result_file(blobs, root, name).is_file() for name in files):
             raise _gone(job)
         files_dir = None
         if chosen is not None and chosen.files_key is not None:
             if not await blobs.fetch(chosen.files_key):
-                # Before `create`, so a refused save leaves nothing under outputs/.
+                # Before the save, so a refused save leaves nothing under outputs/.
                 raise ApiError(
                     status.HTTP_409_CONFLICT,
                     "the job's extra files are no longer in the store; render again",
@@ -208,14 +210,15 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         try:
             await asyncio.to_thread(hold_parts, state.refs, output_id, manifest, job.slug)
             with span("output.write", attributes={"scadbuddy.job_id": job.id}):
-                meta = await asyncio.to_thread(
-                    state.outputs.create,
+                # #7256: the folder, then its bytes in the blob store, then the row.
+                meta = await state.outputs.save(
                     job,
                     name=request["name"],
                     public_url=public_url,
                     inputs={} if arranged else inputs,
                     index=index,
                     files_dir=files_dir,
+                    blobs_root=blobs.root,
                     arranged_from=sources,
                     output_id=output_id,
                     print_settings=print_settings,
@@ -224,9 +227,11 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     source=request.get("source", BACK_OFFICE),
                 )
         except Exception as error:
-            # Not on cancellation: the write's thread cannot be stopped and may still
-            # finish, and an output written without its holds loses its Parts at the
-            # next sweep.
+            # Not on cancellation: the prepare or commit thread cannot be stopped and may
+            # still finish the output, and an output written without its holds loses its
+            # Parts at the next sweep. A cancel during the puts stops the save at once and
+            # leaves a folder with no meta.json, which the hold reaper removes with its
+            # holds (#1007).
             try:
                 await asyncio.to_thread(release_parts, state.refs, output_id)
             except psycopg.Error:
@@ -239,6 +244,13 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 # Evicted or swept after the check above, or unreadable: the same answer,
                 # not the copy's path. Only after the release, so this path leaks no holds.
                 raise _gone(job) from None
+            if isinstance(error, StoreFullError):
+                # Ruling R2, as a render's snapshot put (`api/jobs.py`): the save's folder
+                # is gone (`OutputStore.save`), and its Parts are released above.
+                raise ApiError(
+                    status.HTTP_507_INSUFFICIENT_STORAGE,
+                    f"the blob store has no room for this output: {error}",
+                ) from None
             raise
         emit(state.events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
         # Ruling 8: the save is the output; filing is logged and retried by nothing.
@@ -248,12 +260,15 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 title = await asyncio.to_thread(
                     template_title, state.paths.model_source(meta.slug).parent, meta.slug
                 )
-                model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
+                # The 3MF the save just wrote and put: from its folder, the same bytes as
+                # its blob, so the blob is not downloaded again (#7256).
+                model_3mf = state.outputs.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
                 await file_output(native, meta, model_3mf, title)
         except Exception:
             logger.exception("could not file a saved output in the library", extra={"id": meta.id})
         # A new output has no uploads yet: no read to make.
-        detail = outputs_api.detail(state.outputs, meta, [])
+        # In a thread: the detail reads the blob index and the row.
+        detail = await asyncio.to_thread(outputs_api.detail, state.outputs, meta, [])
         dumped: dict[str, Any] = detail.model_dump(mode="json")
         return dumped
 
@@ -297,7 +312,15 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                 "this request's upload is no longer held; send it again",
             ) from None
         meta = await asyncio.to_thread(require_output, state.outputs, output_id)
-        await asyncio.to_thread(state.outputs.write_thumbnail, output_id, png)
+        try:
+            await state.outputs.put_thumbnail(output_id, png)
+        except StoreFullError as error:
+            # Ruling R2, as `create_run`: the blob goes first, so the refused put changed
+            # neither the file nor the row.
+            raise ApiError(
+                status.HTTP_507_INSUFFICIENT_STORAGE,
+                f"the blob store has no room for this thumbnail: {error}",
+            ) from None
         # #4822: an open History page shows the old image, or "No preview", until told.
         emit(state.events, OutputEvent(kind="output.updated", output_id=meta.id, slug=meta.slug))
         return {}
@@ -398,8 +421,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         native = await serving_native()
         meta = await asyncio.to_thread(require_output, state.outputs, request["output_id"])
         folder_id: int = request["folder_id"]
-        model_3mf = state.paths.output_dir(meta.slug, meta.id) / MODEL_NAME
-        row, created = await put_in_folder(native, meta, model_3mf, folder_id, checked["stem"])
+        row, created = await put_saved_in_folder(
+            native, state.outputs, meta, folder_id, checked["stem"]
+        )
         # The destination picker's "last touched" order (#3651), best effort as on Bambuddy.
         try:
             await state.uploads.touch_destination("folder", folder_id)

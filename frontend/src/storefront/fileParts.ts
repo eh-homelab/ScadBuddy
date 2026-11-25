@@ -36,7 +36,9 @@ export function partsView(listing: Listing): Listing {
  * colours on screen (`values`, the visitor's own picks): the colour each part shows, in the
  * material those colours fix. Null while a part has no colour on offer. With colours of no
  * one material, each part takes its colour's first filament, and the shop refuses them with
- * `listing_colours_clash`.
+ * `listing_colours_clash`. The shop prices what this answers with no pick when a listing is
+ * published (`backend/scadbuddy/orders/storefront/listings.py` `page_colours`, #7523): both
+ * are tested on `test-fixtures/storefront/file-page-colours.json`.
  */
 export function partFilaments(view: Listing, values: Readonly<Record<string, ParamValue>>): Record<string, string> | null {
   const plan = colourPlan(view, values)

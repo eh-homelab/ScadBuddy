@@ -225,9 +225,10 @@ class RepoHold(Protocol):
     #: The HEAD the last writer recorded, or None before any did.
     expected: str | None
 
-    def record(self, change: HeadChange) -> None:
+    def record(self, change: HeadChange, also: Callable[[Any], None] | None = None) -> None:
         """Record ``change.commit`` as HEAD, and announce it, before the lock is
-        released."""
+        released. ``also`` runs in the same transaction, on its connection, after the
+        HEAD and before the announcement; when it fails, nothing is recorded."""
 
 
 class RepoCoordinator(Protocol):
@@ -356,18 +357,9 @@ class GitRepo:
         """A git binary exists and ``root`` is a repository."""
         return shutil.which(self.git) is not None and (self.root / ".git").is_dir()
 
-    def _run(
-        self,
-        *args: str,
-        check: bool = True,
-        text: bool = True,
-        env: dict[str, str] | None = None,
-        timeout: float | None = None,
-        config: Sequence[str] = (),
-    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
-        # `None` is the sentinel, so an explicit 0 is honoured (#2343).
-        limit = self.timeout if timeout is None else timeout
-        command = [
+    def command(self, *args: str, config: Sequence[str] = ()) -> list[str]:
+        """The argv of a git call on this repository, for a caller that streams one."""
+        return [
             self.git,
             "--no-pager",
             "-c",
@@ -380,6 +372,19 @@ class GitRepo:
             *(part for item in config for part in ("-c", item)),
             *args,
         ]
+
+    def _run(
+        self,
+        *args: str,
+        check: bool = True,
+        text: bool = True,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+        config: Sequence[str] = (),
+    ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        # `None` is the sentinel, so an explicit 0 is honoured (#2343).
+        limit = self.timeout if timeout is None else timeout
+        command = self.command(*args, config=config)
         # Another replica's commit is visible to this call, not 60 s later (#2385).
         self.revalidate()
         try:
@@ -805,19 +810,36 @@ class GitRepo:
                 # The commit has landed: the other replicas refresh everything instead.
                 logger.exception("could not list what a commit touched", extra={"commit": created})
                 change = HeadChange(created)
+            also = self._also_record(change)
             try:
-                self._hold.record(change)
+                self._hold.record(change, also)
             except GitError:
                 logger.exception(
                     "a commit landed, but its HEAD could not be recorded for the other replicas",
                     extra={"commit": created},
                 )
+                self._unrecorded(change, also)
+        else:
+            self._landed_alone(created)
         return created
 
     def _change_of(self, commit: str) -> HeadChange:
         """What the other replicas are told of ``commit`` (#2507). Here, only that it
         is HEAD; a repository whose readers cache per entry names what it touched."""
         return HeadChange(commit)
+
+    def _also_record(self, change: HeadChange) -> Callable[[Any], None] | None:
+        """What else to write in the transaction that records ``change`` (#7317).
+        Here, nothing."""
+        return None
+
+    def _unrecorded(self, change: HeadChange, also: Callable[[Any], None] | None) -> None:
+        """After the HEAD record of ``change`` failed: what ``also`` would have written
+        rolled back with it (#7317). Here, nothing to do."""
+
+    def _landed_alone(self, commit: str) -> None:
+        """Told of ``commit`` under the write lock when no coordinator records HEAD
+        (#7317: tests, one process). Here, nothing."""
 
     def _stage(self, targets: list[str]) -> None:
         """``git add -A`` over the paths an action touched.
@@ -984,6 +1006,11 @@ class GitRepo:
         if completed.returncode != 0:
             return None
         return completed.stdout.strip() or None
+
+    def last_commit_checked(self, path: str) -> str | None:
+        """As `last_commit`, but a git failure raises `GitError` in place of answering
+        None, so a caller can tell "no commit touched it" from "git did not answer"."""
+        return self._out("log", "-1", "--format=%H", "--", path).strip() or None
 
     def log(
         self, path: str | None = None, *, limit: int = DEFAULT_LOG_LIMIT, rev: str | None = None

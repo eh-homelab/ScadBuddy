@@ -333,6 +333,22 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // Parts (#5543): a part's stock line and the order's audit line record them.
   part_stock_add: () => [],
   order_item_parts_set: () => [],
+  // The inventory (#7067): kinds, items, offers, lots and units are records of their own, on
+  // the Inventory pages; every stock change is a move in the item's own stock line, and a
+  // re-cost writes an event to each order it changes.
+  inventory_kind_upsert: () => [],
+  inventory_item_upsert: () => [],
+  inventory_item_archive: () => [],
+  inventory_offer_upsert: () => [],
+  inventory_offer_price_add: () => [],
+  inventory_lot_receive: () => [],
+  inventory_lot_update: () => [],
+  inventory_lot_recost: () => [],
+  inventory_unit_receive: () => [],
+  inventory_unit_update: () => [],
+  inventory_unit_status: () => [],
+  inventory_move_use: () => [],
+  inventory_move_count: () => [],
   order_ship: () => [],
   order_close: () => [],
   order_cancel: () => [],
@@ -788,17 +804,17 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sensor_save',
   'filament_sensor_archive',
   'filament_spool_import',
-  // #6264: the RFID override mode, its reconcile and the NTAG write calls touch the filament
-  // inventory (or a SpoolBuddy reader), and none is a recorded resource kind.
+  // #6264: the RFID override mode and its reconcile touch the filament inventory, and
+  // neither is a recorded resource kind.
   'filament_rfid_override_mode',
   'filament_rfid_reconcile',
   // #6265: "Sync now" writes Bambuddy and the sync's links and status, no recorded kind.
   'filament_sync_run',
   // #6773: the links' reset deletes (or, #6845, keeps) the sync's links and asks for a pass, no recorded kind.
   'filament_sync_reset_links',
-  'filament_spool_ntag_write',
-  'filament_spool_ntag_confirm',
-  'filament_spool_ntag_cancel',
+  // #7273: a tag and an NFC job are no recorded resource kind.
+  'nfc_read',
+  'nfc_write',
   // Purchasing (#6266: suppliers, products, price points, invoices, the shopping list) is
   // no recorded resource kind either; an invoice's spools are in each spool's ledger.
   'filament_supplier_upsert',

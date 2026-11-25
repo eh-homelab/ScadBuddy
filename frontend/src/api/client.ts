@@ -147,6 +147,7 @@ import type {
   PrintRun,
   FlowDecided,
   FlowProposal,
+  Task,
   FlowRunQueue,
   FlowCommitMessage,
   FlowDefinition,
@@ -246,12 +247,6 @@ import type {
   OrderEstimate,
   UnitCostHistory,
   ProfitReport,
-  InventoryPart,
-  PartCreate,
-  PartPatch,
-  StockAdd,
-  StockAdjust,
-  StockMove,
   PartRule,
   PartRuleLine,
   ItemPart,
@@ -1158,6 +1153,21 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ call_id: callId, answer }),
     }),
+
+  /** #7364 — a flow prompt's task, its answer too. */
+  getTask: (id: string) => request<Task>(`/tasks/${seg(id)}`),
+
+  /**
+   * #7364 — answers a prompt. `key` is the answer's own: an answer that may have landed is
+   * sent again with it. A followed 202 ends without the task, so read `getTask` after it.
+   */
+  answerTask: (taskId: string, answer: Record<string, unknown>, key?: string) =>
+    command<Task | { run_id: string; task_id: string; outcome: 'answered' }>(
+      `/tasks/${seg(taskId)}/answer`,
+      { method: 'POST', body: JSON.stringify({ answer }) },
+      undefined,
+      key,
+    ),
 
   decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string, boundHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
@@ -2132,10 +2142,16 @@ export const api = {
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
-  /** #1723 — the output's preview mesh, every part in its colour. */
-  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
-  outputPreviewGlbUrl: (id: string, plate?: number) =>
-    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
+  /**
+   * #1723 — the output's preview mesh, every part in its colour; with `plate` that one
+   * plate of its 3MF (#2169). `version` is the output's `preview_version` (#7256), as
+   * `outputThumbnailUrl`'s: it names the mesh, so the browser may keep it. A plate's
+   * mesh is cut from the 3MF and takes none.
+   */
+  outputPreviewGlbUrl: (id: string, plate?: number, version?: string | null) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${
+      plate !== undefined ? `?plate=${plate}` : version ? `?v=${seg(version)}` : ''
+    }`,
 
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
@@ -3019,13 +3035,7 @@ export const api = {
     request<UnitCostHistory>(
       `/orders/history/unit-cost?${new URLSearchParams({ slug, currency, unit_price_minor: String(unitPrice), ...(itemId ? { item_id: itemId } : {}) })}`,
     ),
-  // -- the parts inventory (#5543, job cost spec §11) -------------------------------------------
-  parts: (low = false) => request<InventoryPart[]>(`/parts${low ? '?low=true' : ''}`),
-  createPart: (body: PartCreate) => request<InventoryPart>('/parts', { method: 'POST', body: JSON.stringify(body) }),
-  updatePart: (id: string, body: PartPatch) => request<InventoryPart>(`/parts/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  addPartStock: (id: string, body: StockAdd) => request<InventoryPart>(`/parts/${seg(id)}/stock`, { method: 'POST', body: JSON.stringify(body) }),
-  adjustPartStock: (id: string, body: StockAdjust) => request<InventoryPart>(`/parts/${seg(id)}/adjust`, { method: 'POST', body: JSON.stringify(body) }),
-  partMoves: (id: string) => request<StockMove[]>(`/parts/${seg(id)}/moves`),
+  // -- order parts and model rules (#5543, job cost spec §11); a part is an inventory item (#7067) --
   partRule: (slug: string) => request<PartRule>(`/parts/rules/${seg(slug)}`),
   setPartRule: (slug: string, lines: PartRuleLine[]) => request<PartRule>(`/parts/rules/${seg(slug)}`, { method: 'PUT', body: JSON.stringify({ lines }) }),
   orderParts: (orderId: string) => request<OrderParts>(`/orders/${seg(orderId)}/parts`),

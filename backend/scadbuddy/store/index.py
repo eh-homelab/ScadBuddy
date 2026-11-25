@@ -565,6 +565,14 @@ class BlobIndex:
             )
         return cursor.rowcount
 
+    def holds_kind(self, kind: str) -> bool:
+        """Whether any row is of ``kind``, on any backend."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT 1 FROM store_blobs WHERE kind = %s LIMIT 1", (kind,)
+            ).fetchone()
+        return found is not None
+
     def usage(self, backend: str) -> tuple[int, int, dict[str, int]]:
         """Distinct stored objects and their bytes, in total and per kind."""
         with self._pool.connection() as conn:

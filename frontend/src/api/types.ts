@@ -228,6 +228,14 @@ export type FlowRun = Schemas['Run']
 export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
+/** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`). */
+export type TaskQuestion = Schemas['TaskQuestion']
+export type Task = Schemas['Task']
+/** One thing wrong with an answer (a 422's `problems`): a property, an item of one (`tags/0`), or '' for the whole. */
+export interface AnswerProblem {
+  field: string
+  message: string
+}
 /** #2482 — a parent's narrowing beside the call it narrows. */
 export type FlowProposal = Schemas['ProposalView']
 export type FlowStep = Schemas['FlowStep']
@@ -629,14 +637,8 @@ export type UnitCostHistory = Schemas['UnitCostHistory']
 /** #5329, job cost spec §6.4 — `GET /orders/reports/profit`: the profit report by model. */
 export type ProfitReport = Schemas['ProfitReport']
 export type ProfitRow = Schemas['ProfitRow']
-/** #5543, job cost spec §11 — the parts inventory: hooks, rings, magnets. `unit_cost_minor`
- * is a decimal string in minor units (a rate with its fraction), never an amount. */
-export type InventoryPart = Schemas['InventoryPart']
-export type PartCreate = Defaulted<Schemas['PartInput'], 'supplier' | 'link' | 'low_stock' | 'on_hand'>
-export type PartPatch = Partial<Schemas['PartPatch']>
-export type StockAdd = Partial<Schemas['StockAdd']>
-export type StockAdjust = Schemas['StockAdjust']
-export type StockMove = Schemas['StockMove']
+/** #5543, job cost spec §11 — an order item's parts and a model's parts rule. A part is an
+ * inventory item of a kind tracked in lots (#7067, `pages/inventory/api.ts`). */
 export type PartRule = Schemas['PartRule']
 export type PartRuleLine = Schemas['PartRuleLine']
 export type ItemPart = Schemas['ItemPart']

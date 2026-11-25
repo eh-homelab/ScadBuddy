@@ -5,6 +5,7 @@ reference a listing builds from its snapshot, pinned to the back office's."""
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Iterator
@@ -353,6 +354,52 @@ def test_the_reference_matches_the_back_offices(
     )
     assert ours.reference == theirs.reference
     assert ours.reference.inputs["params"]["width"] == 40
+
+
+def test_a_pipelines_reference_matches_the_back_offices(
+    client: TestClient,  # noqa: F811
+    template: dict[str, Any],  # noqa: F811
+    pla_red: str,  # noqa: F811
+) -> None:
+    """#5701: the whole inputs, as a back-office item made with them."""
+    state = _state(client)
+    directory = state.paths.model_dir(template["slug"])
+    (directory / "pipeline").mkdir()
+    (directory / "pipeline" / "pipeline.py").write_text("INPUTS_VERSION = 2\n")
+    (directory / "pipeline" / "inputs.json").write_text(
+        json.dumps({"type": "object", "properties": {"cols": {"type": "integer"}}})
+    )
+    meta = json.loads((directory / "model.json").read_text())
+    meta["pipeline"] = {
+        "module": "pipeline/pipeline.py",
+        "api": 1,
+        "inputs": "pipeline/inputs.json",
+    }
+    (directory / "model.json").write_text(json.dumps(meta))
+    commit = state.history.commit("pipeline", template["slug"])
+    body = listing_body({**template, "commit": commit}, pla_red, inputs={"cols": 2})
+    made = publish(client, create(client, body)["id"])
+    listing = Listing.model_validate(client.get(f"{LISTINGS}/{made['id']}").json())
+    filaments = {f["id"]: Filament.model_validate(f) for f in client.get(BOOK).json()["filaments"]}
+    values = listing_values(listing, {"width": 40}, filaments, ["PLA"])
+    ours = listing_reference(listing, values, {0: pla_red}, filaments=filaments)
+    assert client.portal is not None
+    theirs = client.portal.call(
+        lambda: resolve_reference(
+            state.catalogue,
+            state.history,
+            state.outputs,
+            paths=state.paths,
+            config=state.config,
+            fetcher=None,
+            slug=listing.slug,
+            commit=listing.commit,
+            inputs={"cols": 2, "params": values, "v": 2},
+            output_id=None,
+        )
+    )
+    assert ours.reference == theirs.reference
+    assert ours.reference.inputs["cols"] == 2
 
 
 def test_a_lost_medium_is_left_out_and_logged(

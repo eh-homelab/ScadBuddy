@@ -34,14 +34,18 @@ from tests.api.test_storefront_file_listings import (  # noqa: F401  (fixtures)
     two_colours,
     upload,
 )
+from tests.api.test_storefront_listings import listing_body, template  # noqa: F401  (a fixture)
 from tests.api.test_storefront_public import TOKEN_A
 from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     TOKEN_B,
     CrudCaller,
     FakeSlicer,
     crud,
+    render_body,
+    render_until_done,
     sliced,
 )
+from tests.api.test_storefront_renders import priced as render_priced
 from tests.support.sliced3mf import sliced_3mf
 
 pytestmark = pytest.mark.requires_postgres
@@ -240,6 +244,18 @@ def test_an_unpublished_listings_price_is_never_anothers_last_price(
     assert r.json()["source"] == "pending"
 
 
+def test_a_price_that_names_no_listing_is_never_a_last_price(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """A row made before its listing was recorded names none: it is no listing's last price."""
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    with _state(crud.api).projection.pool.connection() as conn:
+        conn.execute("UPDATE storefront_slice_prices SET listing_id = NULL")
+    r = read(crud, listed, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
+
+
 def test_a_listing_with_no_price_yet_answers_pending(
     crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
 ) -> None:
@@ -266,10 +282,76 @@ def test_a_read_that_claims_a_slice_counts_as_a_render(
     assert priced(crud, listed, {0: pla_red, 1: pla_blue}, token=TOKEN_B)["source"] == "slice"
     assert priced(crud, listed, {0: pla_red, 1: pla_blue})["source"] == "slice"
     assert counted(crud) == 1
-    # New colours over the visitor's limit: 429, and no slice starts.
-    found = problem_of(read(crud, listed, {0: pla_blue, 1: pla_red}), "render_limited", 429)
-    assert found["limit"] == "per_minute"
+    # New colours over the visitor's limit: no slice starts.
+    read(crud, listed, {0: pla_blue, 1: pla_red})
     assert rows(crud, "SELECT count(*) AS n FROM storefront_slice_prices") == [{"n": 1}]
+
+
+def test_over_the_limit_the_last_price_shows_with_the_limits_wait(
+    crud: CrudCaller, listed: dict[str, Any], pla_red: str, pla_blue: str
+) -> None:
+    """#7523 item 1: over the limit, the listing's last price, to read again once the limit
+    passes; no slice starts."""
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_day": 1}).is_success
+    first = priced(crud, listed, {0: pla_red, 1: pla_blue})
+    r = read(crud, listed, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    last = r.json()
+    assert (last["source"], last["price_minor"]) == ("last", first["price_minor"])
+    assert last["retry_after"] > 3600
+    assert rows(crud, "SELECT count(*) AS n FROM storefront_slice_prices") == [{"n": 1}]
+
+
+def test_over_the_limit_with_no_last_price_is_429_and_the_order_is_taken(
+    crud: CrudCaller, listed: dict[str, Any], tmp_path: Path, pla_red: str, pla_blue: str
+) -> None:
+    """#7523 items 1 and 3: with no price to show, 429; the page says the design can still
+    be ordered, and the shop sends its price before the customer pays."""
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_minute": 1}).is_success
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    other = upload(crud.api, two_colours(tmp_path / "other.3mf", top="#00AA00"))
+    fresh = publish(crud.api, create(crud.api, body(other, [pla_red, pla_blue]))["id"])
+    colours = {0: pla_red, 1: pla_blue}
+    found = problem_of(read(crud, fresh, colours), "render_limited", 429)
+    assert found["limit"] == "per_minute"
+    r = add(crud, fresh, colours)
+    assert r.status_code == 200, r.text
+    draft = r.json()
+    assert draft["items"][0]["price"] == "by_hand"
+    r = submit(crud, draft)
+    assert r.status_code == 200, r.text
+    assert r.json()["pay_now"] is False
+
+
+def test_another_listings_last_price_is_of_the_chosen_material(
+    crud: CrudCaller,
+    listed: dict[str, Any],
+    keychain: NativeFile,
+    pla_red: str,
+    pla_blue: str,
+) -> None:
+    """#7523 item 4: the first listing's PLA price is not a last price of the second's
+    PETG colours, and is one of its other PLA colours; another remembered setup is none."""
+    # More slices than the default limit of renders, which this test is not about.
+    assert crud.api.put("/api/v1/settings", json={"storefront_renders_per_minute": 50}).is_success
+    priced(crud, listed, {0: pla_red, 1: pla_blue})
+    petg = _filament(crud, "PETG", "#00FF00")
+    black = _filament(crud, "PETG", "#000000")
+    everything = body(keychain, [pla_red, pla_blue, petg, black], materials=["PLA", "PETG"])
+    second = publish(crud.api, create(crud.api, everything)["id"])
+    third = publish(crud.api, create(crud.api, everything)["id"])
+    r = read(crud, second, {0: petg, 1: black})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] != "last"
+    r = read(crud, second, {0: pla_blue, 1: pla_red})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "last"
+    _state(crud.api).settings_store.set_library_choices(
+        keychain.id, ModelPrintChoices(process_overrides={"wall_loops": "6"})
+    )
+    r = read(crud, third, {0: pla_blue, 1: pla_blue})
+    assert r.status_code == 200, r.text
+    assert r.json()["source"] == "pending"
 
 
 def test_colours_of_two_materials_clash(
@@ -305,6 +387,71 @@ def test_an_unpublished_listing_has_no_price(
 ) -> None:
     assert crud.api.post(f"{LISTINGS}/{listed['id']}/unpublish").status_code == 200
     problem_of(read(crud, listed, {0: pla_red, 1: pla_red}), "listing_not_found", 404)
+
+
+def _template_reads(crud: CrudCaller, listing: dict[str, Any]) -> list[Any]:
+    """A template page's reads and add of ``listing`` as the page read it."""
+    sent = render_body(listing, {})
+    return [
+        crud.post("/renders", json=sent, key=uuid.uuid4().hex),
+        crud.post(f"/listings/{listing['id']}/variant", json=sent),
+        crud.post("/draft/items", json={**sent, "quantity": 1}, key=uuid.uuid4().hex),
+    ]
+
+
+def _file_reads(crud: CrudCaller, listing: dict[str, Any], filament: str) -> list[Any]:
+    """A file page's read and add of ``listing`` as the page read it."""
+    colours = {0: filament, 1: filament}
+    return [read(crud, listing, colours), add(crud, listing, colours)]
+
+
+def test_a_file_listing_switched_to_a_design_has_changed(
+    crud: CrudCaller, listed: dict[str, Any], template: dict[str, Any], pla_red: str
+) -> None:
+    """A page that read the file listing is told it changed (409), so it offers "Load the
+    latest version"; an unpublished listing stays 404, and so does its held preview."""
+    design = listing_body(template, pla_red)
+    save(crud.api, listed, source="template", library_file=None, **design)
+    for r in _file_reads(crud, listed, pla_red):
+        problem_of(r, "listing_not_found", 404)
+    publish(crud.api, listed["id"])
+    for r in _file_reads(crud, listed, pla_red):
+        problem_of(r, "listing_changed", 409)
+    gone = crud.get(f"/listings/{listed['id']}/preview/1.glb")
+    problem_of(gone, "listing_not_found", 404)
+
+
+def test_a_design_switched_to_a_file_listing_has_changed(
+    crud: CrudCaller, keychain: NativeFile, template: dict[str, Any], pla_red: str
+) -> None:
+    design = publish(crud.api, create(crud.api, listing_body(template, pla_red))["id"])
+    save(crud.api, design, **body(keychain, [pla_red], slug=None, commit=None, media_ids=[]))
+    for r in _template_reads(crud, design):
+        problem_of(r, "listing_not_found", 404)
+    publish(crud.api, design["id"])
+    for r in _template_reads(crud, design):
+        problem_of(r, "listing_changed", 409)
+
+
+def test_the_variant_preview_of_a_switched_listing_is_404(
+    crud: CrudCaller,
+    sliced: type[FakeSlicer],
+    keychain: NativeFile,
+    template: dict[str, Any],
+    pla_red: str,
+) -> None:
+    """A picture of the design the listing showed before: gone, not changed."""
+    design = publish(crud.api, create(crud.api, listing_body(template, pla_red))["id"])
+    job = render_until_done(crud, TOKEN_A, design, {})
+    render_priced(crud, job["id"])
+    [row] = rows(
+        crud, "SELECT variant_key FROM storefront_slice_prices WHERE listing_id = %s", design["id"]
+    )
+    preview = f"/variants/{row['variant_key']}/preview.glb"
+    assert crud.get(preview).status_code == 200
+    save(crud.api, design, **body(keychain, [pla_red], slug=None, commit=None, media_ids=[]))
+    publish(crud.api, design["id"])
+    problem_of(crud.get(preview), "variant_not_found", 404)
 
 
 def test_the_price_shown_is_the_price_charged(

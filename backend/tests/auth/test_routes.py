@@ -81,6 +81,8 @@ def test_every_route_has_a_class() -> None:
             "crud.agent",
             "crud.intake",
             "crud.profile-fetch",
+            "crud.camera",
+            "crud.camera-relay",
             "flow.host",
         )
 
@@ -120,10 +122,10 @@ def test_a_files_bytes_are_scriptless_gets_on_every_entity() -> None:
 
 
 def test_an_endpoint_only_a_person_may_call_is_person() -> None:
-    """`_browser_only` (api/flows.py) refuses agents today; the gate's class must too."""
+    """`browser_only` (api/flows.py) refuses agents today; the gate's class must too."""
     for route in ROUTES:
         source = inspect.getsource(route.endpoint)
-        if "_browser_only(" in source:
+        if "browser_only(" in source:
             assert route_class(route) == "person", endpoint_name(route)
 
 
@@ -354,3 +356,30 @@ def test_profile_fetch_caller_has_its_scope() -> None:
     match = CRUD_PATH.match("/api/v1/internal/crud/profile-fetch/areas")
     assert match is not None
     assert match.group(1) == "profile-fetch"
+
+
+def test_camera_scopes() -> None:
+    assert SCOPES["camera"] == frozenset({"crud.camera"})
+    assert SCOPES["camera-relay"] == frozenset({"crud.camera-relay"})
+
+
+def test_camera_routes_classed() -> None:
+    for caller in ("camera", "camera-relay"):
+        path = f"/api/v1/internal/crud/{caller}/x"
+        match = CRUD_PATH.match(path)
+        assert match is not None
+        assert CRUD_CLASSES[match.group(1)] == f"crud.{caller}"
+    camera = Service("camera", frozenset({"crud.camera"}))
+    relay = Service("camera-relay", frozenset({"crud.camera-relay"}))
+    assert would_refuse("crud.camera", camera, request_header=False, header_needed=False) is None
+    assert (
+        would_refuse("crud.camera-relay", relay, request_header=False, header_needed=False) is None
+    )
+    assert (
+        would_refuse("crud.camera-relay", camera, request_header=False, header_needed=False)
+        == "wrong_caller"
+    )
+    assert (
+        would_refuse("crud.camera", relay, request_header=False, header_needed=False)
+        == "wrong_caller"
+    )

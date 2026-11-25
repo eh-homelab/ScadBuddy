@@ -9,8 +9,9 @@ import { isSignedOut, noteSignedOut, SIGNED_OUT_CLOSE, whenSignedIn } from './si
  *
  * One socket per tab. A caller follows a *topic* (`job:<id>`, `model:<slug>`,
  * `print:<output id>`, `printer:<printer id>`, `preview-slice:<slicer>:<job id>`, `models`,
- * `outputs`, `libraries`, `fonts`, `settings`, `printers`, `flows`) and is
- * told when something under it changed; it then re-reads through the REST call it
+ * `outputs`, `libraries`, `fonts`, `settings`, `printers`, `flows`, `task:<id>`,
+ * `tasks:<place>`, `tasks`; the backend's file has them all) and is told when something
+ * under it changed; it then re-reads through the REST call it
  * already makes. Events carry ids, never content, so a lost or repeated one costs
  * one fetch and never shows stale data.
  *

@@ -28,6 +28,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
+from scadbuddy.inventory.stock import PartsMoved, parts_moved, parts_moves
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
     Actor,
@@ -110,6 +111,10 @@ class CostRows:
     cost_entries: dict[str, list[CostEntry]] = field(default_factory=dict)
     shipping_minor: dict[str, int] = field(default_factory=dict)
     charges: dict[str, list[Charge]] = field(default_factory=dict)
+    #: Each order item's parts (#7067), from its `use` and `return` moves: the known-cost
+    #: ones' ``-sum(amount_minor)``, whether a use not given back is of unknown cost, and
+    #: whether any use is not given back.
+    parts: dict[str, PartsMoved] = field(default_factory=dict)
 
 
 class UnsetType(Enum):
@@ -2470,19 +2475,22 @@ class OrderStore:
             )
 
     def attempts_missing_media(
-        self, created_after: datetime, checked_before: datetime, limit: int
+        self, created_after: datetime, checked_before: datetime, limit: int, *, batch: int
     ) -> list[str]:
         """The attempts made after ``created_after`` and not read for media since
         ``checked_before`` that still lack a medium (spec 2026-11-05 §4.6): one of their
         archives has no finish photo or no timelapse copy on the attempt or on its item (a
         copy from before #5268), and the import did not refuse it as too large at ``limit``
-        bytes (the upload limit) or more (#7281 review). A settled run's attempt with no
-        archive copied yet counts too, as its outcome may have been missed. Least lately
-        read first."""
+        bytes (the upload limit) or more (#7281 review), and the last step did not find
+        it not offered by an archive past ``FRESH`` (#7453). A settled run's attempt with
+        no archive copied yet counts too, as its outcome may have been missed. At most
+        ``batch`` of them, least lately read first (#7453)."""
         with self._read(None) as c:
             rows = c.execute(
                 "SELECT f.id FROM order_item_fulfilments f"
                 " WHERE f.created_at > %(after)s"
+                # The predicate of the partial index order_item_fulfilments_media_sweep.
+                " AND (f.archive_ids <> '{}' OR f.print_run_id IS NOT NULL)"
                 " AND (f.media_checked_at IS NULL OR f.media_checked_at <= %(before)s)"
                 " AND ((f.archive_ids = '{}'"
                 "  AND f.print_run_id IS NOT NULL AND f.finished_at IS NOT NULL)"
@@ -2494,9 +2502,18 @@ class OrderStore:
                 "    AND e.archive_id = a.id AND e.archive_media = m.media)"
                 "   AND NOT EXISTS (SELECT 1 FROM order_attempt_media_refusals r"
                 "    WHERE r.fulfilment_id = f.id AND r.archive_id = a.id"
-                "    AND r.archive_media = m.media AND r.limit_bytes >= %(limit)s)))"
-                " ORDER BY f.media_checked_at NULLS FIRST, f.created_at, f.id",
-                {"after": created_after, "before": checked_before, "limit": limit},
+                "    AND r.archive_media = m.media AND r.limit_bytes >= %(limit)s)"
+                "   AND NOT EXISTS (SELECT 1 FROM order_attempt_media_not_offered n"
+                "    WHERE n.fulfilment_id = f.id AND n.archive_id = a.id"
+                "    AND n.archive_media = m.media)))"
+                " ORDER BY f.media_checked_at NULLS FIRST, f.created_at, f.id"
+                " LIMIT %(batch)s",
+                {
+                    "after": created_after,
+                    "before": checked_before,
+                    "limit": limit,
+                    "batch": batch,
+                },
             ).fetchall()
         return [row["id"] for row in rows]
 
@@ -2622,6 +2639,14 @@ class OrderStore:
             ).fetchall():
                 charge = Charge.model_validate(row)
                 rows.charges.setdefault(charge.order_id, []).append(charge)
+            # One reading with a re-cost's (`parts_moved`, R-P2-31).
+            items = [
+                r["id"]
+                for r in c.execute(
+                    "SELECT id FROM order_items WHERE order_id = ANY(%s)", (ids,)
+                ).fetchall()
+            ]
+            rows.parts.update(parts_moved(parts_moves(c, items)))
         return rows
 
     # -- shipments (§6.3) -------------------------------------------------------------
@@ -3275,6 +3300,26 @@ class OrderStore:
                 " refused_at = EXCLUDED.refused_at",
                 (fulfilment_id, archive_id, what, limit, at),
             )
+
+    def record_media_not_offered(
+        self, fulfilment_id: str, media: set[tuple[int, ArchiveCopyMedia]], at: datetime
+    ) -> None:
+        """The attempt's media that its archives did not offer once ``FRESH`` had passed,
+        as the last step read them (#7453). They replace the attempt's earlier rows, so a
+        medium offered since is swept again."""
+        with self._write(None) as c:
+            c.execute(
+                "DELETE FROM order_attempt_media_not_offered WHERE fulfilment_id = %s",
+                (fulfilment_id,),
+            )
+            if media:
+                with c.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO order_attempt_media_not_offered"
+                        " (fulfilment_id, archive_id, archive_media, seen_at)"
+                        " VALUES (%s, %s, %s, %s)",
+                        [(fulfilment_id, a, what, at) for a, what in sorted(media)],
+                    )
 
     def media_refused(
         self, fulfilment_id: str, limit: int, *, conn: Conn | None = None

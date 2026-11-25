@@ -70,23 +70,36 @@ def build_store(
     fonts: FontService,
     metrics: Metrics | None,
     downloads_dir: Path | None = None,
+    downloads_private: bool = False,
     folders: KeepsFolders | None = None,
     drop_asset_copy: Callable[[str], bool] | None = None,
 ) -> StoreBundle:
     """``downloads_dir`` is where this process keeps whole Bambuddy downloads (#2788),
     None for none: the API passes its default, a worker only one it is set (README).
+    ``downloads_private`` says that directory is this process's alone (#7316), so a hit
+    is read in place; only the API passes it, never a worker, which runs template code.
+    The spool root (``config.spool_dir``, default the data volume's ``cache/``) is
+    resolved here once, onto the download cache and the content store: a hit's private
+    copy, every library read and every body spooled to `ContentStore.spool` (internal
+    PUTs, slice bodies, thumbnail and archive copies, a library upload's body) go under
+    it, and no caller passes it.
     ``index`` is the blob index: the API's `BlobIndex` on ``pool``, the render worker's
     `crud/render.py` `RemoteBlobIndex` (#5298). ``folders`` keeps a Bambuddy store's
     folders: SQL on ``pool`` unless given (the render worker's `RemoteStoreFolders`).
     ``drop_asset_copy`` drops an upload's unreadable copy: the render worker's
     `RemoteAssetRows.drop_copy`, None on the API (`RemoteAssets`). ``pool`` is None on the
-    render worker, which holds no database."""
+    render worker, which holds no database. The piece cache of a remote store is under
+    ``config.blob_cache_dir`` when set (#7318), else the data volume's ``blobs/``, which on
+    ``local`` is the store itself and never moves."""
     local = LocalBlobStore(paths.blobs)
+    spool_root = config.spool_dir or paths.cache
     downloads = (
         DownloadCache(
             downloads_dir,
             max_bytes=config.download_cache_max_bytes,
             min_age=config.activity_timeout,
+            private=downloads_private,
+            spool=spool_root,
         )
         if downloads_dir is not None and config.download_cache_max_bytes > 0
         else None
@@ -101,10 +114,13 @@ def build_store(
         max_count=config.store_max_count,
         metrics=metrics,
         downloads=downloads,
-        spool=paths.cache / "blob-spool",
+        spool=spool_root / "blob-spool",
     )
+    # #7318: on a remote store the pieces here are a cache (the backend is the record),
+    # so `SCADBUDDY_BLOB_CACHE_DIR` may put them on a node-local volume.
+    cache_root = config.blob_cache_dir or paths.blobs
     blobs = CachedBlobStore(
-        local,
+        LocalBlobStore(cache_root),
         content,
         max_bytes=config.worker_cache_max_bytes,
         min_age=config.activity_timeout,

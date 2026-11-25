@@ -37,6 +37,7 @@ export AGENT_DURABLE_IMAGE=ghcr.io/eh-homelab/scadbuddy-agent-durable
 export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
 export SANDBOX_IMAGE=ghcr.io/eh-homelab/scadbuddy-sandbox
 export PROFILE_FETCH_IMAGE=ghcr.io/eh-homelab/scadbuddy-profile-fetch
+export PLAYWRIGHT_MCP_IMAGE=ghcr.io/eh-homelab/scadbuddy-playwright-mcp
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -46,6 +47,7 @@ export MANIFEST_SLICER=applications/scadbuddy/scadbuddy-slicer.yaml
 export MANIFEST_STOREFRONT=applications/scadbuddy/scadbuddy-storefront.yaml
 export MANIFEST_INTAKE=applications/scadbuddy/scadbuddy-intake.yaml
 export MANIFEST_PROFILE_FETCH=applications/scadbuddy/scadbuddy-profile-fetch.yaml
+export MANIFEST_PLAYWRIGHT_MCP=applications/scadbuddy/playwright-mcp.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_DIR=clusters/prod/scadbuddy/grafana
 # What the step before it found: deploy/grafana exists at REVISION (its files
@@ -59,7 +61,8 @@ AGENT_DURABLE_DIGEST="sha256:$(printf '5%.0s' {1..64})"
 SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
 SANDBOX_DIGEST="sha256:$(printf '9%.0s' {1..64})"
 PROFILE_FETCH_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST
+PLAYWRIGHT_MCP_DIGEST="sha256:$(printf 'd%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST PLAYWRIGHT_MCP_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -73,6 +76,8 @@ sandbox_old="$SANDBOX_IMAGE:sha-3333333@sha256:$(printf 'a%.0s' {1..64})"
 sandbox_pinned="$SANDBOX_IMAGE:$VERSION@$SANDBOX_DIGEST"
 pf_old="$PROFILE_FETCH_IMAGE:sha-3333333@sha256:$(printf 'c%.0s' {1..64})"
 pf_pinned="$PROFILE_FETCH_IMAGE:$VERSION@$PROFILE_FETCH_DIGEST"
+pm_old="$PLAYWRIGHT_MCP_IMAGE:sha-3333333@sha256:$(printf 'e%.0s' {1..64})"
+pm_pinned="$PLAYWRIGHT_MCP_IMAGE:$VERSION@$PLAYWRIGHT_MCP_DIGEST"
 failures=0
 
 fail() {
@@ -142,6 +147,7 @@ run() {
   [ -z "${durable_manifest:-}" ] || printf '%s\n' "$durable_manifest" > "$work/repo/$MANIFEST_AGENT_DURABLE"
   [ -z "${slicer_manifest:-}" ] || printf '%s\n' "$slicer_manifest" > "$work/repo/$MANIFEST_SLICER"
   [ -z "${pf_manifest:-}" ] || printf '%s\n' "$pf_manifest" > "$work/repo/$MANIFEST_PROFILE_FETCH"
+  [ -z "${pm_manifest:-}" ] || printf '%s\n' "$pm_manifest" > "$work/repo/$MANIFEST_PLAYWRIGHT_MCP"
   [ -z "${extra_path:-}" ] || printf '%s\n' "$extra_content" > "$work/repo/$extra_path"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   [ -z "${vendored:-}" ] || vendor_dir
@@ -437,6 +443,51 @@ else
 fi
 pf_manifest=
 
+# 8a'. The agent's Playwright MCP browser (#7027, #7546), pinned exactly as the
+#      profile-fetch worker is: its own file (eh-homelab/clusters#4237), optional
+#      until clusters has it; a build with no image keeps the pin. Before #7546
+#      the final check failed every deploy on this file's hand-made pin.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^playwright_mcp=none$' "$work/out" || fail "no playwright-mcp file: output is not none"
+else
+  fail "no playwright-mcp file: step failed: $(grep '::error' "$work/log")"
+fi
+pm_manifest=$(deployment playwright-mcp "$pm_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "playwright-mcp: api image not pinned"
+  has_line "$pm_pinned" "$MANIFEST_PLAYWRIGHT_MCP" || fail "playwright-mcp: image not pinned"
+  grep -q '^playwright_mcp=pinned$' "$work/out" || fail "playwright-mcp: output is not pinned"
+  grep -q "^files=.*$MANIFEST_PLAYWRIGHT_MCP" "$work/out" || fail "playwright-mcp: not among the changed files"
+  rerun || fail "playwright-mcp: rerun failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=true' "$work/out" || fail "playwright-mcp: rerun expected unchanged=true"
+else
+  fail "playwright-mcp: step failed: $(grep '::error' "$work/log")"
+fi
+if PLAYWRIGHT_MCP_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "playwright-mcp, no image: api image not pinned"
+  has_line "$pm_old" "$MANIFEST_PLAYWRIGHT_MCP" || fail "playwright-mcp, no image: old pin was not kept"
+  grep -q '^playwright_mcp=kept$' "$work/out" || fail "playwright-mcp, no image: output is not kept"
+  grep -q '::warning.*keeping the playwright-mcp pin' "$work/log" || fail "playwright-mcp, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_PLAYWRIGHT_MCP" "$work/out" && fail "playwright-mcp, no image: kept file listed as changed"
+else
+  fail "playwright-mcp, no image: step failed: $(grep '::error' "$work/log")"
+fi
+pm_manifest=$(deployment playwright-mcp "$pm_old" "$pm_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "two playwright-mcp lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one playwright-mcp image line, found 2' "$work/log" \
+    || fail "two playwright-mcp lines: wrong error: $(grep '::error' "$work/log")"
+fi
+pm_manifest=$(deployment playwright-mcp "mcr.microsoft.com/playwright/mcp:v0.0.41")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "playwright-mcp file without its line: step passed, expected an error"
+else
+  grep -q 'expected exactly one playwright-mcp image line, found 0' "$work/log" \
+    || fail "playwright-mcp file without its line: wrong error: $(grep '::error' "$work/log")"
+fi
+pm_manifest=
+
 # 8b. Every other file that runs the agent is pinned too, found by the image
 #     (#5037): the agent's worker Deployment, scadbuddy-agent-worker.yaml.
 worker_path=applications/scadbuddy/scadbuddy-agent-worker.yaml
@@ -509,6 +560,8 @@ stale_fails "slicer outside its file" applications/scadbuddy/scadbuddy-extra.yam
   "$(deployment scadbuddy-extra "$slicer_old")" "names $slicer_old, $not_moved"
 stale_fails "profile-fetch outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
   "$(deployment scadbuddy-extra "$pf_old")" "names $pf_old, $not_moved"
+stale_fails "playwright-mcp outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$pm_old")" "names $pm_old, $not_moved"
 stale_fails "an overlay images: entry" clusters/prod/scadbuddy/images.yaml \
   "$(printf '%s\n' 'images:' "  - name: $IMAGE" "    newName: $IMAGE:sha-1111111")" "names $IMAGE:sha-1111111, $not_moved"
 stale_fails "an alias of an old pin" applications/scadbuddy/scadbuddy-alias.yaml \

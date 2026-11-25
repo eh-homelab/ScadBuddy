@@ -16,11 +16,13 @@ from temporal_agent_harness.harness import agent
 
 from scadbuddy.core.input_schema import schema_problems
 from scadbuddy.flows.inputs import INPUTS_FILE
-from scadbuddy.workflows.flow_tools import MAX_WAIT_S, MIN_WAIT_S, run_flow_tool
+from scadbuddy.workflows.flow_tools import MIN_WAIT_S, run_flow_tool
 
 log = logging.getLogger(__name__)
 
 MAX_SCRIPT_BYTES = 65_536
+#: The host functions that wait for a person, and the position of their `timeout_s`.
+_WAITS = {"wait_for_human": 1, "prompt": 5}
 _LINE = re.compile(r"-->\s*main\.py:(\d+):\d+")
 #: How many times a check runs when the checker's worker dies (#6123).
 CHECK_ATTEMPTS = 3
@@ -91,8 +93,8 @@ def _problems(report: str) -> list[ScriptProblem]:
 
 
 def _literal_ranges(script: str) -> list[ScriptProblem]:
-    """A `wait_for_human` whose `timeout_s` is a literal out of range. A computed one is
-    checked when the call runs."""
+    """A `wait_for_human` or `prompt` whose `timeout_s` is a literal that is too short. A
+    computed one is checked when the call runs."""
     problems: list[ScriptProblem] = []
     try:
         tree = ast.parse(script)
@@ -102,22 +104,22 @@ def _literal_ranges(script: str) -> list[ScriptProblem]:
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id == "wait_for_human"
+            and node.func.id in _WAITS
         ):
             continue
         timeout = next((k.value for k in node.keywords if k.arg == "timeout_s"), None)
-        if timeout is None and len(node.args) > 1:
-            timeout = node.args[1]
+        if timeout is None and len(node.args) > _WAITS[node.func.id]:
+            timeout = node.args[_WAITS[node.func.id]]
         if (
             isinstance(timeout, ast.Constant)
             and isinstance(timeout.value, int)
-            and not MIN_WAIT_S <= timeout.value <= MAX_WAIT_S
+            and timeout.value < MIN_WAIT_S
         ):
             problems.append(
                 ScriptProblem(
                     line=node.lineno,
-                    message=f"wait_for_human's timeout_s must be {MIN_WAIT_S} to"
-                    f" {MAX_WAIT_S} seconds, not {timeout.value}",
+                    message=f"{node.func.id}'s timeout_s must be at least {MIN_WAIT_S}"
+                    f" seconds, not {timeout.value}",
                 )
             )
     return problems

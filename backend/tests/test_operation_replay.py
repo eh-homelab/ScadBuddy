@@ -100,7 +100,11 @@ async def test_record_operation_cancel_histories() -> None:
                 accepting = asyncio.create_task(start(client, queue, arg))
                 while step not in fake.calls:
                     await asyncio.sleep(0.05)
-                await cancel_recorded(client.get_workflow_handle(f"op-{arg.kind}-{arg.key}"))
+                await cancel_recorded(
+                    client.get_workflow_handle(f"op-{arg.kind}-{arg.key}"),
+                    gate=gate,
+                    pending=accepting,
+                )
                 if step == "check":
                     await accepting  # the check is cancelled, never completed
                     gate.set()

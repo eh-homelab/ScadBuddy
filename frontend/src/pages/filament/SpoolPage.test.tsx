@@ -1,17 +1,21 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
-import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets } from '../../api/filament'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
+import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { SpoolPage } from './SpoolPage'
 import { SpoolsTab } from './SpoolsTab'
+
+beforeEach(() => window.localStorage.clear())
 
 function render(route: string) {
   return renderPage(
@@ -62,11 +66,23 @@ describe('the spool page', () => {
     open(8)
     await heading(8)
     const identity = screen.getByRole('region', { name: 'Identity' })
-    expect(within(identity).getByText('Its tag was written through SpoolBuddy.')).toBeInTheDocument()
+    expect(within(identity).getByText('Its tag was written as an OpenTag3D tag.')).toBeInTheDocument()
     expect(within(identity).getByText(`Tag written ${new Date('2026-11-10T15:30:00Z').toLocaleDateString(undefined, { dateStyle: 'medium' })}.`)).toBeInTheDocument()
   })
 
+  it('names a tag written in OpenSpool from the phone page (#7273)', async () => {
+    const uid = '04:0C:0C:0C:0C:0C:0C'
+    const { backup_id } = await createTagBackup({ uid, records: [], reason: 'spool_write' })
+    const { records } = await spoolTagRecords(spoolId(1), { uid, records: [], backup_id })
+    await spoolTagWritten(spoolId(1), { uid, backup_id, sent: records, read_back: records })
+    open(1)
+    await heading(1)
+    const identity = screen.getByRole('region', { name: 'Identity' })
+    expect(within(identity).getByText('Its tag was written as an OpenSpool tag.')).toBeInTheDocument()
+  })
+
   it('saves whether the spool was added full (#7149)', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const patches = recorded('PATCH', /\/spools\//)
     const { user } = open(4)
     await heading(4)
@@ -180,6 +196,7 @@ describe('the spool page', () => {
   })
 
   it('shows the type preset and K value as From type, and overrides a preset with one PUT', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const { user } = open(1)
     await heading(1)
     const presets = screen.getByRole('table', { name: 'Slicer presets' })
@@ -217,6 +234,7 @@ describe('the spool page', () => {
   })
 
   it('records a weighing from the scale reading, less the empty spool', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const { user } = open(1)
     await heading(1)
     expect(screen.getByText(/Empty spool/)).toHaveTextContent('250 g')
@@ -296,6 +314,7 @@ describe('the spool page', () => {
   })
 
   it('makes no spool when its presets are refused, and keeps the form (#7150: one request)', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     server.use(http.post('*/api/v1/filament/spools/bulk', () => HttpResponse.json({ type: 'about:blank', title: 'Unprocessable Content', status: 422, detail: 'two rows name the same printer and nozzle' }, { status: 422, headers: { 'Content-Type': 'application/problem+json' } })))
     const before = (await listSpools()).length
     const { user } = render('/filament/spools/new')
@@ -320,6 +339,7 @@ describe('the spool page', () => {
   })
 
   it('locks the type picker while the presets of a spool that needs a type are edited', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const { user } = open(6)
     await heading(6)
     expect(screen.getByRole('combobox', { name: 'Type' })).toBeEnabled()
@@ -332,6 +352,7 @@ describe('the spool page', () => {
   })
 
   it('takes the first type of a spool that needs one: the migrated rows are marked dropped, and the save writes no presets', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const puts = recorded('PUT', /\/spools\/.*\/presets$/)
     const { user } = open(6)
     await heading(6)
@@ -355,6 +376,7 @@ describe('the spool page', () => {
     // The migrated 0.4 row goes back unchanged (it stays migrated); the 0.6 row is the person's.
     const own = (await getSpool(spoolId(6))).presets.map(({ overridden: _o, migrated: _m, ...row }) => row)
     await setSpoolPresets(spoolId(6), [...own, { printer_model: 'H2C', nozzle_diameter: '0.6', slicer_filament: 'GFX01', slicer_filament_name: null }])
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const { user } = open(6)
     await heading(6)
     await choose(user, screen.getByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-JADE-WHITE/)
@@ -369,6 +391,7 @@ describe('the spool page', () => {
   })
 
   it('shows no Reset or Remove on an own preset row until the type has loaded', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     await setSpoolPresets(spoolId(1), [{ printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'GFA09', slicer_filament_name: null }])
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
@@ -384,6 +407,7 @@ describe('the spool page', () => {
   })
 
   it('says so when the type could not be loaded, and offers no Reset or Remove', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     await setSpoolPresets(spoolId(1), [{ printer_model: 'H2C', nozzle_diameter: '0.4', slicer_filament: 'GFA09', slicer_filament_name: null }])
     server.use(http.get('*/api/v1/filament/types/:id', () => HttpResponse.json({ type: 'about:blank', title: 'Not Found', status: 404, detail: 'no spool type gone' }, { status: 404, headers: { 'Content-Type': 'application/problem+json' } })))
     open(1)
@@ -392,6 +416,7 @@ describe('the spool page', () => {
   })
 
   it('offers Reset to type only for a row the type has, and Remove for one it lacks', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const { user } = open(1)
     await heading(1)
     const table = screen.getByRole('table', { name: 'Slicer presets' })
@@ -627,6 +652,7 @@ describe('the spool page\'s history (#6269)', () => {
   })
 
   it('resets the used counter after a confirm, and the tile counts from then (#7149)', async () => {
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
     const posts = recorded('POST', /\/spools\/[^/]+\/events$/)
     const { user } = open(2)
     await heading(2)
@@ -650,5 +676,89 @@ describe('the spool page\'s history (#6269)', () => {
     const burn = within(metrics).getByText('Burn rate').parentElement!
     expect(burn).toHaveTextContent('—')
     expect(burn).toHaveTextContent('No prints in the last 14 days')
+  })
+})
+
+describe("the spool page's Advanced toggle", () => {
+  const nav = () => screen.getByRole('navigation', { name: 'Sections' })
+  /** The controls Advanced hides, by what finds each. */
+  const hidden = () => ({
+    weigh: screen.queryByLabelText('Scale reading, with the spool (g)'),
+    record: screen.queryByRole('button', { name: 'Record weighing' }),
+    lock: screen.queryByRole('checkbox', { name: /Lock the weight/ }),
+    reset: screen.queryByRole('button', { name: 'Reset the used counter' }),
+    diameter: screen.queryByLabelText('Diameter (mm)'),
+    density: screen.queryByLabelText('Density (g/cm³)'),
+    lowStock: screen.queryByLabelText('Low stock at (%)'),
+    addedFull: screen.queryByRole('combobox', { name: 'Added full' }),
+    presets: screen.queryByRole('table', { name: 'Slicer presets' }),
+    kValues: screen.queryByRole('table', { name: 'K values' }),
+    dryingDefault: screen.queryByLabelText('Default drying temperature (°C)'),
+  })
+
+  it('is off by default: the index has it under the sections, and the rarely used controls are not drawn', async () => {
+    open(2)
+    await heading(2)
+    await screen.findByRole('list', { name: 'History of this spool' })
+    const toggle = within(nav()).getByRole('switch', { name: 'Advanced' })
+    expect(toggle).not.toBeChecked()
+    expect(nav().lastElementChild).toContainElement(toggle)
+    for (const [name, element] of Object.entries(hidden())) expect(element, name).toBeNull()
+    // The daily controls stay.
+    expect(screen.getByLabelText('Label weight (g)')).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: 'Spool' })).toBeInTheDocument()
+    expect(screen.getByText(/^Measured /)).toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'How the grams left add up' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Cost per kg')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Record drying' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Spool metrics')).toBeInTheDocument()
+  })
+
+  it('shows the weigh form and the other controls when turned on, and hides them again', async () => {
+    const { user } = open(2)
+    await heading(2)
+    await screen.findByRole('list', { name: 'History of this spool' })
+    await user.click(within(nav()).getByRole('switch', { name: 'Advanced' }))
+    expect(within(nav()).getByRole('switch', { name: 'Advanced' })).toBeChecked()
+    for (const [name, element] of Object.entries(hidden())) expect(element, name).toBeInTheDocument()
+    await user.click(within(nav()).getByRole('switch', { name: 'Advanced' }))
+    for (const [name, element] of Object.entries(hidden())) expect(element, name).toBeNull()
+  })
+
+  it('is remembered across a remount', async () => {
+    const { user, unmount } = open(2)
+    await heading(2)
+    await user.click(within(nav()).getByRole('switch', { name: 'Advanced' }))
+    expect(window.localStorage.getItem(SPOOL_ADVANCED_KEY)).toBe('1')
+    unmount()
+    open(2)
+    await heading(2)
+    expect(within(nav()).getByRole('switch', { name: 'Advanced' })).toBeChecked()
+    expect(screen.getByRole('button', { name: 'Record weighing' })).toBeInTheDocument()
+  })
+
+  it('is reachable in the narrow layout, beside Go to section', async () => {
+    const { user } = open(2)
+    await heading(2)
+    const narrow = screen.getAllByRole('switch', { name: 'Advanced' }).find((one) => !nav().contains(one))!
+    expect(narrow.parentElement!.parentElement).toContainElement(screen.getByRole('combobox', { name: 'Go to section' }))
+    await user.click(narrow)
+    expect(screen.getByRole('button', { name: 'Record weighing' })).toBeInTheDocument()
+    expect(within(nav()).getByRole('switch', { name: 'Advanced' })).toBeChecked()
+  })
+
+  it('keeps a hidden field on screen while it holds an unsaved edit', async () => {
+    const { user } = open(2)
+    await heading(2)
+    await user.click(within(nav()).getByRole('switch', { name: 'Advanced' }))
+    await user.type(screen.getByLabelText('Diameter (mm)'), '2.85')
+    await user.click(screen.getByRole('checkbox', { name: /Lock the weight/ }))
+    await user.click(within(nav()).getByRole('switch', { name: 'Advanced' }))
+    expect(screen.getByLabelText('Diameter (mm)')).toHaveValue('2.85')
+    expect(screen.getByRole('checkbox', { name: /Lock the weight/ })).toBeChecked()
+    expect(screen.queryByLabelText('Density (g/cm³)')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Discard changes' }))
+    expect(screen.queryByLabelText('Diameter (mm)')).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: /Lock the weight/ })).toBeNull()
   })
 })

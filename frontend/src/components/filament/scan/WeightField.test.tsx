@@ -1,0 +1,69 @@
+import { screen, waitFor } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { getSpool, listSpoolEvents } from '../../../api/filament'
+import { spoolId } from '../../../mocks/features/filament/seed'
+import { renderPage } from '../../../test/utils'
+import { WeightField } from './WeightField'
+
+const lastWeighing = async (id: string) => (await listSpoolEvents(id)).filter((one) => one.kind === 'weighed').at(-1)
+
+describe('WeightField (#7273)', () => {
+  it('subtracts the empty spool from the gross weight', async () => {
+    // #3: its type sits on the 250 g Bambu reusable spool.
+    const spool = await getSpool(spoolId(3))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    const field = await screen.findByLabelText('Gross weight (g)')
+    await user.type(field, '1250')
+    expect(screen.getByText('1 250 g − 250 g empty spool = 1 000 g of filament')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    const event = await lastWeighing(spool.id)
+    expect(event).toMatchObject({ kind: 'weighed', source: 'person', grams_after: 1000 })
+  })
+
+  it('takes the filament weight when the empty spool is unknown', async () => {
+    // #6 has no type and no spool insert.
+    const spool = await getSpool(spoolId(6))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    const field = await screen.findByLabelText('Filament weight (g)')
+    expect(screen.queryByLabelText('Gross weight (g)')).toBeNull()
+    await user.type(field, '432')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    await waitFor(async () => expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 432, source: 'person' }))
+  })
+
+  it.each(['1e3', '0x10', '1,243', '-5', '12 kg'])('refuses %s as a weight', async (typed) => {
+    const spool = await getSpool(spoolId(6))
+    const before = (await listSpoolEvents(spool.id)).length
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Filament weight (g)'), typed)
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter the weight in grams, such as 1243.')
+    expect(await listSpoolEvents(spool.id)).toHaveLength(before)
+  })
+
+  it('hands the spool, read again, to the page after a save, and keeps its live region mounted', async () => {
+    const spool = await getSpool(spoolId(3))
+    const saved = vi.fn()
+    const { user } = renderPage(<WeightField spool={spool} onSaved={saved} />)
+    const field = await screen.findByLabelText('Gross weight (g)')
+    const live = screen.getByRole('status', { name: 'Weight saved' })
+    expect(live).toHaveTextContent('')
+    await user.type(field, '1050')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    await waitFor(() => expect(live).toHaveTextContent('Saved'))
+    expect(screen.getByRole('status', { name: 'Weight saved' })).toBe(live)
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce())
+    expect(saved.mock.calls[0]![0]).toMatchObject({ id: spool.id, grams_left: 800 })
+  })
+
+  it('refuses a weight below the empty spool', async () => {
+    const spool = await getSpool(spoolId(3))
+    const before = (await listSpoolEvents(spool.id)).length
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '200')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The weight is less than the empty spool.')
+    expect(await listSpoolEvents(spool.id)).toHaveLength(before)
+  })
+})

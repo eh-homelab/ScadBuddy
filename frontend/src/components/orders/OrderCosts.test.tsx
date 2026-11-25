@@ -70,6 +70,18 @@ describe('OrderCosts', () => {
     expect(within(screen.getByRole('row', { name: 'Order total' })).getByText('$35.00')).toBeInTheDocument()
   })
 
+  it('shows the parts taken from stock in the cost breakdown (#7067)', async () => {
+    const costs = await api.orderCosts(ORDER_ACCEPTED)
+    const first = costs.items[0]!
+    const item = { ...first, parts_minor: 1250, cost_minor: first.cost_minor + 1250 }
+    const { user } = renderPage(<OrderCosts costs={{ ...costs, items: [item] }} onChanged={() => {}} />)
+
+    const row = await screen.findByRole('row', { name: /Name Keychain/ })
+    await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
+    const parts = await screen.findByText('Parts')
+    expect(parts.nextElementSibling).toHaveTextContent('$12.50')
+  })
+
   it('tints a loss and logs time at the labour rate', async () => {
     await api.putSettings({ pricing_labour_rate_per_hour: '600' })
     const { user } = renderPage(<Card />)

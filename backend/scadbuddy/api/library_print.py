@@ -16,7 +16,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Sequence
 from functools import partial
-from typing import Annotated, BinaryIO, Literal
+from typing import Annotated, Any, BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -95,10 +95,10 @@ from scadbuddy.bambuddy.library_listing import (
     search_library,
 )
 from scadbuddy.bambuddy.library_view import (
-    SPOOL_DIRNAME,
     NotViewableError,
     library_filaments,
     library_preview,
+    library_spool,
 )
 from scadbuddy.bambuddy.preview import (
     TOOLPATH_HEADERS,
@@ -140,6 +140,7 @@ from scadbuddy.library.library_file_operations import (
     LibraryRestoreResult,
 )
 from scadbuddy.library.library_write_operations import (
+    UPLOAD_GONE,
     LibraryEntryUpdated,
     LibraryFileUpdate,
     LibraryFolder,
@@ -150,6 +151,7 @@ from scadbuddy.library.library_write_operations import (
 from scadbuddy.library.outputs import OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
 from scadbuddy.library_search.component import LibraryIndexDep
+from scadbuddy.operations.blob_claims import BlobClaims, HeldBlob
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.preview_follow.component import PreviewFollowsDep
@@ -173,6 +175,7 @@ from scadbuddy.slicing.preview import (
     read_native_preview,
     read_native_toolpath,
 )
+from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
@@ -706,14 +709,20 @@ async def post_library_file(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
+    state: StateDep,
     idempotency_key: IdempotencyKey = None,
 ) -> LibraryEntryUpdated | JSONResponse:
     """Streams the ``file`` part to disk and uploads it through Bambuddy, to the folder
     in ``folder_id`` or the top level; its filename is the library name. The body may be
     as large as the library download cap (#2686)."""
-    # The body streamed to the data volume (#7245): the client's upload and the writes.
+    content = state.store.content
+    # The client's upload and the writes (#7245). On a remote store the body is spooled
+    # node-local (SCADBUDDY_SPOOL_DIR, #7316) and put in the blob store before the run
+    # starts, which reads it there on any replica (#7373). The local store has no blob
+    # index, and one replica: the body goes to the data volume and is claimed as a file.
+    directory = content.spool if content is not None else paths.cache
     with span("library.receive_upload") as current:
-        received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
+        received = await receive_upload(request, directory, fields={"folder_id": 32})
         current.set_attribute("scadbuddy.bytes", sum(received.sizes.values()))
     try:
         path = received.files.get("file")
@@ -739,11 +748,11 @@ async def post_library_file(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "`folder_id` is a folder's number"
             )
         digest = received.hashes["file"].hexdigest()
-        body = {"claim": digest, "filename": filename, "folder_id": folder_id}
+        body: dict[str, Any] = {"claim": digest, "filename": filename, "folder_id": folder_id}
+        if content is not None:
+            body["store"] = "blob"
         kind = ops.kinds["library_file_upload"]
-        claims = ClaimStore(paths.claims)
-        held: list[Held] = []
-        if (
+        unrecorded = (
             await recorded(
                 ops,
                 kind=kind,
@@ -752,8 +761,34 @@ async def post_library_file(
                 idempotency_key=idempotency_key,
             )
             is None
-        ):
-            held.append(await traced_thread("claims.hold_file", claims.hold_file, path, digest))
+        )
+        claimed: Claimed
+        if content is not None:
+            blobs = BlobClaims(content)
+            held_blobs: list[HeldBlob] = []
+            if unrecorded:
+                with span("library.hold_upload"):
+                    try:
+                        held_blobs.append(
+                            await blobs.hold_file(
+                                path, digest, received.sizes["file"], name=filename
+                            )
+                        )
+                    except StoreFullError as error:
+                        raise ApiError(
+                            status.HTTP_507_INSUFFICIENT_STORAGE,
+                            f"the blob store has no room for this file: {error}",
+                        ) from None
+                    except LookupError:
+                        # A release or sweep took the row right after the put.
+                        raise ApiError(status.HTTP_409_CONFLICT, UPLOAD_GONE) from None
+            claimed = Claimed(blobs, held_blobs)
+        else:
+            claims = ClaimStore(paths.claims)
+            held: list[Held] = []
+            if unrecorded:
+                held.append(await traced_thread("claims.hold_file", claims.hold_file, path, digest))
+            claimed = Claimed(claims, held)
         result = await run_operation(
             ops,
             response,
@@ -761,7 +796,7 @@ async def post_library_file(
             subject=LIBRARY_FILES_SUBJECT,
             request=body,
             idempotency_key=idempotency_key,
-            claimed=Claimed(claims, held),
+            claimed=claimed,
         )
         return operation_answer(result, LibraryEntryUpdated)
     finally:
@@ -918,9 +953,10 @@ async def get_library_preview(
     return Response(data, media_type=GLB_MEDIA_TYPE)
 
 
-#: The largest kept file served from the download cache. A hit is copied whole into the
-#: request's own file before its first byte is sent, so past this a cached file would
-#: start later than Bambuddy's stream of it does; it is streamed from Bambuddy instead.
+#: The largest kept file served from the download cache. A hit is checked whole before
+#: its first byte is sent (copied into the request's own file, or, with a private cache,
+#: hashed in place), so past this a cached file would start later than Bambuddy's stream
+#: of it does; it is streamed from Bambuddy instead.
 CACHED_COPY_MAX_BYTES = 256 * 1024 * 1024
 
 
@@ -961,9 +997,8 @@ async def get_library_file(
         # One kept but too large to copy before its first byte is not kept again.
         keep = sha is not None and (kept_size is None or kept_size <= CACHED_COPY_MAX_BYTES)
         if sha is not None and kept_size is not None and kept_size <= CACHED_COPY_MAX_BYTES:
-            copy = await asyncio.to_thread(
-                downloads.private_copy, sha, paths.cache / SPOOL_DIRNAME, what="library_file"
-            )
+            spool = library_spool(paths.cache, downloads)
+            copy = await asyncio.to_thread(downloads.read_checked, sha, spool, what="library_file")
             if copy is not None:
                 size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
                 return StreamingResponse(
@@ -1040,8 +1075,9 @@ async def _native_download(native: NativeLibrary, file_id: int) -> Response:
 
 
 async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
-    """``copy``'s bytes, closing it however the response ends. It has no name on disk,
-    so a dropped connection leaves nothing behind."""
+    """``copy``'s bytes, closing it however the response ends. It is the request's own
+    unnamed copy, so a dropped connection leaves nothing behind, or, with a private
+    cache, the kept entry itself, which stays in the cache."""
     try:
         while chunk := await asyncio.to_thread(copy.read, 1 << 20):
             yield chunk

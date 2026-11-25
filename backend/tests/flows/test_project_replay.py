@@ -30,8 +30,14 @@ on #4262's (a `turn_tool_tier` whose three attempts missed their beats, asked on
 with no heartbeat timeout, recorded by
 `test_a_tier_on_agent_replicas_that_never_beat_is_asked_again_without_beats`); `lowered` on
 #2171's (a tool lowered from outward while the run waited, run without approval, recorded by
-`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`). Never
-re-record them.
+`test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`);
+`refused_wait` on the workflow before #7364 (a `wait_for_human` of more than a day, refused
+before it drew a call id, then an approved `queue_print`, whose activity id has the next one)
+and so `waited_default` (a `wait_for_human` with the hour of its default, then a `sleep`), each
+recorded once on that code, by a test that is not kept; `waited_open` on #7364's (a
+`wait_for_human` with no limit, answered) and `prompted` on #7364's (a prompt answered through
+its route, recorded by `tests/api/test_flow_prompt.py`), with `prompt_expired` (a prompt whose
+`timeout_s` ended it) and `prompted_twice` (two prompts at once). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -70,6 +76,12 @@ NAMES = [
     "beatless",
     "lowered",
     "unregistered",
+    "refused_wait",
+    "waited_default",
+    "waited_open",
+    "prompted",
+    "prompt_expired",
+    "prompted_twice",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
@@ -126,6 +138,72 @@ async def test_answered(flows: Flows) -> None:
     )
     await flows.finished(run_id)
     await _record(flows, "answered", run_id)
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.requires_postgres
+async def test_waited_open(flows: Flows) -> None:
+    run_id = await flows.start(
+        script("a = await wait_for_human('Swap to pink?')", "return a['answer']")
+    )
+    run = await flows.row(run_id, lambda r: r.status == "waiting")
+    client = AgentClient(flows.client, f"flow-{run_id}")
+    for _ in range(100):
+        if await client.get_pending_callbacks():
+            break
+        await asyncio.sleep(0.1)
+    await client.provide_callback_result(run.waiting_on[0].call_id, result={"answer": "ok"})
+    assert (await flows.finished(run_id)).result == "result: 'ok'"
+    await _record(flows, "waited_open", run_id)
+
+
+ASKS = {"type": "object", "properties": {"size": {"type": "string"}}}
+
+
+async def _asked(flows: Flows, run_id: str, count: int) -> dict[str, str]:
+    """The run's call ids by question, once the harness has them all."""
+    run = await flows.row(run_id, lambda r: len(r.waiting_on) == count)
+    client = AgentClient(flows.client, f"flow-{run_id}")
+    for _ in range(100):
+        if len(await client.get_pending_callbacks()) == count:
+            break
+        await asyncio.sleep(0.1)
+    return {str(w.prompt): w.call_id for w in run.waiting_on}
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.requires_postgres
+async def test_prompt_expired(flows: Flows) -> None:
+    run_id = await flows.start(
+        script(
+            "try:",
+            f"    await prompt('Size?', {ASKS!r}, timeout_s=10)",
+            "except TimeoutError:",
+            "    return 'late'",
+        )
+    )
+    await _asked(flows, run_id, 1)
+    assert (await flows.finished(run_id)).result == "result: 'late'"
+    await _record(flows, "prompt_expired", run_id)
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.requires_postgres
+async def test_prompted_twice(flows: Flows) -> None:
+    """Two prompts at once, the second answered first."""
+    run_id = await flows.start(
+        script(
+            f"a, b = await asyncio.gather(prompt('A?', {ASKS!r}), prompt('B?', {ASKS!r}))",
+            "return [a['size'], b['size']]",
+        )
+    )
+    asked = await _asked(flows, run_id, 2)
+    client = AgentClient(flows.client, f"flow-{run_id}")
+    await client.provide_callback_result(asked["B?"], result={"answer": {"size": "big"}})
+    await _asked(flows, run_id, 1)
+    await client.provide_callback_result(asked["A?"], result={"answer": {}})
+    assert (await flows.finished(run_id)).result == "result: [None, 'big']"
+    await _record(flows, "prompted_twice", run_id)
 
 
 @pytest.mark.requires_temporal

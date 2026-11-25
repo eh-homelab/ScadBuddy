@@ -8,13 +8,14 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.input_schema import (
+    MAX_PATTERN,
     MAX_PATTERN_SIZE,
     MAX_PATTERNED_LENGTH,
     PATTERN_TIMEOUT_S,
     PATTERNS_BUDGET_S,
     schema_problems,
 )
-from scadbuddy.flows.inputs import InputsError, inputs_model, resolve_inputs
+from scadbuddy.flows.inputs import InputsError, filled, inputs_model, resolve_inputs
 from scadbuddy.flows.typecheck import check_script
 
 SCHEMA: dict[str, Any] = {
@@ -208,6 +209,27 @@ def test_a_pattern_whose_counted_repeats_are_too_large_is_refused(
 )
 def test_a_pattern_whose_counted_repeats_fit_is_accepted(pattern: str) -> None:
     assert schema_problems(_patterned(pattern)) == []
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_an_array_items_pattern_whose_counted_repeats_are_too_large_is_refused(
+    stored: bool,
+) -> None:
+    """#7512: an array's ``items`` pattern goes through the same bound as a string's."""
+    prop = {"type": "array", "items": {"type": "string", "pattern": "^a{10001}$", "maxLength": 64}}
+    assert schema_problems({"type": "object", "properties": {"s": prop}}, stored=stored) == [
+        f"s: a pattern repeats at most {MAX_PATTERN_SIZE} times, nested counts multiplied"
+    ]
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_an_array_items_pattern_that_is_too_long_is_refused(stored: bool) -> None:
+    """#7611: the other bound of the same loop, an ``items`` pattern over `MAX_PATTERN`."""
+    long = "^" + "a" * MAX_PATTERN + "$"
+    prop = {"type": "array", "items": {"type": "string", "pattern": long, "maxLength": 64}}
+    assert schema_problems({"type": "object", "properties": {"s": prop}}, stored=stored) == [
+        f"s: a pattern is at most {MAX_PATTERN} characters"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -437,3 +459,35 @@ async def test_a_flow_without_a_schema_has_no_inputs_function() -> None:
 async def test_a_bad_schema_is_reported_against_inputs_json() -> None:
     problems = await check_script(_script("await sleep(1)"), {"type": "array"})
     assert problems and all(p.file == "inputs.json" for p in problems)
+
+
+def test_filled_gives_the_defaults_and_the_types_and_runs_no_pattern() -> None:
+    """A prompt's answer (#7364), which was checked before: a workflow fills it in."""
+    schema: dict[str, Any] = {
+        "type": "object",
+        "required": ["code"],
+        "properties": {
+            "code": {"type": "string", "pattern": "^never$", "maxLength": 5},
+            "copies": {"type": "integer", "default": 2},
+            "scale": {"type": "number"},
+            "sms": {"type": "boolean"},
+            "tags": {"type": "array", "items": {"type": "string"}, "default": []},
+            "note": {"type": "string"},
+        },
+    }
+    sent: dict[str, Any] = {"code": "other", "scale": 2}
+    got = filled(schema, sent)
+    assert got == {
+        "code": "other",
+        "copies": 2,
+        "scale": 2.0,
+        "sms": False,
+        "tags": [],
+        "note": None,
+    }
+    assert isinstance(got["scale"], float)
+    assert sent == {"code": "other", "scale": 2}
+    got["tags"].append("x")
+    assert filled(schema, sent)["tags"] == []
+    with pytest.raises(InputsError):
+        filled(schema, {"scale": 1})
