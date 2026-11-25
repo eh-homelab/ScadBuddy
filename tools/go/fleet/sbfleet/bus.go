@@ -119,6 +119,7 @@ func (b *bus) follow(ctx context.Context, last *string, f func(fleetchat.Event))
 	if res.StatusCode != http.StatusOK {
 		return false, problemOf(res)
 	}
+	slog.InfoContext(ctx, "sbfleet: the fleet change stream connected", "resumed", *last != "")
 
 	framed := false
 	var event, id string
@@ -181,9 +182,13 @@ func dispatch(ctx context.Context, event, data string, f func(fleetchat.Event)) 
 			return
 		}
 		if d.Resync || !d.Reconnect {
+			slog.InfoContext(ctx, "sbfleet: the fleet change stream may have lost events; resyncing every inbox",
+				"frame", "ready", "resync", d.Resync, "reconnect", d.Reconnect)
 			f(fleetchat.Event{Resync: true})
 		}
 	case "reconnected":
+		slog.InfoContext(ctx, "sbfleet: the fleet change stream may have lost events; resyncing every inbox",
+			"frame", "reconnected")
 		f(fleetchat.Event{Resync: true})
 	case "change":
 		recipients, err := recipientsOf(data)

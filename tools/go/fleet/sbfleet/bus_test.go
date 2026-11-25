@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -308,5 +309,38 @@ func TestBusResyncsOnUnreadableFrames(t *testing.T) {
 	want := []fleetchat.Event{{Resync: true}, {Resync: true}, {SessionIDs: []string{sid}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("events %+v, want %+v", got, want)
+	}
+}
+
+func TestStreamLogsConnectsAndResyncs(t *testing.T) {
+	logs := captureLogs(t)
+	_, f, _, url := newExchange(t, ProofKubernetes)
+	f.mu.Lock()
+	f.current = credentialN(9)
+	f.mu.Unlock()
+	b := newBus(url, func() (string, error) { return credentialN(9), nil })
+	last := ""
+	if _, err := b.follow(context.Background(), &last, func(fleetchat.Event) {}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	dispatch(ctx, "reconnected", "", func(fleetchat.Event) {})
+	dispatch(ctx, "ready", "{", func(fleetchat.Event) {})
+	dispatch(ctx, "change", "{", func(fleetchat.Event) {})
+	dispatch(ctx, "ready", `{"resync":false,"reconnect":true}`, func(fleetchat.Event) {})
+	out := logs.String()
+	for _, want := range []string{
+		"the fleet change stream connected",
+		"frame=ready resync=false reconnect=false",
+		"frame=reconnected",
+		"a ready frame that cannot be read; resyncing",
+		"a change frame that cannot be read; resyncing",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no %q in the logs:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, "resyncing every inbox"); n != 2 {
+		t.Errorf("%d resync lines, want 2 (a replay that lost nothing logs none):\n%s", n, out)
 	}
 }

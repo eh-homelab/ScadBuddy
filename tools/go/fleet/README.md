@@ -50,6 +50,9 @@ over HTTP (`TestNoCoreImports` checks it).
   - A `ready` or `change` frame that cannot be read is logged and becomes
     `Event{Resync: true}`.
 
+  Each stream logs a line once core answers 200, and each frame that becomes a resync
+  logs one too.
+
   Every frame's `id` is kept and sent as `Last-Event-ID` on each reconnect. A stream
   that fails, is refused (a 401 or 403 too: the credential rotates), ends, or sends
   nothing for 45 s is followed again after a back-off of 500 ms doubling to 30 s,
