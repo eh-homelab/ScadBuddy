@@ -1198,9 +1198,58 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
   (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
-  QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
-  /filament/labels` (the PDF as the body, at most 100 labels; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST
+  /filament/labels` (route `render_labels`: the file as the body, at most 100 labels; in
+  `NOT_NUDGED`). The labels as PNG (#7216, plan
+  `docs/superpowers/plans/2026-11-25-label-outputs.md` R-7216-5 to R-7216-8):
+  `label_output.py` `LabelOutput` (`format` `pdf` or `png`, `dpi` 203, 300 or 600, and the
+  spool label's `fields`), the stored-only setting `filament_label_output`, which a body's
+  own `format`, `dpi` and `fields` outrank. The fields (R-7216-9, R-7216-10): `LabelField`,
+  `ALL_FIELDS` (`number`, `material`, `colour`, `hex`, `brand`, `location`, `temps`, `weight`,
+  `note`, `added`, `qr`, the order the lines print; a validator puts any list in it and
+  refuses none or a repeat), `DEFAULT_FIELDS` (`number`, `material`, `colour`, `brand`, `qr`,
+  what labels printed before); `labels.py` `pdf_labels` fills each value (`temps_text`;
+  `added` is the row's `created_at` day in UTC). `label_pdf.py` `fit_lines` drops the last
+  lines while the block is taller than the label less 2 x `PAD_MM`, from line heights only
+  (`NUMBER_MM`, `CODE_MM`, `FIELD_MM`, `LEADING`, `BIG_LEADING`, `GAP_MM`; the big text
+  counted at its full size), never a chosen number or a place's code; the browser label
+  (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use the same values:
+  `test-fixtures/filament/label-fit-vectors.json` holds them and fit cases, and
+  `tests/filament/test_label_fit_vectors.py` and the frontend's `labelFitVectors.test.ts` check
+  both sides against it (R-7216-19).
+  With no `qr` the text column starts at `QUIET_MM`. Place labels ignore the fields.
+  `label_png.py` rasterises the PDF with pypdfium2, every
+  PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), a request's
+  on the one-thread executor `_PDFIUM` (`rasterise`, R-7216-20), so a request that waits for
+  PDFium holds no worker of the shared `to_thread` pool; each page a
+  greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
+  pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
+  entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`
+  counts every page before anything is drawn: past `MAX_PNG_PIXELS` (400 megapixels) the
+  route answers 422 `png_too_large`. The text (#7216 R-7216-1 to R-7216-4): `label_fonts.py`
+  draws each line as runs of one font each, DejaVu Sans (`DEJAVU`), else the first font of the
+  Noto chain `FALLBACKS` in `FALLBACK_DIR` that holds the character, else U+FFFD from DejaVu;
+  each font is loaded and registered with ReportLab once per process, when a character needs
+  it, and embedded as a subset; `label_pdf.py` measures every width through
+  `label_fonts.width_mm`. A missing DejaVu file is `LabelFontMissingError`, which the route
+  answers 503 `label_font_missing`, never Helvetica; a missing Noto file is skipped and logged
+  once. No shaping, no right-to-left order and no CJK font: #7707. The tests read the text back
+  with pypdfium2; a test that needs a Noto file skips when it is absent, and fails instead with
+  `SCADBUDDY_TEST_FONTS_REQUIRED=1`, which CI's `backend-pytest` sets (the `test` image has
+  `fonts-noto-core`). Saved sheet grids (#7216 R-7216-11 to R-7216-13): `label_sheets.py`
+  (`LabelSheetStore`, the API's own table `label_sheets`, through `Filament.label_sheets` on the
+  filament pool; `SheetLayout` holds the bounds and the fit on the page; a name is unique by
+  `name_key`, NFC then casefold, a unique index; a create counts and inserts under a
+  transaction advisory lock, at most `MAX_SAVED_SHEETS`). `LabelTemplateChoice` takes
+  `template` `saved` with `sheet_id`, and `resolve` reads the row once per labels request, so
+  the PDF and the PNG use one grid and an edit applies to the next print; a deleted sheet is
+  409 `label_sheet_gone`. Routes `POST /filament/label-sheets`, `PUT` and `DELETE
+  /filament/label-sheets/{sheet_id}` (409 `label_sheet_name_taken`, `too_many_label_sheets`;
+  in `NOT_NUDGED`); `GET /filament/label-templates` lists them as `saved`. Agent tools:
+  `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` and `filament_label_templates` (all `read`), and
+  `filament_label_sheet_upsert` and `filament_label_sheet_delete` (`write`, #7216
+  R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`

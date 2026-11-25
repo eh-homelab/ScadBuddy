@@ -142,6 +142,7 @@ export function reset() {
   invoicedLine.clear()
   fetches.clear()
   insertReadings.clear()
+  savedSheets = []
 }
 
 type InsertBasis = S['InsertType']['empty_weight_basis']
@@ -267,6 +268,78 @@ export const LABEL_TEMPLATES: S['LabelTemplates'] = {
     },
   ],
   custom: { min_width_mm: 40, min_height_mm: 25, max_width_mm: 190, max_height_mm: 190 },
+  // #7216 — the saved sheet grids: `GET /label-templates` answers `savedSheets` here.
+  saved: [],
+}
+
+/** #7216 — the saved sheets (`label_sheets.py` `LabelSheetStore`); none until the Labels page saves one. */
+let savedSheets: S['SavedLabelSheet'][] = []
+
+/**
+ * Python's `str.casefold()` for the common cases: `toLowerCase()`, then `ß` (and `ẞ`, which lowers to it) to `ss`,
+ * and the final sigma `ς` to `σ`. JavaScript has no casefold. Not covered: the other full case folds, such as the
+ * ligatures (`ﬁ` to `fi`), `ŉ`, the Greek letters with a iota subscript and the Cherokee letters, so two such names
+ * the real route refuses can both save in the mock.
+ */
+const casefold = (text: string) => text.toLowerCase().replace(/ß/g, 'ss').replace(/ς/g, 'σ')
+
+/** `label_sheets.py` `name_key`: NFC, then case folded (`casefold` says where it differs). */
+const sheetKey = (name: string) => casefold(name.normalize('NFC'))
+
+/** `label_sheets.py` `sort_key`: the name with its marks removed, then its key. */
+const sheetSort = (name: string) => casefold(name.normalize('NFKD').replace(/\p{M}/gu, ''))
+
+/**
+ * #7216 — a sheet body as `LabelSheetIn` and `SheetLayout` check it, or the refusal: the name, the bounds and the
+ * fit on the page, with Pydantic's messages, so the Labels page shows what the real route says.
+ */
+function sheetRefusal(body: S['LabelSheetIn']): Response | null {
+  const errors: { loc: string[]; msg: string }[] = []
+  const name = (body.name ?? '').normalize('NFC').trim()
+  if (name.length < 1) errors.push({ loc: ['body', 'name'], msg: 'String should have at least 1 character' })
+  if (name.length > 100) errors.push({ loc: ['body', 'name'], msg: 'String should have at most 100 characters' })
+  const layout = body.layout
+  const bounds: [Exclude<keyof S['SheetLayout'], 'page'>, number, number][] = [
+    ['width_mm', 40, 190],
+    ['height_mm', 25, 190],
+    ['cols', 1, 20],
+    ['rows', 1, 40],
+    ['top_mm', 0, 190],
+    ['left_mm', 0, 190],
+    ['col_gap_mm', 0, 190],
+    ['row_gap_mm', 0, 190],
+  ]
+  for (const [key, min, max] of bounds) {
+    const value: unknown = layout[key]
+    if (typeof value !== 'number') errors.push({ loc: ['body', 'layout', key], msg: 'Input should be a valid number' })
+    else if (value < min) errors.push({ loc: ['body', 'layout', key], msg: `Input should be greater than or equal to ${min}` })
+    else if (value > max) errors.push({ loc: ['body', 'layout', key], msg: `Input should be less than or equal to ${max}` })
+  }
+  if (errors.length === 0) {
+    const [pageW, pageH] = layout.page === 'a4' ? [210, 297] : [215.9, 279.4]
+    const wide = layout.left_mm + layout.cols * layout.width_mm + (layout.cols - 1) * layout.col_gap_mm
+    const tall = layout.top_mm + layout.rows * layout.height_mm + (layout.rows - 1) * layout.row_gap_mm
+    const g = (n: number) => String(Number(n.toPrecision(6)))
+    if (wide > pageW + 0.01) errors.push({ loc: ['body', 'layout'], msg: `Value error, the grid is ${g(wide)} mm wide, but the ${layout.page} page is ${g(pageW)} mm wide` })
+    else if (tall > pageH + 0.01) errors.push({ loc: ['body', 'layout'], msg: `Value error, the grid is ${g(tall)} mm tall, but the ${layout.page} page is ${g(pageH)} mm tall` })
+  }
+  return errors.length > 0 ? problem(422, 'the request did not match the expected shape', { errors }) : null
+}
+
+/** `label_sheets.py` `LabelSheetNameTakenError`, as the route answers it. */
+const sheetNameTaken = (name: string) => problem(409, `a label sheet named '${name}' exists: choose another name`, { code: 'label_sheet_name_taken' })
+
+/**
+ * #7216 — the pages `label_pdf.py` `page_count` draws for `count` labels: one label a page on a roll, else as many
+ * pages as the sheet needs (the template's own grid, or the packed Letter sheet of `_packed` for the `sheet` layout).
+ */
+function labelPages(choice: S['LabelTemplateChoice'] | null | undefined, layout: 'roll' | 'sheet', count: number) {
+  const sheet = choice?.template === 'saved' ? savedSheets.find((one) => one.id === choice.sheet_id)?.layout : undefined
+  const known = LABEL_TEMPLATES.templates.find((one) => one.id === (choice?.template ?? 'roll_50x25'))
+  const width = sheet?.width_mm ?? known?.width_mm ?? choice?.width_mm ?? 50
+  const height = sheet?.height_mm ?? known?.height_mm ?? choice?.height_mm ?? 25
+  const grid = sheet ?? known?.sheet ?? (layout === 'sheet' ? { cols: Math.max(1, Math.floor(192 / (width + 2))), rows: Math.max(1, Math.floor((279.4 - 20 + 2) / (height + 2))) } : null)
+  return grid ? Math.ceil(count / (grid.cols * grid.rows)) : count
 }
 
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
@@ -2579,10 +2652,41 @@ export const handlers = [
     return HttpResponse.json({ base_url: null, labels: wanted.flatMap(printerLabelRows), no_report: [] } satisfies S['PrinterLabels'])
   }),
   // #7157 — `filament/label_templates.py` `TEMPLATES` and its custom bounds.
-  http.get(`${BASE}/label-templates`, () => HttpResponse.json(LABEL_TEMPLATES)),
+  http.get(`${BASE}/label-templates`, () =>
+    HttpResponse.json({ ...LABEL_TEMPLATES, saved: [...savedSheets].sort((a, b) => sheetSort(a.name).localeCompare(sheetSort(b.name)) || a.id.localeCompare(b.id)) }),
+  ),
+  // #7216 — `POST`, `PUT` and `DELETE /filament/label-sheets`, with the route's refusals.
+  http.post(`${BASE}/label-sheets`, async ({ request }) => {
+    const body = (await request.json()) as S['LabelSheetIn']
+    const refused = sheetRefusal(body)
+    if (refused) return refused
+    const name = body.name.normalize('NFC').trim()
+    if (savedSheets.some((one) => sheetKey(one.name) === sheetKey(name))) return sheetNameTaken(name)
+    if (savedSheets.length >= 100) return problem(409, 'at most 100 saved label sheets: delete one before you save another', { code: 'too_many_label_sheets' })
+    const made: S['SavedLabelSheet'] = { id: newId(), name, layout: { ...body.layout }, created_at: now(), updated_at: now() }
+    savedSheets.push(made)
+    return HttpResponse.json(made, { status: 201 })
+  }),
+  http.put(`${BASE}/label-sheets/:id`, async ({ params, request }) => {
+    const body = (await request.json()) as S['LabelSheetIn']
+    const refused = sheetRefusal(body)
+    if (refused) return refused
+    const at = savedSheets.findIndex((one) => one.id === params.id)
+    if (at < 0) return problem(404, `no label sheet ${String(params.id)}`)
+    const name = body.name.normalize('NFC').trim()
+    if (savedSheets.some((one) => one.id !== params.id && sheetKey(one.name) === sheetKey(name))) return sheetNameTaken(name)
+    const changed: S['SavedLabelSheet'] = { ...savedSheets[at]!, name, layout: { ...body.layout }, updated_at: now() }
+    savedSheets[at] = changed
+    return HttpResponse.json(changed)
+  }),
+  http.delete(`${BASE}/label-sheets/:id`, ({ params }) => {
+    if (!savedSheets.some((one) => one.id === params.id)) return problem(404, `no label sheet ${String(params.id)}`)
+    savedSheets = savedSheets.filter((one) => one.id !== params.id)
+    return new HttpResponse(null, { status: 204 })
+  }),
   // #7157 — `POST /filament/labels`: the route's refusals, and a stand-in PDF (the real one is ReportLab's).
   http.post(`${BASE}/labels`, async ({ request }) => {
-    const body = (await request.json()) as S['LabelsPdfRequest']
+    const body = (await request.json()) as S['LabelsRequest']
     const spools = body.spool_ids ?? []
     const places = body.location_ids ?? []
     const count = spools.length + places.length
@@ -2592,8 +2696,19 @@ export const handlers = [
     const noPlace = places.find((id) => !state.locations.some((one) => one.id === id))
     if (noPlace) return problem(404, `no location ${noPlace}`)
     const settings = mockSettings()
+    // #7216 — a choice that names a deleted saved sheet (R-7216-12).
+    const chosen = body.template ?? settings.filament_label_template
+    if (chosen?.template === 'saved' && !savedSheets.some((one) => one.id === chosen.sheet_id))
+      return problem(409, 'The saved sheet was deleted. Choose another template.', { code: 'label_sheet_gone' })
     if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
       return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
+    // (R-7216-6). The real route reads the stored settings when the request names no format or template.
+    if ((body.format ?? settings.filament_label_output?.format) === 'png') {
+      const choice = body.template ?? settings.filament_label_template
+      const [type, name] = labelPages(choice, body.layout ?? 'roll', count) === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
+      return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
+    }
     return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })

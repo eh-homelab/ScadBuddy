@@ -1,0 +1,77 @@
+{
+  "comment": "#7216 R-7216-10, R-7216-19: the spool label's fit. backend/tests/filament/test_label_fit_vectors.py checks label_pdf.py's constants and fit_lines against this file, and frontend/src/components/filament/labelFitVectors.test.ts checks labelSheet.ts's constants and fitLines, so the browser label and the PDF keep the same lines. A case gives the label's height in mm, the chosen fields, the fields that have a value (the number always has one), and the fields of the lines kept, in order.",
+  "constants": {
+    "PAD_MM": 1.5,
+    "QR_MM": 19.8,
+    "QUIET_MM": 2.6,
+    "NUMBER_MM": 9,
+    "CODE_MM": 8,
+    "PLACE_NAME_MM": 3.2,
+    "LEADING": 1.25,
+    "BIG_LEADING": 1,
+    "GAP_MM": 1,
+    "FIELD_MM": {
+      "material": 3.2,
+      "colour": 3,
+      "hex": 2.6,
+      "brand": 2.6,
+      "location": 2.6,
+      "temps": 2.6,
+      "weight": 2.6,
+      "note": 2.6,
+      "added": 2.6
+    },
+    "BOLD_FIELDS": ["material"]
+  },
+  "cases": [
+    {
+      "name": "every field on a 25 mm roll label",
+      "height_mm": 25,
+      "fields": ["number", "material", "colour", "hex", "brand", "location", "temps", "weight", "note", "added", "qr"],
+      "values": ["material", "colour", "hex", "brand", "location", "temps", "weight", "note", "added"],
+      "kept": ["number", "material", "colour", "hex"]
+    },
+    {
+      "name": "every field on a label tall enough",
+      "height_mm": 55,
+      "fields": ["number", "material", "colour", "hex", "brand", "location", "temps", "weight", "note", "added", "qr"],
+      "values": ["material", "colour", "hex", "brand", "location", "temps", "weight", "note", "added"],
+      "kept": ["number", "material", "colour", "hex", "brand", "location", "temps", "weight", "note", "added"]
+    },
+    {
+      "name": "the default fields on a 30 mm label",
+      "height_mm": 30,
+      "fields": ["number", "material", "colour", "brand", "qr"],
+      "values": ["material", "colour", "brand"],
+      "kept": ["number", "material", "colour", "brand"]
+    },
+    {
+      "name": "no number: no gap, and the lines from the bottom leave first",
+      "height_mm": 20,
+      "fields": ["material", "colour", "brand", "location", "temps", "weight"],
+      "values": ["material", "colour", "brand", "location", "temps", "weight"],
+      "kept": ["material", "colour", "brand", "location"]
+    },
+    {
+      "name": "the first line with a value takes the gap under the number",
+      "height_mm": 25,
+      "fields": ["number", "material", "colour", "hex", "brand", "location", "temps", "qr"],
+      "values": ["hex", "brand", "location", "temps"],
+      "kept": ["number", "hex", "brand", "location"]
+    },
+    {
+      "name": "the number stays when nothing else fits",
+      "height_mm": 15,
+      "fields": ["number", "material"],
+      "values": ["material"],
+      "kept": ["number"]
+    },
+    {
+      "name": "a chosen field with no value prints no line",
+      "height_mm": 25,
+      "fields": ["note", "added"],
+      "values": ["added"],
+      "kept": ["added"]
+    }
+  ]
+}
