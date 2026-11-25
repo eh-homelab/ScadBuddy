@@ -36,6 +36,8 @@ on:
       - .github/workflows/hot-path-e2e.yml
       # The whole backend (#4766 review): the fakes are tested against its LAN client.
       - backend/**
+      - "!**/CLAUDE.md"
+      - "!**/AGENTS.md"
 
 permissions:
   contents: read
