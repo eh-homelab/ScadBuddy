@@ -226,9 +226,11 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
         operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
     )
     release = threading.Event()
+    entered = threading.Event()
     save = models_api._save_source
 
     async def held(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
         await asyncio.to_thread(release.wait, 60)
         return await save(*args, **kwargs)
 
@@ -255,6 +257,9 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
                 )
             )
         assert started.status_code == 202, started.text
+        # The source moves only once the run waits at the lock: moved earlier, a patch
+        # run could read the moved source and refuse its edit with a 422 (#7598).
+        assert entered.wait(60), "the run never reached _save_source"
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
     finally:
         release.set()
