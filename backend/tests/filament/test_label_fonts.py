@@ -8,6 +8,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from reportlab.lib.units import mm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from scadbuddy.filament import label_fonts
 from scadbuddy.filament.label_fonts import (
@@ -82,6 +84,21 @@ def test_the_width_is_the_sum_of_the_runs_widths() -> None:
     whole = width_mm("AB", "regular", 3.0)
     assert whole == pytest.approx(width_mm("A", "regular", 3.0) + width_mm("B", "regular", 3.0))
     assert width_mm("AB", "regular", 6.0) == pytest.approx(2 * whole)
+
+
+@needs_font("NotoSansThai-Regular.ttf")
+def test_a_line_in_two_fonts_is_measured_in_each_runs_own_font() -> None:
+    assert [font for font, _ in runs("Aไ", "regular")] == [
+        "SBLabel-regular",
+        "SBLabel-NotoSansThai-regular",
+    ]
+    each = (
+        stringWidth("A", "SBLabel-regular", 3 * mm)
+        + stringWidth("ไ", "SBLabel-NotoSansThai-regular", 3 * mm)
+    ) / mm
+    assert width_mm("Aไ", "regular", 3.0) == pytest.approx(each)
+    # Not the width of the whole line in DejaVu, which would cut a mixed line elsewhere.
+    assert each != pytest.approx(stringWidth("Aไ", "SBLabel-regular", 3 * mm) / mm)
 
 
 def test_a_missing_dejavu_names_its_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

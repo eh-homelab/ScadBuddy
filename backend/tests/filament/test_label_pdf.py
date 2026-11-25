@@ -8,11 +8,14 @@ import re
 import pypdfium2
 import pytest
 from pydantic import ValidationError
+from reportlab.lib.units import mm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from scadbuddy.filament import label_pdf, label_png
 from scadbuddy.filament.label_fonts import width_mm
 from scadbuddy.filament.label_pdf import PlaceLabel, SpoolLabel, render_pdf
 from scadbuddy.filament.label_templates import BY_ID, LabelTemplateChoice
+from tests.filament.test_label_fonts import needs_font
 
 MM = 72 / 25.4
 
@@ -54,6 +57,26 @@ def _pages(pdf: bytes) -> list[tuple[str, list[float]]]:
                 out.append((textpage.get_text_range(), sizes))
                 textpage.close()
                 page.close()
+        finally:
+            document.close()
+    return out
+
+
+def _glyphs(pdf: bytes) -> list[tuple[str, float, float]]:
+    """The first page's characters as PDFium reads them, each with its box's left and right
+    edge in points, under the labels' PDFium lock."""
+    out = []
+    with label_png._PDFIUM_LOCK:
+        document = pypdfium2.PdfDocument(pdf)
+        try:
+            page = document[0]
+            textpage = page.get_textpage()
+            for index in range(textpage.count_chars()):
+                left, _, right, _ = textpage.get_charbox(index)
+                char = chr(pypdfium2.raw.FPDFText_GetUnicode(textpage, index))
+                out.append((char, left, right))
+            textpage.close()
+            page.close()
         finally:
             document.close()
     return out
@@ -146,6 +169,35 @@ def test_a_place_name_of_one_long_word_runs_onto_the_second_line() -> None:
     assert drawn[1] == lines[0]
 
 
+#: U+065A has an advance of its own in DejaVu Sans (1.5 mm at 3 mm), where U+0308 has none
+#: (measured 2026-11-25 with `label_fonts.width_mm`). Only a mark with an advance can make a
+#: cut fall between it and its base.
+WIDE_MARK = "\N{ARABIC VOWEL SIGN SMALL V ABOVE}"
+
+
+def test_a_cut_before_a_combining_mark_moves_before_its_base() -> None:
+    # "Zoë" with a combining diaeresis: a cut at the mark keeps "Zo", never a bare "e".
+    assert label_pdf._cut_back("Zoe\N{COMBINING DIAERESIS}…", 3) == 2
+    assert label_pdf._cut_back("Zoe\N{COMBINING DIAERESIS}\N{COMBINING ACUTE ACCENT}", 4) == 2
+    assert label_pdf._cut_back("Zoe", 2) == 2
+
+
+def test_the_ellipsis_cut_keeps_a_combining_mark_with_its_base() -> None:
+    name = f"Zoe{WIDE_MARK} Smith"
+    # Room for "Zoe…" but not for "Zoe" with its mark and the ellipsis.
+    column = label_pdf._width(f"Zoe{label_pdf.ELLIPSIS}", label_pdf.PLAIN, 3.0) + 0.1
+    assert label_pdf._width(f"Zoe{WIDE_MARK}{label_pdf.ELLIPSIS}", label_pdf.PLAIN, 3.0) > column
+    assert label_pdf._fit(name, label_pdf.PLAIN, 3.0, column) == f"Zo{label_pdf.ELLIPSIS}"
+
+
+def test_a_long_word_breaks_before_a_base_and_its_combining_mark() -> None:
+    word = f"Zoe{WIDE_MARK}lia"
+    column = label_pdf._width("Zoe", label_pdf.BOLD, 3.2) + 0.1
+    lines = label_pdf._wrap(word, label_pdf.BOLD, 3.2, column, 3)
+    assert lines[0] == "Zo"
+    assert lines[1].startswith(f"e{WIDE_MARK}")
+
+
 def test_a_column_narrower_than_one_character_leaves_no_empty_line() -> None:
     assert label_pdf._wrap("W", label_pdf.BOLD, 3.2, 0.5, 2) == ["W"]
     lines = label_pdf._wrap("Wx", label_pdf.BOLD, 3.2, 0.5, 2)
@@ -206,6 +258,43 @@ def test_a_mixed_script_name_is_cut_by_its_measured_runs() -> None:
     assert line.endswith(label_pdf.ELLIPSIS)
     assert line.startswith("Пётр 3D ✓")
     assert width_mm(line, "regular", 3.0) <= column
+
+
+def _measured(parts: list[tuple[str, str]], size: float) -> float:
+    """The width in mm of ``parts``, each (registered font name, text), in its own font."""
+    return sum(stringWidth(text, font, size * mm) for font, text in parts) / mm
+
+
+@needs_font("NotoSansThai-Regular.ttf")
+def test_a_line_in_two_fonts_is_cut_inside_the_second_run() -> None:
+    thai = "ไทย" * 8
+    odd = SpoolLabel(
+        number=6, material=None, colour=f"Mint {thai}", brand=None, qr="scadbuddy:spool:t"
+    )
+    # Drawn first: it registers the fonts that `_measured` names.
+    pdf = render_pdf([odd], BY_ID["roll_50x25"], "roll")
+    column = 50 - 2 * label_pdf.QUIET_MM - label_pdf.QR_MM - label_pdf.PAD_MM
+    dejavu, noto = "SBLabel-regular", "SBLabel-NotoSansThai-regular"
+    # The longest head of the Thai run that fits with "Mint " before it and the ellipsis
+    # after it, each measured in its own font.
+    kept = max(
+        end
+        for end in range(len(thai) + 1)
+        if _measured([(dejavu, "Mint "), (noto, thai[:end]), (dejavu, label_pdf.ELLIPSIS)], 3.0)
+        <= column
+    )
+    assert 0 < kept < len(thai)
+    want = f"Mint {thai[:kept]}{label_pdf.ELLIPSIS}"
+    assert _lines(pdf)[1] == want
+    # Each run is drawn where the one before it ends, and the line ends inside the column.
+    drawn = [glyph for glyph in _glyphs(pdf) if glyph[0] in want and glyph[0] != " "]
+    line = drawn[[char for char, _, _ in drawn].index("M") :][: len(want) - 1]
+    assert "".join(char for char, _, _ in line) == want.replace(" ", "")
+    first_thai = len("Mint")
+    assert line[first_thai][1] >= line[first_thai - 1][2] - 0.01
+    assert line[-1][1] >= line[-2][2] - 0.01
+    text_x = 2 * label_pdf.QUIET_MM + label_pdf.QR_MM
+    assert line[-1][2] <= (text_x + column) * MM + 0.01
 
 
 def test_a_custom_choice_needs_both_sizes_in_bounds() -> None:

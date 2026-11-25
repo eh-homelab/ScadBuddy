@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import math
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -225,13 +226,22 @@ def _width(text: str, font: Weight, size: float) -> float:
     return width_mm(text, font, size)
 
 
+def _cut_back(text: str, end: int) -> int:
+    """``end``, moved back to before the base character when a cut there would fall before
+    a combining mark, so a cut never parts a base from the marks after it (#7216)."""
+    while 0 < end < len(text) and unicodedata.combining(text[end]):
+        end -= 1
+    return end
+
+
 def _fit(text: str, font: Weight, size: float, column: float) -> str:
     """``text``, cut with an ellipsis to fit ``column`` mm."""
     if _width(text, font, size) <= column:
         return text
-    while text and _width(text + ELLIPSIS, font, size) > column:
-        text = text[:-1]
-    return text.rstrip() + ELLIPSIS
+    end = len(text)
+    while end and _width(text[:end] + ELLIPSIS, font, size) > column:
+        end = _cut_back(text, end - 1)
+    return text[:end].rstrip() + ELLIPSIS
 
 
 def _wrap(text: str, font: Weight, size: float, column: float, most: int) -> list[str]:
@@ -243,11 +253,15 @@ def _wrap(text: str, font: Weight, size: float, column: float, most: int) -> lis
     while words and len(lines) < most - 1:
         line = words.pop(0)
         if _width(line, font, size) > column:
-            head = line
-            while len(head) > 1 and _width(head, font, size) > column:
-                head = head[:-1]
-            rest = line[len(head) :]
-            # One character wider than the column stays whole: nothing runs on.
+            end = len(line)
+            while _width(line[:end], font, size) > column:
+                back = _cut_back(line, end - 1)
+                if back < 1:
+                    break
+                end = back
+            head, rest = line[:end], line[end:]
+            # One character (with its marks) wider than the column stays whole: nothing
+            # runs on.
             if rest:
                 words.insert(0, rest)
             lines.append(head)
