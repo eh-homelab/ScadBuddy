@@ -319,6 +319,18 @@ class OutputRows:
             ).fetchone()
         return None if found is None else str(found["output_id"])
 
+    def plate_covers_for(self, slugs: Sequence[str]) -> dict[str, str]:
+        """Each slug's oldest output with a plate cover, as `oldest_with_plate_cover`
+        answers it for one, in one query (#7317). A slug with none is left out."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT DISTINCT ON (slug) slug, output_id FROM outputs"
+                " WHERE slug = ANY(%s) AND has_plate_cover"
+                " ORDER BY slug, created_at, output_id",
+                (list(slugs),),
+            ).fetchall()
+        return {str(item["slug"]): str(item["output_id"]) for item in found}
+
     def ids_copied_before(self, before: datetime) -> set[str]:
         """The rows the running copy did not refresh: written before ``before``."""
         with self._pool.connection() as conn:

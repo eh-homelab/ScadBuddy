@@ -23,7 +23,7 @@ import logging
 import shutil
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -171,6 +171,15 @@ class PreviewStore:
         if record is None or not record.ok:
             return None
         return record.key[:PREVIEW_ID_LENGTH]
+
+    def preview_ids(self, slugs: Sequence[str]) -> dict[str, str]:
+        """:meth:`preview_id` of each of ``slugs`` that has one, in one query (#7317)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT model_id, source_key FROM model_previews WHERE model_id = ANY(%s) AND ok",
+                (list(slugs),),
+            ).fetchall()
+        return {row["model_id"]: row["source_key"][:PREVIEW_ID_LENGTH] for row in rows}
 
     def write(
         self, slug: str, key: str, png: bytes, *, wanted: Callable[[], bool] | None = None

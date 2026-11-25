@@ -281,8 +281,8 @@ class TemplateRows:
 
     def copied(self) -> bool:
         """Whether a copy run has finished. Once true, it stays true for this object.
-        No reader calls it yet: phase 2's readers read rows only once it is true (plan
-        2026-11-25 Task 7, `Catalogue._from_rows`)."""
+        The catalogue's readers read rows only once it is true (`Catalogue._from_rows`,
+        #7317 phase 2)."""
         if self._copied:
             return True
         with self._pool.connection() as conn:

@@ -17,8 +17,9 @@ every start; each catalogue write is one commit. The API process alone reads and
 the repository. Longer writes (duplicate, mesh-model creation) run as `library`
 operations ([workflows.md](../architecture/workflows.md#operations-one-shape-for-writes)).
 
-Each template also has a derived row of `templates` in Postgres (#7317, phase 1; nothing
-reads it yet). Every catalogue write refreshes its templates' rows under the models write
+Each template also has a derived row of `templates` in Postgres (#7317). Once a copy run
+has finished, the list, a template's record and its id list read the rows; before
+that, they read the files. Every catalogue write refreshes its templates' rows under the models write
 lock: a commit writes them in the transaction that records the models HEAD, and a write
 that commits nothing writes them in a transaction of its own. A failed refresh never fails
 the write; it is logged and counted, and the copy repairs it. The copy runs at each API

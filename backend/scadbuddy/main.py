@@ -1849,6 +1849,9 @@ async def _start_render(state: AppState) -> None:
     # Only now is the `templates` table there (#7317, plan decision 2): the boot
     # commit `ensure_repo` made before it writes no rows; the start copy fills them.
     state.history.template_rows = state.catalogue.refresh
+    # The readers too (#7317 phase 2): they read the rows once a copy run has finished.
+    if state.catalogue.refresh is not None:
+        state.catalogue.rows = state.catalogue.refresh.rows
     await _prepare_catalogue(state)
     # What a pre-Temporal release was running, nothing
     # will finish (#546).

@@ -144,8 +144,9 @@ migration `20261124T1824Z_templates.sql`): its parsed `model.json` (`meta`, or `
 and the raw `meta_text` when it cannot be read or stored), `name`, `version` (the last
 commit that touched it), `inputs_version`, its `// color` parameters, its media files'
 sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
-The row is derived: git stays the record, and any row can be rebuilt from the tree. In
-phase 1 nothing reads the rows yet; the readers move to them in phase 2.
+The row is derived: git stays the record, and any row can be rebuilt from the tree. Once a
+copy run has finished, `Catalogue.slugs`, `list_models` and `record` read the rows
+(phase 2); before that, they read the files.
 
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,
