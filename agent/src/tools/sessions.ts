@@ -296,7 +296,11 @@ const waitSeconds = z
 
 const approvalInput = z.object({
   approval_id: z.string().min(1).describe('The approval id (sessions_list_approvals, or approval.required in the transcript).'),
-  session_id: z.string().min(1).optional().describe('When given, the approval must belong to this session.'),
+  session_id: z
+    .string()
+    .min(1)
+    .optional()
+    .describe("When given, a durable: approval must belong to this session. An MCP prepare belongs to no session, so it is refused with one."),
   input_hash: z
     .string()
     .regex(/^[0-9a-f]{64}$/)

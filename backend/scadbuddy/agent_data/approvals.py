@@ -84,10 +84,12 @@ def visible_pending(conn: Connection[Any], kind: str, principal: str) -> list[di
 
 
 def list_rows(conn: Connection[Any], session_id: str | None, pending: bool) -> list[dict[str, Any]]:
-    """A session's approvals (pending only with ``pending``), or with none every pending one."""
+    """A session's approvals (pending only with ``pending``), or with none every pending MCP
+    prepare. A session's row is no one's to decide here (#7323), so none takes a place under
+    the cap."""
     if session_id is None:
         return conn.execute(
-            f"SELECT {COLUMNS} FROM ai_approvals WHERE decision IS NULL"
+            f"SELECT {COLUMNS} FROM ai_approvals WHERE decision IS NULL AND session_id IS NULL"
             " ORDER BY created_at, id LIMIT %s",
             (LIST_MAX,),
         ).fetchall()
