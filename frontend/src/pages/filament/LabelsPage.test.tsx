@@ -1,6 +1,7 @@
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../../api/client'
 import type * as embed from '../../lib/embed'
 import { downloadBlob } from '../../lib/embed'
 import { L } from '../../mocks/features/filament/seed'
@@ -450,9 +451,16 @@ describe('the label output (#7216)', () => {
   it('saves no field tick when the settings cannot be read, and downloads the fields shown', async () => {
     serve()
     const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
-    server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ detail: 'no' }, { status: 500 })))
+    // The read fails before the tick, so the tick takes the failed-read path, not the waiting one.
+    const failed = Promise.reject(new Error('no'))
+    failed.catch(() => {})
+    const read = vi.spyOn(api, 'getSettings').mockReturnValue(failed)
     const bodies = serveLabels('application/pdf')
     const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(read).toHaveBeenCalled())
+    await act(async () => {
+      await failed.catch(() => {})
+    })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
     await user.click(screen.getByRole('checkbox', { name: 'Weight' }))
     expect(await screen.findByText('The file choice could not be saved. It holds on this page only.')).toBeInTheDocument()
