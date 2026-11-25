@@ -1,29 +1,44 @@
-"""#7154: a printer's K-profiles through Bambuddy, from ScadBuddy (plan
-``docs/superpowers/plans/2026-11-23-printer-kprofiles.md``). The routes take SB's registry
-printer, the writes are operations on the ``bambuddy`` queue, and Bambuddy is respx only."""
+"""#7276 Task 7: a printer's K-profiles over ScadBuddy's own LAN link, notes in ScadBuddy.
+The printer is scripted by replacing `LanPrinter.request` (P8) under the app's in-process
+print worker; Bambuddy is never called (`forbid_bambuddy`)."""
 
 from __future__ import annotations
 
-import json
-from datetime import UTC, datetime
+import re
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import httpx
 import pytest
-import respx
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
-from scadbuddy.printers.component import PRINTERS
-from scadbuddy.printers.models import BambuddyView, PrinterCreate
-from scadbuddy.printers.store import PrinterStore
-from tests.api.test_send import API, configure
+from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.kprofiles import KProfileSet, set_rows
+from scadbuddy.printers.lan import LanPrinter
+from scadbuddy.printers.lan_commands import extrusion_cali_set
+from scadbuddy.printers.models import LanLink, PrinterCreate
+from tests.api.test_send import BASE
+from tests.printers.conftest import KEK
+from tests.support.no_bambuddy import forbid_bambuddy
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000071"
-ROW: dict[str, Any] = {
+ROW_04: dict[str, Any] = {
+    "cali_idx": 3,
+    "extruder_id": 0,
+    "nozzle_id": "HS00-0.4",
+    "filament_id": "GFA00",
+    "name": "PLA Basic",
+    "k_value": "0.020000",
+    "n_coef": "1.400000",
+    "setting_id": "PF1",
+}
+ROW_06: dict[str, Any] = {**ROW_04, "cali_idx": 5, "nozzle_diameter": "0.6"}
+SET: dict[str, Any] = {
     "slot_id": 0,
     "extruder_id": 1,
     "nozzle_id": "HH00-0.4",
@@ -32,207 +47,159 @@ ROW: dict[str, Any] = {
     "name": "High Flow_Bambu PLA Basic",
     "k_value": "0.02",
 }
-SENT = {"success": True, "confirmed": True, "message": "K-profile added successfully"}
+ONE_NOZZLE = {"gcode_state": "IDLE", "nozzle_type": "HS", "nozzle_diameter": "0.4"}
+TWO_NOZZLES = {
+    "gcode_state": "IDLE",
+    "device": {
+        "nozzle": {
+            "info": [
+                {"id": 0, "type": "HS", "diameter": "0.4"},
+                {"id": 1, "type": "HS", "diameter": "0.4"},
+            ]
+        }
+    },
+}
 
 
-def store(client: TestClient) -> PrinterStore:
+class Scripted:
+    """What the printer answers, and what reached it."""
+
+    def __init__(self) -> None:
+        self.published: list[dict[str, Any]] = []
+        self.replies: dict[str, dict[str, Any] | None] = {}
+
+    def reply(self, name: str, **fields: Any) -> None:
+        self.replies[name] = {"result": "success", **fields}
+
+    def refuse(self, name: str, reason: str) -> None:
+        self.replies[name] = {"result": "fail", "reason": reason}
+
+    def silent(self, name: str) -> None:
+        self.replies[name] = None
+
+
+@pytest.fixture
+def scripted(monkeypatch: pytest.MonkeyPatch) -> Scripted:
+    script = Scripted()
+
+    async def request(
+        self: LanPrinter,
+        command: dict[str, Any],
+        *,
+        name: str,
+        seq: str,
+        wait: float,
+        until: float | None = None,
+    ) -> dict[str, Any] | None:
+        script.published.append(command["print"])
+        answer = script.replies.get(name, {"result": "success"})
+        if answer is None:
+            return None
+        return {"command": name, "sequence_id": seq, **answer}
+
+    monkeypatch.setattr(LanPrinter, "request", request)
+    return script
+
+
+def printers_of(client: TestClient) -> Printers:
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    return state.components.get(PRINTERS).store
+    return state.components.get(PRINTERS)
 
 
-def linked(client: TestClient, bambuddy_id: int = 3) -> str:
-    configure(client)
-    return (
-        store(client)
-        .create_linked(serial=SERIAL, name="H2C", model="H2C", bambuddy_printer_id=bambuddy_id)
-        .id
+def lan_printer(
+    client: TestClient, report: dict[str, Any] | None = None, *, age: timedelta | None = None
+) -> str:
+    printers = printers_of(client)
+    printers.store.kek = KEK
+    row = printers.store.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    printers.store.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
     )
+    printers.reports.put(row.id, report or ONE_NOZZLE, datetime.now(UTC) - (age or timedelta()))
+    return row.id
+
+
+@pytest.fixture
+def pid(client: TestClient) -> str:
+    return lan_printer(client)
 
 
 def base(printer_id: str) -> str:
     return f"/api/v1/printers/{printer_id}/kprofiles"
 
 
-@respx.mock
-def test_the_list_reads_the_linked_bambuddy_printer(client: TestClient) -> None:
-    pid = linked(client, 3)
-    route = respx.get(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "profiles": [{**ROW, "slot_id": 2, "k_value": "0.020000", "setting_id": "PF1"}],
-                "nozzle_diameter": "0.6",
-            },
-        )
-    )
+def sent(script: Scripted, command: str) -> list[dict[str, Any]]:
+    return [p for p in script.published if p["command"] == command]
 
-    response = client.get(base(pid), params={"nozzle_diameter": "0.6"})
 
+def test_the_list_is_the_printers_reply(client: TestClient, scripted: Scripted, pid: str) -> None:
+    scripted.reply("extrusion_cali_get", nozzle_diameter="0.4", filaments=[ROW_04, ROW_06])
+    response = client.get(base(pid), params={"nozzle_diameter": "0.4"})
     assert response.status_code == 200, response.text
-    assert route.calls.last.request.url.params["nozzle_diameter"] == "0.6"
     body = response.json()
-    assert body["nozzle_diameter"] == "0.6"
+    assert body["nozzle_diameter"] == "0.4"
+    assert [p["slot_id"] for p in body["profiles"]] == [3]
     assert body["profiles"][0]["setting_id"] == "PF1"
-    assert body["profiles"][0]["tray_id"] == -1
+    assert sent(scripted, "extrusion_cali_get")[0]["nozzle_diameter"] == "0.4"
 
 
-@respx.mock
-def test_notes_are_read_from_bambuddy(client: TestClient) -> None:
-    pid = linked(client)
-    respx.get(f"{API}/printers/3/kprofiles/notes").mock(
-        return_value=httpx.Response(200, json={"notes": {"PF1": "dry first"}})
-    )
-    response = client.get(f"{base(pid)}/notes")
-    assert response.status_code == 200, response.text
-    assert response.json() == {"notes": {"PF1": "dry first"}}
-
-
-def test_an_unknown_printer_is_a_404(client: TestClient) -> None:
-    configure(client)
-    missing = "0b7a3a52-0000-4000-8000-000000000000"
-    assert client.get(base(missing)).status_code == 404
-    response = client.post(base(missing), json=ROW, headers=press())
-    assert response.status_code == 404, response.text
-
-
-def test_an_unlinked_printer_is_a_409(client: TestClient) -> None:
-    configure(client)
-    pid = store(client).create(PrinterCreate(serial=SERIAL, name="Bare")).id
+def test_a_list_with_no_answer_is_502(client: TestClient, scripted: Scripted, pid: str) -> None:
+    scripted.silent("extrusion_cali_get")
     response = client.get(base(pid))
-    assert response.status_code == 409, response.text
-    assert "not linked to a Bambuddy printer" in response.json()["detail"]
-    write = client.post(base(pid), json=ROW, headers=press())
-    assert write.status_code == 409, write.text
+    assert response.status_code == 502, response.text
+    assert response.json()["code"] == "printer_no_answer"
 
 
-def test_a_virtual_printer_is_a_409(client: TestClient) -> None:
-    configure(client)
-    row, _, _ = store(client).upsert_virtual(
-        1,
-        serial=SERIAL,
-        name="H2C Virtual",
-        model="H2C",
-        mode="queue",
-        forwards_to=None,
-        view=BambuddyView(seen_at=datetime.now(UTC), name="H2C Virtual"),
-    )
-    response = client.get(base(row.id))
-    assert response.status_code == 409, response.text
-    assert "virtual printer" in response.json()["detail"]
-
-
-@respx.mock
-def test_set_sends_the_profile_with_six_places(client: TestClient) -> None:
-    pid = linked(client, 3)
-    route = respx.post(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(200, json=SENT)
-    )
-
-    response = client.post(base(pid), json=ROW, headers=press())
-
-    assert response.status_code == 200, response.text
-    assert response.json() == SENT
-    sent = json.loads(route.calls.last.request.content)
-    assert sent == {
-        **ROW,
-        "k_value": "0.020000",
-        "setting_id": None,
-        "n_coef": "0.000000",
-        "ams_id": 0,
-        "tray_id": -1,
-    }
-
-
-@respx.mock
-def test_an_edit_keeps_what_the_printer_reported(client: TestClient) -> None:
-    """Review of #7173: a row as the printer reported it (a flow code with no diameter, its
-    own ``n_coef``) goes back as it is."""
-    pid = linked(client, 3)
-    route = respx.post(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(200, json=SENT)
-    )
-    row = {**ROW, "slot_id": 5, "nozzle_id": "HH01", "n_coef": "1.400000", "tray_id": 2}
-
-    response = client.post(base(pid), json=row, headers=press())
-
-    assert response.status_code == 200, response.text
-    sent = json.loads(route.calls.last.request.content)
-    assert (sent["nozzle_id"], sent["n_coef"], sent["tray_id"]) == ("HH01", "1.400000", 2)
-
-
-def test_a_write_needs_an_idempotency_key(client: TestClient) -> None:
-    pid = linked(client)
-    assert client.post(base(pid), json=ROW).status_code == 428
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        {"k_value": "-0.1"},
-        {"k_value": "10"},
-        {"k_value": "0.0200001"},
-        {"k_value": "abc"},
-        {"nozzle_diameter": "0.5"},
-        {"nozzle_id": "hh00-0.4"},
-        {"nozzle_id": "HH00-0.4x"},
-        {"filament_id": "GF A00"},
-        {"name": ""},
-        {"name": "a\nb"},
-        {"extruder_id": 2},
-        {"slot_id": -1},
-        {"n_coef": "x"},
-        {"tray_id": 16},
-        {"ams_id": 256},
-        {"surprise": 1},
-    ],
-)
-def test_a_bad_profile_is_refused_before_bambuddy(
-    client: TestClient, field: dict[str, Any]
+def test_a_set_sends_one_extrusion_cali_set(
+    client: TestClient, scripted: Scripted, pid: str
 ) -> None:
-    pid = linked(client)
-    response = client.post(base(pid), json={**ROW, **field}, headers=press())
-    assert response.status_code == 422, response.text
-
-
-@respx.mock
-def test_the_batch_sends_every_row(client: TestClient) -> None:
-    pid = linked(client, 3)
-    route = respx.post(f"{API}/printers/3/kprofiles/batch").mock(
-        return_value=httpx.Response(
-            200, json={"success": True, "confirmed": False, "message": "Added 2 K-profiles"}
-        )
+    response = client.post(base(pid), json=SET, headers=press())
+    assert response.status_code == 200, response.text
+    assert response.json() == {"success": True, "confirmed": True, "message": ""}
+    [command] = sent(scripted, "extrusion_cali_set")
+    [entry] = command["filaments"]
+    assert (entry["cali_idx"], entry["k_value"], entry["tray_id"], entry["ams_id"]) == (
+        -1,
+        "0.020000",
+        0,
+        0,
     )
-    rows = [{**ROW, "extruder_id": 0}, ROW]
+    assert entry["n_coef"] == "0.000000"
+    assert re.fullmatch(r"PF\d{17}", entry["setting_id"])
+    assert command["nozzle_diameter"] == "0.4"
 
+
+def test_an_edit_keeps_its_slot_and_setting_id(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    edit = {**SET, "slot_id": 5, "setting_id": "PF123"}
+    assert client.post(base(pid), json=edit, headers=press()).status_code == 200
+    [entry] = sent(scripted, "extrusion_cali_set")[0]["filaments"]
+    assert (entry["cali_idx"], entry["setting_id"]) == (5, "PF123")
+
+
+def test_set_rows_matches_the_payload(client: TestClient, scripted: Scripted, pid: str) -> None:
+    body = {**SET, "slot_id": 2, "setting_id": "PF9"}
+    client.post(base(pid), json=body, headers=press())
+    rows = set_rows([KProfileSet.model_validate(body)])
+    expected = extrusion_cali_set(rows, "0.4", "x")["print"]["filaments"]
+    assert sent(scripted, "extrusion_cali_set")[0]["filaments"] == expected
+
+
+def test_a_batch_sends_every_row_in_one_command(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    rows = [{**SET, "extruder_id": 0}, SET]
     response = client.post(f"{base(pid)}/batch", json={"profiles": rows}, headers=press())
-
     assert response.status_code == 200, response.text
-    assert response.json()["confirmed"] is False
-    sent = json.loads(route.calls.last.request.content)
-    assert [row["extruder_id"] for row in sent] == [0, 1]
-    assert all(row["k_value"] == "0.020000" for row in sent)
+    [command] = sent(scripted, "extrusion_cali_set")
+    assert [e["extruder_id"] for e in command["filaments"]] == [0, 1]
+    assert len({e["setting_id"] for e in command["filaments"]}) == 2
 
 
-@pytest.mark.parametrize(
-    "profiles",
-    [[], [ROW] * 17, [ROW, {**ROW, "nozzle_diameter": "0.6", "nozzle_id": "HH00-0.6"}]],
-)
-def test_a_batch_is_one_to_sixteen_rows_of_one_nozzle(
-    client: TestClient, profiles: list[dict[str, Any]]
+def test_a_delete_on_one_nozzle_sends_the_full_form(
+    client: TestClient, scripted: Scripted, pid: str
 ) -> None:
-    pid = linked(client)
-    response = client.post(f"{base(pid)}/batch", json={"profiles": profiles}, headers=press())
-    assert response.status_code == 422, response.text
-
-
-@respx.mock
-def test_delete_sends_bambuddys_delete_body(client: TestClient) -> None:
-    pid = linked(client, 3)
-    route = respx.delete(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(
-            200, json={"success": True, "confirmed": True, "message": "K-profile deleted"}
-        )
-    )
     body = {
         "slot_id": 4,
         "extruder_id": 0,
@@ -241,86 +208,89 @@ def test_delete_sends_bambuddys_delete_body(client: TestClient) -> None:
         "filament_id": "GFA00",
         "setting_id": "PF1",
     }
-
     response = client.post(f"{base(pid)}/delete", json=body, headers=press())
-
     assert response.status_code == 200, response.text
-    assert json.loads(route.calls.last.request.content) == body
+    [command] = sent(scripted, "extrusion_cali_del")
+    assert (command["cali_idx"], command["setting_id"]) == (4, "PF1")
 
 
-@respx.mock
-def test_a_profile_the_printer_reported_with_no_ids_can_be_deleted(client: TestClient) -> None:
-    """Review of #7173: many printers report no ``nozzle_id`` (Bambuddy's
-    ``KProfilesView.tsx``), and a ``setting_id`` may be empty; the delete sends them as the
-    list answered them."""
-    pid = linked(client, 3)
-    route = respx.delete(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(200, json={"success": True, "message": "K-profile deleted"})
-    )
+def test_a_delete_on_two_nozzles_sends_the_extruder_form(
+    client: TestClient, scripted: Scripted
+) -> None:
+    pid = lan_printer(client, TWO_NOZZLES)
     body = {
         "slot_id": 4,
-        "extruder_id": 0,
-        "nozzle_id": "",
+        "extruder_id": 1,
+        "nozzle_id": "HH00-0.4",
         "nozzle_diameter": "0.4",
         "filament_id": "GFA00",
-        "setting_id": "",
+        "setting_id": "PF1",
     }
+    assert client.post(f"{base(pid)}/delete", json=body, headers=press()).status_code == 200
+    [command] = sent(scripted, "extrusion_cali_del")
+    assert "setting_id" not in command and command["extruder_id"] == 1
 
-    response = client.post(f"{base(pid)}/delete", json=body, headers=press())
 
+def test_a_resent_key_publishes_once(client: TestClient, scripted: Scripted, pid: str) -> None:
+    for _ in range(2):
+        response = client.post(base(pid), json=SET, headers={"Idempotency-Key": "k1"})
+        assert response.status_code == 200, response.text
+    assert len(sent(scripted, "extrusion_cali_set")) == 1
+
+
+def test_a_write_needs_an_idempotency_key(client: TestClient, scripted: Scripted, pid: str) -> None:
+    assert client.post(base(pid), json=SET).status_code == 428
+    assert scripted.published == []
+
+
+def test_an_unacknowledged_write_is_unconfirmed(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    scripted.silent("extrusion_cali_set")
+    response = client.post(base(pid), json=SET, headers=press())
     assert response.status_code == 200, response.text
-    assert json.loads(route.calls.last.request.content) == body
+    body = response.json()
+    assert body["success"] is True and body["confirmed"] is False
+    assert "did not acknowledge" in body["message"]
 
 
-@respx.mock
-def test_a_write_bambuddys_auth_refuses_names_the_admin_only_scope(client: TestClient) -> None:
-    pid = linked(client, 3)
-    respx.post(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(403, json={"detail": "Not enough permissions"})
-    )
-    response = client.post(base(pid), json=ROW, headers=press())
+def test_a_refused_write_is_409_printer_refused(
+    client: TestClient, scripted: Scripted, pid: str
+) -> None:
+    scripted.refuse("extrusion_cali_set", "invalid tray_id")
+    response = client.post(base(pid), json=SET, headers=press())
     assert response.status_code == 409, response.text
-    problem = response.json()
-    assert problem["required_scope"] == "K-profiles (admin only)"
-    assert "auth is on" in problem["detail"]
+    assert response.json()["code"] == "printer_refused"
 
 
-@respx.mock
-def test_a_set_is_sent_once_even_when_bambuddy_fails(client: TestClient) -> None:
-    """R-7154-5: Bambuddy dedupes no add, so a 5xx is never sent again."""
-    pid = linked(client, 3)
-    route = respx.post(f"{API}/printers/3/kprofiles/").mock(
-        return_value=httpx.Response(500, json={"detail": "Printer rejected the K-profile: x"})
-    )
-    response = client.post(base(pid), json=ROW, headers=press())
-    assert response.status_code >= 500, response.text
-    assert route.call_count == 1
+def test_a_stale_report_is_409_printer_offline(client: TestClient, scripted: Scripted) -> None:
+    pid = lan_printer(client, age=timedelta(minutes=5))
+    for response in (
+        client.get(base(pid)),
+        client.post(base(pid), json=SET, headers=press()),
+        client.post(f"{base(pid)}/batch", json={"profiles": [SET]}, headers=press()),
+    ):
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "printer_offline"
+    assert scripted.published == []
 
 
-@respx.mock
-def test_a_note_is_put_and_deleted_by_its_key(client: TestClient) -> None:
-    pid = linked(client, 3)
-    put = respx.put(f"{API}/printers/3/kprofiles/notes").mock(
-        return_value=httpx.Response(200, json={"success": True, "message": "Note saved"})
-    )
-    deleted = respx.delete(f"{API}/printers/3/kprofiles/notes/name_PLA%20Basic_GFA00").mock(
-        return_value=httpx.Response(200, json={"success": True, "message": "Note deleted"})
-    )
-
-    saved = client.put(
-        f"{base(pid)}/notes",
-        json={"setting_id": "name_PLA Basic_GFA00", "note": "dry first"},
-        headers=press(),
-    )
-    gone = client.delete(f"{base(pid)}/notes/name_PLA%20Basic_GFA00", headers=press())
-
+def test_notes_live_in_scadbuddy(client: TestClient, scripted: Scripted, pid: str) -> None:
+    key = "name_PLA Basic_GFA00"
+    saved = client.put(f"{base(pid)}/notes", json={"setting_id": key, "note": "dry"})
     assert saved.status_code == 200, saved.text
-    assert json.loads(put.calls.last.request.content) == {
-        "setting_id": "name_PLA Basic_GFA00",
-        "note": "dry first",
-    }
+    assert saved.json()["success"] is True
+    assert client.get(f"{base(pid)}/notes").json() == {"notes": {key: "dry"}}
+    gone = client.delete(f"{base(pid)}/notes/name_PLA%20Basic_GFA00", headers=press())
     assert gone.status_code == 200, gone.text
-    assert deleted.called
+    assert client.get(f"{base(pid)}/notes").json() == {"notes": {}}
+    assert scripted.published == []
+
+
+def test_a_blank_note_deletes_it(client: TestClient, pid: str) -> None:
+    client.put(f"{base(pid)}/notes", json={"setting_id": "PF1", "note": "x"})
+    client.put(f"{base(pid)}/notes", json={"setting_id": "PF1", "note": "  "})
+    assert client.get(f"{base(pid)}/notes").json() == {"notes": {}}
 
 
 @pytest.mark.parametrize(
@@ -328,10 +298,74 @@ def test_a_note_is_put_and_deleted_by_its_key(client: TestClient) -> None:
     [
         {"setting_id": "", "note": "x"},
         {"setting_id": "a/b", "note": "x"},
+        {"setting_id": "k" * 257, "note": "x"},
         {"setting_id": "PF1", "note": "x" * 2001},
+        {"setting_id": "PF1", "note": "a\x00b"},
+        {"setting_id": "a\x00b", "note": "x"},
     ],
+    ids=["empty-key", "slash", "long-key", "long-note", "nul-note", "nul-key"],
 )
-def test_a_bad_note_is_refused(client: TestClient, body: dict[str, Any]) -> None:
-    pid = linked(client)
-    response = client.put(f"{base(pid)}/notes", json=body, headers=press())
+def test_a_bad_note_is_422_not_500(client: TestClient, pid: str, body: dict[str, Any]) -> None:
+    response = client.put(f"{base(pid)}/notes", json=body)
     assert response.status_code == 422, response.text
+
+
+def test_a_lone_surrogate_note_is_422(client: TestClient, pid: str) -> None:
+    raw = b'{"setting_id": "PF1", "note": "a\\ud800b"}'
+    response = client.put(
+        f"{base(pid)}/notes", content=raw, headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 422, response.text
+
+
+def test_a_note_key_with_a_slash_cannot_be_deleted(client: TestClient, pid: str) -> None:
+    assert client.delete(f"{base(pid)}/notes/a%2Fb").status_code in (404, 422)
+    long = "k" * 257
+    assert client.delete(f"{base(pid)}/notes/{long}").status_code == 422
+
+
+def test_notes_of_an_unknown_printer_are_404(client: TestClient) -> None:
+    missing = "0b7a3a52-0000-4000-8000-000000000000"
+    assert client.get(f"{base(missing)}/notes").status_code == 404
+    put = client.put(f"{base(missing)}/notes", json={"setting_id": "PF1", "note": "x"})
+    assert put.status_code == 404
+
+
+def test_an_unknown_printer_is_a_404(client: TestClient, scripted: Scripted) -> None:
+    missing = "0b7a3a52-0000-4000-8000-000000000000"
+    assert client.get(base(missing)).status_code == 404
+    assert client.post(base(missing), json=SET, headers=press()).status_code == 404
+
+
+@pytest.fixture
+def bb_only(client: TestClient) -> Iterator[str]:
+    printers = printers_of(client)
+    row = printers.store.create(PrinterCreate(serial=SERIAL, name="Bare"))
+    printers.store.link_bambuddy(row.id, 3)
+    yield row.id
+
+
+def test_a_bambuddy_only_printer_is_not_lan_linked(
+    client: TestClient, scripted: Scripted, bb_only: str
+) -> None:
+    for response in (
+        client.get(base(bb_only)),
+        client.post(base(bb_only), json=SET, headers=press()),
+    ):
+        assert response.status_code == 409, response.text
+        assert response.json()["code"] == "not_lan_linked"
+    assert scripted.published == []
+
+
+def test_a_printer_linked_both_ways_never_calls_bambuddy(
+    client: TestClient, scripted: Scripted, spans: InMemorySpanExporter
+) -> None:
+    pid = lan_printer(client)
+    printers_of(client).store.link_bambuddy(pid, 3)
+    scripted.reply("extrusion_cali_get", nozzle_diameter="0.4", filaments=[ROW_04])
+    with forbid_bambuddy(spans, BASE):
+        assert client.get(base(pid)).status_code == 200
+        assert client.post(base(pid), json=SET, headers=press()).status_code == 200
+        put = client.put(f"{base(pid)}/notes", json={"setting_id": "k", "note": "n"})
+        assert put.status_code == 200
+        assert client.get(f"{base(pid)}/notes").status_code == 200
