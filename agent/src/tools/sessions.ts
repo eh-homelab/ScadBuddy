@@ -300,7 +300,7 @@ const approvalInput = z.object({
     .string()
     .min(1)
     .optional()
-    .describe("When given, a durable: approval must belong to this session. An MCP prepare belongs to no session, so it is refused with one."),
+    .describe('When given, an approval whose id starts with `durable:` must belong to this session. An MCP prepare belongs to no session, so it is refused with one.'),
   input_hash: z
     .string()
     .regex(/^[0-9a-f]{64}$/)
