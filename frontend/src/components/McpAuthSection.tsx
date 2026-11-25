@@ -15,6 +15,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Textarea } from '@/components/ui/textarea'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './settings/form'
 import { Spinner } from './ui/spinner'
 
@@ -23,9 +24,11 @@ import { Spinner } from './ui/spinner'
 // §8.3). The agent service keeps both in `ai_settings` and reads them on every /mcp
 // request, so a save applies to the next call.
 //
-// Turning authentication off is the operator trusting the network: every caller that
-// reaches /mcp over HTTPS gets the anonymous cap (full access by default). It takes an
-// explicit confirmation here, as does raising the cap while it stays off. The
+// Turning authentication off is the operator trusting the network: a caller from the
+// anonymous networks (#7767; loopback and private ranges by default) that reaches /mcp
+// over HTTPS gets the anonymous cap (full access by default). Any other caller needs a
+// token, as when authentication is on. Turning it off takes an explicit confirmation
+// here, as do raising the cap and adding a network while it stays off. The
 // confirmation is UI-only: the PUT route does not require it (#258). Outward actions still wait for a person to approve them
 // in ScadBuddy whatever the mode (§8.2). Save and the confirmation are USER_ONLY:
 // changing the auth mode is an outward settings write the browser agent may not make.
@@ -47,6 +50,18 @@ const CAP_HELP: Record<McpTokenTier, string> = {
 
 const CAP_RANK: Record<McpTokenTier, number> = { read: 0, write: 1, outward: 2 }
 
+/** The networks in the text field: one per line, blank lines left out. */
+function networksOf(text: string): string[] {
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+function sameNetworks(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((entry, i) => entry === b[i])
+}
+
 function describeError(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
@@ -62,6 +77,7 @@ export function McpAuthSection({ onSaved }: Props) {
   // Edits over what was loaded; undefined means "as loaded".
   const [mode, setMode] = useState<Mode | undefined>(undefined)
   const [cap, setCap] = useState<McpTokenTier | undefined>(undefined)
+  const [networksText, setNetworksText] = useState<string | undefined>(undefined)
   const [saving, setSaving] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -73,15 +89,22 @@ export function McpAuthSection({ onSaved }: Props) {
   const oidcActive = current?.mode === 'oidc'
   const chosenMode = mode ?? storedMode
   const chosenCap = cap ?? current?.anonymous_cap ?? 'outward'
+  const storedNetworks = current?.anonymous_networks ?? []
+  const shownNetworks = networksText ?? storedNetworks.join('\n')
+  const chosenNetworks = networksOf(shownNetworks)
+  const networksChanged = !sameNetworks(chosenNetworks, storedNetworks)
   const changed =
     current !== undefined &&
     chosenMode !== undefined &&
-    (chosenMode !== current.configured_mode || chosenCap !== current.anonymous_cap)
+    (chosenMode !== current.configured_mode || chosenCap !== current.anonymous_cap || networksChanged)
   // Calls without a token are allowed already; this save only raises what they may do.
   const raisingCap =
     storedMode === 'disabled' &&
     current !== undefined &&
     CAP_RANK[chosenCap] > CAP_RANK[current.anonymous_cap]
+  // Calls without a token are allowed already; this save lets them come from more places.
+  const addingNetworks =
+    storedMode === 'disabled' && chosenNetworks.some((network) => !storedNetworks.includes(network))
 
   async function save() {
     if (!chosenMode || !current) return
@@ -91,14 +114,29 @@ export function McpAuthSection({ onSaved }: Props) {
     try {
       // `expected` makes the save a compare-and-set: a tab showing an old setting
       // gets a 409 instead of skipping the confirmation the current one needs.
-      const next = await api.setMcpAuth({
-        mode: chosenMode,
-        anonymous_cap: chosenCap,
-        expected: { mode: current.configured_mode, anonymous_cap: current.anonymous_cap },
-      })
+      // The networks go only when they were edited, with the ones this page showed.
+      const next = await api.setMcpAuth(
+        networksChanged
+          ? {
+              mode: chosenMode,
+              anonymous_cap: chosenCap,
+              anonymous_networks: chosenNetworks,
+              expected: {
+                mode: current.configured_mode,
+                anonymous_cap: current.anonymous_cap,
+                anonymous_networks: storedNetworks,
+              },
+            }
+          : {
+              mode: chosenMode,
+              anonymous_cap: chosenCap,
+              expected: { mode: current.configured_mode, anonymous_cap: current.anonymous_cap },
+            },
+      )
       state.setData(next)
       setMode(undefined)
       setCap(undefined)
+      setNetworksText(undefined)
       setConfirming(false)
       setSaved(true)
       onSaved?.(next)
@@ -109,6 +147,7 @@ export function McpAuthSection({ onSaved }: Props) {
         setConfirming(false)
         setMode(undefined)
         setCap(undefined)
+        setNetworksText(undefined)
         setError(
           'The MCP authentication setting was changed elsewhere since this page loaded it, so nothing was saved. It now shows the current setting; choose again.',
         )
@@ -129,9 +168,10 @@ export function McpAuthSection({ onSaved }: Props) {
 
   function submit() {
     // Anything that lets an unauthenticated caller do more asks first: turning
-    // authentication off, or raising the anonymous cap while it stays off. While
-    // OIDC is on it asks too: the stored choice applies once OIDC is turned off.
-    if (chosenMode === 'disabled' && (storedMode !== 'disabled' || raisingCap)) {
+    // authentication off, or raising the anonymous cap or adding a network while it
+    // stays off. While OIDC is on it asks too: the stored choice applies once OIDC is
+    // turned off.
+    if (chosenMode === 'disabled' && (storedMode !== 'disabled' || raisingCap || addingNetworks)) {
       setError(null)
       setConfirming(true)
       return
@@ -170,9 +210,10 @@ export function McpAuthSection({ onSaved }: Props) {
                   className="rounded-lg bg-warn/10 px-3 py-2 text-xs text-warn ring-1 ring-warn/50"
                   data-testid="mcp-auth-disabled-warning"
                 >
-                  Authentication is off. Anyone who can reach <code>/mcp</code> over HTTPS can call
-                  ScadBuddy&rsquo;s tools without a token, with{' '}
-                  {CAP_LABEL[current.anonymous_cap].toLowerCase()}.
+                  Authentication is off. A caller from the networks listed below that reaches{' '}
+                  <code>/mcp</code> over HTTPS can call ScadBuddy&rsquo;s tools without a token, with{' '}
+                  {CAP_LABEL[current.anonymous_cap].toLowerCase()}. Any other caller needs an access
+                  token.
                 </p>
               )}
               {oidcActive && (
@@ -185,8 +226,8 @@ export function McpAuthSection({ onSaved }: Props) {
                   turned off in MCP access &rarr; OIDC sign-in.
                   {current.configured_mode === 'disabled' && (
                     <span className="mt-1 block text-warn" data-testid="mcp-auth-oidc-disabled">
-                      The stored choice allows calls without a token: turning OIDC off will let
-                      anyone who can reach <code>/mcp</code> call it with{' '}
+                      The stored choice allows calls without a token: turning OIDC off will let a
+                      caller from the networks listed below call <code>/mcp</code> with{' '}
                       {CAP_LABEL[current.anonymous_cap].toLowerCase()}.
                     </span>
                   )}
@@ -215,8 +256,8 @@ export function McpAuthSection({ onSaved }: Props) {
                     <Label htmlFor="mcp-auth-mode-disabled" className="block leading-snug font-normal">
                       Allow calls without a token
                       <span className="mt-0.5 block text-xs text-muted-foreground">
-                        Only for a network you trust: every caller is anonymous and gets the access
-                        chosen below.
+                        Only for networks you trust: a caller from the networks below is anonymous
+                        and gets the access chosen below. Any other caller still needs a token.
                       </span>
                     </Label>
                   </div>
@@ -239,6 +280,46 @@ export function McpAuthSection({ onSaved }: Props) {
                   {CAP_HELP[chosenCap]} Applies only while calls without a token are allowed.
                 </p>
               </div>
+
+              {chosenMode === 'disabled' && (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="mcp-anonymous-networks" className="font-normal">
+                    Networks allowed without a token
+                  </Label>
+                  <Textarea
+                    id="mcp-anonymous-networks"
+                    value={shownNetworks}
+                    onChange={(event) => setNetworksText(event.target.value)}
+                    rows={Math.min(Math.max(chosenNetworks.length, 3), 8)}
+                    spellCheck={false}
+                    autoCapitalize="off"
+                    autoCorrect="off"
+                    className="font-mono text-xs sm:max-w-[16rem]"
+                    aria-describedby="mcp-anonymous-networks-help"
+                  />
+                  <p
+                    id="mcp-anonymous-networks-help"
+                    data-testid="mcp-anonymous-networks-help"
+                    className="text-xs text-muted-foreground"
+                  >
+                    One IP address or CIDR range per line. A caller from any other address needs an
+                    access token. Behind a proxy that puts its own address in place of the
+                    caller&rsquo;s, every caller seems to come from the proxy&rsquo;s network. The
+                    default is {current.default_anonymous_networks.join(', ')}.
+                  </p>
+                  {!sameNetworks(chosenNetworks, current.default_anonymous_networks) && (
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto justify-self-start p-0 text-xs"
+                      onClick={() => setNetworksText(current.default_anonymous_networks.join('\n'))}
+                    >
+                      Use the default
+                    </Button>
+                  )}
+                </div>
+              )}
 
               <div className="flex items-center gap-3">
                 <Button
@@ -272,7 +353,11 @@ export function McpAuthSection({ onSaved }: Props) {
         <AlertDialogContent className="sm:max-w-md">
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {raisingCap ? 'Give MCP calls without a token more access?' : 'Allow MCP calls without a token?'}
+              {raisingCap
+                ? 'Give MCP calls without a token more access?'
+                : addingNetworks
+                  ? 'Allow MCP calls without a token from more networks?'
+                  : 'Allow MCP calls without a token?'}
             </AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-2">
@@ -283,9 +368,14 @@ export function McpAuthSection({ onSaved }: Props) {
                   </p>
                 )}
                 <p>
-                  Anyone who can reach ScadBuddy&rsquo;s <code>/mcp</code> over HTTPS will be able to call
-                  its tools without a token, as an anonymous caller with{' '}
+                  A caller from{' '}
+                  <span className="font-medium text-foreground" data-testid="mcp-auth-confirm-networks">
+                    {chosenNetworks.length ? chosenNetworks.join(', ') : 'no network'}
+                  </span>{' '}
+                  that reaches ScadBuddy&rsquo;s <code>/mcp</code> over HTTPS will be able to call its
+                  tools without a token, as an anonymous caller with{' '}
                   <span className="font-medium text-foreground">{CAP_LABEL[chosenCap].toLowerCase()}</span>.
+                  Any other caller still needs an access token.
                 </p>
                 <p>
                   Sending, printing, deleting and changing settings still wait for a person to approve
@@ -308,6 +398,8 @@ export function McpAuthSection({ onSaved }: Props) {
                 <Spinner />
               ) : raisingCap ? (
                 'Raise access'
+              ) : addingNetworks ? (
+                'Allow these networks'
               ) : oidcActive ? (
                 'Allow once OIDC is off'
               ) : (

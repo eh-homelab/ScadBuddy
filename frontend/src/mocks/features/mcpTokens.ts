@@ -19,6 +19,8 @@ import type {
 const base = '/api/v1/ai/mcp-tokens'
 const TIERS: readonly McpTokenTier[] = ['read', 'write', 'outward']
 const MAX_NAME = 100
+/** As the agent's `DEFAULT_ANONYMOUS_NETWORKS` (`agent/src/auth/authenticate.ts`). */
+const DEFAULT_ANONYMOUS_NETWORKS = ['127.0.0.0/8', '::1/128', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7']
 const MAX_EXPIRES_IN = 10 * 366 * 24 * 60 * 60
 
 function seed(): McpToken[] {
@@ -55,6 +57,7 @@ const state = {
   /** `/api/v1/ai/mcp/auth`'s stored mode; `authMode` is `oidc` over it while OIDC is on. */
   configuredMode: 'bearer' as ConfiguredMcpAuthMode,
   anonymousCap: 'outward' as McpTokenTier,
+  anonymousNetworks: [...DEFAULT_ANONYMOUS_NETWORKS],
 }
 
 export function reset(): void {
@@ -62,6 +65,7 @@ export function reset(): void {
   state.authMode = 'bearer'
   state.configuredMode = 'bearer'
   state.anonymousCap = 'outward'
+  state.anonymousNetworks = [...DEFAULT_ANONYMOUS_NETWORKS]
 }
 
 /**
@@ -113,22 +117,42 @@ function problems(body: Partial<McpTokenCreate> & Record<string, unknown>): stri
 
 const authBase = '/api/v1/ai/mcp/auth'
 
+/** An IPv4 or IPv6 address with an optional prefix: a loose stand-in for the agent's `parseCidr`. */
+const NETWORK = /^(?:\d{1,3}(?:\.\d{1,3}){3}(?:\/(?:3[0-2]|[12]?\d))?|[0-9a-f:]*:[0-9a-f:.]*(?:\/(?:12[0-8]|1[01]\d|\d?\d))?)$/i
+
+function networkProblems(value: unknown, prefix: string): string | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) return `${prefix}anonymous_networks: expected an array`
+  for (const [i, entry] of value.entries()) {
+    if (typeof entry !== 'string' || !NETWORK.test(entry.trim())) {
+      return `${prefix}anonymous_networks.${i}: ${JSON.stringify(entry)} is not an IP address or CIDR range`
+    }
+  }
+  return undefined
+}
+
+function sameNetworks(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((entry, i) => entry === b[i])
+}
+
 function authView(): McpAuthSetting {
   return {
     mode: state.authMode ?? state.configuredMode,
     configured_mode: state.configuredMode,
     anonymous_cap: state.anonymousCap,
+    anonymous_networks: [...state.anonymousNetworks],
+    default_anonymous_networks: [...DEFAULT_ANONYMOUS_NETWORKS],
   }
 }
 
 function settingProblems(body: unknown, prefix: string): string | undefined {
   if (body === null || typeof body !== 'object') return `${prefix || 'body'}: expected an object`
-  const { mode, anonymous_cap } = body as Record<string, unknown>
+  const { mode, anonymous_cap, anonymous_networks } = body as Record<string, unknown>
   if (mode !== 'bearer' && mode !== 'disabled') return `${prefix}mode: must be bearer or disabled`
   if (!TIERS.includes(anonymous_cap as McpTokenTier)) {
     return `${prefix}anonymous_cap: must be read, write or outward`
   }
-  return undefined
+  return networkProblems(anonymous_networks, prefix)
 }
 
 /** As `agent/src/routes/mcpAuthMode.ts`: the same validation and answers. */
@@ -137,10 +161,15 @@ function authProblems(body: Record<string, unknown>): string | undefined {
     return 'mode: "oidc" cannot be set here; it is switched on with the OIDC configuration once its discovery check passes (#262)'
   }
   const extra = Object.keys(body).filter(
-    (key) => !['mode', 'anonymous_cap', 'expected'].includes(key),
+    (key) => !['mode', 'anonymous_cap', 'anonymous_networks', 'expected'].includes(key),
   )
   if (extra.length > 0) return `body: unrecognized key(s) ${extra.join(', ')}`
-  return settingProblems(body, '') ?? settingProblems(body.expected, 'expected.')
+  const problem = settingProblems(body, '') ?? settingProblems(body.expected, 'expected.')
+  if (problem) return problem
+  if (body.anonymous_networks !== undefined && (body.expected as Record<string, unknown>).anonymous_networks === undefined) {
+    return 'expected.anonymous_networks: required when anonymous_networks is sent (the networks this page showed)'
+  }
+  return undefined
 }
 
 export const handlers = [
@@ -161,7 +190,9 @@ export const handlers = [
     const update = body as unknown as McpAuthUpdate
     if (
       update.expected.mode !== state.configuredMode ||
-      update.expected.anonymous_cap !== state.anonymousCap
+      update.expected.anonymous_cap !== state.anonymousCap ||
+      (update.expected.anonymous_networks !== undefined &&
+        !sameNetworks(update.expected.anonymous_networks, state.anonymousNetworks))
     ) {
       return detail(
         409,
@@ -171,6 +202,7 @@ export const handlers = [
     state.configuredMode = update.mode
     if (state.authMode !== 'oidc') state.authMode = update.mode
     state.anonymousCap = update.anonymous_cap
+    if (update.anonymous_networks) state.anonymousNetworks = update.anonymous_networks.map((n) => n.trim())
     return HttpResponse.json(authView())
   }),
 

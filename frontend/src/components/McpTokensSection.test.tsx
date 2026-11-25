@@ -2,6 +2,7 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import type { McpAuthSetting } from '../api/mcpTokens'
 import { mcpAuthChanged } from '../lib/mcpAuthChanges'
 import { setMcpAuthMode } from '../mocks/features/mcpTokens'
 import { server } from '../mocks/server'
@@ -231,7 +232,7 @@ describe('McpTokensSection', () => {
   })
 
   it('reads the auth mode itself, and again when it is saved elsewhere on the page', async () => {
-    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward' } as const
+    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward', anonymous_networks: [], default_anonymous_networks: [] } as McpAuthSetting
     vi.spyOn(api, 'getMcpAuth').mockResolvedValue(auth)
     renderPage(<McpTokensSection />)
     expect(await screen.findByTestId('mcp-auth-note')).toHaveTextContent('MCP authentication is turned off')
@@ -242,7 +243,7 @@ describe('McpTokensSection', () => {
   })
 
   it('falls back to the list\'s mode when the read after a save fails (#5021)', async () => {
-    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward' } as const
+    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward', anonymous_networks: [], default_anonymous_networks: [] } as McpAuthSetting
     server.use(http.get('/api/v1/ai/mcp-tokens', () => HttpResponse.json({ auth_mode: 'bearer', tokens: [] })))
     vi.spyOn(api, 'getMcpAuth').mockResolvedValue(auth)
     renderPage(<McpTokensSection />)
@@ -254,7 +255,7 @@ describe('McpTokensSection', () => {
   })
 
   it('keeps nothing of a failed read while the next one loads (#5023)', async () => {
-    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward' } as const
+    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward', anonymous_networks: [], default_anonymous_networks: [] } as McpAuthSetting
     server.use(http.get('/api/v1/ai/mcp-tokens', () => HttpResponse.json({ auth_mode: 'bearer', tokens: [] })))
     vi.spyOn(api, 'getMcpAuth').mockResolvedValue(auth)
     renderPage(<McpTokensSection />)

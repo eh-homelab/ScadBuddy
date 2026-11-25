@@ -34,8 +34,9 @@ export function McpAuthBanner({ link = false, className = '' }: { link?: boolean
       className={cn('bg-warn/10 text-xs text-warn ring-warn/50', className)}
     >
       <CardContent>
-        <strong className="font-medium">MCP authentication is off.</strong> Anyone who can reach{' '}
-        <code>/mcp</code> over HTTPS can call ScadBuddy&rsquo;s tools without a token, with{' '}
+        <strong className="font-medium">MCP authentication is off.</strong> A caller from the anonymous
+        networks that reaches <code>/mcp</code> over HTTPS can call ScadBuddy&rsquo;s tools without a
+        token, with{' '}
         {CAP_WORDS[auth.data.anonymous_cap]}.{' '}
         {link ? (
           <>

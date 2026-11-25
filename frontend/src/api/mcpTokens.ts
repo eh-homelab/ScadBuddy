@@ -58,14 +58,23 @@ export interface McpAuthSetting {
   configured_mode: ConfiguredMcpAuthMode
   /** The most an anonymous caller may do while the mode is `disabled`. */
   anonymous_cap: McpTokenTier
+  /**
+   * The networks (IP addresses or CIDR ranges) an anonymous caller must come from while the
+   * mode is `disabled` (#7767). A caller from anywhere else needs an access token.
+   */
+  anonymous_networks: string[]
+  /** What `anonymous_networks` is when it was never set. */
+  default_anonymous_networks: string[]
 }
 
 /**
- * What Settings may save. `expected` is the stored mode and cap the page showed:
- * the service answers 409, and saves nothing, when they have changed since.
+ * What Settings may save. `expected` is the stored mode, cap and networks the page showed:
+ * the service answers 409, and saves nothing, when they have changed since. Without
+ * `anonymous_networks` the stored networks stay as they are.
  */
 export interface McpAuthUpdate {
   mode: ConfiguredMcpAuthMode
   anonymous_cap: McpTokenTier
-  expected: { mode: ConfiguredMcpAuthMode; anonymous_cap: McpTokenTier }
+  anonymous_networks?: string[]
+  expected: { mode: ConfiguredMcpAuthMode; anonymous_cap: McpTokenTier; anonymous_networks?: string[] }
 }

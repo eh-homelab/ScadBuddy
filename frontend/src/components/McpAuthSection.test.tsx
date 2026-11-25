@@ -11,6 +11,10 @@ import { choose } from '../test/select'
 // #251 — Settings → MCP access → Auth mode over the msw stand-in for the agent
 // service's /api/v1/ai/mcp/auth (src/mocks/features/mcpTokens.ts).
 
+/** The agent's default anonymous networks (`DEFAULT_ANONYMOUS_NETWORKS`). */
+const NETS = ['127.0.0.0/8', '::1/128', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7']
+const NETWORK_FIELDS = { anonymous_networks: NETS, default_anonymous_networks: NETS }
+
 async function loaded() {
   return await screen.findByRole('radio', { name: /Require an access token/ })
 }
@@ -49,6 +53,7 @@ describe('McpAuthSection', () => {
       mode: 'bearer',
       configured_mode: 'bearer',
       anonymous_cap: 'outward',
+      ...NETWORK_FIELDS,
     })
   })
 
@@ -72,7 +77,7 @@ describe('McpAuthSection', () => {
     expect(screen.getByTestId('mcp-auth-disabled-warning')).toHaveTextContent(
       'without a token, with full access',
     )
-    const off = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward' }
+    const off = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward', ...NETWORK_FIELDS }
     expect(onSaved).toHaveBeenCalledWith(off)
     expect(await api.getMcpAuth()).toEqual(off)
 
@@ -151,7 +156,7 @@ describe('McpAuthSection', () => {
     setMcpAuthMode('oidc', 'read', 'disabled')
     renderPage(<McpAuthSection />)
     expect(await screen.findByTestId('mcp-auth-oidc-disabled')).toHaveTextContent(
-      'turning OIDC off will let anyone who can reach /mcp call it with read only',
+      'turning OIDC off will let a caller from the networks listed below call /mcp with read only',
     )
     expect(screen.getByRole('radio', { name: /Allow calls without a token/ })).toBeChecked()
     expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull()
@@ -177,6 +182,7 @@ describe('McpAuthSection', () => {
       mode: 'oidc',
       configured_mode: 'disabled',
       anonymous_cap: 'outward',
+      ...NETWORK_FIELDS,
     })
     expect(screen.getByRole('status')).toHaveTextContent('OIDC sign-in still applies')
     expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull()
@@ -203,6 +209,7 @@ describe('McpAuthSection', () => {
       mode: 'bearer',
       configured_mode: 'bearer',
       anonymous_cap: 'write',
+      ...NETWORK_FIELDS,
     })
 
     // The page now shows the current setting, and turning auth off asks first.
@@ -228,6 +235,69 @@ describe('McpAuthSection', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Turn authentication off' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('must come through the HTTPS ingress')
     expect(screen.queryByTestId('mcp-auth-disabled-warning')).toBeNull()
+  })
+
+  it('shows the anonymous networks only while calls without a token are chosen, with the default', async () => {
+    const { user } = renderPage(<McpAuthSection />)
+    await loaded()
+    expect(screen.queryByLabelText('Networks allowed without a token')).toBeNull()
+    await user.click(screen.getByRole('radio', { name: /Allow calls without a token/ }))
+    expect(screen.getByLabelText('Networks allowed without a token')).toHaveValue(NETS.join('\n'))
+    expect(screen.getByTestId('mcp-anonymous-networks-help')).toHaveTextContent(`The default is ${NETS.join(', ')}.`)
+    expect(screen.queryByRole('button', { name: 'Use the default' })).toBeNull()
+  })
+
+  it('saves edited networks with the ones it showed, and asks first when it adds one', async () => {
+    setMcpAuthMode('disabled', 'read')
+    const set = vi.spyOn(api, 'setMcpAuth')
+    const { user } = renderPage(<McpAuthSection />)
+    expect(await screen.findByTestId('mcp-auth-disabled-warning')).toHaveTextContent(
+      'from the networks listed below',
+    )
+    const field = screen.getByLabelText('Networks allowed without a token')
+
+    // Taking networks out gives no one more access: no confirmation.
+    await user.clear(field)
+    await user.type(field, '192.168.0.0/16\n\n  ')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(set).toHaveBeenLastCalledWith({
+        mode: 'disabled',
+        anonymous_cap: 'read',
+        anonymous_networks: ['192.168.0.0/16'],
+        expected: { mode: 'disabled', anonymous_cap: 'read', anonymous_networks: NETS },
+      }),
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(await api.getMcpAuth()).toMatchObject({ anonymous_networks: ['192.168.0.0/16'] })
+
+    // Adding a network does, and the dialog names the list.
+    await user.click(screen.getByRole('button', { name: 'Use the default' }))
+    expect(field).toHaveValue(NETS.join('\n'))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    const dialog = await screen.findByRole('alertdialog', { name: 'Allow MCP calls without a token from more networks?' })
+    expect(within(dialog).getByTestId('mcp-auth-confirm-networks')).toHaveTextContent(NETS.join(', '))
+    await user.click(within(dialog).getByRole('button', { name: 'Allow these networks' }))
+    await waitFor(() =>
+      expect(set).toHaveBeenLastCalledWith({
+        mode: 'disabled',
+        anonymous_cap: 'read',
+        anonymous_networks: NETS,
+        expected: { mode: 'disabled', anonymous_cap: 'read', anonymous_networks: ['192.168.0.0/16'] },
+      }),
+    )
+  })
+
+  it('shows the service’s refusal of a network that is not an address or range', async () => {
+    setMcpAuthMode('disabled', 'read')
+    const { user } = renderPage(<McpAuthSection />)
+    const field = await screen.findByLabelText('Networks allowed without a token')
+    await user.clear(field)
+    await user.type(field, '10.0.0.0/8\nlan')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    const dialog = await screen.findByRole('alertdialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Allow these networks' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('"lan" is not an IP address or CIDR range')
   })
 
   it('says so when the setting cannot be loaded', async () => {
