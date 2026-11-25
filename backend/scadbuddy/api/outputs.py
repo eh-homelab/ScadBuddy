@@ -1160,7 +1160,7 @@ class OutputBytesStatus(BaseModel):
     finished_at: datetime | None
     #: A folder could not be read (a failed stat), an output's folder is missing, or the
     #: outputs folder is missing or lists no slug folder while rows exist (the run then
-    #: writes nothing). The next run tries again.
+    #: writes nothing). No later run comes: #7257 retired the copy.
     incomplete: bool
     #: Why the run copied nothing: no content store, the ``bambuddy`` store, or
     #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
@@ -1176,11 +1176,11 @@ class OutputBytesStatus(BaseModel):
     needed_bytes: int
     needed_count: int
     #: ``{output_id, role, error}`` for each output whose bytes could not be read, put or
-    #: verified. The output gets no write; the next run tries again.
+    #: verified. The output got no write; no later run comes (#7257).
     failed: list[dict[str, Any]]
     #: ``{output_id, role, error}`` for each missing byte file this run found, and
-    #: ``names`` too for a ``files/`` folder with a name an output may not hold. A later
-    #: run skips an output whose files did not change, so it does not name it again:
+    #: ``names`` too for a ``files/`` folder with a name an output may not hold. A run
+    #: skipped an output whose files did not change, so a later run did not name it again:
     #: read ``damaged_rows`` and ``damaged_sample`` for every output that is damaged now.
     damaged: list[dict[str, Any]]
     #: How many rows the files still hold the bytes of now.
@@ -1193,8 +1193,8 @@ class OutputBytesStatus(BaseModel):
 
 
 class OutputCopyStatus(BaseModel):
-    """The last run of the copy of the saved outputs' files to rows (#7255): at an API start,
-    or in a housekeeping sweep."""
+    """The last run of the copy of the saved outputs' files to rows (#7255), which ran at
+    an API start or in a housekeeping sweep until #7257 retired it."""
 
     started_at: datetime
     #: ``None`` while the run goes on, when it stopped before its end, or when it is
@@ -1202,7 +1202,7 @@ class OutputCopyStatus(BaseModel):
     finished_at: datetime | None
     #: The run walked to its end but may have missed folders (a listing failed, the
     #: outputs folder read empty while rows exist, or a first run found no outputs
-    #: folder). It does not end the fallback to the files; the next run tries again.
+    #: folder). Such a run wrote no cut-over mark; no later run comes (#7257).
     incomplete: bool
     copied: int
     refreshed: int

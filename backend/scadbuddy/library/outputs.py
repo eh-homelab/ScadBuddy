@@ -1348,7 +1348,8 @@ class OutputStore:
         transaction guarded by a mark taken first: a model delete that dropped them and
         then failed keeps its outputs, so they get their rows back. Each row takes a
         ``files_stamp``, as the retired copy's did (#7257), so a later save of its id
-        may write over it. A folder that cannot be listed is skipped. The one reader of the
+        may write over it. A folder that cannot be listed or stat'ed (ESTALE, EIO, EACCES)
+        is skipped and logged, as the retired copy's walk did. The one reader of the
         folders left, until #7257's task B5 removes it with the model delete's restore."""
         mark = self.rows.clock()
         read: list[OutputRow] = []
@@ -1357,7 +1358,16 @@ class OutputStore:
         except OSError:
             entries = []
         for directory in entries:
-            if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or not directory.is_dir():
+            if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name):
+                continue
+            try:
+                if not directory.is_dir():
+                    continue
+            except OSError as error:
+                logger.warning(
+                    "could not list an outputs folder",
+                    extra={"path": str(directory), "error": type(error).__name__},
+                )
                 continue
             row = _row_from_folder(directory, slug)
             if row is not None:

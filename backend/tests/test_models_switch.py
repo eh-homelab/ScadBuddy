@@ -783,6 +783,25 @@ def test_a_rollback_after_an_api_has_started(
     assert world.column("outputs", "output_id", "meta") == metas
 
 
+def test_a_rollback_of_a_row_that_the_start_copy_made_again(world: World) -> None:
+    """A file of an older build has not every key, and the copy wrote each default: a
+    row written again from its files (`restore_rows`, as release A's copy did) still
+    rolls back (`models_switch._same`)."""
+    path = world.meta_path("a", 1)
+    body = json.loads(path.read_text())
+    del body["sent_to_bambuddy"]
+    path.write_text(json.dumps(body, indent=2) + "\n")
+    query = "SELECT meta::text FROM outputs WHERE output_id = %s"
+    world.sql("UPDATE outputs SET meta = meta - 'sent_to_bambuddy'")
+    was = world.sql(query, output_id(1))
+    world.run()
+    with world.outputs() as (store, _):
+        store.restore_rows("a")
+    assert "sent_to_bambuddy" in world.sql(query, output_id(1))[0][0]
+    world.rollback()
+    assert world.sql(query, output_id(1)) == was
+
+
 def test_a_rollback_where_no_push_was_recorded(world: World) -> None:
     world.sql("DELETE FROM git_remote_pushes WHERE repository = 'models'")
     world.run()

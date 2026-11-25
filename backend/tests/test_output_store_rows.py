@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import shutil
 import threading
 import time
@@ -422,6 +423,32 @@ async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
         assert store.get(kept.id).name == kept.name
     catalogue.delete(job.slug)
     assert rows_of(store).get(meta.id) is None
+
+
+async def test_restore_rows_skips_a_folder_it_cannot_stat(
+    saved: tuple[OutputStore, OutputMeta, Job],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stale NFS handle (ESTALE) on one output's folder skips that folder, logged, as
+    the retired copy's walk did; the other outputs get their rows back."""
+    store, meta, job = saved
+    second = await store.save(job, name="second")
+    rows_of(store).delete_slug(job.slug)
+    stale = _dir(store, meta)
+    is_dir = Path.is_dir
+
+    def stale_handle(self: Path, *args: Any, **kwargs: Any) -> bool:
+        if self == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return is_dir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_dir", stale_handle)
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
+        store.restore_rows(job.slug)
+    assert rows_of(store).get(meta.id) is None
+    assert rows_of(store).get(second.id) is not None
+    assert "could not list an outputs folder" in caplog.text
 
 
 async def test_orphan_sweep_keeps_outputs_whose_rows_stay(

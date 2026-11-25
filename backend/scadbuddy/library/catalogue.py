@@ -3517,7 +3517,8 @@ class Catalogue:
         # Its output rows first (spec §6.2): they are the outputs' record (#7255), so a
         # failure fails the delete and leaves the model and its outputs whole for a retry.
         # The rows go before the rename on purpose: a failed rename leaves the files, and
-        # a retried delete removes them, and the rows come back from the files.
+        # a retried delete removes them; `restore_rows` writes the rows again from the
+        # files meanwhile.
         self._forget_outputs(slug)
         # Renamed out of `models/` first, so the model leaves the catalogue in one
         # step: an `rmtree` that dies halfway could otherwise leave `model.scad`
@@ -3533,8 +3534,8 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
         except OSError:
             # The model and its outputs stay: their rows come back from the files. A
-            # failure there must not hide the move's own error; the next copy run
-            # writes them too.
+            # failure there must not hide the move's own error; the rows then stay
+            # missing until a retried delete (no copy run writes them, #7257).
             if self.outputs is not None:
                 try:
                     self.outputs.restore_rows(slug)
