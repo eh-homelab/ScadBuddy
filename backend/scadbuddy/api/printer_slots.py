@@ -397,7 +397,7 @@ def _name_place(
     except NoAmsKindError:
         return None, "no_ams_kind"
     except CatalogRefError:
-        return None, None
+        return None, "no_printer"
 
 
 @router.put(
@@ -409,7 +409,7 @@ def _name_place(
         " names ScadBuddy's place of the unit the same, making it if missing. A refused"
         " Bambuddy write changes nothing. Once Bambuddy's label is written the answer is 200;"
         " `place_problem` `no_ams_kind` says the place was not made: no location kind is"
-        " marked AMS."
+        " marked AMS; `no_printer` says the printer was deleted meanwhile."
         + ADMIN
         + " 404 for an unknown printer; 409 for a virtual or unlinked printer; 422 for a unit"
         " no printer has."
@@ -440,7 +440,9 @@ async def set_printer_ams_label(
     summary="Clear an AMS unit's label",
     description=(
         "Deletes Bambuddy's AMS label, then names ScadBuddy's place of the unit"
-        " `<printer> <unit>` again." + ADMIN + " 404 for an unknown printer; 409 for a virtual"
+        " `<printer> <unit>` again, with `place_problem` as the label write has it."
+        + ADMIN
+        + " 404 for an unknown printer; 409 for a virtual"
         " or unlinked printer; 422 for a unit no printer has."
     ),
 )
