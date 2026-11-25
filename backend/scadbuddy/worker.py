@@ -93,6 +93,7 @@ from scadbuddy.crud.render import (
     RemoteRenderSettingsSource,
     RemoteStoreFolders,
 )
+from scadbuddy.crud.tasks import RemoteTasks
 from scadbuddy.filament.bb_pull_run import FilamentPullActivities
 from scadbuddy.filament.bb_sync_run import FilamentSyncActivities, settings_loader
 from scadbuddy.filament.print_uses import print_use_hook
@@ -154,7 +155,7 @@ from scadbuddy.workflows.client import (
     render_worker,
     routes_to,
 )
-from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_activities import FlowActivities, FlowTaskActivities
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
@@ -1604,7 +1605,7 @@ class ProjectsKeyMissingError(ValueError):
 
 
 #: The CRUD areas the projects worker calls (`api/crud_areas.py` `CRUD_AREAS`).
-PROJECTS_CRUD_AREAS = frozenset({"flows", "operations", "payload-keys"})
+PROJECTS_CRUD_AREAS = frozenset({"flows", "operations", "payload-keys", "tasks"})
 
 
 async def run_projects_worker(
@@ -1614,7 +1615,7 @@ async def run_projects_worker(
     health_port: HealthListen | None = HEALTH_PORT,
 ) -> None:
     """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
-    §4.3). No database (#5298): its flow runs, operations and payload keys go through
+    §4.3). No database (#5298): its flow runs, operations, tasks and payload keys go through
     the API's CRUD routes, with a credential it exchanges its proof for, and the KEK
     opens the payload keys: a flow's payloads are sealed per run, and it never runs
     unsealed. Versioned (#4146): the Worker Deployment ``scadbuddy-projects`` at
@@ -1649,7 +1650,7 @@ async def run_projects_worker(
     routes: FlowRoutes | None = None
     try:
         runtime, sdk_port = _sdk_runtime(settings)
-        # #5298: flow runs, decisions, grants, operations and payload keys through the
+        # #5298: flow runs, decisions, grants, operations, tasks and payload keys through the
         # API's CRUD routes. A key comes sealed and is opened here with the KEK (plan D10).
         crud = CrudClient(settings.api_internal_url, "projects", credential, metrics=metrics)
         keys = RemotePayloadKeys(crud, kek)
@@ -1657,6 +1658,7 @@ async def run_projects_worker(
             settings.temporal_address, settings.temporal_namespace, keys, runtime=runtime
         )
         store = RemoteFlowStore(crud)
+        tasks = RemoteTasks(crud)
         queue = settings.temporal_task_queue_projects
         kinds = {
             kind.name: kind
@@ -1665,6 +1667,7 @@ async def run_projects_worker(
                 keys,
                 approval_key(settings),
                 api=lambda: api_client(settings.api_internal_url, credential),
+                tasks=tasks,
             )
         }
         # The API ends its kinds' records and counts them (#2295, #5298); the dashboards
@@ -1677,7 +1680,13 @@ async def run_projects_worker(
         worker = projects_worker(
             client,
             queue,
-            [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
+            [
+                *FlowActivities(store).all(),
+                *FlowTaskActivities(tasks).all(),
+                *routes.all(),
+                *grants.all(),
+                *decisions,
+            ],
             deployment_config=projects_deployment(build_id),
         )
         routed = asyncio.Event()

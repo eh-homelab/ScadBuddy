@@ -362,6 +362,18 @@ class Settings(BaseSettings):
     # volume's cache/downloads and a worker keeps none.
     download_cache_dir: Path | None = None
     download_cache_max_bytes: int = Field(default=DEFAULT_DOWNLOAD_CACHE_MAX_BYTES, ge=0)
+    # #7316: the download cache's directory is this process's alone (a node-local
+    # emptyDir), so a hit is read in place, with no private copy. The API only.
+    download_cache_private: bool = False
+    # #7316: where this process spools whole files while it works on them: blob-spool/
+    # (the store's request-body spool: cached downloads' private copies, the slicer's
+    # and print worker's PUT bodies, slice bodies, thumbnail copies, an order's archive
+    # copy) and library-spool/ (every read of a Bambuddy library file). The API's, and
+    # a render worker's where it is set there. Unset, under the data volume's cache/.
+    spool_dir: Path | None = None
+    # #7318: the piece cache's root on a remote store (a node-local emptyDir); unset, the
+    # data volume's blobs/. Ignored on the local store, where blobs/ is the record.
+    blob_cache_dir: Path | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
@@ -813,6 +825,9 @@ class Settings(BaseSettings):
     filament_burn_window_days: int = Field(default=30, ge=1, le=365)
     filament_lead_time_days: int = Field(default=7, ge=0, le=365)
     filament_safety_margin_days: int = Field(default=3, ge=0, le=365)
+    # SCADBUDDY_FILAMENT_TAG_FORMAT (#7273): the format a spool tag write uses when the tag
+    # holds neither OpenSpool nor OpenTag3D (`filament/tag_formats.py` `pick_format`).
+    filament_tag_format: Literal["openspool", "opentag3d"] = "openspool"
 
     @field_validator("flow_approval_timeout_seconds")
     @classmethod
@@ -892,6 +907,9 @@ class Settings(BaseSettings):
             worker_cache_max_bytes=self.worker_cache_max_bytes,
             download_cache_dir=self.download_cache_dir,
             download_cache_max_bytes=self.download_cache_max_bytes,
+            download_cache_private=self.download_cache_private,
+            spool_dir=self.spool_dir,
+            blob_cache_dir=self.blob_cache_dir,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
@@ -1095,6 +1113,18 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Paired with the download cache's directory: a budget of the volume the"
             " deployment mounts it from."
         ),
+        "download_cache_private": (
+            "Paired with the download cache's directory: only the deployment knows whether"
+            " that volume is this container's alone."
+        ),
+        "spool_dir": (
+            "A directory of the deployment's volumes, like the download cache's: the"
+            " process needs it before any stored setting is read."
+        ),
+        "blob_cache_dir": (
+            "A directory of the deployment's volumes, like the spool's: the store is built"
+            " at start, from it."
+        ),
         "storefront_public_url": (
             "The storefront edge's origin (#4960), set on its Deployment beside the edge's own"
             " copy; a stored value could point customers' pay links anywhere."
@@ -1178,6 +1208,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_burn_window_days": "live",
         "filament_lead_time_days": "live",
         "filament_safety_margin_days": "live",
+        "filament_tag_format": "live",
         # Attributes of the stores that read them on every use.
         "library_max_bytes": "live",
         "asset_max_total_bytes": "live",

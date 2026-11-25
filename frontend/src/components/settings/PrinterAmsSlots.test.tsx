@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import type { PrinterRow } from '../../api/types'
 import { amsPresetsSaved, amsSent, setAmsAdminOnly, setAmsPrinting, setAmsTrayNow } from '../../mocks/features/printerAmsSlots'
@@ -165,6 +166,21 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(screen.getByRole('button', { name: 'Save label' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Labelled AMS-A “Left rack”.')
     expect(await screen.findByRole('heading', { name: 'Left rack' })).toBeInTheDocument()
+  })
+
+  it('warns when the label was saved but its place was not named', async () => {
+    server.use(
+      http.put('/api/v1/printers/:id/ams/:ams/label', () =>
+        HttpResponse.json({ ams_id: 0, label: 'Left rack', place: null, place_problem: 'no_printer' }),
+      ),
+    )
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
+    await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')
+    await user.click(screen.getByRole('button', { name: 'Save label' }))
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('Its place was not named: the printer was deleted meanwhile.')
+    expect(status).toHaveClass('text-warn')
   })
 
   it('reads the tag again when the status names no tray, as the route allows', async () => {

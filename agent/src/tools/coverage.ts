@@ -27,6 +27,42 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
   },
   {
+    operation: 'POST /api/v1/filament/tags/reads',
+    reason:
+      "The phone page's own Web NFC reading (#7273): the browser reads the tag. An agent reads a tag through nfc_read, which queues a job that the phone page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/backups',
+    reason:
+      "The phone page backs a tag up right before it writes, in the same tap (#7273 G7). An agent's write is backed up by the page when it runs the nfc_write job.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-records',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/spools/{spool_id}/tag-written',
+    reason:
+      "One step of the phone page's write in one tap (#7273 G7): read and back up, the records, the write, the read-back check. The browser holds the tag, so an agent writes through nfc_write, which the page runs.",
+  },
+  {
+    operation: 'POST /api/v1/filament/tags/{tag_id}/backups/{backup_id}/restore',
+    reason:
+      "One step of the phone page's restore of a tag backup (#7273 G7): the records to write back, after a fresh backup. The browser holds the tag and the page checks the read-back itself (R6), so an agent writes through nfc_write, which the page runs.",
+  },
+  ...(
+    [
+      'GET /api/v1/filament/nfc-jobs',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/claim',
+      'POST /api/v1/filament/nfc-jobs/{job_id}/result',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The phone page's side of an agent's NFC job (#7273 G4): it lists the pending jobs, arms one when the person taps Arm, and posts what the tag held. The agent creates and waits on jobs with nfc_read and nfc_write.",
+  })),
+  {
     operation: 'GET /api/v1/filament/spools/{spool_id}/presets',
     reason: "A spool's effective slicer presets (#6262); the assistant reads them in filament_spool_get's answer, and the Filament page shows them on the spool.",
   },
@@ -348,6 +384,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
       'Ruling 6); the route refuses an agent-authored request.',
   },
+  {
+    operation: 'POST /api/v1/tasks/{task_id}/answer',
+    reason:
+      "A flow prompt's typed answer (#7364) is the browser user's, as a flow's other answers are; the route " +
+      'refuses an agent-authored request.',
+  },
+  ...(['GET /api/v1/tasks', 'GET /api/v1/tasks/{task_id}'] as const).map((operation) => ({
+    operation,
+    reason:
+      "The questions flows ask a person (#7364), for the screens that show and answer them; the list has no answers, " +
+      'and one task has its own. The assistant reads what a run waits on with get_flow_run, and only a person answers.',
+  })),
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
     reason:
@@ -749,6 +797,48 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
       "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
+  // Temporary (#7067, layer 2 of 6): layer 5 adds the inventory_* tools and drops these entries.
+  ...(
+    [
+      'GET /api/v1/inventory/kinds',
+      'POST /api/v1/inventory/kinds',
+      'PATCH /api/v1/inventory/kinds/{kind_id}',
+      'POST /api/v1/inventory/kinds/{kind_id}/archive',
+      'POST /api/v1/inventory/kinds/{kind_id}/restore',
+      'GET /api/v1/inventory/kinds/{kind_id}/schema',
+      'GET /api/v1/inventory/items',
+      'POST /api/v1/inventory/items',
+      'GET /api/v1/inventory/items/{item_id}',
+      'PATCH /api/v1/inventory/items/{item_id}',
+      'POST /api/v1/inventory/items/{item_id}/archive',
+      'POST /api/v1/inventory/items/{item_id}/restore',
+      'GET /api/v1/inventory/items/{item_id}/offers',
+      'GET /api/v1/inventory/suppliers/{supplier_id}/offers',
+      'POST /api/v1/inventory/offers',
+      'PATCH /api/v1/inventory/offers/{offer_id}',
+      'POST /api/v1/inventory/offers/{offer_id}/archive',
+      'GET /api/v1/inventory/offers/{offer_id}/prices',
+      'POST /api/v1/inventory/offers/{offer_id}/prices',
+      'GET /api/v1/inventory/items/{item_id}/lots',
+      'POST /api/v1/inventory/items/{item_id}/lots',
+      'GET /api/v1/inventory/lots/{lot_id}',
+      'PATCH /api/v1/inventory/lots/{lot_id}',
+      'POST /api/v1/inventory/lots/{lot_id}/adjust',
+      'POST /api/v1/inventory/items/{item_id}/use',
+      'POST /api/v1/inventory/items/{item_id}/count',
+      'GET /api/v1/inventory/items/{item_id}/units',
+      'POST /api/v1/inventory/items/{item_id}/units',
+      'GET /api/v1/inventory/units/{unit_id}',
+      'PATCH /api/v1/inventory/units/{unit_id}',
+      'POST /api/v1/inventory/units/{unit_id}/status',
+      'GET /api/v1/inventory/moves',
+      'GET /api/v1/entities/{ref}/property-schema',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      'Inventory phase 2 (#7067, spec §6.4–6.6); its `inventory_*` tools follow in layer 5 of the same stack, which drops these entries.',
+  })),
 ]
 
 /**

@@ -257,6 +257,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "flow.changed",
         "preview_slice.progress",
         "preview_slice.settled",
+        # A task a flow asks a person (#7364).
+        "task.changed",
         "library.changed",
         "library.removed",
         "font.installed",
@@ -266,6 +268,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "activity.changed",
         "printer.report",
         "printer.changed",
+        # Camera recording: a printer's feed state changed.
+        "camera.feed",
         # Orders (#4249, spec 2026-10-18 §7.1).
         "order.changed",
         "order_item.changed",

@@ -15,7 +15,7 @@ from scadbuddy.inventory.items import (
     ItemStore,
 )
 from scadbuddy.inventory.kinds import KindArchived, KindNotFound, KindStore
-from scadbuddy.inventory.models import Item, ItemInput, ItemPatch, KindInput
+from scadbuddy.inventory.models import InventoryItemPatch, Item, ItemInput, KindInput
 from scadbuddy.orders.models import Actor
 from tests.conftest import PgPool
 
@@ -92,14 +92,18 @@ def test_an_imported_items_edits_are_remembered(items: ItemStore) -> None:
         BY,
     )
 
-    updated = items.update(made.id, ItemPatch(name="0.4 mm hardened", note=""), BY)
+    updated = items.update(made.id, InventoryItemPatch(name="0.4 mm hardened", note=""), BY)
     assert updated.name == "0.4 mm hardened"
     assert updated.edited_fields == ["name"]
-    updated = items.update(made.id, ItemPatch(name="0.4 mm hardened", low_stock=Decimal(2)), BY)
+    updated = items.update(
+        made.id, InventoryItemPatch(name="0.4 mm hardened", low_stock=Decimal(2)), BY
+    )
     assert updated.edited_fields == ["name", "low_stock"]
 
     manual = items.create(ItemInput(kind_id="hardware", name="M3 nut"), BY)
-    assert items.update(manual.id, ItemPatch(name="M3 nut DIN 934"), BY).edited_fields == []
+    assert (
+        items.update(manual.id, InventoryItemPatch(name="M3 nut DIN 934"), BY).edited_fields == []
+    )
 
 
 def test_a_blank_source_ref_is_none(items: ItemStore) -> None:
@@ -174,7 +178,7 @@ def test_update_and_archive_name_a_missing_item(items: ItemStore) -> None:
 
     assert items.get(uuid4()) is None
     with pytest.raises(ItemNotFound):
-        items.update(uuid4(), ItemPatch(name="x"), BY)
+        items.update(uuid4(), InventoryItemPatch(name="x"), BY)
     with pytest.raises(ItemNotFound):
         items.archive(uuid4())
 
@@ -184,7 +188,7 @@ def test_a_rename_into_a_taken_name_is_refused(items: ItemStore) -> None:
     bolt = items.create(ItemInput(kind_id="hardware", name="M3 bolt"), BY)
 
     with pytest.raises(ItemExists):
-        items.update(bolt.id, ItemPatch(name="m3 NUT"), BY)
+        items.update(bolt.id, InventoryItemPatch(name="m3 NUT"), BY)
 
 
 def test_a_restore_into_a_taken_name_is_refused(items: ItemStore) -> None:
@@ -210,7 +214,7 @@ def test_a_restore_into_an_archived_kind_is_refused(items: ItemStore, kinds: Kin
 def test_a_null_clears_only_a_nullable_field(items: ItemStore) -> None:
     made = items.create(ItemInput(kind_id="nozzle", name="0.4 nozzle", life_hours=Decimal(500)), BY)
 
-    updated = items.update(made.id, ItemPatch(life_hours=None, name=None), BY)
+    updated = items.update(made.id, InventoryItemPatch(life_hours=None, name=None), BY)
     assert updated.life_hours is None
     assert updated.name == "0.4 nozzle"
 

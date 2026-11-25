@@ -105,13 +105,14 @@ function setsColour(listing: Listing, values: Record<string, ParamValue>): boole
  * (`customizeState.ts`) until they are added to the order, so leaving the page loses
  * nothing; coming back sends the same values, and the shop reuses the render it made.
  */
-export function CustomizePage({
-  id,
-  timing = POLL,
-  wait = sleep,
-  now = Date.now,
-  debounceMs = DEBOUNCE_MS,
-}: {
+export function CustomizePage(props: CustomizeProps) {
+  /** How often the shop switched the listing between a design and a file while the page was open. */
+  const [switches, setSwitches] = useState(0)
+  // Each listing and each switch is a page of its own, so nothing of the other one stays.
+  return <ListingPage key={`${props.id}:${switches}`} {...props} onSourceChange={() => setSwitches((n) => n + 1)} />
+}
+
+interface CustomizeProps {
   id: string
   timing?: PollTiming
   /** How a poll waits; a test passes one that fires early, as a real timer can (#5902). */
@@ -120,6 +121,18 @@ export function CustomizePage({
   now?: () => number
   /** How long the page waits after the last change before it renders. */
   debounceMs?: number
+}
+
+function ListingPage({
+  id,
+  timing = POLL,
+  wait = sleep,
+  now = Date.now,
+  debounceMs = DEBOUNCE_MS,
+  onSourceChange,
+}: CustomizeProps & {
+  /** The listing read again is the other source (a design, or a library file). */
+  onSourceChange: () => void
 }) {
   const [listing, setListing] = useState<Listing>()
   /**
@@ -458,6 +471,10 @@ export function CustomizePage({
     try {
       const fresh = await store.listing(listing.id)
       if (!alive.current) return
+      if (fresh.source === 'library_file') {
+        onSourceChange()
+        return
+      }
       setListing(fresh)
       setValues(keepOffered(fresh, values))
       setSettled(undefined)
@@ -481,7 +498,7 @@ export function CustomizePage({
       </section>
     )
   }
-  if (file) return <FileCustomize key={file.id} initial={file} timing={timing} wait={wait} now={now} debounceMs={debounceMs} />
+  if (file) return <FileCustomize initial={file} timing={timing} wait={wait} now={now} debounceMs={debounceMs} onSourceChange={onSourceChange} />
   if (!listing) return <p className="sf-hint">Loading the design…</p>
 
   return (

@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.resolver import PRINTER_MODEL
+from scadbuddy.filament.catalog import CatalogRefError
 from scadbuddy.filament.component import FILAMENT, Filament
 from scadbuddy.filament.models import Material, SpoolCreate, SpoolKValueCreate, SpoolPresetCreate
 from scadbuddy.filament.sb_presets import create_on
@@ -600,6 +601,47 @@ def test_a_slot_preset_is_saved_and_cleared(client: TestClient) -> None:
     assert put.calls.last.request.url.params["tray_info_idx"] == "GFG00"
     assert client.delete(f"{slot(pid)}/preset").status_code == 204
     assert delete.called
+
+
+@respx.mock
+def test_a_slot_preset_keeps_a_64_character_filament_id(client: TestClient) -> None:
+    """Configure sends a preset id of up to 64 characters as the slot's ``tray_info_idx``,
+    so the saved preset that follows it takes as many (#7507)."""
+    pid = linked(client, 3)
+    long_id = "G" * 64
+    put = respx.put(f"{API}/printers/3/slot-presets/0/1").mock(
+        return_value=httpx.Response(
+            200,
+            json={"ams_id": 0, "tray_id": 1, "preset_id": long_id, "preset_name": "Long"},
+        )
+    )
+    saved = client.put(
+        f"{slot(pid)}/preset",
+        json={"preset_id": long_id, "preset_name": "Long", "tray_info_idx": long_id},
+    )
+    assert saved.status_code == 200, saved.text
+    assert put.calls.last.request.url.params["tray_info_idx"] == long_id
+
+
+@respx.mock
+def test_a_printer_deleted_after_the_label_says_no_printer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bambuddy's label is written, then the place is not named because the printer row
+    is gone: the answer says why (#7507)."""
+    pid = linked(client, 3)
+    status_route()
+    respx.put(f"{API}/printers/3/ams-labels/0").mock(
+        return_value=httpx.Response(200, json={"ams_id": 0, "label": "Shelf"})
+    )
+
+    def gone(*_args: object) -> None:
+        raise CatalogRefError()
+
+    monkeypatch.setattr(filament(client).locations, "name_ams_unit", gone)
+    response = client.put(f"/api/v1/printers/{pid}/ams/0/label", json={"label": "Shelf"})
+    assert response.status_code == 200, response.text
+    assert (response.json()["place"], response.json()["place_problem"]) == (None, "no_printer")
 
 
 def test_an_unlinked_or_unknown_printer_is_refused(client: TestClient) -> None:

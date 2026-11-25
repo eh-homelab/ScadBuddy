@@ -341,6 +341,43 @@ def test_the_store_caps_reach_the_config_from_either_source(tmp_path: Path) -> N
         assert config.worker_cache_max_bytes == 1024
 
 
+def test_the_spool_and_a_private_download_cache_reach_the_config_from_either_source(
+    tmp_path: Path,
+) -> None:
+    """#7316: the spools and the download cache can move off the data volume onto a
+    node-local directory. Unset, both are as before."""
+    unset = load_config({})
+    assert (unset.spool_dir, unset.download_cache_private) == (None, False)
+    env = {"SCADBUDDY_SPOOL_DIR": "/node/spool", "SCADBUDDY_DOWNLOAD_CACHE_PRIVATE": "true"}
+    loaded = load_config(env)
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        spool_dir=Path("/node/spool"),
+        download_cache_private=True,
+    ).to_config()
+    for config in (loaded, settings):
+        assert (config.spool_dir, config.download_cache_private) == (Path("/node/spool"), True)
+
+
+def test_the_blob_cache_dir_reaches_the_config_from_either_source(tmp_path: Path) -> None:
+    """#7318: the API's piece cache can move off the data volume onto a node-local
+    directory. Unset, it stays under the data volume's ``blobs/``."""
+    assert load_config({}).blob_cache_dir is None
+    loaded = load_config({"SCADBUDDY_BLOB_CACHE_DIR": "/node/blobs"})
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        blob_cache_dir=Path("/node/blobs"),
+    ).to_config()
+    for config in (loaded, settings):
+        assert config.blob_cache_dir == Path("/node/blobs")
+
+
 def test_the_temporal_ui_url_is_empty_by_default_and_seeded_by_its_variable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

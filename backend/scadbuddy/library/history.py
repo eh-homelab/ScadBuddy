@@ -240,6 +240,7 @@ class ModelHistory(GitRepo):
         )
 
     def _uses_lfs(self, commit: str) -> bool:
+        # The root's is the only ``.gitattributes`` written here (`_gitattributes_body`).
         listed = self._run("cat-file", "blob", f"{commit}:{GITATTRIBUTES_NAME}", check=False)
         assert isinstance(listed.stdout, str)
         return listed.returncode == 0 and "filter=lfs" in listed.stdout
@@ -268,17 +269,18 @@ class ModelHistory(GitRepo):
 
     def show(self, commit: str, path: str) -> bytes:
         """As :meth:`GitRepo.show`; a mesh's bytes where git holds its pointer."""
-        return self._mesh_or(super().show(commit, path), commit, path)
+        resolved = self.resolve(commit)
+        return self._mesh_or(super().show(resolved, path), resolved, path)
 
-    def _mesh_or(self, data: bytes, commit: str, path: str, *, limit: int | None = None) -> bytes:
+    def _mesh_or(self, data: bytes, resolved: str, path: str, *, limit: int | None = None) -> bytes:
         """``data``, the blob at ``path``; a mesh's bytes where it is a mesh's pointer.
         :class:`BlobTooLargeError` for a mesh over ``limit``, before it is read."""
         if not (_is_mesh(path) and data.startswith(LFS_POINTER)):
             return data
         size = LFS_SIZE.search(data)
         if limit is not None and size is not None and int(size[1]) > limit:
-            raise BlobTooLargeError(f"{path!r} at {commit} is over {limit} bytes")
-        done = self._run("cat-file", "--filters", f"{self.resolve(commit)}:{path}", text=False)
+            raise BlobTooLargeError(f"{path!r} at {resolved} is over {limit} bytes")
+        done = self._run("cat-file", "--filters", f"{resolved}:{path}", text=False)
         assert isinstance(done.stdout, bytes)
         return done.stdout
 

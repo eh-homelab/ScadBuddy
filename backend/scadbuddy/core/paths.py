@@ -58,6 +58,28 @@ def revalidate_dirs(*directories: Path) -> None:
         os.close(descriptor)
 
 
+#: How a `JobResult` names a file of a piece: ``blobs/<key>/<file>``, the data volume's
+#: layout, kept whatever directory this process's piece cache is in (#7318).
+RESULT_BLOBS = "blobs"
+
+
+def result_name(path: Path, *, blobs_root: Path, data_root: Path) -> str:
+    """The stored name of ``path``: ``blobs/<key>/<file>`` for a file under the blob
+    store's root ``blobs_root``, which may be outside the data dir (a node-local cache,
+    #7318); otherwise relative to ``data_root``."""
+    if path.is_relative_to(blobs_root):
+        return f"{RESULT_BLOBS}/{path.relative_to(blobs_root).as_posix()}"
+    return str(path.relative_to(data_root))
+
+
+def result_path(name: str, *, blobs_root: Path, data_root: Path) -> Path:
+    """Where the file a `JobResult` names (`result_name`) is in this process."""
+    head, _, rest = name.partition("/")
+    if head == RESULT_BLOBS and rest:
+        return blobs_root / rest
+    return data_root / name
+
+
 def is_builtin(model_id: str) -> bool:
     return model_id.startswith(BUILTIN_PREFIX)
 

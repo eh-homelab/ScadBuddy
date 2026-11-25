@@ -24,6 +24,7 @@ from scadbuddy.library.history import (
     lfs_endpoint,
 )
 from scadbuddy.library.upstream import Upstream, plan_merge
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows.housekeeping import GIT_REMOTE_TIMEOUT
 
 pytestmark = [
@@ -39,7 +40,7 @@ TOKEN = "s3cret-token-7314"
 
 @pytest.fixture
 def history(tmp_path: Path) -> ModelHistory:
-    made = ModelHistory(tmp_path / "models")
+    made = ModelHistory(tmp_path / "models", wrapper_prefix=WRAPPER_PREFIX)
     made.ensure_repo()
     return made
 
@@ -75,11 +76,11 @@ def test_git_holds_a_pointer_and_the_volume_the_mesh(history: ModelHistory, path
 
 def test_a_repository_with_a_commit_is_never_turned_into_an_lfs_one(tmp_path: Path) -> None:
     root = tmp_path / "models"
-    old = ModelHistory(root)
+    old = ModelHistory(root, wrapper_prefix=WRAPPER_PREFIX)
     old._gitattributes_body = lambda: None  # type: ignore[method-assign]
     old.ensure_repo()
     first = put(old, ONE)
-    again = ModelHistory(root)
+    again = ModelHistory(root, wrapper_prefix=WRAPPER_PREFIX)
     again.ensure_repo()
     second = put(again, TWO)
     assert not (root / ".gitattributes").exists()
@@ -90,7 +91,7 @@ def test_without_git_lfs_a_fresh_repository_is_a_plain_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(history_module, "GIT_LFS", "no-such-git-lfs")
-    plain = ModelHistory(tmp_path / "models")
+    plain = ModelHistory(tmp_path / "models", wrapper_prefix=WRAPPER_PREFIX)
     plain.ensure_repo()
     assert not (plain.root / ".gitattributes").exists()
 
@@ -151,6 +152,32 @@ def test_an_upstream_merge_takes_the_bytes(history: ModelHistory) -> None:
     upstream = Upstream(id="a", path="a", base=base)
     plan = plan_merge(history, "copy", history.root / "copy", upstream, theirs)
     assert plan.files["meshes/o1-p1.3mf"] == TWO
+
+
+def test_the_history_views_answer_over_a_mesh_change(history: ModelHistory) -> None:
+    first = put(history, ONE)
+    second = put(history, TWO)
+    patch = history.diff(history.revision_range(first, second), "a")
+    assert hashlib.sha256(TWO).hexdigest() in patch
+    assert history.last_commits()["a"] == second
+
+
+def test_a_merge_whose_base_is_gone_is_one_without_a_base(history: ModelHistory) -> None:
+    """#7314: a base of a history that was replaced. Nothing of the template is taken over."""
+    (history.root / "copy").mkdir()
+    (history.root / "copy/model.scad").write_text("sphere();\n")
+    (history.root / "copy/notes.txt").write_text("mine\n")
+    history.commit("Copy", "copy")
+    theirs = put(history, ONE)
+    (history.root / "a/notes.txt").write_text("theirs\n")
+    theirs = history.commit("Notes", "a") or theirs
+    gone = Upstream(id="a", path="a", base="f" * 40)
+    none = Upstream(id="a", path="a", base=None)
+    plan = plan_merge(history, "copy", history.root / "copy", gone, theirs)
+    same = plan_merge(history, "copy", history.root / "copy", none, theirs)
+    assert plan.conflicts == same.conflicts > 0
+    assert (plan.files, plan.preview.kept) == (same.files, same.preview.kept)
+    assert "notes.txt" in plan.preview.kept and "notes.txt" not in plan.files
 
 
 def test_a_mesh_works_on_a_volume_another_user_owns(

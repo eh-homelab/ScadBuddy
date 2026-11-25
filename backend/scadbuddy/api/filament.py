@@ -4,15 +4,13 @@ over `filament/catalog.py`), the spool types (`filament/types.py`), and the spoo
 their tags and their ledger (`filament/spools.py`, `filament/ledger.py`). Some routes reach
 Bambuddy. Only reads: the import (`POST /filament/bambuddy/import`, whose Bambuddy reads
 the print worker makes since #6772, `filament/bambuddy_pull.py`), the list of Home Assistant
-entities (`GET /filament/sensors/entities`, #6268), `GET /rfid/status` and `POST /rfid/scan`.
-Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags`, its unbind,
-and the NTAG confirm,
+entities (`GET /filament/sensors/entities`, #6268), and `GET /rfid/status`.
+Writes, each with its own rule: a tag change (`POST /filament/spools/{id}/tags` and its unbind,
 `filament/rfid_push.py`, #6264) tells Bambuddy only while ``filament_sync.tags`` pushes
 (``sb_to_bb`` or ``two_way``);
 `PUT /rfid/override-mode` writes Bambuddy's auto-add setting (`filament/rfid_mode.py`) and
 `POST /rfid/reconcile` runs the mode, the tag push and the AMS slot configure of each override
-tag (`filament/rfid_slots.py`), whatever ``tags`` says; the NTAG write and cancel
-(`filament/ntag.py`) act on a SpoolBuddy device only when the caller asks.
+tag (`filament/rfid_slots.py`), whatever ``tags`` says.
 `POST /filament/presets/bambuddy-import` reads Bambuddy's local presets and writes
 ScadBuddy's own presets only (#7244).
 `POST /filament/sync/run` asks the ScadBuddy-to-Bambuddy sync for a full pass (#6265),
@@ -30,10 +28,10 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
@@ -64,7 +62,14 @@ from scadbuddy.crud.idempotency import (
     idempotent_write,
     required_key,
 )
-from scadbuddy.filament import capture, label_pdf, label_templates, ntag, rfid_mode, type_proposals
+from scadbuddy.filament import (
+    capture,
+    label_pdf,
+    label_templates,
+    rfid_mode,
+    tags,
+    type_proposals,
+)
 from scadbuddy.filament import metrics_models as mm
 from scadbuddy.filament import models as m
 from scadbuddy.filament.assignments_cache import AssignmentsCache
@@ -205,22 +210,30 @@ from scadbuddy.workflows.commands import (
 #: The write routes, by route name, that `nudge_after_write` skips: the AMS weights
 #: come from the printers' reports and leave Bambuddy to the timer, as the capture's do
 #: (Decision 17, R-T8-3); "Sync now" and the links' reset (#6773) nudge a full pass
-#: themselves; the Bambuddy import pulls
-#: and the RFID scan writes nothing, so neither has anything to push (Decision 163), nor
-#: has the labels PDF (#7157);
+#: themselves; the Bambuddy import pulls and writes nothing, so it has nothing to push
+#: (Decision 163), nor has the labels PDF (#7157);
 #: the printer labels (#6955) make only the printer and AMS places that capture makes
 #: too, un-nudged, and every labels-page load and agent read calls them; the presets
-#: import (#7244) takes Bambuddy's presets, which Bambuddy already holds.
+#: import (#7244) takes Bambuddy's presets, which Bambuddy already holds. The phone's tag
+#: routes (#7273) change nothing the sync pushes: a backup, the records to write, a
+#: restore's records and the agent's NFC jobs. A tag reading nudges only when it binds
+#: (`read_tag` sets `SKIP_NUDGE` otherwise); a checked write binds, so it nudges.
 NOT_NUDGED = frozenset(
     {
         "sync_ams_weights",
         "run_filament_sync",
         "reset_filament_sync_links",
         "import_bambuddy",
-        "scan_rfid_tag",
         "printer_labels",
         "render_labels_pdf",
         "import_bambuddy_presets",
+        "back_up_tag",
+        "tag_records",
+        "restore_tag_backup",
+        "create_nfc_job",
+        "claim_nfc_job",
+        "cancel_nfc_job",
+        "finish_nfc_job",
         # #7153: these write the printer or Bambuddy's slot presets, no ScadBuddy row
         # (`api/printer_slots.py`); the AMS label routes rename a place, so they nudge.
         "configure_printer_slot",
@@ -232,16 +245,21 @@ NOT_NUDGED = frozenset(
         "clear_printer_slot_preset",
     }
 )
+#: A ``request.state`` attribute: a route that sets it true is not nudged for this request.
+SKIP_NUDGE = "skip_filament_nudge"
 
 
 async def nudge_after_write(request: Request, state: StateDep) -> AsyncIterator[None]:
     """A router's dependency: after a write's 2xx answer, nudge the filament sync in the
     background (Decision 17). A route that raised (any error answer, a 422 of its body
-    too) nudges nothing, and neither does a read or a route in `NOT_NUDGED`."""
+    too) nudges nothing, and neither does a read, a route in `NOT_NUDGED` or a request
+    whose route set `SKIP_NUDGE`."""
     yield
     if request.method in ("GET", "HEAD", "OPTIONS"):
         return
     if getattr(request.scope.get("route"), "name", None) in NOT_NUDGED:
+        return
+    if getattr(request.state, SKIP_NUDGE, False):
         return
     state.filament_sync.nudge_soon()
 
@@ -1821,6 +1839,371 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
     return found
 
 
+@router.post(
+    "/tags/reads",
+    response_model=m.TagReadResult,
+    summary="Record a tag reading",
+    description=(
+        "A phone's reading of a tag (`source` is `phone`): its `uid` and NDEF `records`. "
+        "The tag is found or made by its UID and marked seen. With `bind_spool_id` the tag "
+        "is also bound to that spool, as `POST /spools/{id}/tags` does. `next` says what the "
+        "page does: `open_spool` when a spool holds the tag, `bind_or_create` for a tag no "
+        "spool holds, `none` for a reading with no UID. 404 for an unknown `bind_spool_id`, "
+        "422 `no_uid` for a bind with no UID, 409 when the two keys name two tags (a phone "
+        "sends only a UID, so this route never answers it)."
+    ),
+)
+async def read_tag(
+    request: Request,
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    body: m.TagReadIn,
+) -> m.TagReadResult:
+    # Only a bind changes what the sync pushes (`NOT_NUDGED`).
+    setattr(request.state, SKIP_NUDGE, body.bind_spool_id is None)
+    reading = tags.TagRead(
+        source="phone", uid=body.uid, tag_type=body.tag_type, records=tuple(body.records)
+    )
+
+    def run() -> m.TagReadResult:
+        return tags.read(
+            filament.spools,
+            reading,
+            actor=actor(caller),
+            bind_spool_id=body.bind_spool_id,
+            defaults=filament.spools.defaults(),
+        )
+
+    try:
+        result = await asyncio.to_thread(run)
+    except tags.SpoolNotFoundError as exc:
+        raise _no_spool(exc.spool_id) from None
+    except tags.BindWithoutUidError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    if body.bind_spool_id is not None:
+        await _push_now(filament, store)
+    return result
+
+
+@router.post(
+    "/tags/backups",
+    response_model=m.TagBackupMade,
+    status_code=status.HTTP_201_CREATED,
+    summary="Back a tag up before a write",
+    description=(
+        "Keeps what a tag holds (its `uid` and NDEF `records`) just before a write, and makes "
+        "the tag when ScadBuddy has not seen it. `reason` is `spool_write`, `agent_write` (with "
+        "the NFC job's `job_id`; no other reason takes one) or `restore`. The answer is the "
+        "`backup_id` the write names. 422 `no_uid` for a UID that cleans to nothing. 409 "
+        "`job_not_armed` for an `agent_write` whose job is not an armed `write` job."
+    ),
+)
+async def back_up_tag(
+    filament: FilamentDep, caller: CallerDep, body: m.TagBackupIn
+) -> m.TagBackupMade:
+    try:
+        made = await asyncio.to_thread(tags.back_up, filament.spools, body, actor=actor(caller))
+    except tags.NoUidError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except tags.JobNotArmedError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    return m.TagBackupMade(backup_id=made.id)
+
+
+@router.get(
+    "/tags/{tag_id}/backups",
+    response_model=list[m.TagBackup],
+    summary="List a tag's backups",
+    description=(
+        "What the tag held before each write, newest first, a page of `limit` (default 50, at "
+        "most 200). `before` is a backup's id: the page holds the backups older than it. Rows "
+        "are never changed or deleted. 404 for no such tag."
+    ),
+)
+async def list_tag_backups(
+    filament: FilamentDep,
+    tag_id: UUID,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    before: UUID | None = None,
+) -> list[m.TagBackup]:
+    found = await asyncio.to_thread(
+        lambda: tags.backups(filament.spools, tag_id, limit=limit, before=before)
+    )
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no tag {tag_id}")
+    return found
+
+
+def _empty_weight_of(filament: Filament) -> Callable[[UUID], int | None]:
+    def weight(insert_type_id: UUID) -> int | None:
+        row = filament.catalog.get("insert-types", insert_type_id)
+        return row.empty_weight_g if isinstance(row, m.InsertType) else None
+
+    return weight
+
+
+@router.post(
+    "/spools/{spool_id}/tag-records",
+    response_model=m.TagRecords,
+    summary="The records that put a spool on a tag",
+    description=(
+        "Takes the tag as just read (`uid` and `records`) and the `backup_id` of the backup "
+        "taken of it for this write, and answers the records to write: in the tag's own "
+        "format when it holds OpenSpool or OpenTag3D, else in the `filament_tag_format` "
+        "setting. Answers the records only. The browser writes them, and a write that skips "
+        "this route has no backup. 404 for no spool. 409 `backup_mismatch` when the backup "
+        "is unknown, does not hold the `records` sent, is of another UID, is over 10 minutes "
+        "old or is not a `spool_write` "
+        "backup."
+    ),
+)
+async def tag_records(
+    filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.TagRecordsIn
+) -> m.TagRecords:
+    try:
+        found = await asyncio.to_thread(
+            lambda: tags.records_for_spool(
+                filament.spools,
+                spool_id,
+                body,
+                default=store.read({"filament_tag_format"})["filament_tag_format"],
+                empty_weight_g=_empty_weight_of(filament),
+                defaults=filament.spools.defaults(),
+            )
+        )
+    except tags.BackupMismatchError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    if found is None:
+        raise _no_spool(spool_id)
+    return found
+
+
+@router.post(
+    "/spools/{spool_id}/tag-written",
+    response_model=m.TagReadResult,
+    summary="Check a tag write and bind the tag",
+    description=(
+        "After a phone writes a tag: `sent` is what it wrote and `read_back` what the tag "
+        "held after. In one transaction ScadBuddy checks the backup (as `tag-records` "
+        "does), that `read_back` equals `sent`, that `sent` is one OpenSpool or OpenTag3D "
+        "record and that it equals what `tag-records` answers for the spool now, in the "
+        "format it picks from the backup's records. Only then "
+        "does it bind the tag to the spool, with the format's `data_origin` and the time "
+        "of the write. 404 for no spool. 409 `backup_mismatch` for a backup that does not "
+        "cover the write. 409 `read_back_mismatch` when the tag does not hold what was "
+        "sent. 409 `sent_mismatch` when `sent` is not what the spool gives now (the spool "
+        "changed since `tag-records`). 422 `unknown_format` for `sent` in no known format. "
+        "Nothing is bound on a refusal."
+    ),
+)
+async def tag_written(
+    filament: FilamentDep,
+    store: SettingsStoreDep,
+    caller: CallerDep,
+    spool_id: UUID,
+    body: m.TagWrittenIn,
+) -> m.TagReadResult:
+    try:
+        result = await asyncio.to_thread(
+            lambda: tags.written(
+                filament.spools,
+                spool_id,
+                body,
+                actor=actor(caller),
+                default=store.read({"filament_tag_format"})["filament_tag_format"],
+                defaults=filament.spools.defaults(),
+                empty_weight_g=_empty_weight_of(filament),
+            )
+        )
+    except tags.UnknownFormatError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except (
+        tags.BackupMismatchError,
+        tags.ReadBackMismatchError,
+        tags.SentMismatchError,
+    ) as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    except tags.SpoolNotFoundError as exc:
+        raise _no_spool(exc.spool_id) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+    await _push_now(filament, store)
+    return result
+
+
+@router.post(
+    "/tags/{tag_id}/backups/{backup_id}/restore",
+    response_model=m.TagRecords,
+    summary="The records of a backup, to write back",
+    description=(
+        "Answers the records of backup `backup_id` of this tag, to write back the same way "
+        "(`format` is null when they are in neither known format). The body is the tag as "
+        "just read and the `backup_id` of a fresh backup of it with reason `restore`; "
+        "nothing is restored without one. 404 for no such tag or backup. 409 "
+        "`backup_mismatch` when the fresh backup does not cover this write or is of "
+        "another tag."
+    ),
+)
+async def restore_tag_backup(
+    filament: FilamentDep, tag_id: UUID, backup_id: UUID, body: m.TagRecordsIn
+) -> m.TagRecords:
+    try:
+        return await asyncio.to_thread(
+            tags.restore_records, filament.spools, tag_id, backup_id, body
+        )
+    except tags.TagBackupNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"no backup {backup_id} of tag {tag_id}"
+        ) from None
+    except tags.BackupMismatchError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+
+
+def _no_job(job_id: UUID) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"no NFC job {job_id}")
+
+
+@router.post(
+    "/nfc-jobs",
+    response_model=m.NfcJob,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ask the phone page to read or write a tag",
+    description=(
+        "Queues a tag read or write for the /filament/scan page (#7273 G4). `kind` is `read` "
+        "(no `records`) or `write` (the NDEF `records` to write, 888 bytes at most). The job "
+        "waits `ttl_s` seconds (default and most 600) for a person to arm it, then it is "
+        "`expired`. Arming gives the run 60 seconds (`expires_at` moves). A write whose backup "
+        "exists (`write_begun`) never expires: it ends with its result, or `failed` with "
+        "`result.code` `no_read_back` once the backup is over 10 minutes old."
+    ),
+)
+async def create_nfc_job(filament: FilamentDep, caller: CallerDep, body: m.NfcJobIn) -> m.NfcJob:
+    return await asyncio.to_thread(tags.create_job, filament.spools, body, actor=actor(caller))
+
+
+@router.get(
+    "/nfc-jobs",
+    response_model=list[m.NfcJob],
+    summary="List the pending NFC jobs",
+    description=(
+        "The jobs no page armed yet, oldest first, for the phone page to show. `state` must be "
+        "`pending`."
+    ),
+)
+async def list_nfc_jobs(filament: FilamentDep, state: Literal["pending"]) -> list[m.NfcJob]:
+    return await asyncio.to_thread(tags.pending_jobs, filament.spools)
+
+
+@router.get(
+    "/nfc-jobs/{job_id}",
+    response_model=m.NfcJob,
+    summary="Read an NFC job",
+    description=(
+        "One job: its `state` (`pending`, `armed`, `done`, `failed`, `expired` or "
+        "`cancelled`), whether its write has begun (`write_begun`) and, once it ended, its "
+        "`result`. 404 for none."
+    ),
+)
+async def get_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
+    found = await asyncio.to_thread(tags.get_job, filament.spools, job_id)
+    if found is None:
+        raise _no_job(job_id)
+    return found
+
+
+@router.post(
+    "/nfc-jobs/{job_id}/claim",
+    response_model=m.NfcJob,
+    summary="Arm an NFC job",
+    description=(
+        "The phone page arms a pending job when its person taps Arm; only one page can. A "
+        "`write` job's claim carries `records_sha256`, the SHA-256 of the canonical JSON of "
+        "the records the page showed (the body's schema says how it is written, #7273 R22); "
+        "a missing or other hash is 409 `records_mismatch` and the job stays pending. A "
+        "`read` job's claim takes no body, or one with no hash: a hash is 422 "
+        "`records_sha256_not_taken`. 404 for no job, 409 `job_not_pending` for a job that is "
+        "not pending."
+    ),
+)
+async def claim_nfc_job(
+    filament: FilamentDep,
+    caller: CallerDep,
+    job_id: UUID,
+    body: m.NfcJobClaimIn | None = None,
+) -> m.NfcJob:
+    try:
+        return await asyncio.to_thread(
+            tags.claim_job, filament.spools, job_id, body, actor=actor(caller)
+        )
+    except tags.NfcJobNotFoundError:
+        raise _no_job(job_id) from None
+    except tags.RecordsHashNotTakenError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code=exc.code) from None
+    except (tags.JobNotPendingError, tags.RecordsMismatchError) as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+
+
+@router.post(
+    "/nfc-jobs/{job_id}/cancel",
+    response_model=m.NfcJob,
+    summary="Cancel an NFC job",
+    description=(
+        "The agent that asked for a job stops waiting for it (#7273): a `pending` or `armed` "
+        "job becomes `cancelled`, so no page can arm it or post its result. A job that has "
+        "ended already (`done`, `failed`, `expired` or `cancelled`) is answered as it is, "
+        "unchanged. 409 `write_begun` for a write whose backup exists: the tag may hold the "
+        "new records, so only its result ends it. 404 for no job."
+    ),
+)
+async def cancel_nfc_job(filament: FilamentDep, job_id: UUID) -> m.NfcJob:
+    try:
+        return await asyncio.to_thread(tags.cancel_job, filament.spools, job_id)
+    except tags.NfcJobNotFoundError:
+        raise _no_job(job_id) from None
+    except tags.WriteBegunError as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+
+
+@router.post(
+    "/nfc-jobs/{job_id}/result",
+    response_model=m.NfcJob,
+    summary="End an armed NFC job",
+    description=(
+        "What the phone page got from the tag. An `error` fails the job and nothing else is "
+        "read. A `read` job records the reading as `POST /tags/reads` does (`source` "
+        "`agent`); its `result` is that answer with the `uid` and `records`. A `write` job "
+        "names its `agent_write` backup as `backup_id`, and `records` is the read-back: the "
+        "job is `done` when it equals the records sent, else `failed`. 404 for no job, 409 "
+        "`job_not_armed` for a job that is not armed, 409 `backup_mismatch` for a backup that "
+        "does not cover this write."
+    ),
+)
+async def finish_nfc_job(
+    filament: FilamentDep, caller: CallerDep, job_id: UUID, body: m.NfcJobResultIn
+) -> m.NfcJob:
+    try:
+        return await asyncio.to_thread(
+            lambda: tags.finish_job(
+                filament.spools,
+                job_id,
+                body,
+                actor=actor(caller),
+                defaults=filament.spools.defaults(),
+            )
+        )
+    except tags.NfcJobNotFoundError:
+        raise _no_job(job_id) from None
+    except (tags.JobNotArmedError, tags.BackupMismatchError) as exc:
+        raise ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code) from None
+    except _SPOOL_REFUSED as exc:
+        raise _refused(exc) from None
+
+
 @router.get(
     "/events",
     response_model=m.EventPage,
@@ -2613,9 +2996,8 @@ async def import_bambuddy_presets(
         "stands: `applied` (the mode or the setting holds it, and Bambuddy's value is false), "
         "`pending` (a write has not landed, or Bambuddy could not be reached; `detail` names "
         "the error), `blocked` "
-        "(Bambuddy refused the write because its auth is on) or `off`. Also lists the "
-        "SpoolBuddy devices. Reads Bambuddy and writes nothing; when Bambuddy fails, "
-        "`bambuddy_auto_add` is null and `devices` is empty."
+        "(Bambuddy refused the write because its auth is on) or `off`. Reads Bambuddy "
+        "and writes nothing; when Bambuddy fails, `bambuddy_auto_add` is null."
     ),
 )
 async def get_rfid_status(filament: FilamentDep, store: SettingsStoreDep) -> m.RfidStatus:
@@ -2955,110 +3337,3 @@ async def run_filament_sync(state: StateDep) -> SyncRun:
             code=reason,
         )
     return SyncRun(requested_at=requested_at)
-
-
-@router.post(
-    "/rfid/scan",
-    response_model=m.ScanResult,
-    summary="Wait for a tag at a SpoolBuddy reader",
-    description=(
-        "Listens on Bambuddy's WebSocket for up to `timeout_s` seconds (1 to 50, default 30) "
-        "while a person holds a tag to a SpoolBuddy reader; `device_id` limits it to one "
-        "reader. Answers 200 either way: `status` `tag` with the tag's `tag_uid`, "
-        "`tray_uuid`, `tag_type`, its `kind` (`bambu_mifare` with a tray UUID, `ntag_opentag` for "
-        "an NTAG chip, else `other`; for a tag Bambuddy already knows, which names no chip, the "
-        "kind of the ScadBuddy tag bound to it, else `ntag_opentag` when Bambuddy's record says "
-        "OpenTag3D wrote it, else `other`), the Bambuddy spool it matched (`bambuddy_spool_id`) "
-        "and the ScadBuddy spool that holds the tag (`sb_spool`, else the one linked to that "
-        "Bambuddy spool, else null); or `status` `timeout` with nothing else when the wait ran "
-        "out. Writes nothing. 409 when no Bambuddy is configured or its key lacks the Read "
-        "Status scope; 502 or 504 when Bambuddy cannot be reached or closes the socket first."
-    ),
-)
-async def scan_rfid_tag(
-    filament: FilamentDep, store: SettingsStoreDep, body: m.ScanRequest
-) -> m.ScanResult:
-    settings = await asyncio.to_thread(store.load)
-    async with client_for(settings) as client:
-        return await ntag.scan(filament, client, timeout=body.timeout_s, device_id=body.device_id)
-
-
-async def _spool_or_404(filament: Filament, spool_id: UUID) -> None:
-    if await asyncio.to_thread(filament.spools.get, spool_id) is None:
-        raise _no_spool(spool_id)
-
-
-def _ntag_refused(exc: ntag.NtagNoBambuddySpoolError | ntag.NtagOverrideOpenError) -> ApiError:
-    return ApiError(status.HTTP_409_CONFLICT, str(exc), code=exc.code)
-
-
-@router.post(
-    "/spools/{spool_id}/ntag/write",
-    response_model=m.NtagQueued,
-    summary="Queue an NTAG write for a spool",
-    description=(
-        "Asks the SpoolBuddy `device_id` to write an OpenTag3D tag for the spool's Bambuddy "
-        "record; the person then holds a blank tag to the reader. It changes no tag binding: "
-        "call confirm after the write. `warnings` lists what Bambuddy says is missing from "
-        "the record. 404 for no such spool. 409 with `code` `no_bambuddy_spool` when the "
-        "spool is not linked to a Bambuddy spool, and `override_tag_open` when its open tag "
-        "was bound with `override` and `replace` is false."
-    ),
-)
-async def write_ntag(
-    filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.NtagWrite
-) -> m.NtagQueued:
-    await _spool_or_404(filament, spool_id)
-    settings = await asyncio.to_thread(store.load)
-    try:
-        async with client_for(settings) as client:
-            return await ntag.write(
-                filament, client, spool_id, body.device_id, replace=body.replace
-            )
-    except (ntag.NtagNoBambuddySpoolError, ntag.NtagOverrideOpenError) as exc:
-        raise _ntag_refused(exc) from None
-
-
-@router.post(
-    "/spools/{spool_id}/ntag/confirm",
-    response_model=m.NtagConfirm,
-    summary="Bind the NTAG that was written for a spool",
-    description=(
-        "Reads the spool's Bambuddy record. When it holds a tag UID written by OpenTag3D "
-        "that differs from the one it held when the write was queued, binds that tag as "
-        "`ntag_opentag` (the ledger names the caller) and answers `bound` true with "
-        "`tag_uid`; otherwise (also when no write is queued) answers `bound` false and "
-        "changes nothing, so it can be called again. 404 for no such "
-        "spool, 409 with `code` `no_bambuddy_spool` when the spool is not linked to a "
-        "Bambuddy spool."
-    ),
-)
-async def confirm_ntag(
-    filament: FilamentDep, store: SettingsStoreDep, caller: CallerDep, spool_id: UUID
-) -> m.NtagConfirm:
-    await _spool_or_404(filament, spool_id)
-    settings = await asyncio.to_thread(store.load)
-    try:
-        async with client_for(settings) as client:
-            confirmed = await ntag.confirm(filament, client, spool_id, actor=actor(caller))
-    except ntag.NtagNoBambuddySpoolError as exc:
-        raise _ntag_refused(exc) from None
-    if confirmed.bound:
-        await _push_now(filament, store)
-    return confirmed
-
-
-@router.post(
-    "/spools/{spool_id}/ntag/cancel",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Cancel a queued NTAG write",
-    description=("Drops the write the SpoolBuddy `device_id` has queued. 404 for no such spool."),
-)
-async def cancel_ntag(
-    filament: FilamentDep, store: SettingsStoreDep, spool_id: UUID, body: m.NtagCancel
-) -> Response:
-    await _spool_or_404(filament, spool_id)
-    settings = await asyncio.to_thread(store.load)
-    async with client_for(settings) as client:
-        await ntag.cancel(filament, client, spool_id, body.device_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)

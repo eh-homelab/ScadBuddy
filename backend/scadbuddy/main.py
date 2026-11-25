@@ -12,6 +12,7 @@ from functools import partial
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.routing import iter_route_contexts
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from pydantic import BaseModel
 from temporalio import activity
@@ -49,6 +50,7 @@ from scadbuddy.api import (
     order_attachments,
     outputs,
     print_attachments,
+    tasks,
     telemetry,
 )
 from scadbuddy.api.accepting import install_accepting_handler, note_preference
@@ -2124,6 +2126,19 @@ async def _import_presets(state: AppState) -> PresetImport:
     return await import_from_bambuddy(state.settings_store.pool, state.store.blobs, loaded)
 
 
+async def _built_off_loop[T](build: Callable[[], T]) -> T:
+    """``build()`` in a thread (#7359). A Temporal ``Worker`` runs each workflow once in
+    the sandbox to check it, which imports the workflow's modules: on an API pod that
+    had just started that held the loop 2 s. The check's workflow instance asks for the
+    running loop, so the thread runs one of its own for the build; nothing the build
+    makes stays bound to it."""
+
+    async def built() -> T:
+        return build()
+
+    return await asyncio.to_thread(asyncio.run, built())
+
+
 async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     """Serve the ``library`` queue until ``stop`` (#1054): the housekeeping Schedule's
     sweeps and the preview backfill need the data volume this process holds. Once
@@ -2224,14 +2239,17 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
     ]
     try:
         while not stop.is_set():
-            worker = library_worker(
-                client,
-                queue,
-                activities,
-                workflows=LIBRARY_WORKFLOWS,
-                workflow_runner=sandboxed_runner(),
-                graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
-                deployment_config=library_deployment(build_id),
+            worker = await _built_off_loop(
+                partial(
+                    library_worker,
+                    client,
+                    queue,
+                    activities,
+                    workflows=LIBRARY_WORKFLOWS,
+                    workflow_runner=sandboxed_runner(),
+                    graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
+                    deployment_config=library_deployment(build_id),
+                )
             )
             if not await _serve_until([worker], stop, name="library"):
                 with suppress(TimeoutError):
@@ -2388,6 +2406,17 @@ LIBRARY_GRACEFUL_SHUTDOWN = timedelta(seconds=30)
 LIBRARY_WORKER_STOP_TIMEOUT = LIBRARY_GRACEFUL_SHUTDOWN.total_seconds() + SWEEP_SHUTDOWN_JOIN + 10.0
 
 
+def _build_route_contexts(app: FastAPI) -> None:
+    """Build what FastAPI builds on the first walk of the routes: each route's
+    dependencies, signatures read with their annotations evaluated (#7359). The server
+    span's name (`FastAPIInstrumentor`) comes from a walk of every route, so the first
+    traced request made it, on the loop: 1.1 to 9.7 s on a new API pod, measured from
+    `core/loop_watch.py`'s stacks on prod, 2026-11-24. FastAPI keeps it until the routes
+    change, and nothing adds one after `create_app`. Blocking: run it off the loop."""
+    for _ in iter_route_contexts(app.routes):
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
@@ -2435,8 +2464,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             history=state.history,
             fonts=state.fonts,
             metrics=state.metrics,
-            # #2788: on the API's /data, so every replica shares it.
+            # #2788: on the API's /data, so every replica shares it, unless set
+            # elsewhere: a node-local one (#7316) may be marked this container's alone.
             downloads_dir=state.config.download_cache_dir or state.paths.cache / DOWNLOADS_DIRNAME,
+            downloads_private=state.config.download_cache_dir is not None
+            and state.config.download_cache_private,
         )
         # Plan 2026-10-17 Ruling 3: from any source, the environment's seed included
         # (a save never checks a seeded value), `native` needs a content store.
@@ -2589,6 +2621,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # backfill's Schedule (#1054), triggered once the library worker connects.
         if state.previews is not None:
             state.previews.start()
+        # #7359: every route's dependencies, before either port takes a request.
+        await asyncio.to_thread(_build_route_contexts, app)
         # #5298 (plan D3): the workers' CRUD port, once the app can answer.
         await crud_listener.start(app, state.settings.crud_port)
         logger.info(
@@ -2742,6 +2776,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
+            # A task's answer is small (#7364).
+            tasks.ANSWER_ROUTE_LIMIT,
             # The slicer worker's upload (plan 2026-10-16-native-slicer-rust-worker).
             internal_blobs.PUT_ROUTE_LIMIT,
             # A native run's per-print copy from the print worker (#3818 tier A Task 4).

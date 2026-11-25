@@ -40,9 +40,28 @@ def projection(pg_conninfo: str) -> Iterator[JobProjection]:
         store.close()
 
 
+class _Clock:
+    """The client's clock: the real one, moved on by `end_budget`."""
+
+    def __init__(self) -> None:
+        self.offset = 0.0
+
+    def __call__(self) -> float:
+        return time.monotonic() + self.offset
+
+    def end_budget(self) -> None:
+        """Spend the current call's retry budget, so the try in flight is its last."""
+        self.offset += 3600
+
+
 @pytest.fixture
-async def jobs(projection: JobProjection) -> AsyncIterator[RemoteJobProjection]:
-    async with served_render_jobs(projection, unavailable_budget=0.5) as remote:
+def clock() -> _Clock:
+    return _Clock()
+
+
+@pytest.fixture
+async def jobs(projection: JobProjection, clock: _Clock) -> AsyncIterator[RemoteJobProjection]:
+    async with served_render_jobs(projection, unavailable_budget=0.5, clock=clock) as remote:
         yield remote
 
 
@@ -192,12 +211,18 @@ async def test_a_finish_to_an_unfinished_state_is_a_422(
 
 
 async def test_a_500_from_the_accept_route_does_not_pass(
-    jobs: RemoteJobProjection, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+    jobs: RemoteJobProjection,
+    projection: JobProjection,
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An error the route does not expect fails the accept fast, as a 5xx, which the
-    worker does not take for a state that passes (`render_accept`)."""
+    worker does not take for a state that passes (`render_accept`). The route's answer
+    ends the budget: the error names the last try's failure, and a retry that a loaded
+    runner stalls past `ACCEPT_TIMEOUT` would be a read timeout, `transport` (#7525)."""
 
     def broken(*_: object, **__: object) -> Job:
+        clock.end_budget()
         raise RuntimeError("relation render_jobs has no column x")
 
     monkeypatch.setattr(projection, "accept", broken)
@@ -240,9 +265,15 @@ async def test_a_slow_route_makes_a_project_write_raise_inside_its_attempt(
 
 
 async def test_a_database_out_of_reach_at_the_accept_route_passes(
-    jobs: RemoteJobProjection, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+    jobs: RemoteJobProjection,
+    projection: JobProjection,
+    clock: _Clock,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """As a 500: the route's answer ends the budget, so its 503 is the last try's."""
+
     def unreachable(*_: object, **__: object) -> Job:
+        clock.end_budget()
         raise psycopg.OperationalError("connection refused")
 
     monkeypatch.setattr(projection, "accept", unreachable)

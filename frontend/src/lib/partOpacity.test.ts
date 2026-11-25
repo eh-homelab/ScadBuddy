@@ -186,6 +186,20 @@ describe('recolourSlots (#6710 §8.2)', () => {
     expect(shared.color.getHexString(THREE.SRGBColorSpace)).toBe('808080')
   })
 
+  it('clones a translucent slotted material once', () => {
+    const { root, shared, top } = slotted()
+    top.userData.scadbuddy_alpha = 128
+    const clear = withPartOpacity(root)
+    const own = ownSlotMaterials(root, clear)
+    expect(clear).toEqual([top.material])
+    expect(own).toHaveLength(1)
+    recolourSlots(root, { 1: '#1B6CA8' })
+    const material = top.material as THREE.MeshStandardMaterial
+    expect(material.color.getHexString(THREE.SRGBColorSpace)).toBe('1b6ca8')
+    expect(material.opacity).toBeCloseTo(128 / 255)
+    expect(shared.color.getHexString(THREE.SRGBColorSpace)).toBe('808080')
+  })
+
   it("keeps a slot with no colour given in the file's own colour", () => {
     const { root, body } = slotted()
     ownSlotMaterials(root)

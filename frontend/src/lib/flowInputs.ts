@@ -3,10 +3,13 @@
  * closed subset of JSON Schema the backend checks, `flows/inputs.py`), as the Start run
  * form draws it and the editor reads it. The backend checks the values again when the
  * run starts and fills in the defaults; this only turns the form's text into JSON.
+ *
+ * #7364 — a prompt's schema is the same subset, and its strings may have a `format`.
  */
 
 export type InputScalar = 'string' | 'integer' | 'number' | 'boolean'
 export type InputType = InputScalar | 'array'
+export type InputFormat = 'email' | 'date' | 'date-time'
 
 export interface InputField {
   name: string
@@ -19,6 +22,7 @@ export interface InputField {
   required: boolean
   default?: unknown
   enum?: (string | number)[]
+  format?: InputFormat
   minimum?: number
   maximum?: number
 }
@@ -27,6 +31,7 @@ export interface InputField {
 export type InputValues = Record<string, string | boolean>
 
 const SCALARS = new Set(['string', 'integer', 'number', 'boolean'])
+const FORMATS = new Set<unknown>(['email', 'date', 'date-time'] satisfies InputFormat[])
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -51,11 +56,68 @@ export function inputFields(schema: unknown): InputField[] {
         required: required.has(name),
         ...('default' in prop ? { default: prop['default'] } : {}),
         ...(Array.isArray(prop['enum']) ? { enum: prop['enum'] as (string | number)[] } : {}),
+        ...(type === 'string' && FORMATS.has(prop['format']) ? { format: prop['format'] as InputFormat } : {}),
         ...(typeof prop['minimum'] === 'number' ? { minimum: prop['minimum'] } : {}),
         ...(typeof prop['maximum'] === 'number' ? { maximum: prop['maximum'] } : {}),
       },
     ]
   })
+}
+
+/** #7364 — the titles of the schema's properties that `inputFields` has no field for. */
+export function undrawnFields(schema: unknown): string[] {
+  if (!isObject(schema) || !isObject(schema['properties'])) return []
+  const drawn = new Set(inputFields(schema).map((field) => field.name))
+  return Object.entries(schema['properties']).flatMap(([name, prop]) => {
+    if (drawn.has(name)) return []
+    return [isObject(prop) && typeof prop['title'] === 'string' && prop['title'] ? prop['title'] : name]
+  })
+}
+
+/** `at` in the browser's time zone as RFC 3339, its offset apart; null for a year it cannot write. */
+function localParts(at: Date): { wall: string; offset: string } | null {
+  if (Number.isNaN(at.getTime())) return null
+  // Whole minutes: an offset has no seconds, and the wall time moves with it.
+  const minutes = -Math.trunc(at.getTimezoneOffset())
+  const wall = new Date(at.getTime() + minutes * 60_000).toISOString()
+  if (!/^\d{4}-/.test(wall)) return null
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const size = Math.abs(minutes)
+  return {
+    wall: wall.slice(0, -1).replace(/\.000$/, ''),
+    offset: `${minutes < 0 ? '-' : '+'}${pad(Math.floor(size / 60))}:${pad(size % 60)}`,
+  }
+}
+
+/** A `date-time` value as a `datetime-local` input takes it, in the browser's time zone. */
+function localInput(value: string): string {
+  const parts = localParts(new Date(value.toUpperCase()))
+  return parts ? parts.wall.replace(/:00$/, '') : ''
+}
+
+/** What a `datetime-local` input holds, with the offset the browser's zone has at that time. */
+function withOffset(text: string): string | null {
+  const parts = localParts(new Date(text))
+  return parts && parts.wall + parts.offset
+}
+
+const isDateTime = (field: InputField) => field.format === 'date-time' && !field.enum
+const isDated = (field: InputField) => isDateTime(field) || (field.format === 'date' && !field.enum)
+
+/** A field's default as a person reads it: a date-time in local time. */
+export function defaultText(field: InputField): string {
+  const { default: value } = field
+  if (value === undefined || value === null) return ''
+  if (isDateTime(field)) {
+    const at = new Date(String(value).toUpperCase())
+    if (!Number.isNaN(at.getTime())) return at.toLocaleString()
+  }
+  return Array.isArray(value) ? value.join(', ') : String(value)
+}
+
+/** An array's items as typed, one per line, with the line of each: a blank line is no item. */
+export function itemLines(text: string): { line: number; text: string }[] {
+  return text.split('\n').flatMap((item, i) => (item.trim() === '' ? [] : [{ line: i + 1, text: item }]))
 }
 
 /** The form at each input's default: an array one item per line. */
@@ -65,12 +127,18 @@ export function initialValues(fields: InputField[]): InputValues {
       if (field.type === 'boolean') return [field.name, field.default === true]
       if (field.default === undefined || field.default === null) return [field.name, '']
       if (Array.isArray(field.default)) return [field.name, field.default.map(String).join('\n')]
+      if (isDateTime(field)) return [field.name, localInput(String(field.default))]
       return [field.name, String(field.default)]
     }),
   )
 }
 
-function scalar(type: InputScalar, text: string): { value?: unknown; error?: string } {
+interface Parsed {
+  value?: unknown
+  error?: string
+}
+
+function scalar(type: InputScalar, text: string): Parsed {
   if (type === 'integer') {
     const value = Number(text)
     return text.trim() !== '' && Number.isInteger(value) ? { value } : { error: 'a whole number' }
@@ -86,6 +154,9 @@ function scalar(type: InputScalar, text: string): { value?: unknown; error?: str
   return { value: text }
 }
 
+/** Errors by field: no prototype, because a field may be named `constructor`. */
+export const noErrors = (): Record<string, string> => Object.create(null) as Record<string, string>
+
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
 
 /**
@@ -93,13 +164,18 @@ const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
  * left out, so the backend fills in its default; a blank required one is an error. A
  * string or array that has a default starts filled with it, so blanking it is a choice:
  * it is sent empty (`""`, `[]`), never swapped back for the default (#2662).
+ *
+ * #7364 — with `answer`, a prompt's: every blank is left out, and a blank required one is
+ * an error whatever its default, because a task's answer is checked before its defaults.
+ * `unread` are the fields that only look blank: the browser could not read what they hold.
  */
 export function toInputs(
   fields: InputField[],
   values: InputValues,
+  { answer = false, unread = [] }: { answer?: boolean; unread?: readonly string[] } = {},
 ): { inputs: Record<string, unknown>; errors: Record<string, string> } {
   const inputs: Record<string, unknown> = {}
-  const errors: Record<string, string> = {}
+  const errors = noErrors()
   for (const field of fields) {
     const raw = values[field.name]
     if (field.type === 'boolean') {
@@ -107,8 +183,15 @@ export function toInputs(
       continue
     }
     const text = typeof raw === 'string' ? raw : ''
+    if (unread.includes(field.name)) {
+      const number = field.type === 'integer' || field.type === 'number' ? scalar(field.type, '') : ({} as Parsed)
+      errors[field.name] = capital(number.error ?? 'this is not complete')
+      continue
+    }
     if (text.trim() === '') {
-      if (field.default != null && !field.enum && (field.type === 'string' || field.type === 'array')) {
+      if (answer) {
+        if (field.required) errors[field.name] = 'Required'
+      } else if (field.default != null && !field.enum && (field.type === 'string' || field.type === 'array')) {
         // A string as typed: spaces someone entered are theirs, not a cleared field.
         inputs[field.name] = field.type === 'string' ? text : []
       } else if (field.required && field.default === undefined) errors[field.name] = 'Required'
@@ -116,13 +199,28 @@ export function toInputs(
     }
     if (field.type === 'array') {
       const items: unknown[] = []
-      text.split('\n').forEach((line, i) => {
-        if (line.trim() === '' || errors[field.name]) return
-        const parsed = scalar(field.itemType ?? 'string', field.itemType === 'string' ? line : line.trim())
-        if (parsed.error) errors[field.name] = `Line ${i + 1}: ${parsed.error}`
-        else items.push(parsed.value)
-      })
+      for (const { line, text: item } of itemLines(text)) {
+        const parsed = scalar(field.itemType ?? 'string', field.itemType === 'string' ? item : item.trim())
+        if (parsed.error) {
+          errors[field.name] = `Line ${line}: ${parsed.error}`
+          break
+        }
+        items.push(parsed.value)
+      }
       if (!errors[field.name]) inputs[field.name] = items
+      continue
+    }
+    // A date input takes it, and no server does.
+    if (isDated(field) && /^\d{5}/.test(text)) {
+      errors[field.name] = 'The year must have four digits'
+      continue
+    }
+    if (isDateTime(field)) {
+      // Untouched, it is sent as it came: the local time has lost its offset.
+      const untouched = typeof field.default === 'string' && localInput(field.default) === text
+      const sent = untouched ? field.default : withOffset(text)
+      if (sent === null) errors[field.name] = 'A date and a time'
+      else inputs[field.name] = sent
       continue
     }
     const parsed = scalar(field.type, text)

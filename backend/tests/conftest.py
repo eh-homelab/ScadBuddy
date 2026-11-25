@@ -114,7 +114,10 @@ def sdk_deadlock_bound(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every worker the test builds keeps the SDK's 2 s bound, its own or one a helper
     builds (`verify_pipeline.verify`): a test whose activation never yields needs the
     detector to fire as in production. With the session's 30 s, the worker's shutdown
-    waited for the stuck activation until the detector fired (#7522)."""
+    waited for the stuck activation until the detector fired (#7522). The bound is read
+    when a worker is built, so a worker built in a fixture that pytest sets up before
+    this one keeps the 30 s bound: build it in the test, or in a fixture that takes this
+    one (#7539)."""
     monkeypatch.setitem(globals(), "TEST_DEADLOCK_SECONDS", SDK_DEADLOCK_SECONDS)
 
 

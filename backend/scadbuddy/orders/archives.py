@@ -374,6 +374,9 @@ async def mirror_attempt(
             now,
         )
     except Exception:
+        # The attempt's earlier "not offered" rows stay on purpose: the sweep keeps
+        # skipping those media until a step succeeds, and a step a trigger starts
+        # still asks the archives for the media.
         logger.warning("could not import the media of attempt %s", fulfilment_id, exc_info=True)
         missing = True
     try:

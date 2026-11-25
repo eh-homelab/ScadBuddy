@@ -14,9 +14,20 @@ import type { StoreEstimate } from '../api/client'
  * estimate answers. A `last` price is never shown as firm, whatever `updating` says.
  *
  * #6710: with `held` (a file listing's page), no update will come: the price stays, and the
- * page says it is the last one, not the price of the choices on screen.
+ * page says it is the last one, not the price of the choices on screen. With `orderable`
+ * false (#7523: the design cannot be ordered) the page promises no price of an order.
  */
-export function Estimate({ estimate, updating = false, held = false }: { estimate: StoreEstimate; updating?: boolean; held?: boolean }) {
+export function Estimate({
+  estimate,
+  updating = false,
+  held = false,
+  orderable = true,
+}: {
+  estimate: StoreEstimate
+  updating?: boolean
+  held?: boolean
+  orderable?: boolean
+}) {
   if (estimate.source === 'pending') {
     return (
       <div className="sf-estimate" role="status">
@@ -29,7 +40,7 @@ export function Estimate({ estimate, updating = false, held = false }: { estimat
     return (
       <div className="sf-estimate" role="status">
         <p className="sf-estimate-price">We price this design by hand</p>
-        <p className="sf-estimate-note">Add it to your order, and we will send you the price before you pay.</p>
+        {orderable && <p className="sf-estimate-note">Add it to your order, and we will send you the price before you pay.</p>}
       </div>
     )
   }
@@ -38,7 +49,7 @@ export function Estimate({ estimate, updating = false, held = false }: { estimat
     return (
       <div className="sf-estimate" role="status">
         <p className="sf-estimate-price">{`${price} for one`}</p>
-        <p className="sf-estimate-note">This was our last price. We confirm the price before you pay.</p>
+        <p className="sf-estimate-note">{orderable ? 'This was our last price. We confirm the price before you pay.' : 'This was our last price.'}</p>
       </div>
     )
   }

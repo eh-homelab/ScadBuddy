@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
 
 from scadbuddy.bambuddy.models import ProcessValue
 from scadbuddy.bambuddy.stages import Stage
-from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
+from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths, result_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url
@@ -715,6 +715,7 @@ class OutputStore:
         inputs: Mapping[str, Any] | None = None,
         index: int = 0,
         files_dir: Path | None = None,
+        blobs_root: Path | None = None,
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
         print_settings: Mapping[str, ProcessValue] | None = None,
@@ -722,10 +723,12 @@ class OutputStore:
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
-        files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
-        that holds the output's Parts first name the output before it exists: a fresh id,
-        or one the caller holds the :meth:`claim` of, since a failed write removes the
-        directory.
+        files (the caller's ``dir_for(files_key) / "files"``). ``blobs_root`` is the
+        caller's blob store's root, where the job's ``blobs/<key>/<file>`` files are
+        (#7318: a node-local cache); the data volume's ``blobs/`` by default.
+        ``output_id`` lets a caller that holds the output's Parts first name the output
+        before it exists: a fresh id, or one the caller holds the :meth:`claim` of, since
+        a failed write removes the directory.
         ``print_settings`` are the template's (#770), written into the saved 3MF.
         ``source`` says who saved it (#6371)."""
         if job.outputs and not 0 <= index < len(job.outputs):
@@ -747,7 +750,9 @@ class OutputStore:
         # Every copy and write, or none: a failure part-way (a source gone from the
         # store, a full disk) leaves no half-written output behind to list.
         try:
-            shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
+            blobs, root = blobs_root or self.paths.blobs, self.paths.root
+            preview = result_path(result.preview_glb, blobs_root=blobs, data_root=root)
+            shutil.copyfile(preview, directory / PREVIEW_NAME)
             (directory / PARAMS_NAME).write_text(
                 json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
             )
@@ -770,7 +775,7 @@ class OutputStore:
                     edit_url=edit_url(public_url, output_id),
                 ),
                 print_settings,
-                source=self.paths.root / result.model_3mf,
+                source=result_path(result.model_3mf, blobs_root=blobs, data_root=root),
             )
 
             if chosen is not None:

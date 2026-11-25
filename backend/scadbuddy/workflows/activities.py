@@ -785,6 +785,7 @@ class RenderActivities:
                             slug=req.slug,
                             thumbnail_executor=d.thumbnail_executor,
                             stage=_stage(d.metrics),
+                            blobs_root=d.blobs.root,
                         )
                     )
                 )

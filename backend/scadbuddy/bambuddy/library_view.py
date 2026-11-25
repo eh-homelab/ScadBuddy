@@ -89,12 +89,19 @@ class NotViewableError(Exception):
         self.reason = reason
 
 
-#: Where a library file is spooled while it is read, under the data volume's cache.
+#: Where a library file is spooled while it is read, under :func:`library_spool`'s root.
 SPOOL_DIRNAME = "library-spool"
 #: What a spooled download leaves free on its volume: a file of any size is read, but
 #: not by filling the volume that holds the models, outputs and their history. Checked
 #: before each 1 MiB chunk, so spools running at once may each go one chunk past it.
 SPOOL_RESERVE_BYTES = RESERVE_BYTES
+
+
+def library_spool(cache: Path, downloads: DownloadCache | None) -> Path:
+    """Where a read of a library file spools it: under the spool root the store resolved
+    onto ``downloads`` (``SCADBUDDY_SPOOL_DIR``, #7316), else under ``cache``."""
+    root = downloads.spool if downloads is not None else None
+    return (root or cache) / SPOOL_DIRNAME
 
 
 def _room(spool: Path) -> Callable[[], bool]:
@@ -114,22 +121,22 @@ async def spooled_3mf(
     downloads: DownloadCache | None = None,
     file_hash: str | None = None,
 ) -> AsyncIterator[BinaryIO | None]:
-    """``source``'s 3MF downloaded whole into an unnamed file under ``cache``, open at
-    its start; ``None`` for an STL that holds no mesh. A library file of any size can be
-    read this way: what the read may cost is ``budget``'s to say, not the file's size
-    (an STL past it is :class:`~scadbuddy.render.objects3mf.OverBudgetError` before it
-    is wrapped). It stops as :class:`SpoolFullError` before the volume's last
-    :data:`SPOOL_RESERVE_BYTES`.
+    """``source``'s 3MF downloaded whole into an unnamed file under :func:`library_spool`
+    (the ``SCADBUDDY_SPOOL_DIR``, #7316, or ``cache``), open at its start; ``None`` for
+    an STL that holds no mesh. A library file of any size can be read this way: what the
+    read may cost is ``budget``'s to say, not the file's size (an STL past it is
+    :class:`~scadbuddy.render.objects3mf.OverBudgetError` before it is wrapped). It
+    stops as :class:`SpoolFullError` before the volume's last :data:`SPOOL_RESERVE_BYTES`.
 
     #2788: a 3MF whose hash Bambuddy states is read from ``downloads`` when another
     read, in any process, downloaded the same bytes; else it is downloaded into it.
     An STL is not kept: what is read is its wrapped 3MF, not the file's bytes."""
+    spool = library_spool(cache, downloads)
     if downloads is not None and source.file_type == "3mf" and is_sha256(file_hash):
-        spool = cache / SPOOL_DIRNAME
-        # Read from a checked private copy, never the shared entry itself. A fault in
-        # the cache reads as a miss.
+        # Read from a checked private copy, never a shared entry itself (a private
+        # directory's entry is read in place, #7316). A fault in the cache reads as a miss.
         copy = await asyncio.to_thread(
-            downloads.private_copy, file_hash, spool, what="library_file"
+            downloads.read_checked, file_hash, spool, what="library_file"
         )
         if copy is not None:
             with copy:
@@ -151,7 +158,6 @@ async def spooled_3mf(
             await asyncio.to_thread(out.seek, 0)
             yield out
         return
-    spool = cache / SPOOL_DIRNAME
     await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
     with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
         if not await source.write_3mf(client, out, budget, _room(spool)):

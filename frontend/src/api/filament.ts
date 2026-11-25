@@ -204,16 +204,68 @@ export const deleteSpool = (id: string) => request<void>(`${BASE}/spools/${seg(i
 export const bindTag = (spoolId: string, body: TagBind) =>
   request<TagBinding>(`${BASE}/spools/${seg(spoolId)}/tags`, json('POST', body))
 
-// -- NTAG through SpoolBuddy (#6264) --------------------------------------------------
+// -- tags read through Web NFC (#7273) -----------------------------------------------------
 
-export type ScanResult = Schemas['ScanResult']
-export type NtagQueued = Schemas['NtagQueued']
-export type NtagConfirm = Schemas['NtagConfirm']
+export type TagReadIn = Schemas['TagReadIn']
+export type TagReadResult = Schemas['TagReadResult']
+export type NdefRecord = Schemas['NdefRecord']
+export type DecodedSpool = Schemas['DecodedSpool']
+
+/**
+ * One phone read: finds or makes the tag by its UID, and answers its spool, what its records
+ * decode to, a new spool's draft, and what to do `next`. With `bind_spool_id`, binds it there first.
+ */
+export const postTagRead = (body: TagReadIn) => request<TagReadResult>(`${BASE}/tags/reads`, json('POST', body))
+
+export type TagBackup = Schemas['TagBackup']
+export type TagBackupIn = Schemas['TagBackupIn']
+export type TagRecords = Schemas['TagRecords']
+export type TagRecordsIn = Schemas['TagRecordsIn']
+export type TagWrittenIn = Schemas['TagWrittenIn']
+
+/** Keeps what a tag holds just before a write (G7); the write names the `backup_id`. */
+export const createTagBackup = (body: TagBackupIn, signal?: AbortSignal) =>
+  request<Schemas['TagBackupMade']>(`${BASE}/tags/backups`, { ...json('POST', body), signal })
+
+/** A tag's backups, newest first (the first page, up to 50). */
+export const listTagBackups = (tagId: string) => request<TagBackup[]>(`${BASE}/tags/${seg(tagId)}/backups`)
+
+/** The records that put the spool on the tag just read and backed up; the server picks the format (G2). */
+export const spoolTagRecords = (spoolId: string, body: TagRecordsIn) =>
+  request<TagRecords>(`${BASE}/spools/${seg(spoolId)}/tag-records`, json('POST', body))
+
+/** Checks a write against its read-back and binds the tag to the spool. */
+export const spoolTagWritten = (spoolId: string, body: TagWrittenIn) =>
+  request<TagReadResult>(`${BASE}/spools/${seg(spoolId)}/tag-written`, json('POST', body))
+
+/** A backup's records, to write back; `body` names a fresh `restore` backup of the tag as just read. */
+export const restoreTagBackup = (tagId: string, backupId: string, body: TagRecordsIn) =>
+  request<TagRecords>(`${BASE}/tags/${seg(tagId)}/backups/${seg(backupId)}/restore`, json('POST', body))
+
+export type NfcJob = Schemas['NfcJob']
+export type NfcJobClaimIn = Schemas['NfcJobClaimIn']
+export type NfcJobResultIn = Schemas['NfcJobResultIn']
+
+/** The agents' NFC jobs no page armed yet, oldest first (G4). */
+export const listPendingNfcJobs = () => request<NfcJob[]>(`${BASE}/nfc-jobs?state=pending`)
+
+/** One job and its `state`; the page watches the job it armed, as the agent can cancel it (R23). */
+export const getNfcJob = (id: string) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}`)
+
+/**
+ * Arms a job for this page. A write job's claim names the `records_sha256` of the records the
+ * person saw (R22): 409 `records_mismatch` when the job holds others, `job_not_pending` once it ended.
+ */
+export const claimNfcJob = (id: string, body: NfcJobClaimIn = {}) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/claim`, json('POST', body))
+
+/** Ends an armed job with what the tag gave, or with an `error`. */
+export const postNfcJobResult = (id: string, body: NfcJobResultIn) => request<NfcJob>(`${BASE}/nfc-jobs/${seg(id)}/result`, json('POST', body))
+
+// -- The RFID override mode (#6264) --------------------------------------------------
+
 export type RfidStatus = Schemas['RfidStatus']
 export type RfidReconcileReport = Schemas['RfidReconcileReport']
-export type SpoolBuddyDevice = Schemas['SpoolBuddyDevice']
 
-/** `devices` is read only by the GET: the PUT answers an empty list. */
 export const getRfidStatus = () => request<RfidStatus>(`${BASE}/rfid/status`)
 
 /** Waits up to 5 s for the write to land: `pending` with the detail `busy` means it applies on the next refresh. */
@@ -273,28 +325,6 @@ export const resetSyncLinks = (confirmInstance: string, expectKept: boolean) =>
     `${BASE}/sync/reset-links`,
     json('POST', { confirm_instance: confirmInstance, expect_kept: expectKept }),
   )
-
-/**
- * Waits up to `timeoutS` seconds (1 to 50) for a tag at a SpoolBuddy reader; a timeout is a 200 with
- * `status: 'timeout'`. The request stays open that long: pass a `signal` to stop waiting.
- */
-export const scanTag = (options: { timeoutS?: number; deviceId?: string } = {}, signal?: AbortSignal) =>
-  request<ScanResult>(`${BASE}/rfid/scan`, {
-    ...json('POST', { timeout_s: options.timeoutS, device_id: options.deviceId }),
-    signal,
-  })
-
-/** Queues one tag write on the device for the spool's Bambuddy record; binds nothing (see `confirmNtag`). */
-export const writeNtag = (spoolId: string, deviceId: string, replace = false) =>
-  request<NtagQueued>(`${BASE}/spools/${seg(spoolId)}/ntag/write`, json('POST', { device_id: deviceId, replace }))
-
-/** Binds the tag Bambuddy wrote, when it did; `bound: false` changes nothing. */
-export const confirmNtag = (spoolId: string) =>
-  request<NtagConfirm>(`${BASE}/spools/${seg(spoolId)}/ntag/confirm`, { method: 'POST' })
-
-/** Drops the write the device has queued. */
-export const cancelNtag = (spoolId: string, deviceId: string) =>
-  request<void>(`${BASE}/spools/${seg(spoolId)}/ntag/cancel`, json('POST', { device_id: deviceId }))
 
 export const unbindTag = (tagId: string) => request<TagBinding>(`${BASE}/tags/${seg(tagId)}/binding`, { method: 'DELETE' })
 
