@@ -9,6 +9,7 @@ import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasing
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
+import { entityMock } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -839,5 +840,32 @@ describe("the spool page's Advanced toggle", () => {
     await user.click(screen.getByRole('button', { name: 'Discard changes' }))
     expect(screen.queryByLabelText('Diameter (mm)')).toBeNull()
     expect(screen.queryByRole('checkbox', { name: /Lock the weight/ })).toBeNull()
+  })
+
+  describe('defined and required properties (#7703)', () => {
+    it('saves the row and its defined properties with one request', async () => {
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+      const { user } = render('/filament/spools/new')
+      await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      expect(await screen.findByText('Fill the required properties first: lot_number.')).toBeVisible()
+      expect(screen.getByLabelText('lot_number')).toHaveAttribute('aria-invalid', 'true')
+      await user.type(screen.getByLabelText('lot_number'), 'L-7')
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(async () => expect((await listSpools()).length).toBe(12))
+      expect(posts.at(-1)).toMatchObject({ quantity: 1, spool: { properties: { lot_number: 'L-7' } } })
+      const made = (await listSpools()).find((one) => one.number === 20)!
+      expect(entityMock.properties.get(`spool:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['lot_number', 'L-7']])
+    })
+
+    it('an edit sends a changed defined property with its PATCH', async () => {
+      const patches = recorded('PATCH', new RegExp(`/filament/spools/${spoolId(1)}$`))
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('lot_number'), 'L-9')
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'lot_number')?.value).toBe('L-9'))
+      expect(patches).toEqual([{ properties: { lot_number: 'L-9' } }])
+    })
   })
 })

@@ -6,6 +6,7 @@ import { getType, listTypes, startProfileFetch, upsertType } from '../../api/fil
 import { listShopping, patchSupplier } from '../../api/filamentPurchasing'
 import { SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { server } from '../../mocks/server'
+import { entityMock } from '../../mocks/features/entities'
 import { T } from '../../mocks/features/filament/seed'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -516,5 +517,26 @@ describe('the 3DFP id and fetch (#6625)', () => {
     await waitFor(() => expect(within(table).getAllByDisplayValue('H2C')).toHaveLength(4))
     for (const nozzle of ['0.2', '0.4', '0.6', '0.8']) expect(within(table).getByDisplayValue(nozzle)).toBeInTheDocument()
     expect(screen.getByLabelText('Colour name')).toHaveValue('Jade')
+  })
+
+  describe('defined and required properties (#7703)', () => {
+    it('saves the row and its defined properties with one request', async () => {
+      const patches: Record<string, unknown>[] = []
+      server.events.on('request:start', ({ request }) => {
+        if (request.method === 'PATCH' && new URL(request.url).pathname === `/api/v1/filament/types/${T.JADE}`) void request.clone().json().then((body) => patches.push(body as Record<string, unknown>))
+      })
+      entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+      const { user } = render(`/filament/types/${T.JADE}`)
+      const note = await screen.findByLabelText('Note')
+      await user.type(note, 'x')
+      await user.click(screen.getByRole('button', { name: 'Save type' }))
+      expect(await screen.findByText('Fill the required properties first: mpn.')).toBeVisible()
+      expect(screen.getByLabelText('mpn')).toHaveAttribute('aria-invalid', 'true')
+      await user.type(screen.getByLabelText('mpn'), 'A00-W1')
+      await user.click(screen.getByRole('button', { name: 'Save type' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool_type:${T.JADE}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'A00-W1']]))
+      expect(patches.at(-1)).toEqual({ note: 'x', properties: { mpn: 'A00-W1' } })
+      expect((await getType(T.JADE)).note).toBe('x')
+    })
   })
 })

@@ -3,7 +3,11 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router'
 import { ApiError } from '../../api/client'
 import { isAliasedKind, listCatalog, upsertCatalog, type CatalogInput, type CatalogKind } from '../../api/filament'
+import { useAsync } from '../../lib/useAsync'
+import { entityApi, type PropertyValue } from '../entities/api'
 import { AttachmentsPanel } from '../entities/AttachmentsPanel'
+import { DefinedFields } from '../entities/DefinedFields'
+import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../entities/definedProperties'
 import { KindKeysForm } from '../entities/KindKeysForm'
 import { LinksPanel } from '../entities/LinksPanel'
 import { PropertiesPanel } from '../entities/PropertiesPanel'
@@ -114,6 +118,13 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   const [formError, setFormError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [editingKeys, setEditingKeys] = useState(false)
+  // #7703: the kind's defined keys are fields of the row's form, saved with it.
+  const keys = useAsync(() => entityApi.propertySchema(spec.entity), [spec.entity, editingKeys])
+  const schema = keys.data?.schema ?? {}
+  const requiresKeys = Array.isArray(schema.required) && schema.required.length > 0
+  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
+  const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
   const [search, setSearch] = useState('')
   const [asked, setAsked] = useState('')
   // A catalog where every row is drawn and may be re-ordered; colours are searched instead.
@@ -126,7 +137,25 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
   }, [search, searched])
 
   const refs = [...new Set(spec.fields.flatMap((field) => (field.ref ? [field.ref] : [])))]
-  const needsMore = spec.fields.some((field) => field.required)
+  const needsMore = spec.fields.some((field) => field.required) || requiresKeys
+
+  /** Opens the row's form (a new row's without one), with its defined properties. */
+  async function open(row?: Row) {
+    setFormError(null)
+    setFieldErrors(undefined)
+    let values: Record<string, PropertyValue | undefined> = {}
+    if (row) {
+      try {
+        values = Object.fromEntries((await entityApi.properties(`${spec.entity}:${row.id}`)).map((p) => [p.key, p.value]))
+      } catch (cause) {
+        setError(message(cause))
+        return
+      }
+    }
+    setDefined(values)
+    setDefinedBefore(values)
+    setDraft(draftOf(spec.fields, row))
+  }
 
   // Each load's number: an answer to any but the newest is dropped, so a late answer to
   // an older search never replaces a newer one's rows.
@@ -191,6 +220,8 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
         const before = was ? sent(field, draftOf(spec.fields, was).values[field.name] ?? null) : null
         if (was ? JSON.stringify(value) !== JSON.stringify(before) : value !== null && value !== false) body[field.name] = value
       }
+      const properties = propertiesPatch(schema, definedBefore, defined)
+      if (Object.keys(properties).length > 0) body.properties = properties
       if (was) {
         if (Object.keys(body).length > 0) await write(kind, body, was.id)
       } else {
@@ -199,6 +230,9 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
       setDraft(null)
       await load()
     } catch (cause) {
+      const refused = fieldErrorsOf(cause)
+      setFieldErrors(refused ?? undefined)
+      if (refused) return setFormError(refusalText(refused))
       setFormError(cause instanceof Error && !(cause instanceof ApiError) ? cause.message : message(cause))
     } finally {
       setSaving(false)
@@ -300,6 +334,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           </label>
         )
       })}
+      <DefinedFields schema={schema} values={defined} onChange={setDefined} errors={fieldErrors} />
       {isAliasedKind(kind) && draft.id && (
         <AliasChips kind={kind} id={draft.id} aliases={(rows?.find((row) => row.id === draft.id)?.aliases as string[] | undefined) ?? []} onSaved={load} />
       )}
@@ -347,7 +382,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
           Property keys
         </Button>
         {needsMore ? (
-          <Button type="button" size="sm" onClick={() => { setFormError(null); setDraft(draftOf(spec.fields)) }}>
+          <Button type="button" size="sm" onClick={() => void open()}>
             <PlusIcon /> Add
           </Button>
         ) : (
@@ -430,7 +465,7 @@ export function CatalogList({ kind }: { kind: CatalogKind }) {
                           </Button>
                         </>
                       )}
-                      <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${row.name}`} onClick={() => { setFormError(null); setDraft(draftOf(spec.fields, row)) }}>
+                      <Button type="button" size="xs" variant="ghost" aria-label={`Edit ${row.name}`} onClick={() => void open(row)}>
                         <PencilIcon /> Edit
                       </Button>
                       <Button

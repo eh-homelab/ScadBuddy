@@ -214,4 +214,48 @@ describe('the Catalog tab', () => {
     await waitFor(() => expect(entityMock.schemas.insert_type?.properties).toEqual({ bore_mm: { type: 'string' } }))
     expect(screen.queryByRole('form', { name: 'Keys of insert_type' })).toBeNull()
   })
+
+  describe('defined and required properties (#7703)', () => {
+    const requireSite = () => {
+      entityMock.schemas.brand = { type: 'object', properties: { site: { type: 'string', title: 'Web site' }, note_key: { type: 'string' } }, required: ['site'] }
+    }
+    const posted = () => {
+      const bodies: Record<string, unknown>[] = []
+      server.events.on('request:start', ({ request }) => {
+        if (request.method === 'POST' && new URL(request.url).pathname === '/api/v1/filament/catalog/brands') void request.clone().json().then((body) => bodies.push(body as Record<string, unknown>))
+      })
+      return bodies
+    }
+
+    it('saves the row and its defined properties with one request', async () => {
+      requireSite()
+      const bodies = posted()
+      const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=brands' })
+      await list('Brands')
+      await user.click(screen.getByRole('button', { name: 'Add' }))
+      await user.type(await screen.findByLabelText('Name'), 'Prusament')
+      await user.type(screen.getByLabelText('Web site'), 'prusa3d.com')
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(within(screen.getByRole('table', { name: 'Brands' })).getByText('Prusament')).toBeInTheDocument())
+      expect(bodies).toEqual([{ name: 'Prusament', properties: { site: 'prusa3d.com' } }])
+      const made = (await listCatalog('brands')).find((row) => row.name === 'Prusament')!
+      expect(entityMock.properties.get(`brand:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['site', 'prusa3d.com']])
+    })
+
+    it('a refused save marks each missing field and keeps the draft', async () => {
+      requireSite()
+      const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=brands' })
+      await user.click(within(rowOf(await list('Brands'), 'Sunlu')).getByRole('button', { name: 'Edit Sunlu' }))
+      const name = await screen.findByLabelText('Name')
+      await user.clear(name)
+      await user.type(name, 'SUNLU')
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('Fill the required properties first: site.')
+      expect(screen.getByLabelText('Web site')).toHaveAttribute('aria-invalid', 'true')
+      expect(screen.getByLabelText('Name')).toHaveValue('SUNLU')
+      await user.type(screen.getByLabelText('Web site'), 'sunlu.com')
+      await user.click(screen.getByRole('button', { name: 'Save' }))
+      await waitFor(() => expect(within(screen.getByRole('table', { name: 'Brands' })).getByText('SUNLU')).toBeInTheDocument())
+    })
+  })
 })

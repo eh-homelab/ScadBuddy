@@ -59,6 +59,10 @@ import { TagPanel } from '../../components/filament/TagPanel'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
+import { entityApi, type PropertyValue } from '../../components/entities/api'
+import { DefinedFields } from '../../components/entities/DefinedFields'
+import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../../components/entities/definedProperties'
+import { useAsync } from '../../lib/useAsync'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -465,6 +469,12 @@ export function SpoolPage() {
   const [typeDetail, setTypeDetail] = useState<SpoolTypeDetail | null>(null)
   const [typeError, setTypeError] = useState<string | null>(null)
   const [advanced, toggleAdvanced] = useAdvanced(SPOOL_ADVANCED_KEY)
+  // #7703: the spool's defined keys are fields of this form, saved with it. A copy starts with none.
+  const keys = useAsync(() => entityApi.propertySchema('spool'), [])
+  const schema = keys.data?.schema ?? {}
+  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
+  const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
 
   useEffect(() => {
     let live = true
@@ -478,6 +488,16 @@ export function SpoolPage() {
     setCreateKey(crypto.randomUUID())
     setSourceGone(false)
     setSourceNumber(null)
+    setDefined({})
+    setDefinedBefore({})
+    setFieldErrors(undefined)
+    if (id !== 'new')
+      entityApi.properties(`spool:${id}`).then((own) => {
+        if (!live) return
+        const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
+        setDefined(values)
+        setDefinedBefore(values)
+      }, () => {})
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
       asked ? copySpool(asked) : Promise.resolve(null),
@@ -531,7 +551,8 @@ export function SpoolPage() {
     for (const type of lists.types) hrefs.set(type.id, filamentLinks.type(type.id))
     return hrefs
   }, [lists])
-  const dirty = JSON.stringify(draft) !== JSON.stringify(base)
+  const properties = propertiesPatch(schema, definedBefore, defined)
+  const dirty = JSON.stringify(draft) !== JSON.stringify(base) || Object.keys(properties).length > 0
   const presetsDirty = JSON.stringify(draft.presets) !== JSON.stringify(base.presets)
   const typeId = draft.type_id
   useEffect(() => {
@@ -620,18 +641,21 @@ export function SpoolPage() {
     setNotice(null)
     const spoolId = spoolKey
     const firstType = !creating && saved !== null && !saved.type_id && draft.type_id !== ''
+    const withProperties = Object.keys(properties).length > 0 ? { properties } : {}
+    setFieldErrors(undefined)
     try {
       if (creating) {
-        // One request makes every spool with its place, presets and K values (#7150).
-        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf, continued_from: continuedFrom }, createKey)
+        // One request makes every spool with its place, presets, K values and properties (#7150, #7703).
+        const made = await bulkCreateSpools({ spool: { ...created(body, draft.grams_left), ...withProperties }, quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf, continued_from: continuedFrom }, createKey)
         const first = made[0]!
         setMadeId(first.id)
         setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
         guard.leaveTo(made.length > 1 ? listPath : filamentLinks.spool(first.id), { replace: true, state: location.state })
         return
       }
-      const patch = changed(body, bodyOf(base))
+      const patch = { ...changed(body, bodyOf(base)), ...withProperties }
       if (Object.keys(patch).length > 0) await patchSpool(spoolId, patch)
+      setDefinedBefore(defined)
       if (draft.location_id !== base.location_id) await moveSpool(spoolId, draft.location_id || null)
       // The first type drops the carried-over presets: the form's copy of them is not written back.
       if (!firstType && JSON.stringify(draft.presets) !== JSON.stringify(base.presets)) await setSpoolPresets(spoolId, draft.presets)
@@ -647,7 +671,9 @@ export function SpoolPage() {
         setError('The spool this form copied was deleted after the form opened. Save again to make this one a new spool without a link to it.')
         return
       }
-      setError(message(cause))
+      const refusedKeys = fieldErrorsOf(cause)
+      setFieldErrors(refusedKeys ?? undefined)
+      setError(refusedKeys ? refusalText(refusedKeys) : message(cause))
       // A write that did land is shown as it now is, unsaved edits kept.
       if (spoolId !== 'new') await Promise.all([getSpool(spoolId).then(setSaved, () => {}), readHistory(spoolId)])
     } finally {
@@ -912,6 +938,15 @@ export function SpoolPage() {
               </Label>
               <Textarea id="spool-note" rows={2} value={draft.note} onChange={(e) => set('note', e.target.value)} />
             </div>
+            <DefinedFields
+              schema={schema}
+              values={defined}
+              onChange={(next) => {
+                setNotice(null)
+                setDefined(next)
+              }}
+              errors={fieldErrors}
+            />
             <div className="flex flex-col gap-2">
               <h3 className="text-[13px] font-medium">Tag</h3>
               {saved && !creating ? (
