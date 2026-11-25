@@ -477,9 +477,10 @@ class LanPrinter:
         or a dropped connection is ``None``. The close ends by ``until`` (else within
         `MQTT_TIMEOUT`); a close that fails or overruns keeps the reply. A connect that
         never got in (cut by `MQTT_TIMEOUT` or failed inside ``__aenter__``) is shut by
-        force, as a cut close is (`_force_close`, P31). A cut does not stop aiomqtt's
-        connect in its executor thread, so when that connect ends, it queues a
-        `_force_close` of the socket it made on the loop (`_close_late_connect`, #7616)."""
+        force, as a cut close is (`_force_close`, P31), in a close queued on the loop. A
+        cut does not stop aiomqtt's connect in its executor thread, so when that connect
+        ends, it queues a `_force_close` of the socket it made on the loop
+        (`_close_late_connect`, #7616)."""
         loop = asyncio.get_running_loop()
         may_be_sent = False
         reply: dict[str, Any] | None = None
@@ -495,9 +496,12 @@ class LanPrinter:
                     # aiomqtt leaves the socket open when its wait for the CONNACK is
                     # cancelled or times out: nothing was entered, so no close would run.
                     # A connect still in its executor thread queues a close of its own
-                    # socket on the loop when it ends (`_close_late_connect`).
+                    # socket on the loop when it ends (`_close_late_connect`). This close
+                    # is queued too, so it runs after any ``add_reader`` or ``add_writer``
+                    # that the thread queued before it: an inline close could free the fd
+                    # before they run (#7616).
                     cut.set()
-                    _force_close(made)
+                    loop.call_soon(_force_close, made)
                     raise
                 await client.subscribe(self.report_topic)
                 may_be_sent = True
@@ -636,13 +640,14 @@ async def _close(stack: AsyncExitStack, client: aiomqtt.Client | None, budget: f
 
 
 def _close_late_connect(client: aiomqtt.Client) -> threading.Event:
-    """Make ``client``'s connect close its own socket when it ends after a cut. aiomqtt's
-    ``__aenter__`` runs paho's blocking connect in an executor thread
-    (``loop.run_in_executor(None, self._client_connect)``, aiomqtt 2.5.1 ``client.py:779``;
-    ``_client_connect`` at ``client.py:752``). A cut does not stop that thread, so a connect
-    that ends after `_force_close` ran would leave a connected socket that nothing closes.
+    """Make ``client``'s connect queue a close of its socket on the loop when it ends
+    after a cut. aiomqtt's ``__aenter__`` runs paho's blocking connect in an executor
+    thread (``loop.run_in_executor(None, self._client_connect)``, aiomqtt 2.5.1
+    ``client.py:779``; ``_client_connect`` at ``client.py:752``). A cut does not stop that
+    thread, so a connect that ends after `_force_close` ran would leave a connected socket
+    that nothing closes.
     When the connect ends while the returned event is set, the wrapper queues `_force_close`
-    on the loop; the caller sets the event before its own `_force_close`.
+    on the loop; the caller sets the event before it queues its own `_force_close`.
 
     The thread must not close the socket itself. aiomqtt does not register the socket from
     that thread: it queues ``add_reader`` and ``add_writer`` with ``call_soon_threadsafe``

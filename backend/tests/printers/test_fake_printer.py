@@ -30,7 +30,7 @@ import ssl
 import sys
 import threading
 import urllib.request
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sized
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -930,6 +930,17 @@ def _spy_force_close(monkeypatch: pytest.MonkeyPatch) -> list[aiomqtt.Client]:
     return shut
 
 
+async def _queued_closes(shut: Sized, count: int) -> None:
+    """Let the loop run until ``shut`` holds ``count`` closes. A cut connect queues its
+    close with ``call_soon`` (#7616), so it runs within a few loop turns, not a time; the
+    bound only stops a hang."""
+    for _ in range(1000):
+        if len(shut) >= count:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"{len(shut)} of {count} queued closes ran")
+
+
 async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
     """The broker takes the connection, and the client waits for its CONNACK past
     `MQTT_TIMEOUT`: the connect is cut inside ``__aenter__`` with nothing entered, and its
@@ -948,6 +959,7 @@ async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.Monkey
     monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 1.0)
     with pytest.raises(TimeoutError):
         await _ask(linked, ams_get_rfid(0, 0, "71"))
+    await _queued_closes(shut, 1)
     assert len(shut) == 1
     assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1
 
@@ -1010,6 +1022,7 @@ async def test_a_late_executor_connect_is_shut(
         try:
             with pytest.raises(TimeoutError):
                 await _ask(linked, ams_get_rfid(0, 0, "91"))
+            await _queued_closes(shut, 1)
             assert len(shut) == 1
         finally:
             go.set()
