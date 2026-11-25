@@ -59,7 +59,7 @@ from scadbuddy.workflows.flow_models import (
 
 _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
-    " input_hash, hops, created_at"
+    " input_hash, hops, created_at, admitted_by"
 )
 _DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 #: The decision that a row has, by `_decided`'s values.
@@ -445,12 +445,12 @@ class FlowStore:
     async def take_over_decision(
         self, decision: Decision, *, held: Decision, seen: list[str] | None
     ) -> bool:
-        """Put a person's `decision` in the row of `held`, another of theirs (#7575, #7588),
-        only while the row has `held` and the call has no operation but those `seen`, under
-        the row's lock. An approval or denial only while the call waits too, under the run's
-        lock. With `seen` None, whatever operations it has: `decision`'s Update is in the
-        run; an approval is never put back so. True too when the row has `decision` already;
-        False otherwise."""
+        """Put `decision` in the row of `held`, which it may take over (`may_take_over`;
+        #7575, #7588, #7471), only while the row has `held` and the call has no operation
+        but those `seen`, under the row's lock. An approval or denial only while the call
+        waits too, under the run's lock. With `seen` None, whatever operations it has:
+        `decision`'s Update is in the run; an approval is never put back so. True too when
+        the row has `decision` already; False otherwise."""
         return await asyncio.to_thread(self._take_over_decision, decision, held, seen)
 
     async def withdraw_decision(self, decision: Decision) -> None:
@@ -920,8 +920,8 @@ class FlowStore:
                     raise HopMovedError(decision.request_id)
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
-                " call_id, kind, outcome, response, responder, input_hash, hops)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " call_id, kind, outcome, response, responder, input_hash, hops, admitted_by)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
                 (
                     decision.request_id,
@@ -934,6 +934,7 @@ class FlowStore:
                     decision.responder,
                     decision.input_hash,
                     _hops(decision.hops),
+                    decision.admitted_by,
                 ),
             ).fetchone()
             if row is not None:
@@ -1146,7 +1147,8 @@ class FlowStore:
     def _call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, workflow_id, CASE WHEN status = 'running' THEN request END AS request"
+                "SELECT id, workflow_id, kind,"
+                " CASE WHEN status = 'running' THEN request END AS request"
                 f" FROM operations WHERE {_ON_CALL}",
                 (f"flow:{run_id}", call_id),
             ).fetchall()
@@ -1155,7 +1157,7 @@ class FlowStore:
     def _take_over_decision(
         self, decision: Decision, held: Decision, seen: list[str] | None
     ) -> bool:
-        if decision.responder != "browser":
+        if not may_take_over(decision, held, seen):
             return False
         # A call that is let through may have read its row. One that is denied reads none.
         if decision.kind == "approval" and seen is None and decision.outcome != "denied":
@@ -1165,15 +1167,8 @@ class FlowStore:
             waits = decision.kind == "answer" or seen is None or self._waits(conn, decision)
             row = conn.execute(
                 f"SELECT {_SAME} AS same, {_SAME} AS held"
-                " FROM workflow_run_decisions WHERE request_id = %s AND kind = %s"
-                " AND responder = %s FOR UPDATE",
-                (
-                    *_decided(decision),
-                    *_decided(held),
-                    decision.request_id,
-                    decision.kind,
-                    decision.responder,
-                ),
+                " FROM workflow_run_decisions WHERE request_id = %s AND kind = %s FOR UPDATE",
+                (*_decided(decision), *_decided(held), decision.request_id, decision.kind),
             ).fetchone()
             if row is None:
                 return False
@@ -1189,13 +1184,16 @@ class FlowStore:
                 return False
             conn.execute(
                 "UPDATE workflow_run_decisions SET outcome = %s, response = %s, input_hash = %s,"
-                " hops = %s, created_at = coalesce(%s, now()) WHERE request_id = %s",
+                " hops = %s, created_at = coalesce(%s, now()), responder = %s, admitted_by = %s"
+                " WHERE request_id = %s",
                 (
                     decision.outcome,
                     Jsonb(decision.response),
                     decision.input_hash,
                     _hops(decision.hops),
                     decision.created_at,
+                    decision.responder,
+                    decision.admitted_by,
                     decision.request_id,
                 ),
             )
@@ -1534,6 +1532,17 @@ class FlowStore:
             # Last: it takes the event log's lock, and everything above takes row locks.
             self._tasks.announce_cancelled_in(conn, tasks)
         return cur.rowcount > 0
+
+
+def may_take_over(decision: Decision, held: Decision, seen: list[str] | None) -> bool:
+    """Whether `decision` may take the row of `held` over: an approval, a person's from a
+    person's; an answer, a person's from any answerer's and an agent's from its own (#7471),
+    never a run grant's. Putting back (`seen` None) restores the answer that landed."""
+    if decision.kind != held.kind or held.responder.startswith("grant:"):
+        return False
+    if decision.kind == "approval":
+        return decision.responder == held.responder == "browser"
+    return seen is None or decision.responder in ("browser", held.responder)
 
 
 def _decided(decision: Decision) -> tuple[Any, ...]:
