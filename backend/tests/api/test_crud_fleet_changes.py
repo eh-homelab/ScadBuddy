@@ -154,3 +154,32 @@ async def test_another_callers_credential_is_refused(served: Served) -> None:
             assert refused.status_code == 403
         fleet = await client.get(f"{served.url}{BASE}/areas", headers=served.token("fleet"))
         assert fleet.json()["areas"] == ["changes", "fleet"]
+
+
+async def _status(client: httpx.AsyncClient, served: Served, caller: str) -> int:
+    async def ask() -> int:
+        async with client.stream(
+            "GET",
+            f"{served.url}{BASE}/changes",
+            headers=served.token("fleet"),
+        ) as response:
+            return response.status_code
+
+    return await asyncio.wait_for(ask(), PROMPTLY)
+
+
+async def test_fleet_streams_have_a_budget_of_their_own(served: Served) -> None:
+    """The cap counts the caller group, so one more stream is 429 and the agent's stay free."""
+    async with httpx.AsyncClient(timeout=None) as client:
+        opened = []
+        try:
+            for _ in range(crud_fleet.FLEET_STREAMS_MAX):
+                opened.append(await _open(client, served))
+            assert await _status(client, served, "fleet") == 429
+            agent = await client.get(
+                f"{served.url}/api/v1/internal/crud/agent/areas", headers=served.token("agent")
+            )
+            assert agent.status_code == 200
+        finally:
+            for ctx, _ in opened:
+                await ctx.__aexit__(None, None, None)
