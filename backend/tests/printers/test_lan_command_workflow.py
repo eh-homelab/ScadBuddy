@@ -247,6 +247,13 @@ def short_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scadbuddy.printers.lan_command_models.LAN_COMMAND_MARGIN", 0.5)
 
 
+@pytest.fixture
+def long_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run's timeout well past its commands' sum, so a timed-out command's own activity
+    timeout fails the run, never the run's timeout racing it."""
+    monkeypatch.setattr(lan_command_module, "run_timeout", lambda _: timedelta(seconds=30))
+
+
 def _sleeps(seconds: float) -> Answer:
     async def answer(_: LanCommandInput) -> LanCommandReply:
         await asyncio.sleep(seconds)
@@ -271,7 +278,7 @@ async def test_a_write_timed_out_is_unconfirmed_and_the_rest_still_run(client: C
 
 
 @pytest.mark.requires_temporal
-@pytest.mark.usefixtures("short_timeouts")
+@pytest.mark.usefixtures("short_timeouts", "long_run")
 async def test_a_read_timed_out_is_no_answer(client: Client) -> None:
     run = LanCommandRun(commands=[command("extrusion_cali_get", kind="read", wait_s=0.0)])
     # Three tries of 0.1 s and two pauses: about 1.8 s.
@@ -279,6 +286,30 @@ async def test_a_read_timed_out_is_no_answer(client: Client) -> None:
     assert isinstance(outcome, ApiError)
     assert outcome.status == status.HTTP_502_BAD_GATEWAY
     assert outcome.extensions["code"] == "printer_no_answer"
+    # N3: the read that timed out is the failure itself, not a command sent before it.
+    assert "unacknowledged" not in outcome.detail
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.usefixtures("short_timeouts", "long_run")
+async def test_a_read_timed_out_after_a_write_names_only_the_write(client: Client) -> None:
+    """N3: only a timed-out write is an earlier command; the timed-out read failed the run."""
+    run = LanCommandRun(
+        commands=[
+            command("ams_filament_setting"),
+            command("ams_get_rfid", kind="read", wait_s=0.0),
+        ]
+    )
+
+    def answer(input: LanCommandInput) -> LanCommandReply | Awaitable[LanCommandReply]:
+        return _sleeps(5.0)(input)
+
+    [outcome], sent = await _run(client, answer, run)
+    assert sent[0] == "ams_filament_setting" and "ams_get_rfid" in sent
+    assert isinstance(outcome, ApiError)
+    assert outcome.extensions["code"] == "printer_no_answer"
+    assert "unacknowledged: ams_filament_setting." in outcome.detail
+    assert "ams_get_rfid" not in outcome.detail.split("unacknowledged:", 1)[1]
 
 
 @pytest.mark.requires_temporal

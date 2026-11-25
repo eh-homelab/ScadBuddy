@@ -236,8 +236,10 @@ async def _with_earlier(
     """``problem`` with the commands that ran before the failed one (P61): a configure is
     two or three writes, so a later one's failure leaves an earlier one applied, and the
     problem must not read as though nothing changed. Each earlier command the printer
-    confirmed is named, and each sent but not acknowledged (it may have applied, P30)."""
+    confirmed is named, and each write sent but not acknowledged (it may have applied,
+    P30). A read that timed out is not named: it failed the run itself (N3)."""
     names: dict[int, str] = {}
+    writes: set[int] = set()
     confirmed: list[str] = []
     unacknowledged: list[str] = []
     async for event in handle.fetch_history_events():
@@ -247,6 +249,8 @@ async def _with_earlier(
                 list(scheduled.input.payloads), [LanCommandInput]
             )
             names[event.event_id] = command.name
+            if command.kind == "write":
+                writes.add(event.event_id)
         elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_COMPLETED:
             done = event.activity_task_completed_event_attributes
             [reply] = await client.data_converter.decode(
@@ -255,9 +259,11 @@ async def _with_earlier(
             name = names.get(done.scheduled_event_id, "a command")
             (confirmed if reply.confirmed else unacknowledged).append(name)
         elif event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT:
-            # Only a write timed out lets the run go on (`LanCommandWorkflow.run`).
+            # Only a write timed out lets the run go on (`LanCommandWorkflow.run`); a read
+            # timed out is the failure itself.
             timed_out = event.activity_task_timed_out_event_attributes
-            unacknowledged.append(names.get(timed_out.scheduled_event_id, "a command"))
+            if timed_out.scheduled_event_id in writes:
+                unacknowledged.append(names[timed_out.scheduled_event_id])
     if not confirmed and not unacknowledged:
         return problem
     said = []
