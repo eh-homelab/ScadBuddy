@@ -68,6 +68,7 @@ from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.conftest import PgPool, make_library_upstream, open_pg_pool
 from tests.support.operations import accepted, press, subjects
+from tests.support.template_rows import sync_template_rows
 from tests.test_library_processes import _age
 
 pytestmark = pytest.mark.requires_git
@@ -396,6 +397,8 @@ def test_a_model_lists_its_invalid_library_entries_and_they_can_be_removed(
         {**good, "name": "bad name"},
     ]
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    # A hand edit: the next copy run repairs its row (#7317 phase 3).
+    sync_template_rows(lib_client)
 
     model = lib_client.get(f"/api/v1/models/{SLUG}").json()
     render = lib_client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}})
@@ -427,6 +430,8 @@ def test_a_libraries_that_is_not_a_list_is_one_invalid_entry(
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["libraries"] = {"BOSL2": "v1"}
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    # A hand edit: the next copy run repairs its row (#7317 phase 3).
+    sync_template_rows(lib_client)
 
     model = lib_client.get(f"/api/v1/models/{SLUG}").json()
 
@@ -436,11 +441,14 @@ def test_a_libraries_that_is_not_a_list_is_one_invalid_entry(
     ]
 
 
-def _write_libraries(paths: DataPaths, entries: list[Any]) -> None:
+def _write_libraries(client: TestClient, paths: DataPaths, entries: list[Any]) -> None:
+    """A hand edit of the template's ``libraries``, then the copy run that repairs its
+    row (#7317 phase 3)."""
     meta_path = paths.model_meta(SLUG)
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["libraries"] = entries
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    sync_template_rows(client)
 
 
 def _raw_libraries(paths: DataPaths) -> Any:
@@ -456,7 +464,7 @@ def test_removing_an_invalid_entry_by_index_keeps_a_pin_of_the_same_name(
     pin(lib_client, "BOSL2")
     good = _raw_libraries(paths)[0]
     broken = {"name": "BOSL2", "url": good["url"], "ref": "v1"}
-    _write_libraries(paths, [good, broken])
+    _write_libraries(lib_client, paths, [good, broken])
     [entry] = lib_client.get(f"/api/v1/models/{SLUG}").json()["invalid_libraries"]
     assert (entry["name"], entry["index"]) == ("BOSL2", 1)
 
@@ -474,7 +482,7 @@ def test_removing_one_of_two_invalid_entries_of_a_name_keeps_the_other(
 ) -> None:
     create_model(lib_client)
     first = {"name": "threads", "url": "https://example.invalid/a.git", "ref": "v1"}
-    _write_libraries(paths, ["threads", first])
+    _write_libraries(lib_client, paths, ["threads", first])
 
     removed = lib_client.delete(
         f"/api/v1/models/{SLUG}/libraries/threads", params={"index": 0}, headers=press()
@@ -495,7 +503,7 @@ def test_removing_by_index_refuses_an_entry_that_is_not_that_invalid_one(
     create_model(lib_client)
     pin(lib_client, "BOSL2")
     good = _raw_libraries(paths)[0]
-    _write_libraries(paths, [good, "threads"])
+    _write_libraries(lib_client, paths, [good, "threads"])
 
     for name, index in (("BOSL2", 0), ("BOSL2", 1), ("threads", 0), ("threads", 2)):
         refused = lib_client.delete(

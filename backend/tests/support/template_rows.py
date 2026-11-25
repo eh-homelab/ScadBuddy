@@ -37,5 +37,13 @@ def open_template_rows(catalogue: Catalogue, pool: PgPool) -> TemplateRows:
     catalogue.rows = catalogue.refresh.rows
     if catalogue.history is not None:
         catalogue.history.template_rows = catalogue.refresh
-    _finished(copy_templates(catalogue, catalogue.rows, catalogue.refresh, pool))
-    return catalogue.rows
+    return copy_template_rows(catalogue, pool)
+
+
+def copy_template_rows(catalogue: Catalogue, pool: PgPool) -> TemplateRows:
+    """One copy on the rows `open_template_rows` gave ``catalogue``: after a test wrote
+    template files by hand."""
+    refresh = catalogue.refresh
+    assert refresh is not None, "open_template_rows first"
+    _finished(copy_templates(catalogue, refresh.rows, refresh, pool))
+    return refresh.rows

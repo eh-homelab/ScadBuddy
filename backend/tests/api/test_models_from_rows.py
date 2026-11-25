@@ -382,7 +382,7 @@ def test_the_catalogue_reads_rows_from_the_start(world: TestClient) -> None:
     """The app's start copied first (phase 3, `main._first_template_copy`)."""
     catalogue: Catalogue = _state(world).catalogue
     assert catalogue.rows is _rows(world)
-    assert catalogue._from_rows()
+    assert _rows(world).copied()
 
 
 def _refresh_fails(monkeypatch: pytest.MonkeyPatch) -> None:

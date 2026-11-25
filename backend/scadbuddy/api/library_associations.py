@@ -82,8 +82,8 @@ async def _native(library: PrintLibraryDep) -> NativeLibrary | None:
 
 
 def _raw_meta(catalogue: Catalogue, slug: str) -> dict[str, Any] | None:
-    """The model's ``model.json`` dict, None where it does not read: its row once the
-    rows are copied (`Catalogue.raw_metas`, #7317 Task 8)."""
+    """The model's ``model.json`` dict, None where it does not read: its row
+    (`Catalogue.raw_metas`, #7317 Task 8)."""
     return catalogue.raw_metas([slug])[slug]
 
 
@@ -131,7 +131,7 @@ def _implied_for_file(
 ) -> list[Association]:
     """The models made from ``file`` (mine only: a built-in is never made from a library
     file), and the model of the output it is a copy of. Reads every model's
-    ``model.json`` once (`Catalogue.raw_metas`: the rows once they are copied), as
+    ``model.json`` once (`Catalogue.raw_metas`: the rows), as
     `Catalogue.library_pin_index` does, and names each model found from that read."""
     implied: list[Association] = []
     if file.output_id is not None:
