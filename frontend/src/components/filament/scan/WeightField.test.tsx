@@ -94,7 +94,7 @@ describe('WeightField (#7273)', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('saves the reading the person chose, even before the check answered (#7683)', async () => {
+  it('saves the reading the person chose (#7683)', async () => {
     const spool = await getSpool(spoolId(9))
     const { user } = renderPage(<WeightField spool={spool} />)
     await user.type(await screen.findByLabelText('Gross weight (g)'), '800')
@@ -103,5 +103,21 @@ describe('WeightField (#7273)', () => {
     expect(await screen.findByText('Saved')).toBeInTheDocument()
     expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 620, data: { resolution: 'short' } })
     expect((await getSpool(spool.id)).added_full).toBe(false)
+  })
+
+  it('a Save before the check answered shows the question first and books nothing (#7683)', async () => {
+    const spool = await getSpool(spoolId(9))
+    const before = (await listSpoolEvents(spool.id)).length
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '800')
+    // Tapped within the check's 300 ms wait: the person has not seen the question yet.
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    const group = await screen.findByRole('group', { name: 'The reading is 200 g under the label weight. What is up?' })
+    expect(within(group).getByRole('radio', { name: /The spool is short/ })).toBeChecked()
+    expect(await listSpoolEvents(spool.id)).toHaveLength(before)
+    expect(screen.queryByText('Saved')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 620, data: { resolution: 'short' } })
   })
 })

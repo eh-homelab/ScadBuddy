@@ -60,8 +60,11 @@ export function WeightField({ spool, onSaved }: { spool: Spool; onSaved?: (spool
     setError(null)
     setSaving(true)
     try {
-      // A save sent before the hook's check answered reads the check itself (#7683).
+      // A save sent before the hook's check answered reads the check itself (#7683). When
+      // that check asks what is up and the person has not seen the question yet, nothing
+      // is booked: the hook's answer renders the choice, and the next Save takes it.
       const below = pending && empty !== null ? await insertWeightOffer(spool.id, value).then((one) => (one.reason === 'below_label' ? one : null), () => null) : belowLabel
+      if (pending && below && choice?.reading !== value) return
       const picked: Resolution | null = below ? (choice?.reading === value ? choice.resolution : (below.default ?? 'tared')) : null
       const filament = below ? (below.resolutions.find((one) => one.kind === picked)?.filament_g ?? value) : empty == null ? value : value - empty
       if (filament < 0) {
