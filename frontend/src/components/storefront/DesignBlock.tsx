@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { Filament } from '../../api/types'
+import { sameJson, type JsonObject } from '../../lib/inputs'
 import { Button } from '@/components/ui/button'
 import { DesignDialog } from './DesignDialog'
 import { designText, hasInputs, inputsRefusalText, pipelineOf, withDesign, withoutDesign, withoutInput } from './designInputs'
@@ -30,14 +31,14 @@ export function DesignBlock({ draft, onChange, schema, name, filaments, settled,
   const [said, setSaid] = useState<{ inputs: ListingDraft['inputs']; commit: string; text: string } | null>(null)
   const pipeline = pipelineOf(schema)
   const refusedInputs = refusal?.kind === 'inputs' ? refusal : null
-  const refusedParam = refusal?.kind === 'param' && schema && !shownParams(schema).some((param) => param.name === refusal.name) ? refusal : null
+  const refusedParam = refusal?.kind === 'param' && refusal.code === 'pipeline_set' && schema && !shownParams(schema).some((param) => param.name === refusal.name) ? refusal : null
   const stray = schema !== undefined && !pipeline && hasInputs(draft)
   if (!pipeline && !stray && !refusedInputs && !refusedParam) return null
 
   // One opening per design and version: another one picked while it is open closes it.
   const key = `${draft.slug}\n${draft.commit}`
   const text =
-    said && said.inputs === draft.inputs && said.commit === draft.commit
+    said && sameJson((said.inputs ?? {}) as JsonObject, (draft.inputs ?? {}) as JsonObject) && said.commit === draft.commit
       ? said.text
       : hasInputs(draft)
         ? designText(pipeline?.inputs, draft.inputs ?? {})

@@ -484,6 +484,15 @@ describe('the parameters a design’s pipeline sets (#5701)', () => {
     const fits: ListingDraft = { ...draft, params: {}, fixed: { hole_side: 'left' } }
     expect(withoutUnknown(fits, schema)).toBe(fits)
   })
+
+  it('keep a lock at the default only in the default’s own letter case, as publish compares it (#7660 review)', () => {
+    // `check_set_params` uses `same_value`, which is case-sensitive: '#1b6ca8' is not '#1B6CA8' there.
+    const colour: DesignSchema = { ...keychainSchema, pipeline_params: ['body_color'] }
+    const draft: ListingDraft = { ...emptyDraft('m', 'c'.repeat(40)), fixed: { body_color: '#1b6ca8' } }
+    expect(withoutUnknown(draft, colour).fixed).toEqual({})
+    const same: ListingDraft = { ...draft, fixed: { body_color: '#1B6CA8' } }
+    expect(withoutUnknown(same, colour)).toBe(same)
+  })
 })
 
 describe('what publish refuses of a design’s inputs (#5701)', () => {

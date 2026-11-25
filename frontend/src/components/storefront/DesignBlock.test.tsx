@@ -51,6 +51,9 @@ function Harness({ start = {}, schema = SCHEMA, refusal = null, seen = [] }: { s
       <button type="button" onClick={() => setDraft({ ...draft, commit: 'f'.repeat(40) })}>
         Another version
       </button>
+      <button type="button" onClick={() => setDraft({ ...draft, inputs: structuredClone(draft.inputs) })}>
+        Saved
+      </button>
       <DesignBlock
         draft={draft}
         onChange={(next) => {
@@ -135,6 +138,11 @@ describe('the Design block (#5701 §5.1)', () => {
     renderPage(<Harness start={SET} refusal={{ kind: 'param', code: 'pipeline_set', name: 'piece', detail: 'no' }} />)
     expect(within(block()).getByRole('alert')).toHaveTextContent('the design sets “Piece” itself')
   })
+
+  it('leaves a refusal of another kind of a parameter with no row to the page (#7660 review)', () => {
+    renderPage(<Harness start={SET} refusal={{ kind: 'param', code: 'default_invalid', name: 'gone', detail: 'no' }} />)
+    expect(within(block()).queryByRole('alert')).toBeNull()
+  })
 })
 
 describe('"Set up the design" (#5701 §5.2, §5.3)', () => {
@@ -152,6 +160,16 @@ describe('"Set up the design" (#5701 §5.2, §5.3)', () => {
     expect(seen.at(-1)).toMatchObject({ inputs: { house: { ...HOUSE, cols: 4 } }, inputs_v: 1, fixed: { course_height: 240 } })
     expect(seen.at(-1)?.inputs).not.toHaveProperty('params')
     // The template's own words, while these are the inputs.
+    expect(block()).toHaveTextContent('4×1-module house')
+  })
+
+  it('keeps the template’s words when a save gives the same design back (#7660 review)', async () => {
+    describing = () => '4×1-module house'
+    const { user } = renderPage(<Harness start={SET} />)
+    const { dialog } = await open(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Use this design' }))
+    expect(block()).toHaveTextContent('4×1-module house')
+    await user.click(screen.getByRole('button', { name: 'Saved' }))
     expect(block()).toHaveTextContent('4×1-module house')
   })
 

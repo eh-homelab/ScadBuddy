@@ -458,6 +458,22 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(await screen.findByText('Not published: “text_size” needs a change. See the note under it below.')).toBeInTheDocument()
   })
 
+  it('says a refusal of a parameter with no row in the alert itself (#7660 review)', async () => {
+    server.use(
+      http.post('/api/v1/storefront/listings/:id/publish', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_default_invalid', title: 'Unprocessable Content', status: 422, detail: 'no', name: 'gone' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderStorefront()
+    await within(await screen.findByTestId('listing-preview')).findByLabelText('Name on the tag')
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    expect(await screen.findByText('Not published: “gone” starts at a value these choices do not allow. Set “Starts at” to one they allow.')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: 'Design' })).toBeNull()
+  })
+
   describe('a pipeline design (#5701)', () => {
     const HOUSE = { cols: 3, rows: 1, storeys: 2, windows: 4 }
     const seedHouse = (house: Record<string, number>, over: object = {}) =>

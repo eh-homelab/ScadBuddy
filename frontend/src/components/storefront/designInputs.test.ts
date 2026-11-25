@@ -225,4 +225,15 @@ describe('the schema’s own form (#5701 §5.2)', () => {
     const optional = fieldGroups({ ...SHAPE, required: [] })
     expect(fieldInputs(optional, { 'house.flat_roof': false })).toEqual({})
   })
+
+  it('keeps the inputs it does not draw, and leaves out a field cleared in it (#7660 review)', () => {
+    const inputs = { house: { cols: 2, storeys: 2, attic: { pitch: 30 } }, rooms: [{ name: 'hall' }], tags: ['x'] }
+    expect(fieldInputs(groups, { 'house.cols': 3, 'house.storeys': 1, 'house.flat_roof': false }, inputs)).toEqual({
+      house: { cols: 3, storeys: 1, flat_roof: false, attic: { pitch: 30 } },
+      rooms: [{ name: 'hall' }],
+    })
+    const optional = fieldGroups({ ...SHAPE, required: [] })
+    expect(fieldInputs(optional, { 'house.flat_roof': false }, { house: { attic: { pitch: 30 } } })).toEqual({ house: { flat_roof: false, attic: { pitch: 30 } } })
+    expect(fieldInputs(optional, { 'house.flat_roof': false }, { house: { cols: 2 } })).toEqual({})
+  })
 })

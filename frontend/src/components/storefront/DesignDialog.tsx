@@ -402,7 +402,7 @@ function FormDesign({
     // The browser shows a number it could not read as typed, and its value is blank.
     const unread = Array.from(form.current?.querySelectorAll<HTMLInputElement>('input[data-field]') ?? []).filter((input) => input.validity.badInput)
     const values = parse(unread.map((input) => input.dataset['field']!))
-    if (values) onUse({ ...fieldInputs(groups, values), params: inputs.params ?? {}, v: inputs.v ?? 0 })
+    if (values) onUse({ ...fieldInputs(groups, values, inputs), params: inputs.params ?? {}, v: inputs.v ?? 0 })
   }
 
   const drawn = new Map(fields.map((field, index) => [field.name, rendered[index]]))

@@ -17,6 +17,7 @@ import {
   listingRefusal,
   platePictures,
   previewListing,
+  refusalText,
   savedKey,
   sellMedia,
   shownParams,
@@ -175,7 +176,11 @@ function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefi
   const param = schema?.parameters?.find((p) => p.name === refusal.name)
   // #5701: a parameter the design sets itself has no row of its own. Until the schema is
   // read, the Design block shows no note, so the alert names the parameter instead.
-  if (refusal.kind === 'param' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
+  if (refusal.kind === 'param' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) {
+    if (refusal.code === 'pipeline_set') return 'Not published: the design needs a change. See the note under “Design” below.'
+    // Another refusal of a parameter with no row (hidden, or not in this version) has no note anywhere.
+    return refusalText(refusal, param?.caption || refusal.name)
+  }
   return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
 
