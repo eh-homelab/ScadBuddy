@@ -50,6 +50,8 @@ pytestmark = pytest.mark.requires_postgres
 DEPLOY = Path(__file__).resolve().parents[3] / "deploy" / "camera"
 CRUD = {"X-ScadBuddy-Crud": "1"}
 READ_USER, READ_PASS = "reader", "relay-read-pass"
+#: The edge's read user, which the API sends to the edge's HLS and WHEP ports.
+EDGE_USER, EDGE_PASS = "edge-reader", "edge-read-pass"
 #: Segments to index before the kill, and after it.
 BEFORE, AFTER = 10, 10
 #: The longest hole allowed between one indexed segment's end and the next one's start.
@@ -454,7 +456,7 @@ async def test_edge_serves_hls_on_demand_from_the_relay(
         await until(
             "the relay's pull of the printer", lambda: path_ready(relay.api, printer_id), 30
         )
-        hls = free_port()
+        hls, whep = free_port(), free_port()
         _, edge_mtx = await start_mediamtx(
             spawn,
             media,
@@ -464,8 +466,10 @@ async def test_edge_serves_hls_on_demand_from_the_relay(
                 "MTX_APIADDRESS": f"127.0.0.1:{free_port()}",
                 "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
                 "MTX_HLSADDRESS": f"127.0.0.1:{hls}",
-                "MTX_WEBRTCADDRESS": f"127.0.0.1:{free_port()}",
+                "MTX_WEBRTCADDRESS": f"127.0.0.1:{whep}",
                 "MTX_WEBRTCLOCALUDPADDRESS": f"127.0.0.1:{free_port()}",
+                "MTX_AUTHINTERNALUSERS_0_USER": EDGE_USER,
+                "MTX_AUTHINTERNALUSERS_0_PASS": EDGE_PASS,
             },
         )
         stack.push_async_callback(edge_mtx.aclose)
@@ -486,6 +490,19 @@ async def test_edge_serves_hls_on_demand_from_the_relay(
         # On demand: no viewer, no pull from the relay.
         assert await readers(relay.api, printer_id) == 0
 
+        # The edge fails closed: no read without the edge read user's password.
+        index = f"http://127.0.0.1:{hls}/{printer_id}/index.m3u8?cookieCheck=1"
+        offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+        sdp = {"Content-Type": "application/sdp"}
+        whep_url = f"http://127.0.0.1:{whep}/{printer_id}/whep"
+        async with httpx.AsyncClient(timeout=10) as http:
+            # ``httpx.Auth()`` sends no credentials.
+            for auth in (httpx.Auth(), httpx.BasicAuth(EDGE_USER, "wrong")):
+                assert (await http.get(index, auth=auth)).status_code == 401
+                answer = await http.post(whep_url, content=offer, headers=sdp, auth=auth)
+                assert answer.status_code == 401
+        assert await readers(relay.api, printer_id) == 0
+
         last_request = 0.0
         loop = asyncio.get_running_loop()
 
@@ -493,7 +510,8 @@ async def test_edge_serves_hls_on_demand_from_the_relay(
             nonlocal last_request
             assert publisher.poll() is None, "the publisher exited; see publisher.log"
             # MediaMTX v1.21.4 first answers 302 to ``?cookieCheck=1`` with a cookie.
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as http:
+            auth = (EDGE_USER, EDGE_PASS)
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True, auth=auth) as http:
                 response = await http.get(f"http://127.0.0.1:{hls}/{printer_id}/index.m3u8")
             last_request = loop.time()
             return response.status_code == 200 and response.text.startswith("#EXTM3U")
@@ -510,6 +528,15 @@ async def test_edge_serves_hls_on_demand_from_the_relay(
         waited = loop.time() - last_request
         assert waited <= 60, f"the edge held the relay pull {waited:.1f} s after the last request"
 
+        # Last, as it starts the on-demand pull: with the password, WHEP gets past the check
+        # and refuses the empty offer.
+        async with httpx.AsyncClient(timeout=20) as http:
+            answer = await http.post(
+                whep_url, content=offer, headers=sdp, auth=(EDGE_USER, EDGE_PASS)
+            )
+        assert answer.status_code == 400, answer.text
+
     output = (tmp_path / "edge.log").read_text(errors="replace")
     assert output, "edge wrote nothing: the check would prove nothing"
     assert READ_PASS not in output, "edge.log holds the relay read password"
+    assert EDGE_PASS not in output, "edge.log holds the edge read password"

@@ -1028,7 +1028,9 @@ jobs:
       # The build checks MediaMTX's version and that the controller imports no Postgres
       # code. `type=gha` on a hosted runner only. One scope for every part, which ci.yml's
       # `camera-image` job reads and writes too, at mode=min (the repo's Actions cache is
-      # at its ceiling, #743).
+      # at its ceiling, #743). Only the relay leg writes it, as in ci.yml: a second write
+      # to the scope would replace the relay's cache entry. The recorder and the edge build
+      # the `camera` stage the relay caches, plus a config COPY that takes no time.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -1044,7 +1046,7 @@ jobs:
             SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
           cache-from: type=gha,scope=camera
-          cache-to: type=gha,scope=camera,mode=min
+          cache-to: ${{ matrix.part == 'relay' && 'type=gha,scope=camera,mode=min' || '' }}
 
       - name: Report the published digest
         env:

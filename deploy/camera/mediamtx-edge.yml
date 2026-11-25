@@ -6,10 +6,18 @@
 # https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml
 #
 # The browser never reaches this pod: the API proxies `/api/v1/camera/live/{printer_id}/...`
-# to it. A NetworkPolicy in eh-homelab/clusters admits only the API to :8888 and :8889, so
-# the read user below has no password. The address browsers reach for ICE comes from the
-# environment: the pod sets MTX_WEBRTCADDITIONALHOSTS (MediaMTX overrides a key from
-# `MTX_<KEY>`, https://mediamtx.org/docs/features/configuration).
+# to it. A NetworkPolicy in eh-homelab/clusters admits only the API to :8888 and :8889, and
+# the API must also send the edge read user's password (HTTP Basic), so the edge fails
+# closed without the policy.
+#
+# The read user and the address browsers reach for ICE come from the environment. MediaMTX
+# reads no variables inside this file; it overrides a key from `MTX_<KEY>`, and a list entry
+# by its index (https://mediamtx.org/docs/features/configuration). So the pod sets
+#   MTX_AUTHINTERNALUSERS_0_USER=$(MTX_READ_USER)
+#   MTX_AUTHINTERNALUSERS_0_PASS=$(MTX_READ_PASS)
+#   MTX_WEBRTCADDITIONALHOSTS=<the address browsers reach>
+# Without the first two, entry 0 keeps the placeholder below: its pass is the sha256 of a
+# random value that nobody kept, so no client can read.
 #
 # The edge serves no RTSP, RTMP, SRT or MoQ listener.
 
@@ -50,9 +58,9 @@ hlsMuxerCloseAfter: 10s
 
 authMethod: internal
 authInternalUsers:
-  # The API, through the NetworkPolicy only: WHEP and HLS reads.
-  - user: any
-    pass:
+  # Entry 0: the API's read user, for WHEP and HLS (see above).
+  - user: read-user-unset
+    pass: sha256:Wbdt6Pfz3S83QDssMcx0gtQt06QotiJ7mTUszfkUehU=
     ips: []
     permissions:
       - action: read

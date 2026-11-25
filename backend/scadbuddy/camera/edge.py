@@ -1,7 +1,8 @@
 """The camera live edge (printer camera live view, phase 3): ``python -m scadbuddy.camera.edge``.
 
 It runs beside MediaMTX in one pod, which serves WebRTC (WHEP, :8889) and LL-HLS (:8888) to
-the API, the only client its NetworkPolicy admits (`deploy/camera/mediamtx-edge.yml`). It
+the API, the only client its NetworkPolicy admits, and only with the edge read user's
+password (`deploy/camera/mediamtx-edge.yml`). It
 reads the recorded printers from the API's ``camera`` CRUD routes (`api/crud_camera.py`), as
 the recorders do, and gives MediaMTX one path per printer, named by the printer id, through
 its control API only (`mediamtx.MediaMtx`). Each path reads the relay's path of that printer
@@ -49,7 +50,9 @@ AREAS: Final = frozenset({"printers", "changes"})
 #: How long MediaMTX keeps the relay pull after the path's last reader leaves.
 CLOSE_AFTER: Final = "10s"
 VIEWERS: Final = "scadbuddy_camera_viewers"
-VIEWERS_HELP: Final = "Readers of the printer's live path on the edge (WebRTC sessions, HLS muxer)."
+VIEWERS_HELP: Final = (
+    "MediaMTX readers of the printer's edge path: one per WebRTC session; HLS counts one muxer."
+)
 #: How long one scrape may wait for MediaMTX's runtime list.
 SCRAPE_TIMEOUT: Final = 2.0
 _SOURCES = TypeAdapter(list[CameraSource])
