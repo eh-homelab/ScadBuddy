@@ -63,9 +63,11 @@ class Variant:
     listing_id: str
     model_sha256: str
     slot_filaments: tuple[str, ...]
-    #: Whether ``model_sha256`` is known to be of the whole render (#5701): false only for
-    #: a line added before its row kept this.
-    every_output: bool = True
+    #: Whether ``model_sha256`` is known to be of the whole render (#5701). Each caller says
+    #: it. False is only a line whose row does not: one added before the column, or by a pod
+    #: of the old build during a rollout, which takes the column's default. Such a pipeline's
+    #: line stays priced by hand.
+    every_output: bool
 
 
 class LinePrice(BaseModel):
@@ -185,7 +187,7 @@ async def variant_at_add(
     digest, slots = await variant_of(state, listing, found, colours, material)
     if slots is None:
         return None
-    return Variant(listing.id, digest, tuple(f.id for f in slots))
+    return Variant(listing.id, digest, tuple(f.id for f in slots), every_output=True)
 
 
 async def _priced_variant(
@@ -202,7 +204,8 @@ async def _priced_variant(
         return None
     if await asyncio.to_thread(output_of, state, row, listing) is None:
         return None
-    return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments))
+    # Only `estimate_of` records a variant key, and it refuses a render of several outputs.
+    return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments), every_output=True)
 
 
 async def price_of(
