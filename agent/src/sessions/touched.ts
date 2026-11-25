@@ -804,6 +804,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sensor_save',
   'filament_sensor_archive',
   'filament_spool_import',
+  // #7216: a saved label sheet is no recorded resource kind.
+  'filament_label_sheet_upsert',
+  'filament_label_sheet_delete',
   // #6264: the RFID override mode and its reconcile touch the filament inventory, and
   // neither is a recorded resource kind.
   'filament_rfid_override_mode',

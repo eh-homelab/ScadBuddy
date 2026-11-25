@@ -99,7 +99,7 @@ function SheetPreview({ draft }: { draft: Draft }) {
       viewBox={`${-pad} ${-pad} ${viewW + 2 * pad} ${viewH + 2 * pad}`}
       className="h-auto w-full"
     >
-      <rect x={0} y={0} width={pageW} height={pageH} rx={1.5} className="fill-muted stroke-border" strokeWidth={1} />
+      <rect x={0} y={0} width={pageW} height={pageH} rx={1.5} className="fill-card stroke-border" strokeWidth={1} />
       {labels.map((one, at) => (
         <rect
           key={at}
