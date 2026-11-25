@@ -85,7 +85,10 @@ handlers:
   - id: move.place
     steps: [move]
     applies: {nature: physical}
-    does: Changes the place of a lot or a unit and writes a `transfer` move.
+    does: >-
+      Changes the place of a lot or a unit. It writes no stock move: a place change moves
+      no quantity, and `on_hand` is the sum of the moves (phase 2 `inventory/stock.py`
+      `update_lot`).
 
   # --- retire -----------------------------------------------------------------------------
   - id: retire.default

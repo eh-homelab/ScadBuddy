@@ -227,7 +227,8 @@ for a refresh".
   A value that did not change writes nothing. Rows are never rewritten: a report of book
   value at a past date reads the history, so it shows what the shop knew then.
 - **Parameter history.** Every change to a kind's, item's or unit's handler or
-  parameters is appended to `handler_config_history` (old, new, who, when). It explains a
+  parameters is appended to `handler_config_history` (old, new, who, when). It starts in
+  K1, since K1 already lets people change `steps`. It explains a
   value row with the reason `params_changed`.
 - **Manual readings** (owner, 2026-11-25: "allow for manual, like weight, in
   advanced"). The unit page's Advanced section takes a measured value by hand for a
@@ -263,10 +264,14 @@ overwrites and a remove leaves no trace.
 - A property schema change (`entity_property_schemas`, a kind's `schema`) is recorded the
   same way in `entity_property_schema_history`.
 - Every writer records the row in the same transaction as the write. My call: a database
-  trigger on `entity_properties` writes it, so no writer, Python or Go, can skip it. The
-  actor of a set is the row's `updated_by`; the actor of a remove comes from
-  `SET LOCAL scadbuddy.actor`, which both writers set per transaction, and the trigger
-  refuses a remove without it.
+  trigger on `entity_properties` writes it, so no writer, Python or Go, can skip it. Every
+  writer sets `SET LOCAL scadbuddy.actor` per transaction; the trigger takes that actor
+  first, and the row's `updated_by` only when it is unset. So a merge, which copies
+  `updated_by` from the old row (`entities/registry.py` l.135), is credited to the person
+  who merged. A remove without an actor is refused.
+- A delete of an entity (the sweep, a merge) cascades to its properties after the entity
+  row is gone. A `BEFORE DELETE` trigger on `entities` records each of its keys as
+  removed, with the entity's `kind` and `ref`, before the cascade.
 - The current properties must equal the history replayed (last row per key). The proof
   checks it; the Go tests do too.
 - The item, unit and kind pages show a property's history, and the agent's
@@ -310,26 +315,36 @@ Go owns stock; Python calls it.
 
 - `scadbuddy-core` (`tools/go/core`, epic #7667) holds the inventory and stock tables, the
   registry and every handler. It serves them as internal CRUD routes under
-  `/api/v1/internal/crud/inventory/*`, which take a service credential, as the agent CRUD
-  areas do (area `inventory`, and `inventory:read` for its GETs).
+  `/api/v1/internal/crud/inventory/*`, which take a service credential of a new caller
+  `inventory`, minted in process by the API (area `inventory`, and `inventory:read` for
+  its GETs). The Go router mounts areas per caller: today `tools/go/core/main.go`
+  `newRouter` mounts every area for the caller `agent`, and `internal/crud/crud.go`
+  refuses a credential whose caller is not the path's, so the caller is added to
+  `auth/service_auth.py` and the `service_credentials_caller_check` constraint
+  (plan K1, R-K1-3).
 - Python keeps the public `/api/v1/inventory/*` (and `/filament/*`) routes: the login
   checks, the OpenAPI export and so `schema.d.ts` stay as they are. Each route parses,
   forwards to its Go route, and maps the answer. The pydantic models stay the source of
   the public contract; a Go internal route takes and returns the same JSON. When #7667's
   phase 6 ports the login checks, the public routes move to Go unchanged and the Python
   forwarders go.
-- Python callers that write stock become HTTP clients of the Go routes: `orders/parts.py`,
-  `orders/lifecycle.py`, `orders/costs.py`, `orders/store.py`, `printers/store.py`,
-  `entities/registry.py` (merge), `entities/sweep.py`, and later the `PrintRun` workflow,
-  `filament/bambuddy_usage.py` and the `FilamentBbSync` workflow. No Python code writes a
-  stock table after its caller moves; until then a caller keeps its current SQL and runs no
-  handler, and the layer that moves it says so.
+- Python code that writes stock tables outside `inventory/` (read on main `ed32aabf1`):
+  `orders/lifecycle.py` (take l.5381, give back l.5424, re-cost l.5517),
+  `entities/registry.py` (the merge's `UPDATE stock_moves`, l.132), `printers/store.py`
+  (its merge re-points `stock_units.printer_id`, l.358) and `inventory/part_alias.py`
+  (the `/parts` aliases, l.219-360). Later: the `PrintRun` workflow,
+  `filament/bambuddy_usage.py` and the `FilamentBbSync` workflow. These become HTTP
+  clients of the Go routes, each in the layer the plan names; until then a caller keeps
+  its SQL and runs no handler. `orders/parts.py`, `orders/costs.py`, `orders/store.py` and
+  `entities/sweep.py` only read stock tables and keep their reads.
 - An order change and its stock write are two steps now, not one transaction. Every Go
-  write takes an `Idempotency-Key`; the Go side keeps the key with the write's result for
-  7 days, and a repeat returns that result. The Python caller writes its own row first,
-  then calls Go with a key derived from that row (`order_item:<id>:parts:<version>`), and a
-  Temporal activity retries a failed call. A caller that must undo its own row on a refusal
-  does so in its own transaction.
+  write takes an `Idempotency-Key`. The ledger is the existing `crud_requests`
+  (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
+  the caller `inventory` (24 hours for the others); a repeat returns the stored result.
+  The Python caller writes its own row first, then calls Go with a key derived from that
+  row (`order_item:<id>:parts:<version>`), and a retry settles a failed call (plan K1,
+  R-K1-14). A caller that must undo its own row on a refusal does so in its own
+  transaction.
 - In Go, a handler runs in the base flow's transaction: every table a handler writes is
   in the same database, written by `scadbuddy-core`.
 
@@ -367,11 +382,13 @@ layout is asked of the #7667 owner (comment on #7667, 2026-11-25).
   printer's run hours are its own rows. `printer_run_hours` (one counter per printer,
   `migrations/20261118T0738Z_printer_run_hours.sql`) stays as it is until K6, which back-
   fills one opening row per printer from it and then reads `unit_uses` only.
-- New `relation_types` and `relations` (`type_id`, `from_entity`, `to_entity` as FKs to
+- New `relation_types` and `relations` (K1 creates them, since §8 turns
+  `items.compatible_with` into relationships; their handlers come in K2), and the entity
+  kind `item_kind` for a kind's end (`entities/registry.py` `KINDS`). `relations` has
+  `type_id`, `from_entity`, `to_entity` as FKs to
   `entities`, `attrs jsonb` for `max` and `where`, `created_at`, `created_by`, `ended_at`).
 - New `inventory_signals`: one row per signal raised, so the schedule never raises one
   twice.
-- New `idempotency_keys` for §6.1.
 - New `entity_property_history` and `entity_property_schema_history` (append only, a
   trigger writes them), §4.8.
 - New `handler_values` (the cache, primary key `entity_id`, `step`),
@@ -447,8 +464,9 @@ Each is an issue under #6949, with layers as stacked PRs.
   units, moves, the internal routes, the Python forwarders for the phase 2 routes, the
   idempotency keys, and the migration of §8. The YAML test. It needs `scadbuddy-core`
   deployed with its CRUD port (#7702), not the front process: Python calls Go directly.
-- K1 also adds the property history (§4.8): it touches only `entity_properties`, so it can
-  land first, on its own.
+- K1 also adds the property history (§4.8): it touches only `entity_properties` and
+  `entities`, so it can land first, on its own. K1 also creates the relationship tables
+  and `handler_config_history` (§6.3, §4.7).
 - K2. Life, services and relationships: `unit_uses`, the life handlers, the handler
   cache with its history and refresh, term instances, the relationship types and
   container fields, the schedule.
