@@ -1907,14 +1907,17 @@ const tools: Tool[] = [
     description:
       'Save a label sheet (#7216): a named grid of labels on an A4 or Letter page. Without `sheet_id` it adds a ' +
       'sheet. With one (from filament_label_templates `saved`) it replaces that whole sheet. `name` is 1 to 100 ' +
-      'characters, and two names may not differ only by case. `layout` has `page` (`a4` or `letter`), `width_mm` ' +
+      'characters after the spaces at its ends are removed, and two names may not differ only by case. `layout` has `page` (`a4` or `letter`), `width_mm` ' +
       '(40 to 190), `height_mm` (25 to 190), `cols` (1 to 20), `rows` (1 to 40), `top_mm` and `left_mm` (the page ' +
       'margins, 0 to 190) and `col_gap_mm` and `row_gap_mm` (0 to 190, default 0). 422 when the grid does not fit ' +
       'its page. 409 `label_sheet_name_taken` when the name is in use. 409 `too_many_label_sheets` when 100 sheets ' +
       'are saved. 404 for an unknown `sheet_id`. Only what the user says. Writes ScadBuddy only.',
     input: z.object({
       sheet_id: z.string().uuid().optional().describe('A saved sheet `id`; omit to add'),
-      name: z.string().min(1).max(100),
+      name: z
+        .string()
+        .transform((v) => v.trim().normalize('NFC'))
+        .pipe(z.string().min(1).max(100)),
       layout: z.object({
         page: z.enum(['a4', 'letter']),
         width_mm: z.number().min(40).max(190),
@@ -1932,7 +1935,7 @@ const tools: Tool[] = [
     routes: ['POST /api/v1/filament/label-sheets', 'PUT /api/v1/filament/label-sheets/{sheet_id}'],
     summarize: ({ name }) => `Save label sheet ${name}`,
     handler: async ({ sheet_id, name, layout }, { backend }) => {
-      const body = { name, layout } as never
+      const body = { name, layout: { ...layout, col_gap_mm: layout.col_gap_mm ?? 0, row_gap_mm: layout.row_gap_mm ?? 0 } }
       if (sheet_id === undefined)
         return json(await ok(backend.POST('/api/v1/filament/label-sheets', { body }), 'add a label sheet'))
       return json(
