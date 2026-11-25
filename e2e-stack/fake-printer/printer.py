@@ -44,7 +44,10 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
     takes the next free index (the largest plus one, from 1; made up), any other replaces
     the entry of that index. A slot's K set (``extrusion_cali_set_slot``'s form:
     ``cali_idx`` -1, ``n_coef`` ``"1.400000"``, an ``HS00-`` nozzle, ``tray_id`` the flat
-    slot index) sets that slot's ``k`` and ``cali_idx`` -1 and lists no profile.
+    slot index) sets that slot's ``k`` and ``cali_idx`` -1 and lists no profile. That
+    flat index collides by design (HT-A gives 0, HT-B 4, the external holders 0 and 1,
+    the same as AMS slots; P4), so the fake reads it as an AMS slot. A test of an HT or
+    external slot's K set checks the payload sent (``/__received``), not the report.
   - ``extrusion_cali_del``: removes the entry with that ``cali_idx`` and ``filament_id``.
     The dual-nozzle form's ``extruder_id`` and ``nozzle_id`` are ignored: indexes are one
     series per diameter across both extruders, unmeasured for the H2C.
@@ -53,14 +56,15 @@ It is what a LAN client (3a's ``LanPrinter``) connects to, and it records what i
     sent; empty values (a reset) empty it. A slot this printer lacks is refused.
   - ``extrusion_cali_sel``: the slot's ``cali_idx``, and the chosen profile's
     ``k_value`` as its ``k``; an index with no profile for that diameter is refused.
-
-  The slot K set, the refusal of a missing index and the ``k`` a selection shows are
-  unmeasured until the live check (Task 14). A malformed command (a required id that is
-  missing or not a number) is answered ``fail`` with a reason; it never stops the fake.
   - ``ams_change_filament``: ``ams.tray_now`` (and ``tray_tar``) becomes the ``target``,
     255 on an unload; ``ams_status`` (at the top of ``print``, as the H2C reports it)
     reads ``0x0100`` in the report the change pushes, then 0.
   - ``ams_get_rfid``: the reply only.
+
+  The slot K set, the refusal of a missing index and the ``k`` a selection shows are
+  unmeasured until the live check (Task 14). A malformed command (a required id that is
+  missing or not a number) is answered ``fail`` with a reason and changes nothing; it
+  never stops the fake.
 
   A slot is addressed as ``lan_commands`` addresses it: an AMS unit's tray by
   ``slot_id``; the external holder (``vt_tray``, id 254) by ``ams_id`` 254 or by 255 with
@@ -796,17 +800,21 @@ class FakePrinter:
         if slots:
             if len(slots) != len(entries):
                 raise RefusedError("a slot's K set and profiles in one command")
+            # Every entry is checked before any is written: a refused command changes nothing.
+            writes = []
             for entry in slots:
                 flat = _number(entry, "tray_id")
                 tray = self._tray({"ams_id": flat // 4, "tray_id": flat % 4, "slot_id": flat % 4})
-                tray.update(k=str(_text(entry, "k_value")), cali_idx=-1)
+                writes.append((tray, _text(entry, "k_value")))
+            for tray, k in writes:
+                tray.update(k=k, cali_idx=-1)
             return True
+        indexes = [_number(entry, "cali_idx") for entry in entries]
         with self.controls.lock:
-            for entry in entries:
+            for entry, index in zip(entries, indexes, strict=True):
                 diameter = str(entry.get("nozzle_diameter") or common)
                 table = self.controls.k_table.setdefault(diameter, [])
                 row = {key: entry.get(key, "") for key in K_FIELDS}
-                index = _number(entry, "cali_idx")
                 if index < 0:
                     index = max((e["cali_idx"] for e in table), default=0) + 1
                 row["cali_idx"] = index

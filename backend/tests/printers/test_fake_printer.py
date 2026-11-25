@@ -827,6 +827,20 @@ async def test_a_malformed_command_is_refused_and_the_printer_carries_on(
     assert await _result(linked, ams_get_rfid(0, 0, "91")) == "success"
 
 
+async def test_a_refused_k_set_changes_nothing(linked: _Linked) -> None:
+    """Every entry is checked before any is written: a second entry with no index fails
+    the command, and the first one is not listed."""
+    assert await _result(linked, extrusion_cali_set([_row(1, "0.025000")], "0.4", "94")) == (
+        "success"
+    )
+    payload = extrusion_cali_set([_row(1, "0.040000"), _row(2, "0.041000")], "0.4", "95")
+    del payload["print"]["filaments"][1]["cali_idx"]
+    reply = await _ask(linked, payload)
+    assert reply is not None and refusal(reply) is not None
+    listed = await _profiles(linked, "0.4", "96")
+    assert [(p["cali_idx"], p["k_value"]) for p in listed] == [(1, "0.025000")]
+
+
 async def test_a_reset_restores_the_ams(linked: _Linked) -> None:
     before = (await linked.printer.probe()).print
     slot = wire_slot(0, 0, external_count=1)
