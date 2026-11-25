@@ -20,9 +20,15 @@ the client.
   | `CUPS_PRINTER_INFO` | description clients show (optional) |
   | `CUPS_DEFAULT_PAGE_SIZE` | a PageSize of the PPD: `w144h72` is 2 x 1 in, `w288h432` is 4 x 6 in (default) |
 
+- Your own config instead: leave `CUPS_PRINTER_NAME` unset and `start.sh` touches nothing
+  in `/etc/cups`, so a mounted `printers.conf`, `ppd/` and `cupsd.conf` are used as they
+  are. `cupsd.conf` can be replaced either way (`start.sh` never writes it). cupsd rewrites
+  `printers.conf` when a queue changes, so mount the directory writable (a ConfigMap
+  copied into an emptyDir by an init container), not a read-only file.
 - `cupsd.conf` lets a network client print, see jobs and cancel one job. Every
   administration and operator operation is refused (a remote `lpadmin` gets `Forbidden`,
-  checked by the CI smoke), so the Deployment's env is the only place the queue is set.
+  checked by the CI smoke), so with the image's `cupsd.conf` the queue is set only by env
+  or a mounted config.
   Connections from inside the pod are trusted as local; nothing else runs there.
 - TLS ends at the shared Envoy Gateway; cupsd serves plain HTTP. Clients add the printer
   as `ipps://cups.internal.nullreference.io/printers/S-EDCDU03`.

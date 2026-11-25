@@ -1,7 +1,9 @@
 #!/bin/sh
 # Declares the one label printer from env, then runs cupsd in the foreground
 # (deploy/cups/README.md). The queue is rewritten at every start, so the Deployment's
-# env is the only place it is configured.
+# env is the only place it is configured. With CUPS_PRINTER_NAME unset, /etc/cups is
+# left as it is, for a deployment that mounts its own printers.conf, PPDs and
+# cupsd.conf.
 #
 #   CUPS_PRINTER_NAME       queue name, e.g. S-EDCDU03
 #   CUPS_PRINTER_URI        device URI, e.g. socket://S-EDCDU03.internal.nullreference.io:9100
@@ -9,7 +11,10 @@
 #   CUPS_DEFAULT_PAGE_SIZE  a PageSize of the Zebra ZPL PPD, e.g. w144h72 (2 x 1 in)
 set -eu
 
-: "${CUPS_PRINTER_NAME:?set CUPS_PRINTER_NAME}"
+if [ -z "${CUPS_PRINTER_NAME:-}" ]; then
+  exec /usr/sbin/cupsd -f
+fi
+
 : "${CUPS_PRINTER_URI:?set CUPS_PRINTER_URI}"
 : "${CUPS_DEFAULT_PAGE_SIZE:=w288h432}"
 : "${CUPS_PRINTER_INFO:=$CUPS_PRINTER_NAME}"
