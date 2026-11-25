@@ -106,7 +106,7 @@ deleted after a grace period.
 | Logical key | What | Code |
 |---|---|---|
 | 64-hex, `act-<40hex>`, `output-<32hex>-<n>` | a render job's pieces | `scadbuddy/api/crud_render.py:116` |
-| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save puts each under `<key>-save-<attempt>` first, `staged_save_key`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
+| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save uploads each with no index row first, and the key is indexed in the row's transaction, `OutputBytes.put_folder`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
 | `output-<id>-thumbnail-<sha256>`, `output-<id>-plate_cover-<sha256>` | a thumbnail upload before its key names it (held by nothing); the plate cover read once out of the output's 3MF | `scadbuddy/library/output_rows.py` `staged_thumbnail_key`, `plate_cover_key` |
 | `src-<slug>-<revision>` | a template's source snapshot | `scadbuddy/store/snapshots.py:65-66` |
 | `asset-<id>` | an uploaded template asset | `scadbuddy/store/assets.py:30` |
@@ -251,31 +251,34 @@ names the keys (`model_blob`, `preview_blob`, `thumbnail_blob`, and one `output_
 per `files/` name); `bytes_at` is set once the blobs hold the bytes, and NULL while only
 the files do. The folder `data/outputs/<slug>/<id>/` stays as the fallback until #7257: a
 save still writes it, and every reader reads the file when the row names no blob, or when
-the blob is lost (logged, never a 500). A save writes the folder, puts the bytes under
-keys of its own (`OutputBytes.put_folder`, `<key>-save-<attempt>`), then inserts the row,
-points the output's keys at those objects, and writes its `output_files` rows and its
-holds, in one transaction; then it deletes its staged keys. When the row fails (an id
+the blob is lost (logged, never a 500). A save writes the folder, uploads the bytes with no
+index row (`OutputBytes.put_folder`, `ContentStore.stage`), then inserts the row, writes the
+index rows of the output's keys naming those objects, its `output_files` rows and its holds,
+in one transaction. When the row fails (an id
 that another output holds, `orders/quote.py` `operation_output_id`, among the causes), the
-save fails, its folder is removed (`OutputStore._insert_row`) and its staged keys and
-their objects are deleted: no key of the other output moved, so that output keeps its
-bytes. A put into a full store is a 507. On the `local` backend (no
+save fails, its folder is removed (`OutputStore._insert_row`) and the objects it uploaded
+are removed (`OutputBytes.drop_staged`; an object it reused is another row's and stays): no
+key of the other output moved, so that output keeps its bytes. A put into a full store is a
+507. On the `local` backend (no
 content store) and on `bambuddy` (spec §6.4) no output blob is written: the bytes stay
 files. A store migration to `bambuddy` is refused while the index holds an `output` blob
 (`scadbuddy/store/migrate.py` `refuse_outputs_to_bambuddy`). A delete deletes the row
 and releases its byte holds in one transaction, then removes the folder; the content sweep
 removes the blobs after its grace (`OutputRows.delete`).
 
-A save's cost in commits: each put writes its index row in a transaction of its own
-(`ContentStore.put`), one each for `model.3mf`, `preview.glb`, `thumbnail.png` when there,
-and each `files/` entry, before the row's transaction, and the delete of each staged key
-commits once more after it. On prod a commit is known to take 1-2 s, so a save takes some
-seconds more than in phase 1. The save then files its 3MF in
+A save's cost in commits is one, however many files it has (#7477): the row's transaction
+writes every index row. Two cases each put once handled alone have a rule of their own.
+An object the save reused (the index named the same bytes already) is held only from that
+transaction on; when the sweep freed it first (`ReuseLostError`), the transaction rolls
+back whole, the save uploads its own copy of every object it reused
+(`OutputBytes.own_copies`), and writes the transaction once more, which then reuses
+nothing. A deadlock or a serialization failure runs the transaction again whole, up to
+three attempts (`OutputRows.insert`); the last one's error fails the save, which removes its
+folder and the objects it uploaded. Until the commit no row names an uploaded object, so
+a process that dies meanwhile leaves it to the unrecorded sweep. The save then files its 3MF in
 the native library from the folder it wrote, the same bytes as the model blob, so it
 does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
-own put commits once more. Fewer commits would need a batch put in `ContentStore`:
-upload every file first, then write every index row in one transaction (or in the row's
-own transaction), with its own answer to a reused object that the sweep freed meanwhile
-(`ReuseLostError`) and to a deadlock.
+own put commits once more.
 
 What readers derive of the model (the geometry analysis and its attributed form, the
 asset ids, the plate names, the plate cover) is kept in `output_derived`, once per output.

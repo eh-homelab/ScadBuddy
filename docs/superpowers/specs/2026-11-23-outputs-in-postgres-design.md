@@ -176,10 +176,11 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    bytes or the temporary-file helper. The copy also uploads existing
    outputs' bytes and checks each 3MF's sha256 against the file.
 
-   As built (#7256): a save writes the folder, puts its bytes under keys of its own
-   (`<key>-save-<attempt>`), then inserts the row, points the output's keys at those
-   objects, and writes its `output_files` rows and its `blob_refs` holds, in one
-   transaction; then it deletes its staged keys. A save that fails on the row (an id
+   As built (#7256, #7477): a save writes the folder, uploads its bytes with no index row,
+   then inserts the row, writes the index rows of the output's keys naming those objects,
+   and writes its `output_files` rows and its `blob_refs` holds, in one transaction: one
+   commit per save (`docs/architecture/data.md` has its rules for a lost reuse and a
+   deadlock). A save that fails on the row (an id
    another output holds) moved no key of that output, so it keeps its bytes (#7478
    review). A put into a full store is a 507 and leaves no folder, row or hold. The keys
    are `output-<id>-<role>` and `output-<id>-file-<hash>` (the first 32 hex digits of the

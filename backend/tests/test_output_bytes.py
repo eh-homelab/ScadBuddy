@@ -71,9 +71,15 @@ def _folder(root: Path, *, preview: bool = True, thumbnail: bool = True) -> Path
     return root
 
 
-def _staged(got: OutputBlobs) -> dict[str, str]:
-    """Each of the output's keys and the staged key its bytes went under."""
-    return {item.key: item.staged_key for item in got.staged}
+def _staged(got: OutputBlobs) -> dict[str, BlobRef]:
+    """Each of the output's keys and the object its bytes went to."""
+    return {item.key: item.ref for item in got.staged}
+
+
+def _index_keys(pool: Pool) -> list[str]:
+    with pool.connection() as conn:
+        found = conn.execute("SELECT key FROM store_blobs").fetchall()
+    return [str(item["key"]) for item in found]
 
 
 def _spooled(content: ContentStore) -> list[Path]:
@@ -81,7 +87,7 @@ def _spooled(content: ContentStore) -> list[Path]:
 
 
 async def test_put_folder_puts_every_role_and_file(
-    blobs: OutputBytes, content: ContentStore, tmp_path: Path
+    blobs: OutputBytes, content: ContentStore, pool: Pool, tmp_path: Path
 ) -> None:
     got = await blobs.put_folder(_folder(tmp_path / "o1"), "o1", "cube")
     assert got.model == output_blob_key("o1", "model")
@@ -93,25 +99,54 @@ async def test_put_folder_puts_every_role_and_file(
     )
     staged = _staged(got)
     assert list(staged) == got.keys()
-    # The bytes went under the save's own keys; the output's keys stay unwritten until
-    # the row's transaction (`OutputRows.insert`).
-    keys = got.keys()
-    assert all(blobs.ref(key) is None for key in keys)
-    assert await blobs.read(staged[output_blob_key("o1", "model")]) == b"3mf"
-    assert await blobs.read(staged[output_file_key("o1", "b.stl")]) == b"bb"
-    ref = blobs.ref(staged[output_blob_key("o1", "preview")])
-    assert ref is not None and ref.kind == "output"
+    # The objects are uploaded and no index row is written (#7477): the output's keys
+    # are indexed only in the row's transaction (`OutputRows.insert`).
+    assert _index_keys(pool) == []
+    assert not any(item.reused for item in got.staged)
+    assert await content.read(staged[output_blob_key("o1", "model")]) == b"3mf"
+    assert await content.read(staged[output_file_key("o1", "b.stl")]) == b"bb"
+    ref = staged[output_blob_key("o1", "preview")]
+    assert ref.kind == "output"
     assert ref.sha256 == hashlib.sha256(b"glb").hexdigest()
-    assert ref in [item.ref for item in got.staged]
-    stat = await content.stat(staged[output_blob_key("o1", "preview")])
-    assert stat is not None and stat.slug == "cube"
-    # Another call stages under keys of its own.
-    again = await blobs.put_folder(_folder(tmp_path / "o1b"), "o1", "cube")
-    assert set(_staged(again).values()).isdisjoint(staged.values())
     # No thumbnail: no thumbnail blob.
     bare = await blobs.put_folder(_folder(tmp_path / "o2", thumbnail=False), "o2", "cube")
     assert bare.thumbnail is None
     assert output_blob_key("o2", "thumbnail") not in _staged(bare)
+
+
+async def test_put_folder_reuses_an_object_a_row_names(
+    blobs: OutputBytes, content: ContentStore, tmp_path: Path
+) -> None:
+    """An object the index names already is reused, not uploaded again; the row's
+    transaction holds it (`BlobIndex.put_in` ``reuse``)."""
+    first = await blobs.put_folder(_folder(tmp_path / "o1"), "o1", "cube")
+    model = output_blob_key("o1", "model")
+    await asyncio.to_thread(content.index.put, model, _staged(first)[model], slug="cube", meta={})
+    again = await blobs.put_folder(_folder(tmp_path / "o2"), "o2", "cube")
+    reused = {item.key: item.reused for item in again.staged}
+    assert reused[output_blob_key("o2", "model")]
+    assert not reused[output_blob_key("o2", "preview")]
+    assert _staged(again)[output_blob_key("o2", "model")] == _staged(first)[model]
+
+
+async def test_a_failed_put_folder_removes_what_it_uploaded(
+    blobs: OutputBytes, content: ContentStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = content.stage
+    refs: list[BlobRef] = []
+
+    async def third_fails(*args: Any, **kwargs: Any) -> tuple[BlobRef, bool]:
+        if len(refs) == 2:
+            raise OSError("the store went away")
+        ref, reused = await stage(*args, **kwargs)
+        refs.append(ref)
+        return ref, reused
+
+    monkeypatch.setattr(content, "stage", third_fails)
+    with pytest.raises(OSError, match="the store went away"):
+        await blobs.put_folder(_folder(tmp_path / "o1"), "o1", "cube")
+    for ref in refs:
+        assert not await content.backend.exists(ref.backend_id)
 
 
 async def test_put_folder_without_preview_raises(
@@ -231,9 +266,9 @@ async def test_put_folder_on_s3_reads_its_files_off_the_loop(
         monkeypatch.undo()
         # The model is past the threshold, so it went up in parts; the rest whole.
         assert len(parts) == 1
-        assert await blobs.read(staged[output_blob_key("o1", "model")]) == big
-        assert await blobs.read(staged[output_blob_key("o1", "preview")]) == b"glb"
-        assert await blobs.read(staged[output_file_key("o1", "b.stl")]) == b"bb"
+        assert await content.read(staged[output_blob_key("o1", "model")]) == big
+        assert await content.read(staged[output_blob_key("o1", "preview")]) == b"glb"
+        assert await content.read(staged[output_file_key("o1", "b.stl")]) == b"bb"
     finally:
         await content.aclose()
     assert reads

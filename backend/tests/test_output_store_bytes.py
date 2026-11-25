@@ -608,6 +608,161 @@ async def test_save_puts_bytes_and_row_in_one_transaction(
     assert row is not None and row.bytes_at is not None
 
 
+async def test_a_save_writes_its_index_rows_in_the_rows_transaction(
+    tmp_path: Path, projection: JobProjection, pool: Pool
+) -> None:
+    """#7477: a save commits once, however many files it has. Its puts upload the
+    objects and write no index row; the output's keys are indexed in the row's own
+    transaction, and nothing is left to delete after it."""
+    paths, job, files = await _with_files(tmp_path)
+    index_pool = _Counted(pool)
+    content = local_content(tmp_path / "remote", index_pool)  # type: ignore[arg-type]
+    content.spool = tmp_path / "spool"
+    rows_pool = _Counted(projection.pool)
+    store = _store(paths, rows_pool, content)
+    try:
+        meta = await store.save(job, name="first", files_dir=files)
+    finally:
+        await content.aclose()
+    assert (index_pool.transactions, index_pool.writes_outside) == (0, [])
+    assert (rows_pool.transactions, rows_pool.writes_outside) == (1, [])
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{meta.id}-",)
+        ).fetchall()
+    assert {str(item["key"]) for item in found} == _holds(pool, meta.id)
+
+
+async def test_a_save_whose_reused_object_was_freed_puts_its_own_copies(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477's rule for a lost reuse: the sweep freed an object the save reused after
+    its put found it. The row's transaction rolls back whole, the save uploads its own
+    copy of every file it reused, and writes the row once more, reusing nothing."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    first = await store.save(job, name="first", files_dir=files)
+    assert store.rows is not None
+    insert = store.rows.insert
+    reused: list[list[bool]] = []
+
+    def freed_first(row: Any, conn: Any = None) -> Any:
+        reused.append([item.reused for item in row.blobs.staged])
+        if len(reused) == 1:
+            # What the sweep does to the first output's objects meanwhile.
+            with pool.connection() as own:
+                gone = own.execute(
+                    "DELETE FROM store_blobs WHERE starts_with(key, %s) RETURNING backend_id",
+                    (f"output-{first.id}-",),
+                ).fetchall()
+            for item in gone:
+                Path(content.backend.root, item["backend_id"]).unlink(missing_ok=True)  # type: ignore[attr-defined]
+        return insert(row, conn)
+
+    monkeypatch.setattr(store.rows, "insert", freed_first)
+    meta = await store.save(job, name="second", files_dir=files)
+    assert len(reused) == 2
+    assert any(reused[0]) and not any(reused[1])
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    directory = store.directory(meta.id)
+    assert store.bytes is not None
+    assert row.blobs.model is not None and row.blobs.preview is not None
+    assert await store.bytes.read(row.blobs.model) == (directory / MODEL_NAME).read_bytes()
+    assert await store.bytes.read(row.blobs.preview) == (directory / PREVIEW_NAME).read_bytes()
+    key = output_file_key(meta.id, "a.stl")
+    assert await store.bytes.read(key) == b"a stl"
+
+
+async def test_a_save_runs_its_rows_transaction_again_after_a_deadlock(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477's rule for a deadlock: Postgres picked the row's transaction as a victim.
+    The whole transaction runs again, as `BlobIndex.retrying` runs an index write."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    put_in = BlobIndex.put_in
+    calls = 0
+
+    def deadlocks_once(self: BlobIndex, *args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise DeadlockDetected("deadlock detected")
+        return put_in(self, *args, **kwargs)
+
+    monkeypatch.setattr(BlobIndex, "put_in", deadlocks_once)
+    meta = await store.save(job, name="first", files_dir=files)
+    monkeypatch.undo()
+    assert store.rows is not None
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
+    keys = {
+        row.blobs.model,
+        row.blobs.preview,
+        *(item.blob_key for item in store.rows.files(meta.id)),
+    }
+    assert _holds(pool, meta.id) == keys
+    assert store.bytes is not None and row.blobs.model is not None
+    assert (
+        await store.bytes.read(row.blobs.model)
+        == (store.directory(meta.id) / MODEL_NAME).read_bytes()
+    )
+
+
+async def test_a_save_that_deadlocks_every_time_removes_what_it_uploaded(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7477: the last attempt's deadlock fails the save; it removes its folder and every
+    object it uploaded, which no row names."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    assert store.bytes is not None
+    put_folder = store.bytes.put_folder
+    refs: list[Any] = []
+
+    async def kept(*args: Any, **kwargs: Any) -> Any:
+        got = await put_folder(*args, **kwargs)
+        refs.extend(item.ref for item in got.staged)
+        return got
+
+    def deadlocks(self: BlobIndex, *args: Any, **kwargs: Any) -> Any:
+        raise DeadlockDetected("deadlock detected")
+
+    monkeypatch.setattr(store.bytes, "put_folder", kept)
+    monkeypatch.setattr(BlobIndex, "put_in", deadlocks)
+    output_id = "9" * 32
+    with pytest.raises(DeadlockDetected):
+        await store.save(job, name="first", files_dir=files, output_id=output_id)
+    monkeypatch.undo()
+    assert not paths.output_dir(job.slug, output_id).exists()
+    assert store.rows is not None and store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
+    assert refs
+    for ref in refs:
+        assert not await content.backend.exists(ref.backend_id)
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
+        ).fetchall()
+    assert found == []
+
+
 async def test_save_row_names_every_blob_and_holds_it(
     tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
 ) -> None:
@@ -662,24 +817,26 @@ async def test_save_put_failure_removes_folder_and_row(
 ) -> None:
     paths, job, files = await _with_files(tmp_path)
     store = _store(paths, projection.pool, content)
-    put = content.put
-    calls = 0
+    stage = content.stage
+    refs: list[Any] = []
 
     async def second_fails(*args: Any, **kwargs: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+        if refs:
             raise OSError("the store went away")
-        return await put(*args, **kwargs)
+        ref, reused = await stage(*args, **kwargs)
+        refs.append(ref)
+        return ref, reused
 
-    monkeypatch.setattr(content, "put", second_fails)
+    monkeypatch.setattr(content, "stage", second_fails)
     output_id = "f" * 32
     with pytest.raises(OSError, match="the store went away"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
     assert not paths.output_dir(job.slug, output_id).exists()
     assert store.rows is not None and store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
-    # The first put went under the save's own key, and the failed save deleted it.
+    # The first put's object is removed; no index row ever named it.
+    assert len(refs) == 1
+    assert not await content.backend.exists(refs[0].backend_id)
     with pool.connection() as conn:
         found = conn.execute(
             "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
@@ -1042,8 +1199,7 @@ async def test_save_commit_failure_after_puts_discards_folder_and_row(
     assert not paths.output_dir(job.slug, output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
-    # The blobs were put under the save's own keys, and the failed save deleted them;
-    # the output's keys never named them.
+    # The failed save removed the objects it uploaded; no index row named them.
     with pool.connection() as conn:
         found = conn.execute(
             "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)

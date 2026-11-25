@@ -4,9 +4,9 @@ outputs-in-Postgres spec 2026-11-23 §4.3).
 It wraps the API's `ContentStore`: keyed puts, a compare-and-swap for the byte copy,
 streamed reads, and a temporary file for a reader that needs a path. The keys are
 `output_rows.output_blob_key` and `output_file_key`; the row and its holds are
-`OutputRows`' to write. A save puts its bytes under keys of its own
-(`output_rows.staged_save_key`), and the output's keys take them only in the row's
-transaction (`OutputBlobs.staged`). The temporary files go under ``content.spool``
+`OutputRows`' to write. A save uploads its bytes with no index row (`ContentStore.stage`),
+and the output's keys are indexed only in the row's transaction (`OutputBlobs.staged`), so
+a save commits once (#7477). The temporary files go under ``content.spool``
 (``SCADBUDDY_SPOOL_DIR``, else the data volume's ``cache/blob-spool``, #7316), and are
 removed when the reader is done, error or not.
 
@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import os
 import re
 import tempfile
-import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, field
@@ -42,7 +42,6 @@ from scadbuddy.library.output_rows import (
     StagedBlob,
     output_blob_key,
     output_file_key,
-    staged_save_key,
 )
 from scadbuddy.render.job_models import FILE_NAME_PATTERN
 from scadbuddy.store.content import BlobData, BlobMissingError, BlobRef, BlobScope, ContentStore
@@ -314,28 +313,36 @@ class OutputBytes:
             path, lambda data: self.replace(key, data, slug=slug, expected=expected)
         )
 
+    async def _stage_file(self, key: str, path: Path, slug: str, *, own: bool) -> StagedBlob:
+        ref, reused = await self._with_file(
+            path,
+            lambda data: self.content.stage(
+                "output", data, name=key, scope=BlobScope(slug=slug), own=own
+            ),
+        )
+        return StagedBlob(key, ref, reused, path)
+
     async def put_folder(self, directory: Path, output_id: str, slug: str) -> OutputBlobs:
-        """Put the folder's bytes for a save, a file at a time and never read whole:
+        """Upload the folder's bytes for a save, a file at a time and never read whole:
         ``model.3mf`` and ``preview.glb``, ``thumbnail.png`` when there, and every
-        ``files/`` entry. Each goes under a key of this call's own (`staged_save_key`),
-        never under the output's key: the result names the output's keys and, in
-        ``staged``, the object each takes when `OutputRows.insert` writes the row. So a
-        save that fails on the id changes no blob of the output that holds it (#7478
-        review). Before any put: `FileNotFoundError` when ``model.3mf`` or
-        ``preview.glb`` is missing, and `OutputFileNameError` when a ``files/`` entry is
-        not a regular file or has a name an output may not hold."""
+        ``files/`` entry. No index row is written (`ContentStore.stage`): the result names
+        the output's keys and, in ``staged``, the object each takes when `OutputRows.insert`
+        writes the row, all in that one transaction (#7477). So a save that fails on the
+        id changes no blob of the output that holds it (#7478 review). Until then no row
+        names an uploaded object; a failed save calls `drop_staged`. Before any put:
+        `FileNotFoundError` when ``model.3mf`` or ``preview.glb`` is missing, and
+        `OutputFileNameError` when a ``files/`` entry is not a regular file or has a name
+        an output may not hold."""
         for name in (MODEL_NAME, PREVIEW_NAME):
             if not await asyncio.to_thread((directory / name).is_file):
                 raise FileNotFoundError(directory / name)
         names = await asyncio.to_thread(put_names, directory)
-        attempt = uuid.uuid4().hex
         staged: list[StagedBlob] = []
 
         async def stage(key: str, path: Path) -> BlobRef:
-            staged_key = staged_save_key(key, attempt)
-            ref = await self._put_file(staged_key, path, slug)
-            staged.append(StagedBlob(key, staged_key, ref))
-            return ref
+            item = await self._stage_file(key, path, slug, own=False)
+            staged.append(item)
+            return item.ref
 
         model = output_blob_key(output_id, "model")
         preview = output_blob_key(output_id, "preview")
@@ -362,18 +369,36 @@ class OutputBytes:
             staged=tuple(staged),
         )
 
+    async def own_copies(self, blobs: OutputBlobs, slug: str) -> OutputBlobs:
+        """``blobs`` with the save's own copy of each object it reused: the rule for a
+        reuse the sweep freed before the row's transaction held it (`ReuseLostError`,
+        #7477). Every reused one is put again with no lookup, not only the lost one, so
+        the next transaction reuses nothing and cannot lose again. On a failure the
+        copies made so far are removed, and the caller drops ``blobs``."""
+        made: list[StagedBlob] = []
+        try:
+            for item in blobs.staged:
+                if item.reused:
+                    made.append(await self._stage_file(item.key, item.path, slug, own=True))
+        except Exception:
+            await self.drop_staged(OutputBlobs(staged=tuple(made)))
+            raise
+        copies = {item.key: item for item in made}
+        return dataclasses.replace(
+            blobs, staged=tuple(copies.get(item.key, item) for item in blobs.staged)
+        )
+
     async def drop_staged(self, blobs: OutputBlobs) -> None:
-        """Delete a save's staged keys (`put_folder`), and each object no other key names:
-        after a failed save, its objects; after a commit, only the keys, as the output's
-        keys name the objects. A failed delete is logged, and the sweep removes the key
-        after the grace."""
+        """After a failed save: remove each object its puts uploaded (`put_folder`) that
+        no row names. A reused object is another row's and stays. A failed remove is
+        logged, and the unrecorded sweep removes the object after the grace."""
         for staged in blobs.staged:
             try:
-                await self.content.delete(staged.staged_key)
+                await self.content.release_unindexed(staged.ref, staged.reused)
             except Exception:
                 logger.warning(
-                    "could not delete a failed save's blob",
-                    extra={"key": staged.staged_key},
+                    "could not remove a failed save's blob",
+                    extra={"key": staged.key},
                     exc_info=True,
                 )
 

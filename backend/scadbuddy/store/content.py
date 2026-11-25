@@ -238,6 +238,28 @@ class ContentStore:
             await self.release_replaced(key, previous)
         return ref
 
+    async def stage(
+        self,
+        kind: BlobKind,
+        data: BlobData,
+        *,
+        name: str,
+        scope: BlobScope,
+        own: bool = False,
+    ) -> tuple[BlobRef, bool]:
+        """Upload ``data`` and write no index row: the object, and whether it is an
+        existing one reused. The caller writes its rows in a transaction of its own
+        (`BlobIndex.put_in` with ``reuse`` as answered), so a batch of puts commits once
+        (#7477). Until then no row names an uploaded object; a caller that writes none
+        calls `release_unindexed`. ``own`` uploads the caller's own copy with no lookup,
+        for a reuse lost to the sweep (`ReuseLostError`)."""
+        return await self._store(kind, data, name=name, scope=scope, lost_reuse=own)
+
+    async def release_unindexed(self, ref: BlobRef, reused: bool) -> None:
+        """Remove what `stage` uploaded when no row came to name it. A reused object is
+        another row's, and stays."""
+        await self._release_unindexed(ref, reused)
+
     async def link(
         self,
         key: str,
