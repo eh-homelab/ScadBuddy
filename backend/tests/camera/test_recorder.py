@@ -18,13 +18,28 @@ from scadbuddy.api.crud_camera import MAX_SEGMENTS
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.models import SegmentIn
 from scadbuddy.camera.process import serve_local
-from scadbuddy.camera.recorder import ADOPT_AGE, BATCH, LEADER, STALL_SECONDS, Recorder, serve_hooks
+from scadbuddy.camera.recorder import (
+    ADOPT_AGE,
+    BATCH,
+    LEADER,
+    STALL_SECONDS,
+    STALLED_LEAD_TICKS,
+    Recorder,
+    serve_hooks,
+)
 from scadbuddy.camera.settings import CameraRefusal, RecorderSettings
 from scadbuddy.camera.uploads import LocalSegment, Uploader, UploadError, object_key
 from scadbuddy.crud.client import CrudClient
-from tests.camera.test_follow import Token, until
-from tests.camera.test_relay import FakeMtx
-from tests.camera.test_uploads import KEY_ID, RELAY_PASS, SECRET, settings, write_segment
+from tests.camera.support import (
+    KEY_ID,
+    RELAY_PASS,
+    SECRET,
+    FakeMtx,
+    Token,
+    settings,
+    until,
+    write_segment,
+)
 from tests.support.store import moto_s3
 
 BASE = "/api/v1/internal/crud/camera"
@@ -568,6 +583,7 @@ async def test_resync_keeps_unchanged_paths(tmp_path: Path, api: FakeCamera) -> 
     assert conf["recordDeleteAfter"] == "0s"
     api.printers = []
     await rig.recorder.reconcile_all()
+    await rig.recorder.flushed()
     assert P1 not in rig.mtx.paths
 
 
@@ -888,6 +904,7 @@ async def test_last_segment_age(tmp_path: Path, api: FakeCamera) -> None:
     assert REGISTRY.get_sample_value("scadbuddy_camera_last_segment_age_seconds", age) == 30
     api.printers = []
     await rig.recorder.reconcile_all()
+    await rig.recorder.flushed()
     assert REGISTRY.get_sample_value("scadbuddy_camera_last_segment_age_seconds", age) is None
     await rig.recorder.aclose()
 
@@ -1053,3 +1070,192 @@ async def test_ready_after_the_stall_time_without_a_segment(
     rig.clock.now += 1
     assert rig.recorder.ready()
     await rig.recorder.aclose()
+
+
+async def test_a_stalled_leader_gives_up_its_lease(tmp_path: Path, api: FakeCamera) -> None:
+    """#7407: a leader that renews but indexes nothing while MediaMTX says the path is ready
+    releases its lease after `STALLED_LEAD_TICKS` renewals, so the standby takes over."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    assert api.starts() == [at(0)]
+    rig.mtx.ready[P1] = True
+    api.bucket.fail = True
+    # The first renewal still sees the index of the tick before.
+    for i in range(STALLED_LEAD_TICKS + 1):
+        assert api.leases[P1][0] == "rec-a"
+        await rig.segment(4 + i * 4)
+        rig.clock.now += 5
+        await rig.recorder.tick(P1)
+    assert P1 not in api.leases
+    assert api.events.count("lease release rec-a") == 1
+    assert (
+        REGISTRY.get_sample_value("scadbuddy_camera_leader", {"printer": P1, "recorder": "rec-a"})
+        == 0
+    )
+    # It does not take the lease straight back: the standby gets it first.
+    rig.clock.now += 5
+    await rig.recorder.tick(P1)
+    assert P1 not in api.leases
+    await rig.recorder.aclose()
+
+
+async def test_a_leader_whose_path_is_not_ready_keeps_its_lease(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """A printer that is off sends no video: no segment is no stall."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    rig.mtx.ready[P1] = False
+    for _ in range(3 * STALLED_LEAD_TICKS):
+        rig.clock.now += 5
+        await rig.recorder.tick(P1)
+    assert api.leases[P1][0] == "rec-a"
+    assert "lease release rec-a" not in api.events
+    await rig.recorder.aclose()
+
+
+async def test_a_leader_that_indexes_keeps_its_lease(tmp_path: Path, api: FakeCamera) -> None:
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    rig.mtx.ready[P1] = True
+    for i in range(3 * STALLED_LEAD_TICKS):
+        await rig.segment(i * 4)
+        rig.clock.now += 5
+        await rig.recorder.tick(P1)
+    assert api.leases[P1][0] == "rec-a"
+    assert "lease release rec-a" not in api.events
+    await rig.recorder.aclose()
+
+
+async def test_a_takeover_seen_after_a_failed_index_is_handed_over(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """A's index fails (409) while its acquire is on its way, and B indexed meanwhile: the
+    answer names B's end, so A starts after it and indexes nothing that overlaps."""
+    a, b = Rig(tmp_path, api, name="rec-a"), Rig(tmp_path, api, name="rec-b")
+    for rig in (a, b):
+        await rig.recorder.reconcile_all()
+    await a.segment(0)
+    await a.recorder.tick(P1)
+    await a.segment(4)
+    await a.segment(8)
+    # A's lease runs out; B takes it, indexes past A's segments, and releases.
+    api.now += LEASE + timedelta(seconds=1)
+    await b.segment(4.5)
+    await b.segment(8.5)
+    await b.recorder.tick(P1)
+    await b.recorder.shutdown()
+    assert api.indexed_until(P1) == at(12.5)
+    feed = a.recorder._feeds[P1]
+    real = a.recorder._lease
+
+    async def lease(printer_id: str, action: Any) -> Any:
+        # A's index call 409s while the lease call is on its way.
+        first = feed.pending[0]
+        first.key = await a.recorder._uploader.put(first.seg)
+        assert not await a.recorder._index(P1, feed, [first])
+        return await real(printer_id, action)
+
+    a.recorder._lease = lease  # type: ignore[method-assign]
+    await a.recorder.renew(P1)
+    a.recorder._lease = real  # type: ignore[method-assign]
+    await a.recorder.upload(P1)
+    assert api.starts() == [at(0), at(4.5), at(8.5)]
+    assert a.files() == []
+
+
+async def test_adopt_measures_a_gap_from_the_segment_before(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """A leftover file right after a hooked one is no discontinuity."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    old = time.time() - 60
+    for offset in (0, 8):
+        path = write_segment(rig.root, P1, at(offset))
+        os.utime(path, (old + offset, old + offset))
+    await rig.segment(4)  # its hook came; the others' were lost
+    await rig.recorder.adopt(P1)
+    await rig.recorder.tick(P1)
+    assert api.starts() == [at(0), at(4), at(8)]
+    assert api.flags()[2] is False
+
+
+async def test_scan_keeps_a_file_on_an_os_error(
+    tmp_path: Path, api: FakeCamera, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error that is not about the file's bytes (EMFILE, EIO) keeps the file for a later
+    pass; only an unreadable file is deleted."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    path = write_segment(rig.root, P1, at(0))
+    old = time.time() - 60
+    os.utime(path, (old, old))
+
+    def busy(_: Path) -> datetime:
+        raise OSError(24, "Too many open files")
+
+    monkeypatch.setattr("scadbuddy.camera.recorder.segment_start", busy)
+    await rig.recorder.adopt(P1)
+    assert path.exists()
+    assert rig.recorder._feeds[P1].pending == []
+    monkeypatch.undo()
+    await rig.recorder.adopt(P1)
+    assert [item.seg.path for item in rig.recorder._feeds[P1].pending] == [path]
+
+
+async def test_a_printer_added_at_run_time_does_not_hold_back_ready(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """Readiness gates a rollout only: a printer added after the first full reconcile does
+    not take a running recorder out of ready for `STALL_SECONDS`."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    assert rig.recorder.ready()
+    api.printers = [P1, "p2"]
+    await rig.recorder.reconcile("p2")
+    assert rig.recorder.ready()
+    await rig.recorder.reconcile_all()
+    assert rig.recorder.ready()
+    await rig.recorder.aclose()
+
+
+async def test_a_stop_that_flushes_does_not_hold_other_printers(
+    tmp_path: Path, api: FakeCamera, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.printers = [P1]
+    rig = Rig(tmp_path, api)
+    fake = cast("FakeUploader", rig.recorder._uploader)
+    gate = asyncio.Event()
+
+    async def put(seg: LocalSegment) -> str:
+        if seg.printer_id == P1:
+            await gate.wait()
+        return await FakeUploader.put(fake, seg)
+
+    try:
+        await rig.recorder.reconcile_all()
+        await rig.recorder.renew(P1)
+        await rig.segment(0)
+        monkeypatch.setattr(rig.recorder._uploader, "put", put)
+        api.printers = ["p2"]
+        async with asyncio.timeout(10):
+            await rig.recorder.reconcile(P1)
+            # P1's flush waits on the bucket; p2 starts meanwhile.
+            await rig.recorder.reconcile("p2")
+        assert "p2" in rig.mtx.paths
+        assert P1 in rig.mtx.paths
+        gate.set()
+        async with asyncio.timeout(10):
+            await rig.recorder.flushed()
+        assert api.starts() == [at(0)]
+        assert P1 not in rig.mtx.paths
+        assert api.events[-3:] == ["lease release rec-a", "mtx delete", "feed stopped"]
+    finally:
+        gate.set()
+        await rig.recorder.aclose()

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from typing import Any
 
 import httpx
@@ -11,7 +10,6 @@ import pytest
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.follow import ChangeFollower
-from scadbuddy.camera.mediamtx import MediaMtx
 from scadbuddy.camera.relay import (
     HOOK_URL,
     Relay,
@@ -20,7 +18,7 @@ from scadbuddy.camera.relay import (
     serve_hooks,
 )
 from scadbuddy.crud.client import CrudClient
-from tests.camera.test_follow import Token, frame, sse, until
+from tests.camera.support import FakeMtx, Token, frame, sse, until
 
 BASE = "/api/v1/internal/crud/camera-relay"
 FINGERPRINT = "ab" * 32
@@ -89,53 +87,6 @@ class FakeApi:
 
     def states(self, printer_id: str) -> list[str]:
         return [body["state"] for pid, body in self.feeds if pid == printer_id]
-
-
-class FakeMtx:
-    def __init__(self, paths: dict[str, dict[str, Any]] | None = None) -> None:
-        self.paths: dict[str, dict[str, Any]] = paths or {}
-        self.calls: list[tuple[str, str]] = []
-        self.fail = False
-        #: The runtime ``ready`` flag per path; false when absent.
-        self.ready: dict[str, bool] = {}
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        name = path.rsplit("/", 1)[-1]
-        if path == "/v3/paths/list":
-            # The runtime list's fields, measured on MediaMTX v1.21.4.
-            runtime = [
-                {"name": n, "confName": n, "ready": self.ready.get(n, False), "online": True}
-                for n in self.paths
-            ]
-            return httpx.Response(200, json={"pageCount": 1, "items": runtime})
-        if path.endswith("/list"):
-            # As MediaMTX 1.x does (measured 2026-11-24, bluenviron/mediamtx:1).
-            items = [
-                {
-                    "name": n,
-                    **c,
-                    "source": re.sub(r"//[^@/]*@", "//<redacted>:<redacted>@", c["source"]),
-                }
-                for n, c in self.paths.items()
-            ]
-            return httpx.Response(200, json={"pageCount": 1, "items": items})
-        verb = path.split("/")[-2]
-        self.calls.append((verb, name))
-        if self.fail:
-            return httpx.Response(400, json={"error": "invalid", "echo": request.content.decode()})
-        if verb == "replace" and name not in self.paths:
-            return httpx.Response(404)
-        if verb in ("replace", "add"):
-            self.paths[name] = json.loads(request.content)
-        elif verb == "delete":
-            if name not in self.paths:
-                return httpx.Response(404)
-            del self.paths[name]
-        return httpx.Response(200)
-
-    def client(self) -> MediaMtx:
-        return MediaMtx("http://mtx", transport=httpx.MockTransport(self.handle))
 
 
 def relay(api: FakeApi, mtx: FakeMtx) -> Relay:

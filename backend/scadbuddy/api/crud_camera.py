@@ -7,7 +7,8 @@
 - ``GET …/printers`` and ``…/printers/{printer_id}``: the printers that qualify
   (`CameraStore.sources`); 404 ``not_recorded`` for one that does not;
 - ``POST …/printers/{printer_id}/segments``: index uploaded segments, in at most
-  `MAX_SEGMENTS` per call; 409 ``not_leader`` when the recorder holds no live lease;
+  `MAX_SEGMENTS` per call; 409 ``not_leader`` when the recorder holds no live lease; 422
+  ``foreign_object_key`` for a key outside the printer's ``camera/<printer_id>/`` folder;
 - ``POST …/printers/{printer_id}/lease``: acquire, renew or release the lease;
 - ``POST …/printers/{printer_id}/feed``: the recorder's feed state; 204. A change of
   state emits ``camera.feed``.
@@ -33,7 +34,7 @@ from scadbuddy.agent_changes.hub import Change, ChangeHub
 from scadbuddy.api.crud_agent_changes import HubDep, change_stream
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.camera.models import CameraSource, FeedReport, LeaseAnswer, SegmentIn
-from scadbuddy.camera.store import CameraStore, NotLeaderError
+from scadbuddy.camera.store import CameraStore, NotLeaderError, ObjectKeyError
 from scadbuddy.core.events import PG_CHANNEL, CameraFeedEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
@@ -122,6 +123,12 @@ async def post_segments(printer_id: str, body: SegmentsAsk, state: StateDep) -> 
     except NotLeaderError:
         raise ApiError(
             status.HTTP_409_CONFLICT, "This recorder does not hold the lease.", reason="not_leader"
+        ) from None
+    except ObjectKeyError:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "A segment's object key is not in this printer's camera folder.",
+            reason="foreign_object_key",
         ) from None
     return Indexed(indexed=indexed)
 
