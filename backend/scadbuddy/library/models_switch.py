@@ -841,6 +841,9 @@ def _put_files(paths: DataPaths, dump: Dump) -> int:
         path = paths.root / file.path
         if _is_new(paths, file):
             continue
+        if not path.exists():
+            # Nothing deletes one while no API runs: a write would make an orphan folder.
+            raise SwitchFailedError(f"{file}: its output is gone since the dump")
         old = dump.kept(file).read_bytes()
         version = json.loads(old)["model_version"]
         data = _with_version(old, dump.ids[path.parent.parent.name, version])
