@@ -18,14 +18,15 @@ epic #6949).
 issue:
 
 - **Phase 3a, the data model** (#7068): the kinds tree, the entity fold, the plain
-  `suppliers`, `invoices`, `invoice_lines`, `locations` and `location_kinds` tables, the
-  generic line model, receive, links, amend, the migrations, job cost, the routes and the
-  agent tools. Layers A1 to A6. The UI stays where it is and keeps working through the
-  route aliases.
-- **Phase 3b, the move** (a new issue under #6949; see "Issues to file"): the Filament
-  section moves into Inventory, the invoice editor gets the line model, and the invoice
-  import and backfill become the `invoice-import` flow. Layers B1 to B4. It starts when
-  phase 3a's layer A5 has merged.
+  `suppliers`, `invoices`, `invoice_lines`, `locations`, `location_kinds` and
+  `shopping_items` tables, the generic line model, receive, links, amend, the migrations,
+  the `/inventory` routes with `/filament` aliases, and job cost. Layers A1 to A5. The UI
+  stays where it is and keeps working through the route aliases.
+- **Phase 3b, the UI, the parity features and the flows** (a new issue under #6949; see
+  "Issues to file"): the Filament section moves into Inventory; item types, stock, suppliers,
+  price sheets, metrics, shopping, codes, labels, tags and quick find serve every item; the
+  generic agent tools and the `purchasing` skill; the `invoice-import` flow. Layers B1 to
+  B7. It starts when layer A4 has merged. The split is spec §9's (R-P3-65).
 
 **Architecture:** The filament purchasing tables and the location tables get plain names,
 with views under the old names for the rolling update. `filament_supplier_products` and
@@ -278,7 +279,7 @@ answer `WrongTracking`, as a unit kind's do.
 - Each layer: `cd backend && uv run --frozen ruff check . && uv run --frozen ruff format
   --check . && uv run --frozen mypy`; `cd frontend && pnpm lint && pnpm typecheck`;
   `cd agent && pnpm lint && pnpm typecheck` for the trees it touches.
-- Conventional-commit titles with `(#7068, 3a N/6)` or `(#<3b>, N/5)`; PR bodies as
+- Conventional-commit titles with `(#7068, 3a N/5)` or `(#<3b>, N/7)`; PR bodies as
   "Phases and layers" says. Every fact in docs and comments cites its
   source (#259). Every doc and comment a layer touches matches its code.
 - Full parity (R-P3-58): no purchasing or type feature exists for filament only, except the
@@ -295,16 +296,17 @@ answer `WrongTracking`, as a unit kind's do.
   `PETG-CF`; a subtype kind `Basic`, `Silk`, `Matte`; never a slug, an id or a path. Every
   read that today answers `spool.material` or a subtype name answers the same text after
   the move (3DFP and Bambuddy matching compare it, R-P3-56).
-- Entity kinds of inventory things are `item` and `unit` (and `lot`). `spool_type:` and
-  `spool:` stay accepted as ref aliases for one release. The order kinds (`order`,
-  `order_item`, `order_item_fulfilment`, `order_item_revision`) and every other kind stay as
-  they are (R-P3-47).
+- Entity kinds of inventory things are `item` and `unit` (and `lot`), plus `item_kind` for
+  a kind. `spool_type:` and `spool:` stay accepted as ref aliases for one release;
+  `material` and `subtype` go (spec §9 3a, Q6). The order kinds (`order`, `order_item`,
+  `order_item_fulfilment`, `order_item_revision`), `supplier`, `invoice`, `invoice_line`,
+  `location` and the other filament catalog kinds stay (R-P3-47, R-P3-66).
 - Phase 3 renames no printer workflow table (`filament_override_slots`,
   `printer_kprofile_notes`, `printer_slot_presets`, #7670) and no sensor table
   (`filament_location_sensors`); their FKs follow the renamed `locations` table. The new
   `label_sheets` table (#7216) already has a plain name (R-P3-57).
 - The HTTP routes under `/api/v1/filament/` that the spool workflow serves keep their paths.
-  Only suppliers, invoices and locations get `/inventory/` routes, with the old paths as
+  Suppliers, invoices, locations and Task 7's parity reads get `/inventory/` routes, with the old paths as
   aliases for one release (R-P3-20, R-P3-49).
 - Phase 3b's flow uses only the #7361 API that is on main (A1, Pre-flight 9). It works with
   plain forms and gains the A2 widgets and context blocks when they land, with no change to
@@ -329,7 +331,8 @@ answer `WrongTracking`, as a unit kind's do.
    amend, the link routes and the order purchase routes call it.
 5. **Coverage.** Each new route is a tool or a `coverage.ts` entry, or
    `agent/test/coverage.test.ts` fails (`agent/CLAUDE.md` l.397). Layer A2 adds temporary
-   entries that name the layer-A5 tools; layer A5 drops them.
+   entries that name Task 13's tools (phase 3b, layer B4), which drops them; Task 7's
+   routes get theirs in B2 the same way.
 6. **Data cases the migration handles** (R-P3-29). Each query below names a case that
    Task 9 handles in SQL and pins with a seeded-row test; none stops the migration except a
    true invariant (step 1). The control session runs them read only on prod
@@ -346,7 +349,7 @@ answer `WrongTracking`, as a unit kind's do.
    - `SELECT count(*) FROM filament_spools WHERE type_id IS NULL` (these get no unit);
    - `SELECT count(*) FROM filament_spools WHERE cost_per_kg IS NULL` (their units open cost-unknown);
    - `SELECT count(*) FROM filament_spool_events e JOIN filament_spools s ON s.id = e.spool_id LEFT JOIN filament_spool_types t ON t.id = s.type_id WHERE e.ref_kind IN ('print_run','bb_usage') AND coalesce(s.cost_per_kg, t.cost_per_kg) IS NULL` (uses with no cost; the spec expects 0, §6.6);
-   - `SELECT kind, count(*) FROM entities WHERE kind IN ('spool','spool_type') GROUP BY 1` and `SELECT kind FROM entity_property_schemas` (Task 9 moves them to `item` and `unit`);
+   - `SELECT kind, count(*) FROM entities WHERE kind IN ('spool','spool_type','material','subtype') GROUP BY 1` and `SELECT kind FROM entity_property_schemas` (Task 9 moves them to `item`, `unit` and `item_kind`);
    - `SELECT count(*) FROM invoices WHERE file_key IS NOT NULL AND file_key !~ '^attachment-[0-9a-f]{64}$'` (expect 0; Task 9 reads the sha256 from the key);
    - `SELECT count(*) FROM blob_refs WHERE holder_kind = 'filament_invoice'` and the count of invoices with a file (expect equal);
    - `SELECT currency, count(*) FROM filament_price_points GROUP BY 1`;
@@ -440,70 +443,94 @@ answer `WrongTracking`, as a unit kind's do.
 
 Each layer is one PR on the one before, green alone. Phase 3a's PRs say `Part of #7068`
 (the last: `Fixes #7068`). Phase 3b's say `Part of #<3b issue>` (the last: `Fixes #<3b
-issue>`; layer B5 also `Fixes #7648`).
+issue>`; layer B7 also `Fixes #7648`).
 
 | Layer | Branch | Tasks | What it ships |
 |---|---|---|---|
 | A1 | `feat/7068-a1-purchasing-store` | 1-5 | Renames with views (suppliers, invoices, lines, locations, location kinds, shopping items); `adopt_ids`; links, events, billed and received; receive from a line; amend |
-| A2 | `feat/7068-a2-purchasing-routes` | 6-7 | `/inventory/` routes for suppliers, invoices, lines, locations; purchases link lines; the review list; price sheets, price history, supplier stats, metrics, the cost calculator, the stock list and shopping for every item |
-| A3 | `feat/7068-a3-filament-items` | 8-11 | The kind tree; spool types become item types and spools units; entities fold to `item`/`unit`; the catch-up; one confirm path; Bambuddy sees only filament |
+| A2 | `feat/7068-a2-purchasing-routes` | 6 | `/inventory/` routes for suppliers, invoices, lines, locations; purchases link lines; the review list |
+| A3 | `feat/7068-a3-filament-items` | 8-11 | The kind tree; spool types become item types and spools units; entities fold to `item`/`unit`/`item_kind`; the catch-up; one confirm path; Bambuddy sees only filament |
 | A4 | `feat/7068-a4-spool-job-cost` | 12 | `inventory_moves`; job cost at the unit's cost; re-cost; derived grams |
-| A5 | `feat/7068-a5-purchasing-agent` | 13 | Generic purchasing, stock and location tools, with the `filament_*` aliases |
-| A6 | `feat/7068-a6-docs` | 14 | Phase 3a docs |
+| A5 | `feat/7068-a5-docs` | 14 | Phase 3a docs |
 | B1 | `feat/<3b>-b1-filament-in-inventory` | 15 | The Filament section moves into Inventory; names; every old URL redirects |
-| B2 | `feat/<3b>-b2-item-types` | 16-17 | The Item types and Stock lists; the item type page at parity |
-| B3 | `feat/<3b>-b3-purchasing-ui` | 18-21 | The invoice editor, suppliers, price sheets, metrics, shopping, panels and the review page for every item; the parity test |
-| B4 | `feat/<3b>-b4-invoice-flow` | 22 | The built-in `invoice-import` flow with typed prompts |
-| B5 | `feat/<3b>-b5-skill-docs` | 23-24 | The filament skill points to the flow (closes #7648); phase 3b docs |
+| B2 | `feat/<3b>-b2-item-types` | 7, 16, 17, 25, 26 | Parity reads (price sheets, history, stats, metrics, cost per unit, stock list, shopping); the Item types and Stock lists; the item type page; copy, bulk, places, moves; property search and quick find |
+| B3 | `feat/<3b>-b3-purchasing-ui` | 18-20 | The invoice editor, suppliers, price sheets, metrics, shopping, panels and the review page for every item |
+| B4 | `feat/<3b>-b4-agent-tools` | 13 | Generic purchasing, stock and location tools with the `filament_*` aliases |
+| B5 | `feat/<3b>-b5-invoice-flow` | 22 | The built-in `invoice-import` flow with typed prompts |
+| B6 | `feat/<3b>-b6-codes-tags` | 27-28 | Codes and labels for item types, units and lots (#7169); NTAG tags bound to any unit |
+| B7 | `feat/<3b>-b7-skill-docs-parity` | 23, 24, 21 | The `purchasing` skill (closes #7648); phase 3b docs; the parity test, the exit check |
+
+Task numbers are kept from the first draft so that references stay valid; the table, not the
+number, gives the order (Task 7 and Task 13 moved to phase 3b, R-P3-65).
 
 Until phase 3b, the Filament pages keep working on phase 3a: the request fields `type_id`,
 `proposed_type`, `supplier_product_id` and `update_spool_ids` are aliases (Task 11), and the
-`/filament/` routes answer as their `/inventory/` twins (Tasks 6 and 7).
+`/filament/` routes answer as their `/inventory/` twins (Task 6; the parity reads keep
+their filament routes until Task 7).
 
 ## Parity: every purchasing feature serves every item (owner, R-P3-58)
 
 The owner's verdict (2026-11-25): "The invoice experience for filament was great, but the
 implementation for the non spool is trash. We don't see invoice line items. We don't have
 price sheets etc." And: "We don't have Item types". So phase 3 has a hard requirement: every
-purchasing and catalog feature that filament has today serves every item, through the same
+purchasing and stock feature that filament has today serves every item, through the same
 pages, routes and tools. Where filament shows a price per kg, every item shows a price per
-unit (a unit item) or per pack and per unit of measure (a lot item); a filament item shows
-per kg as well, as its kind's view. No feature exists for filament only, except the spool
-workflow of R-P3-30's table (grams, ledger, trays, tags, labels, presets, K values,
-temperatures, drying, 3DFP and slicer profiles, Bambu colour codes, the orders price book,
-Bambuddy sync).
+unit of measure and per pack; a filament item shows per kg as well, as its kind's view.
 
-The list below is every filament purchasing and type feature on main (read from
-`frontend/src/pages/filament/`, `frontend/src/components/filament/purchasing/`,
-`frontend/src/components/filament/CostCalculator.tsx`, `api/filament_purchasing.py`,
-`api/filament.py` l.2361-2400, `agent/src/tools/filamentPurchasing.ts` and
-`agent/src/tools/filament.ts` l.1369-1440, at `cf8590f53`). "Task" names the task that
-delivers the generic home; the parity test of each row is in that task, and Task 21 runs the
-whole set on a filament item and a hardware item.
+The rows are the spec's gap analysis, §11.2 of
+`docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` on branch
+`docs/6949-parity-gap-analysis` (PR #7716, `dfc3fa8b6`), which lists every filament feature
+read from the code with its class and phase; this table keeps its row numbers and adds the
+task that delivers each (a) row of phase 3a or 3b. The (b) rows (9, 12, 15, 17b, 33, 37, 42,
+43, 44, 45, 45c) stay the spool workflow of R-P3-30's table. Rows 40 and 41 are done on main.
 
-| # | Filament feature today (source) | Generic home: page / route / tool | Task |
-|---|---|---|---|
-| 1 | Types tab: list of spool types with code, colour, label g, newest price, price per kg, product, spool count, archived toggle (`TypesTab.tsx`) | "Item types" list `/inventory/types` (name, kind, manufacturer, newest price per pack and per unit, offers, stock on hand, archived toggle; a `kind` filter; the filament kind adds colour, label g and per kg columns) / `GET /inventory/items` / `inventory_item_list` | 16 |
-| 2 | Spools tab: filters, status, table and cards views, columns shown, bulk bar (bulk edit, archive, move), CSV import, forecast (`SpoolsTab.tsx`, `BulkBar`, `SpoolImport`, `SpoolForecast`) | "Stock" list `/inventory/stock` (lots and units of every item; filters kind, type, status, location, supplier, invoice; table and cards; columns shown; bulk bar: move to a location, set status, archive, edit note; CSV import of stock; forecast from `use` moves); spools are its filament view / `GET /inventory/stock`, `POST /inventory/stock/bulk`, `POST /inventory/stock/import` / `inventory_stock_list`, `inventory_stock_bulk` | 7, 16 |
-| 3 | Type page: identity (code, brand, material, subtype, colour), weights and price (label weight, cost per kg, `CostCalculator`, `PricePanel` with price history, sparkline, "Use as default cost"), reordering, spools of this type, files, links and properties (`TypePage.tsx`) | Item type page `/inventory/items/:id`: identity (name, kind path, manufacturer, MPN, GTIN and every property of the kind's schema), price (default unit cost, the cost calculator, the price panel with history per offer, sparkline, "Use as default cost"), reordering (`low_stock`, "Add to shopping list"), stock of this type (the Stock list filtered), linked invoices, files, links and properties. Filament items add the extension sections (temperatures, drying, slicer presets, K values, pressure advance, 3DFP) | 17 |
-| 4 | Spool page "Bought on" and "Where to buy" (`SpoolPurchasing.tsx`) | Lot page and unit page: the invoice line it came from (billed, received, free, cost per unit) and each offer of its type with the newest price / `GET /inventory/items/{id}/prices` | 7, 20 |
-| 5 | Suppliers tab: name, customer number, website, products, spend, spools bought, archived (`SuppliersTab.tsx`) | `/inventory/suppliers`: the same columns, "units bought" for every item and "spools bought" in the filament view / `GET /inventory/suppliers`, `GET /inventory/suppliers/stats` / `supplier_list`, `supplier_stats` | 6, 7, 19 |
-| 6 | Supplier page: products table (SKU, type, pack, page, newest price, add price), add product sheet, price sheet, files and links; non-filament offers shown apart as "Other offers" (`SupplierPage.tsx`, `ProductsTable`, `AddProductSheet`, `PriceSheet`) | `/inventory/suppliers/:id`: ONE offers table for every item (SKU, item type, pack size and unit, page, newest price per pack and per unit, add price), one "Add offer" sheet with an item type search, one price sheet; "Other offers" goes / `GET /inventory/suppliers/{id}/offers`, `GET /inventory/suppliers/{id}/price-sheet` / `inventory_offer_list`, `supplier_price_sheet` | 7, 19 |
-| 7 | Price points with history; add and delete a price (`AddPriceForm`, `PriceCell`, `Sparkline`) | Offer price history for every offer; add and delete / `GET\|POST /inventory/offers/{id}/prices`, `DELETE /inventory/offer-prices/{price_id}` / `inventory_offer_price_list`, `inventory_offer_price_add`, `inventory_offer_price_delete` | 7, 19 |
-| 8 | A type's prices at every supplier (`GET /filament/types/{id}/prices`, `type_prices`) | `GET /inventory/items/{id}/prices` (per pack, per unit; per kg for filament) | 7 |
-| 9 | Invoices tab: filter by supplier, status, has file; spools made or filled; total (`InvoicesTab.tsx`) | `/inventory/invoices`: the same filters; "stock received" (lots and units) for every line / `GET /inventory/invoices` / `invoice_list` | 6, 18 |
-| 10 | Invoice page: header form, lines table (description, SKU, type, product, quantity, money, the server's figures), candidates and the spool match picker ("fills existing spools"), totals, confirm, file preview and upload, links to the spools made, line anchors (`InvoicePage.tsx`, `InvoiceLinesTable`, `SpoolMatchPicker`, `InvoiceTotals`, `InvoiceFile`, `InvoicePhoto`, `InvoiceUpload`) | `/inventory/invoices/:id`: one line editor for every item: item type search, offer, kind, pack, quantity, received; candidates by SKU, MPN, name (and colour for filament); "Adopts existing stock" picker for lots and units; totals; confirm; file preview; every confirmed line shows its item type, what it received (lots or units, billed against received, free) with links, and its entity links. A hardware line looks and works as a filament line does | 5, 6, 18 |
-| 11 | Invoice import with the assistant (`InvoiceImport.tsx`, `POST /api/v1/ai/filament/invoice-import`) | The `invoice-import` flow, for every item, started from the invoice page; the chat route stays for ad-hoc use | 22 |
-| 12 | Purchasing metrics: price per kg over time per type, spend by supplier and month (`MetricsTab.tsx`, `GET /filament/metrics/purchasing`, `filament_purchasing_metrics`) | `/inventory/metrics` purchasing section: price per unit over time per item type (per kg in the filament view), spend by supplier and month / `GET /inventory/metrics/purchasing` / `purchasing_metrics` | 7, 19 |
-| 13 | Cost per kg calculator (`CostCalculator.tsx`, `GET /filament/cost-per-kg`, `filament_cost_per_kg`) | Cost per unit calculator: price for a quantity of packs, pack size, tax, shipping → cost per unit and price per unit (and per kg with a net weight) / `GET /inventory/cost-per-unit` / `inventory_cost_per_unit`; the filament route and tool stay as its per-kg view | 7, 17 |
-| 14 | Shopping list: type, material, subtype, brand, colour, spools, pending or purchased, note, free-text product (`ShoppingListTab.tsx`, `filament_shopping_items`, `filament_shopping_*`) | `/inventory/shopping-list` for every item: item type (any kind) or free text, supplier, offer, quantity in the item's unit (packs shown with the offer's pack size), pending or purchased, note; "Add to shopping list" on every item type page and on a low-stock row; the filament view keeps material, subtype, brand and colour / table `shopping_items` (renamed, Task 1), `/inventory/shopping-list` routes / `shopping_list`, `shopping_add`, `shopping_update`, `shopping_remove` | 1, 7, 19 |
-| 15 | Price sheet compare: newest against previous price per pack, change chip (`PriceSheet.tsx`, `filament_price_sheet`) | The supplier price sheet for every offer, change per pack and per unit (per kg for filament) | 7, 19 |
-| 16 | Supplier products CRUD (`filament_product_list`, `filament_product_upsert`) | Offers (`inventory_offer_list`, `inventory_offer_upsert`, phase 2); the filament tools become aliases | 13 |
-| 17 | Supplier stats (`GET /filament/suppliers/stats`, `filament_supplier_stats`) | `GET /inventory/suppliers/stats` / `supplier_stats` (spend, lines, units bought per supplier and currency) | 7, 13 |
-| 18 | Catalog tab: brands, materials, subtypes, colours, inserts (`CatalogTab.tsx`, `filament_catalog_*`) | Materials and subtypes are kinds, edited on `/inventory/kinds` (R-P3-45); the rest stays the filament kind's catalog under `/inventory/filament/catalog`. A generic item catalog (a manufacturer list and a product lookup new item types come from) is not in phase 3: follow-up issue (R-P3-60) | 8, 15 |
-| 19 | Locations tab and page (`LocationsTab.tsx`, `LocationPage.tsx`, `filament_location_*`) | `/inventory/locations`, `/inventory/locations/:id` for every item's stock / `/inventory/locations` routes / `location_*` tools | 6, 13, 15 |
+| §11 row | Feature | Phase | Generic home: page / route / tool | Task |
+|---|---|---|---|---|
+| 1 | Types list | 3b | "Item types" `/inventory/types` (R-P3-59), the Types tab's columns for every kind / `GET /inventory/items` | 16 |
+| 2 | Type page, price panel | 3b | Item type page `/inventory/items/:id` with the price panel per offer, "Use as default cost", its stock | 17 |
+| 3 | Cost calculator | 3b | `GET /inventory/cost-per-unit`; `CostCalculator` per unit of measure, per kg for filament | 7, 17 |
+| 4 | Stock list, CSV export | 3b | `/inventory/stock` (lots, units, spools as its `filament` rows), CSV export / `GET /inventory/stock` | 7, 16 |
+| 5 | Bulk create, copy | 3b | "Copy" on an item type and a unit / `POST /inventory/items/{id}/copy`, `POST /inventory/units/{id}/copy` | 25 |
+| 6 | Bulk edit, archive, restore | 3b | Items and stock, one request, all or none / `POST /inventory/items/bulk`, `POST /inventory/stock/bulk` | 7, 16, 25 |
+| 7 | CSV import | 3b if Q5 | `POST /inventory/stock/import` (only if the owner answers Q5 yes; otherwise a follow-up) | 7, 16 |
+| 8 | Property search; inline properties on unit and lot tools | 3b | One search over item and unit properties for the lists and quick find; `properties` on `inventory_unit_receive`/`_update` and `inventory_lot_receive`/`_update` | 26, 13 |
+| 10 | Materials and subtypes | 3a (data), 3b (UI) | Child kinds of `filament` (R-P3-45) / `/inventory/kinds` | 8, 15 |
+| 11 | Brands | 3a if Q2 | A `manufacturers` table from `filament_brands`, only if the owner answers Q2 yes (Task 9 step 14); otherwise a follow-up | 9 |
+| 13 | Location kinds | 3a | `location_kinds` (R-P3-49) | 1 |
+| 14 | Locations with their stock | 3b | `/inventory/locations/:id` lists lots, units and spools at the place | 25 |
+| 16 | Codes and labels for items, units, lots (#7169) | 3b (Q1) | A prefix per kind in `PREFIXES`, a drawer per kind in `labels.py` | 27 |
+| 17 | NTAG tags bound to any unit | 3b | A generic NDEF URL record of the unit's code; tags bound to any unit | 28 |
+| 18 | Suppliers with stats | 3b | `/inventory/suppliers`, `GET /inventory/suppliers/stats` / `supplier_stats` | 7, 19 |
+| 19 | Supplier page, products | 3b | One offers table for every item, "Add product" for any item | 19 |
+| 20 | Supplier products | 3a | One offer table, `supplier_offers` (ids kept) | 9, 11 |
+| 21 | Price points with history | 3a (data), 3b (UI) | One price point table; history per offer / `GET /inventory/items/{id}/prices`, `/inventory/offers/{id}/prices` | 9, 7, 17, 19 |
+| 22 | Price sheet | 3b | `GET /inventory/suppliers/{id}/price-sheet` / `supplier_price_sheet` | 7, 19 |
+| 23 | Invoices list | 3b | `/inventory/invoices` | 6, 15, 18 |
+| 24 | Invoice from a file | 3a (data), 3b (UI) | The `invoice` attachment | 11, 18 |
+| 25 | Invoice page, header, totals | 3b | `/inventory/invoices/:id` | 18 |
+| 26 | Invoice line editor | 3a (data), 3b (UI) | One line model (R-P3-48) | 1, 5, 18 |
+| 27 | Line candidates | 3a | One candidates path with adoptable lots and units | 5 |
+| 28 | Confirm | 3a | One confirm path | 5, 11 |
+| 29 | Links to what a line made | 3b | A line lists its lots, units and links; "Bought on" on lot and unit pages | 18, 20 |
+| 30 | File preview | 3b | Reads the `invoice` attachment | 18 |
+| 31 | Invoice import | 3b | The `invoice-import` flow | 22 |
+| 32 | Amend; back-fill | 3a (amend), 3b (flow) | `POST /inventory/invoices/{id}/amend`; the flow's `missing_lines` mode | 5, 6, 22 |
+| 34 | Purchasing metrics | 3b | `GET /inventory/metrics/purchasing` / `purchasing_metrics` | 7, 19 |
+| 35 | Stock metrics and summary | 3b | `GET /inventory/metrics/stock` from `inventory_moves` | 7, 19 |
+| 38 | Shopping list | 3a (data), 3b (UI) | `shopping_items` with `item_id`, packs, an optional offer and supplier; `/inventory/shopping-list`; the auto-add only if Q3 is yes | 1, 7, 19 |
+| 39 | Moves page | 3b | `/inventory/moves` across items, spool events through `inventory_moves` | 12, 25 |
+| 46 | Agent tools | 3b | `supplier_*`, `offer_*`, `invoice_*`, `shopping_*`, `purchasing_metrics`, `cost_per_unit`, the filament names as aliases | 13 |
+| 47 | The skill | 3b | A `purchasing` skill for every item; the `filament` skill keeps the spool workflow | 23 |
+| 48 | Quick find | 3b | Over every item and unit, by name, code, tag and property value | 26 |
+| exit | The parity test | 3b | The same steps on a `filament` item and a `hardware` item | 21 |
 
-Rows 1, 2 and 3 are the owner's "Item types" (R-P3-59): an item is already the type of its
+Out of phase 3 (spec §9, §11): row 36 (the forecast for lot items) is a follow-up unless the
+owner answers Q4 yes; rows 45a (a container's tare, with #7278 and PR #7710), 45b (weighing
+breakdown and end-of-life weighings on the unit ledger, Q8) and 49 (phone intake and the
+"Unlinked" list, the intake epic on 3a's model) are later work. A generic external catalog
+beyond phase 7's Bambu import is a follow-up (R-P3-60).
+
+Rows 1, 2 and 4 are the owner's "Item types" (R-P3-59): an item is already the type of its
 lots and units, as a spool type is of its spools; the UI shows that split exactly as the
 Filament section shows Types against Spools.
 
@@ -571,7 +598,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
   numeric(20,6) CHECK (quantity > 0)` (NULL reads as `quantity_spools`, which old pods
   still write), `product text CHECK (length(product) <= 200)` (free text), `ALTER COLUMN
   material DROP NOT NULL`, `CHECK (type_id IS NOT NULL OR item_id IS NOT NULL OR material IS
-  NOT NULL OR product IS NOT NULL)` (R-P3-19, parity row 14).
+  NOT NULL OR product IS NOT NULL)` (R-P3-19, §11 row 38).
 - `supplier_offers`: drop the `sku` length CHECK and add `CHECK (length(sku) BETWEEN 1 AND
   128)` (R-P3-26). `CREATE UNIQUE INDEX offer_price_points_line ON offer_price_points
   (invoice_line_id) WHERE invoice_line_id IS NOT NULL` (the filament table's rule).
@@ -603,7 +630,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_purchasing_schema.py tests/entities/test_registry.py -q` — Expected: FAIL.
 - [ ] **Step 3: Write the migration; move every SQL name.** No behavior changes in this step.
 - [ ] **Step 4: Run** the same plus `uv run --frozen pytest tests/filament tests/inventory tests/codes tests/printers tests/test_pg_migrations.py -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): generic purchasing tables, links and events (#7068, 3a 1/6)`
+- [ ] **Step 5: Commit** `feat(inventory): generic purchasing tables, links and events (#7068, 3a 1/5)`
 
 ### Task 2: Amend arithmetic
 
@@ -639,7 +666,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament/test_invoice_money.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): amend arithmetic spreads only what no line holds (#7068, 3a 1/6)`
+- [ ] **Step 5: Commit** `feat(inventory): amend arithmetic spreads only what no line holds (#7068, 3a 1/5)`
 
 ### Task 3: Receive from a line; the unit extension; the ledger snapshots cost
 
@@ -725,7 +752,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_stock.py tests/inventory/test_offers.py tests/filament/test_ledger.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.** Every lot insert still takes `_open_lock` first (R-P2-32).
 - [ ] **Step 4: Run** `cd backend && uv run --frozen pytest tests/inventory tests/filament -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): receive from an invoice line; unit extensions (#7068, 3a 1/6)`
+- [ ] **Step 5: Commit** `feat(inventory): receive from an invoice line; unit extensions (#7068, 3a 1/5)`
 
 ### Task 4: Invoice line links and their consumers
 
@@ -805,7 +832,7 @@ The migration, in one file (a top comment cites #7068 and spec §6.5, §6.7):
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_invoice_links.py tests/entities/test_sweep.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.** Lock order R-P3-11: `lock_orders` before the invoice row.
 - [ ] **Step 4: Run** the same — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): invoice line links with exact reversal (#7068, 3a 1/6)`
+- [ ] **Step 5: Commit** `feat(inventory): invoice line links with exact reversal (#7068, 3a 1/5)`
 
 ### Task 5: One confirm path for item lines; amend
 
@@ -930,7 +957,7 @@ layer A3 on, `receive_line` is the one path (R-P3-30).
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_invoice_lines.py tests/filament/test_invoice_confirm.py tests/filament/test_invoice_amend.py tests/filament/test_invoice_candidates.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd backend && uv run --frozen pytest tests/filament tests/inventory tests/orders -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): invoice lines of any kind receive stock; amend (#7068, 3a 1/6)`
+- [ ] **Step 5: Commit** `feat(inventory): invoice lines of any kind receive stock; amend (#7068, 3a 1/5)`
 
 ## Layer A2 — `feat/7068-a2-purchasing-routes` (on A1)
 
@@ -1018,106 +1045,10 @@ layer A3 on, `receive_line` is the one path (R-P3-30).
   `all=true`.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/api/test_purchasing.py tests/api/test_filament_purchasing.py tests/orders/test_purchases.py tests/filament/test_shopping.py tests/filament/test_invoices.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement** the routes and the coverage entries (reason: "Inventory phase 3
-  (#7068, spec §6.5, §6.7); its `invoice_*`, `supplier_*` and `location_*` tools follow in layer A5 of the
-  same stack, which drops these entries").
+  (#7068, spec §6.5, §6.7); its `invoice_*`, `supplier_*` and `location_*` tools follow in phase 3b, layer B4
+  (Task 13), which drops these entries").
 - [ ] **Step 4: Run** the tests, `uv run --frozen pytest tests/auth -q`, and `cd agent && pnpm exec vitest run test/coverage.test.ts` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): supplier, invoice, amend, review and link routes (#7068, 3a 2/6)`
-
-### Task 7: Price sheets, price history, supplier stats, metrics, the calculator, the stock list and shopping for every item
-
-Parity rows 2, 4-8, 12-15, 17 (R-P3-58). Every route reads `supplier_offers` and
-`offer_price_points` of every item; before layer A3 filament still has its own tables, so a
-filament row joins in through Task 11 and the filament routes keep serving it until then.
-
-**Files:**
-- Create: `backend/scadbuddy/inventory/purchasing_reads.py` (`PurchasingReads`, one store,
-  SQL only here), `backend/scadbuddy/inventory/stock_list.py` (`StockList`)
-- Modify: `backend/scadbuddy/api/purchasing.py`, `backend/scadbuddy/api/inventory_stock.py`,
-  `backend/scadbuddy/inventory/models.py`, `backend/scadbuddy/inventory/offers.py`
-  (`delete_price`), `backend/scadbuddy/filament/shopping.py` (generic rows),
-  `backend/scadbuddy/filament/invoice_money.py` (`cost_per_unit`)
-- Test: `backend/tests/inventory/test_purchasing_reads.py`, `test_stock_list.py`,
-  `backend/tests/api/test_purchasing.py`, `backend/tests/filament/test_invoice_money.py`
-
-**Interfaces:**
-- Produces (`inventory/models.py`): `PricePer(pack: Decimal, unit: Decimal, kg: Decimal |
-  None)` (`unit` = pack price over `offer.pack_size` in the offer's `pack_uom`; `kg` only
-  for a filament item, over its label weight); `PriceHistoryRow(price_id, on_date, price,
-  currency, source, invoice_line_id, per: PricePer)`; `OfferPrices(offer: Offer,
-  supplier_name, history: list[PriceHistoryRow])`; `SheetRow(offer_id, item_id, item_name,
-  kind_id, sku, newest: PriceHistoryRow | None, previous: PriceHistoryRow | None,
-  change_pct: Decimal | None)` (the change of the per-unit price, per kg for filament,
-  `ChangeChip`'s input); `SupplierStats(supplier_id, currency, spend, invoices, lines,
-  units_bought, offers)`; `PurchasingMetrics(prices: list[PriceSeries], spend:
-  list[SpendRow])`, `PriceSeries(item_id, item_name, currency, basis: Literal["unit",
-  "kg"], points: list[tuple[date, Decimal]])`, `SpendRow(supplier_id, month, currency,
-  total, invoices)`; `CostPerUnit(cost_per_unit, price_per_unit, cost_per_kg: Decimal |
-  None, price_per_kg: Decimal | None)`; `StockRow(kind: Literal["lot", "unit"], id,
-  item_id, item_name, kind_id, status, qty, uom, location_id, supplier_id, invoice_line_id,
-  received_at, cost_per_unit, note, ui_path)`; `StockBulk(ids: list[StockRef] (1..500),
-  action: Literal["move", "status", "archive", "note"], location_id, status, note)`.
-- Produces (`PurchasingReads(pool)`): `item_prices(item_id) -> list[OfferPrices]`,
-  `offer_prices(offer_id) -> OfferPrices`, `price_sheet(supplier_id) -> list[SheetRow]`,
-  `supplier_stats() -> list[SupplierStats]`, `metrics(since: date, until: date) ->
-  PurchasingMetrics` (since after until → `ValueError` → 422, as the filament route).
-- Produces (`invoice_money.cost_per_unit(price: Decimal, quantity: int, pack_size:
-  Decimal, tax: Decimal, shipping: Decimal, net_weight_g: Decimal | None) ->
-  CostPerUnit`): `cost_per_unit` with tax and shipping, `price_per_unit` without shipping,
-  as `/filament/cost-per-kg` does per kg; the filament route calls it with `pack_size` 1.
-- Produces (`StockList(pool)`): `list(*, kind: str | None, item_id, status, location_id,
-  supplier_id, invoice_id, q, archived: bool, limit ≤ 500, cursor) -> Page[StockRow]`
-  (a `kind` filter covers its descendants; a filament item's units come with their
-  spool's grams left in `qty` and `uom = 'g'`); `bulk(body: StockBulk, by) -> BulkResult`
-  (each id under the lock order of R-P2-32; a status change through
-  `set_unit_status_in`; a move writes the location; one result per id, no partial
-  transaction); `import_csv(text: str, by, *, dry_run: bool) -> ImportResult` (columns
-  `item`, `qty`, `unit_cost`, `location`, `note`, `received_at`; each row a `receive_in` or
-  `receive_units_in` with `origin = 'opening'`; filament rows go to the spool import).
-  `forecast(item_id) -> Forecast(daily_use, days_left)` from the `use` moves of the last
-  90 days (the filament view keeps `SpoolForecast`'s own rule).
-- Produces routes (tag `inventory`): `GET /inventory/items/{item_id}/prices`, `GET
-  /inventory/offers/{offer_id}/prices` (phase 2's route answers `OfferPrices` now; the
-  POST stays), `DELETE /inventory/offer-prices/{price_id}` (an `invoice` price point is
-  409 `price_from_invoice`, as the filament delete), `GET
-  /inventory/suppliers/{supplier_id}/price-sheet`, `GET /inventory/suppliers/stats`, `GET
-  /inventory/metrics/purchasing?since&until`, `GET /inventory/cost-per-unit?price&quantity&pack_size&tax&shipping&net_weight_g`,
-  `GET /inventory/stock`, `POST /inventory/stock/bulk`, `POST /inventory/stock/import?dry_run=`,
-  `GET /inventory/items/{item_id}/forecast`, and `/inventory/shopping-list` (`GET`, `POST`,
-  `DELETE`, `PATCH|DELETE /{row_id}`; a row names an `item_id` of any kind, or free text,
-  with `quantity` in the item's unit). The `/filament/` twins (`types/{id}/prices`,
-  `products/{id}/prices`, `suppliers/{id}/price-sheet`, `suppliers/stats`,
-  `metrics/purchasing`, `cost-per-kg`, `shopping-list`) call the same store and keep
-  their answer shapes.
-
-- [ ] **Step 1: Write the failing tests** (`requires_postgres`; seed supplier "Acme" with
-  an offer of `hardware` item "M3 bolt" (pack 100, `pack_uom` `each`) priced 12.00 on
-  2026-10-01 and 15.00 on 2026-11-01, and a `nozzle` offer (pack 1) at 30.00):
-  - `test_a_hardware_price_sheet_has_per_unit_and_change`: `price_sheet(acme)` → the bolt's
-    row has `newest.per.pack == 15.00`, `newest.per.unit == Decimal("0.1500")`,
-    `previous.per.unit == Decimal("0.1200")`, `change_pct == Decimal("25.0")`; the nozzle
-    row has no change; no row is left out for its kind.
-  - `test_item_prices_lists_every_offer_with_history`: two suppliers' offers of the bolt →
-    two `OfferPrices`, newest first.
-  - `test_supplier_stats_counts_every_item`: a confirmed invoice of 2 bolt packs (allocated
-    30.00) and 1 nozzle (30.00) → `spend == 60.00`, `lines == 2`, `units_bought == 201`.
-  - `test_metrics_price_per_unit_over_time`: two `PriceSeries` points for the bolt at
-    0.12 and 0.15, `basis == "unit"`; spend per supplier and month.
-  - `test_cost_per_unit`: `cost_per_unit(30.00, 2, 100, 2.40, 5.00, None)` →
-    `cost_per_unit == Decimal("0.1872")`, `price_per_unit == Decimal("0.1620")`; with
-    `pack_size` 1 and `net_weight_g` 1000 it equals today's `/filament/cost-per-kg`
-    answer for the same inputs.
-  - `test_deleting_an_invoice_price_is_refused`.
-  - `test_stock_list_filters_and_bulk` (`test_stock_list.py`): a lot of bolts and two
-    nozzle units → `list(kind="part")` has 3 rows; `bulk(move to L1)` moves all 3 and
-    `bulk(status retired)` on a lot answers `WrongTracking` for that id only;
-    `import_csv` of `M3 bolt,50,0.14,Shelf A,,2026-11-02` with `dry_run` writes nothing,
-    without it receives one lot.
-  - `test_a_shopping_row_takes_any_item`: a bolt row with `quantity` 300 lists with its
-    item and kind; the filament view's material and colour columns are null for it.
-- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_purchasing_reads.py tests/inventory/test_stock_list.py tests/api/test_purchasing.py tests/filament/test_invoice_money.py -q` — Expected: FAIL.
-- [ ] **Step 3: Implement.** Route handlers hold no SQL (R-P3-54).
-- [ ] **Step 4: Run** the same and `cd backend && uv run --frozen pytest tests/filament -n auto -q` (the filament twins answer as before) — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): price sheets, history, stats, metrics, stock list and shopping for every item (#7068, 3a 2/6)`
+- [ ] **Step 5: Commit** `feat(inventory): supplier, invoice, amend, review and link routes (#7068, 3a 2/5)`
 
 ## Layer A3 — `feat/7068-a3-filament-items` (on A2; ships like any PR, R-P3-29, R-P3-63)
 
@@ -1184,7 +1115,7 @@ The migration (a top comment cites #7068, spec §6.4 and the owner's rule A.1 of
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament/test_kinds.py tests/test_pg_migrations.py -k "kinds" -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd backend && uv run --frozen pytest tests/filament tests/inventory -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): material and subtype are child kinds of filament (#7068, 3a 3/6)`
+- [ ] **Step 5: Commit** `feat(inventory): material and subtype are child kinds of filament (#7068, 3a 3/5)`
 
 ### Task 9: Migrate filament purchasing onto the generic tables
 
@@ -1213,7 +1144,9 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
    `entity_property_schemas`; the `spool` row's `properties` merge into the `unit` row (made
    when absent); both old rows are deleted (spec §6.3a, R-P3-5).
 4. Entities: `entities` of kind `spool_type` become `item`, of kind `spool` become `unit`
-   (same `ref`, the ids are equal); their `entity_attachments.subject` likewise (R-P3-5).
+   (same `ref`, the ids are equal); their `entity_attachments.subject` likewise. Entities of
+   kind `material` become `item_kind:<its kind>`, and of kind `subtype` `item_kind:<each
+   of its kinds>`, files, links and properties copied to each (R-P3-47, R-P3-66).
 5. `stock_units` from every spool with a type: `id` = the spool's id, `item_id` = its type,
    `status` = `retired` when archived else `in_stock`, `cost_minor` = `round(cost_per_kg ×
    label weight / 1000 × 10^exp, 6)` with the spool's own label weight, else its type's;
@@ -1243,12 +1176,16 @@ The migration, in one file, in this order (actor `{"kind": "provider", "principa
 10. `filament_spool_events.cost_per_kg_at` = the spool's effective cost today
     (`coalesce(s.cost_per_kg, t.cost_per_kg)`) for every event with `ref_kind IN
     ('print_run','bb_usage')` (spec §6.6 "Phase 3 backfills"); NULL stays NULL.
-11. `filament_shopping_items.item_id = type_id` where set.
+11. `shopping_items.item_id = type_id` where set.
 12. `filament_supplier_products` and `filament_price_points` stay tables; from this layer
     no new code writes them, and the catch-up copies what an old pod writes (R-P3-63). A
     follow-up drops them after a prod check, as phase 2's Ruling 6.
 13. Properties: for each new item, `rgba`, `colour_name` and `diameter_mm` of its type
     become entity properties of `item:<id>` (R-P3-46).
+14. Brands, only if the owner answers Q2 yes (§11 row 11): `filament_brands` becomes
+    `manufacturers` (renamed with a view, aliases kept), `items.manufacturer_id` names it,
+    and `items.manufacturer` text stays as the display for one release. Otherwise this step
+    is left out and row 11 is a follow-up.
 
 **The rollout and the catch-up (R-P3-63, review finding 3).** During A3's rollout the old
 pods are A2 pods. They read and write `invoice_lines.supplier_product_id`, write
@@ -1307,7 +1244,7 @@ catch-up logs all zeros on two starts in a row.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/test_pg_migrations.py -k purchasing_migration -q` — Expected: FAIL.
 - [ ] **Step 3: Write the migration.**
 - [ ] **Step 4: Run** the same — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): filament purchasing moves onto offers, items and units (#7068, 3a 3/6)`
+- [ ] **Step 5: Commit** `feat(inventory): filament purchasing moves onto offers, items and units (#7068, 3a 3/5)`
 
 ### Task 10: One model for spool types and spools; the spool workflow as an extension
 
@@ -1323,7 +1260,8 @@ catch-up logs all zeros on two starts in a row.
   `backend/scadbuddy/filament/bambuddy_pull.py` (l.1290: the same receive),
   `backend/scadbuddy/inventory/items.py`, `stock.py`, `offers.py` (`FilamentItemRefused`
   goes), `backend/scadbuddy/entities/refs.py` and `registry.py` (`spool_type` and `spool`
-  parse as `item` and `unit`; their `KINDS` rows go), `backend/scadbuddy/entities/properties.py`,
+  parse as `item` and `unit`; their `KINDS` rows go, and so do `material` and `subtype`;
+  a new `item_kind` row names `item_kinds` with a text id, R-P3-66), `backend/scadbuddy/entities/properties.py`,
   every `spool_type:` and `spool:` ref built in backend code (`grep -rn "spool_type\b\|\"spool\""
   backend/scadbuddy`)
 - Test: `backend/tests/filament/test_spool_units.py`, `test_types.py`, `test_spools.py`,
@@ -1424,7 +1362,7 @@ catch-up logs all zeros on two starts in a row.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament tests/inventory tests/entities -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same with `-n auto` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(filament): spool types are items and spools are units (#7068, 3a 3/6)`
+- [ ] **Step 5: Commit** `feat(filament): spool types are items and spools are units (#7068, 3a 3/5)`
 
 ### Task 11: One confirm and candidates path; offers; Bambuddy sees only filament; the invoice file is an attachment
 
@@ -1479,7 +1417,7 @@ catch-up logs all zeros on two starts in a row.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament/test_suppliers.py tests/filament/test_invoice_confirm.py tests/filament/test_invoice_candidates.py tests/filament/test_bb_sync_plan.py tests/api/test_purchasing.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the whole backend suite `cd backend && uv run --frozen pytest -n auto` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): one confirm path for every item; only filament reaches Bambuddy (#7068, 3a 3/6)`
+- [ ] **Step 5: Commit** `feat(inventory): one confirm path for every item; only filament reaches Bambuddy (#7068, 3a 3/5)`
 
 ## Layer A4 — `feat/7068-a4-spool-job-cost` (on A3; Pre-flight 7)
 
@@ -1562,69 +1500,9 @@ paired `print_run` event's (R-P3-28).
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament/test_ledger.py tests/orders/test_costs.py tests/api/test_inventory_stock.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement.** One shared reader for job cost and the profit report (R-P2-31).
 - [ ] **Step 4: Run** `cd backend && uv run --frozen pytest tests/orders tests/filament tests/api/test_orders_job_cost.py -n auto -q` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(orders): job cost prices filament at its unit's cost (#7068, 3a 4/6)`
+- [ ] **Step 5: Commit** `feat(orders): job cost prices filament at its unit's cost (#7068, 3a 4/5)`
 
-## Layer A5 — `feat/7068-a5-purchasing-agent` (on A4)
-
-### Task 13: Purchasing, stock and location tools for every item; the filament aliases
-
-**Files:**
-- Create: `agent/src/tools/purchasing.ts`
-- Modify: `agent/src/tools/filamentPurchasing.ts` (`filament_invoice_*` and
-  `filament_supplier_list|upsert` descriptions say "Alias of invoice_… / supplier_…; goes
-  after one release" (spec §6.7) and call the `/inventory/…` routes),
-  `agent/src/tools/filamentLinks.ts` and `inventoryLinks.ts` (invoice and supplier
-  `ui_path`), `agent/src/tools/orders.ts` (`order_purchase_record` takes `invoice_line_id`),
-  `agent/src/tools/inventory.ts` (`inventory_unit_recost`; `filament_spool_recost` in
-  `filament.ts` is its alias), `agent/src/tools/entities.ts` (`item:` and `unit:` refs for
-  types and spools; `spool_type:` and `spool:` still parse), `agent/src/tools/index.ts`,
-  `agent/src/tools/coverage.ts` (drop the layer-A2 entries), `agent/src/tools/filament.ts`
-  (`filament_purchasing_metrics`, `filament_cost_per_kg` and `filament_location_*` become
-  aliases), `agent/src/tools/inventory.ts` (the stock, offer price, shopping and location
-  tools), `agent/src/sessions/touched.ts`
-  (every new write tool)
-- Test: `agent/test/purchasing.test.ts`, `agent/test/filamentPurchasing.test.ts`,
-  `agent/test/filamentLinks.test.ts`, `agent/test/inventoryLinks.test.ts`,
-  `agent/test/orders.test.ts`, `agent/test/coverage.test.ts`
-
-**Interfaces:**
-- Produces tools (route; risk): `supplier_list` (read), `supplier_upsert` (write),
-  `invoice_list` (read), `invoice_get` (read; lines with links, lots, units, `received_g_source` with the words
-  "derived from weighing and prints" for `derived`, and billed, received, free and
-  cost per unit or per kg, R-P3-42),
-  `invoice_candidates` (read; items with their adoptable lots and units), `invoice_upsert` (write;
-  lines take `item_id`, `offer_id`, `kind`, `pack_size`, `received_units`, `adopt_ids`,
-  `proposed_item`, `proposed_type`), `invoice_confirm` (write), `invoice_amend_preview`
-  (read; `POST …/amend?preview=true` writes nothing), `invoice_amend` (outward, gated: a person approves it,
-  R-P3-34), `invoice_delete` (write), `invoice_events` (read), `invoice_review_list` (read),
-  `invoice_line_link_list` (read; by line or by entity), `invoice_line_link_set` (write; add
-  or update), `invoice_line_link_delete` (write), `inventory_unit_recost` (write); and for parity (R-P3-58, Task 7): `supplier_stats`
-  (read), `supplier_price_sheet` (read), `purchasing_metrics` (read),
-  `inventory_cost_per_unit` (read), `inventory_offer_price_list` (read),
-  `inventory_offer_price_delete` (write), `inventory_stock_list` (read),
-  `inventory_stock_bulk` (write), `inventory_stock_import` (write), `shopping_list`
-  (read), `shopping_add`, `shopping_update`, `shopping_remove` (write), `location_list`,
-  `location_get` (read), `location_upsert` (write). Aliases for one release, each
-  description saying so: `filament_supplier_list|upsert|stats`, `filament_product_list|upsert`
-  (offers), `filament_price_list|add|delete|sheet`, `filament_purchasing_metrics`,
-  `filament_cost_per_kg` (the per-kg view of `inventory_cost_per_unit`),
-  `filament_shopping_*`, `filament_location_*`. Descriptions say "item type" for an item
-  and "stock" for lots and units (R-P3-59). Each
-  description says what it writes: amend spreads only the tax and shipping no line holds
-  unless `respread` (D15); a link's share becomes a maintenance event or an order cost entry
-  only on an expense line (R-P3-9); re-cost changes past order costs (D14).
-
-- [ ] **Step 1: Write the failing tests**: each tool's route and risk (the table style of
-  `agent/test/inventory.test.ts`); `invoice_amend` is `outward` and gated; every
-  alias answers as its generic tool; no `invoice_amend_propose` exists;
-  `filament_invoice_get` answers as `invoice_get`; `order_purchase_record` with
-  `invoice_line_id` sends it; `uiPath("invoice:<id>")` matches the fixture.
-- [ ] **Step 2: Run** `cd agent && pnpm exec vitest run test/purchasing.test.ts test/filamentPurchasing.test.ts test/filamentLinks.test.ts test/inventoryLinks.test.ts test/orders.test.ts test/coverage.test.ts` — Expected: FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `cd agent && pnpm lint && pnpm typecheck && pnpm test` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(agent): invoice and supplier tools for every item (#7068, 3a 5/6)`
-
-## Layer A6 — `feat/7068-a6-docs` (on A5)
+## Layer A5 — `feat/7068-a5-docs` (on A4)
 
 ### Task 14: Phase 3a docs
 
@@ -1635,21 +1513,20 @@ paired `print_run` event's (R-P3-28).
   (purchases with a line; job cost's filament basis), `docs/architecture/data.md` (the
   renames, the views, the two new tables, the moved and retired tables, the
   `inventory_moves` view, the kind tree, the catch-up, the migrations), `backend/CLAUDE.md` (the
-  `inventory/` and `filament/` layout lines), `agent/CLAUDE.md` (the tool families), the
-  spec's §9 phase 3 line (a "done in" note with the PRs), and §6.4's filament paragraph and
-  D1 where R-P3-30 changes them (the unit carries the cost; grams stay in the ledger), and
-  §6.7 for billed and received (R-P3-37).
+  `inventory/` and `filament/` layout lines), and the spec's §9 3a line (a "done in"
+  note with the PRs; the spec's design text is already amended by PR #7716).
 
 - [ ] **Step 1: Edit**, each fact with its source (file:line, PR or issue).
 - [ ] **Step 2: Run** `grep -rn "filament_supplier_products\|filament_price_points\|filament_invoices\b\|filament_invoice_lines\|filament_locations\|update_spool_ids" docs backend/CLAUDE.md frontend/CLAUDE.md agent/CLAUDE.md plugins` — Expected: only historical specs and plans, and the retired names in `data.md`.
-- [ ] **Step 3: Commit** `docs: generic purchasing and invoice line links (#7068, 3a 6/6)`
+- [ ] **Step 3: Commit** `docs: generic purchasing and invoice line links (#7068, 3a 5/5)`
 
-## Phase 3b — the Filament section in Inventory, item types at parity, the invoice flow
+## Phase 3b — the UI, the parity features and the flows
 
-Phase 3b starts when layer A5 has merged. Its issue is filed under #6949 ("Issues to file").
-Load `frontend-design` before Task 15.
+Phase 3b starts when layer A4 has merged. Its issue is filed under #6949 ("Issues to file").
+Load `frontend-design` before Task 15. Task 21, the parity test, is the exit check of
+phase 3b; it runs every (a) row of the parity table on a filament item and a hardware item.
 
-## Layer B1 — `feat/<3b>-b1-filament-in-inventory` (on main after A5)
+## Layer B1 — `feat/<3b>-b1-filament-in-inventory` (on main after A4)
 
 ### Task 15: The Filament section moves into Inventory; names; redirects
 
@@ -1709,13 +1586,112 @@ for the list of types.
 - [ ] **Step 2: Run** `cd frontend && pnpm gen:api && pnpm exec vitest run src/AppRedirects.test.tsx src/lib` and `cd agent && pnpm exec vitest run test/filamentLinks.test.ts test/inventoryLinks.test.ts` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same, `cd backend && uv run --frozen pytest tests/filament/test_links.py tests/inventory -q`, `cd frontend && pnpm lint && pnpm typecheck && pnpm exec playwright test e2e/page-titles.spec.ts` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): the Filament section moves into Inventory (#<3b>, 1/5)`
+- [ ] **Step 5: Commit** `feat(inventory): the Filament section moves into Inventory (#<3b>, 1/7)`
 
 ## Layer B2 — `feat/<3b>-b2-item-types` (on B1)
 
+### Task 7: Price sheets, price history, supplier stats, metrics, the calculator, the stock list and shopping for every item
+
+§11 rows 3, 4, 6, 7 (if Q5), 18, 21, 22, 34, 35 and 38 (R-P3-58). Every route reads `supplier_offers` and
+`offer_price_points` of every item; before layer A3 filament still has its own tables, so a
+filament row joins in through Task 11 and the filament routes keep serving it until then.
+
+**Files:**
+- Create: `backend/scadbuddy/inventory/purchasing_reads.py` (`PurchasingReads`, one store,
+  SQL only here), `backend/scadbuddy/inventory/stock_list.py` (`StockList`)
+- Modify: `backend/scadbuddy/api/purchasing.py`, `backend/scadbuddy/api/inventory_stock.py`,
+  `backend/scadbuddy/inventory/models.py`, `backend/scadbuddy/inventory/offers.py`
+  (`delete_price`), `backend/scadbuddy/filament/shopping.py` (generic rows),
+  `backend/scadbuddy/filament/invoice_money.py` (`cost_per_unit`)
+- Test: `backend/tests/inventory/test_purchasing_reads.py`, `test_stock_list.py`,
+  `backend/tests/api/test_purchasing.py`, `backend/tests/filament/test_invoice_money.py`
+
+**Interfaces:**
+- Produces (`inventory/models.py`): `PricePer(pack: Decimal, unit: Decimal, kg: Decimal |
+  None)` (`unit` = pack price over `offer.pack_size` in the offer's `pack_uom`; `kg` only
+  for a filament item, over its label weight); `PriceHistoryRow(price_id, on_date, price,
+  currency, source, invoice_line_id, per: PricePer)`; `OfferPrices(offer: Offer,
+  supplier_name, history: list[PriceHistoryRow])`; `SheetRow(offer_id, item_id, item_name,
+  kind_id, sku, newest: PriceHistoryRow | None, previous: PriceHistoryRow | None,
+  change_pct: Decimal | None)` (the change of the per-unit price, per kg for filament,
+  `ChangeChip`'s input); `SupplierStats(supplier_id, currency, spend, invoices, lines,
+  units_bought, offers)`; `PurchasingMetrics(prices: list[PriceSeries], spend:
+  list[SpendRow])`, `PriceSeries(item_id, item_name, currency, basis: Literal["unit",
+  "kg"], points: list[tuple[date, Decimal]])`, `SpendRow(supplier_id, month, currency,
+  total, invoices)`; `CostPerUnit(cost_per_unit, price_per_unit, cost_per_kg: Decimal |
+  None, price_per_kg: Decimal | None)`; `StockRow(kind: Literal["lot", "unit"], id,
+  item_id, item_name, kind_id, status, qty, uom, location_id, supplier_id, invoice_line_id,
+  received_at, cost_per_unit, note, ui_path)`; `StockBulk(ids: list[StockRef] (1..500),
+  action: Literal["move", "status", "archive", "note"], location_id, status, note)`.
+- Produces (`PurchasingReads(pool)`): `item_prices(item_id) -> list[OfferPrices]`,
+  `offer_prices(offer_id) -> OfferPrices`, `price_sheet(supplier_id) -> list[SheetRow]`,
+  `supplier_stats() -> list[SupplierStats]`, `metrics(since: date, until: date) ->
+  PurchasingMetrics` (since after until → `ValueError` → 422, as the filament route).
+- Produces (`invoice_money.cost_per_unit(price: Decimal, quantity: int, pack_size:
+  Decimal, tax: Decimal, shipping: Decimal, net_weight_g: Decimal | None) ->
+  CostPerUnit`): `cost_per_unit` with tax and shipping, `price_per_unit` without shipping,
+  as `/filament/cost-per-kg` does per kg; the filament route calls it with `pack_size` 1.
+- Produces (`StockList(pool)`): `list(*, kind: str | None, item_id, status, location_id,
+  supplier_id, invoice_id, q, archived: bool, limit ≤ 500, cursor) -> Page[StockRow]`
+  (a `kind` filter covers its descendants; a filament item's units come with their
+  spool's grams left in `qty` and `uom = 'g'`); `bulk(body: StockBulk, by) -> BulkResult`
+  (all or none in one transaction, spec row 6: each id under the lock order of
+  R-P2-32; a status change through `set_unit_status_in`; a move writes the location; one
+  refused id refuses the request, 409 naming it); `import_csv(text: str, by, *, dry_run: bool) -> ImportResult` (built only if the owner
+  answers Q5 yes; otherwise it and its route go to a follow-up) (columns
+  `item`, `qty`, `unit_cost`, `location`, `note`, `received_at`; each row a `receive_in` or
+  `receive_units_in` with `origin = 'opening'`; filament rows go to the spool import).
+  No forecast for lot items: §11 row 36 is a follow-up unless Q4 is yes (the filament
+  view keeps `SpoolForecast`).
+- Produces routes (tag `inventory`): `GET /inventory/items/{item_id}/prices`, `GET
+  /inventory/offers/{offer_id}/prices` (phase 2's route answers `OfferPrices` now; the
+  POST stays), `DELETE /inventory/offer-prices/{price_id}` (an `invoice` price point is
+  409 `price_from_invoice`, as the filament delete), `GET
+  /inventory/suppliers/{supplier_id}/price-sheet`, `GET /inventory/suppliers/stats`, `GET
+  /inventory/metrics/purchasing?since&until`, `GET /inventory/cost-per-unit?price&quantity&pack_size&tax&shipping&net_weight_g`,
+  `GET /inventory/stock`, `POST /inventory/stock/bulk`, `POST /inventory/stock/import?dry_run=`,
+  `GET /inventory/stock.csv` (the export), `GET /inventory/metrics/stock` (stock value and
+  use by kind, supplier and place from `inventory_moves`, row 35; it needs Task 12), and `/inventory/shopping-list` (`GET`, `POST`,
+  `DELETE`, `PATCH|DELETE /{row_id}`; a row names an `item_id` of any kind, or free text,
+  with `quantity` in the item's unit). The `/filament/` twins (`types/{id}/prices`,
+  `products/{id}/prices`, `suppliers/{id}/price-sheet`, `suppliers/stats`,
+  `metrics/purchasing`, `cost-per-kg`, `shopping-list`) call the same store and keep
+  their answer shapes.
+
+- [ ] **Step 1: Write the failing tests** (`requires_postgres`; seed supplier "Acme" with
+  an offer of `hardware` item "M3 bolt" (pack 100, `pack_uom` `each`) priced 12.00 on
+  2026-10-01 and 15.00 on 2026-11-01, and a `nozzle` offer (pack 1) at 30.00):
+  - `test_a_hardware_price_sheet_has_per_unit_and_change`: `price_sheet(acme)` → the bolt's
+    row has `newest.per.pack == 15.00`, `newest.per.unit == Decimal("0.1500")`,
+    `previous.per.unit == Decimal("0.1200")`, `change_pct == Decimal("25.0")`; the nozzle
+    row has no change; no row is left out for its kind.
+  - `test_item_prices_lists_every_offer_with_history`: two suppliers' offers of the bolt →
+    two `OfferPrices`, newest first.
+  - `test_supplier_stats_counts_every_item`: a confirmed invoice of 2 bolt packs (allocated
+    30.00) and 1 nozzle (30.00) → `spend == 60.00`, `lines == 2`, `units_bought == 201`.
+  - `test_metrics_price_per_unit_over_time`: two `PriceSeries` points for the bolt at
+    0.12 and 0.15, `basis == "unit"`; spend per supplier and month.
+  - `test_cost_per_unit`: `cost_per_unit(30.00, 2, 100, 2.40, 5.00, None)` →
+    `cost_per_unit == Decimal("0.1872")`, `price_per_unit == Decimal("0.1620")`; with
+    `pack_size` 1 and `net_weight_g` 1000 it equals today's `/filament/cost-per-kg`
+    answer for the same inputs.
+  - `test_deleting_an_invoice_price_is_refused`.
+  - `test_stock_list_filters_and_bulk` (`test_stock_list.py`): a lot of bolts and two
+    nozzle units → `list(kind="part")` has 3 rows; `bulk(move to L1)` moves all 3 and
+    `bulk(status retired)` naming the lot answers 409 `WrongTracking` naming it
+    and changes none of the three; `GET /inventory/stock.csv` has a header and 3 rows; if
+    Q5 is yes, `import_csv` of `M3 bolt,50,0.14,Shelf A,,2026-11-02` with `dry_run` writes
+    nothing and without it receives one lot.
+  - `test_a_shopping_row_takes_any_item`: a bolt row with `quantity` 300 lists with its
+    item and kind; the filament view's material and colour columns are null for it.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_purchasing_reads.py tests/inventory/test_stock_list.py tests/api/test_purchasing.py tests/filament/test_invoice_money.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement.** Route handlers hold no SQL (R-P3-54).
+- [ ] **Step 4: Run** the same and `cd backend && uv run --frozen pytest tests/filament -n auto -q` (the filament twins answer as before) — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(inventory): price sheets, history, stats, metrics, stock list and shopping for every item (#<3b>, 2/7)`
+
 ### Task 16: The Item types list and the Stock list
 
-Parity rows 1 and 2 (R-P3-58, R-P3-59).
+§11 rows 1, 4 and 6 (R-P3-58, R-P3-59).
 
 **Files:**
 - Create: `frontend/src/pages/inventory/TypesPage.tsx` (`/inventory/types`),
@@ -1731,29 +1707,30 @@ Parity rows 1 and 2 (R-P3-58, R-P3-59).
 
 **Interfaces:**
 - Consumes: `GET /inventory/items`, `GET /inventory/stock`, `POST /inventory/stock/bulk`,
-  `POST /inventory/stock/import`, `GET /inventory/items/{id}/forecast` (Task 7).
+  `POST /inventory/stock/import`, `GET /inventory/stock.csv` (Task 7).
 - Produces: one layout for every kind. The Item types list has the same columns, filters
   and actions as today's Types tab (name, kind, newest price per pack and per unit,
   offers, on hand, archived toggle, "New item type"); a `kind` filter that names
   `filament` adds the filament columns. The Stock list has the Spools tab's filters
   (kind, type, status, location, supplier, invoice, text), table and cards views, "Columns
-  shown", the bulk bar (move, status, archive, note), CSV import with a dry run, and the
-  forecast; a filament row is a spool row (grams left, tray, tag).
+  shown", the bulk bar (move, status, archive, note; all or none), CSV export, and the CSV
+  import with a dry run only if Q5 is yes; no forecast for lot items (Q4); a filament row is a spool row (grams left, tray, tag).
 
 - [ ] **Step 1: Write the failing tests**: with the mocks, `/inventory/types` lists the
   `hardware` item "M3 bolt" with "0.15 / each" and the filament type "PLA Basic Black"
   with "25.00 / kg"; `?kind=filament` adds the colour column; `/inventory/stock` lists a
   bolt lot and a spool; selecting both and "Move to Shelf A" posts one bulk body with both
-  refs; the bulk bar is the same component on `?kind=filament` and `?kind=part`; a CSV dry
-  run shows the rows it would receive and sends nothing more.
+  refs; the bulk bar is the same component on `?kind=filament` and `?kind=part`; "Export
+  CSV" downloads `GET /inventory/stock.csv` with the filters; the import button shows only
+  where the route exists.
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/pages/inventory src/components/inventory` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same, `pnpm lint && pnpm typecheck` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): item types and stock lists for every kind (#<3b>, 2/5)`
+- [ ] **Step 5: Commit** `feat(inventory): item types and stock lists for every kind (#<3b>, 2/7)`
 
 ### Task 17: The item type page at parity with the spool type page
 
-Parity row 3 and 13 (R-P3-58).
+§11 rows 2, 3 and 21 (R-P3-58).
 
 **Files:**
 - Modify: `frontend/src/pages/inventory/ItemPage.tsx` (the sections below; a filament item
@@ -1787,13 +1764,78 @@ Parity row 3 and 13 (R-P3-58).
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/pages/inventory/ItemPage.test.tsx src/components/inventory` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same, `pnpm lint && pnpm typecheck` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): the item type page has every section the spool type page has (#<3b>, 2/5)`
+- [ ] **Step 5: Commit** `feat(inventory): the item type page has every section the spool type page has (#<3b>, 2/7)`
+
+### Task 25: Copy, bulk edit of item types, places with their stock, the moves page
+
+§11 rows 5, 6, 14 and 39.
+
+**Files:**
+- Modify: `backend/scadbuddy/inventory/items.py` (`copy`, `bulk`), `inventory/stock.py`
+  (`copy_unit`), `api/inventory.py`, `api/inventory_stock.py`,
+  `frontend/src/pages/inventory/TypesPage.tsx` (the bulk bar), `ItemPage.tsx` and
+  `UnitPage.tsx` ("Copy"), `frontend/src/pages/inventory/LocationPage.tsx` (from the
+  filament page: the place's lots, units and spools), `frontend/src/pages/inventory/MovesPage.tsx`
+  (new, `/inventory/moves`)
+- Test: `backend/tests/inventory/test_items.py`, `test_stock.py`, `backend/tests/api/test_inventory.py`,
+  `frontend/src/pages/inventory/LocationPage.test.tsx`, `MovesPage.test.tsx`, `TypesPage.test.tsx`
+
+**Interfaces:**
+- Produces: `POST /inventory/items/{item_id}/copy` → a new item type with the same kind,
+  manufacturer, properties and offers (no stock, no price points), named `"<name> (copy)"`;
+  `POST /inventory/units/{unit_id}/copy` → a new unit of the same item at the same place
+  and cost, `origin = 'opening'`, with a `receive` move (a filament unit copies its spool
+  through the extension, as `GET /filament/spools/{id}/copy` does); `POST
+  /inventory/items/bulk` (`ItemBulk(ids: list[UUID] (1..500), action:
+  Literal["edit", "archive", "restore"], patch: ItemPatch | None)`), all or none in one
+  transaction (spec row 6); `GET /inventory/locations/{id}/stock` → the lots, units and
+  spools at the place and below it; `/inventory/moves` reads `inventory_moves` (Task 12)
+  through `GET /inventory/moves` with `source` in its rows.
+- [ ] **Step 1: Write the failing tests**: copying "M3 bolt" makes "M3 bolt (copy)" with its
+  MPN and its Acme offer and no lot; copying a nozzle unit makes a unit with one `receive`
+  move; a bulk archive of two item types where one is already archived archives none and
+  answers 409 naming it; a place with a bolt lot and a spool lists both; the moves page
+  lists a stock move and a spool use with their sources.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_items.py tests/inventory/test_stock.py tests/api/test_inventory.py -q` and `cd frontend && pnpm exec vitest run src/pages/inventory` — Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** the same — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(inventory): copy, bulk edit, places with stock and the moves page (#<3b>, 2/7)`
+
+### Task 26: Property search and quick find over every item and unit
+
+§11 rows 8 and 48.
+
+**Files:**
+- Modify: `frontend/src/lib/filamentSearch.ts` → `frontend/src/lib/inventorySearch.ts`
+  (`propertyTexts` for `item` and `unit`, not only `spool` and `spool_type`),
+  `frontend/src/components/entities/api.ts` (`loadKindPropertyTexts` for `item` and `unit`),
+  `frontend/src/components/filament/FilamentQuickFind.tsx` →
+  `components/inventory/QuickFind.tsx` (every item type and unit: name, code, tag UID,
+  property value; filament rows keep their swatch), `agent/src/tools/filamentSearch.ts`
+  (the same rule for the agent's copy), `backend/scadbuddy/inventory/stock_list.py` (`q`
+  matches unit and lot property values, as `inventory/items.py` l.113 does for items)
+- Test: `frontend/src/lib/inventorySearch.test.ts`, `components/inventory/QuickFind.test.tsx`,
+  `agent/test/filamentSearch.test.ts`, `backend/tests/inventory/test_stock_list.py`
+
+**Interfaces:**
+- Produces: one search over item and unit properties for the Item types list, the Stock
+  list and quick find. Inline `properties` on `inventory_unit_receive`/`_update` and
+  `inventory_lot_receive`/`_update` are Task 13's (spec row 8: `inventory_item_upsert`
+  already has them, `agent/src/tools/inventory.ts` l.256, l.280).
+- [ ] **Step 1: Write the failing tests**: a bolt with property `thread` = `M3x0.5` is found
+  by `0.5` in the Item types list and in quick find; a nozzle unit with property `serial`
+  = `HN-0042` is found by `0042` in the Stock list and quick find; a spool is still found by
+  its tag UID; `GET /inventory/stock?q=0042` returns the unit.
+- [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/lib/inventorySearch.test.ts src/components/inventory/QuickFind.test.tsx` and `cd backend && uv run --frozen pytest tests/inventory/test_stock_list.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** the same and `cd agent && pnpm exec vitest run test/filamentSearch.test.ts` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(inventory): property search and quick find over every item and unit (#<3b>, 2/7)`
 
 ## Layer B3 — `feat/<3b>-b3-purchasing-ui` (on B2)
 
 ### Task 18: The invoice editor for every item
 
-Parity rows 9 and 10 (R-P3-58). Task 15 moved the pages; this task makes the one line
+§11 rows 23 to 30 (R-P3-58). Task 15 moved the pages; this task makes the one line
 editor.
 
 **Files:**
@@ -1835,11 +1877,11 @@ editor.
 - [ ] **Step 2: Run** `cd frontend && pnpm gen:api && pnpm exec vitest run src/pages/inventory src/components/inventory/purchasing` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same, `pnpm typecheck && pnpm lint` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): suppliers, invoices, amend and line links in Inventory (#<3b>, 3/5)`
+- [ ] **Step 5: Commit** `feat(inventory): suppliers, invoices, amend and line links in Inventory (#<3b>, 3/7)`
 
 ### Task 19: Suppliers, offers, price sheets, metrics and the shopping list for every item
 
-Parity rows 5-8, 12, 14, 15, 17 (R-P3-58).
+§11 rows 18, 19, 21, 22, 34, 35 and 38 (R-P3-58).
 
 **Files:**
 - Modify: `frontend/src/pages/inventory/SupplierPage.tsx` (one offers table and one price
@@ -1870,7 +1912,7 @@ Parity rows 5-8, 12, 14, 15, 17 (R-P3-58).
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/pages/inventory src/components/inventory/purchasing` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same, `pnpm lint && pnpm typecheck` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): suppliers, price sheets, metrics and shopping for every item (#<3b>, 3/5)`
+- [ ] **Step 5: Commit** `feat(inventory): suppliers, price sheets, metrics and shopping for every item (#<3b>, 3/7)`
 
 ### Task 20: Linked lines; purchases; lots, units and spools; the backfill review
 
@@ -1905,47 +1947,84 @@ Parity rows 5-8, 12, 14, 15, 17 (R-P3-58).
   spool calls `/inventory/units/{id}/recost` and shows the returned orders with links; the review page shows a row with
   `subtotal_differs` and "4900.00 / 160.00"; "Mark done" sends `{lines_review: "done"}`;
   a lot page and a unit page show "Bought on" with the line's billed, received and free
-  figures and "Where to buy" with each offer's newest price (parity row 4); a line with
+  figures and "Where to buy" with each offer's newest price (§11 row 29); a line with
   `adopt_ids` shows the lot it adopts and "no new stock"; the spool page shows "received
   1,010 g" for a weighed spool, "received 1,020 g (derived from weighing and prints)" for a
   derived one, and "not weighed" for one without.
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/components/inventory src/pages src/components/orders/CustomerModels.test.tsx` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `cd frontend && pnpm lint && pnpm typecheck && pnpm test` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): invoice lines on items, orders and spools; the backfill review (#<3b>, 3/5)`
+- [ ] **Step 5: Commit** `feat(inventory): invoice lines on items, orders and spools; the backfill review (#<3b>, 3/7)`
 
-### Task 21: The parity test
+## Layer B4 — `feat/<3b>-b4-agent-tools` (on B3)
 
-R-P3-58: one test runs the same purchasing steps on a filament item and on a hardware item,
-so no feature can exist for one only.
+### Task 13: Purchasing, stock and location tools for every item; the filament aliases
 
 **Files:**
-- Create: `frontend/e2e/purchasing-parity.spec.ts`, `frontend/src/mocks/features/purchasingParity.ts`
-  (the msw state both runs share)
-- Test: that spec, run by the `frontend` e2e job as every spec in `frontend/e2e/` is
+- Create: `agent/src/tools/purchasing.ts`
+- Modify: `agent/src/tools/filamentPurchasing.ts` (`filament_invoice_*` and
+  `filament_supplier_list|upsert` descriptions say "Alias of invoice_… / supplier_…; goes
+  after one release" (spec §6.7) and call the `/inventory/…` routes),
+  `agent/src/tools/filamentLinks.ts` and `inventoryLinks.ts` (invoice and supplier
+  `ui_path`), `agent/src/tools/orders.ts` (`order_purchase_record` takes `invoice_line_id`),
+  `agent/src/tools/inventory.ts` (`inventory_unit_recost`; `filament_spool_recost` in
+  `filament.ts` is its alias), `agent/src/tools/entities.ts` (`item:` and `unit:` refs for
+  types and spools; `spool_type:` and `spool:` still parse), `agent/src/tools/index.ts`,
+  `agent/src/tools/coverage.ts` (drop the layer-A2 entries), `agent/src/tools/filament.ts`
+  (`filament_purchasing_metrics`, `filament_cost_per_kg` and `filament_location_*` become
+  aliases), `agent/src/tools/inventory.ts` (the stock, offer price, shopping and location
+  tools), `agent/src/sessions/touched.ts`
+  (every new write tool)
+- Test: `agent/test/purchasing.test.ts`, `agent/test/filamentPurchasing.test.ts`,
+  `agent/test/filamentLinks.test.ts`, `agent/test/inventoryLinks.test.ts`,
+  `agent/test/orders.test.ts`, `agent/test/coverage.test.ts`
 
 **Interfaces:**
-- Produces: `for (const item of [{ kind: 'filament', name: 'PLA Basic Black', unitWord:
-  'kg' }, { kind: 'hardware', name: 'M3 bolt', unitWord: 'each' }])`, one `test` each, the
-  same steps: open `/inventory/types?kind=<kind>` and find the item type; open its page and
-  see "Price", "Reordering", "Stock of this type", "Invoice lines"; open supplier Acme and
-  see the item in the one offers table and the price sheet; add a price; make a draft
-  invoice with one line of the item (quantity 2, received 3), confirm it; see the line's
-  item type, "Billed 2, received 3, 1 free", its cost per unit (per kg for filament as
-  well) and the links to the lots or units made; open one of them and see "Bought on" with
-  the invoice; see the new price on the item type's price panel; add the item to the
-  shopping list and mark it purchased. Each step uses the same locator for both items.
+- Produces tools (route; risk): `supplier_list` (read), `supplier_upsert` (write),
+  `invoice_list` (read), `invoice_get` (read; lines with links, lots, units, `received_g_source` with the words
+  "derived from weighing and prints" for `derived`, and billed, received, free and
+  cost per unit or per kg, R-P3-42),
+  `invoice_candidates` (read; items with their adoptable lots and units), `invoice_upsert` (write;
+  lines take `item_id`, `offer_id`, `kind`, `pack_size`, `received_units`, `adopt_ids`,
+  `proposed_item`, `proposed_type`), `invoice_confirm` (write), `invoice_amend_preview`
+  (read; `POST …/amend?preview=true` writes nothing), `invoice_amend` (outward, gated: a person approves it,
+  R-P3-34), `invoice_delete` (write), `invoice_events` (read), `invoice_review_list` (read),
+  `invoice_line_link_list` (read; by line or by entity), `invoice_line_link_set` (write; add
+  or update), `invoice_line_link_delete` (write), `inventory_unit_recost` (write); inline `properties` on `inventory_unit_receive`,
+  `inventory_unit_update`, `inventory_lot_receive` and `inventory_lot_update`, as
+  `inventory_item_upsert` has (`setPropertiesAfter`, `agent/src/tools/inventory.ts` l.256,
+  l.280; §11 row 8); and for parity (R-P3-58, Task 7): `supplier_stats`
+  (read), `supplier_price_sheet` (read), `purchasing_metrics` (read),
+  `inventory_cost_per_unit` (read), `inventory_offer_price_list` (read),
+  `inventory_offer_price_delete` (write), `inventory_stock_list` (read),
+  `inventory_stock_bulk` (write), `inventory_stock_import` (write), `shopping_list`
+  (read), `shopping_add`, `shopping_update`, `shopping_remove` (write), `location_list`,
+  `location_get` (read), `location_upsert` (write). Aliases for one release, each
+  description saying so: `filament_supplier_list|upsert|stats`, `filament_product_list|upsert`
+  (offers), `filament_price_list|add|delete|sheet`, `filament_purchasing_metrics`,
+  `filament_cost_per_kg` (the per-kg view of `inventory_cost_per_unit`),
+  `filament_shopping_*`, `filament_location_*`. Descriptions say "item type" for an item
+  and "stock" for lots and units (R-P3-59). Each
+  description says what it writes: amend spreads only the tax and shipping no line holds
+  unless `respread` (D15); a link's share becomes a maintenance event or an order cost entry
+  only on an expense line (R-P3-9); re-cost changes past order costs (D14).
 
-- [ ] **Step 1: Write the spec** — Expected: FAIL on main before Tasks 16-20.
-- [ ] **Step 2: Run** `cd frontend && pnpm exec playwright test e2e/purchasing-parity.spec.ts` — Expected: PASS on this layer.
-- [ ] **Step 3: Commit** `test(inventory): one purchasing flow for a filament item and a hardware item (#<3b>, 3/5)`
+- [ ] **Step 1: Write the failing tests**: each tool's route and risk (the table style of
+  `agent/test/inventory.test.ts`); `invoice_amend` is `outward` and gated; every
+  alias answers as its generic tool; no `invoice_amend_propose` exists;
+  `filament_invoice_get` answers as `invoice_get`; `order_purchase_record` with
+  `invoice_line_id` sends it; `uiPath("invoice:<id>")` matches the fixture.
+- [ ] **Step 2: Run** `cd agent && pnpm exec vitest run test/purchasing.test.ts test/filamentPurchasing.test.ts test/filamentLinks.test.ts test/inventoryLinks.test.ts test/orders.test.ts test/coverage.test.ts` — Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `cd agent && pnpm lint && pnpm typecheck && pnpm test` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(agent): invoice and supplier tools for every item (#<3b>, 4/7)`
 
-## Layer B4 — `feat/<3b>-b4-invoice-flow` (on B3)
+## Layer B5 — `feat/<3b>-b5-invoice-flow` (on B4)
 
 ### Task 22: The `invoice-import` flow: extract, match, prompt, confirm or amend
 
 R-P3-51 to R-P3-53. One built-in flow serves the import of a draft and the backfill of a
-confirmed invoice that misses lines, for every item (parity row 11).
+confirmed invoice that misses lines, for every item (§11 rows 31 and 32).
 
 **Files:**
 - Create: `backend/scadbuddy/inventory/builtin_flow.py` (`NAME = "invoice-import"`,
@@ -2061,22 +2140,87 @@ confirmed invoice that misses lines, for every item (parity row 11).
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/inventory/test_invoice_flow.py tests/flows/test_project_replay.py -q` and `cd agent && pnpm exec vitest run test/imageRefs.test.ts` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same, `cd backend && uv run --frozen pytest tests/flows -n auto -q`, and `cd frontend && pnpm exec vitest run src/components/inventory/purchasing` — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(inventory): the invoice-import flow with typed prompts (#<3b>, 4/5)`
+- [ ] **Step 5: Commit** `feat(inventory): the invoice-import flow with typed prompts (#<3b>, 5/7)`
 
-## Layer B5 — `feat/<3b>-b5-skill-docs` (on B4)
+## Layer B6 — `feat/<3b>-b6-codes-tags` (on B5)
 
-### Task 23: The filament skill points to the flow; #7648 closes
+### Task 27: Codes and labels for item types, units and lots (#7169)
+
+§11 row 16. The spec's designer proposes codes and labels for all three (Q1); this task
+builds all three and each prefix is one entry, so a "no" for one drops its entry and its
+drawer before the layer merges.
 
 **Files:**
-- Modify: `plugins/scadbuddy/skills/filament/SKILL.md`, `plugins/scadbuddy/.claude-plugin/plugin.json`
+- Modify: `backend/scadbuddy/codes/resolve.py` (`PREFIXES`: `I` on `items`, `U` on
+  `stock_units` resolving to `unit:<id>`, `T` on `stock_lots` resolving to `lot:<id>`; `S`
+  stays and resolves to the spool's `unit:<id>`; the letters are checked free in
+  `PREFIXES` first), `backend/scadbuddy/filament/labels.py` (one drawer per subject
+  kind; #7216's output layer and `label_sheets` unchanged), `backend/scadbuddy/filament/label_pdf.py`,
+  a `number` per item, unit and lot (a new migration file `<UTC>_inventory_codes.sql`:
+  `items.number`, `stock_units.number`, `stock_lots.number`, each `bigint` from its own
+  sequence, unique, backfilled in `created_at` order), `frontend/src/pages/inventory/filament/LabelsPage.tsx`
+  (subjects of any kind), `ItemPage.tsx`, `UnitPage.tsx`, `LotPage.tsx` ("Print label")
+- Test: `backend/tests/codes/test_resolve.py`, `backend/tests/filament/test_labels.py`,
+  `backend/tests/test_pg_migrations.py`, `frontend/src/pages/inventory/filament/LabelsPage.test.tsx`
+
+**Interfaces:**
+- Produces: a label's fields are the item's property keys plus number, place, note, added
+  date and the QR of the code (spec row 16); `GET /codes/{code}` resolves `I-`, `U-` and
+  `T-` codes; `/x/<code>` opens the page.
+- [ ] **Step 1: Write the failing tests**: `GET /codes/U-12` names `unit:<id>` of unit
+  number 12; `T-3` a lot; `I-7` an item type; a bolt lot's label PDF holds its `thread`
+  property, number, place and a QR of `T-3`; a spool label prints as before.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/codes tests/filament/test_labels.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** the same and `cd frontend && pnpm exec vitest run src/pages/inventory/filament/LabelsPage.test.tsx` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(inventory): codes and labels for item types, units and lots (#<3b>, 6/7)` (body `Fixes #7169`)
+
+### Task 28: NTAG tags bound to any unit
+
+§11 row 17.
+
+**Files:**
+- Modify: `backend/scadbuddy/filament/tag_formats.py` (a new `TagFormat` `ndef_url`: one
+  NDEF URI record of `<base>/x/<unit code>`; `pick_format(records, default)` (l.119)
+  recognises it when a tag is read, and `ndef_url_records(code) -> list[NdefRecord]` writes
+  it), the tag binding store (a
+  tag binds to any `unit:<id>`; `filament_spool_tags` keeps the spool's binding and the
+  generic binding table `unit_tags (tag_uid text PRIMARY KEY, unit_id uuid NOT NULL
+  REFERENCES stock_units (id), format text NOT NULL, bound_at timestamptz NOT NULL)` comes
+  in a new migration file), `frontend/src/pages/inventory/filament/ScanPage.tsx` (a scan of
+  any unit's tag opens it), `UnitPage.tsx` ("Write tag")
+- Test: `backend/tests/filament/test_tag_formats.py`, `backend/tests/inventory/test_unit_tags.py`,
+  `frontend/src/pages/inventory/filament/ScanPage.test.tsx`
+
+**Interfaces:**
+- Produces: a non-filament unit's tag is written as `ndef_url`, a spool's in today's
+  formats (OpenSpool, OpenTag3D); `pick_format` reads all three; a written tag of a nozzle unit holds one URI
+  record `…/x/U-12`; a scan of it opens the unit.
+- [ ] **Step 1: Write the failing tests**: the NDEF bytes of `ndef_url` for `U-12` decode to
+  one URI record with that URL; binding a tag to a nozzle unit lists under the unit; a spool's
+  tag is still written as OpenSpool; a scan of the nozzle's UID resolves to `unit:<id>`.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/filament/test_tag_formats.py tests/inventory/test_unit_tags.py -q` — Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** the same and `cd frontend && pnpm exec vitest run src/pages/inventory/filament/ScanPage.test.tsx` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(inventory): NTAG tags with an NDEF URL bound to any unit (#<3b>, 6/7)`
+
+## Layer B7 — `feat/<3b>-b7-skill-docs-parity` (on B6)
+
+### Task 23: The `purchasing` skill; the filament skill points to it; #7648 closes
+
+**Files:**
+- Create: `plugins/scadbuddy/skills/purchasing/SKILL.md` (§11 row 47, R-P3-68: invoices,
+  the flow, offers, prices, price sheets and shopping for every item)
+- Modify: `plugins/scadbuddy/skills/filament/SKILL.md` (its invoice text goes; one line
+  points to `purchasing`), `plugins/scadbuddy/.claude-plugin/plugin.json`
   (above PR #7704's `0.1.62`: the next free version, `check-plugin-version.sh`),
   `agent/src/filament/invoiceImportPrompt.ts` (the `invoice_*` tools; every printed line
   goes on the invoice as an item line of any kind)
 - Test: `agent/test/invoiceImportPrompt.test.ts`, `.github/scripts/lint-plugin.sh`
 
 **Interfaces:**
-- Produces (`SKILL.md`, R-P3-36, R-P3-44): the interim #7648 section (PR #7704) is replaced
-  completely by "### Invoices": an invoice is imported, and a confirmed invoice that misses
+- Produces (`purchasing/SKILL.md`, R-P3-36, R-P3-44, R-P3-68): the interim #7648 section
+  (PR #7704) leaves the filament skill, and the purchasing skill's "### Invoices" says: an invoice is imported, and a confirmed invoice that misses
   lines is reviewed, by the `invoice-import` flow started from the invoice page (`start_flow_run`
   with `invoice-import` and `mode`); a person answers each line's prompt. For ad-hoc work
   the `invoice_*` tools take lines of any kind (`item_id` from `inventory_item_list` `q`,
@@ -2086,14 +2230,15 @@ confirmed invoice that misses lines, for every item (parity row 11).
   differs from the bill sets `received_units`. It names "item types" and "stock"
   (R-P3-59) and cites #7648, spec §6.7 and `inventory/builtin_flow.py`.
 
-- [ ] **Step 1: Write the failing tests**: the skill has no text of the interim section (no
-  `inventory_lot_receive` outside an invoice, no `Not filament:` instruction); it names
-  `invoice-import`; the import prompt names `invoice_get` and `invoice_upsert`, not the old
+- [ ] **Step 1: Write the failing tests**: the filament skill has no text of the interim
+  section (no `inventory_lot_receive` outside an invoice, no `Not filament:` instruction)
+  and names `purchasing`; the purchasing skill names `invoice-import`, `supplier_price_sheet`
+  and `shopping_add`; the import prompt names `invoice_get` and `invoice_upsert`, not the old
   names.
 - [ ] **Step 2: Run** `cd agent && pnpm exec vitest run test/invoiceImportPrompt.test.ts` and `.github/scripts/lint-plugin.sh` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same — Expected: PASS.
-- [ ] **Step 5: Commit** `docs(plugin): the filament skill imports invoices through the flow (#<3b>, 5/5)` (body `Fixes #7648`)
+- [ ] **Step 5: Commit** `docs(plugin): the filament skill imports invoices through the flow (#<3b>, 7/7)` (body `Fixes #7648`)
 
 ### Task 24: Phase 3b docs
 
@@ -2102,22 +2247,54 @@ confirmed invoice that misses lines, for every item (parity row 11).
   the flow), `docs/features/flows.md` (the built-in `invoice-import`), the filament feature
   page (its pages now under Inventory), `docs/architecture/frontend.md` (the routes and the
   redirect table of Task 15), `frontend/CLAUDE.md` (the `pages/inventory/filament/` and
-  `components/inventory/purchasing/` layout lines), `agent/CLAUDE.md` (the `invoice_file`
-  ref kind).
+  `components/inventory/purchasing/` layout lines), `agent/CLAUDE.md` (the tool families and the `invoice_file` ref kind), the
+  spec's §9 3b line (a "done in" note).
 - [ ] **Step 1: Edit**, each fact with its source (file:line, PR or issue).
 - [ ] **Step 2: Run** `grep -rn "/filament/\(types\|spools\|suppliers\|invoices\|locations\|shopping-list\|catalog\|metrics\|tags\|ledger\|scan\|labels\)" docs/features docs/architecture frontend/CLAUDE.md agent/CLAUDE.md plugins` — Expected: only the redirect table and historical specs and plans.
-- [ ] **Step 3: Commit** `docs: the Filament section in Inventory and the invoice flow (#<3b>, 5/5)`
+- [ ] **Step 3: Commit** `docs: the Filament section in Inventory and the invoice flow (#<3b>, 7/7)`
+
+### Task 21: The parity test
+
+R-P3-58: one test runs the same purchasing steps on a filament item and on a hardware item,
+so no feature can exist for one only.
+
+**Files:**
+- Create: `frontend/e2e/purchasing-parity.spec.ts`, `frontend/src/mocks/features/purchasingParity.ts`
+  (the msw state both runs share)
+- Test: that spec, run by the `frontend` e2e job as every spec in `frontend/e2e/` is
+
+**Interfaces:**
+- Produces: `for (const item of [{ kind: 'filament', name: 'PLA Basic Black', unitWord:
+  'kg' }, { kind: 'hardware', name: 'M3 bolt', unitWord: 'each' }])`, one `test` each, the
+  same steps: open `/inventory/types?kind=<kind>` and find the item type; open its page and
+  see "Price", "Reordering", "Stock of this type", "Invoice lines"; open supplier Acme and
+  see the item in the one offers table and the price sheet; add a price; make a draft
+  invoice with one line of the item (quantity 2, received 3), confirm it; see the line's
+  item type, "Billed 2, received 3, 1 free", its cost per unit (per kg for filament as
+  well) and the links to the lots or units made; open one of them and see "Bought on" with
+  the invoice; see the new price on the item type's price panel; add the item to the
+  shopping list with supplier Acme and mark it purchased; find the item by a property value
+  in quick find; copy the item type; see its stock at its place and its moves on
+  `/inventory/moves`; print a unit's or lot's label and resolve its code; read the price
+  sheet and the purchasing metrics. Each step uses the same locator for both items.
+
+- [ ] **Step 1: Write the spec** — Expected: FAIL before Tasks 16-28.
+- [ ] **Step 2: Run** `cd frontend && pnpm exec playwright test e2e/purchasing-parity.spec.ts` — Expected: PASS on this layer.
+- [ ] **Step 3: Commit** `test(inventory): one purchasing flow for a filament item and a hardware item (#<3b>, 7/7)`
 
 ## Issues to file
 
-- **#7068** is phase 3a (retitle: "inventory phase 3a: one item model for filament,
-  generic purchasing tables and lines"). Layers A1-A6.
-- **Phase 3b** (new, under epic #6949, blocked by #7068 layer A5): "inventory phase 3b:
-  the Filament section in Inventory, item types at parity, the invoice-import flow".
-  Layers B1-B5. Blocked by nothing in #7361 (A1 is on main); it gains from A2.
-- **Generic item catalog** (new, under #6949, R-P3-60): a manufacturer list and a product
-  lookup that new item types come from, as `filament_catalog_*` serves spool types.
-- The follow-ups below, each filed when its layer merges.
+- **#7068** is phase 3a (retitle: "inventory phase 3a: the data model for one item model,
+  generic purchasing tables and lines"). Layers A1-A5.
+- **Phase 3b** (new, under epic #6949, blocked by #7068 layer A4): "inventory phase 3b: the
+  UI, the parity features and the flows". Layers B1-B7. It folds in #7169 (Task 27). It
+  needs nothing more from #7361 (A1 is on main) and gains from A2.
+- Follow-ups named by the spec (§9, §11): the forecast for lot items (row 36, unless Q4 is
+  yes), the CSV import (row 7, unless Q5 is yes), the brands table (row 11, unless Q2 is
+  yes), a generic external catalog (R-P3-60); later work outside phase 3: a container's
+  tare (row 45a, with #7278 and PR #7710), weighings on the unit ledger (row 45b, Q8), the
+  phone intake and "Unlinked" list (row 49, the intake epic).
+- The clean-up follow-ups below, each filed when its layer merges.
 
 ## Follow-ups (issues to file when their layer merges)
 
@@ -2141,17 +2318,38 @@ confirmed invoice that misses lines, for every item (parity row 11).
 
 ## Questions for the owner
 
-1. Colour and diameter (R-P3-46): they become item properties with the spool type's
-   columns kept as a mirror for one release. Should the mirror columns go after that, or
-   stay as the spool workflow's own fields?
-2. The confirm in the flow (R-P3-51): the final prompt is the person's decision, and
-   `invoice_amend` then waits for the usual outward approval unless a grant admits it. Is
-   one decision enough (a standing grant for the built-in flow, as `order-fulfilment` has),
-   or keep both?
-3. Kind ids (R-P3-45): material and subtype kinds get ids such as `filament_pla` and
-   `filament_pla_silk`; only their names show. Accept, or name a scheme?
-4. Generic item catalog (R-P3-60): a follow-up, not phase 3. Confirm.
-5. Phase 3b's issue: one issue with five layers, or one issue per layer?
+One list: the spec's §11.4 Q1 to Q8 (at `dfc3fa8b6`) and the plan's own, with no duplicates.
+Each names what the plan does until the answer comes.
+
+1. **Codes and labels** (spec Q1). Do item types, units and lots each get a code and a
+   printed label? The plan builds all three in Task 27; a "no" drops that prefix.
+2. **Brands and a catalog** (spec Q2, and the plan's R-P3-60). Do filament brands become
+   one `manufacturers` table that every item names (Task 9 step 14, in A3)? And is a
+   generic external catalog a follow-up, as the spec and R-P3-60 say? The plan keeps
+   `items.manufacturer` text until the answer.
+3. **Shopping auto-add** (spec Q3). Is the trigger for an item "on hand at or under
+   `low_stock`", as a toggle per item? The plan builds no auto-add until the answer.
+4. **Forecast** (spec Q4). Do lot items get a run-out date in phase 3? The plan: follow-up.
+5. **CSV import and export** (spec Q5). Do items and stock get a CSV import? The plan ships
+   the export (row 4) and builds the import only on a yes.
+6. **Entity kinds** (spec Q6). `spool_type`, `spool`, `material` and `subtype` go; `lot`,
+   `supplier`, `invoice`, `invoice_line` and `location` stay. The plan follows this
+   (R-P3-66).
+7. **The other catalogs** (spec Q7). Colours, effects, categories and inserts stay filament
+   catalogs. The plan follows this.
+8. **Weighings on the unit ledger** (spec Q8). Which phase moves #7681's weighing and
+   closing events to the generic unit ledger, if any? The plan: none in phase 3.
+9. **Colour and diameter** (R-P3-46). They become item properties with the spool type's
+   columns as a mirror for one release. Drop the mirror after that, or keep the columns as
+   the spool workflow's own?
+10. **The flow's confirm** (R-P3-51). The final prompt is the person's decision; then
+    `invoice_amend` waits for the usual outward approval unless a grant admits it. One
+    decision (a standing grant for the built-in flow, as `order-fulfilment` has), or both?
+11. **Kind ids and subtype names** (R-P3-45, R-P3-67). Kinds get ids such as
+    `filament_pla_matte`, shown nowhere; a subtype kind is named `Matte` under `PLA`, one
+    per material, where the spec's example says `PLA Matte` and puts a subtype "for every
+    material" under `filament`. Accept the plan's form?
+12. **Phase 3b's issue.** One issue with seven layers, or one issue per layer?
 
 ## Rulings (R-P3, the planner's, where the spec leaves a choice open)
 
@@ -2275,8 +2473,8 @@ confirmed invoice that misses lines, for every item (parity row 11).
   each spool unit whose cost dropped with "Re-cost past uses". Reason: the old header spread
   tax and shipping over the filament lines only, so their spools' cost is overstated, and
   the re-cost carries the fix to past job cost.
-- **R-P3-36.** The filament skill's invoice text makes a non-filament line an item line on
-  the same invoice, with the printed header kept; layer B5 closes #7648. Reason: phase 3
+- **R-P3-36** (changed by R-P3-68: the text lands in a new `purchasing` skill). The filament skill's invoice text makes a non-filament line an item line on
+  the same invoice, with the printed header kept; layer B7 closes #7648. Reason: phase 3
   answers #7648's open question (R-P3-42).
 - **R-P3-37** (owner, 2026-11-25: "we should be able to understand what we got 'for free'
   -- actual amount of filament or items. i.e. we bought 10 but got 11"). Every line keeps
@@ -2315,7 +2513,7 @@ confirmed invoice that misses lines, for every item (parity row 11).
   them by the supplier's name and the order number in their note (the interim rule writes
   both), then by received date within 30 days of the invoice date. Reason: such lots may already exist on prod.
 - **R-P3-44.** The interim #7648 skill section lands first in its own PR (#7704, plugin
-  `0.1.62`); layer B5 replaces it completely and bumps the plugin past it. Reason: agents stop improvising before phase 3 ships.
+  `0.1.62`); layer B7 replaces it completely and bumps the plugin past it. Reason: agents stop improvising before phase 3 ships.
 - **R-P3-45** (owner, 2026-11-25, rule A.1). Material and subtype are child kinds of
   `filament` in `item_kinds`: `filament` → material → subtype, one subtype kind per material
   it is used with. A spool type's item has the subtype's kind, else the material's, else
@@ -2329,7 +2527,7 @@ confirmed invoice that misses lines, for every item (parity row 11).
   the property store's filament hook. Temperatures, label weight, insert, presets and K
   values stay spool type fields (R-P3-30). Reason: the owner allowed them as properties,
   and the workflow's many readers keep working (owner question 1).
-- **R-P3-47** (owner, rule A.2; replaces R-P3-5). Entities of inventory things are `item:`,
+- **R-P3-47** (owner, rule A.2; replaces R-P3-5; changed by R-P3-66). Entities of inventory things are `item:`,
   `lot:` and `unit:`. `spool_type` and `spool` leave `KINDS`; their entities, files, links,
   properties and schemas move to `item` and `unit` (Task 9), and `spool_type:` and `spool:`
   stay ref aliases for one release. `part` already left in phase 2
@@ -2337,8 +2535,8 @@ confirmed invoice that misses lines, for every item (parity row 11).
   copies under `order_item:<id>` and `order_item_fulfilment:<id>`, and
   `OrderStore.archive_media_present`, `archive_media_attachments` and
   `attempts_missing_media` match those subject strings (`tests/orders/test_archives.py`,
-  `test_attempt_files.py` pass unchanged). The filament catalog kinds (`material`,
-  `subtype`, `brand` and the rest) stay on their rows. Reason: the owner's rule, limited to
+  `test_attempt_files.py` pass unchanged). The `material` and `subtype` entity kinds go too (R-P3-66);
+  `brand` and the other filament catalog kinds stay on their rows. Reason: the owner's rule, limited to
   the inventory kinds.
 - **R-P3-48** (owner, rule A.3). One line model with one list of line kinds (`stock`,
   `expense`, `asset`). A filament line is an item line whose item is a filament item.
@@ -2380,8 +2578,8 @@ confirmed invoice that misses lines, for every item (parity row 11).
   contract. Phase 3's routes are that contract; handlers hold no SQL; every statement is in
   a store; the flow, the tools and the UI call routes only. Reason: a later port changes
   stores, not callers.
-- **R-P3-55** (owner, rule E). Phase 3 splits into 3a (data model, #7068, A1-A6) and 3b (the
-  move, item types at parity and the flow, a new issue, B1-B5). Reason: one issue would be
+- **R-P3-55** (owner, rule E; the layers are now R-P3-65's). Phase 3 splits into 3a (data model, #7068, A1-A5) and 3b (the
+  UI, the parity features and the flows, a new issue, B1-B7). Reason: one issue would be
   too large to review; 3a alone is useful through the aliases.
 - **R-P3-56.** A material or subtype kind's name is the catalog's exact text and follows a
   rename. Every reader of `spool.material` and the 3DFP and Bambuddy matchers
@@ -2434,3 +2632,33 @@ confirmed invoice that misses lines, for every item (parity row 11).
 - **R-P3-64** (review finding 4). A person's `cost_per_kg` on a spool becomes `cost_minor`
   over the same grams `cost_set` uses (`received_net_g`, else the label weight), so it
   survives its own round trip. Reason: one basis in both directions (R-P3-40).
+- **R-P3-65** (follows spec §9 at `dfc3fa8b6`; changes R-P3-55). The split is the spec's:
+  phase 3a is the data model with the `/inventory` routes of Task 6 and job cost (A1-A5);
+  the parity reads (Task 7) and the generic agent tools (Task 13, spec row 46) are phase
+  3b. Until Task 13, A2's routes carry `coverage.ts` entries. Reason: the gap analysis
+  places rows 3, 4, 18, 22, 34, 35, 38 (UI) and 46 in 3b, and 3a stays reviewable.
+- **R-P3-66** (follows spec §9 3a and the designer's reading in §11.4 Q6; changes R-P3-47).
+  The entity kinds `material` and `subtype` go with `spool_type` and `spool`. A3 adds the
+  entity kind `item_kind` (text id, on `item_kinds`); an entity of kind `material` moves to
+  `item_kind:<its material kind>`, and one of kind `subtype` to each of its subtype kinds
+  (its files, links and properties copied to each when it has more than one). `lot`,
+  `supplier`, `invoice`, `invoice_line` and `location` stay. Pre-flight 6 counts them.
+  Reason: the spec, and a material is a kind now. Q6 can still undo it before A3 merges.
+- **R-P3-67** (keeps R-P3-45 and R-P3-56 against spec §6.4's example). A subtype kind is
+  named with the subtype's exact text (`Matte`) under its material (`PLA`), not a joined
+  name (`PLA Matte`), and a subtype "for every material" gets one kind under each material
+  a type uses it with, not one kind under `filament`. Reason: a kind under `filament`
+  would lose the type's material, and the 3DFP and Bambuddy matchers read the subtype's
+  exact text (R-P3-56, a peer constraint of 2026-11-25 newer than the spec's example).
+  Question 11 asks the owner.
+- **R-P3-68** (follows spec row 47; changes R-P3-36 and R-P3-44). A new `purchasing` skill
+  serves every item (invoices, the flow, offers, prices, shopping); the `filament` skill
+  keeps the spool workflow and points to it for invoices. #7704's interim section goes.
+  Reason: the spec's row 47.
+- **R-P3-69** (follows spec §9, §11). Codes and labels for item types, units and lots
+  (row 16, #7169, Q1), NTAG tags with an NDEF URL bound to any unit (row 17), property
+  search and quick find (rows 8, 48), copy and bulk edit (rows 5, 6), places with their
+  stock and the moves page (rows 14, 39) and stock metrics (row 35) are phase 3b. The
+  forecast for lot items (row 36) is a follow-up unless Q4 is yes; the CSV import (row 7)
+  ships only if Q5 is yes; the brands table (row 11) is in A3 only if Q2 is yes. Rows 45a,
+  45b and 49 are later work. Reason: the spec's phase column.
