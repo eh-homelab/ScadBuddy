@@ -17,7 +17,8 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 |---|---|
 | `session-events:read` | `GET` `/sessions/{id}/events`, `…/events/last-seq`, `…/events/user-turn`, `…/events/turn` |
 | `session-events` | those, and `POST` `/sessions/{id}/events` and `…/fork-log` |
-| `session-turns:read` | `GET /sessions/{id}/turn` |
+| `session-turns:read` | `GET` `/sessions/{id}/turn`, `…/turn/queue`, `/turns/stale` |
+| `session-turns` | those, and `POST` `/sessions/{id}/turn/send-claim`, `…/queueable`, `…/give-back`, `…/interrupt`, `…/placement`, `…/spend`, `…/finish`, `…/begin`, `…/queue`, `…/end-lost` |
 | `settings`, `settings:read` | `GET`, `POST` `/settings` |
 | `credentials` †, `credentials:read` † | `GET` `/credentials`, `…/one`, `…/key`; `POST` `/credentials` and `…/save`, `…/delete`, `…/order`, `…/reset`, `…/name`, `…/events`, `…/reveal` |
 | `payload-keys` † | `POST /payload-keys/{subject}` |
@@ -27,11 +28,17 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
 | `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
 | `mcp-relay` | `POST /mcp-relay/*` |
+| `gate` | `POST` `/gate/open`, `…/grant`, `…/deny`, `…/resolve`, `…/decide`; `GET` `/gate/response` |
+| `pending-input` | `/pending-input/*`: the open entries, responses, traces, the orphan sweep and a call's recorded approval |
+| `approvals` | `/approvals/*`: the classic approvals read, made, settled once and used once |
+| `questions` | `/questions/*`: the `done` summaries read, dismissed and posted, and the attention count |
+| `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
+| `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
 
 `internal/seal` is the agent's sealed format (`backend/scadbuddy/core/secrets.py`), the payload
 codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
 open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's validator, pinned by
-`pending-input-vectors.json`; no route uses it yet.
+`pending-input-vectors.json` and `response-hash-vectors.json`, and the `gate` area's routes.
 
 A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always overwritten.
 
@@ -49,11 +56,14 @@ A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always o
   on prod.
 - A body bound refuses a body with no `Content-Length` (411) on the routes with one. Python's
   JSON gate counts a chunked body instead.
+- The approvals' input hash refuses JSON past 512 levels; Python's parser goes to about 1000.
 - A number, boolean or UUID in a body is read strictly: pydantic's lax mode also takes a numeric
   string. A UUID in another spelling is still read and written lower-case with hyphens.
-- The approvals' input hash refuses JSON past 512 levels; Python's parser goes to about 1000.
-- A gate response with a lone surrogate (`\ud800`) reads as U+FFFD; Python's validator refuses
-  it.
+- A lone surrogate escape (`"\ud800"`) in a gate response is kept, so its hash is the agent's,
+  and it is written to the log escaped, as `JSON.stringify` writes it. Python could not send it to
+  Postgres. In any other body text it reads as U+FFFD.
+- `session-turns`' writes wait for a connection for at most 10 s (503 `pool_busy`), and for the
+  row's lock for at most `lock_timeout` (503 `row_busy`), as in Python.
 
 ## Tests
 
