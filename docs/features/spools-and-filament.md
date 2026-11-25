@@ -106,8 +106,9 @@ Filament presets are ScadBuddy's own (#7176, plan
 `filament_presets`, each document a blob with every version kept. A type or spool names one
 by the ref `sb-<id>` in `slicer_filament`. The native slicer reads them from ScadBuddy's
 store; Bambuddy knows each one only by its mirror's local preset id
-(`EffectivePreset.bambuddy_id`), which its slice path, the spool push and the AMS slot
-configure send. ScadBuddy owns the presets, and Bambuddy is at most a mirror target or
+(`EffectivePreset.bambuddy_id`), which its slice path, the spool push and the print dialog's
+tray-question answer (below) send. The AMS slot configure sends none: it goes over the LAN
+and names the preset through the native catalogue. ScadBuddy owns the presets, and Bambuddy is at most a mirror target or
 the source of an import (#7244, the owner's decision of 2026-11-23): ScadBuddy keeps no
 copy of Bambuddy's local presets, and the native slicer, the print dialog and the profile
 fill read none. Bambuddy's presets come in three ways only, each reading `GET
@@ -176,6 +177,17 @@ preset and K value for the slot's nozzle) or the values by hand. A slot's saved 
 ScadBuddy's own (`printers/command_data.py`), and an AMS unit's label is the name of
 ScadBuddy's place of the unit; neither is sent to the printer or to Bambuddy. The page asks
 before every printer write.
+
+An override tag's slot is configured the same way: the RFID reconcile
+(`backend/scadbuddy/filament/rfid_slots.py`) runs the configure's commands over the LAN link
+and does not call Bambuddy.
+
+One filament hardware write still goes through Bambuddy. The print dialog's tray-question
+answer (`BambuddyClient.assign_spool`, `POST /inventory/assignments`) places the spool at the
+tray in ScadBuddy and writes Bambuddy's assignment for a linked spool, after which Bambuddy
+configures the tray over MQTT. #7641 moves it. The K-profile read for the profile fill
+(`BambuddyClient.k_profiles`, `filament/profile_fetch.py`) also stays on Bambuddy until
+[#7604](https://github.com/eh-homelab/ScadBuddy/issues/7604).
 
 ### The phone page (#7273)
 
@@ -261,7 +273,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - `bb_sync_*.py` and `bambuddy_pull.py`;
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
     `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them);
-  - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); `BambuddyClient` has no K-profile write, slot command, slot preset or AMS label call any more (removed in #7276; it keeps only the K-table read `k_profiles` that `profile_fetch.py` uses).
+  - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); `BambuddyClient` has no K-profile write, slot command, slot preset or AMS label call any more (removed in #7276; it keeps only the K-table read `k_profiles` that `profile_fetch.py` uses, until #7604, and `assign_spool` for the tray question, until #7641).
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
