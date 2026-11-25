@@ -16,7 +16,10 @@ import pytest
 from scadbuddy.filament import tags
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.inventory import FilamentInventory
+from scadbuddy.filament.locations import LocationStore
 from scadbuddy.filament.models import (
+    LocationCreate,
+    LocationKind,
     Material,
     NdefRecord,
     NfcJobClaimIn,
@@ -1114,3 +1117,124 @@ def test_a_checked_write_books_one_edited_event_with_the_formats_origin(pg_pool:
             (spool,),
         ).fetchone()
     assert row is not None and row["n"] == 1
+
+
+# --- What a read resolves from the records (the hand-held Scan mode, #6955) ---
+
+
+def _url_record(href: str) -> NdefRecord:
+    return NdefRecord(record_type="url", data_hex=href.encode("utf-8").hex())
+
+
+def _text_record(value: str) -> NdefRecord:
+    return NdefRecord(record_type="text", encoding="utf-8", data_hex=value.encode().hex())
+
+
+def _place(pool: PgPool, name: str) -> tuple[UUID, int]:
+    kind = next(
+        r.id
+        for r in CatalogStore(pool).list("location-kinds")
+        if isinstance(r, LocationKind) and r.name == "Shelf"
+    )
+    made = LocationStore(pool).create(LocationCreate(name=name, kind_id=kind))
+    return made.id, made.number
+
+
+def test_a_read_of_an_unbound_tag_with_a_place_code_resolves_the_place(pg_pool: PgPool) -> None:
+    place, number = _place(pg_pool, "Shelf 9")
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(
+        store,
+        TagRead(
+            source="phone", uid="04:a2:b3:c4", records=(_url_record(f"https://h/x/L-{number}"),)
+        ),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.resolved is not None
+    assert result.resolved.kind == "location" and result.resolved.id == place
+    assert result.resolved.code == f"L-{number}" and result.resolved.name == "Shelf 9"
+    assert result.next == "open_code" and result.tag is not None and result.spool is None
+
+
+def test_a_read_with_no_uid_and_a_spool_code_resolves_the_spool(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    with pg_pool.connection() as conn:
+        row = FilamentSpoolStore.read(conn, spool, defaults=DEFAULTS)
+    assert row is not None
+    number = row.number
+    result = tags.read(
+        store,
+        TagRead(source="phone", uid=None, records=(_text_record(f"S-{number}"),)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.resolved is not None and result.resolved.kind == "spool"
+    assert result.resolved.id == spool and result.next == "open_code" and result.tag is None
+
+
+def test_a_bound_tag_still_opens_its_spool_over_a_code_in_its_records(pg_pool: PgPool) -> None:
+    _, number = _place(pg_pool, "Shelf 9")
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    store.bind_tag(spool, tag_uid="04A2B3C4", kind="other", actor="ann")
+    result = tags.read(
+        store,
+        TagRead(source="phone", uid="04a2b3c4", records=(_url_record(f"https://h/x/L-{number}"),)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.next == "open_spool" and result.resolved is None
+    assert result.spool is not None and result.spool.id == spool
+
+
+def test_a_code_that_names_no_row_is_a_new_tag(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(
+        store,
+        TagRead(source="phone", uid="04:a2:b3:c4", records=(_text_record("L-999999"),)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.next == "bind_or_create" and result.resolved is None
+
+
+def test_a_code_that_names_no_row_with_no_uid_is_none(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(
+        store,
+        TagRead(source="phone", uid=None, records=(_text_record("L-999999"),)),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.next == "none" and result.resolved is None and result.tag is None
+
+
+def test_a_scadbuddy_spool_text_of_an_archived_spool_resolves_archived(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(store, pg_pool)
+    store.archive(spool, True, actor="ann")
+    result = tags.read(
+        store,
+        TagRead(
+            source="phone", uid="04:a2:b3:c4", records=(_text_record(f"scadbuddy:spool:{spool}"),)
+        ),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.resolved is not None and result.resolved.id == spool
+    assert result.resolved.archived is True and result.next == "open_code"
+
+
+def test_a_scadbuddy_spool_text_of_an_unknown_spool_is_a_new_tag(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    result = tags.read(
+        store,
+        TagRead(
+            source="phone", uid="04:a2:b3:c4", records=(_text_record(f"scadbuddy:spool:{uuid4()}"),)
+        ),
+        actor="ann",
+        defaults=DEFAULTS,
+    )
+    assert result.next == "bind_or_create" and result.resolved is None

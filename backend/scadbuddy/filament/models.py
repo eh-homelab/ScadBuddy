@@ -30,6 +30,7 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.codes.resolve import Resolved
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
@@ -2242,7 +2243,11 @@ class TagReadResult(BaseModel):
     spool: Spool | None
     decoded: DecodedSpool | None
     draft: SpoolCreate | None
-    next: Literal["open_spool", "bind_or_create", "none"]
+    #: What the records name when no spool holds the tag (#6955): a typed code in a `url`
+    #: record's `/x/<code>` path or a `text` record, or a `scadbuddy:spool:<id>` text. The
+    #: `/codes/{code}` shape; set only with `next` of `open_code`.
+    resolved: Resolved | None = None
+    next: Literal["open_spool", "open_code", "bind_or_create", "none"]
 
 
 class LedgerRow(SpoolEvent):

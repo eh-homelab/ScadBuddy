@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
-from tests.api.test_filament import SPOOLS, _material_id
+from tests.api.test_filament import SPOOLS, _location, _material_id
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -34,6 +34,22 @@ def test_a_phone_read_answers_the_tag_and_next(client: TestClient) -> None:
     got = client.post(READS, json={"uid": "04:a2:b3:c4", "records": []})
     assert got.status_code == 200, got.text
     assert got.json()["next"] == "bind_or_create" and got.json()["tag"]["tag_uid"] == "04A2B3C4"
+
+
+def test_a_read_of_a_place_label_answers_open_code_and_the_place(client: TestClient) -> None:
+    place = _location(client, "Shelf 9")
+    href = f"https://scadbuddy.example/x/L-{place['number']}?from=label"
+    record = {"record_type": "url", "data_hex": href.encode().hex()}
+    got = client.post(READS, json={"uid": "04:a2:b3:c4", "records": [record]})
+    assert got.status_code == 200, got.text
+    assert got.json()["next"] == "open_code" and got.json()["tag"]["tag_uid"] == "04A2B3C4"
+    assert got.json()["resolved"] == {
+        "kind": "location",
+        "id": place["id"],
+        "code": f"L-{place['number']}",
+        "name": "Shelf 9",
+        "archived": False,
+    }
 
 
 def test_a_read_binds_with_bind_spool_id(client: TestClient) -> None:
