@@ -591,8 +591,14 @@ FLOW_NARROWED_PATCH = "flow-narrowed-decision"
 
 
 class NarrowedInputError(Exception):
-    """The call was approved narrowed, but the narrowed input is not the one approved, or
-    no approval of it is on record (#7588): nothing runs."""
+    """The call was approved narrowed, but the narrowed input is not the one approved:
+    nothing runs."""
+
+
+class NoApprovalError(NarrowedInputError):
+    """No approval of the call is on record (#7588): the harness let it through on one
+    that was replaced or undone, or on a denial. Nothing runs. A subclass, so a script that
+    caught the narrowed refusal still catches this one."""
 
 
 async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRead:
@@ -611,10 +617,10 @@ async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRe
         start_to_close_timeout=timedelta(seconds=10),
         retry_policy=RetryPolicy(maximum_attempts=5),
     )
+    if read.refused is not None:
+        raise NoApprovalError(read.refused)
     if read.narrowed and read.args is None:
-        raise NarrowedInputError(
-            read.refused or "the narrowed input is not the one that was approved"
-        )
+        raise NarrowedInputError("the narrowed input is not the one that was approved")
     return read
 
 
