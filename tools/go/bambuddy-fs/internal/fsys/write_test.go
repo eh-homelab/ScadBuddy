@@ -273,10 +273,10 @@ func TestRenameNoReplaceAndOverAFolder(t *testing.T) {
 	if err := renameat2(t, filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf"), renameNoReplace); !errors.Is(err, syscall.EEXIST) {
 		t.Fatalf("noreplace: %v", err)
 	}
-	if err := syscall.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "Top")); !errors.Is(err, syscall.EISDIR) {
+	if err := retryEINTR(func() error { return syscall.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "Top")) }); !errors.Is(err, syscall.EISDIR) {
 		t.Fatalf("file over a folder: %v", err)
 	}
-	if err := syscall.Rename(filepath.Join(dir, "Top"), filepath.Join(dir, "a.3mf")); !errors.Is(err, syscall.ENOTDIR) {
+	if err := retryEINTR(func() error { return syscall.Rename(filepath.Join(dir, "Top"), filepath.Join(dir, "a.3mf")) }); !errors.Is(err, syscall.ENOTDIR) {
 		t.Fatalf("folder over a file: %v", err)
 	}
 	lib.locked(func() {
@@ -786,7 +786,7 @@ func TestXattrsSymlinksAndLinks(t *testing.T) {
 		if ro {
 			refused = syscall.EROFS
 		}
-		if err := syscall.Setxattr(path, "user.x", []byte("1"), 0); !errors.Is(err, refused) {
+		if err := retryEINTR(func() error { return syscall.Setxattr(path, "user.x", []byte("1"), 0) }); !errors.Is(err, refused) {
 			t.Fatalf("ro %v setxattr: %v", ro, err)
 		}
 		if err := syscall.Removexattr(path, "user.x"); !errors.Is(err, refused) {
@@ -798,7 +798,10 @@ func TestXattrsSymlinksAndLinks(t *testing.T) {
 		if err := os.Link(path, filepath.Join(dir, "l.3mf")); !errors.Is(err, refused) {
 			t.Fatalf("ro %v link: %v", ro, err)
 		}
-		if _, err := syscall.Getxattr(path, "user.x", make([]byte, 16)); !errors.Is(err, syscall.ENODATA) {
+		if err := retryEINTR(func() error {
+			_, err := syscall.Getxattr(path, "user.x", make([]byte, 16))
+			return err
+		}); !errors.Is(err, syscall.ENODATA) {
 			t.Fatalf("ro %v getxattr: %v", ro, err)
 		}
 		if n, err := syscall.Listxattr(path, make([]byte, 16)); err != nil || n != 0 {

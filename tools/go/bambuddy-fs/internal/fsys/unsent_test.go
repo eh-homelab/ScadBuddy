@@ -503,8 +503,19 @@ func saveByRename(t *testing.T, dir, data string) {
 	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := syscall.Rename(tmp, filepath.Join(dir, "X.3mf")); err != nil {
+	if err := retryEINTR(func() error { return syscall.Rename(tmp, filepath.Join(dir, "X.3mf")) }); err != nil {
 		t.Fatalf("rename: %v", err)
+	}
+}
+
+// retryEINTR calls a raw syscall through the mount again while it answers EINTR, as Go's
+// os package does. A FUSE request that a signal interrupts (Go's preemption signal under
+// -race) is cancelled and answers EINTR (api.Errno) before it changes anything (#7718).
+func retryEINTR(call func() error) error {
+	for {
+		if err := call(); !errors.Is(err, syscall.EINTR) {
+			return err
+		}
 	}
 }
 
