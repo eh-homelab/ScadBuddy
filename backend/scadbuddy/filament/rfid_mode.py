@@ -23,7 +23,6 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
-from scadbuddy.bambuddy.models import SpoolBuddyDevice
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament import models as m
 from scadbuddy.filament.rfid_push import acquire_lock, error_label
@@ -219,11 +218,10 @@ async def reconcile_mode_now(
 
 
 async def read_status(store: RfidModeStore, load: Callable[[], StoredSettings]) -> m.RfidStatus:
-    """The mode as it stands, with Bambuddy's value and the SpoolBuddy devices where
-    Bambuddy answers. Writes nothing; a Bambuddy error leaves those fields empty."""
+    """The mode as it stands, with Bambuddy's value where Bambuddy answers.
+    Writes nothing; a Bambuddy error leaves that field empty."""
     state = await asyncio.to_thread(store.state)
     seen: bool | None = None
-    devices: list[SpoolBuddyDevice] = []
     detail: str | None = None
     try:
         settings = await asyncio.to_thread(load)
@@ -232,7 +230,6 @@ async def read_status(store: RfidModeStore, load: Callable[[], StoredSettings]) 
         else:
             async with client_for(settings) as client:
                 seen = await client.auto_add_unknown_rfid()
-                devices = await _devices(client)
     except ApiError as exc:
         detail = error_label(exc)
     if state.holds:
@@ -241,13 +238,4 @@ async def read_status(store: RfidModeStore, load: Callable[[], StoredSettings]) 
         kind = "off" if state.saved_auto_add is None else "pending"
     if kind == "pending" and state.blocked and detail is None:
         kind, detail = "blocked", BLOCKED_DETAIL
-    status = _status(state, kind, seen=seen, detail=detail)
-    status.devices = devices
-    return status
-
-
-async def _devices(client: BambuddyClient) -> list[SpoolBuddyDevice]:
-    try:
-        return await client.spoolbuddy_devices()
-    except ApiError:
-        return []
+    return _status(state, kind, seen=seen, detail=detail)

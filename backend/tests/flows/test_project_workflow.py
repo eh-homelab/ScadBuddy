@@ -41,7 +41,7 @@ async def test_wait_for_human_parks_until_answered(flows: Flows) -> None:
     client = AgentClient(flows.client, f"flow-{run_id}")
     status = await client.get_status()
     assert [(p.tool_id, p.tool_name) for p in status.pending_callbacks] == [
-        (waiting.call_id, "human_answer")
+        (waiting.call_id, "human_answer_open")
     ]
     await client.provide_callback_result(waiting.call_id, result={"answer": "ok"})
     run = await flows.finished(run_id)

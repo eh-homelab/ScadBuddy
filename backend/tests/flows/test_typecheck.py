@@ -43,15 +43,34 @@ async def test_wait_for_human_may_leave_out_its_timeout() -> None:
     assert await check_script(_script("await wait_for_human('swap spool?')")) == []
 
 
-async def test_a_literal_wait_timeout_out_of_range() -> None:
-    for timeout in ("timeout_s=5", "86401"):
-        problems = await check_script(_script(f"await wait_for_human('swap spool', {timeout})"))
-        assert [p.line for p in problems] == [3], timeout
-        assert "10 to 86400" in problems[0].message
+@pytest.mark.parametrize(
+    "call",
+    [
+        "wait_for_human('swap spool', timeout_s=5)",
+        "wait_for_human('swap spool', 5)",
+        "prompt('q', {'type': 'object'}, timeout_s=5)",
+        "prompt('q', {'type': 'object'}, None, None, None, 5)",
+    ],
+)
+async def test_a_literal_wait_timeout_that_is_too_short(call: str) -> None:
+    problems = await check_script(_script(f"await {call}"))
+    assert [p.line for p in problems] == [3]
+    fn = call.split("(")[0]
+    assert problems[0].message == f"{fn}'s timeout_s must be at least 10 seconds, not 5"
 
 
-async def test_a_literal_wait_timeout_in_range() -> None:
-    assert await check_script(_script("await wait_for_human('swap spool', timeout_s=60)")) == []
+@pytest.mark.parametrize("timeout", ["timeout_s=60", "timeout_s=200_000", "timeout_s=None"])
+async def test_a_literal_wait_timeout_has_no_ceiling(timeout: str) -> None:
+    assert await check_script(_script(f"await wait_for_human('swap spool', {timeout})")) == []
+    schema = "{'type': 'object'}"
+    assert await check_script(_script(f"await prompt('q', {schema}, {timeout})")) == []
+
+
+async def test_a_prompts_answer_is_a_dict() -> None:
+    schema = "{'type': 'object', 'properties': {'email': {'type': 'string'}}}"
+    body = _script(f"a = await prompt('q', {schema}, place='bench')", "return a['email']")
+    assert await check_script(body) == []
+    assert await check_script(_script("await prompt('q')"))
 
 
 async def test_an_oversized_script() -> None:

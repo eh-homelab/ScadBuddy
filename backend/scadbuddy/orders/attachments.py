@@ -199,6 +199,13 @@ async def _keep(blobs: BlobStore, sha256: str, write: Callable[[Path], None]) ->
     return key
 
 
+async def read_blob(blobs: BlobStore, key: str) -> bytes | None:
+    """The kept file's bytes, for a small file read whole; None when the store holds
+    nothing under ``key``. A remote store's miss reads it in memory and puts nothing on
+    this process's cache (#7318); `blob_path` is for a caller that needs a path."""
+    return await blobs.read_file(key, BLOB_FILE)
+
+
 async def blob_path(blobs: BlobStore, key: str) -> Path | None:
     """The kept file on this process's volume, fetched first where the store is
     remote; None when the store holds nothing under ``key``."""

@@ -51,7 +51,6 @@ import { GramsChart } from '../../components/filament/GramsChart'
 import { Section, SectionIndex } from '../../components/filament/SpoolSections'
 import { SpoolMetricsPanel } from '../../components/filament/SpoolMetricsPanel'
 import { SpoolTimeline } from '../../components/filament/SpoolTimeline'
-import { NtagPanel } from '../../components/filament/NtagPanel'
 import { TagPanel } from '../../components/filament/TagPanel'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
@@ -65,6 +64,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea'
 import { listBack } from '../../components/filament/spoolsQuery'
 import { EntityLink } from '../../components/filament/EntityLink'
+import { DECIMAL } from '../../components/filament/spoolWeight'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { parseRgba } from '../../lib/rgba'
 import { useLeaveGuard } from '../../lib/useLeaveGuard'
@@ -232,7 +232,6 @@ function draftOfCopy(copy: SpoolDraft): Draft {
 const MOST_SPOOLS = 100
 
 const INTEGER = /^\d+$/
-const DECIMAL = /^\d+(\.\d+)?$/
 
 /** The spool's own columns a draft makes (`null`: the type's value), or why it cannot be saved. */
 function bodyOf(draft: Draft): SpoolPatch | string {
@@ -319,13 +318,15 @@ const NONE = '__none__'
 
 /**
  * #7149: how the spool's tag came in, in a person's words, from Bambuddy's `data_origin`
- * (`rfid-routes.json` `data_origin_values`); an origin not listed is shown as it is.
+ * (`rfid-routes.json` `data_origin_values`), or ScadBuddy's own `openspool` for a tag the phone
+ * page wrote in OpenSpool (#7273; Bambuddy has no value for it); an origin not listed is shown as it is.
  */
 const ORIGINS: Record<string, string> = {
   rfid_auto: 'Bambuddy added this spool when an AMS read its unknown tag.',
   rfid_linked: 'Bambuddy matched its tag to this spool.',
   nfc_link: 'Its tag was linked to it by hand.',
-  opentag3d: 'Its tag was written through SpoolBuddy.',
+  opentag3d: 'Its tag was written as an OpenTag3D tag.',
+  openspool: 'Its tag was written as an OpenSpool tag.',
 }
 const originText = (origin: string) => ORIGINS[origin] ?? `Its data came in as “${origin}”.`
 
@@ -878,8 +879,6 @@ export function SpoolPage() {
                       {saved.tag_encoded_at && <span>{`Tag written ${new Date(saved.tag_encoded_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`}</span>}
                     </p>
                   )}
-                  <h3 className="mt-2 text-[13px] font-medium">Write a tag</h3>
-                  <NtagPanel spool={saved} onBound={() => void reload(true).catch((cause) => setError(message(cause)))} />
                 </>
               ) : (
                 <p className="text-[13px] text-muted-foreground">Save the spool first, then bind its tag.</p>

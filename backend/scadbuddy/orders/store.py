@@ -3299,13 +3299,14 @@ class OrderStore:
                 "DELETE FROM order_attempt_media_not_offered WHERE fulfilment_id = %s",
                 (fulfilment_id,),
             )
-            for archive_id, what in sorted(media):
-                c.execute(
-                    "INSERT INTO order_attempt_media_not_offered"
-                    " (fulfilment_id, archive_id, archive_media, seen_at)"
-                    " VALUES (%s, %s, %s, %s)",
-                    (fulfilment_id, archive_id, what, at),
-                )
+            if media:
+                with c.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO order_attempt_media_not_offered"
+                        " (fulfilment_id, archive_id, archive_media, seen_at)"
+                        " VALUES (%s, %s, %s, %s)",
+                        [(fulfilment_id, a, what, at) for a, what in sorted(media)],
+                    )
 
     def media_refused(
         self, fulfilment_id: str, limit: int, *, conn: Conn | None = None

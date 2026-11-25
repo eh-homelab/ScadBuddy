@@ -5,7 +5,7 @@ uploaded pictures. Publish itself, which reads the library, is in
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,8 +14,10 @@ import pytest
 from pydantic import ValidationError
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.orders.models import Filament
 from scadbuddy.orders.storefront import prepare
 from scadbuddy.orders.storefront.file_listings import check_offered, support_locks
+from scadbuddy.orders.storefront.file_prices import default_choice
 from scadbuddy.orders.storefront.listings import HOLDER, KEPT_HOLDER, ListingStore
 from scadbuddy.orders.storefront.wire import (
     FileSlot,
@@ -34,6 +36,7 @@ pytestmark = pytest.mark.requires_postgres
 
 SHA = "1" * 64
 OTHER = "2" * 64
+NOW = datetime(2026, 11, 24, tzinfo=UTC)
 
 
 def file_body(**fields: Any) -> ListingInput:
@@ -362,15 +365,58 @@ def test_a_support_slot_takes_a_support_filament_of_its_material() -> None:
     assert refused.value.extensions["slots"] == [1]
 
 
-async def test_a_published_file_listing_starts_no_default_render(
+async def test_a_published_file_listing_starts_its_default_run(
     store: ListingStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#6922's warm run renders a template's default; a file listing has none to render."""
+    """#7523: publish warms a file listing's price as a template's (#6922)."""
     listing = published(store, pg_pool)
+    started: list[str] = []
 
-    def no_run(_: object) -> None:
-        raise AssertionError("a run was started")
+    async def start_default(listing_id: str) -> None:
+        started.append(listing_id)
 
-    monkeypatch.setattr(prepare, "preparer", no_run)
+    monkeypatch.setattr(prepare, "preparer", lambda _: SimpleNamespace(start_default=start_default))
     state = SimpleNamespace(settings=SimpleNamespace(storefront_warm_prices=True))
     await prepare.warm_default(state, listing)  # type: ignore[arg-type]
+    assert started == [listing.id]
+
+
+def _pla(filament_id: str, colour: str, material: str = "PLA") -> Filament:
+    return Filament(
+        id=filament_id,
+        material=material,
+        subtype=None,
+        brand=None,
+        colour_name=None,
+        colour=colour,
+        cost_per_kg="20",
+        density_g_cm3=None,
+        archived_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+
+
+def test_the_default_choice_is_what_the_page_opens_on(store: ListingStore, pg_pool: PgPool) -> None:
+    """#7523: the page knows a part by its colour, so of two filaments of one colour and
+    material it takes the first listed; a listing with no colour left has none."""
+    made = store.create(file_body(colours=["petg", "a-red", "z-red", "blue"]))
+    hold(pg_pool, f"listing-file-{SHA}", KEPT_HOLDER, made.id)
+    listing = store.mark_published(
+        made.id, snapshot=snapshot(), media=[], expected_updated_at=made.updated_at
+    )
+    book = {
+        f.id: f
+        for f in (
+            _pla("petg", "#FF0000", "PETG"),
+            _pla("a-red", "#FF0000"),
+            _pla("z-red", "#ff0000"),
+            _pla("blue", "#0000FF"),
+        )
+    }
+    choice = default_choice(listing, book, ["PLA", "PETG"])
+    assert choice is not None and choice.filaments is not None
+    assert {f.material for f in choice.filaments} == {"PLA"}
+    assert "z-red" not in {f.id for f in choice.filaments}
+    assert choice.alike >= {"a-red", "z-red", "blue"} and "petg" not in choice.alike
+    assert default_choice(listing, {}, ["PLA"]) is None

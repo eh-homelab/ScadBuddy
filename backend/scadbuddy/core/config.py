@@ -194,6 +194,11 @@ class Config:
     #: worker where it is set there. It reads it once, onto the download cache, so with
     #: no download cache (a cap of 0) a library read spools under ``cache/``.
     spool_dir: Path | None = None
+    #: #7318: the piece cache's root on a remote store (`CachedBlobStore`), such as a
+    #: node-local emptyDir. Unset, the data volume's ``blobs/``. On ``local`` that
+    #: directory is the record, so `build_store` ignores this there. A piece's files keep
+    #: their stored names (``blobs/<key>/<file>``, `paths.result_path`).
+    blob_cache_dir: Path | None = None
 
     @property
     def sweep_grace(self) -> float:
@@ -366,6 +371,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     data_dir = source.get("SCADBUDDY_DATA_DIR")
     downloads_dir = source.get("SCADBUDDY_DOWNLOAD_CACHE_DIR")
     spool_dir = source.get("SCADBUDDY_SPOOL_DIR")
+    blob_cache_dir = source.get("SCADBUDDY_BLOB_CACHE_DIR")
     return Config(
         openscad=source.get("SCADBUDDY_OPENSCAD") or DEFAULT_OPENSCAD,
         data_dir=Path(data_dir) if data_dir else DEFAULT_DATA_DIR,
@@ -431,6 +437,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         download_cache_private=(source.get("SCADBUDDY_DOWNLOAD_CACHE_PRIVATE") or "").lower()
         in ("1", "true", "yes", "on"),
         spool_dir=Path(spool_dir) if spool_dir else None,
+        blob_cache_dir=Path(blob_cache_dir) if blob_cache_dir else None,
     )
 
 

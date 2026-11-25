@@ -2,10 +2,12 @@ package fsys
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 )
@@ -83,9 +85,8 @@ func TestWriteBackFailedUploadsAreTheQueuesOnly(t *testing.T) {
 		q := queued(t, state)
 		return len(q) == 1 && q[0].Attempts >= 1 && strings.Contains(q[0].LastError, "502")
 	})
-	if got := log.String(); !strings.Contains(got, "sending an unsent write failed") {
-		t.Fatalf("log: %q", got)
-	}
+	// The retrier writes the record before it logs the failure.
+	eventually(t, "the failure logged", func() bool { return strings.Contains(log.String(), "sending an unsent write failed") })
 	lib.setDown(false)
 	eventually(t, "the upload", func() bool { return libraryHas(lib, map[string]string{"0/a.3mf": "abc"}) })
 	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
@@ -197,4 +198,59 @@ func TestAWriteBackFileRenamesAndRemovesBeforeItIsSent(t *testing.T) {
 	lib.setDown(false)
 	eventually(t, "the upload under its final name", func() bool { return libraryHas(lib, map[string]string{"0/b.3mf": "abc"}) })
 	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+}
+
+// A read while the retrier finishes a write-back upload sees the written bytes. The
+// file moves from the unsent queue to the library, and a reader never gets EIO or an
+// empty file between the two (#7563).
+func TestWriteBackReadsAcrossTheUploadsFinish(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state, WriteBack: true})
+	logs(t)
+	want := map[string]string{}
+	for i := range 10 {
+		block := make(chan struct{})
+		lib.locked(func() { lib.uploading = func(int) { <-block } })
+		name := fmt.Sprintf("a%d.3mf", i)
+		path := filepath.Join(dir, "Top", name)
+		if err := os.WriteFile(path, []byte("abc"), 0o644); err != nil {
+			close(block)
+			t.Fatalf("close %s: %v", name, err)
+		}
+		waitRelease(t, released)
+		stop := make(chan struct{})
+		bad := make(chan string, 1)
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Go(func() {
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					if data, err := os.ReadFile(path); err != nil || string(data) != "abc" {
+						select {
+						case bad <- fmt.Sprintf("read %s: %q %v", name, data, err):
+						default:
+						}
+						return
+					}
+				}
+			})
+		}
+		close(block)
+		want["4/"+name] = "abc"
+		eventually(t, "the upload", func() bool { return libraryHas(lib, want) })
+		eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+		close(stop)
+		wg.Wait()
+		select {
+		case msg := <-bad:
+			t.Fatal(msg)
+		default:
+		}
+	}
 }

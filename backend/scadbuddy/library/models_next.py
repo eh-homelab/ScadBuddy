@@ -388,7 +388,9 @@ def _walk(repo: _Repo, *args: str) -> Iterator[tuple[str, str, list[str]]]:
     """Each commit up to HEAD, newest first: its id, its ``Imported-From`` values and the
     paths it changed."""
     shape = f"%x1e%H%x1f%(trailers:key={TRAILER},valueonly,separator=%x2c)%x1f"
-    log = repo.bytes_out("log", "-z", f"--format={shape}", "--name-only", *args)
+    # A rename names the new path only, and the old one may be another template's.
+    flags = ("-z", f"--format={shape}", "--name-only", "--no-renames")
+    log = repo.bytes_out("log", *flags, *args)
     for record in os.fsdecode(log).split(_RECORD)[1:]:
         commit, trailer, names = record.split(_FIELD, 2)
         yield commit, trailer, [name for name in names.strip("\0\n").split("\0") if name]
@@ -815,7 +817,8 @@ def _destination(source: _Repo, dest: Path, live: Path) -> Path:
 
 
 def _may_replace(target: Path) -> None:
-    """Only an empty directory, or what a run made and nothing has committed to since."""
+    """Only an empty directory, or what a run made, with nothing committed, changed or
+    left in it since. An ignored file there is a copy or a render's."""
     if not target.is_dir():
         raise RefusedError(f"{target} is not a directory")
     if not any(target.iterdir()):
@@ -824,6 +827,9 @@ def _may_replace(target: Path) -> None:
     head = _held(repo).get("head")
     if not isinstance(head, str) or not repo.available or repo.head() != head:
         raise RefusedError(f"{target} is not empty, and not as this command left it")
+    left = repo._out("status", "--porcelain", "--untracked-files=all").splitlines()
+    if left:
+        raise RefusedError(f"{target} holds changes this command did not make: {left[0]}")
 
 
 def _held(repo: _Repo) -> dict[str, Any]:

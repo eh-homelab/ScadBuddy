@@ -22,13 +22,17 @@ where the zombie loses and the retry works on fresh state.
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import threading
 import time
 import weakref
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from scadbuddy.core.paths import result_path
+from scadbuddy.core.tracing import span
 from scadbuddy.render.job_models import JobResult
 from scadbuddy.store import BlobStore, PieceStateLostError
 from scadbuddy.store.archive import (
@@ -41,6 +45,7 @@ from scadbuddy.store.archive import (
 from scadbuddy.store.content import (
     BlobCorruptError,
     BlobMissingError,
+    BlobRef,
     BlobScope,
     BlobStat,
     ContentStore,
@@ -56,6 +61,15 @@ logger = logging.getLogger(__name__)
 class StaleBlobError(RuntimeError):
     """The key moved on since this process fetched it. The activity fails; Temporal
     retries it, and the retry fetches the newer state."""
+
+
+def _member(archive: bytes, name: str) -> bytes | None:
+    """The file ``name`` of a packed directory (`archive.pack_dir`); None when absent."""
+    with zipfile.ZipFile(io.BytesIO(archive)) as packed:
+        try:
+            return packed.read(name)
+        except KeyError:
+            return None
 
 
 def _size(directory: Path) -> int:
@@ -94,6 +108,10 @@ class CachedBlobStore:
         self._walked: tuple[float, int] | None = None
 
     # --- phase 1's BlobStore, over the local cache ---------------------------
+
+    @property
+    def root(self) -> Path:
+        return self.local.root
 
     def dir_for(self, key: str) -> Path:
         return self.local.dir_for(key)
@@ -160,29 +178,72 @@ class CachedBlobStore:
 
     async def _fetch(self, key: str) -> str | None:
         """Under the key's lock: make the directory hold the stored blob; its sha, or
-        None when nothing (of this backend) is stored."""
-        stat = await asyncio.to_thread(self._row, key)
-        if stat is None:
-            return None
-        directory = self.local.dir_for(key)
-        if read_marker(directory) == stat.ref.sha256:
-            self._cache("hit")
-        else:
-            self._cache("miss")
-            try:
-                data = await self.content.read(stat.ref)
-            except (BlobMissingError, BlobCorruptError) as error:
-                logger.warning(
-                    "a stored piece is gone or altered; it will be rendered again",
-                    extra={"key": key, "error": repr(error)},
-                )
-                await self.content.forget(key)
+        None when nothing (of this backend) is stored. A span says hit or miss (#7318)."""
+        with span("blob_cache.fetch", attributes={"scadbuddy.blob_key": key}) as current:
+            stat = await asyncio.to_thread(self._row, key)
+            if stat is None:
+                current.set_attribute("scadbuddy.blob_found", False)
                 return None
-            await asyncio.to_thread(unpack_dir, data, directory, sha256=stat.ref.sha256)
-            await self._trim()
-        # Claimed: the sweep's `delete_if_stale` now skips it (see `sweep_content`).
-        await self.content.touch(key)
-        return stat.ref.sha256
+            directory = self.local.dir_for(key)
+            hit = await asyncio.to_thread(read_marker, directory) == stat.ref.sha256
+            current.set_attribute("scadbuddy.cache.hit", hit)
+            if hit:
+                self._cache("hit")
+            else:
+                self._cache("miss")
+                data = await self._read(key, stat.ref)
+                if data is None:
+                    return None
+                await asyncio.to_thread(unpack_dir, data, directory, sha256=stat.ref.sha256)
+                await self._trim()
+            # Claimed: the sweep's `delete_if_stale` now skips it (see `sweep_content`).
+            await self.content.touch(key)
+            return stat.ref.sha256
+
+    async def _read(self, key: str, ref: BlobRef) -> bytes | None:
+        """The stored blob's bytes; None, and its row forgotten, when it is gone or
+        altered in the backend (the next render stores it again)."""
+        try:
+            return await self.content.read(ref)
+        except (BlobMissingError, BlobCorruptError) as error:
+            logger.warning(
+                "a stored piece is gone or altered; it will be rendered again",
+                extra={"key": key, "error": repr(error)},
+            )
+            await self.content.forget(key)
+            return None
+
+    async def read_file(self, key: str, name: str) -> bytes | None:
+        """One file of the blob ``key``, whole (#7318). A hit reads the cached copy; a
+        miss reads the stored blob in memory, as `fetch` does, but unpacks nothing onto
+        the cache, so a small file read now and then (a preset document, a plugin zip)
+        costs the cache no directory and no write."""
+        with span("blob_cache.read_file", attributes={"scadbuddy.blob_key": key}) as current:
+            stat = await asyncio.to_thread(self._row, key)
+            if stat is None:
+                current.set_attribute("scadbuddy.blob_found", False)
+                return None
+            directory = self.local.root / key  # not dir_for: a read makes no directory
+            sha = stat.ref.sha256
+            if await asyncio.to_thread(read_marker, directory) == sha:
+                try:
+                    data = await asyncio.to_thread((directory / name).read_bytes)
+                except OSError:
+                    # An eviction clears the marker before it removes the files: with the
+                    # marker still there, the blob has no such file. Else read the store.
+                    if await asyncio.to_thread(read_marker, directory) == sha:
+                        current.set_attribute("scadbuddy.cache.hit", True)
+                        return None
+                else:
+                    current.set_attribute("scadbuddy.cache.hit", True)
+                    self._cache("hit")
+                    return data
+            current.set_attribute("scadbuddy.cache.hit", False)
+            self._cache("miss")
+            archive = await self._read(key, stat.ref)
+            if archive is None:
+                return None
+            return await asyncio.to_thread(_member, archive, name)
 
     async def publish(self, key: str, *, scope: BlobScope) -> None:
         directory = self.local.dir_for(key)
@@ -220,8 +281,9 @@ class CachedBlobStore:
     def cached_bytes(self, *, max_age: float = 0) -> int | None:
         """The bytes in the cache: a walk of every file in it. A walk at most `max_age`
         seconds old answers instead, and a call while another walks answers the last
-        total, or None before the first (#6354). In the API the cache is on the shared
-        `/data` NFS volume, where one walk took 13 s (19,340 files, 2026-11-15): the
+        total, or None before the first (#6354). In the API the cache was on the shared
+        `/data` NFS volume (its default, unless `SCADBUDDY_BLOB_CACHE_DIR` moves it,
+        #7318), where one walk took 13 s (19,340 files, 2026-11-15): the
         `/metrics` scrape, every 30 s from each of two Prometheus replicas with a 10 s
         timeout, started one each time, and on a slow node they piled up until the
         default executor had no thread for `/healthz` and liveness killed the pod."""
@@ -283,9 +345,19 @@ class CachedBlobStore:
         return removed
 
 
+def result_file(blobs: BlobStore, data_root: Path, name: str) -> Path:
+    """Where the file a `JobResult` names is in this process: ``blobs/<key>/<file>`` under
+    ``blobs``' root, wherever its cache is (#7318); anything else under ``data_root``."""
+    return result_path(name, blobs_root=blobs.root, data_root=data_root)
+
+
 async def materialize_result(blobs: BlobStore, result: JobResult | None) -> None:
     """Pull a finished job's piece into this process's cache before its files are read
-    (`JobResult` paths are `blobs/<key>/<file>`, relative to the data dir)."""
+    (`JobResult` paths are `blobs/<key>/<file>`; `result_file` finds them).
+
+    The routes that read them (preview, plates, view, colours, a save, a quote) need
+    a path or read several files of one piece, request after request, so the piece is
+    unpacked onto the cache once rather than read from the store each time (#7318)."""
     if result is None:
         return
     for rel in {result.model_3mf, result.preview_glb}:

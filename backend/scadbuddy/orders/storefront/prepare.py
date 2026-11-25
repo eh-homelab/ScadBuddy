@@ -34,7 +34,9 @@ the done render's 3MF and slots, with the combination's variant key, through
 `storefront_slices_concurrent`. So there is no second slicer path, a variant with a
 ``done`` price starts no slice, and a variant with no room waits. Publish starts a run of
 the default combination only (`warm_default`, `default_combination`), so the default
-variant has a price before a visitor asks. Both are off with `storefront_warm_prices`.
+variant has a price before a visitor asks. A file listing (#7523) has no render: its run
+submits none, and prices the colours its page opens on (`file_prices.py` `default_choice`)
+with no visitor charge. All are off with `storefront_warm_prices`.
 """
 
 from __future__ import annotations
@@ -57,7 +59,9 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.service import RPCError
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament, Reference
+from scadbuddy.orders.storefront.file_prices import FileChoice, default_choice, plan_file
 from scadbuddy.orders.storefront.inputs import (
     ColoursClashError,
     LockedColoursClashError,
@@ -71,6 +75,7 @@ from scadbuddy.orders.storefront.inputs import (
 )
 from scadbuddy.orders.storefront.listings import listing_not_found, problem
 from scadbuddy.orders.storefront.renders import estimate_of, variant_key
+from scadbuddy.orders.storefront.slice_price import planned_estimate
 from scadbuddy.orders.storefront.wire import ChoiceBound, Listing
 from scadbuddy.render.job_models import Job, JobNotFoundError, QueueFullError
 from scadbuddy.render.schema import ParamValue
@@ -547,15 +552,12 @@ def preparer(state: AppState) -> TemporalPreparer:
 
 async def warm_default(state: AppState, listing: Listing) -> None:
     """After a publish (#6922): start the run that renders the published ``listing``'s
-    default combination and starts its storefront slice price, unless
-    `storefront_warm_prices` is off. A run that does not start is logged, never the
-    publish's failure, nor is one that takes past `WARM_START_TIMEOUT`: a visitor's read
-    still starts the slice. A start given up on may still have reached Temporal, so its
-    log says it was given up, not that it failed."""
+    default combination and starts its storefront slice price (a file listing's has no
+    render, #7523), unless `storefront_warm_prices` is off. A run that does not start is
+    logged, never the publish's failure, nor is one that takes past `WARM_START_TIMEOUT`: a
+    visitor's read still starts the slice. A start given up on may still have reached
+    Temporal, so its log says it was given up, not that it failed."""
     if not state.settings.storefront_warm_prices or not listing.published:
-        return
-    if listing.template_snapshot is None:
-        # A file listing has no render to make (#6710): its price is read by its colours.
         return
     try:
         # A Temporal that does not answer never holds up the publish (review of #6970).
@@ -732,9 +734,13 @@ async def warm(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Warm
     done render, its files lost, no shop slice profile, a failed slice); ``running`` while
     its slice runs; ``waiting`` while its files are fetched or the cap leaves no room;
     ``end`` past the last combination, for a listing not published, or with
-    `storefront_warm_prices` off."""
+    `storefront_warm_prices` off. A publish's run of a file listing is `_warm_file`."""
     if not state.settings.storefront_warm_prices:
         return Warmed(outcome="end")
+    if ask.default_only:
+        file = await asyncio.to_thread(orders.listings.get, ask.listing_id)
+        if file is not None and file.published and file.file_snapshot is not None:
+            return await _warm_file(state, orders, file, ask.index)
     try:
         target = await asyncio.to_thread(_target, state, orders, ask)
     except ApiError:
@@ -750,6 +756,31 @@ async def warm(state: AppState, orders: OrdersComponent, ask: SubmitAsk) -> Warm
     estimate = await estimate_of(
         state, listing, job, {}, combination.material, variant_key=combination.variant_key
     )
+    return await _warmed(orders, estimate)
+
+
+async def _warm_file(
+    state: AppState, orders: OrdersComponent, listing: Listing, index: int
+) -> Warmed:
+    """`warm`, for the published file ``listing`` (#7523): the one price of the colours its
+    page opens on, read with no ``charge``, so it counts against no visitor."""
+    if index > 0:
+        return Warmed(outcome="end")
+
+    def read() -> FileChoice | None:
+        runtime = state.settings_store.snapshot().runtime
+        filaments = {f.id: f for f in orders.store.filaments()}
+        return default_choice(listing, filaments, runtime.storefront_materials)
+
+    choice = await asyncio.to_thread(read)
+    planned = None if choice is None else await plan_file(state, listing, choice)
+    if planned is None:
+        return Warmed(outcome="settled")
+    return await _warmed(orders, await planned_estimate(state, planned))
+
+
+async def _warmed(orders: OrdersComponent, estimate: StoreEstimate) -> Warmed:
+    """What the run does next, from the price read's answer."""
     if estimate.source != "pending":
         return Warmed(outcome="settled")
     # No key: its files are still being fetched. A key: its slice runs, or waits for room.
