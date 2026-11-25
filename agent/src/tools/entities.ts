@@ -33,6 +33,22 @@ const caption = z.string().max(1000)
 const linkKind = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text, `other` when left out: `support`, `datasheet`, `store`, ...')
 
 const deleted = (what: string) => json({ deleted: what })
+/** A workspace path segment's most characters (workspace/store.ts `SEGMENT`). */
+const SEGMENT_MAX = 128
+
+/**
+ * A kept file's last path segment, `<id>-<name>`: the name made safe and cut to fit
+ * SEGMENT_MAX, keeping its extension, so a long vendor file name is still kept.
+ */
+export function keptName(id: string, filename: string): string {
+  const safe = filename.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.+/, '') || 'file'
+  const room = SEGMENT_MAX - id.length - 1
+  if (safe.length <= room) return `${id}-${safe}`
+  const dot = safe.lastIndexOf('.')
+  const ext = dot > 0 && safe.length - dot <= 10 ? safe.slice(dot) : ''
+  return `${id}-${safe.slice(0, room - ext.length)}${ext}`
+}
+
 /** The most of a file entity_attachment_get reads: the workspace's default file cap. */
 const FILE_READ_MAX = 25 * 1024 * 1024
 
@@ -223,7 +239,7 @@ export const entityTools = [
         return json({
           viewable: false,
           media_type: mimeType,
-          size_bytes: read.size ?? null,
+          ...(read.size === undefined ? { size_bytes_over: FILE_READ_MAX } : { size_bytes: read.size }),
           note: `Larger than ${FILE_READ_MAX} bytes: too large to read here.` + (thumbable ? ' Call again with `thumbnail: true` for a small copy.' : ''),
         })
       }
@@ -255,8 +271,7 @@ export const entityTools = [
         return json({ media_type: mimeType, size_bytes: bytes.byteLength, note: 'There is no workspace to keep it in here.' })
       }
       try {
-        const name = record.filename.replace(/[^A-Za-z0-9_.-]/g, '_').replace(/^\.+/, '').slice(0, 100) || 'file'
-        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${attachment_id}-${name}`, new Uint8Array(bytes), {
+        const info = await ctx.workspace.write(workspaceOf(ctx), `attachments/${keptName(attachment_id, record.filename)}`, new Uint8Array(bytes), {
           mediaType: mimeType,
           source: { tool: 'entity_attachment_get', entity: ref, attachment_id },
         })

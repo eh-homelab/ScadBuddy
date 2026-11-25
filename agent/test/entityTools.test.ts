@@ -4,6 +4,7 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { keptName } from '../src/tools/entities.js'
 import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 import { memoryWorkspace } from './helpers/workspace.js'
@@ -134,6 +135,19 @@ describe('entity attachment and link tools', () => {
       viewable: false,
       media_type: 'image/tiff',
     })
+  })
+
+  it('keeps a file with a long name, cut to fit a workspace path segment with its extension', async () => {
+    const long = `${'a'.repeat(120)}.pdf`
+    expect(keptName(ID, long)).toHaveLength(128)
+    expect(keptName(ID, long)).toMatch(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/)
+    expect(keptName(ID, long).endsWith('.pdf')).toBe(true)
+    expect(keptName(ID, 'manual.pdf')).toBe(`${ID}-manual.pdf`)
+    expect(keptName(ID, '..')).toBe(`${ID}-file`)
+    server.use(...serveFile(PRINTER, 'application/pdf', Buffer.from('%PDF-1.7'), {}, long))
+    const ws = memoryWorkspaceWithWrites()
+    const result = await tool('entity_attachment_get').execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
+    expect(firstText(result)).toMatchObject({ workspace_file: { name: `attachments/${keptName(ID, long)}` } })
   })
 
   it('refuses a file the entity does not hold', async () => {
