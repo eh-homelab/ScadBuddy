@@ -15,13 +15,29 @@ function anchorText(event: SpoolEvent): string {
 }
 
 /**
+ * #7682 — an added-full spool whose anchor is not a reading (a Bambuddy pull's grams)
+ * started at its label weight; the gap to the anchor is unexplained. Nothing under 0.05 g.
+ */
+function startGap(anchor: SpoolEvent | null, addedFull: boolean | null, labelWeight: number | null): string | null {
+  if (addedFull !== true || labelWeight == null || !anchor || anchor.grams_after == null) return null
+  if (anchor.source === 'scale' || anchor.source === 'person') return null
+  const gap = labelWeight - anchor.grams_after
+  if (Math.abs(gap) < 0.05) return null
+  const source = anchor.source ? (SOURCE[anchor.source] ?? anchor.source) : 'The spool'
+  return `Started at the label weight ${grams(labelWeight)}. ${source.charAt(0).toUpperCase()}${source.slice(1)} reported ${grams(anchor.grams_after)}; ${grams(gap)} unexplained.`
+}
+
+/**
  * #6262 — what a spool's grams left are made of: the reading they start from, the print
  * use taken off since (`SpoolDetail.basis`, the server's own sum), and the result, so a
- * person can trust the number or weigh the spool again.
+ * person can trust the number or weigh the spool again. `addedFull` and `labelWeight`
+ * are the spool's, for the start gap (#7682).
  */
-export function GramsBasis({ basis, gramsLeft }: { basis: Basis; gramsLeft: number | null }) {
+export function GramsBasis({ basis, gramsLeft, addedFull = null, labelWeight = null }: { basis: Basis; gramsLeft: number | null; addedFull?: boolean | null; labelWeight?: number | null }) {
+  const gap = startGap(basis.anchor, addedFull, labelWeight)
   return (
     <ul aria-label="How the grams left add up" className="flex flex-col gap-0.5 text-[13px]">
+      {gap && <li className="text-muted-foreground">{gap}</li>}
       {basis.anchor ? (
         <li className="flex justify-between gap-3">
           <span>{anchorText(basis.anchor)}</span>

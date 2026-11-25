@@ -32,6 +32,7 @@ import {
   type SpoolTypeDetail,
 } from '../../api/filament'
 import { GramsBasis } from '../../components/filament/GramsBasis'
+import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { InsertWeightOffer } from '../../components/filament/InsertWeightOffer'
 import { useInsertWeightCheck } from '../../components/filament/useInsertWeightCheck'
 import { FirstTypePresets } from '../../components/filament/FirstTypePresets'
@@ -953,12 +954,16 @@ export function SpoolPage() {
               <div className="grid gap-4 rounded-md border p-3 md:grid-cols-2">
                 <div className="flex flex-col gap-2">
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
-                  <p className="text-[13px] text-muted-foreground">
-                    {saved?.last_weighed_g != null && saved.last_weighed_at
-                      ? `Measured ${grams(saved.last_weighed_g)} on ${new Date(saved.last_weighed_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
-                      : 'Never weighed.'}
-                  </p>
-                  {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} />}
+                  {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
+                    <WeighingBreakdown event={saved.last_weighing} />
+                  ) : (
+                    <p className="text-[13px] text-muted-foreground">
+                      {saved?.last_weighed_g != null && saved.last_weighed_at
+                        ? `Measured ${grams(saved.last_weighed_g)} on ${new Date(saved.last_weighed_at).toLocaleDateString(undefined, { dateStyle: 'medium' })}.`
+                        : 'Never weighed.'}
+                    </p>
+                  )}
+                  {saved && <GramsBasis basis={saved.basis} gramsLeft={leftNow} addedFull={saved.added_full ?? null} labelWeight={effective?.label_weight_g ?? null} />}
                 </div>
                 {(advanced || reading.trim() !== '') && (
                   <form
