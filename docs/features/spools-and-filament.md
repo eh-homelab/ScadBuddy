@@ -334,7 +334,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `docs/superpowers/plans/2026-11-23-label-templates-pdf.md`): the labels page offers SB's
   50 x 25 mm roll label, Bambuddy's six templates (two box labels, two AMS holder labels and
   the Avery 5160 and L7160 sheets) and a custom size, and saves the choice in
-  `filament_label_template`. A sheet template prints on its own grid. "Download PDF" asks
+  `filament_label_template`. A sheet template prints on its own grid. "Download" asks
   `POST /api/v1/filament/labels` (`backend/scadbuddy/filament/label_pdf.py`, ReportLab) for
   the same labels at the same template and saves it through `downloadBlob`, so it works
   inside Bambuddy's frame. A place label's PDF needs the label address or an https public
@@ -349,7 +349,9 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   carries its dpi, so label printer software prints it at its size. One page is `labels.png`;
   more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
   a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
-  `png_too_large`: choose PDF, a lower dpi or fewer labels.
+  `png_too_large`: choose PDF, a lower dpi or fewer labels. The labels page has the choice
+  beside the template: PDF or PNG, and for PNG the dpi (203, 300 or 600). It saves each change
+  in `filament_label_output`, and "Download" names the file by the type of the answer.
 - The fields a spool label prints (#7216, R-7216-9 and R-7216-10): the body's `fields`, else
   the setting `filament_label_output`'s, from `number`, `material` (with its subtype),
   `colour` (its name), `hex` (the effective colour as `#RRGGBB`), `brand`, `location` (its

@@ -47,6 +47,7 @@ export type LabelTemplate = Schemas['LabelTemplate']
 export type LabelSheet = Schemas['LabelSheet']
 export type LabelTemplateChoice = Schemas['LabelTemplateChoice']
 export type LabelsRequest = Schemas['LabelsRequest']
+export type LabelOutput = Schemas['LabelOutput']
 export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -469,12 +470,24 @@ export const printerLabels = (printerIds: string[] | null) =>
 export const listLabelTemplates = () => request<LabelTemplates>(`${BASE}/label-templates`)
 
 /**
- * #7157 — the labels PDF of these spools, then these places (`POST /filament/labels`), as the answer's bytes for
- * `downloadBlob`; a refusal throws `ApiError` with the sentence for the person (`no_label_base`, an unknown id).
+ * #7157, #7216 — the labels file of these spools, then these places (`POST /filament/labels`), as the answer's bytes for
+ * `downloadBlob`: a PDF, one PNG, or a ZIP of PNGs (R-7216-6). A refusal throws `ApiError` with the sentence for
+ * the person (`no_label_base`, `png_too_large`, an unknown id).
  */
-export async function labelsPdf(body: LabelsRequest): Promise<Blob> {
-  const response = await requestRaw(`${BASE}/labels`, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/pdf' }, body: JSON.stringify(body) })
+export async function labelsFile(body: LabelsRequest): Promise<Blob> {
+  const response = await requestRaw(`${BASE}/labels`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/pdf, image/png, application/zip' },
+    body: JSON.stringify(body),
+  })
   return response.blob()
+}
+
+/** #7216 — the name to save a labels file under, from its type (R-7216-6). */
+export function fileName(blob: Blob): string {
+  if (blob.type === 'image/png') return 'labels.png'
+  if (blob.type === 'application/zip') return 'labels.zip'
+  return 'labels.pdf'
 }
 
 /** Adds a place, or with `id` changes one (only the fields sent). */

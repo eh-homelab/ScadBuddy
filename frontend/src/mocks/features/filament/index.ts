@@ -2531,6 +2531,12 @@ export const handlers = [
     const settings = mockSettings()
     if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
       return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
+    // #7216 — a PNG answer is one byte of the type the real route gives: one label is one PNG, more are a ZIP (R-7216-6).
+    // The real route reads the stored setting when the request names no format.
+    if ((body.format ?? settings.filament_label_output?.format) === 'png') {
+      const [type, name] = count === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
+      return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
+    }
     return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {
       headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': 'attachment; filename="labels.pdf"' },
     })

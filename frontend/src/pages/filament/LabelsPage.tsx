@@ -3,8 +3,20 @@ import { type FocusEvent, type ReactNode, useEffect, useMemo, useRef, useState }
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router'
 import { api } from '../../api/client'
-import { getLocation, getSpool, labelsPdf, type LabelTemplateChoice, type LabelTemplates, listLabelTemplates, printerLabels, type SpoolDetail } from '../../api/filament'
+import {
+  fileName,
+  getLocation,
+  getSpool,
+  labelsFile,
+  type LabelOutput,
+  type LabelTemplateChoice,
+  type LabelTemplates,
+  listLabelTemplates,
+  printerLabels,
+  type SpoolDetail,
+} from '../../api/filament'
 import { Label, LocationLabel } from '../../components/filament/Label'
+import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
 import { DEFAULT_SIZE, httpsOrigin, labelBase, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg } from '../../components/filament/labelSheet'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,6 +24,7 @@ import { Label as FieldLabel } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { downloadBlob } from '../../lib/embed'
+import { useSettingSaver } from '../../lib/useSettingSaver'
 import { filamentLinks } from '../../lib/filamentLinks'
 
 type Layout = 'roll' | 'sheet'
@@ -60,6 +73,12 @@ const printCss = (layout: Layout, size: LabelSize) => {
 
 /** The template the page starts at, and the one an unreadable setting leaves. */
 const DEFAULT_CHOICE: LabelTemplateChoice = { template: 'roll_50x25' }
+
+/** #7216 — the output the page starts at, and the one an unreadable setting leaves: the setting's default (R-7216-8, R-7216-9). */
+const DEFAULT_OUTPUT: LabelOutput = { format: 'pdf', dpi: 300, fields: ['number', 'material', 'colour', 'brand', 'qr'] }
+
+/** What the Download button's `title` says it gives. */
+const outputTitle = (output: LabelOutput) => (output.format === 'png' ? `Download PNG images at ${output.dpi} dpi` : 'Download a PDF')
 
 /** A choice as the setting and the PDF take it: the sizes only for `custom`. */
 function cleanChoice(choice: LabelTemplateChoice): LabelTemplateChoice {
@@ -174,17 +193,18 @@ export function LabelsPage() {
   const [editingCustom, setEditingCustom] = useState(false)
   const [draft, setDraft] = useState({ width: '', height: '' })
   const [customProblem, setCustomProblem] = useState<string | null>(null)
-  const [saveProblem, setSaveProblem] = useState<string | null>(null)
   const [pdfProblem, setPdfProblem] = useState<string | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
   const size = sizeOf(choice, templates)
   // A choice saved on this page outranks the stored one that arrives after it. Opening the
   // custom fields saves nothing, so the stored choice still shows under them, and the
   // person's typing is kept.
-  const picked = useRef(false)
   const customOpened = useRef(false)
-  // R-7157-9: one PUT at a time; a newer save replaces one still waiting, so the newest choice is stored last.
-  const saving = useRef<{ busy: boolean; next: LabelTemplateChoice | null; seq: number }>({ busy: false, next: null, seq: 0 })
+  // R-7157-9, R-7216-16: one PUT at a time, the newest choice stored last.
+  const templateSaver = useSettingSaver('filament_label_template')
+  // #7216 — the file's format and dpi: the setting `filament_label_output`, saved at each change.
+  const [output, setOutput] = useState<LabelOutput>(DEFAULT_OUTPUT)
+  const outputSaver = useSettingSaver('filament_label_output')
   const picker = useRef<HTMLButtonElement>(null)
   const pickerList = useRef<HTMLDivElement>(null)
 
@@ -198,8 +218,10 @@ export function LabelsPage() {
     api
       .getSettings()
       .then((settings) => {
+        if (!live) return
+        if (settings.filament_label_output && !outputSaver.savedBeforeRead) setOutput(settings.filament_label_output)
         const stored = settings.filament_label_template
-        if (!live || !stored || picked.current) return
+        if (!stored || templateSaver.savedBeforeRead) return
         setChoice(cleanChoice(stored))
         if (stored.template === 'custom' && !customOpened.current) setDraft({ width: String(stored.width_mm ?? ''), height: String(stored.height_mm ?? '') })
       })
@@ -207,31 +229,18 @@ export function LabelsPage() {
     return () => {
       live = false
     }
+    // The settings are read once. `savedBeforeRead` is a getter over the saver's own ref, so the first render's saver reads it current.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const save = (next: LabelTemplateChoice) => {
-    picked.current = true
     setChoice(next)
-    setSaveProblem(null)
-    const queue = saving.current
-    queue.seq += 1
-    queue.next = next
-    if (queue.busy) return
-    queue.busy = true
-    void (async () => {
-      while (queue.next) {
-        const body = cleanChoice(queue.next)
-        queue.next = null
-        const seq = queue.seq
-        try {
-          await api.putSettings({ filament_label_template: body })
-        } catch {
-          // Only the newest save's failure is the page's to tell.
-          if (seq === queue.seq) setSaveProblem('The label choice could not be saved. It holds on this page only.')
-        }
-      }
-      queue.busy = false
-    })()
+    templateSaver.save(cleanChoice(next))
+  }
+
+  const pickOutput = (next: LabelOutput) => {
+    setOutput(next)
+    outputSaver.save(next)
   }
 
   const pick = (value: string) => {
@@ -381,13 +390,27 @@ export function LabelsPage() {
   // A place label's PDF needs an address from Settings; a spool label needs none.
   const pdfNeedsBase = placeLabels.length > 0 && readyPlaces !== null && !readyPlaces.hasBase
 
-  /** #7157 — the server's PDF of the labels drawn, at the template shown; saved through `downloadBlob`, which works inside Bambuddy's frame. */
-  const downloadPdf = () => {
+  /**
+   * #7157, #7216 — the server's file of the labels drawn, at the template and output shown; saved through
+   * `downloadBlob`, which works inside Bambuddy's frame. The name follows the type of the answer.
+   */
+  const download = () => {
     setPdfProblem(null)
     setPdfBusy(true)
-    const body = { spool_ids: labels.map(({ spool }) => spool.id), location_ids: placeLabels.map((one) => one.id), template: cleanChoice(choice), layout }
-    downloadBlob(() => labelsPdf(body), 'labels.pdf')
-      .catch((cause: unknown) => setPdfProblem(cause instanceof Error ? cause.message : 'The PDF could not be made. Try again.'))
+    const body = {
+      spool_ids: labels.map(({ spool }) => spool.id),
+      location_ids: placeLabels.map((one) => one.id),
+      template: cleanChoice(choice),
+      layout,
+      format: output.format,
+      dpi: output.dpi,
+    }
+    let file: Blob | null = null
+    downloadBlob(
+      async () => (file = await labelsFile(body)),
+      () => (file ? fileName(file) : 'labels.pdf'),
+    )
+      .catch((cause: unknown) => setPdfProblem(cause instanceof Error ? cause.message : 'The labels file could not be made. Try again.'))
       .finally(() => setPdfBusy(false))
   }
 
@@ -443,22 +466,24 @@ export function LabelsPage() {
               </span>
             </RadioGroup>
           )}
+          <LabelOutputPicker value={output} onChange={pickOutput} />
           <Button
             type="button"
             size="sm"
             variant="outline"
             disabled={count === 0 || pdfBusy || pdfNeedsBase}
             aria-describedby={pdfNeedsBase ? 'labels-pdf-needs-base' : undefined}
-            onClick={downloadPdf}
+            title={outputTitle(output)}
+            onClick={download}
           >
-            <FileDownIcon /> Download PDF
+            <FileDownIcon /> Download
           </Button>
           <Button type="button" size="sm" disabled={count === 0} onClick={() => window.print()}>
             <PrinterIcon /> Print
           </Button>
           {pdfNeedsBase && (
             <p id="labels-pdf-needs-base" className="basis-full text-right text-[13px] text-muted-foreground">
-              A PDF of place labels needs a label address. Set one in Settings, or an https public URL.
+              A download of place labels needs a label address. Set one in Settings, or an https public URL.
             </p>
           )}
         </header>
@@ -499,7 +524,8 @@ export function LabelsPage() {
             {customProblem && <p className="pb-1.5 text-[13px] text-warn">{customProblem}</p>}
           </div>
         )}
-        {saveProblem && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">{saveProblem}</p>}
+        {templateSaver.error && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The label choice could not be saved. It holds on this page only.</p>}
+        {outputSaver.error && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The file choice could not be saved. It holds on this page only.</p>}
         {pdfProblem && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
             {pdfProblem}

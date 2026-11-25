@@ -200,12 +200,12 @@ describe('the label template (#7157)', () => {
       }),
     )
     const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a,b' })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
     await waitFor(() => expect(screen.getAllByTestId('label')[0]!.getAttribute('style')).toMatch(/width: 40mm/))
-    await user.click(screen.getByRole('button', { name: 'Download PDF' }))
+    await user.click(screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(saved).toHaveLength(1))
-    expect(vi.mocked(downloadBlob).mock.calls[0]![1]).toBe('labels.pdf')
-    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], template: { template: 'box_40x30' }, layout: 'roll' })
+    expect(savedName()).toBe('labels.pdf')
+    expect(body).toEqual({ spool_ids: ['a', 'b'], location_ids: [], template: { template: 'box_40x30' }, layout: 'roll', format: 'pdf', dpi: 300 })
   })
 
   it('says why the PDF was refused', async () => {
@@ -216,8 +216,8 @@ describe('the label template (#7157)', () => {
       ),
     )
     const { user } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled())
-    await user.click(screen.getByRole('button', { name: 'Download PDF' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
   })
 
@@ -233,11 +233,11 @@ describe('the label template (#7157)', () => {
       }),
     )
     renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
-    expect(screen.getByRole('button', { name: 'Download PDF' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled()
     expect(screen.getByText('Loading labels…')).toBeInTheDocument()
     release()
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
-    expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled()
   })
 
   it('holds the PDF of place labels drawn at the page’s own address, and says why', async () => {
@@ -245,21 +245,112 @@ describe('the label template (#7157)', () => {
     server.use(http.get('*/api/v1/settings', noBase))
     const { unmount } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
-    const button = screen.getByRole('button', { name: 'Download PDF' })
+    const button = screen.getByRole('button', { name: 'Download' })
     expect(button).toBeDisabled()
-    expect(button).toHaveAccessibleDescription('A PDF of place labels needs a label address. Set one in Settings, or an https public URL.')
+    expect(button).toHaveAccessibleDescription('A download of place labels needs a label address. Set one in Settings, or an https public URL.')
     unmount()
     // The same for the printers' places, when `printerLabels` answers no address.
     server.use(http.post('*/api/v1/filament/printer-labels', () => HttpResponse.json({ base_url: null, labels: [{ location_id: 'x', code: 'L-12', name: 'H2C', depth: 0 }], no_report: [] })))
     const printers = renderPage(<LabelsPage />, { route: '/filament/labels?printers=all' })
     await waitFor(() => expect(screen.getAllByTestId('label')).toHaveLength(1))
-    expect(screen.getByRole('button', { name: 'Download PDF' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled()
     printers.unmount()
     // Spool labels need no address: their PDF stays on offer.
     serve()
     renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Download PDF' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
     expect(screen.queryByText(/needs a label address/)).toBeNull()
+  })
+})
+
+const FIELDS = ['number', 'material', 'colour', 'brand', 'qr']
+
+/** The settings with the label output `output`, and every `PUT /settings` body in `puts`. */
+function serveOutput(output: object, puts: unknown[] = []) {
+  server.use(
+    http.get('*/api/v1/settings', () =>
+      HttpResponse.json({
+        filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null },
+        filament_label_output: output,
+        filament_label_base_url: 'https://sb.example.com',
+        public_url: null,
+      }),
+    ),
+    http.put('*/api/v1/settings', async ({ request }) => {
+      puts.push(await request.json())
+      return HttpResponse.json({})
+    }),
+  )
+  return puts
+}
+
+/** `POST /filament/labels` answers `type`; each body sent goes in the list returned. */
+function serveLabels(type: string) {
+  const bodies: unknown[] = []
+  server.use(
+    http.post('*/api/v1/filament/labels', async ({ request }) => {
+      bodies.push(await request.json())
+      return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type } })
+    }),
+  )
+  return bodies
+}
+
+/** The file name the page asked `downloadBlob` to save under. */
+function savedName() {
+  const name = vi.mocked(downloadBlob).mock.calls[0]![1]
+  return typeof name === 'function' ? name() : name
+}
+
+describe('the label output (#7216)', () => {
+  it('downloads a PNG when the output is PNG', async () => {
+    serve()
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
+    const bodies = serveLabels('image/png')
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(await screen.findByRole('radio', { name: 'PNG' }))
+    await choose(user, await screen.findByRole('combobox', { name: 'Resolution' }), '600 dpi')
+    const png600 = { filament_label_output: { format: 'png', dpi: 600, fields: FIELDS } }
+    await waitFor(() => expect(puts.at(-1)).toEqual(png600))
+    expect(puts.filter((one) => JSON.stringify(one) === JSON.stringify(png600))).toHaveLength(1)
+    expect(screen.getByRole('button', { name: 'Download' })).toHaveAttribute('title', 'Download PNG images at 600 dpi')
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ spool_ids: ['a'], format: 'png', dpi: 600 })
+    expect(savedName()).toBe('labels.png')
+  })
+
+  it('names a ZIP answer labels.zip', async () => {
+    serve()
+    serveOutput({ format: 'png', dpi: 300, fields: FIELDS })
+    serveLabels('application/zip')
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a,b' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(savedName()).toBe('labels.zip')
+  })
+
+  it('shows the stored output choice', async () => {
+    serve()
+    const puts = serveOutput({ format: 'png', dpi: 203, fields: FIELDS })
+    renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'PNG' })).toBeChecked())
+    expect(screen.getByRole('combobox', { name: 'Resolution' })).toHaveTextContent('203 dpi')
+    expect(screen.getByRole('button', { name: 'Download' })).toHaveAttribute('title', 'Download PNG images at 203 dpi')
+    expect(puts).toEqual([])
+  })
+
+  it('hides the dpi for PDF', async () => {
+    serve()
+    const puts = serveOutput({ format: 'png', dpi: 600, fields: FIELDS })
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Resolution' })).toBeInTheDocument())
+    await user.click(screen.getByRole('radio', { name: 'PDF' }))
+    expect(screen.queryByRole('combobox', { name: 'Resolution' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Download' })).toHaveAttribute('title', 'Download a PDF')
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'pdf', dpi: 600, fields: FIELDS } }]))
   })
 })
 
