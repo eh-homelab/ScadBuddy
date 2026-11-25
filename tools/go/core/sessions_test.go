@@ -34,14 +34,6 @@ func newSession(extra ...any) map[string]any {
 	return s
 }
 
-func js(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return string(b)
-}
-
 func (a *api) value(query string, args ...any) any {
 	a.t.Helper()
 	var v any
