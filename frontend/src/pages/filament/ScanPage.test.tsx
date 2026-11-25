@@ -1,16 +1,20 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { listTags } from '../../api/filament'
-import { spoolId } from '../../mocks/features/filament/seed'
+import { L, spoolId } from '../../mocks/features/filament/seed'
 import { seedNfcJob } from '../../mocks/features/filament/tags'
 import { server } from '../../mocks/server'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { installNdefStub, type NdefStub } from '../../test/ndefStub'
+import { MemoryRouter, Route, Routes } from 'react-router'
 import { renderPage } from '../../test/utils'
 import { ScanPage } from './ScanPage'
 
 const open = () => renderPage(<ScanPage />, { route: '/scan', path: '/scan' })
 const json = (text: string) => new TextEncoder().encode(text)
+/** A place label's `url` record, as Web NFC hands the page a URL's bytes. */
+const PLACE_LABEL = { recordType: 'url', data: json('https://scadbuddy.example/x/L-4?from=label') }
+const OPEN_AT_ONCE_KEY = 'scadbuddy.scan.openAtOnce'
 const OPENSPOOL_PLA = json('{"protocol":"openspool","version":"1.0","type":"PLA","color_hex":"FFAABB","brand":"Generic","min_temp":"220","max_temp":"240"}')
 
 /** Each API request the page sends, as `METHOD path` with its JSON body. */
@@ -346,6 +350,109 @@ describe('the scan page (#7273)', () => {
     } finally {
       log.off()
     }
+  })
+
+  it('a tapped place label opens its card', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:0c:0c:0c:0c:0c:0c', records: [PLACE_LABEL] })
+    const card = await screen.findByRole('region', { name: 'Place L-4' })
+    expect(within(card).getByRole('link', { name: 'Open' })).toHaveAttribute('href', filamentLinks.location(L.AMS_A1))
+    const reads = screen.getByRole('list', { name: "This session's reads" })
+    expect(within(reads).getByText('Place L-4')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Create a spool from this tag' })).toBeNull()
+  })
+
+  it('announces a place label by its code', async () => {
+    const { user } = open()
+    await user.click(screen.getByRole('button', { name: 'Scan' }))
+    await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+    stub.tap({ serialNumber: '04:0c:0c:0c:0c:0c:0c', records: [PLACE_LABEL] })
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Last read' })).toHaveTextContent('Read 04:0c:0c:0c:0c:0c:0c: place L-4 (read 1)'))
+  })
+
+  describe('Open what I scan at once', () => {
+    beforeEach(() => localStorage.clear())
+
+    /** The page with a stand-in for the place's and the spool's pages, so a navigation shows. */
+    const openWithTargets = () =>
+      render(
+        <MemoryRouter initialEntries={['/scan']}>
+          <Routes>
+            <Route path="/scan" element={<ScanPage />} />
+            <Route path="/filament/locations/:id" element={<h1>Place page</h1>} />
+            <Route path="/filament/spools/:id" element={<h1>Spool page</h1>} />
+          </Routes>
+        </MemoryRouter>,
+      )
+
+    it('is off by default and opens nothing by itself', async () => {
+      const { user } = open()
+      expect(screen.getByRole('switch', { name: 'Open what I scan at once' })).not.toBeChecked()
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:0c:0c:0c:0c:0c:0c', records: [PLACE_LABEL] })
+      expect(await screen.findByRole('region', { name: 'Place L-4' })).toBeInTheDocument()
+    })
+
+    it('with Open at once on, a tapped place label navigates to the place', async () => {
+      openWithTargets()
+      const { default: userEvent } = await import('@testing-library/user-event')
+      const user = userEvent.setup()
+      await user.click(screen.getByRole('switch', { name: 'Open what I scan at once' }))
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:0c:0c:0c:0c:0c:0c', records: [PLACE_LABEL] })
+      expect(await screen.findByRole('heading', { name: 'Place page' })).toBeInTheDocument()
+    })
+
+    it("with Open at once on, a known tag navigates to its spool", async () => {
+      openWithTargets()
+      const { default: userEvent } = await import('@testing-library/user-event')
+      const user = userEvent.setup()
+      await user.click(screen.getByRole('switch', { name: 'Open what I scan at once' }))
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:a1:b2:c3:d4:e5:f6', records: [] })
+      expect(await screen.findByRole('heading', { name: 'Spool page' })).toBeInTheDocument()
+    })
+
+    it('with Open at once on, a new tag stays on the page', async () => {
+      openWithTargets()
+      const { default: userEvent } = await import('@testing-library/user-event')
+      const user = userEvent.setup()
+      await user.click(screen.getByRole('switch', { name: 'Open what I scan at once' }))
+      await user.click(screen.getByRole('button', { name: 'Scan' }))
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      stub.tap({ serialNumber: '04:0c:0c:0c:0c:0c:0c', records: [] })
+      // Nothing to open: the New tag card (a blank tag has no draft, so it offers the form).
+      expect(await screen.findByRole('link', { name: 'Make the spool by hand' })).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: 'Place page' })).toBeNull()
+      expect(screen.getByRole('heading', { name: 'Scan', level: 1 })).toBeInTheDocument()
+    })
+
+    it('is remembered, and a page opened with it on starts the scan by itself', async () => {
+      const first = open()
+      await first.user.click(screen.getByRole('switch', { name: 'Open what I scan at once' }))
+      expect(localStorage.getItem(OPEN_AT_ONCE_KEY)).toBe('1')
+      first.unmount()
+      stub.restore()
+      stub = installNdefStub()
+      open()
+      expect(screen.getByRole('switch', { name: 'Open what I scan at once' })).toBeChecked()
+      await screen.findByRole('button', { name: 'Scanning — hold a tag to the phone' })
+      expect(stub.scans).toBe(1)
+    })
+
+    it('a refused auto-start shows the Scan button and the reason', async () => {
+      localStorage.setItem(OPEN_AT_ONCE_KEY, '1')
+      stub.failScan(new DOMException('', 'NotAllowedError'))
+      open()
+      expect(await screen.findByRole('alert')).toHaveTextContent("Allow NFC for this site in Chrome's settings, then tap Scan again.")
+      expect(screen.getByRole('button', { name: 'Scan' })).toBeEnabled()
+      expect(stub.scans).toBe(1)
+    })
   })
 
   it('stops scanning when it unmounts', async () => {
