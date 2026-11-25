@@ -20,7 +20,7 @@ from scadbuddy.camera.models import FeedReport
 from scadbuddy.camera.store import CameraStore
 from scadbuddy.core.events import PG_CHANNEL, CameraReconnectEvent, Event
 from scadbuddy.printers.component import PRINTERS
-from scadbuddy.printers.models import LanLink, PrinterCreate
+from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from tests.printers.conftest import KEK
 
 pytestmark = pytest.mark.requires_postgres
@@ -35,10 +35,10 @@ def _state(client: TestClient) -> AppState:
     return state
 
 
-def _make_printer(client: TestClient, *, recorded: bool) -> str:
+def _make_printer(client: TestClient, *, recorded: bool, serial: str = "01P00A000000001") -> str:
     printers = _state(client).components.get(PRINTERS)
     printers.store.kek = KEK
-    row = printers.store.create(PrinterCreate(serial="01P00A000000001", name="H2C", model="H2C"))
+    row = printers.store.create(PrinterCreate(serial=serial, name="H2C", model="H2C"))
     if recorded:
         printers.store.link_lan(
             row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
@@ -98,7 +98,7 @@ def test_live_is_false_without_an_edge_url(client: TestClient, printer: str) -> 
     assert body["live"] is False
 
 
-def test_live_is_true_with_an_edge_set_up(client: TestClient, printer: str) -> None:
+def _set_up_edge(client: TestClient) -> None:
     state = _state(client)
     state.settings = state.settings.model_copy(
         update={
@@ -108,6 +108,10 @@ def test_live_is_true_with_an_edge_set_up(client: TestClient, printer: str) -> N
             "camera_edge_read_pass": SecretStr("read-pass"),
         }
     )
+
+
+def test_live_is_true_with_an_edge_set_up(client: TestClient, printer: str) -> None:
+    _set_up_edge(client)
     assert client.get(f"/api/v1/printers/{printer}/camera").json()["live"] is True
 
 
@@ -138,3 +142,23 @@ def test_camera_reconnect_passes_the_change_stream() -> None:
     event = CameraReconnectEvent(printer_id="p1")
     assert event.kind == "camera.reconnect"
     assert keep_camera(Change(PG_CHANNEL, event.model_dump_json(), event.id))
+
+
+def _camera_live(client: TestClient) -> dict[str, bool]:
+    response = client.get("/api/v1/print/printers/now")
+    assert response.status_code == 200
+    return {card["id"]: card["camera_live"] for card in response.json()["printers"]}
+
+
+def test_printers_now_marks_a_recorded_printer_live(client: TestClient, printer: str) -> None:
+    # LAN-linked with a camera, so it has a card, but not recorded.
+    other = _make_printer(client, recorded=True, serial="01P00A000000002")
+    _state(client).components.get(PRINTERS).store.patch(other, PrinterPatch(camera_recording=False))
+    _set_up_edge(client)
+    assert _camera_live(client) == {printer: True, other: False}
+
+
+def test_printers_now_marks_no_printer_live_without_an_edge(
+    client: TestClient, printer: str
+) -> None:
+    assert _camera_live(client) == {printer: False}

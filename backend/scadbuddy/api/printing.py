@@ -119,6 +119,7 @@ from scadbuddy.bambuddy.printers_now import (
     printers_now,
     printing_items,
     with_archive_pages,
+    with_camera_live,
     with_lan_runs,
     with_scadbuddy_jobs,
 )
@@ -150,6 +151,7 @@ from scadbuddy.bambuddy.runs import (
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.trays import seen_trays, tray_label
+from scadbuddy.camera.store import CameraStore
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import (
     DATABASE_ERRORS,
@@ -811,6 +813,7 @@ async def post_tray_spool(
     ),
 )
 async def get_printers_now(
+    state: StateDep,
     store: SettingsStoreDep,
     links: PrintLinksDep,
     printers: PrintersDep,
@@ -843,7 +846,22 @@ async def get_printers_now(
             if needs_archive_pages(cards):
                 cards = with_archive_pages(cards, client, await cache.version(client))
     cards = with_scadbuddy_jobs(cards, await _scadbuddy_jobs(links, cards, printing), printing)
-    return with_lan_runs(cards, await _lan_controls(runs, cards))
+    cards = with_lan_runs(cards, await _lan_controls(runs, cards))
+    if not state.settings.camera_edge_ready():
+        return cards
+    return with_camera_live(cards, await _recorded_cameras(printers))
+
+
+async def _recorded_cameras(printers: Printers) -> frozenset[str]:
+    """The recorded printers (#7330), in one read; none when it fails, so a database blip
+    costs the live view, never the strip."""
+    camera = CameraStore(printers.store.pool, printers.store)
+    try:
+        sources = await asyncio.to_thread(camera.sources)
+    except DATABASE_ERRORS:
+        logger.warning("camera sources unreadable; the strip offers no live view")
+        return frozenset()
+    return frozenset(source.printer_id for source in sources)
 
 
 async def _scadbuddy_jobs(
