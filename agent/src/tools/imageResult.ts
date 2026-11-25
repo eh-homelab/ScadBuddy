@@ -32,6 +32,9 @@ export async function imageOrRef(bytes: Uint8Array, declaredType: string, ctx: T
   // An SVG is text the model reads, as it always was here.
   if (declaredType === 'image/svg+xml') return { content: [{ type: 'text', text: Buffer.from(bytes).toString('utf8') }] }
   const type = sniffImage(bytes)
+  if (type === undefined && !declaredType.startsWith('image/')) {
+    return json({ viewable: false, media_type: declaredType, size_bytes: bytes.byteLength, note: `A ${declaredType} file, not an image.` })
+  }
   if (type === undefined) {
     return json({
       viewable: false,

@@ -68,6 +68,13 @@ describe('imageOrRef', () => {
     expect(answer.note).toMatch(/too large for you to view/)
   })
 
+  it('says a file that is not an image is not one', async () => {
+    const { ctx: c } = ctx(1000)
+    const answer = firstText(await imageOrRef(Buffer.from('solid x'), 'model/stl', c, REF)) as { note: string }
+    expect(answer).toMatchObject({ viewable: false, media_type: 'model/stl' })
+    expect(answer.note).toBe('A model/stl file, not an image.')
+  })
+
   it('answers a HEIC photo as a note, an SVG as its text', async () => {
     const { ctx: c } = ctx()
     expect(firstText(await imageOrRef(Buffer.from('....ftypheic'), 'image/heic', c, REF))).toMatchObject({ viewable: false, media_type: 'image/heic' })

@@ -129,6 +129,7 @@ export function registerImageSettingsRoutes(app: Hono, deps: ImageSettingsRouteD
       return c.json({ detail }, 400)
     }
     const by = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
+    // Two independent settings, so two writes: when the second fails the first stays saved.
     if (body.long_edge !== undefined) await settings.set(SETTING_IMAGE_LONG_EDGE, body.long_edge, by)
     if (body.tool_inline_max_bytes !== undefined) await settings.set(SETTING_TOOL_IMAGE_INLINE_MAX, body.tool_inline_max_bytes, by)
     return c.json(await stored(settings))

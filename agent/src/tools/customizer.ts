@@ -784,4 +784,3 @@ export function plainFetchUrl(url: string): boolean {
   }
 }
 
-/** MCP image content is raster; an SVG is more useful to a model as its text. */

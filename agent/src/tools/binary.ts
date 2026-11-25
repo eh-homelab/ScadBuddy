@@ -4,7 +4,9 @@ import { IMAGE_READ_MAX } from './imageLimits.js'
 import { imageOrRef } from './imageResult.js'
 import { json, type ToolContext, type ToolServices } from './registry.js'
 
-// Binary tool results (3MF, GLB, PNG/SVG): inline when small, a LINK when not.
+// Binary tool results (3MF, GLB, MP4, library and sliced files): inline when small, a
+// LINK when not. Images go through `binaryImage` below and tools/imageResult.ts
+// (#7745): inline, a workspace file or a note, never a link.
 //
 // A tool result travels as one JSON-RPC message, base64-inflated by a third,
 // so inlining has a cap (`ToolServices.maxInlineBytes`, 8 MiB by default).

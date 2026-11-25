@@ -189,6 +189,27 @@ describe('/mcp resources (#264)', () => {
     expect(isPreamble((contents[0] as { text: string }).text)).toBe(true)
   })
 
+  it('reads a thumbnail over the assistant\'s inline limit whole, and one too large for an image as a JSON note (#7745)', async () => {
+    const sized = (n: number) => {
+      const bytes = new Uint8Array(n)
+      bytes.set(PNG)
+      return bytes
+    }
+    const big = sized(600 * 1024)
+    backend.use(http.get(`${BACKEND}/api/v1/models/:slug/thumbnail`, () => HttpResponse.arrayBuffer(big.buffer, { headers: { 'content-type': 'image/png' } })))
+    const { client } = await setup()
+    const whole = await client.readResource({ uri: 'scadbuddy://models/keychain/thumbnail' })
+    expect(whole.contents[1]).toMatchObject({ mimeType: 'image/png', blob: Buffer.from(big).toString('base64') })
+
+    const huge = sized(4 * 1024 * 1024)
+    backend.use(http.get(`${BACKEND}/api/v1/models/:slug/thumbnail`, () => HttpResponse.arrayBuffer(huge.buffer, { headers: { 'content-type': 'image/png' } })))
+    const note = await client.readResource({ uri: 'scadbuddy://models/keychain/thumbnail' })
+    const body = note.contents.find((c) => !('blob' in c) && !isPreamble((c as { text: string }).text)) as { mimeType: string; text: string }
+    expect(body.mimeType).toBe('application/json')
+    expect(body.text).toMatch(/inline.{0,6}false/)
+    expect(note.contents.some((c) => 'blob' in c)).toBe(false)
+  })
+
   it('answers -32002 for an unknown URI and for a backend 404', async () => {
     const { client } = await setup()
     await expect(client.readResource({ uri: 'scadbuddy://nothing' })).rejects.toMatchObject({ code: -32002 })
