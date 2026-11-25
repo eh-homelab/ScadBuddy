@@ -286,6 +286,10 @@ async def test_a_filament_page_with_no_add_button_logs_that_nothing_was_added(
     await browser.page.route("**/filament/details/*", no_button)
     await browser.ensure_in_my_spools(30173)
     assert replica.site.adds == []
+    # The replica answers the record check with 200 and no export button, so the check
+    # takes the timeout branch, not the 404 branch.
+    assert "the My Spools record check for 3DFP filament 30173 timed out" in caplog.text
+    assert "has no My Spools record (404)" not in caplog.text
     assert '3DFP filament 30173\'s page offered no "Add to My Spools" button' in caplog.text
     assert "added 3DFP filament 30173 to My Spools" not in caplog.text
 
