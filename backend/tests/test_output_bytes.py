@@ -15,7 +15,12 @@ from typing import Any
 import pytest
 
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputFileNameError, usable
-from scadbuddy.library.output_rows import OutputFileBlob, output_blob_key, output_file_key
+from scadbuddy.library.output_rows import (
+    OutputBlobs,
+    OutputFileBlob,
+    output_blob_key,
+    output_file_key,
+)
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef, ContentStore
 from scadbuddy.store.index import BlobIndex, Pool
@@ -66,6 +71,11 @@ def _folder(root: Path, *, preview: bool = True, thumbnail: bool = True) -> Path
     return root
 
 
+def _staged(got: OutputBlobs) -> dict[str, str]:
+    """Each of the output's keys and the staged key its bytes went under."""
+    return {item.key: item.staged_key for item in got.staged}
+
+
 def _spooled(content: ContentStore) -> list[Path]:
     return list(content.spool.iterdir()) if content.spool.exists() else []
 
@@ -78,20 +88,30 @@ async def test_put_folder_puts_every_role_and_file(
     assert got.preview == output_blob_key("o1", "preview")
     assert got.thumbnail == output_blob_key("o1", "thumbnail")
     assert got.files == (
-        OutputFileBlob(name="a.stl", blob_key=output_file_key("o1", 0), size=1),
-        OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", 1), size=2),
+        OutputFileBlob(name="a.stl", blob_key=output_file_key("o1", "a.stl"), size=1),
+        OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", "b.stl"), size=2),
     )
-    assert await blobs.read(output_blob_key("o1", "model")) == b"3mf"
-    assert await blobs.read(output_file_key("o1", 1)) == b"bb"
-    ref = blobs.ref(output_blob_key("o1", "preview"))
+    staged = _staged(got)
+    assert list(staged) == got.keys()
+    # The bytes went under the save's own keys; the output's keys stay unwritten until
+    # the row's transaction (`OutputRows.insert`).
+    keys = got.keys()
+    assert all(blobs.ref(key) is None for key in keys)
+    assert await blobs.read(staged[output_blob_key("o1", "model")]) == b"3mf"
+    assert await blobs.read(staged[output_file_key("o1", "b.stl")]) == b"bb"
+    ref = blobs.ref(staged[output_blob_key("o1", "preview")])
     assert ref is not None and ref.kind == "output"
     assert ref.sha256 == hashlib.sha256(b"glb").hexdigest()
-    stat = await content.stat(output_blob_key("o1", "preview"))
+    assert ref in [item.ref for item in got.staged]
+    stat = await content.stat(staged[output_blob_key("o1", "preview")])
     assert stat is not None and stat.slug == "cube"
+    # Another call stages under keys of its own.
+    again = await blobs.put_folder(_folder(tmp_path / "o1b"), "o1", "cube")
+    assert set(_staged(again).values()).isdisjoint(staged.values())
     # No thumbnail: no thumbnail blob.
     bare = await blobs.put_folder(_folder(tmp_path / "o2", thumbnail=False), "o2", "cube")
     assert bare.thumbnail is None
-    assert blobs.ref(output_blob_key("o2", "thumbnail")) is None
+    assert output_blob_key("o2", "thumbnail") not in _staged(bare)
 
 
 async def test_put_folder_without_preview_raises(
@@ -207,13 +227,13 @@ async def test_put_folder_on_s3_reads_its_files_off_the_loop(
     reads = record_reads(monkeypatch, folder)
     blobs = OutputBytes(content)
     try:
-        await blobs.put_folder(folder, "o1", "cube")
+        staged = _staged(await blobs.put_folder(folder, "o1", "cube"))
         monkeypatch.undo()
         # The model is past the threshold, so it went up in parts; the rest whole.
         assert len(parts) == 1
-        assert await blobs.read(output_blob_key("o1", "model")) == big
-        assert await blobs.read(output_blob_key("o1", "preview")) == b"glb"
-        assert await blobs.read(output_file_key("o1", 1)) == b"bb"
+        assert await blobs.read(staged[output_blob_key("o1", "model")]) == big
+        assert await blobs.read(staged[output_blob_key("o1", "preview")]) == b"glb"
+        assert await blobs.read(staged[output_file_key("o1", "b.stl")]) == b"bb"
     finally:
         await content.aclose()
     assert reads

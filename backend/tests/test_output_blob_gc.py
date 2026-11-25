@@ -17,6 +17,7 @@ from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
     OutputRows,
+    output_file_key,
     plate_cover_prefix,
 )
 from scadbuddy.library.outputs import (
@@ -140,7 +141,7 @@ async def test_deleted_output_blobs_go_after_grace(
     keys = _keys(pool, meta.id)
     assert any(key.startswith(plate_cover_prefix(meta.id)) for key in keys)
     assert any(key.startswith(f"output-{meta.id}-thumbnail-") for key in keys)
-    assert {f"output-{meta.id}-model", f"output-{meta.id}-file-0"} <= keys.keys()
+    assert {f"output-{meta.id}-model", output_file_key(meta.id, "a.stl")} <= keys.keys()
     store.delete(meta.id)
     assert _holds(pool, meta.id) == set()
     with pool.connection() as conn:
@@ -207,12 +208,20 @@ async def test_failed_save_blobs_are_swept(
     def failing(*args: Any, **kwargs: Any) -> Any:
         raise OSError("the commit failed")
 
-    monkeypatch.setattr(store, "commit", failing)
+    async def no_delete(key: str) -> None:
+        raise OSError("the store went away")
+
+    # The failed save deletes its own blobs at once; when that fails too, the sweep
+    # removes them.
+    monkeypatch.setattr(store, "_commit", failing)
+    monkeypatch.setattr(content, "delete", no_delete)
     output_id = "e" * 32
     with pytest.raises(OSError, match="the commit failed"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
+    monkeypatch.undo()
     keys = _keys(pool, output_id)
-    assert f"output-{output_id}-model" in keys
+    assert any(key.startswith(f"output-{output_id}-model-save-") for key in keys)
+    assert f"output-{output_id}-model" not in keys
     assert _holds(pool, output_id) == set()
     await sweep_content(content, BlobRefs(pool), grace=0)
     assert _keys(pool, output_id) == {}

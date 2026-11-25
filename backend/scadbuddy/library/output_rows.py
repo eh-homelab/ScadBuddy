@@ -15,6 +15,7 @@ It is synchronous, like `OutputIndex`: callers on the loop use a thread. It impo
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
@@ -57,6 +58,15 @@ def staged_thumbnail_key(output_id: str, sha256: str) -> str:
     return f"output-{output_id}-thumbnail-{sha256}"
 
 
+def staged_save_key(key: str, attempt: str) -> str:
+    """The key a save puts the bytes of ``key`` under before its row's transaction points
+    ``key`` at them (`OutputBlobs.staged`). ``attempt`` is the save's own, so a save that
+    fails on the id writes no key the output it lost to reads. Nothing holds it: the save
+    deletes it once its row committed or failed, else the sweep removes it after the
+    grace."""
+    return f"{key}-save-{attempt}"
+
+
 def plate_cover_prefix(output_id: str) -> str:
     """What every key of the output's plate cover starts with (`plate_cover_key`)."""
     return f"output-{output_id}-plate_cover-"
@@ -90,10 +100,12 @@ def lock_thumbnail(conn: Connection[DictRow], output_id: str) -> None:
     )
 
 
-def output_file_key(output_id: str, n: int) -> str:
-    """The blob key of the output's ``files/`` entry ``n``: the 0-based index of its name
-    in the sorted names (spec §4.3)."""
-    return f"output-{output_id}-file-{n}"
+def output_file_key(output_id: str, name: str) -> str:
+    """The blob key of the output's ``files/`` entry ``name``: a hash of the name (spec
+    §4.3), so a name added or gone never moves the key of another name, and a reader of
+    an older ``output_files`` row never gets another file's bytes (#7478 review)."""
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:32]
+    return f"output-{output_id}-file-{digest}"
 
 
 @dataclass(frozen=True)
@@ -104,6 +116,16 @@ class OutputFileBlob:
 
 
 @dataclass(frozen=True)
+class StagedBlob:
+    """A save's put: the object ``ref``, put under ``staged_key`` (`staged_save_key`),
+    that the output's ``key`` takes in the row's transaction."""
+
+    key: str
+    staged_key: str
+    ref: BlobRef
+
+
+@dataclass(frozen=True)
 class OutputBlobs:
     """The blob keys of an output's bytes. ``None``: the role has no blob yet."""
 
@@ -111,6 +133,10 @@ class OutputBlobs:
     preview: str | None = None
     thumbnail: str | None = None
     files: tuple[OutputFileBlob, ...] = ()
+    #: A save's puts (`OutputBytes.put_folder`). Each key takes its object only in the
+    #: transaction that writes the row (`OutputRows.insert`), after the row's insert, so
+    #: a save that fails on the id never changes the bytes of the output that holds it.
+    staged: tuple[StagedBlob, ...] = ()
 
     def keys(self) -> list[str]:
         """Every key, the roles first, then the files in their order."""
@@ -401,7 +427,9 @@ class _FileThereError(Exception):
     """A drawn thumbnail's file write found a file there: its step rolls back."""
 
 
-def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
+def _insert(
+    conn: Connection[DictRow], pool: ConnectionPool[Connection[DictRow]], row: OutputRow
+) -> list[tuple[str, BlobRef]]:
     blobs = row.blobs
     values = (
         *_values(row),
@@ -414,6 +442,16 @@ def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
         # Another row holds the id: the plain insert raises its `UniqueViolation`. (If
         # that row went meanwhile, the insert adds the save's row.)
         conn.execute(_INSERT, values)
+    # Only now, with the row the save's, do its keys take the objects it put. A key
+    # named another object before (the copy's put of the same folder) is released by the
+    # caller after the commit. `ReuseLostError`: a staged object was freed first, and the
+    # save fails.
+    replaced: list[tuple[str, BlobRef]] = []
+    index = BlobIndex(pool)
+    for staged in blobs.staged:
+        previous = index.put_in(conn, staged.key, staged.ref, slug=row.slug, meta={}, reuse=True)
+        if previous is not None and previous.backend_id != staged.ref.backend_id:
+            replaced.append((staged.key, previous))
     # A row the save took over from the copy keeps nothing of the copy's bytes: its
     # files, derived rows and byte holds go. A new row has none of them.
     conn.execute("DELETE FROM output_files WHERE output_id = %s", (row.output_id,))
@@ -421,6 +459,7 @@ def _insert(conn: Connection[DictRow], row: OutputRow) -> None:
     _release_bytes(conn, [row.output_id])
     _write_files(conn, row.output_id, blobs.files)
     _hold_keys(conn, row.output_id, blobs.keys())
+    return replaced
 
 
 def _swap_thumbnail(
@@ -567,16 +606,21 @@ class OutputRows:
             ).fetchall()
         return [_row(item) for item in found]
 
-    def insert(self, row: OutputRow, conn: Connection[DictRow] | None = None) -> None:
+    def insert(
+        self, row: OutputRow, conn: Connection[DictRow] | None = None
+    ) -> list[tuple[str, BlobRef]]:
         """Add a save's row, with its blob keys, its ``output_files`` rows and a hold of
-        each key. It takes over a row the copy wrote of the same slug, also one the copy
+        each key; each key takes its staged object (`OutputBlobs.staged`) after the row's
+        insert. It takes over a row the copy wrote of the same slug, also one the copy
         has not committed yet; any other row with that id is a `UniqueViolation`, and
-        then nothing is written. With ``conn``, inside its transaction."""
+        then nothing is written and no key moves. With ``conn``, inside its transaction.
+
+        Returns each key that named another object before and that object, which the
+        caller releases after the commit (`OutputBytes.release_replaced`)."""
         if conn is not None:
-            _insert(conn, row)
-            return
+            return _insert(conn, self._pool, row)
         with self._pool.connection() as own, own.transaction():
-            _insert(own, row)
+            return _insert(own, self._pool, row)
 
     def drop_copied(self, output_id: str, slug: str) -> None:
         """Delete the row the copy wrote of the folder ``<slug>/<output_id>``, and its byte

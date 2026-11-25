@@ -5,7 +5,9 @@ It lives apart from `api/outputs.py` because `bambuddy/download.py` uses it too,
 `api/outputs.py` imports that module; `api/outputs.py` re-exports it.
 
 A conditional GET gets its ``304`` (#7256): a blob's strong ``ETag`` is its sha256,
-which `blob_not_modified` compares from the index before any byte of the blob is read; a
+which `blob_not_modified` compares from the index before any byte of the blob is read,
+once the backend says it holds the object (`OutputBytes.held_sha`: a lost blob's file
+serves, with its own tag); a
 file's weak ``ETag`` is from its size and mtime, read on the descriptor that serves it
 (`stream_response`). A request whose ``v`` names the bytes' current version
 (`OutputStream.version`) is cached for good (`IMMUTABLE_CACHE_CONTROL`).

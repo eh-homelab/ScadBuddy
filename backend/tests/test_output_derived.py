@@ -36,6 +36,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
+from tests.support.output_blobs import put_folder_at_keys
 from tests.support.saved_outputs import save_files
 from tests.support.store import local_content, store_pool
 
@@ -80,7 +81,7 @@ async def _copied(
     store.rows = OutputRows(projection.pool)
     store.bytes = OutputBytes(content)
     meta = save_files(store, job, name="first")
-    blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
+    blobs = await put_folder_at_keys(store.bytes, store.directory(meta.id), meta.id, meta.slug)
     store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
     return store, meta
 
@@ -227,7 +228,7 @@ async def test_plate_cover_from_model_blob(
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
     run = rows.start_run()
     rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
-    blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
+    blobs = await put_folder_at_keys(store.bytes, directory, meta.id, meta.slug)
     rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
     (directory / MODEL_NAME).unlink()
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
@@ -276,7 +277,7 @@ async def _covered(
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
     run = rows.start_run()
     rows.finish_run(run, copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
-    blobs = await store.bytes.put_folder(directory, meta.id, meta.slug)
+    blobs = await put_folder_at_keys(store.bytes, directory, meta.id, meta.slug)
     rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
     (directory / MODEL_NAME).unlink()
     return store, meta

@@ -1347,7 +1347,7 @@ async def download_output(
 ) -> Response:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if_none_match = request.headers.get("if-none-match")
-    sha256 = await asyncio.to_thread(outputs.blob_sha, output_id, "model")
+    sha256 = await outputs.blob_sha(output_id, "model")
     if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
         return unchanged
     stream = await outputs.open_role(output_id, "model")
@@ -1390,7 +1390,7 @@ async def get_output_preview(
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         return Response(data, media_type=GLB_MEDIA_TYPE)
     if_none_match = request.headers.get("if-none-match")
-    sha256 = await asyncio.to_thread(outputs.blob_sha, output_id, "preview")
+    sha256 = await outputs.blob_sha(output_id, "preview")
     if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match, v=v)) is not None:
         return unchanged
     stream = await outputs.open_role(output_id, "preview")
@@ -1411,7 +1411,7 @@ async def output_file(
 ) -> Response:
     """An extra file a pipeline wrote (§10): served as a download, never as a page."""
     if_none_match = request.headers.get("if-none-match")
-    sha256 = await asyncio.to_thread(outputs.file_blob_sha, output_id, name)
+    sha256 = await outputs.file_blob_sha(output_id, name)
     if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
         return unchanged
     try:
@@ -1449,7 +1449,7 @@ async def get_output_thumbnail(
 ) -> Response:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if_none_match = request.headers.get("if-none-match")
-    sha256 = await asyncio.to_thread(outputs.blob_sha, output_id, "thumbnail")
+    sha256 = await outputs.blob_sha(output_id, "thumbnail")
     if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match, v=v)) is not None:
         return unchanged
     stream = await outputs.open_role(output_id, "thumbnail")

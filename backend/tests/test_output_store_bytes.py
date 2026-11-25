@@ -16,7 +16,7 @@ from typing import Any, BinaryIO
 
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
-from psycopg.errors import DeadlockDetected
+from psycopg.errors import DeadlockDetected, UniqueViolation
 
 import scadbuddy.library.outputs as outputs_module
 from scadbuddy.api.outputs import _listed
@@ -47,6 +47,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import StoreFullError
 from scadbuddy.store.index import BlobIndex, Pool
 from tests.support.arrange import finished_job
+from tests.support.output_blobs import put_folder_at_keys
 from tests.support.saved_outputs import save_files
 from tests.support.store import flip_first_byte, local_content, store_pool
 
@@ -98,7 +99,7 @@ async def _saved(
 async def _copy_bytes(store: OutputStore, meta: OutputMeta) -> None:
     """What the byte copy does: put the folder, then name the blobs in the row."""
     assert store.bytes is not None and store.rows is not None
-    blobs = await store.bytes.put_folder(store.directory(meta.id), meta.id, meta.slug)
+    blobs = await put_folder_at_keys(store.bytes, store.directory(meta.id), meta.id, meta.slug)
     store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
 
 
@@ -178,7 +179,7 @@ async def test_open_file_falls_back_when_blob_missing(
     copied: tuple[OutputStore, OutputMeta], content: ContentStore
 ) -> None:
     store, meta = copied
-    found = await content.stat(output_file_key(meta.id, 0))
+    found = await content.stat(output_file_key(meta.id, "a.stl"))
     assert found is not None
     await content.backend.remove(found.ref.backend_id)
     (store.directory(meta.id) / FILES_DIR / "a.stl").write_bytes(b"file stl")
@@ -622,8 +623,8 @@ async def test_save_row_names_every_blob_and_holds_it(
     assert row.blobs.thumbnail is None
     listed = store.rows.files(meta.id)
     assert [(item.name, item.blob_key) for item in listed] == [
-        ("a.stl", output_file_key(meta.id, 0)),
-        ("b.stl", output_file_key(meta.id, 1)),
+        ("a.stl", output_file_key(meta.id, "a.stl")),
+        ("b.stl", output_file_key(meta.id, "b.stl")),
     ]
     keys = {row.blobs.model, row.blobs.preview, *(item.blob_key for item in listed)}
     assert _holds(pool, meta.id) == keys
@@ -631,7 +632,7 @@ async def test_save_row_names_every_blob_and_holds_it(
     for key, name in (
         (row.blobs.model, MODEL_NAME),
         (row.blobs.preview, PREVIEW_NAME),
-        (output_file_key(meta.id, 1), f"{FILES_DIR}/b.stl"),
+        (output_file_key(meta.id, "b.stl"), f"{FILES_DIR}/b.stl"),
     ):
         assert key is not None
         assert await store.bytes.read(key) == (directory / name).read_bytes()  # type: ignore[union-attr]
@@ -678,6 +679,41 @@ async def test_save_put_failure_removes_folder_and_row(
     assert not paths.output_dir(job.slug, output_id).exists()
     assert store.rows is not None and store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
+    # The first put went under the save's own key, and the failed save deleted it.
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
+        ).fetchall()
+    assert found == []
+
+
+async def test_a_save_that_loses_on_the_id_keeps_the_outputs_bytes(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    """A second save of an id an output of another model holds (a quote's uuid5 id,
+    `orders/quote.py`) fails on the row, and the output keeps its own bytes: its keys
+    take the save's objects only in the row's transaction (#7478 review)."""
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    output_id = "c" * 32
+    await store.save(job, name="first", files_dir=files, output_id=output_id)
+    model = await store.model_3mf(output_id)
+    keys = _holds(pool, output_id)
+    before = {key: await content.stat(key) for key in keys}
+    other = job.model_copy(update={"slug": "other"})
+    with pytest.raises(UniqueViolation):
+        await store.save(other, name="second", files_dir=files, output_id=output_id)
+    assert not paths.output_dir("other", output_id).exists()
+    assert store.directory(output_id) == paths.output_dir(job.slug, output_id)
+    assert await store.model_3mf(output_id) == model
+    assert _holds(pool, output_id) == keys
+    assert {key: await content.stat(key) for key in keys} == before
+    # The losing save's own blobs went with it; only the output's keys are left.
+    with pool.connection() as conn:
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
+        ).fetchall()
+    assert {str(row["key"]) for row in found} == keys
 
 
 async def test_put_thumbnail_puts_blob_then_file(
@@ -1006,18 +1042,13 @@ async def test_save_commit_failure_after_puts_discards_folder_and_row(
     assert not paths.output_dir(job.slug, output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
-    # The blobs were put, and nothing holds them: the content sweep takes them.
-    keys = [
-        output_blob_key(output_id, "model"),
-        output_blob_key(output_id, "preview"),
-        output_file_key(output_id, 0),
-        output_file_key(output_id, 1),
-    ]
-    for key in keys:
-        assert await content.stat(key) is not None
+    # The blobs were put under the save's own keys, and the failed save deleted them;
+    # the output's keys never named them.
     with pool.connection() as conn:
-        held = conn.execute("SELECT key FROM blob_refs WHERE key = ANY(%s)", (keys,)).fetchall()
-    assert held == []
+        found = conn.execute(
+            "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
+        ).fetchall()
+    assert found == []
 
 
 async def test_a_listing_reads_its_versions_in_one_query(

@@ -536,7 +536,7 @@ async def variant_preview_route(
     before any byte is read (`blob_not_modified`), as the outputs' own routes answer."""
     output_id = await variant_output(state, variant_key)
     if_none_match = request.headers.get("if-none-match")
-    sha256 = await asyncio.to_thread(state.outputs.blob_sha, output_id, "preview")
+    sha256 = await state.outputs.blob_sha(output_id, "preview")
     if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
         return unchanged
     stream = await state.outputs.open_role(output_id, "preview")

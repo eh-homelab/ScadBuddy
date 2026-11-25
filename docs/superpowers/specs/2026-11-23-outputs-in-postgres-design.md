@@ -128,7 +128,8 @@ Anti-goals (a failure even if it works)
 ### 4.3 Blobs
 
 - A new `BlobKind` `output` (`store/content_models.py`). Key
-  `output-<output_id>-<role>` (and `output-<output_id>-file-<n>` for `files/`).
+  `output-<output_id>-<role>` (and `output-<output_id>-file-<hash>` for `files/`: the
+  first 32 hex digits of the name's sha256, so a name added or gone moves no other key).
 - Each output holds its blobs in `blob_refs` as `(OUTPUT_HOLDER, output_id)`, the same
   holder its manifest parts already use (`hold_parts`). Delete releases them. The
   sweep removes unheld blobs only for kinds in `SWEPT_KINDS`
@@ -175,11 +176,14 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    bytes or the temporary-file helper. The copy also uploads existing
    outputs' bytes and checks each 3MF's sha256 against the file.
 
-   As built (#7256): a save writes the folder, puts its bytes, then inserts the row,
-   its `output_files` rows and its `blob_refs` holds in one transaction; a put into a
-   full store is a 507 and leaves no folder, row or hold. The keys are
-   `output-<id>-<role>` and `output-<id>-file-<n>` (`n` the index of the name in the
-   sorted `files/`), held by `(output, <id>)`. A thumbnail upload puts its blob first,
+   As built (#7256): a save writes the folder, puts its bytes under keys of its own
+   (`<key>-save-<attempt>`), then inserts the row, points the output's keys at those
+   objects, and writes its `output_files` rows and its `blob_refs` holds, in one
+   transaction; then it deletes its staged keys. A save that fails on the row (an id
+   another output holds) moved no key of that output, so it keeps its bytes (#7478
+   review). A put into a full store is a 507 and leaves no folder, row or hold. The keys
+   are `output-<id>-<role>` and `output-<id>-file-<hash>` (the first 32 hex digits of the
+   name's sha256), held by `(output, <id>)`. A thumbnail upload puts its blob first,
    under `output-<id>-thumbnail-<sha256>`, then names it under a Postgres advisory lock
    per output. Readers read the blob first and the file when the row names none or the
    blob is lost (`library/outputs.py` `read_role`); a reader that needs a path gets a

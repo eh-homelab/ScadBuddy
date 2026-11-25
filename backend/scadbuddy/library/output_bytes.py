@@ -4,7 +4,9 @@ outputs-in-Postgres spec 2026-11-23 §4.3).
 It wraps the API's `ContentStore`: keyed puts, a compare-and-swap for the byte copy,
 streamed reads, and a temporary file for a reader that needs a path. The keys are
 `output_rows.output_blob_key` and `output_file_key`; the row and its holds are
-`OutputRows`' to write. The temporary files go under ``content.spool``
+`OutputRows`' to write. A save puts its bytes under keys of its own
+(`output_rows.staged_save_key`), and the output's keys take them only in the row's
+transaction (`OutputBlobs.staged`). The temporary files go under ``content.spool``
 (``SCADBUDDY_SPOOL_DIR``, else the data volume's ``cache/blob-spool``, #7316), and are
 removed when the reader is done, error or not.
 
@@ -18,9 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 import re
 import tempfile
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, aclosing
 from dataclasses import dataclass, field
@@ -35,8 +39,10 @@ from botocore.exceptions import ConnectionError as BotoConnectionError
 from scadbuddy.library.output_rows import (
     OutputBlobs,
     OutputFileBlob,
+    StagedBlob,
     output_blob_key,
     output_file_key,
+    staged_save_key,
 )
 from scadbuddy.render.job_models import FILE_NAME_PATTERN
 from scadbuddy.store.content import BlobData, BlobMissingError, BlobRef, BlobScope, ContentStore
@@ -46,6 +52,8 @@ MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
 FILES_DIR = "files"
+
+logger = logging.getLogger(__name__)
 
 
 class OutputFileNameError(ValueError):
@@ -307,29 +315,67 @@ class OutputBytes:
         )
 
     async def put_folder(self, directory: Path, output_id: str, slug: str) -> OutputBlobs:
-        """Put the folder's bytes, a file at a time and never read whole: ``model.3mf``
-        and ``preview.glb``, ``thumbnail.png`` when there, and every ``files/`` entry.
-        Before any put: `FileNotFoundError` when ``model.3mf`` or ``preview.glb`` is
-        missing, and `OutputFileNameError` when a ``files/`` entry is not a regular file
-        or has a name an output may not hold."""
+        """Put the folder's bytes for a save, a file at a time and never read whole:
+        ``model.3mf`` and ``preview.glb``, ``thumbnail.png`` when there, and every
+        ``files/`` entry. Each goes under a key of this call's own (`staged_save_key`),
+        never under the output's key: the result names the output's keys and, in
+        ``staged``, the object each takes when `OutputRows.insert` writes the row. So a
+        save that fails on the id changes no blob of the output that holds it (#7478
+        review). Before any put: `FileNotFoundError` when ``model.3mf`` or
+        ``preview.glb`` is missing, and `OutputFileNameError` when a ``files/`` entry is
+        not a regular file or has a name an output may not hold."""
         for name in (MODEL_NAME, PREVIEW_NAME):
             if not await asyncio.to_thread((directory / name).is_file):
                 raise FileNotFoundError(directory / name)
         names = await asyncio.to_thread(put_names, directory)
+        attempt = uuid.uuid4().hex
+        staged: list[StagedBlob] = []
+
+        async def stage(key: str, path: Path) -> BlobRef:
+            staged_key = staged_save_key(key, attempt)
+            ref = await self._put_file(staged_key, path, slug)
+            staged.append(StagedBlob(key, staged_key, ref))
+            return ref
+
         model = output_blob_key(output_id, "model")
         preview = output_blob_key(output_id, "preview")
-        await self._put_file(model, directory / MODEL_NAME, slug)
-        await self._put_file(preview, directory / PREVIEW_NAME, slug)
-        thumbnail: str | None = None
-        if await asyncio.to_thread((directory / THUMBNAIL_NAME).is_file):
-            thumbnail = output_blob_key(output_id, "thumbnail")
-            await self._put_file(thumbnail, directory / THUMBNAIL_NAME, slug)
-        files: list[OutputFileBlob] = []
-        for n, name in enumerate(names):
-            key = output_file_key(output_id, n)
-            ref = await self._put_file(key, directory / FILES_DIR / name, slug)
-            files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
-        return OutputBlobs(model=model, preview=preview, thumbnail=thumbnail, files=tuple(files))
+        try:
+            await stage(model, directory / MODEL_NAME)
+            await stage(preview, directory / PREVIEW_NAME)
+            thumbnail: str | None = None
+            if await asyncio.to_thread((directory / THUMBNAIL_NAME).is_file):
+                thumbnail = output_blob_key(output_id, "thumbnail")
+                await stage(thumbnail, directory / THUMBNAIL_NAME)
+            files: list[OutputFileBlob] = []
+            for name in names:
+                key = output_file_key(output_id, name)
+                ref = await stage(key, directory / FILES_DIR / name)
+                files.append(OutputFileBlob(name=name, blob_key=key, size=ref.size))
+        except Exception:
+            await self.drop_staged(OutputBlobs(staged=tuple(staged)))
+            raise
+        return OutputBlobs(
+            model=model,
+            preview=preview,
+            thumbnail=thumbnail,
+            files=tuple(files),
+            staged=tuple(staged),
+        )
+
+    async def drop_staged(self, blobs: OutputBlobs) -> None:
+        """Delete a save's staged keys (`put_folder`), and each object no other key names:
+        after a failed save, its objects; after a commit, only the keys, as the output's
+        keys name the objects. A failed delete is logged, and the sweep removes the key
+        after the grace."""
+        for staged in blobs.staged:
+            try:
+                await self.content.delete(staged.staged_key)
+            except Exception:
+                logger.warning(
+                    "could not delete a failed save's blob",
+                    extra={"key": staged.staged_key},
+                    exc_info=True,
+                )
 
     async def release_replaced(self, key: str, previous: BlobRef) -> None:
         """Release the object ``key`` named before it took another one, as a put that
@@ -383,6 +429,21 @@ class OutputBytes:
 
     async def read(self, key: str) -> bytes:
         return await self.content.read(await self._ref(key))
+
+    async def held_sha(self, key: str) -> str | None:
+        """The sha256 of the blob ``key`` names, only while the backend holds its object:
+        a conditional GET's tag, checked with no read of the bytes. ``None`` when no blob,
+        when the store lost it, or when the check failed: a reader then reads the file,
+        whose own tag decides (#7478 review)."""
+        ref = await asyncio.to_thread(self.ref, key)
+        if ref is None or ref.backend != self.content.name:
+            return None
+        try:
+            held = await self.content.backend.exists(ref.backend_id)
+        except Exception:
+            logger.warning("could not check an output blob", extra={"key": key}, exc_info=True)
+            return None
+        return ref.sha256 if held else None
 
     async def verify(self, key: str) -> bool:
         """Whether the backend holds the blob whole (`ContentStore.verify`)."""

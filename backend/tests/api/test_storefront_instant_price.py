@@ -44,6 +44,7 @@ from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     render_until_done,
     sliced,
 )
+from tests.support.output_blobs import put_folder_at_keys
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -177,7 +178,9 @@ def test_variant_preview_streams_blob(
             glb = (directory / PREVIEW_NAME).read_bytes()
             portal = crud.api.portal
             assert portal is not None
-            blobs = portal.call(outputs.bytes.put_folder, directory, output_id, listing["slug"])
+            blobs = portal.call(
+                put_folder_at_keys, outputs.bytes, directory, output_id, listing["slug"]
+            )
             assert outputs.rows is not None
             outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
             (directory / PREVIEW_NAME).unlink()

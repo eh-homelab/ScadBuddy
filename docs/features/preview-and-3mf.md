@@ -37,7 +37,7 @@ printing is the print dialog's job.
 - Tables: `render_jobs`, `blob_refs`, `piece_geometry`, `outputs` (each output's record,
   #7255), `output_files` and `output_derived` (#7256), and `output_index` (until #7257).
 - Blob keys: a piece's key (64-hex), `output-<job>-<i>`; a saved output's bytes,
-  `output-<id>-<role>` and `output-<id>-file-<n>`, kind `output` (#7256; the folder
+  `output-<id>-<role>` and `output-<id>-file-<hash>`, kind `output` (#7256; the folder
   under `data/outputs/` stays the fallback until #7257)
   ([data.md](../architecture/data.md#keys-and-content-addressing)).
 

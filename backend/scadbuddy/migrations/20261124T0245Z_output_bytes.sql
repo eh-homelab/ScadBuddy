@@ -1,7 +1,7 @@
 -- Saved outputs' bytes in the blob store (#7256, outputs-in-Postgres spec 2026-11-23
 -- §4.2, §4.3). Each byte role of an output (`model.3mf`, `preview.glb`,
 -- `thumbnail.png`) is a blob of kind `output`, keyed `output-<output_id>-<role>`, and
--- each file under `files/` is one keyed `output-<output_id>-file-<n>`. The row holds the
+-- each file under `files/` is one keyed `output-<output_id>-file-<hash>`. The row holds the
 -- keys; `blob_refs` holds the blobs for the row. The files keep the bytes as the
 -- fallback until #7257.
 ALTER TABLE outputs

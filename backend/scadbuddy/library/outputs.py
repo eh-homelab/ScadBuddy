@@ -78,7 +78,7 @@ from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
-from scadbuddy.store.content import BlobCorruptError, BlobMissingError
+from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef
 
 if TYPE_CHECKING:
     from scadbuddy.library.output_index import OutputIndex
@@ -931,15 +931,18 @@ class OutputStore:
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
-        """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob
-        store, then `commit` (#7256, spec §6.6), so the row, its ``output_files`` rows and
-        the holds of its keys are one transaction. With no blob store (`local`, `bambuddy`)
-        or no rows, it puts nothing. A failed put or commit removes the folder (`discard`)
-        and raises again, a `StoreFullError` among them; the blobs it put are held by
-        nothing, so the sweep removes them. A cancel during the puts stops the save at once,
-        with no discard: the folder stays with no ``meta.json``, and the hold reaper removes
-        it and its holds later (#1007). A cancel during `prepare` or `commit` cannot stop
-        their thread, which may still finish the output."""
+        """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob store
+        under keys of the save's own (`OutputBytes.put_folder`), then `commit` (#7256, spec
+        §6.6), so the row, its keys taking those objects, its ``output_files`` rows and the holds
+        of its keys are one transaction. With no blob store (`local`, `bambuddy`) or no rows, it
+        puts nothing. The staged keys go after the commit; the output's keys name their objects.
+        A failed put or commit removes the folder (`discard`) and the blobs it put, and raises
+        again, a `StoreFullError` and a `UniqueViolation` on an id another output holds among
+        them; that output's keys never named this save's objects, so its bytes stay its own
+        (#7478 review). A cancel during the puts stops the save at once, with no discard: the
+        folder stays with no ``meta.json``, and the hold reaper removes it and its holds later
+        (#1007). A cancel during `prepare` or `commit` cannot stop their thread, which may still
+        finish the output."""
         prepared = await asyncio.to_thread(
             self.prepare,
             job,
@@ -953,16 +956,29 @@ class OutputStore:
             print_settings=print_settings,
             source=source,
         )
+        blobs: OutputBlobs | None = None
         try:
-            blobs: OutputBlobs | None = None
             if self.bytes is not None and self.rows is not None:
                 blobs = await self.bytes.put_folder(
                     prepared.directory, prepared.meta.id, prepared.meta.slug
                 )
-            return await asyncio.to_thread(self.commit, prepared, blobs)
+            meta, replaced = await asyncio.to_thread(self._commit, prepared, blobs)
         except Exception:
             await asyncio.to_thread(self.discard, prepared)
+            if blobs is not None and self.bytes is not None:
+                await self.bytes.drop_staged(blobs)
             raise
+        for key, previous in replaced:
+            assert self.bytes is not None
+            try:
+                await self.bytes.release_replaced(key, previous)
+            except Exception:
+                # The save stands; the object stays on the backend with no row.
+                logger.exception("could not release a replaced output blob", extra={"key": key})
+        if blobs is not None and self.bytes is not None:
+            # The output's keys name the objects now; the staged keys only go.
+            await self.bytes.drop_staged(blobs)
+        return meta
 
     def prepare(
         self,
@@ -1088,14 +1104,22 @@ class OutputStore:
 
     def commit(self, prepared: PreparedOutput, blobs: OutputBlobs | None) -> OutputMeta:
         """Make the prepared output the record: ``meta.json``, then its row with
-        ``blobs`` (the keys `OutputBytes.put_folder` put; ``None``: the files hold the
-        bytes) in one transaction, then its index row, the cover and the listener.
-        Blocking."""
+        ``blobs`` (``None``: the files hold the bytes) in one transaction, then its index
+        row, the cover and the listener. ``blobs`` with ``staged`` objects goes through
+        `save`, which releases what the keys named before. Blocking."""
+        return self._commit(prepared, blobs)[0]
+
+    def _commit(
+        self, prepared: PreparedOutput, blobs: OutputBlobs | None
+    ) -> tuple[OutputMeta, list[tuple[str, BlobRef]]]:
+        """`commit`, and each key that named another object before the row's transaction,
+        with that object (`OutputRows.insert`). Blocking."""
         directory = prepared.directory
         meta = prepared.meta
         self._write_meta(directory, meta)
+        replaced: list[tuple[str, BlobRef]] = []
         if self.rows is not None:
-            self._insert_row(prepared, blobs)
+            replaced = self._insert_row(prepared, blobs)
         if self.index is not None:
             # The save stands without its row: a failure is logged, and the next start's
             # `OutputIndex.sync` adds the row.
@@ -1107,7 +1131,7 @@ class OutputStore:
         # resolved against a half-written output.
         self.forget_plate_cover(meta.slug)
         self._changed(meta.slug)
-        return meta
+        return meta, replaced
 
     def discard(self, prepared: PreparedOutput) -> None:
         """Remove a prepared output's folder: a save that failed after `prepare`.
@@ -1115,10 +1139,13 @@ class OutputStore:
         shutil.rmtree(prepared.directory, ignore_errors=True)
         self._dirs.pop(prepared.meta.id, None)
 
-    def _insert_row(self, prepared: PreparedOutput, blobs: OutputBlobs | None) -> None:
+    def _insert_row(
+        self, prepared: PreparedOutput, blobs: OutputBlobs | None
+    ) -> list[tuple[str, BlobRef]]:
         """The saved output's row, with its blob keys, their ``output_files`` rows and
-        holds, in one transaction (spec §6.6). The row is the record: when the insert
-        fails, the files written for the save go and the save fails."""
+        holds, in one transaction (spec §6.6); what `OutputRows.insert` returns. The row is
+        the record: when the insert fails, the files written for the save go and the save
+        fails."""
         from scadbuddy.library.output_rows import OutputRow
 
         assert self.rows is not None
@@ -1151,7 +1178,7 @@ class OutputStore:
             blobs=blobs or OutputBlobs(),
         )
         try:
-            self.rows.insert(row)
+            return self.rows.insert(row)
         except Exception:
             shutil.rmtree(directory, ignore_errors=True)
             self._dirs.pop(meta.id, None)
@@ -1514,28 +1541,31 @@ class OutputStore:
             key: blob_version(sha256) for key, sha256 in self.rows.blob_shas(output_ids).items()
         }
 
-    def blob_sha(self, output_id: str, role: Role) -> str | None:
-        """The sha256 of the blob the row names for ``role``, from the index alone, with no
-        backend read: a conditional GET's tag. ``None``: no such blob. Blocking."""
+    async def blob_sha(self, output_id: str, role: Role) -> str | None:
+        """The sha256 of the blob the row names for ``role``, while the backend holds it
+        (`OutputBytes.held_sha`, no read of the bytes): a conditional GET's tag. ``None``:
+        no such blob, or a lost one, whose file then serves with its own tag."""
         try:
-            indexed = self._indexed(output_id, role)
-        except OutputNotFoundError:
-            return None
-        return None if indexed is None else indexed[1]
-
-    def file_blob_sha(self, output_id: str, name: str) -> str | None:
-        """`blob_sha` of the ``files/`` entry ``name``. Blocking."""
-        if not re.fullmatch(FILE_NAME_PATTERN, name):
-            return None
-        try:
-            key = self._file_key(output_id, name)
+            key = await asyncio.to_thread(self._blob_key, output_id, role)
         except OutputNotFoundError:
             return None
         if key is None:
             return None
         assert self.bytes is not None
-        ref = self.bytes.ref(key)
-        return None if ref is None else ref.sha256
+        return await self.bytes.held_sha(key)
+
+    async def file_blob_sha(self, output_id: str, name: str) -> str | None:
+        """`blob_sha` of the ``files/`` entry ``name``."""
+        if not re.fullmatch(FILE_NAME_PATTERN, name):
+            return None
+        try:
+            key = await asyncio.to_thread(self._file_key, output_id, name)
+        except OutputNotFoundError:
+            return None
+        if key is None:
+            return None
+        assert self.bytes is not None
+        return await self.bytes.held_sha(key)
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
         """Give the output ``name``, or none (#2288). Only its meta changes, in

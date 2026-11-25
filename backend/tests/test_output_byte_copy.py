@@ -216,8 +216,8 @@ async def test_byte_copy_uploads_and_verifies_every_role(
     assert await _blob(content, plain.blobs.thumbnail) == b"plain thumbnail"
     files = tree.rows.files(tree.id("files"))
     assert [(item.name, item.blob_key) for item in files] == [
-        ("a.stl", output_file_key(tree.id("files"), 0)),
-        ("b.step", output_file_key(tree.id("files"), 1)),
+        ("a.stl", output_file_key(tree.id("files"), "a.stl")),
+        ("b.step", output_file_key(tree.id("files"), "b.step")),
     ]
     assert await _blob(content, files[1].blob_key) == b"b step"
     last = tree.rows.last_byte_run()
@@ -620,7 +620,7 @@ async def test_byte_copy_leaves_no_hold_for_deleted_output(
 
     async def deleting(self: OutputBytes, key: str, source: Path, **kwargs: Any) -> Any:
         landed = await replace_file(self, key, source, **kwargs)
-        if key == output_file_key(output_id, 1):
+        if key == output_file_key(output_id, "b.step"):
             tree.rows.delete(output_id)  # a live delete while its bytes go up
         return landed
 

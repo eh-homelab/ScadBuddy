@@ -4,6 +4,7 @@ rows. The tables come first; the row store's tests follow."""
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 
@@ -372,7 +373,7 @@ def _blobs(output_id: str, *names: str) -> OutputBlobs:
         preview=output_blob_key(output_id, "preview"),
         thumbnail=None,
         files=tuple(
-            OutputFileBlob(name=name, blob_key=output_file_key(output_id, n), size=n + 1)
+            OutputFileBlob(name=name, blob_key=output_file_key(output_id, name), size=n + 1)
             for n, name in enumerate(names)
         ),
     )
@@ -380,9 +381,12 @@ def _blobs(output_id: str, *names: str) -> OutputBlobs:
 
 def test_blob_keys_follow_the_spec() -> None:
     assert output_blob_key("o1", "thumbnail") == "output-o1-thumbnail"
-    assert output_file_key("o1", 3) == "output-o1-file-3"
+    assert output_file_key("o1", "a.stl") == (
+        "output-o1-file-" + hashlib.sha256(b"a.stl").hexdigest()[:32]
+    )
+    assert output_file_key("o1", "b.stl") != output_file_key("o1", "a.stl")
     blobs = _blobs("o1", "a.stl")
-    assert blobs.keys() == ["output-o1-model", "output-o1-preview", "output-o1-file-0"]
+    assert blobs.keys() == ["output-o1-model", "output-o1-preview", output_file_key("o1", "a.stl")]
 
 
 def test_insert_with_blobs_writes_columns_files_and_holds(
@@ -413,8 +417,8 @@ def test_insert_failure_writes_no_hold(rows: OutputRows, projection: JobProjecti
     clash = dataclasses.replace(
         _blobs("o1", "b.stl"),
         files=(
-            OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", 0), size=1),
-            OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", 1), size=1),
+            OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", "b.stl"), size=1),
+            OutputFileBlob(name="b.stl", blob_key=output_file_key("o1", "b.stl"), size=1),
         ),
     )
     with pytest.raises(psycopg.errors.UniqueViolation):
@@ -486,7 +490,7 @@ def test_write_bytes_skips_deleted_row_and_its_holds(
 ) -> None:
     rows.insert(make_row("kept"))
     rows.insert(make_row("deleted"))
-    _hold(projection, "kept", output_file_key("kept", 5))
+    _hold(projection, "kept", output_file_key("kept", "f.stl"))
     rows.delete("deleted")
     damaged = [{"role": "thumbnail", "error": "missing"}]
     written, _ = rows.write_byte_copy(

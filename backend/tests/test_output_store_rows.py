@@ -232,7 +232,7 @@ def _waits_on_a_lock(conninfo: str) -> bool:
 _SAVE_BLOBS = OutputBlobs(
     model=output_blob_key("d" * 32, "model"),
     preview=output_blob_key("d" * 32, "preview"),
-    files=(OutputFileBlob("a.stl", output_file_key("d" * 32, 0), 5),),
+    files=(OutputFileBlob("a.stl", output_file_key("d" * 32, "a.stl"), 5),),
 )
 
 

@@ -598,15 +598,16 @@ class _Copy:
             files: list[OutputFileBlob] = []
             gone = [item.name for item in kept if item.name not in names]
             if gone:
-                # A file the row names went: keep every file key the row names, since a
-                # key's index is the name's place in the sorted names.
+                # A file the row names went: keep every file key the row names (a file
+                # that went does not make its blob wrong), and add no name until the
+                # folder is whole again.
                 damaged.append(
                     {"role": "files", "error": f"no {FILES_DIR}/{gone[0]}", "names": gone}
                 )
                 names = []
                 files = list(kept)
-            for n, name in enumerate(names):
-                key = output_file_key(output_id, n)
+            for name in names:
+                key = output_file_key(output_id, name)
                 copied = await self._role(
                     blobs,
                     key,

@@ -38,6 +38,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.support.operations import press
+from tests.support.output_blobs import put_folder_at_keys
 from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -95,7 +96,7 @@ def _copy(client: TestClient, outputs: OutputStore, output_id: str) -> None:
     slug = outputs.get(output_id).slug
     portal = client.portal
     assert portal is not None
-    blobs = portal.call(outputs.bytes.put_folder, directory, output_id, slug)
+    blobs = portal.call(put_folder_at_keys, outputs.bytes, directory, output_id, slug)
     assert outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])[0] == {
         output_id
     }
@@ -256,7 +257,7 @@ def test_output_file_falls_back_to_file_when_blob_lost(
     client: TestClient, model: str, outputs: OutputStore, content: ContentStore
 ) -> None:
     output_id = _copied(client, model, outputs)
-    _lose(client, content, output_file_key(output_id, 0))
+    _lose(client, content, output_file_key(output_id, "a.stl"))
     (outputs.directory(output_id) / FILES_DIR / "a.stl").write_bytes(b"file stl")
     response = client.get(f"/api/v1/outputs/{output_id}/files/a.stl")
     assert response.status_code == 200, response.text
@@ -514,6 +515,42 @@ def test_conditional_get_of_a_blob_is_304_with_no_blob_read(
     other = client.get(f"/api/v1/outputs/{output_id}/{url}", headers={"if-none-match": '"x"'})
     assert other.status_code == 200
     assert other.content == first.content
+
+
+@pytest.mark.parametrize(("url", "role"), _BYTE_ROUTES)
+def test_conditional_get_of_a_lost_blob_gets_the_file(
+    client: TestClient,
+    model: str,
+    outputs: OutputStore,
+    content: ContentStore,
+    url: str,
+    role: str,
+) -> None:
+    # The client holds the blob's tag; the store lost the blob, and the file that serves
+    # now has other bytes: they are sent, never a 304 from the index (#7478 review).
+    output_id = _copied(client, model, outputs)
+    first = client.get(f"/api/v1/outputs/{output_id}/{url}")
+    assert first.status_code == 200, first.text
+    key = (
+        output_file_key(output_id, "a.stl")
+        if role == "file-0"
+        else output_blob_key(output_id, role)  # type: ignore[arg-type]
+    )
+    _lose(client, content, key)
+    name = {
+        "model": MODEL_NAME,
+        "preview": PREVIEW_NAME,
+        "thumbnail": THUMBNAIL_NAME,
+        "file-0": f"{FILES_DIR}/a.stl",
+    }[role]
+    data = PNG_BYTES if role == "thumbnail" else b"file bytes"
+    (outputs.directory(output_id) / name).write_bytes(data)
+    again = client.get(
+        f"/api/v1/outputs/{output_id}/{url}",
+        headers={"accept-encoding": "identity", "if-none-match": first.headers["etag"]},
+    )
+    assert again.status_code == 200, again.text
+    assert again.content == data
 
 
 def test_conditional_get_of_the_gzipped_preview_is_304(

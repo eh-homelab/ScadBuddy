@@ -47,7 +47,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.conftest import PgPool, open_pg_pool
-from tests.support.output_blobs import blob_output
+from tests.support.output_blobs import blob_output, put_folder_at_keys
 from tests.support.saved_outputs import save_files
 
 DAY = 86400.0
@@ -415,7 +415,9 @@ async def test_referenced_asset_ids_from_rows_and_blob_3mf(
         model = output.directory / "model.3mf"
         with zipfile.ZipFile(model, "w") as written:
             written.writestr(ROOT_MODEL, f"<model>{in_archive}</model>")
-        blobs = await store.bytes.put_folder(output.directory, output.meta.id, output.meta.slug)
+        blobs = await put_folder_at_keys(
+            store.bytes, output.directory, output.meta.id, output.meta.slug
+        )
         rows.write_byte_copy([ByteWrite(output.meta.id, blobs, "stamp", [])])
         with output.pool.connection() as conn:
             conn.execute(
@@ -447,7 +449,9 @@ async def test_referenced_asset_ids_read_each_3mf_once(
         model = output.directory / "model.3mf"
         with zipfile.ZipFile(model, "w") as written:
             written.writestr(ROOT_MODEL, f"<model>{in_archive}</model>")
-        blobs = await store.bytes.put_folder(output.directory, output.meta.id, output.meta.slug)
+        blobs = await put_folder_at_keys(
+            store.bytes, output.directory, output.meta.id, output.meta.slug
+        )
         rows.write_byte_copy([ByteWrite(output.meta.id, blobs, "stamp", [])])
         with output.pool.connection() as conn:
             conn.execute("UPDATE outputs SET params = '{}' WHERE output_id = %s", (output.meta.id,))
@@ -479,7 +483,7 @@ async def _two_bare_outputs(output: Any, good: bytes, other: bytes) -> tuple[str
     for output_id, data in zip(ids, (good, other), strict=True):
         directory = store.directory(output_id)
         (directory / "model.3mf").write_bytes(data)
-        blobs = await store.bytes.put_folder(directory, output_id, output.meta.slug)
+        blobs = await put_folder_at_keys(store.bytes, directory, output_id, output.meta.slug)
         rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
         (directory / "model.3mf").unlink()
     with output.pool.connection() as conn:

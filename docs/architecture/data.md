@@ -105,7 +105,7 @@ deleted after a grace period.
 | Logical key | What | Code |
 |---|---|---|
 | 64-hex, `act-<40hex>`, `output-<32hex>-<n>` | a render job's pieces | `scadbuddy/api/crud_render.py:116` |
-| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<n>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and the `n`th name of its sorted `files/` | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
+| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save puts each under `<key>-save-<attempt>` first, `staged_save_key`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
 | `output-<id>-thumbnail-<sha256>`, `output-<id>-plate_cover-<sha256>` | a thumbnail upload before its key names it (held by nothing); the plate cover read once out of the output's 3MF | `scadbuddy/library/output_rows.py` `staged_thumbnail_key`, `plate_cover_key` |
 | `src-<slug>-<revision>` | a template's source snapshot | `scadbuddy/store/snapshots.py:65-66` |
 | `asset-<id>` | an uploaded template asset | `scadbuddy/store/assets.py:30` |
@@ -142,10 +142,14 @@ names the keys (`model_blob`, `preview_blob`, `thumbnail_blob`, and one `output_
 per `files/` name); `bytes_at` is set once the blobs hold the bytes, and NULL while only
 the files do. The folder `data/outputs/<slug>/<id>/` stays as the fallback until #7257: a
 save still writes it, and every reader reads the file when the row names no blob, or when
-the blob is lost (logged, never a 500). A save writes the folder, puts the bytes
-(`OutputBytes.put_folder`), then inserts the row, its `output_files` rows and its holds in
-one transaction. When the row fails, the save fails and its folder is removed
-(`OutputStore._insert_row`); a put into a full store is a 507. On the `local` backend (no
+the blob is lost (logged, never a 500). A save writes the folder, puts the bytes under
+keys of its own (`OutputBytes.put_folder`, `<key>-save-<attempt>`), then inserts the row,
+points the output's keys at those objects, and writes its `output_files` rows and its
+holds, in one transaction; then it deletes its staged keys. When the row fails (an id
+that another output holds, `orders/quote.py` `operation_output_id`, among the causes), the
+save fails, its folder is removed (`OutputStore._insert_row`) and its staged keys and
+their objects are deleted: no key of the other output moved, so that output keeps its
+bytes. A put into a full store is a 507. On the `local` backend (no
 content store) and on `bambuddy` (spec §6.4) no output blob is written: the bytes stay
 files. A store migration to `bambuddy` is refused while the index holds an `output` blob
 (`scadbuddy/store/migrate.py` `refuse_outputs_to_bambuddy`). A delete deletes the row
@@ -154,8 +158,9 @@ removes the blobs after its grace (`OutputRows.delete`).
 
 A save's cost in commits: each put writes its index row in a transaction of its own
 (`ContentStore.put`), one each for `model.3mf`, `preview.glb`, `thumbnail.png` when there,
-and each `files/` entry, before the row's transaction. On prod a commit is known to take
-1-2 s, so a save takes some seconds more than in phase 1. The save then files its 3MF in
+and each `files/` entry, before the row's transaction, and the delete of each staged key
+commits once more after it. On prod a commit is known to take 1-2 s, so a save takes some
+seconds more than in phase 1. The save then files its 3MF in
 the native library from the folder it wrote, the same bytes as the model blob, so it
 does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
 own put commits once more. Fewer commits would need a batch put in `ContentStore`:
@@ -276,8 +281,12 @@ After a roll-out of phase 2, confirm that every pod runs the new image (`kubectl
 bambuddy get pods -o jsonpath` on the images), then read `GET /api/v1/outputs/copy-status`.
 Check that `bytes` has a `finished_at`, is not `incomplete`, has no `refused`, started
 after the last pod on the older build went, and that `pending` counts no output but those
-that `damaged_sample` names with `names` (a refused `files/` name keeps `bytes_at` NULL). Pods on an older
-build write the files only; the next sweep copies what they wrote. Read `damaged_rows`
+that `damaged_sample` names with `names` (a refused `files/` name keeps `bytes_at` NULL). The first
+runs after the roll-out put and read back every output's bytes. A sweep's run stops at its
+30-minute timeout with no `finished_at`, and the batches it committed stay, so `pending`
+can take several sweeps to reach 0. Before you call a run with no `finished_at` a fault,
+check that `pending` went down since the run before it, and read again after the next
+sweep. Pods on an older build write the files only; the next sweep copies what they wrote. Read `damaged_rows`
 and `damaged_sample`, not the run's `damaged`: a person checks each output they name.
 When `damaged_rows` is more than the sample, list the rest with
 `SELECT output_id, damaged FROM outputs WHERE damaged <> '[]' ORDER BY output_id`. An output with a refused `files/` name keeps its
