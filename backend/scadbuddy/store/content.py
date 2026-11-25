@@ -103,7 +103,8 @@ class ContentStore:
         self.downloads = downloads
         #: Where a read's private copy of a cached blob is made, never the shared
         #: directory, which holds only entries and fills; callers spool their request
-        #: bodies here too (internal PUTs, slice bodies, thumbnail and archive copies).
+        #: bodies here too (internal PUTs, slice bodies, thumbnail and archive copies, a
+        #: library upload's body, #7373).
         #: The data volume's ``cache/blob-spool`` unless ``SCADBUDDY_SPOOL_DIR`` names
         #: another (#7316).
         self.spool = spool if spool is not None else Path(tempfile.gettempdir())

@@ -801,6 +801,30 @@ def test_a_run_whose_upload_blob_is_gone_is_409(native_client: TestClient) -> No
     assert caught.value.status == 409
 
 
+def test_an_upload_blob_removed_as_it_was_put_is_409(
+    native_client: TestClient, three_mf: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release or sweep that removes the row right after the route's put is the same
+    409 as a run that finds it gone: the person uploads again, never a 500."""
+    content = _content(native_client)
+    real_put = content.put
+
+    async def put_then_lose(*args: Any, **kwargs: Any) -> Any:
+        ref = await real_put(*args, **kwargs)
+        await content.delete_if_stale(kwargs["key"], datetime.now(UTC) + timedelta(days=1))
+        return ref
+
+    monkeypatch.setattr(content, "put", put_then_lose)
+    with three_mf.open("rb") as data:
+        r = native_client.post(
+            "/api/v1/print/library/files",
+            files={"file": ("bracket.3mf", data, "application/octet-stream")},
+            headers=press(),
+        )
+    assert r.status_code == 409, r.text
+    assert "upload the file again" in r.text
+
+
 def test_a_claim_file_from_an_older_replica_still_uploads(
     native_client: TestClient, paths: DataPaths
 ) -> None:

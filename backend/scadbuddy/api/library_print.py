@@ -140,6 +140,7 @@ from scadbuddy.library.library_file_operations import (
     LibraryRestoreResult,
 )
 from scadbuddy.library.library_write_operations import (
+    UPLOAD_GONE,
     LibraryEntryUpdated,
     LibraryFileUpdate,
     LibraryFolder,
@@ -778,6 +779,9 @@ async def post_library_file(
                             status.HTTP_507_INSUFFICIENT_STORAGE,
                             f"the blob store has no room for this file: {error}",
                         ) from None
+                    except LookupError:
+                        # A release or sweep took the row right after the put.
+                        raise ApiError(status.HTTP_409_CONFLICT, UPLOAD_GONE) from None
             claimed = Claimed(blobs, held_blobs)
         else:
             claims = ClaimStore(paths.claims)

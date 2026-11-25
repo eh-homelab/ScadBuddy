@@ -56,13 +56,17 @@ class BlobClaims:
 
     async def hold_file(self, path: Path, digest: str, size: int, *, name: str) -> HeldBlob:
         """Put the file at ``path``, whose sha256 and size the caller hashed as it
-        streamed, as the upload blob of ``digest``. `StoreFullError` propagates."""
+        streamed, as the upload blob of ``digest``. `StoreFullError` propagates;
+        `LookupError` when a release or sweep removed the row as it was put."""
         key = upload_key(digest)
         before = await asyncio.to_thread(self.content.index.get, key)
-        with path.open("rb") as data:
+        data = await asyncio.to_thread(path.open, "rb")
+        try:
             await self.content.put(
                 UPLOAD_KIND, data, name=name, scope=BlobScope(), key=key, digest=(digest, size)
             )
+        finally:
+            await asyncio.to_thread(data.close)
         stat = await asyncio.to_thread(self.content.index.get, key)
         if stat is None:
             raise LookupError(f"upload {digest} was removed as it was put")
