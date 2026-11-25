@@ -102,7 +102,7 @@ export const inspectTools: Tool[] = [
         },
       )
       // The legend is the only way to read the grid, so it comes first whether the
-      // image is inline or, too large for that, a link (#750 review).
+      // image is inline or, too large for that, a workspace file (#750 review, #7745).
       return { ...drawn, content: [...json(legend).content, ...drawn.content] }
     },
   }),
