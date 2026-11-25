@@ -30,7 +30,8 @@ import ssl
 import sys
 import threading
 import urllib.request
-from collections.abc import AsyncIterator, Callable, Sized
+from collections.abc import AsyncIterator, Callable, Iterator, Sized
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -964,13 +965,55 @@ async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.Monkey
     assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1
 
 
+def _track_connect(
+    loop: asyncio.AbstractEventLoop,
+    monkeypatch: pytest.MonkeyPatch,
+    made: list[aiomqtt.Client],
+    gate: threading.Event | None = None,
+) -> threading.Event:
+    """The event that the first client's connect sets in its executor thread when it ends.
+    With ``gate``, the thread waits for it before it calls the connect (a bounded wait)."""
+    done = threading.Event()
+    run_in_executor = loop.run_in_executor
+
+    def tracked(executor: Any, func: Callable[..., Any], *args: Any) -> Any:
+        if not (made and func == made[0]._client_connect):
+            return run_in_executor(executor, func, *args)
+
+        def run() -> Any:
+            try:
+                if gate is not None:
+                    gate.wait(30.0)
+                return func(*args)
+            finally:
+                done.set()
+
+        return run_in_executor(executor, run)
+
+    monkeypatch.setattr(loop, "run_in_executor", tracked)
+    return done
+
+
+@contextmanager
+def _loop_errors(loop: asyncio.AbstractEventLoop) -> Iterator[list[dict[str, Any]]]:
+    """What the loop's exception handler gets, such as an ``add_reader`` on a closed fd."""
+    seen: list[dict[str, Any]] = []
+    handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: seen.append(context))
+    try:
+        yield seen
+    finally:
+        loop.set_exception_handler(handler)
+
+
 async def test_a_late_executor_connect_is_shut(
     linked: _Linked, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """aiomqtt connects in an executor thread, and a cut does not stop that thread (#7616).
     The connect is held past `MQTT_TIMEOUT`, then let go: it opens a socket after the cut.
-    The loop thread closes that socket after aiomqtt's queued ``add_reader`` and
-    ``add_writer`` ran, so the loop registers no closed fd and logs no error."""
+    The cut queues no close while the thread runs. The thread queues the one close when
+    its connect ends, so the loop closes the socket after aiomqtt's queued ``add_reader``
+    and ``add_writer`` ran: the loop registers no closed fd and logs no error."""
     loop = asyncio.get_running_loop()
     shut: list[tuple[aiomqtt.Client, int]] = []
     closed = asyncio.Event()
@@ -979,12 +1022,10 @@ async def test_a_late_executor_connect_is_shut(
     def spy(client: aiomqtt.Client) -> None:
         shut.append((client, threading.get_ident()))
         force_close(client)
-        if len(shut) == 2:
-            closed.set()
+        closed.set()
 
     monkeypatch.setattr(lan_module, "_force_close", spy)
     go = threading.Event()
-    done = threading.Event()
     held: list[Any] = []
     made: list[aiomqtt.Client] = []
 
@@ -994,50 +1035,173 @@ async def test_a_late_executor_connect_is_shut(
             made.append(self)
 
         def _client_connect(self) -> None:
-            go.wait()
+            go.wait(30.0)
             super()._client_connect()
             held.append(self._client.socket())
 
-    run_in_executor = loop.run_in_executor
-
-    def tracked(executor: Any, func: Callable[..., Any], *args: Any) -> Any:
-        if not (made and func == made[0]._client_connect):
-            return run_in_executor(executor, func, *args)
-
-        def run() -> Any:
-            try:
-                return func(*args)
-            finally:
-                done.set()
-
-        return run_in_executor(executor, run)
-
-    seen: list[dict[str, Any]] = []
-    handler = loop.get_exception_handler()
-    loop.set_exception_handler(lambda _loop, context: seen.append(context))
-    monkeypatch.setattr(loop, "run_in_executor", tracked)
+    done = _track_connect(loop, monkeypatch, made)
     monkeypatch.setattr(aiomqtt, "Client", HeldInExecutor)
     monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 0.5)
-    try:
+    with _loop_errors(loop) as seen:
         try:
             with pytest.raises(TimeoutError):
                 await _ask(linked, ams_get_rfid(0, 0, "91"))
-            await _queued_closes(shut, 1)
-            assert len(shut) == 1
+            await asyncio.sleep(0)  # a close that the cut queued runs in this turn
+            assert shut == []
         finally:
             go.set()
         assert await asyncio.to_thread(done.wait, 30.0)
         async with asyncio.timeout(30.0):
             await closed.wait()
-    finally:
-        loop.set_exception_handler(handler)
     assert len(held) == 1 and held[0] is not None
     try:
-        assert shut[1] == (made[0], threading.get_ident())
+        assert shut == [(made[0], threading.get_ident())]
         assert held[0].fileno() == -1
         assert seen == []
     finally:
         held[0].close()
+
+
+async def test_a_connect_cut_before_it_starts_is_closed(
+    linked: _Linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cut comes before the executor thread runs the connect: the cut queues the one
+    close, and the thread then does not connect at all (#7616)."""
+    loop = asyncio.get_running_loop()
+    shut = _spy_force_close(monkeypatch)
+    made: list[aiomqtt.Client] = []
+
+    class Tracked(aiomqtt.Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    gate = threading.Event()
+    done = _track_connect(loop, monkeypatch, made, gate)
+    monkeypatch.setattr(aiomqtt, "Client", Tracked)
+    monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 0.5)
+    try:
+        with pytest.raises(TimeoutError):
+            await _ask(linked, ams_get_rfid(0, 0, "92"))
+        await _queued_closes(shut, 1)
+        assert shut == [made[0]]
+    finally:
+        gate.set()
+    assert await asyncio.to_thread(done.wait, 30.0)
+    await asyncio.sleep(0)
+    assert made[0]._client.socket() is None
+    assert shut == [made[0]]
+
+
+async def test_a_cut_as_the_socket_opens_closes_after_add_reader(
+    linked: _Linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cut comes while the connect thread is in paho's ``on_socket_open``: the loop
+    thread cancels the request, and the executor thread then queues ``add_reader`` (aiomqtt
+    2.5.1 ``client.py:304`` sets the callback, ``:704`` queues the call) before the cancel
+    is handled. An inline close freed the fd before that ``add_reader`` ran (EBADF on the
+    loop, #7616 m1). The close runs after it. Only events order the threads."""
+    loop = asyncio.get_running_loop()
+    shut = _spy_force_close(monkeypatch)
+    made: list[aiomqtt.Client] = []
+    held: list[Any] = []
+    tasks: list[asyncio.Task[Any]] = []
+    cancelled = threading.Event()
+    resume = threading.Event()
+
+    def block() -> None:
+        # On the loop thread: the cancel's wakeup is queued before the thread's add_reader.
+        try:
+            tasks[0].cancel()
+            cancelled.set()
+        finally:
+            resume.wait(30.0)
+
+    class CutAsTheSocketOpens(aiomqtt.Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+        def _on_socket_open(self, client: Any, userdata: Any, sock: Any) -> None:
+            held.append(sock)
+            try:
+                loop.call_soon_threadsafe(block)
+                cancelled.wait(30.0)
+                super()._on_socket_open(client, userdata, sock)
+            finally:
+                resume.set()
+
+    done = _track_connect(loop, monkeypatch, made)
+    monkeypatch.setattr(aiomqtt, "Client", CutAsTheSocketOpens)
+    monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 30.0)
+    with _loop_errors(loop) as seen:
+        tasks.append(asyncio.create_task(_ask(linked, ams_get_rfid(0, 0, "93"))))
+        with pytest.raises(asyncio.CancelledError):
+            await tasks[0]
+        assert await asyncio.to_thread(done.wait, 30.0)
+        await _queued_closes(shut, 1)
+    assert seen == []
+    assert len(held) == 1 and held[0].fileno() == -1
+    assert shut == [made[0]]
+
+
+class _AtFileno:
+    """Paho's socket, as aiomqtt's ``_on_socket_open`` sees it: ``fileno`` reads the fd,
+    then runs ``then`` before aiomqtt can queue ``add_reader`` with that fd."""
+
+    def __init__(self, sock: Any, then: Callable[[], None]) -> None:
+        self._sock = sock
+        self._then = then
+
+    def fileno(self) -> int:
+        fd: int = self._sock.fileno()
+        self._then()
+        return fd
+
+
+async def test_a_cut_after_add_reader_reads_the_fd_closes_after_it(
+    linked: _Linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cut comes, and is handled, between aiomqtt's ``sock.fileno()`` and its
+    ``call_soon_threadsafe(add_reader, ...)`` (aiomqtt 2.5.1 ``client.py:704``). The
+    connect thread still runs, so the cut queues no close: the thread queues it when it
+    ends, after that ``add_reader``. A close queued by the cut freed the fd first (EBADF
+    on the loop, #7616 review round 2 M1). Only events order the threads."""
+    loop = asyncio.get_running_loop()
+    shut = _spy_force_close(monkeypatch)
+    made: list[aiomqtt.Client] = []
+    held: list[Any] = []
+    tasks: list[asyncio.Task[Any]] = []
+    handled = threading.Event()
+
+    def at_fileno() -> None:
+        loop.call_soon_threadsafe(tasks[0].cancel)
+        handled.wait(30.0)
+
+    class CutAtFileno(aiomqtt.Client):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+        def _on_socket_open(self, client: Any, userdata: Any, sock: Any) -> None:
+            held.append(sock)
+            super()._on_socket_open(client, userdata, _AtFileno(sock, at_fileno))
+
+    done = _track_connect(loop, monkeypatch, made)
+    monkeypatch.setattr(aiomqtt, "Client", CutAtFileno)
+    monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 30.0)
+    with _loop_errors(loop) as seen:
+        tasks.append(asyncio.create_task(_ask(linked, ams_get_rfid(0, 0, "94"))))
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[0]
+        finally:
+            handled.set()
+        assert await asyncio.to_thread(done.wait, 30.0)
+        await _queued_closes(shut, 1)
+    assert seen == []
+    assert len(held) == 1 and held[0].fileno() == -1
+    assert shut == [made[0]]
 
 
 async def test_a_cut_close_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
