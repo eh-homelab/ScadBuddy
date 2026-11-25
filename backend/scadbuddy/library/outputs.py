@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import logging
@@ -1808,14 +1809,31 @@ class OutputStore:
             self._cover_epoch += 1
 
     def restore_rows(self, slug: str) -> None:
-        """Write the rows of ``slug``'s outputs again from their files, as the copy does
-        (#7255): a model delete that dropped them and then failed keeps its outputs, so
-        they get their rows back."""
+        """Write the rows of ``slug``'s outputs again from their files (#7255), in one
+        transaction guarded by a mark taken first: a model delete that dropped them and
+        then failed keeps its outputs, so they get their rows back. Each row takes a
+        ``files_stamp``, as the retired copy's did (#7257), so a later save of its id
+        may write over it. A folder that cannot be listed is skipped."""
         if self.rows is None:
             return
-        from scadbuddy.library.output_copy import restore_slug
-
-        restore_slug(self, self.rows, slug)
+        mark = self.rows.clock()
+        read: list[OutputRow] = []
+        try:
+            entries = sorted((self.paths.outputs / slug).iterdir())
+        except OSError:
+            entries = []
+        for directory in entries:
+            if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or not directory.is_dir():
+                continue
+            row, _ = self.row_from_files(directory, slug)
+            if row is not None:
+                read.append(dataclasses.replace(row, files_stamp="restored"))
+        known = self.rows.existing(row.output_id for row in read)
+        self.rows.write_copy(
+            [row for row in read if row.output_id not in known],
+            [row for row in read if row.output_id in known],
+            mark,
+        )
 
     def forget_indexed(self, slug: str) -> None:
         """Drop the rows of ``slug``'s outputs with their model, before their directory
@@ -2135,7 +2153,8 @@ class OutputStore:
         After the cut-over mark a missing folder does not raise: the file step is skipped
         and the key and the row take the blob (#7257). With no blob store or no row yet,
         the file only, under the same lock when there is a database
-        (`OutputRows.write_thumbnail_file`); the byte copy takes it later."""
+        (`OutputRows.write_thumbnail_file`); no copy puts it in the blob store since the
+        copies were retired (#7257)."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is None:
             await asyncio.to_thread(self._write_thumbnail_file, output_id, png)
@@ -2224,7 +2243,7 @@ class OutputStore:
         nor the file is there; with the key there (a lost blob's), the file alone. A
         failed put is logged, and the file alone is written
         under the lock (True when it was this draw's): the row names no new blob, so
-        readers take the file, and the byte copy puts it later. After the cut-over mark
+        readers take the file; no copy puts it later (#7257). After the cut-over mark
         with no folder, a failed put writes no file, so the drawn thumbnail is lost
         (#7257); the answer is still True. With no blob store or no row, the file alone,
         under the lock when there are rows."""

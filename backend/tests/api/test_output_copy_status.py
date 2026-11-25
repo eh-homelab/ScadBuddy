@@ -1,7 +1,7 @@
 """`GET /outputs/copy-status` (#7255): the last run of the copy of the saved outputs' files
-to rows, at an API start or in a housekeeping sweep, and the last run of the copy of
-their bytes to the blob store (#7256). The tests' apps skip the start's copies
-(`app_output_copy_off`), so each test writes the runs it reads."""
+to rows, and the last run of the copy of their bytes to the blob store (#7256). Release B
+retired both copies (#7257), so the route answers the last runs that release A recorded,
+and each test writes the runs it reads."""
 
 from __future__ import annotations
 

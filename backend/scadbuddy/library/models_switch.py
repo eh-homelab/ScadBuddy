@@ -591,7 +591,7 @@ def _plan_files(paths: DataPaths, found: Found) -> dict[str, tuple[str, str | No
             meta = OutputMeta.model_validate_json(data)
         except ValidationError:
             meta = None
-        # As the start copy reads one (`OutputStore.row_from_files`).
+        # As `OutputStore.row_from_files` reads one.
         if meta is None or (meta.slug, meta.id) != (slug, key):
             found.reports.append(f"outputs/{slug}/{key}: its {META_NAME} cannot be read; left")
             continue
@@ -997,8 +997,9 @@ def _stored(conn: Conn, row: Row) -> Values | None:
 
 
 def _same(now: Values, then: Values) -> bool:
-    """Whether a row holds these values. The start copy makes an output's meta again from
-    its file, with the defaults that the file leaves out."""
+    """Whether a row holds these values. A start copy of the outputs (#7255, retired by
+    #7257) made an output's meta again from its file, with the defaults that the file
+    leaves out."""
     return all(
         now[name] == value or (name == "meta" and _meta(now[name]) == _meta(value))
         for name, value in then.items()

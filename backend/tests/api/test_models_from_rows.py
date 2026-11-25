@@ -7,7 +7,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -22,7 +21,6 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import catalogue as catalogue_module
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.template_copy import copy_templates
 from scadbuddy.library.template_refresh import TemplateRefresh
 from scadbuddy.library.template_rows import TemplateRows
@@ -89,17 +87,16 @@ def _output(client: TestClient, slug: str) -> str:
 
 
 def _copy(client: TestClient) -> None:
-    """The outputs copied first (so the output covers read rows on both sides), then
+    """A finished outputs copy run first (so the output covers read rows on both sides;
+    release B retired the copy, #7257, so the run is recorded as release A left it), then
     the templates; after it the catalogue reads rows."""
     state = _state(client)
     outputs = state.outputs.rows
     assert outputs is not None
     if not outputs.copied():
-        copy_outputs(state.outputs, outputs, state.projection.conninfo)
-    deadline = time.monotonic() + 30
-    while not outputs.copied():
-        assert time.monotonic() < deadline, "no finished outputs copy"
-        time.sleep(0.1)
+        outputs.finish_run(
+            outputs.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[]
+        )
     refresh = state.catalogue.refresh
     assert refresh is not None
     assert not state.catalogue._from_rows()

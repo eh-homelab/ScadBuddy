@@ -34,7 +34,6 @@ from scadbuddy.library.models_switch import (
     rollback,
     run,
 )
-from scadbuddy.library.output_copy import CopyResult, copy_outputs
 from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
 from scadbuddy.library.repo_lock import LOCK_KEY, PgRepoCoordinator
@@ -371,6 +370,7 @@ def world(made: Made, tmp_path: Path, pg_conninfo: str) -> World:
     old.data, old.root, old.clock = data, data / "models", 1_800_000_000
     copy = World(data, pg_conninfo, old, made.commits, made.ids, data / "switch-1")
     seed(copy)
+    rows_from_files(copy)
     start_copies(copy)
     copy.before = {**snapshot(copy), "others": others(copy)}
     return copy
@@ -394,15 +394,26 @@ def catalogue(world: World, pool: PgPool) -> tuple[Catalogue, TemplateRows, Temp
     return found, rows, refresh
 
 
-def start_copies(world: World) -> tuple[CopyResult, TemplateCopyResult]:
-    """The two copies of an API's start, with the app's own functions."""
-    with world.outputs() as (store, pool):
+def rows_from_files(world: World) -> None:
+    """Each output's row written from its files, and a finished copy run recorded, as
+    release A's copy of the outputs left the database (#7255). Release B retired that
+    copy (#7257)."""
+    with world.outputs() as (store, _):
         assert store.rows is not None
-        outputs = copy_outputs(store, store.rows, world.conninfo)
+        for slug in sorted(path.name for path in world.paths.outputs.iterdir()):
+            store.restore_rows(slug)
+        run = store.rows.start_run()
+        store.rows.finish_run(run, copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+
+
+def start_copies(world: World) -> TemplateCopyResult:
+    """The copy of an API's start, with the app's own functions: the templates' only,
+    since release B retired the copy of the outputs (#7257)."""
+    with world.pool() as pool:
         found, rows, refresh = catalogue(world, pool)
         templates = copy_templates(found, rows, refresh, pool)
-    assert outputs is not None and templates is not None
-    return outputs, templates
+    assert templates is not None
+    return templates
 
 
 # ── the end state ─────────────────────────────────────────────────────────────
@@ -536,12 +547,9 @@ def test_the_start_copies_leave_what_was_written(world: World) -> None:
     world.run()
     written = world.column("outputs", "output_id", "meta")
     files = tree(world.paths.outputs)
-    outputs, templates = start_copies(world)
+    templates = start_copies(world)
     assert world.column("outputs", "output_id", "meta") == written
     assert tree(world.paths.outputs) == files
-    # The stamp of a changed file is another; nothing is added or dropped.
-    assert (outputs.copied, outputs.refreshed, outputs.dropped) == (0, 5, 0)
-    assert (outputs.not_copied, outputs.incomplete) == ([], False)
     assert (templates.added, templates.incomplete) == (3, False)
     with world.pool() as pool:
         assert TemplateRows(pool).copied()
@@ -551,8 +559,8 @@ def test_the_start_copies_leave_what_was_written(world: World) -> None:
         "p": world.new("p", "p1"),
         "builtin:b": world.new("builtin:b", "b1"),
     }
-    again, _ = start_copies(world)
-    assert (again.copied, again.refreshed, again.dropped) == (0, 0, 0)
+    start_copies(world)
+    assert world.column("outputs", "output_id", "meta") == written
 
 
 def answers(world: World) -> dict[str, Any]:
@@ -772,25 +780,9 @@ def test_a_rollback_after_an_api_has_started(
         assert now["database"][table] == world.before["database"][table]
     for table in REBUILT:
         assert now["database"][table] == []
-    outputs, templates = start_copies(world)
-    assert not outputs.incomplete and not templates.incomplete
+    templates = start_copies(world)
+    assert not templates.incomplete
     assert world.column("outputs", "output_id", "meta") == metas
-
-
-def test_a_rollback_of_a_row_that_the_start_copy_made_again(world: World) -> None:
-    """A file of an older build has not every key, and the copy writes each default."""
-    path = world.meta_path("a", 1)
-    body = json.loads(path.read_text())
-    del body["sent_to_bambuddy"]
-    path.write_text(json.dumps(body, indent=2) + "\n")
-    query = "SELECT meta::text FROM outputs WHERE output_id = %s"
-    world.sql("UPDATE outputs SET meta = meta - 'sent_to_bambuddy'")
-    was = world.sql(query, output_id(1))
-    world.run()
-    start_copies(world)
-    assert "sent_to_bambuddy" in world.sql(query, output_id(1))[0][0]
-    world.rollback()
-    assert world.sql(query, output_id(1)) == was
 
 
 def test_a_rollback_where_no_push_was_recorded(world: World) -> None:
@@ -938,7 +930,8 @@ def _unmapped_output(world: World) -> None:
     lost = world.old.save("a", scad="cube(8);\n")
     git(world.old.root, "reset", "-q", "--hard", "HEAD~1")
     output(world.paths, "a", 9, lost, INPUTS)
-    start_copies(world)
+    with world.outputs() as (store, _):
+        store.restore_rows("a")
 
 
 def _row_is_not_file(world: World) -> None:
@@ -1118,12 +1111,10 @@ def test_an_output_with_no_row_or_no_folder_is_reported(world: World) -> None:
     reported = "\n".join(found.reports)
     assert output_id(1) in reported and output_id(2) in reported
     world.run()
-    # The file is the record: the start copy makes the row from it.
+    # The file is changed; with no row, the database has nothing to change.
     body = json.loads(world.meta_path("a", 1).read_text())
     assert body["model_version"] == world.new("a", "a1")
-    start_copies(world)
-    stored = world.sql("SELECT meta FROM outputs WHERE output_id = %s", output_id(1))
-    assert stored[0][0]["model_version"] == world.new("a", "a1")
+    assert world.sql("SELECT meta FROM outputs WHERE output_id = %s", output_id(1)) == []
 
 
 def test_a_meta_json_that_cannot_be_read_is_left_and_reported(world: World) -> None:

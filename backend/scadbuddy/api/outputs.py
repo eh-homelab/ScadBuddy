@@ -1135,8 +1135,8 @@ DAMAGED_SAMPLE = 50
 
 
 class OutputBytesStatus(BaseModel):
-    """The last run of the copy of the saved outputs' bytes to the blob store (#7256): at an
-    API start, or in a housekeeping sweep."""
+    """The last run of the copy of the saved outputs' bytes to the blob store (#7256), which
+    ran at an API start or in a housekeeping sweep until #7257 retired it."""
 
     started_at: datetime
     #: ``None`` while the run goes on, when it stopped before its end, when an output
@@ -1209,12 +1209,13 @@ class OutputCopyStatus(BaseModel):
     summary="The last copy of the outputs' files to rows",
 )
 async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
-    """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
-    a housekeeping sweep: when it started and finished, what it copied, refreshed and
-    dropped, the folders it could not copy and the side files it left out. 404 before any
-    run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), how
-    many rows the files still hold the bytes of, and the rows that name damage now.
-    ``cut_over_at``: when the cut-over mark was written (#7257); the copies stop at it."""
+    """The last run of the copy of the outputs' files to rows (#7255), which ran at an API
+    start or in a housekeeping sweep until #7257 retired it: when it started and finished,
+    what it copied, refreshed and dropped, the folders it could not copy and the side files
+    it left out. 404 before any run. ``bytes``: the last run of the copy of their bytes to
+    the blob store (#7256), how many rows the files still hold the bytes of, and the rows
+    that name damage now. ``cut_over_at``: when the cut-over mark was written (#7257); the
+    copies stopped at it."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
     if rows is None or last is None:

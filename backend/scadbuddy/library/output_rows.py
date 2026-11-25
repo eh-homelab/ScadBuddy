@@ -579,10 +579,10 @@ _COPY_REFRESH = (
 #: What a copy logs when it does nothing because the cut-over mark exists (plan D4).
 CUT_OVER_NOTHING_TO_COPY = "the outputs are cut over (#7257); nothing to copy"
 
-#: The row copy's advisory lock (`output_copy.copy_outputs`):
-#: ``pg_try_advisory_lock(hashtextextended(COPY_LOCK, 0))``.
+#: The row copy's advisory lock (the copy is retired, #7257; the lock stays for
+#: `try_cut_over`): ``pg_try_advisory_lock(hashtextextended(COPY_LOCK, 0))``.
 COPY_LOCK = "scadbuddy:outputs:copy"
-#: The byte copy's advisory lock (`output_byte_copy.copy_output_bytes`), the same way.
+#: The retired byte copy's advisory lock, the same way.
 BYTES_LOCK = "scadbuddy:outputs:bytes"
 
 #: Whether neither copy runs now: both copies' locks, taken until the transaction ends.

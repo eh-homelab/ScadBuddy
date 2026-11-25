@@ -126,10 +126,8 @@ from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
-from scadbuddy.library.output_byte_copy import copy_output_bytes
 from scadbuddy.library.output_bytes import OutputBytes, usable
-from scadbuddy.library.output_copy import copy_outputs
-from scadbuddy.library.output_rows import OutputRows
+from scadbuddy.library.output_rows import CUT_OVER_NOTHING_TO_COPY
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
@@ -636,143 +634,11 @@ async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
         )
 
 
-async def _copy_outputs_once(state: AppState, stop: threading.Event) -> None:
-    """One run of the copy of the saved outputs' files to rows (#7255, `copy_outputs`),
-    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
-    that does not get it does nothing. A failure is logged, then raised."""
-    rows = state.outputs.rows
-    if rows is None:
-        return
-    try:
-        result = await asyncio.to_thread(
-            copy_outputs, state.outputs, rows, state.projection.conninfo, stop
-        )
-    except Exception:
-        logger.exception(
-            "could not copy the saved outputs to rows; the next sweep or start retries"
-        )
-        raise
-    if result is not None:
-        logger.info(
-            "copied the saved outputs to rows",
-            extra={
-                "copied": result.copied,
-                "refreshed": result.refreshed,
-                "dropped": result.dropped,
-                "not_copied": len(result.not_copied),
-                "damaged": len(result.damaged),
-                "incomplete": result.incomplete,
-                "stopped": stop.is_set(),
-            },
-        )
-
-
 async def _copy_templates_logged(state: AppState, *, stop: threading.Event) -> None:
     """The start's copy (#7317), once and best effort: a failure is logged only. The
     housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again."""
     with suppress(Exception):
         await _copy_templates_once(state, stop)
-
-
-async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
-    """The start's copy (#7255), once and best effort: a failure is logged only. The
-    housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for the writes of pods on an
-    older build."""
-    with suppress(Exception):
-        await _copy_outputs_once(state, stop)
-
-
-async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> None:
-    """One run of the byte copy of the saved outputs to the blob store (#7256,
-    `copy_output_bytes`), logged. It takes the copy's advisory lock, so one replica copies
-    at a time; a run that does not get it does nothing. On `local` it copies to the
-    outputs' own content store (#7257, plan D7); on `bambuddy` it records a refused run.
-    A failure is logged, then raised."""
-    rows = state.outputs.rows
-    if rows is None:
-        return
-    # On `local` the outputs' own content store (plan D7), else the shared one.
-    content = (
-        state.outputs.bytes.content if state.outputs.bytes is not None else state.store.content
-    )
-    try:
-        result = await copy_output_bytes(
-            state.outputs, rows, content, state.projection.conninfo, stop
-        )
-    except Exception:
-        logger.exception(
-            "could not copy the outputs' bytes to the blob store; the next sweep or start retries"
-        )
-        raise
-    if result is not None:
-        logger.info(
-            "copied the outputs' bytes to the blob store",
-            extra={
-                "copied": result.copied,
-                "verified": result.verified,
-                "skipped": result.skipped,
-                "failed": len(result.failed),
-                "damaged": len(result.damaged),
-                "refused": result.refused,
-                "incomplete": result.incomplete,
-                "stopped": stop.is_set(),
-            },
-        )
-        if result.refused is None and not result.incomplete and not stop.is_set():
-            await _try_cut_over(rows)
-
-
-async def _try_cut_over(rows: OutputRows) -> bool:
-    """Write the cut-over mark (#7257, plan D2) when the copies are done, best effort:
-    whether it exists now. Only the call that wrote the mark logs it (another replica may
-    write it meanwhile); a failure is logged only, and the next byte run or start tries
-    again."""
-    try:
-        if await asyncio.to_thread(rows.cut_over):
-            return True
-        if not await asyncio.to_thread(rows.try_cut_over):
-            return await asyncio.to_thread(rows.cut_over)
-        at = await asyncio.to_thread(rows.cut_over_at)
-    except Exception:
-        logger.exception("could not write the cut-over mark; the next byte run or start retries")
-        return False
-    logger.info("the outputs are cut over (#7257)", extra={"at": at})
-    return True
-
-
-async def _copy_output_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
-    """The start's byte copy (#7256), once and best effort: a failure is logged only. The
-    housekeeping sweep `OUTPUT_BYTES_SWEEP` runs it again, for the files of pods on an
-    older build."""
-    with suppress(Exception):
-        await _copy_output_bytes_once(state, stop)
-
-
-async def _copy_outputs_and_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
-    """The start's copies: the rows (#7255), then the bytes (#7256), which walk the rows
-    the first copy wrote. The bytes are copied only when the last row copy run finished:
-    a run that is ``incomplete`` (an outputs volume not there) or did not end leaves the
-    byte copy to the sweep `OUTPUT_BYTES_SWEEP`.
-
-    It tries the cut-over mark first (#7257): when the copies were done before this start,
-    the mark is written now, and neither copy runs."""
-    rows = state.outputs.rows
-    if rows is not None and await _try_cut_over(rows):
-        return
-    await _copy_outputs_logged(state, stop=stop)
-    if stop.is_set():
-        return
-    if rows is None:
-        return
-    try:
-        last = await asyncio.to_thread(rows.last_run)
-    except Exception:
-        logger.exception("could not read the last row copy; the start does not copy the bytes")
-        return
-    if last is None or last["finished_at"] is None or last["incomplete"]:
-        logger.info("the row copy did not finish; the start does not copy the outputs' bytes")
-        return
-    await _copy_output_bytes_logged(state, stop=stop)
 
 
 #: How often a long sweep heartbeats: well inside its `HEARTBEAT_TIMEOUT`.
@@ -910,26 +776,14 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=OUTPUT_COPY_SWEEP)
     async def copy_outputs_to_rows() -> None:
-        # #7255: its own stop, as `sweep_assets`': the worker's shutdown ends the walk
-        # between folders. Any cancel sets it too, as a timeout's: the thread then ends and
-        # frees the advisory lock.
-        stop = threading.Event()
-        try:
-            await _heartbeating(_copy_outputs_once(state, stop), stop)
-        except asyncio.CancelledError:
-            stop.set()
-            raise
+        # #7257: retired; registered for one release, for the runs recorded before
+        # `OUTPUTS_CUT_OVER_PATCH` that still schedule it.
+        logger.info(CUT_OVER_NOTHING_TO_COPY)
 
     @activity.defn(name=OUTPUT_BYTES_SWEEP)
     async def copy_output_bytes_to_blobs() -> None:
-        # #7256: its own stop, as the row copy's: the worker's shutdown or any cancel ends
-        # the run between outputs and frees its advisory lock.
-        stop = threading.Event()
-        try:
-            await _heartbeating(_copy_output_bytes_once(state, stop), stop)
-        except asyncio.CancelledError:
-            stop.set()
-            raise
+        # #7257: retired, as `copy_outputs_to_rows`.
+        logger.info(CUT_OVER_NOTHING_TO_COPY)
 
     @activity.defn(name=FLOWS_SWEEP)
     async def sweep_flow_runs() -> None:
@@ -2695,7 +2549,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None
     copy_templates_now: asyncio.Task[None] | None = None
-    copy_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -2744,13 +2597,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again.
         copy_templates_now = asyncio.create_task(
             _copy_templates_logged(state, stop=stop_background), name="copy templates"
-        )
-        # #7255: every saved output's files copied to its row, and the rows reconciled
-        # with the files; until a copy run finishes, a missing row falls back to them.
-        # The housekeeping sweep `OUTPUT_COPY_SWEEP` runs it again, for older pods' writes.
-        # #7256: then their bytes to the blob store (`OUTPUT_BYTES_SWEEP` again).
-        copy_now = asyncio.create_task(
-            _copy_outputs_and_bytes_logged(state, stop=stop_background), name="copy outputs"
         )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
@@ -2811,7 +2657,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             attach_now,
             adopt_now,
             copy_templates_now,
-            copy_now,
         )
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
