@@ -319,16 +319,32 @@ class InsertType(_Catalog):
     derived_count: int = 0
 
 
-#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2).
+#: Why a weighing offers no derived insert weight (#7280 R-7280-1, D2). ``below_label``
+#: (#7683): a new spool read under its label weight, and `InsertWeightCheck` names the
+#: shortfall and the resolutions.
 NoOfferReason = Literal[
     "archived",
     "no_insert",
     "no_label_weight",
     "used",
     "not_full",
+    "below_label",
     "not_above_label",
     "derived_too_heavy",
 ]
+
+#: How a new spool's reading under its label weight is read (#7683, spec §5.3): the
+#: scale was tared on the empty spool, the spool is short, or the label weight is wrong.
+BelowLabelResolutionKind = Literal["tared", "short", "label_wrong"]
+
+
+class BelowLabelResolution(BaseModel):
+    """One reading of a new spool's shortfall, with the filament it means."""
+
+    kind: BelowLabelResolutionKind
+    filament_g: float
+    #: For ``label_wrong``: ``filament_g`` rounded half up, at least 1.
+    new_label_weight_g: int | None = None
 
 
 class InsertWeightOffer(BaseModel):
@@ -363,6 +379,12 @@ class InsertWeightCheck(BaseModel):
     empty_weight_g: int | None
     #: ``reading_g - empty_weight_g``; ``None`` without an insert.
     filament_g: float | None
+    #: For ``below_label`` (#7683): ``label_weight_g - reading_g``, the resolutions in the
+    #: order ``tared``, ``short``, ``label_wrong`` (the last two only when the reading is
+    #: at least the empty weight) and the one chosen by default.
+    shortfall_g: float | None = None
+    resolutions: list[BelowLabelResolution] = []
+    default: BelowLabelResolutionKind | None = None
 
 
 class InsertWeightAccept(_In):
