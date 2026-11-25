@@ -257,6 +257,18 @@ export const LABEL_TEMPLATES: S['LabelTemplates'] = {
   saved: [],
 }
 
+/**
+ * #7216 — the pages `label_pdf.py` `page_count` draws for `count` labels: one label a page on a roll, else as many
+ * pages as the sheet needs (the template's own grid, or the packed Letter sheet of `_packed` for the `sheet` layout).
+ */
+function labelPages(choice: S['LabelTemplateChoice'] | null | undefined, layout: 'roll' | 'sheet', count: number) {
+  const known = LABEL_TEMPLATES.templates.find((one) => one.id === (choice?.template ?? 'roll_50x25'))
+  const width = known?.width_mm ?? choice?.width_mm ?? 50
+  const height = known?.height_mm ?? choice?.height_mm ?? 25
+  const grid = known?.sheet ?? (layout === 'sheet' ? { cols: Math.max(1, Math.floor(192 / (width + 2))), rows: Math.max(1, Math.floor((279.4 - 20 + 2) / (height + 2))) } : null)
+  return grid ? Math.ceil(count / (grid.cols * grid.rows)) : count
+}
+
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const
 
 /** A refusal as `core/problems.py` `problem_response` writes it: every error here. */
@@ -2531,10 +2543,11 @@ export const handlers = [
     const settings = mockSettings()
     if (places.length > 0 && !settings.filament_label_base_url && !settings.public_url?.startsWith('https://'))
       return problem(409, 'A place label needs an address: set the label address in Settings, or the public URL.', { code: 'no_label_base' })
-    // #7216 — a PNG answer is one byte of the type the real route gives: one label is one PNG, more are a ZIP (R-7216-6).
-    // The real route reads the stored setting when the request names no format.
+    // #7216 — a PNG answer is one byte of the type the real route gives: one page is one PNG, more pages are a ZIP
+    // (R-7216-6). The real route reads the stored settings when the request names no format or template.
     if ((body.format ?? settings.filament_label_output?.format) === 'png') {
-      const [type, name] = count === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
+      const choice = body.template ?? settings.filament_label_template
+      const [type, name] = labelPages(choice, body.layout ?? 'roll', count) === 1 ? ['image/png', 'labels.png'] : ['application/zip', 'labels.zip']
       return new HttpResponse(new Blob(['x'], { type }), { headers: { 'Content-Type': type, 'Content-Disposition': `attachment; filename="${name}"` } })
     }
     return new HttpResponse(new Blob([`%PDF-1.4\n% ${count} labels\n%%EOF\n`], { type: 'application/pdf' }), {

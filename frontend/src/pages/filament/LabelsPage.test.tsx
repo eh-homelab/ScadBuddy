@@ -221,7 +221,7 @@ describe('the label template (#7157)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('A place label needs an address')
   })
 
-  it('keeps the PDF button disabled while the places load', async () => {
+  it('keeps the Download button disabled while the places load', async () => {
     let release = () => {}
     const gate = new Promise<void>((resolve) => {
       release = resolve
@@ -240,7 +240,7 @@ describe('the label template (#7157)', () => {
     expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled()
   })
 
-  it('holds the PDF of place labels drawn at the page’s own address, and says why', async () => {
+  it('holds the download of place labels drawn at the page’s own address, and says why', async () => {
     const noBase = () => HttpResponse.json({ filament_label_template: { template: 'roll_50x25', width_mm: null, height_mm: null }, filament_label_base_url: null, public_url: null })
     server.use(http.get('*/api/v1/settings', noBase))
     const { unmount } = renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
@@ -303,6 +303,66 @@ function savedName() {
 }
 
 describe('the label output (#7216)', () => {
+  // R-7216-17: a pick never writes fields the page has not read.
+  it('saves a pick made before the settings arrive once, with the stored fields', async () => {
+    serve()
+    const stored = ['number', 'qr', 'weight']
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: stored })
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('*/api/v1/settings', async () => {
+        await held
+        return HttpResponse.json({ filament_label_output: { format: 'pdf', dpi: 300, fields: stored }, filament_label_base_url: null, public_url: null })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('radio', { name: 'PNG' }))
+    expect(screen.getByRole('radio', { name: 'PNG' })).toBeChecked()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toEqual([])
+    answer()
+    await waitFor(() => expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 300, fields: stored } }]))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(puts).toHaveLength(1)
+  })
+
+  it('keeps the format and dpi picked over a stored output read after the pick', async () => {
+    serve()
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('*/api/v1/settings', async () => {
+        await held
+        return HttpResponse.json({ filament_label_output: { format: 'png', dpi: 203, fields: FIELDS }, filament_label_base_url: null, public_url: null })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('radio', { name: 'PNG' }))
+    await choose(user, await screen.findByRole('combobox', { name: 'Resolution' }), '600 dpi')
+    answer()
+    await waitFor(() => expect(puts).toHaveLength(1))
+    expect(puts).toEqual([{ filament_label_output: { format: 'png', dpi: 600, fields: FIELDS } }])
+    expect(screen.getByRole('radio', { name: 'PNG' })).toBeChecked()
+    expect(screen.getByRole('combobox', { name: 'Resolution' })).toHaveTextContent('600 dpi')
+  })
+
+  it('saves no output when the settings cannot be read, and downloads at the pick', async () => {
+    serve()
+    const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })
+    server.use(http.get('*/api/v1/settings', () => HttpResponse.json({ detail: 'no' }, { status: 500 })))
+    const bodies = serveLabels('image/png')
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('radio', { name: 'PNG' }))
+    expect(await screen.findByText('The file choice could not be saved. It holds on this page only.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ format: 'png', dpi: 300 })
+    expect(puts).toEqual([])
+  })
+
   it('downloads a PNG when the output is PNG', async () => {
     serve()
     const puts = serveOutput({ format: 'pdf', dpi: 300, fields: FIELDS })

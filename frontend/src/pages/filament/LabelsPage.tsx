@@ -205,6 +205,10 @@ export function LabelsPage() {
   // #7216 — the file's format and dpi: the setting `filament_label_output`, saved at each change.
   const [output, setOutput] = useState<LabelOutput>(DEFAULT_OUTPUT)
   const outputSaver = useSettingSaver('filament_label_output')
+  // R-7216-17: a pick saves only the format and dpi, with the `fields` read from the setting. Until
+  // the read answers, the newest pick waits here; after a failed read, no pick is saved.
+  const outputRead = useRef<{ state: 'reading' | 'read' | 'failed'; fields: LabelOutput['fields']; waiting: LabelOutput | null }>({ state: 'reading', fields: DEFAULT_OUTPUT.fields, waiting: null })
+  const [outputUnsaved, setOutputUnsaved] = useState(false)
   const picker = useRef<HTMLButtonElement>(null)
   const pickerList = useRef<HTMLDivElement>(null)
 
@@ -219,13 +223,31 @@ export function LabelsPage() {
       .getSettings()
       .then((settings) => {
         if (!live) return
-        if (settings.filament_label_output && !outputSaver.savedBeforeRead) setOutput(settings.filament_label_output)
-        const stored = settings.filament_label_template
-        if (!stored || templateSaver.savedBeforeRead) return
-        setChoice(cleanChoice(stored))
-        if (stored.template === 'custom' && !customOpened.current) setDraft({ width: String(stored.width_mm ?? ''), height: String(stored.height_mm ?? '') })
+        const read = outputRead.current
+        const stored = settings.filament_label_output ?? DEFAULT_OUTPUT
+        read.state = 'read'
+        read.fields = stored.fields
+        // A pick made before the read keeps its format and dpi (R-7216-16), and is saved now with the stored fields.
+        const picked = read.waiting
+        read.waiting = null
+        if (picked) {
+          const next = { ...picked, fields: stored.fields }
+          setOutput(next)
+          outputSaver.save(next)
+        } else setOutput(stored)
+        const template = settings.filament_label_template
+        if (!template || templateSaver.savedBeforeRead) return
+        setChoice(cleanChoice(template))
+        if (template.template === 'custom' && !customOpened.current) setDraft({ width: String(template.width_mm ?? ''), height: String(template.height_mm ?? '') })
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!live) return
+        // The page cannot know the stored fields, so it saves no output; a pick holds on this page only.
+        const read = outputRead.current
+        read.state = 'failed'
+        if (read.waiting) setOutputUnsaved(true)
+        read.waiting = null
+      })
     return () => {
       live = false
     }
@@ -240,7 +262,10 @@ export function LabelsPage() {
 
   const pickOutput = (next: LabelOutput) => {
     setOutput(next)
-    outputSaver.save(next)
+    const read = outputRead.current
+    if (read.state === 'read') outputSaver.save({ ...next, fields: read.fields })
+    else if (read.state === 'reading') read.waiting = next
+    else setOutputUnsaved(true)
   }
 
   const pick = (value: string) => {
@@ -524,8 +549,8 @@ export function LabelsPage() {
             {customProblem && <p className="pb-1.5 text-[13px] text-warn">{customProblem}</p>}
           </div>
         )}
-        {templateSaver.error && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The label choice could not be saved. It holds on this page only.</p>}
-        {outputSaver.error && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The file choice could not be saved. It holds on this page only.</p>}
+        {templateSaver.failed && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The label choice could not be saved. It holds on this page only.</p>}
+        {(outputSaver.failed || outputUnsaved) && <p className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">The file choice could not be saved. It holds on this page only.</p>}
         {pdfProblem && (
           <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
             {pdfProblem}

@@ -54,7 +54,7 @@ describe('useSettingSaver (R-7157-9, R-7216-16)', () => {
     answer()
     await waitFor(() => expect(puts).toHaveLength(2))
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(result.current.error).toBeNull()
+    expect(result.current.failed).toBe(false)
   })
 
   it('shows the failure of the newest save', async () => {
@@ -63,6 +63,6 @@ describe('useSettingSaver (R-7157-9, R-7216-16)', () => {
     act(() => result.current.save(pdf))
     await waitFor(() => expect(puts).toHaveLength(1))
     answer()
-    await waitFor(() => expect(result.current.error).toBe('The choice could not be saved. It holds on this page only.'))
+    await waitFor(() => expect(result.current.failed).toBe(true))
   })
 })

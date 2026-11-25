@@ -5,8 +5,8 @@ import type { SettingsUpdate } from '../api/types'
 export interface SettingSaver<K extends keyof SettingsUpdate> {
   /** Stores `value` under the key. The value goes to `PUT /settings` as it is given. */
   save(value: SettingsUpdate[K]): void
-  /** The newest save's failure, or `null`. */
-  error: string | null
+  /** True when the newest save failed. The page says so in its own words, for each setting. */
+  failed: boolean
   /**
    * True once `save` was called. A stored value read after that is older than the person's
    * choice, so the page keeps its own. Read it when the stored value arrives: it is a getter.
@@ -20,7 +20,7 @@ export interface SettingSaver<K extends keyof SettingsUpdate> {
  * is stored last. Only the newest save's failure shows.
  */
 export function useSettingSaver<K extends keyof SettingsUpdate>(key: K): SettingSaver<K> {
-  const [error, setError] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false)
   const queue = useRef<{ busy: boolean; next: { value: SettingsUpdate[K] } | null; seq: number; saved: boolean }>({ busy: false, next: null, seq: 0, saved: false })
 
   const save = (value: SettingsUpdate[K]) => {
@@ -28,7 +28,7 @@ export function useSettingSaver<K extends keyof SettingsUpdate>(key: K): Setting
     q.saved = true
     q.seq += 1
     q.next = { value }
-    setError(null)
+    setFailed(false)
     if (q.busy) return
     q.busy = true
     void (async () => {
@@ -40,7 +40,7 @@ export function useSettingSaver<K extends keyof SettingsUpdate>(key: K): Setting
           await api.putSettings({ [key]: body } as SettingsUpdate)
         } catch {
           // Only the newest save's failure is the page's to tell.
-          if (seq === q.seq) setError('The choice could not be saved. It holds on this page only.')
+          if (seq === q.seq) setFailed(true)
         }
       }
       q.busy = false
@@ -49,7 +49,7 @@ export function useSettingSaver<K extends keyof SettingsUpdate>(key: K): Setting
 
   return {
     save,
-    error,
+    failed,
     get savedBeforeRead() {
       return queue.current.saved
     },
