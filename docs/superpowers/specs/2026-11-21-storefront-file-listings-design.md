@@ -62,7 +62,8 @@ Each fact says where it was measured. "Read" means a read of the code on `origin
    but not to `start_library_quote_preview` for a file (`operations.py:264-279`). That
    function forwards its other keywords to `start_preview_plates`
    (`orders/bambuddy.py:292-321`), which takes `slot_presets` (`bambuddy/preview.py:331`).
-   Read.
+   Read. Since #7467 the function is in `orders/quote_preview.py`; the lines of
+   `orders/bambuddy.py` that this spec cites for it are on the commit that was read.
 5. **A slot with no spool is sliced in the file's own colour.** `resolver.resolve` sets
    `colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"`
    (`bambuddy/resolver.py:354`): a storefront slot has no spool, so it takes the colour
