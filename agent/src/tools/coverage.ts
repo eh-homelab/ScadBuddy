@@ -24,7 +24,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/filament/labels',
     reason:
-      "The labels PDF (#7157, R-7157-10): the answer is a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
+      "The labels file (#7157, R-7157-10, #7216): the answer is a PDF, a PNG or a ZIP of PNGs, a binary file that the assistant cannot read as text. The download tools' pattern (outputs.ts `binary`) embeds base64, which images and files never travel as (#2479), or links a GET, and this is a POST. The Labels page downloads it; the assistant reads the codes with filament_printer_labels and the sizes with filament_label_templates.",
   },
   {
     operation: 'POST /api/v1/filament/tags/reads',

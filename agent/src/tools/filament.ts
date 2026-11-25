@@ -1890,14 +1890,78 @@ const tools: Tool[] = [
     description:
       'The label sizes the Labels page offers (#7157): each template\'s `id`, `name`, `width_mm`, `height_mm` and, ' +
       'for a sheet of labels, its `sheet` (page, columns, rows, margins and gaps); `custom`, the bounds of a custom ' +
-      'size. With none chosen the labels are `roll_50x25`. The chosen one is the setting ' +
-      '`filament_label_template` (get_settings).',
+      'size; `saved`, the sheets that filament_label_sheet_upsert saved (`id`, `name`, `layout`). With none chosen ' +
+      'the labels are `roll_50x25`. The chosen one is the setting `filament_label_template` (get_settings). A ' +
+      'saved sheet is chosen as `{template: "saved", sheet_id}`.',
     input: z.object({}),
     risk: 'read',
     source: SOURCE,
     routes: ['GET /api/v1/filament/label-templates'],
     handler: async (_input, { backend }) =>
       json(await ok(backend.GET('/api/v1/filament/label-templates'), 'list the label templates')),
+  }),
+
+  defineTool({
+    name: 'filament_label_sheet_upsert',
+    label: 'Save a label sheet',
+    description:
+      'Save a label sheet (#7216): a named grid of labels on an A4 or Letter page. Without `sheet_id` it adds a ' +
+      'sheet. With one (from filament_label_templates `saved`) it replaces that whole sheet. `name` is 1 to 100 ' +
+      'characters, and two names may not differ only by case. `layout` has `page` (`a4` or `letter`), `width_mm` ' +
+      '(40 to 190), `height_mm` (25 to 190), `cols` (1 to 20), `rows` (1 to 40), `top_mm` and `left_mm` (the page ' +
+      'margins, 0 to 190) and `col_gap_mm` and `row_gap_mm` (0 to 190, default 0). 422 when the grid does not fit ' +
+      'its page. 409 `label_sheet_name_taken` when the name is in use. 409 `too_many_label_sheets` when 100 sheets ' +
+      'are saved. 404 for an unknown `sheet_id`. Only what the user says. Writes ScadBuddy only.',
+    input: z.object({
+      sheet_id: z.string().uuid().optional().describe('A saved sheet `id`; omit to add'),
+      name: z.string().min(1).max(100),
+      layout: z.object({
+        page: z.enum(['a4', 'letter']),
+        width_mm: z.number().min(40).max(190),
+        height_mm: z.number().min(25).max(190),
+        cols: z.number().int().min(1).max(20),
+        rows: z.number().int().min(1).max(40),
+        top_mm: z.number().min(0).max(190),
+        left_mm: z.number().min(0).max(190),
+        col_gap_mm: z.number().min(0).max(190).optional(),
+        row_gap_mm: z.number().min(0).max(190).optional(),
+      }),
+    }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['POST /api/v1/filament/label-sheets', 'PUT /api/v1/filament/label-sheets/{sheet_id}'],
+    summarize: ({ name }) => `Save label sheet ${name}`,
+    handler: async ({ sheet_id, name, layout }, { backend }) => {
+      const body = { name, layout } as never
+      if (sheet_id === undefined)
+        return json(await ok(backend.POST('/api/v1/filament/label-sheets', { body }), 'add a label sheet'))
+      return json(
+        await ok(
+          backend.PUT('/api/v1/filament/label-sheets/{sheet_id}', { params: { path: { sheet_id } }, body }),
+          `save label sheet ${sheet_id}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
+    name: 'filament_label_sheet_delete',
+    label: 'Delete a label sheet',
+    description:
+      'Delete a saved label sheet by its `id` (filament_label_templates `saved`). 404 for an unknown id. A label ' +
+      'choice that names the deleted sheet draws at the default size. Only when the user asks. Writes ScadBuddy only.',
+    input: z.object({ sheet_id: z.string().uuid() }),
+    risk: 'write',
+    source: SOURCE,
+    routes: ['DELETE /api/v1/filament/label-sheets/{sheet_id}'],
+    summarize: ({ sheet_id }) => `Delete label sheet ${sheet_id}`,
+    handler: async ({ sheet_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/filament/label-sheets/{sheet_id}', { params: { path: { sheet_id } } }),
+        `delete label sheet ${sheet_id}`,
+      )
+      return json({ deleted: sheet_id })
+    },
   }),
 
   defineTool({
