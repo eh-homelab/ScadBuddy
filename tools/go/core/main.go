@@ -22,6 +22,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
 )
 
@@ -70,7 +71,11 @@ func run(ctx context.Context, env func(string) string) error {
 	}
 	defer pool.Close()
 
-	router, err := newRouter(pool, upstream, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+	keys, err := seal.LoadKeys(env)
+	if err != nil {
+		return err
+	}
+	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
 	if err != nil {
 		return err
 	}
@@ -100,14 +105,32 @@ func serve(ctx context.Context, server *http.Server, listener net.Listener) erro
 	return server.Shutdown(drain)
 }
 
+// areaRoutes is a package's routes by area name, over the pool, with the KEKs (nil without
+// SCADBUDDY_SECRET_KEY_FILE).
+type areaRoutes func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Route
+
+// areaPackages are the packages whose areas the switch below does not name.
+var areaPackages = []areaRoutes{}
+
+// sealed are the areas that seal or open with the KEK: without one they refuse to start.
+var sealed = map[string]bool{
+	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
+}
+
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
-func newRouter(pool *pgxpool.Pool, next http.Handler, areas, authMode string) (*crud.Router, error) {
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string) (*crud.Router, error) {
 	router := &crud.Router{
 		Resolver: &auth.Resolver{Pool: pool},
 		Enforce:  authMode == "enforce",
 		Next:     next,
 	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
+	more := map[string][]crud.Route{}
+	for _, p := range areaPackages {
+		for name, routes := range p(pool, keys) {
+			more[name] = routes
+		}
+	}
 	for name := range strings.SplitSeq(areas, ",") {
 		switch name = strings.TrimSpace(name); name {
 		case "":
@@ -119,7 +142,14 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, areas, authMode string) (*
 		case "session-turns:read":
 			router.Add("agent", turn.Polled()...)
 		default:
-			return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
+			routes, ok := more[name]
+			if !ok {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
+			}
+			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
+				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
+			}
+			router.Add("agent", routes...)
 		}
 	}
 	return router, nil

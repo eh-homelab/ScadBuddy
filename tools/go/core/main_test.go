@@ -43,7 +43,7 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, areas, "")
+	router, err := newRouter(pool, next, nil, areas, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, "session-evnets", ""); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", ""); err == nil {
 		t.Error("an unknown area was taken")
 	}
 }
