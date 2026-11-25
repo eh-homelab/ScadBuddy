@@ -1249,6 +1249,17 @@ class OutputStore:
             self.forget_plate_cover(slug)
             return None
 
+    def plate_image(self, output_id: str) -> bytes | None:
+        """The output's ``plate_1.png``, read out of its 3MF, or None when it is gone or
+        has none: the catalogue thumbnail of the output the template's row names
+        (#7317). Only that archive is opened."""
+        try:
+            archive_path = self._find_dir(output_id) / MODEL_NAME
+            with zipfile.ZipFile(archive_path) as archive:
+                return archive.read(PLATE_THUMBNAIL)
+        except (OutputNotFoundError, OSError, KeyError, zipfile.BadZipFile):
+            return None
+
     def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
         """The mesh analysis of one plate of the output's 3MF (#284, #289), computed
         once and cached.

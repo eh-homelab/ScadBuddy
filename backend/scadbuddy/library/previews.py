@@ -172,6 +172,20 @@ class PreviewStore:
             return None
         return record.key[:PREVIEW_ID_LENGTH]
 
+    def current_image(self, slug: str) -> tuple[str, bytes] | None:
+        """:meth:`preview_id` and the image it names, from one read of the row, or
+        None when there is no image to serve: the thumbnail's 200 tags what it read
+        (#7317, plan decision 12)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT source_key, png FROM model_previews"
+                " WHERE model_id = %s AND ok AND png IS NOT NULL",
+                (slug,),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["source_key"][:PREVIEW_ID_LENGTH], bytes(row["png"])
+
     def preview_ids(self, slugs: Sequence[str]) -> dict[str, str]:
         """:meth:`preview_id` of each of ``slugs`` that has one, in one query (#7317)."""
         with self._connect() as conn:

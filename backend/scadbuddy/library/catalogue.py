@@ -624,6 +624,51 @@ class ThumbnailOrigin:
     preview_id: str | None = None
 
 
+#: A thumbnail read: the image, its content type and the `ETag` of what was read.
+ThumbnailRead = tuple[bytes, str, str]
+
+
+@dataclass(frozen=True)
+class ThumbnailRef:
+    """Which thumbnail a template has now, named without reading it (#7317, spec §5.4):
+    ``etag`` names its source (an own cover's sha256, ``"output-<id>"``,
+    ``"preview-<id>"``), so a matching ``If-None-Match`` needs no read. ``read``
+    answers the bytes, the content type and the `ETag` of what it read, which can
+    differ when the source moved in between (plan decision 12); None for no image."""
+
+    etag: str
+    read: Callable[[], ThumbnailRead | None]
+
+
+#: One thumbnail source: its `ETag` and its read, or None when it has no image.
+_ThumbnailSource = Callable[[], tuple[str, Callable[[], ThumbnailRead | None]] | None]
+
+
+def _first_source(sources: list[_ThumbnailSource]) -> ThumbnailRef | None:
+    """The first source that has an image, as a ref whose read falls through to the
+    later sources when that image is gone by the time it is read."""
+    for index, source in enumerate(sources):
+        found = source()
+        if found is None:
+            continue
+        etag, read = found
+        return ThumbnailRef(etag, _read_through(read, sources[index + 1 :]))
+    return None
+
+
+def _read_through(
+    read: Callable[[], ThumbnailRead | None], later: list[_ThumbnailSource]
+) -> Callable[[], ThumbnailRead | None]:
+    def first() -> ThumbnailRead | None:
+        image = read()
+        if image is not None:
+            return image
+        fallback = _first_source(later)
+        return None if fallback is None else fallback.read()
+
+    return first
+
+
 class ModelRecord(ModelMeta):
     # The template's id: a bare slug for mine, `builtin:<slug>` for a built-in.
     slug: str
@@ -1004,6 +1049,93 @@ class Catalogue:
             return None
         preview = self.previews.image(slug)
         return (preview, "image/png") if preview is not None else None
+
+    def thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+        """The catalogue thumbnail, named by its source, or None (#7317, plan Task 9).
+        From the template's row once the rows are copied: its own cover, else the
+        first output's plate cover, else the preview, with no file read or stat
+        until ``read``. No row is :class:`ModelNotFoundError`. A row that lags its
+        media rows (`TemplateRow.media_newer`), and every template before the copy,
+        is read from its files as :meth:`thumbnail`, tagged by the bytes."""
+        with span("catalogue.thumbnail_ref", attributes={"scadbuddy.slug": slug}) as current:
+            ref = self._thumbnail_ref(slug)
+            current.set_attribute("scadbuddy.found", ref is not None)
+            return ref
+
+    def _thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+        row: TemplateRow | None = None
+        if self._from_rows():
+            assert self.rows is not None
+            row = self.rows.get(slug)
+            if row is None:
+                raise ModelNotFoundError(slug)
+        if row is None or row.media_newer:
+            found = self._thumbnail(slug)
+            if found is None:
+                return None
+            image, content_type = found
+            # Over the bytes, so it changes exactly when the image does.
+            etag = f'"{hashlib.sha256(image).hexdigest()}"'
+            return ThumbnailRef(etag, lambda: (image, content_type, etag))
+        listed = row
+        return _first_source(
+            [
+                lambda: self._own_cover_source(listed),
+                lambda: self._output_cover_source(slug),
+                lambda: self._preview_source(slug),
+            ]
+        )
+
+    def _own_cover_source(
+        self, row: TemplateRow
+    ) -> tuple[str, Callable[[], ThumbnailRead | None]] | None:
+        cover = row.cover
+        if cover is None:
+            return None
+
+        def read() -> ThumbnailRead | None:
+            try:
+                image = (self.paths.root / cover["path"]).read_bytes()
+            except OSError:
+                return None
+            # The same tag as before the copy: the hash of the bytes.
+            return image, cover["content_type"], f'"{hashlib.sha256(image).hexdigest()}"'
+
+        return f'"{cover["sha256"]}"', read
+
+    def _output_cover_source(
+        self, slug: str
+    ) -> tuple[str, Callable[[], ThumbnailRead | None]] | None:
+        outputs = self.outputs
+        if outputs is None:
+            return None
+        output_id = outputs.plate_cover_output(slug)
+        if output_id is None:
+            return None
+        etag = f'"output-{output_id}"'
+
+        def read() -> ThumbnailRead | None:
+            image = outputs.plate_image(output_id)
+            return None if image is None else (image, "image/png", etag)
+
+        return etag, read
+
+    def _preview_source(self, slug: str) -> tuple[str, Callable[[], ThumbnailRead | None]] | None:
+        previews = self.previews
+        if previews is None or not self.serve_previews:
+            return None
+        preview_id = previews.preview_id(slug)
+        if preview_id is None:
+            return None
+
+        def read() -> ThumbnailRead | None:
+            found = previews.current_image(slug)
+            if found is None:
+                return None
+            current, image = found
+            return image, "image/png", f'"preview-{current}"'
+
+        return f'"preview-{preview_id}"', read
 
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)

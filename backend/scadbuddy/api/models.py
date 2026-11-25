@@ -2078,9 +2078,9 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
         "The model's cover -- its first media image, or the poster of its first "
         "video -- or, when it has none, the plate image of its first generated "
         "output, or else its default-render preview. 404 when there is none of the "
-        "three. Carries a strong `ETag` "
-        "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
-        "answered 304 with no body."
+        "three. Carries a strong `ETag` that names the image (the cover's sha256, "
+        "`output-<id>` or `preview-<id>`) and `Cache-Control: no-cache`; a matching "
+        "`If-None-Match` is answered 304 with no body."
     ),
 )
 def get_thumbnail(
@@ -2088,17 +2088,21 @@ def get_thumbnail(
     catalogue: CatalogueDep,
     if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
 ) -> Response:
-    require_model_exists(catalogue, slug)
     try:
-        cover = catalogue.thumbnail(slug)
+        ref = catalogue.thumbnail_ref(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    if cover is None:
+    if ref is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
-    image, content_type = cover
-    # Over the bytes themselves, so it changes exactly when the image does, from
-    # whichever source -- a set, a removal, or the fallback moving to another output.
-    etag = f'"{hashlib.sha256(image).hexdigest()}"'
+    # The tag names the source (#7317): a match reads nothing.
+    if etag_matches(if_none_match, ref.etag):
+        headers = {"ETag": ref.etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    found = ref.read()
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
+    image, content_type, etag = found
+    # The tag of what was read, which may be newer than the ref's (plan decision 12).
     headers = {"ETag": etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
     if etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)

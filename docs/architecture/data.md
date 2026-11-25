@@ -152,6 +152,24 @@ models (`list_summaries`: the activity facets, the print-import suggestions and 
 outputs' `?tag=`); before that, they read the files. `library_users` and `library_pins`
 always read the files (spec §7.4).
 
+- A row whose folder is gone (a hand removal, a delete whose row drop failed) is a 404 for
+  `record`, has no print settings and holds no name in the name check: each of these
+  single-template readers makes one stat for it (`Catalogue.exists`). The list keeps such a
+  row until the next copy run drops it (spec §10).
+- A media file that the row's `files` lacks is stat'ed only while one of the template's
+  `template_media` rows is newer than the row's `refreshed_at` (`TemplateRow.media_newer`,
+  read with the row): the media rows commit before the template's row, so a new item is on
+  the disk first. Once the row is newer, such a file is `missing` with no stat.
+- The catalogue thumbnail reads `Catalogue.thumbnail_ref`: the row's `cover`, else the
+  output's plate cover (`OutputStore.plate_cover_output`), else the preview
+  (`PreviewStore.preview_id`). Its `ETag` names the source: the cover's `sha256` (the hash
+  of the bytes, as before the copy), `"output-<id>"` or `"preview-<id>"`. A matching
+  `If-None-Match` is a 304 with no file read or stat. A 200 reads the source
+  (`OutputStore.plate_image`, `PreviewStore.current_image`, which reads the preview's id and
+  image from one row) and carries the tag of what it read (plan decision 12). No row is a
+  404 with no stat; a row that lags its media rows is read from the files, tagged by the
+  bytes (`scadbuddy/api/models.py` `get_thumbnail`).
+
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,
   `scadbuddy/library/repo_lock.py` `_PgHold._also`, in a savepoint), so a save adds no
