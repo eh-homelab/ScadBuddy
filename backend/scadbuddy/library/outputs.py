@@ -558,7 +558,8 @@ class OutputStore:
         #: ``None`` keeps the files as the only record (tests and tools with no database).
         self.rows: OutputRows | None = None
         #: The outputs' bytes as blobs (#7256), read before the files. ``None``: the
-        #: files only, as on the `local` and `bambuddy` stores (`output_bytes.usable`).
+        #: files only, as on the `bambuddy` store (`output_bytes.usable`). On `local` the
+        #: API sets the outputs' own store (#7257, plan D7).
         self.bytes: OutputBytes | None = None
         # The fallback-cover resolution per slug (#179). Finding it means reading
         # every output record and opening 3MFs, and the catalogue asks on every
@@ -963,7 +964,7 @@ class OutputStore:
         """Save the job's output ``index``: `prepare` its folder, put its bytes in the blob store
         under keys of the save's own (`OutputBytes.put_folder`), then `commit` (#7256, spec
         §6.6), so the row, its keys taking those objects, its ``output_files`` rows and the holds
-        of its keys are one transaction. With no blob store (`local`, `bambuddy`) or no rows, it
+        of its keys are one transaction. With no blob store (`bambuddy`) or no rows, it
         puts nothing. The staged keys go after the commit; the output's keys name their objects.
         A failed put or commit removes the folder (`discard`) and the blobs it put, and raises
         again, a `StoreFullError` and a `UniqueViolation` on an id another output holds among

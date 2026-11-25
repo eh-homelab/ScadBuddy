@@ -103,7 +103,7 @@ LOCK_CONNECT_TIMEOUT = 10
 #: Outputs per transaction: prod commits take 1-2 s, so one commit per output is too slow.
 BATCH_BYTES = 50
 
-REFUSED_LOCAL = "the local store has no blob store; output bytes stay on the share"
+REFUSED_NO_CONTENT = "there is no content store; output bytes stay on the share"
 REFUSED_BAMBUDDY = "outputs do not go into Bambuddy's library"
 #: A blob the backend does not hold whole when read back.
 NOT_WHOLE = "the blob is not whole"
@@ -377,7 +377,7 @@ class _Copy:
         ended = False
         try:
             if self.content is None:
-                result.refused = REFUSED_LOCAL
+                result.refused = REFUSED_NO_CONTENT
                 return result
             if self.content.name == "bambuddy":
                 result.refused = REFUSED_BAMBUDDY

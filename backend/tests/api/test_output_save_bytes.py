@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -146,6 +147,29 @@ def test_local_store_puts_output_bytes(client: TestClient, paths: DataPaths, poo
     held = {key for key, holder in _output_holds(pool) if holder == output_id}
     assert {row.blobs.model, row.blobs.preview} <= held
     assert any((paths.output_blobs / "output").iterdir())
+
+
+def test_output_blobs_folder_only_on_local(
+    client: TestClient, paths: DataPaths, tmp_path: Path
+) -> None:
+    """#7257 A3 review M2: `ensure` makes `data/output-blobs/` only for `local`'s output
+    store, never on the share of an `s3` or `bambuddy` store."""
+    assert _state(client).store.backend == "local"
+    assert paths.output_blobs.is_dir()
+    other = DataPaths(root=tmp_path / "other-data")
+    other.ensure()
+    assert other.outputs.is_dir()
+    assert not other.output_blobs.exists()
+    other.ensure(output_blobs=True)
+    assert other.output_blobs.is_dir()
+
+
+def test_s3_start_makes_no_output_blobs_folder(s3_client: TestClient) -> None:
+    """#7257 A3 review M2: an app on `s3` makes no `data/output-blobs/`."""
+    state = _state(s3_client)
+    assert state.store.backend == "s3"
+    assert state.paths.outputs.is_dir()
+    assert not state.paths.output_blobs.exists()
 
 
 def test_save_on_s3_reads_its_files_off_the_loop(

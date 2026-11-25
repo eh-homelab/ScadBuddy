@@ -697,8 +697,9 @@ async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> Non
 async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> None:
     """One run of the byte copy of the saved outputs to the blob store (#7256,
     `copy_output_bytes`), logged. It takes the copy's advisory lock, so one replica copies
-    at a time; a run that does not get it does nothing. On the `local` and `bambuddy`
-    stores it records a refused run. A failure is logged, then raised."""
+    at a time; a run that does not get it does nothing. On `local` it copies to the
+    outputs' own content store (#7257, plan D7); on `bambuddy` it records a refused run.
+    A failure is logged, then raised."""
     rows = state.outputs.rows
     if rows is None:
         return
@@ -2627,7 +2628,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state.render.snapshots = state.store.snapshots
     # #7256: the outputs' bytes are read from the blob store first, never on `bambuddy`.
     # #7257 plan D7: `local` has no content store, so outputs get one of their own under
-    # `data/output-blobs/`, with the shared index and spool.
+    # `data/output-blobs/`, with the shared index and spool. It has no caps, as the `local`
+    # store has none.
     #: `local`'s output store, which the bundle does not close.
     output_content: ContentStore | None = None
     if state.store.backend == "local":
@@ -2653,7 +2655,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "switched migrated blobs",
                 extra={"backend": current.store_backend, "rows": switched},
             )
-        state.paths.ensure()
+        state.paths.ensure(output_blobs=output_content is not None)
         # Before the built-in sync: an existing models directory becomes revision 1,
         # so what a newer image changes in a built-in is a commit on top of it rather
         # than an unversioned overwrite.

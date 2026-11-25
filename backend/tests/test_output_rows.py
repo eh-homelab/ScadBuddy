@@ -876,9 +876,12 @@ def test_claim_refused_while_a_save_commits(
             claimer = threading.Thread(target=lambda: answers.append(rows.claim("o1", "ball")))
             claimer.start()
             deadline = time.monotonic() + 10
+            # Only a backend that the save's own connection blocks: another xdist worker's
+            # wait must not end this one early (A3 review M3).
             with projection.pool.connection() as conn:
                 while not conn.execute(
-                    "SELECT 1 FROM pg_locks WHERE NOT granted AND locktype = 'transactionid'"
+                    "SELECT 1 FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                    (save.info.backend_pid,),
                 ).fetchone():
                     assert time.monotonic() < deadline, "the claim never waited on the save"
                     time.sleep(0.02)

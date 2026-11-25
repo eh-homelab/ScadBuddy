@@ -1156,7 +1156,7 @@ class OutputBytesStatus(BaseModel):
     #: outputs folder is missing or lists no slug folder while rows exist (the run then
     #: writes nothing). The next run tries again.
     incomplete: bool
-    #: Why the run copied nothing: no blob store (``local``), the ``bambuddy`` store, or
+    #: Why the run copied nothing: no content store, the ``bambuddy`` store, or
     #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
     refused: str | None
     #: Outputs whose row the run wrote with a blob it put or a key the row did not name

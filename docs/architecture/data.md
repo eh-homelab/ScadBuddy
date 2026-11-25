@@ -336,8 +336,9 @@ Refusals: before any put, the copy adds up the bytes and the count of the rows w
 `bytes_at` NULL (an output with a bad `files/` name adds nothing, as it is not copied) and checks them against `store_max_total_bytes` and `store_max_count`.
 Past a cap, the run is `refused`, names the shortfall and puts nothing. The needed bytes
 and count can be more than the copy will add, never less: blobs that a failed run already
-put are counted again until the sweep removes them. On the `local` and the `bambuddy` backends
-every run is refused.
+put are counted again until the sweep removes them. On `local` the outputs' own content
+store has no caps, as the `local` store has none, so the check never refuses there. On the
+`bambuddy` backend every run is refused.
 
 A run has a `finished_at` only when nothing was refused, failed or incomplete and it was
 not stopped. `GET /api/v1/outputs/copy-status` answers the last byte run as `bytes`

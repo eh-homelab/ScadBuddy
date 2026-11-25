@@ -210,11 +210,13 @@ class DataPaths:
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id
 
-    def ensure(self) -> None:
+    def ensure(self, *, output_blobs: bool = False) -> None:
+        """Make the data volume's folders. ``output_blobs``: also `output_blobs`, which
+        only the `local` store uses (#7257, plan D7); on `s3` and `bambuddy` the share
+        gets no such folder."""
         for directory in (
             self.models,
             self.outputs,
-            self.output_blobs,
             self.blobs,
             self.cache,
             self.fonts,
@@ -222,3 +224,5 @@ class DataPaths:
             self.assets,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+        if output_blobs:
+            self.output_blobs.mkdir(parents=True, exist_ok=True)
