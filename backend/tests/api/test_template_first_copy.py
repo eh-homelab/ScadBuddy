@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,7 +23,7 @@ import scadbuddy.main as scadbuddy_main
 from scadbuddy.api.deps import AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.template_copy import COPY_LOCK, copy_templates
+from scadbuddy.library.template_copy import COPY_LOCK, TemplateCopyResult, copy_templates
 from scadbuddy.library.template_rows import TemplateRows
 from tests.conftest import PgPool
 
@@ -150,3 +151,130 @@ def test_a_failed_first_copy_still_serves(
     monkeypatch.setattr(scadbuddy_main, "copy_templates", broken)
     with TestClient(app) as client:
         assert client.get("/api/v1/models").status_code == 200
+
+
+@pytest.fixture
+def sigterm_seen() -> Iterator[list[int]]:
+    """A SIGTERM handler in place of uvicorn's (`Server.handle_exit`): it records the
+    signal. The handler from before the test comes back after it."""
+    seen: list[int] = []
+    before = signal.signal(signal.SIGTERM, lambda sig, frame: seen.append(sig))
+    try:
+        yield seen
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+def test_a_sigterm_stops_the_first_copys_wait(
+    pg_pool: PgPool,
+    copy_lock: None,
+    sigterm_seen: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(scadbuddy_main, "FIRST_COPY_POLL", 0.05)
+    monkeypatch.setattr(scadbuddy_main, "FIRST_COPY_WAIT", 30.0)
+    handler = signal.getsignal(signal.SIGTERM)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            scadbuddy_main._first_template_copy(_state_on(pg_pool), threading.Event())
+        )
+        await asyncio.sleep(0.2)
+        assert not task.done()
+        signal.raise_signal(signal.SIGTERM)
+        await asyncio.wait_for(task, 2)
+
+    with caplog.at_level(logging.ERROR, logger=scadbuddy_main.logger.name):
+        asyncio.run(scenario())
+    assert sigterm_seen == [signal.SIGTERM]
+    assert signal.getsignal(signal.SIGTERM) is handler
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+def test_a_sigterm_stops_the_first_copy(
+    pg_pool: PgPool, sigterm_seen: list[int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stops: list[threading.Event] = []
+
+    def slow(*args: Any, **kwargs: Any) -> TemplateCopyResult:
+        stop: threading.Event = args[4]
+        stops.append(stop)
+        stop.wait(10)
+        return TemplateCopyResult(incomplete=True)
+
+    monkeypatch.setattr(scadbuddy_main, "copy_templates", slow)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            scadbuddy_main._first_template_copy(_state_on(pg_pool), threading.Event())
+        )
+        await asyncio.sleep(0.2)
+        assert stops and not stops[0].is_set()
+        signal.raise_signal(signal.SIGTERM)
+        await asyncio.wait_for(task, 2)
+
+    asyncio.run(scenario())
+    assert stops[0].is_set()
+    assert sigterm_seen == [signal.SIGTERM]
+
+
+def test_first_copy_takes_the_lock_when_the_other_run_ends_incomplete(
+    pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other replica's run ends with no finished run (incomplete, stopped or failed)
+    and releases the lock: the waiting replica copies, in its wait."""
+    monkeypatch.setattr(scadbuddy_main, "FIRST_COPY_POLL", 0.05)
+    monkeypatch.setattr(scadbuddy_main, "FIRST_COPY_WAIT", 30.0)
+    copied: list[bool] = []
+
+    def locked_copy(*args: Any, **kwargs: Any) -> TemplateCopyResult | None:
+        with pg_pool.connection() as conn:
+            got = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (COPY_LOCK,)
+            ).fetchone()
+            if got is None or not got["got"]:
+                return None
+            conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,))
+        copied.append(True)
+        return TemplateCopyResult()
+
+    monkeypatch.setattr(scadbuddy_main, "copy_templates", locked_copy)
+    other = psycopg.connect(pg_conninfo, autocommit=True)
+    other.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (COPY_LOCK,))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            scadbuddy_main._first_template_copy(_state_on(pg_pool), threading.Event())
+        )
+        await asyncio.sleep(0.3)
+        assert not task.done()
+        assert copied == []
+        await asyncio.to_thread(other.close)
+        await asyncio.wait_for(task, 2)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        other.close()
+    assert copied == [True]
+
+
+@pytest.mark.template_copy
+def test_a_fresh_install_copies_once_at_start(
+    app: FastAPI, placed: None, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first copy ran before the app served: the background start copy does not
+    read every template again at once."""
+    calls: list[object] = []
+    copy = copy_templates
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args)
+        return copy(*args, **kwargs)
+
+    monkeypatch.setattr(scadbuddy_main, "copy_templates", counted)
+    with TestClient(app) as client:
+        assert client.get("/api/v1/models").status_code == 200
+    assert len(calls) == 1
+    assert _finished_runs(pg_conninfo) == 1
