@@ -28,6 +28,17 @@ class Message:
     payload: bytes
 
 
+class PahoStub:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def disconnect(self) -> None:
+        self.calls.append("disconnect")
+
+    def _sock_close(self) -> None:
+        self.calls.append("sock_close")
+
+
 class FakeClient:
     def __init__(
         self,
@@ -48,6 +59,8 @@ class FakeClient:
         self.replies = replies or []
         self.drop = drop
         self.published: list[dict[str, Any]] = []
+        #: aiomqtt's paho client, which a cut close shuts by force.
+        self._client = PahoStub()
 
     async def __aenter__(self) -> FakeClient:
         return self
@@ -167,6 +180,15 @@ async def test_a_close_that_overruns_keeps_the_reply_within_the_deadline(
     reply = await _request(_printer(client, monkeypatch), wait=30.0, until=start + 0.3)
     assert reply == ours
     assert loop.time() - start < 1.0
+    # The cut close shut the socket itself: the printer takes few LAN clients.
+    assert client._client.calls == ["disconnect", "sock_close"]
+
+
+async def test_a_close_in_time_is_not_forced(monkeypatch: pytest.MonkeyPatch) -> None:
+    ours = {"command": NAME, "sequence_id": SEQ}
+    client = FakeClient(replies=[ours])
+    assert await _request(_printer(client, monkeypatch)) == ours
+    assert client._client.calls == []
 
 
 async def test_a_close_that_overruns_after_silence_ends_by_the_deadline(

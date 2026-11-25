@@ -669,8 +669,9 @@ class LanActivities:
         older firmware may not answer, R-7276-9), and is never sent twice; a read is tried
         `LAN_READ_TRIES` times, as Bambuddy's ``get_kprofiles``, then is
         ``LAN_NO_ANSWER``. A printer that cannot be reached before the publish is
-        ``LAN_UNSURE``, and another certificate ``LAN_CERT_CHANGED``. Every reply wait
-        ends a second before the start-to-close, so the activity answers rather than being
+        ``LAN_UNSURE``, and another certificate ``LAN_CERT_CHANGED``. The reply wait and
+        the close both end before the start-to-close (the close by a second before it,
+        keeping `lan.CLOSE_RESERVE` for itself), so the activity answers rather than being
         timed out (P30). The reply is returned only: no report is written."""
         # The deadline counts from the activity's start: the row and code reads too.
         loop = asyncio.get_running_loop()

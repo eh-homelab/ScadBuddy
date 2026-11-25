@@ -480,9 +480,11 @@ class LanPrinter:
         may_be_sent = False
         reply: dict[str, Any] | None = None
         stack = AsyncExitStack()
+        made: aiomqtt.Client | None = None
         try:
             async with asyncio.timeout(MQTT_TIMEOUT):
-                client = await stack.enter_async_context(await self._client())
+                made = await self._client()
+                client = await stack.enter_async_context(made)
                 await client.subscribe(self.report_topic)
                 may_be_sent = True
                 await client.publish(self.request_topic, json.dumps(command))
@@ -492,7 +494,7 @@ class LanPrinter:
             if not may_be_sent:
                 raise
         finally:
-            await _close(stack, MQTT_TIMEOUT if until is None else until - loop.time())
+            await _close(stack, made, MQTT_TIMEOUT if until is None else until - loop.time())
         return reply
 
     @staticmethod
@@ -603,9 +605,10 @@ class LanPrinter:
         return md5.hexdigest()
 
 
-async def _close(stack: AsyncExitStack, budget: float) -> None:
+async def _close(stack: AsyncExitStack, client: aiomqtt.Client | None, budget: float) -> None:
     """Close a request's MQTT client within ``budget`` seconds. A close that fails or
-    overruns is logged, never raised: what the request read stands."""
+    overruns is logged, never raised: what the request read stands. A close the budget
+    cut is finished by force: its socket is shut at once."""
     try:
         async with asyncio.timeout(max(budget, 0.0)):
             await stack.aclose()
@@ -614,6 +617,13 @@ async def _close(stack: AsyncExitStack, budget: float) -> None:
             "a LAN command's connection did not close cleanly",
             extra={"error": type(error).__name__},
         )
+        if isinstance(error, TimeoutError) and client is not None:
+            # A cancelled disconnect leaves the socket open for seconds, holding one of the
+            # printer's few LAN client slots; this reaches into aiomqtt's private paho client.
+            with suppress(Exception):
+                paho = client._client
+                paho.disconnect()
+                paho._sock_close()
 
 
 def _close_data(conn: socket.socket) -> None:
