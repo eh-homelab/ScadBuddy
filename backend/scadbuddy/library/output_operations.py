@@ -237,7 +237,17 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             except psycopg.Error:
                 logger.exception("could not release a failed save's Parts", extra={"id": output_id})
             if claimed:
-                # The directory this save claimed, so a later attempt can claim it again.
+                # The row claim and the directory this save claimed, so a later attempt
+                # can claim the id again (#7257). A release that fails leaves the claim
+                # to the hold reaper's prune.
+                rows = state.outputs.rows
+                if rows is not None:
+                    try:
+                        await asyncio.to_thread(rows.release_claim, output_id)
+                    except psycopg.Error:
+                        logger.exception(
+                            "could not release a failed save's claim", extra={"id": output_id}
+                        )
                 directory = state.outputs.paths.output_dir(job.slug, output_id)
                 await asyncio.to_thread(shutil.rmtree, directory, ignore_errors=True)
             if isinstance(error, OSError):

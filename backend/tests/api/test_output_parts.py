@@ -63,12 +63,22 @@ def pool(app: FastAPI, pg_conninfo: str) -> Iterator[Pool]:
 
 
 def held(pool: Pool) -> set[tuple[str, str]]:
-    """Every (Part, output) pair `blob_refs` holds for an output."""
+    """Every (Part, output) pair `blob_refs` holds for an output. An output's own bytes
+    (`output-` keys, held by the same holder kind) are not its Parts."""
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT key, holder_id FROM blob_refs WHERE holder_kind = %s", (OUTPUT_HOLDER,)
+            "SELECT key, holder_id FROM blob_refs WHERE holder_kind = %s"
+            " AND NOT starts_with(key, 'output-')",
+            (OUTPUT_HOLDER,),
         ).fetchall()
     return {(row["key"], row["holder_id"]) for row in rows}
+
+
+def claims(pool: Pool) -> set[str]:
+    """The ids that ``output_claims`` holds (#7257)."""
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT output_id FROM output_claims").fetchall()
+    return {row["output_id"] for row in rows}
 
 
 def answer_for(app: FastAPI, job: Job) -> None:
@@ -406,12 +416,58 @@ def test_overlapping_saves_under_one_id_never_touch_each_others_output(
     assert client.portal is not None
     first = client.portal.start_task_soon(kind.run, body, {})
     assert inside.wait(30)
+    # #7257: the first attempt holds the id's row claim as well as its folder.
+    assert claims(pool) == {shared}
     with pytest.raises(ApiError):
         client.portal.call(kind.run, body, {})
     go.set()
     saved = first.result(30)
 
     assert saved["id"] == shared
+    assert claims(pool) == set()  # the save's row took its claim
     assert client.get(f"/api/v1/outputs/{shared}").status_code == 200
     assert held(pool) == {(part, shared) for part in parts}
     assert calls[0] == shared and calls[1] != shared
+
+
+def test_failed_save_releases_claim(
+    client: TestClient,
+    app: FastAPI,
+    pool: Pool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7257 (plan Task A4): a save that fails after it claimed its id frees the row
+    claim and the folder, so the next attempt claims the id and saves under it."""
+    job_id, _ = finished(app, tmp_path)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    kind = state.components.get(OPERATIONS).kinds["output_create"]
+    real = state.outputs.prepare
+    calls: list[str | None] = []
+
+    def fails_once(job: Job, **kwargs: Any) -> Any:
+        calls.append(kwargs.get("output_id"))
+        if len(calls) == 1:
+            raise RuntimeError("the save stopped")
+        return real(job, **kwargs)
+
+    monkeypatch.setattr(state.outputs, "prepare", fails_once)
+    shared = uuid.uuid4().hex
+    body = {
+        "slug": "demo",
+        "job_id": job_id,
+        "index": 0,
+        "inputs": None,
+        "name": None,
+        "output_id": shared,
+    }
+    assert client.portal is not None
+    with pytest.raises(RuntimeError, match="the save stopped"):
+        client.portal.call(kind.run, body, {})
+    assert claims(pool) == set()
+    assert not state.outputs.paths.output_dir("demo", shared).exists()
+
+    saved = client.portal.call(kind.run, body, {})
+    assert saved["id"] == shared
+    assert calls == [shared, shared]
+    assert claims(pool) == set()

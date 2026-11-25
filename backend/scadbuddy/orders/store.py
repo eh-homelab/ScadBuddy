@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, Final, NamedTuple, NoReturn
 
 import psycopg
 from psycopg import Connection, errors, sql
@@ -270,6 +270,17 @@ _STATUS_STAMPS: dict[str, str] = {
     "closed": "closed_at",
     "cancelled": "cancelled_at",
 }
+
+
+#: When an order was placed (#7722): a storefront order when it was submitted, since its
+#: row was made when the visitor's cart opened; any other when it was made. The list sorts,
+#: pages and filters by it, on the index `orders_placed`.
+PLACED: Final = "COALESCE(o.submitted_at, o.created_at)"
+
+
+def placed_at(order: Order) -> datetime:
+    """`PLACED` of ``order``: its list position's time."""
+    return order.submitted_at or order.created_at
 
 
 def encode_cursor(at: datetime, order_id: str) -> str:
@@ -1272,7 +1283,8 @@ class OrderStore:
     def orders(
         self, filters: OrderFilter, cursor: str | None, limit: int
     ) -> tuple[list[Order], str | None]:
-        """Newest first, and the cursor of the next page (``None`` on the last)."""
+        """Newest placed first (`PLACED`), and the cursor of the next page (``None`` on the
+        last)."""
         where: list[sql.Composable] = []
         params: list[Any] = []
 
@@ -1331,9 +1343,9 @@ class OrderStore:
                 like,
             )
         if filters.since is not None:
-            add("o.created_at >= %s", filters.since)
+            add(f"{PLACED} >= %s", filters.since)
         if filters.until is not None:
-            add("o.created_at <= %s", filters.until)
+            add(f"{PLACED} <= %s", filters.until)
         if filters.accepted_since is not None:
             add("o.accepted_at >= %s", filters.accepted_since)
         if filters.accepted_until is not None:
@@ -1352,9 +1364,9 @@ class OrderStore:
                 # An empty SKU is no SKU, as ``report.py`` ``product_of`` reads it.
                 add(item.format("i.slug IS NULL AND (i.sku IS NULL OR i.sku = '')"))
         if cursor is not None:
-            add("(o.created_at, o.id) < (%s, %s)", *decode_cursor(cursor))
+            add(f"({PLACED}, o.id) < (%s, %s)", *decode_cursor(cursor))
         query = sql.SQL(
-            "SELECT {} FROM orders o{} ORDER BY o.created_at DESC, o.id DESC LIMIT %s"
+            "SELECT {} FROM orders o{} ORDER BY " + PLACED + " DESC, o.id DESC LIMIT %s"
         ).format(
             sql.SQL(", ".join(f"o.{column}" for column in _ORDER.replace(" ", "").split(","))),
             sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where) if where else sql.SQL(""),
@@ -1363,7 +1375,7 @@ class OrderStore:
             found = c.execute(query, [*params, limit + 1]).fetchall()
         rows = [Order.model_validate(r) for r in found[:limit]]
         more = len(found) > limit
-        return rows, encode_cursor(rows[-1].created_at, rows[-1].id) if more else None
+        return rows, encode_cursor(placed_at(rows[-1]), rows[-1].id) if more else None
 
     def accepted_orders(
         self,

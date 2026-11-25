@@ -38,6 +38,7 @@ export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
 export SANDBOX_IMAGE=ghcr.io/eh-homelab/scadbuddy-sandbox
 export PROFILE_FETCH_IMAGE=ghcr.io/eh-homelab/scadbuddy-profile-fetch
 export PLAYWRIGHT_MCP_IMAGE=ghcr.io/eh-homelab/scadbuddy-playwright-mcp
+export CORE_IMAGE=ghcr.io/eh-homelab/scadbuddy-core
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -62,7 +63,8 @@ SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
 SANDBOX_DIGEST="sha256:$(printf '9%.0s' {1..64})"
 PROFILE_FETCH_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
 PLAYWRIGHT_MCP_DIGEST="sha256:$(printf 'd%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST PLAYWRIGHT_MCP_DIGEST
+CORE_DIGEST="sha256:$(printf 'f%.0s' {1..64})"
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST PLAYWRIGHT_MCP_DIGEST CORE_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -78,6 +80,8 @@ pf_old="$PROFILE_FETCH_IMAGE:sha-3333333@sha256:$(printf 'c%.0s' {1..64})"
 pf_pinned="$PROFILE_FETCH_IMAGE:$VERSION@$PROFILE_FETCH_DIGEST"
 pm_old="$PLAYWRIGHT_MCP_IMAGE:sha-3333333@sha256:$(printf 'e%.0s' {1..64})"
 pm_pinned="$PLAYWRIGHT_MCP_IMAGE:$VERSION@$PLAYWRIGHT_MCP_DIGEST"
+core_old="$CORE_IMAGE:sha-3333333@sha256:$(printf '0%.0s' {1..64})"
+core_pinned="$CORE_IMAGE:$VERSION@$CORE_DIGEST"
 failures=0
 
 fail() {
@@ -487,6 +491,48 @@ else
     || fail "playwright-mcp file without its line: wrong error: $(grep '::error' "$work/log")"
 fi
 pm_manifest=
+
+# 8a''. The API in Go (#7667), the `core` container in the API's pod, pinned as
+#       the slicer is: optional until the API's manifest names it, then exactly
+#       one line; a build with no image keeps the pin and warns.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^core=none$' "$work/out" || fail "no core line: output is not none"
+  # CORE_DIGEST is set here, so this also checks that a published core image with no
+  # core line in the manifest is not a kept pin.
+  ! grep -q 'keeping the core pin' "$work/log" || fail "no core line: warned about a kept pin"
+else
+  fail "no core line: step failed: $(grep '::error' "$work/log")"
+fi
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$core_old")"; then
+  has_line "$pinned" "$MANIFEST" || fail "core: api image not pinned"
+  has_line "$agent_pinned" "$MANIFEST" || fail "core: agent image not pinned"
+  has_line "$core_pinned" "$MANIFEST" || fail "core: image not pinned"
+  grep -q '^core=pinned$' "$work/out" || fail "core: output is not pinned"
+  rerun || fail "core: rerun failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=true' "$work/out" || fail "core: rerun expected unchanged=true"
+else
+  fail "core: step failed: $(grep '::error' "$work/log")"
+fi
+if CORE_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$core_old")"; then
+  has_line "$pinned" "$MANIFEST" || fail "core, no image: api image not pinned"
+  has_line "$core_old" "$MANIFEST" || fail "core, no image: old pin was not kept"
+  grep -q '^core=kept$' "$work/out" || fail "core, no image: output is not kept"
+  grep -q '::warning.*keeping the core pin' "$work/log" || fail "core, no image: no warning: $(cat "$work/log")"
+else
+  fail "core, no image: step failed: $(grep '::error' "$work/log")"
+fi
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$core_old" "$core_old")"; then
+  fail "two core lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one core image line, found 2' "$work/log" \
+    || fail "two core lines: wrong error: $(grep '::error' "$work/log")"
+fi
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$CORE_IMAGE")"; then
+  fail "bare core line: step passed, expected an error"
+else
+  grep -q "has an image line for $CORE_IMAGE that is not exactly" "$work/log" \
+    || fail "bare core line: wrong error: $(grep '::error' "$work/log")"
+fi
 
 # 8b. Every other file that runs the agent is pinned too, found by the image
 #     (#5037): the agent's worker Deployment, scadbuddy-agent-worker.yaml.

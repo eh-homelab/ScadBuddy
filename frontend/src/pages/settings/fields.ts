@@ -186,6 +186,12 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'filament',
     kind: 'count',
   },
+  // #7682 — a weighing whose drift is at or over this many grams is a notice.
+  {
+    name: 'filament_weighing_drift_notice_g',
+    section: 'filament',
+    kind: 'count',
+  },
   {
     name: 'filament_default_cost_per_kg',
     section: 'filament',

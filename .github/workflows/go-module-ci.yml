@@ -7,7 +7,7 @@ name: Go Module CI
 # vendor build for a module that ships its own vendor/), then checks that the
 # root vendor/ is what `go work vendor` writes. gofmt is one walk of the whole
 # tree, gooey's step, and each CLI's image is built and run once
-# (build-go-image.yml publishes them).
+# (build-go-image.yml publishes them; build-image.yml's `core` job publishes core, #7667).
 #
 # Path-gated only on a docs-only change (ci.yml `docs_only`), where it skips.
 # Otherwise ci.yml's `go-select` decides whether this change touched Go
@@ -249,8 +249,8 @@ jobs:
               mirrors = ["mirror.gcr.io"]
 
       # Each CLI's image (tools/go/<m>/Dockerfile, the repo root as context),
-      # built and run once, as build-go-image.yml will publish it (amd64, the
-      # only platform it publishes). Every CLI must have a Dockerfile, as there.
+      # built and run once, as build-go-image.yml (or, for core, build-image.yml)
+      # will publish it (amd64, the only platform they publish). Every CLI must have a Dockerfile, as there.
       - name: Build and run each CLI image
         if: ${{ !cancelled() && inputs.run == 'true' }}
         run: |

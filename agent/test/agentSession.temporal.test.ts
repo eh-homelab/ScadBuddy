@@ -1325,6 +1325,32 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(turns).toEqual([])
     })
 
+    // A send claims the row before it refuses it `closed`, so a DurableSession row is `running` for
+    // that moment; a pod that died in it leaves the row so (#7323).
+    it.each([
+      ['just claimed: the give-back ends it', 0, false, 'running'],
+      ['past the grace: it is ended as lost', 5, true, 'idle'],
+    ] as const)('a Stop on a `running` DurableSession row is safe, %s', async (_name, minutesAgo, stopped, after) => {
+      const m = await durableManager()
+      finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      await db.sql`
+        UPDATE ai_sessions SET runtime = 'durable', status = 'running', durable_turn_id = ${randomUUID()},
+          updated_at = now() - make_interval(mins => ${minutesAgo}) WHERE id = ${session.id}`
+      expect(await m.interrupt(session.id, browser)).toBe(stopped)
+      const [row] = await db.sql<{ runtime: string; status: string }[]>`SELECT runtime, status FROM ai_sessions WHERE id = ${session.id}`
+      expect(row).toEqual({ runtime: 'durable', status: after })
+      await expect(handleOf(session.id).describe()).rejects.toBeInstanceOf(WorkflowNotFoundError)
+    })
+
+    it('hands off a DurableSession row, which has no workflow to tell (#7323)', async () => {
+      const m = await durableManager()
+      const { session } = await m.start({ kind: 'bearer', id: 'token:a', label: 'Agent A' }, { origin: 'mcp', title: 't' })
+      await db.sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${session.id}`
+      expect((await m.handoff(session.id, browser, browser)).owner).toEqual(browser)
+      await expect(handleOf(session.id).describe()).rejects.toBeInstanceOf(WorkflowNotFoundError)
+    })
+
     it('forks a session still recorded as DurableSession, with no transcript, into an AgentSession that runs with no model context (plan Step 8.1)', async () => {
       const m = await durableManager()
       finish = sessionFinishActivities(new PgTurnRows(db.sql), m.events)[SESSION_FINISH_ACTIVITY]

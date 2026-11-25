@@ -37,6 +37,7 @@ from tests.api.conftest import PNG_BYTES, set_fake_env
 from tests.support.arrange import saved_output
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 SOURCE = "width = 10;\ncube(width);\n"
 
@@ -1378,6 +1379,7 @@ def test_a_malformed_pipeline_declaration_shows_its_error(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     _declare_pipeline(paths, model, {"module": "../p.py", "api": 1}, None)
+    sync_template_rows(client)
     detail = client.get(f"/api/v1/models/{model}").json()
     assert detail["pipeline"] is None and "module" in detail["pipeline_error"]
     [listed] = [row for row in client.get("/api/v1/models").json() if row["slug"] == model]
@@ -1393,6 +1395,7 @@ def test_a_pipeline_the_parser_chokes_on_never_breaks_the_listing(
     paths.model_source("other").write_text("cube();\n", encoding="utf-8")
     paths.model_meta("other").write_text(json.dumps({"name": "Other"}), encoding="utf-8")
     _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "-" * 200_000 + "1")
+    sync_template_rows(client)
     listing = client.get("/api/v1/models")
     assert listing.status_code == 200
     assert {row["slug"] for row in listing.json()} >= {model, "other"}

@@ -262,6 +262,29 @@ def test_order_list_pages_newest_first_by_cursor(rows: OrderStore) -> None:
         rows.orders(OrderFilter(), "nonsense", 2)
 
 
+def test_a_storefront_order_is_listed_when_it_was_submitted(rows: OrderStore, pool: PgPool) -> None:
+    """#7722: a cart opened before other orders were made, and submitted after them, is the
+    newest order: first in the list, after them by cursor, and in a ``since`` after them."""
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    cart, older, newer = (make_order(rows, customer.id) for _ in range(3))
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE orders SET source = 'storefront', created_at = now() - interval '12 days',"
+            " submitted_at = now() + interval '1 minute' WHERE id = %s",
+            (cart.id,),
+        )
+    listed, _ = rows.orders(OrderFilter(), None, 50)
+    assert [o.id for o in listed] == [cart.id, newer.id, older.id]
+    first, cursor = rows.orders(OrderFilter(), None, 1)
+    assert [o.id for o in first] == [cart.id]
+    rest, _ = rows.orders(OrderFilter(), cursor, 50)
+    assert [o.id for o in rest] == [newer.id, older.id]
+    since, _ = rows.orders(OrderFilter(since=datetime.now(UTC)), None, 50)
+    assert [o.id for o in since] == [cart.id]
+
+
 def test_order_list_hides_orders_ended_before_ended_since(rows: OrderStore, pool: PgPool) -> None:
     """#6334: `ended_since` leaves out a closed or cancelled order that ended before it,
     timed by `closed_at`, else `cancelled_at`, else `updated_at`; an open order of any age

@@ -307,6 +307,10 @@ The backend's migration files and its settings tables: `backend/CLAUDE.md`.
   touching Go (a `CLAUDE.md` or `AGENTS.md` outside `vendor/` aside), a `v*` tag or a dispatch, for amd64 only: `sha-<7>` always,
   `latest` only on a push to main, the version on a tag; buildx `type=gha` cache
   `scope=go-<module>`, `mode=min`. The package must be public, as the app image's.
+  The one exception is `tools/go/core` (#7667): `build-image.yml`'s `core` job publishes
+  `scadbuddy-core` with every main build, under the app image's tags, and
+  `deploy.reusable.yml` pins it in `scadbuddy.yaml`. `build-go-image.yml` skips it, so
+  one workflow writes each tag.
 - `vendor-autofix.yml` (`pull_request_target`, Dependabot's own PRs on this repo only)
   regenerates the root and client `vendor/` after a gomod bump and pushes the commit with
   the `RUNNER_APP` token, which a GITHUB_TOKEN push could not do (it starts no CI); no

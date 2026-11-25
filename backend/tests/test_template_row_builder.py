@@ -26,7 +26,7 @@ from scadbuddy.library.template_rows import (
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import PgPool
-from tests.support.media import MemoryMediaStore, thumbnail_of
+from tests.support.media import MemoryMediaStore
 
 pytestmark = pytest.mark.requires_git
 
@@ -84,7 +84,7 @@ def _builtin(paths: DataPaths) -> str:
 def test_row_matches_the_record_of_a_plain_template(catalogue: Catalogue) -> None:
     catalogue.create("demo", "cube(1);\n", ModelMeta(name="Demo", tags=["a"]), readme="# Demo\n")
     row = _row(catalogue, "demo")
-    record = catalogue.record("demo")
+    record = catalogue._fresh_record("demo")
     assert row.template_id == "demo"
     assert row.origin == "mine"
     assert row.name == record.name == "Demo"
@@ -139,7 +139,7 @@ def test_row_cover_hash_is_the_thumbnail_hash_of_a_built_ins_chosen_cover(
     row = _assert_cover_is_the_thumbnail(
         catalogue, builtin, f"builtin-media/keychain/{chosen.file}"
     )
-    record = catalogue.record(builtin)
+    record = catalogue._fresh_record(builtin)
     assert row.origin == "builtin"
     assert row.name == record.name == "Keychain"
     assert row.updated_at == record.updated_at
@@ -157,7 +157,8 @@ def _assert_cover_is_the_thumbnail(
     catalogue: Catalogue, template_id: str, path: str
 ) -> TemplateRow:
     row = _row(catalogue, template_id)
-    thumbnail = asyncio.run(thumbnail_of(catalogue, template_id))
+    # What the files give, as `Catalogue.read_thumbnail` reads them.
+    thumbnail = asyncio.run(catalogue.read_thumbnail(template_id))
     assert thumbnail is not None
     assert row.cover == {
         "path": path,
@@ -200,7 +201,7 @@ def test_row_of_an_inputs_version_past_bigint_is_clamped(
         f"INPUTS_VERSION = {declared}\n", encoding="utf-8"
     )
     row = _row(catalogue, "demo")
-    record = catalogue.record("demo")
+    record = catalogue._fresh_record("demo")
     assert row.inputs_version == kept
     assert record.inputs_version == declared
     assert row.meta == catalogue.read_raw_meta("demo")

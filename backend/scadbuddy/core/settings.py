@@ -810,6 +810,9 @@ class Settings(BaseSettings):
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = Field(default=20, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
+    # SCADBUDDY_FILAMENT_WEIGHING_DRIFT_NOTICE_G (#7682): a weighing whose drift is at or
+    # over this many grams, either way, is a notice on the spool and in the list.
+    filament_weighing_drift_notice_g: int = Field(default=10, ge=0, le=100000)
     # SCADBUDDY_FILAMENT_DRYING_TEMP_C and _FILAMENT_DRYING_HOURS (#7156, R-7156-5): the
     # drying a spool is offered when nothing in the catalog (spool, type, subtype,
     # material) sets one (`filament/spools.py` `_drying_defaults`). Unset offers none.
@@ -1203,6 +1206,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_sync": "live",
         "filament_low_stock_pct": "live",
         "filament_default_cost_per_kg": "live",
+        "filament_weighing_drift_notice_g": "live",
         "filament_drying_temp_c": "live",
         "filament_drying_hours": "live",
         "filament_label_base_url": "live",
