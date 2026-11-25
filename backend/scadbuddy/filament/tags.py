@@ -674,15 +674,17 @@ def expire_jobs(conn: Conn) -> None:
     its newest backup is past `BACKUP_TTL`, which no result can be checked against, it ends
     ``failed`` with the code ``no_read_back`` and that backup's id.
 
-    The jobs are locked first, in id order, and their backups read after, in later
-    statements: under READ COMMITTED a statement that waited on `back_up`'s ``FOR SHARE``
-    would otherwise judge the job by a snapshot without the backup it just committed
-    (#7419 round 3)."""
+    The due jobs are locked first, in id order, with ``SKIP LOCKED``: a job another
+    transaction holds (`back_up`'s ``FOR SHARE``, a finish or a cancel) is left for the next
+    call, so this never waits on a job's lock and cannot deadlock with another caller, and
+    a read never queues behind a begun write. The backups are read after, in later
+    statements, so each one sees what committed before its job was locked (#7419 rounds 3
+    and 4)."""
     due = [
         row["id"]
         for row in conn.execute(
             "SELECT id FROM filament_nfc_jobs WHERE state IN ('pending', 'armed')"
-            " AND expires_at <= now() ORDER BY id FOR UPDATE"
+            " AND expires_at <= now() ORDER BY id FOR UPDATE SKIP LOCKED"
         ).fetchall()
     ]
     if not due:

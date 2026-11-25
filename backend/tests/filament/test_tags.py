@@ -32,7 +32,7 @@ from scadbuddy.filament.models import (
 from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, TagKeysClashError
 from scadbuddy.filament.tags import TagRead
 from scadbuddy.spools.models import SeenTray
-from tests.conftest import PgPool
+from tests.conftest import PgPool, open_pg_pool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -650,64 +650,118 @@ def test_a_begun_write_with_no_result_past_the_backup_ttl_fails_no_read_back(
     assert found.result["backup_id"] == str(old["id"])
 
 
-def _while_a_backup_commits(pg_pool: PgPool, job: UUID, run: Callable[[], object]) -> object:
-    """Runs ``run`` on another connection while this one holds the job ``FOR SHARE`` and has
-    inserted its ``agent_write`` backup, as `back_up` does; commits once ``run`` waits on the
-    lock, and answers what ``run`` returned or raised (#7419 round 3)."""
-    tag = _backup(FilamentSpoolStore(pg_pool), "04CC")
+def _state(pool: PgPool, job: UUID) -> str:
+    with pool.connection() as conn:
+        row = conn.execute("SELECT state FROM filament_nfc_jobs WHERE id = %s", (job,)).fetchone()
+    assert row is not None
+    return str(row["state"])
+
+
+def _while_held(
+    pg_pool: PgPool,
+    pg_conninfo: str,
+    job: UUID,
+    run: Callable[[FilamentSpoolStore], object],
+    *,
+    waits: bool,
+    lock: str = "FOR SHARE",
+    backup: bool = True,
+) -> tuple[object, str]:
+    """Runs ``run`` on a store of one connection of its own (B) while this one (A) holds the
+    job by ``lock`` and, with ``backup``, has inserted its ``agent_write`` backup, as
+    `back_up` does (#7419 rounds 3 and 4). With ``waits`` A commits once B's own backend
+    waits on a lock; else B must return while A still holds the job. Answers what ``run``
+    returned or raised, and the job's state read while A held it."""
+    tag = _backup(FilamentSpoolStore(pg_pool), "04CC") if backup else None
     answer: list[object] = []
+    pool_b = open_pg_pool(pg_conninfo, size=1)
+    try:
+        with pool_b.connection() as conn_b:
+            pid_row = conn_b.execute("SELECT pg_backend_pid() AS pid").fetchone()
+        assert pid_row is not None
+        store_b = FilamentSpoolStore(pool_b)
 
-    def other() -> None:
-        try:
-            answer.append(run())
-        except Exception as exc:  # the caller asserts on it
-            answer.append(exc)
+        def other() -> None:
+            try:
+                answer.append(run(store_b))
+            except Exception as exc:  # the caller asserts on it
+                answer.append(exc)
 
-    with pg_pool.connection() as conn, conn.transaction():
-        conn.execute("SELECT 1 FROM filament_nfc_jobs WHERE id = %s FOR SHARE", (job,))
-        conn.execute(
-            "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor)"
-            " VALUES (%s, '04CC', '[]', 'agent_write', %s, 'ann')",
-            (tag.tag_id, job),
-        )
-        thread = threading.Thread(target=other)
-        thread.start()
-        with pg_pool.connection() as watch:
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                waiting = watch.execute(
-                    "SELECT count(*) AS n FROM pg_stat_activity"
-                    " WHERE wait_event_type = 'Lock' AND datname = current_database()"
-                ).fetchone()
-                if waiting is not None and waiting["n"] > 0:
-                    break
-                time.sleep(0.05)
+        with pg_pool.connection() as conn, conn.transaction():
+            conn.execute(f"SELECT 1 FROM filament_nfc_jobs WHERE id = %s {lock}", (job,))
+            if tag is not None:
+                conn.execute(
+                    "INSERT INTO filament_tag_backups (tag_id, uid, records, reason, job_id, actor)"
+                    " VALUES (%s, '04CC', '[]', 'agent_write', %s, 'ann')",
+                    (tag.tag_id, job),
+                )
+            thread = threading.Thread(target=other)
+            thread.start()
+            if waits:
+                with pg_pool.connection() as watch:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        found = watch.execute(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                            (pid_row["pid"],),
+                        ).fetchone()
+                        if found is not None and found["wait_event_type"] == "Lock":
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise AssertionError("B never waited on the job's lock")
             else:
-                raise AssertionError("the other connection never waited on the job's lock")
-    thread.join(10)
+                thread.join(10)
+                assert not thread.is_alive(), "B waited on the held job instead of skipping it"
+            held = _state(pg_pool, job)
+        thread.join(10)
+    finally:
+        pool_b.close()
     assert not thread.is_alive() and len(answer) == 1
-    return answer[0]
+    return answer[0], held
 
 
-def test_expire_jobs_waiting_on_a_backup_leaves_the_begun_job_armed(pg_pool: PgPool) -> None:
+def _expire(store: FilamentSpoolStore) -> None:
+    with store.transaction() as conn:
+        tags.expire_jobs(conn)
+
+
+def test_expire_jobs_skips_a_job_a_backup_holds_and_leaves_it_armed(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    # #7419 rounds 3 and 4: B skips the row `back_up` holds (round 2 waited, then expired it).
     store = FilamentSpoolStore(pg_pool)
     job = _armed_job(store)
     _age_job(pg_pool, job)
-
-    def expire() -> None:
-        with store.transaction() as conn:
-            tags.expire_jobs(conn)
-
-    assert _while_a_backup_commits(pg_pool, job, expire) is None
-    with pg_pool.connection() as conn:
-        row = conn.execute("SELECT state FROM filament_nfc_jobs WHERE id = %s", (job,)).fetchone()
-    assert row is not None and row["state"] == "armed"
+    answer, held = _while_held(pg_pool, pg_conninfo, job, _expire, waits=False)
+    assert answer is None and held == "armed"
+    assert _state(pg_pool, job) == "armed"
+    _expire(store)
+    assert _state(pg_pool, job) == "armed"
 
 
-def test_a_cancel_waiting_on_a_backup_is_refused_write_begun(pg_pool: PgPool) -> None:
+def test_expire_jobs_skips_a_due_job_held_for_update_and_ends_it_next_time(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
     store = FilamentSpoolStore(pg_pool)
     job = _armed_job(store)
-    answer = _while_a_backup_commits(pg_pool, job, lambda: tags.cancel_job(store, job))
+    _age_job(pg_pool, job)
+    answer, held = _while_held(
+        pg_pool, pg_conninfo, job, _expire, waits=False, lock="FOR UPDATE", backup=False
+    )
+    assert answer is None and held == "armed"
+    _expire(store)
+    assert _state(pg_pool, job) == "expired"
+
+
+def test_a_cancel_waiting_on_a_backup_is_refused_write_begun(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    job = _armed_job(store)
+    answer, _ = _while_held(
+        pg_pool, pg_conninfo, job, lambda other: tags.cancel_job(other, job), waits=True
+    )
     assert isinstance(answer, tags.WriteBegunError)
     found = tags.get_job(store, job)
     assert found is not None and found.state == "armed" and found.write_begun
