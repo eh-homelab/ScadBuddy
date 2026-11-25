@@ -560,14 +560,14 @@ def revision_meta(directory: Path, slug: str) -> ModelMeta | None:
         return None
 
 
-def inputs_version_in(directory: Path, pipeline: PipelineDeclaration) -> int:
+def inputs_version_in(directory: Path, pipeline: PipelineDeclaration) -> int | None:
     """The ``INPUTS_VERSION`` of the pipeline a template in ``directory`` (a revision's)
-    declares, read without running it (`inputs_version_of`); 0 for a module that cannot
+    declares, read without running it (`inputs_version_of`); None for a module that cannot
     be read."""
     try:
         return inputs_version_of((directory / pipeline.module).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
-        return 0
+        return None
 
 
 def declares_pipeline(directory: Path, slug: str) -> bool:
@@ -1049,7 +1049,7 @@ class Catalogue:
     def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
         if meta.pipeline is None:
             return 0
-        return inputs_version_in(self.paths.model_dir(slug), meta.pipeline)
+        return inputs_version_in(self.paths.model_dir(slug), meta.pipeline) or 0
 
     def print_settings(self, slug: str) -> dict[str, ProcessValue]:
         """The template's ``print_settings`` as its model.json has them now (#770);
