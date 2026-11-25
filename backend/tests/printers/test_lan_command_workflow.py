@@ -313,10 +313,12 @@ async def test_a_run_past_the_route_wait_is_pending_then_read(
     monkeypatch.setattr(lan_command_module, "LAN_ROUTE_WAIT_S", 0.2)
     run = LanCommandRun(commands=[command("extrusion_cali_set")])
     queue = f"lan-command-{uuid.uuid4().hex[:8]}"
+    # The command answers only once the test has read it pending twice: no race with a sleep.
+    release = asyncio.Event()
 
     @activity.defn(name=LAN_COMMAND_ACTIVITY)
     async def lan_command(input: LanCommandInput) -> LanCommandReply:
-        await asyncio.sleep(1.5)
+        await release.wait()
         return LanCommandReply(confirmed=True)
 
     async with Worker(
@@ -331,6 +333,7 @@ async def test_a_run_past_the_route_wait_is_pending_then_read(
         assert pending.workflow_id == lan_command_id(PRINTER, run, "slow-1")
         still = await read_lan_commands(client, PRINTER, pending.workflow_id)
         assert isinstance(still, LanCommandPending)
+        release.set()
         await client.get_workflow_handle(pending.workflow_id).result()
         done = await read_lan_commands(client, PRINTER, pending.workflow_id)
     assert not isinstance(done, LanCommandPending)
