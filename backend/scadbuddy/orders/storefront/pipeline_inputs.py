@@ -207,14 +207,16 @@ def _params(listing: ListingInput, schema: CustomizerSchema) -> dict[str, ParamV
 
 def _path(problem: ValueProblem, schema: dict[str, Any], values: Any) -> list[str]:
     """The path of the input ``problem`` is of: a missing or an extra key's own path, not
-    its object's, so the editor can show the refusal at that key. Only an object has those
-    keywords, and an array of the subset holds scalars (`core/input_schema.py`), so the
-    walk below meets no array index."""
+    its object's, so the editor can show the refusal at that key. The
+    object's own path when the walk meets anything but objects."""
     path = [part for part in problem.path.split(".") if part]
     if problem.keyword not in ("required", "additionalProperties"):
         return path
     for part in path:
-        schema, values = schema["properties"][part], values[part]
+        properties = schema.get("properties", {})
+        if part not in properties or not isinstance(values, dict) or part not in values:
+            return path
+        schema, values = properties[part], values[part]
     if problem.keyword == "required":
         keys = [key for key in schema["required"] if key not in values]
     else:

@@ -29,6 +29,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import tarfile
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -106,7 +107,7 @@ from scadbuddy.orders.storefront.wire import (
     is_support,
     shown_label,
 )
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import SnapshotUnavailableError, resolve_source, source_directory
 from scadbuddy.render.runner import OpenSCADError, cached_schema, format_scad_value
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.store.content_models import BlobScope
@@ -1056,6 +1057,39 @@ def check_locked_colours(
         + " and a choice of each offered colour; add them in one material, or unlock one",
         names=names,
     )
+
+
+async def with_inputs_version(core: Core, body: ListingInput) -> ListingInput:
+    """``body`` as a save keeps it: a pipeline template's inputs with no version are of its
+    commit's ``INPUTS_VERSION`` (#5701), which the row keeps, so a publish at a later commit
+    migrates them. Unchanged for a template or a revision that cannot be read: publish
+    refuses those."""
+    if not body.inputs or body.inputs_v is not None or body.slug is None or body.commit is None:
+        return body
+    if not await asyncio.to_thread(core.catalogue.exists, body.slug):
+        return body
+    try:
+        directory, _ = await source_directory(
+            body.slug, body.commit, paths=core.paths, history=core.history
+        )
+    except (
+        GitError,
+        RevisionNotFoundError,
+        SnapshotUnavailableError,
+        tarfile.TarError,
+        OSError,
+    ) as error:
+        logger.warning(
+            "the inputs version of %s@%s was not read: %s",
+            body.slug,
+            body.commit,
+            type(error).__name__,
+        )
+        return body
+    facts = await asyncio.to_thread(pipeline_facts, directory, body.slug)
+    if facts is None:
+        return body
+    return body.model_copy(update={"inputs_v": facts.inputs_version})
 
 
 async def _commit_facts(

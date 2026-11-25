@@ -139,7 +139,8 @@ def test_publish_keeps_the_inputs_in_the_snapshot(
     client: TestClient, kit: dict[str, Any], pla_red: str
 ) -> None:
     listing = create(client, kit_body(kit, pla_red))
-    assert (listing["inputs"], listing["inputs_v"]) == (HOUSE, None)
+    # Sent with no version: they are of the commit's own.
+    assert (listing["inputs"], listing["inputs_v"]) == (HOUSE, 1)
     published = publish(client, listing["id"])
     snapshot = published["snapshot"]
     assert snapshot["pipeline"] is True
@@ -225,6 +226,38 @@ def test_older_inputs_are_migrated_by_the_templates_own_code(
     assert snapshot["inputs"] == {"cols": 3, "house": {"cols": 3, "storeys": 1}}
     assert snapshot["inputs_version"] == 1
     assert (published["inputs"], published["inputs_v"]) == ({"cols": 3}, 0)
+
+
+def test_inputs_saved_with_no_version_are_migrated_at_a_later_commit(
+    client: TestClient, kit: dict[str, Any], pla_red: str
+) -> None:
+    """The save keeps the version of the commit they were saved at, so the next commit's
+    ``INPUTS_VERSION`` is not read as theirs."""
+    listing = create(client, kit_body(kit, pla_red, inputs={"cols": 3}))
+    assert listing["inputs_v"] == 1
+    state = _state(client)
+    module = state.paths.model_dir(kit["slug"]) / "pipeline" / "pipeline.py"
+    module.write_text(PIPELINE.replace("INPUTS_VERSION = 1", "INPUTS_VERSION = 2"))
+    commit = state.history.commit("version 2", kit["slug"])
+    body = kit_body(
+        {**kit, "commit": commit}, pla_red, inputs=listing["inputs"], inputs_v=listing["inputs_v"]
+    )
+    saved = client.put(
+        f"{LISTINGS}/{listing['id']}",
+        json={"listing": body, "updated_at": listing["updated_at"]},
+    )
+    assert saved.status_code == 200, saved.text
+    published = publish(client, listing["id"])
+    assert published["snapshot"]["inputs"]["house"] == {"cols": 3, "storeys": 1}
+    assert (published["snapshot"]["inputs_version"], published["inputs_v"]) == (2, 1)
+
+
+@pytest.mark.parametrize("fields", [{"slug": "gone"}, {"commit": "f" * 40}])
+def test_a_save_at_a_revision_that_is_not_there_keeps_no_version(
+    client: TestClient, kit: dict[str, Any], pla_red: str, fields: dict[str, Any]
+) -> None:
+    listing = create(client, kit_body(kit, pla_red, **fields))
+    assert (listing["inputs"], listing["inputs_v"]) == (HOUSE, None)
 
 
 def test_every_other_write_of_a_listing_keeps_its_inputs(
