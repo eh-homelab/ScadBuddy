@@ -888,7 +888,12 @@ beside it. The UI confirms before allowing calls without a token.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
-- **`disabled`.** No credential, but still HTTPS only (§8.4). Calls run as `anonymous`
+- **`disabled`.** No credential, but still HTTPS only (§8.4). As built (#7767), only a
+  caller from the `ai_settings` key `mcp_anonymous_networks` (a list of CIDR ranges;
+  loopback, RFC 1918 and IPv6 unique local addresses by default) needs no credential; any
+  other caller, or one whose address is unknown, is handled as in `bearer`. The address is
+  the caller a trusted proxy names, never a raw `X-Forwarded-For` from an untrusted peer.
+  Calls without a credential run as `anonymous`
   with **full access** by default: choosing `disabled` is the operator's explicit decision
   to trust the network, so it isn't second-guessed with a lower cap. The cap stays
   configurable in Settings for operators who want `read` or `write` only. Outward

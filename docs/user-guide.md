@@ -608,6 +608,12 @@ or through your identity provider when the operator has turned on **OIDC sign-in
 **Settings → MCP access → Connect snippet** gives the commands below with your address
 (and a token just created) filled in (#781, #1910).
 
+**Settings → MCP access → MCP authentication** can allow calls without a token. Only a
+caller from the networks listed there needs no token; the list starts as your local and
+private networks. A caller from any other address, such as the internet, still needs a
+token. Each change that lets more callers in asks you to confirm it first
+([operating.md §10](ai/operating.md#10-mcp-auth-mode)).
+
 1. Under **Settings → MCP access → Tokens**, give the token a name ("Claude Desktop on my laptop"),
    an **Access** level (Read, Write or Outward) and an expiry, and press **Create
    token**. Copy it then: it is shown once. **Revoke** ends it. Outward actions still

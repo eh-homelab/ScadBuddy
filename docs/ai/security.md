@@ -75,9 +75,9 @@ by its unique index and compares as a hash only.
     browser agent's snapshot ([`frontend/src/agent/snapshot.ts`](../../frontend/src/agent/snapshot.ts)),
     which reads field values and `role=status`/`alert` text, never sees it. Create,
     Copy and Revoke are `USER_ONLY`, so the browser agent cannot press them.
-  - Every auth mode allows managing tokens. In `disabled` mode `/mcp` does not check
-    them; they are kept for when the mode returns to `bearer`, and Settings shows a
-    warning. In `oidc` mode (#262) bearer tokens keep working alongside the IdP
+  - Every auth mode allows managing tokens. In `disabled` mode `/mcp` does not ask a
+    caller from the anonymous networks for one, and Settings shows a warning. A caller
+    from any other address still needs one (#7767). In `oidc` mode (#262) bearer tokens keep working alongside the IdP
     (spec §8.3). `GET` reports `auth_mode` for this.
 
 ## MCP OIDC access tokens
@@ -247,12 +247,22 @@ AI state in Postgres. It is read from `ai_settings` on every `/mcp` request, by
   then wins over this key, even over `"disabled"`; a stored `"oidc"` without it is
   `bearer`;
 - `mcp_anonymous_cap`: the highest tier an `anonymous` caller gets in `disabled` mode,
-  `"outward"` by default (spec §8.3, "full access by default").
+  `"outward"` by default (spec §8.3, "full access by default");
+- `mcp_anonymous_networks` (#7767): the networks from which `disabled` mode serves
+  `anonymous`, a JSON list of IP addresses and CIDR ranges. Unset, it is loopback,
+  RFC 1918 and IPv6 unique local addresses. A caller from any other address, or whose
+  address is unknown, is handled as in `bearer` mode. The address is the caller a trusted
+  proxy names (`callerAddress()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts):
+  the right-most `X-Forwarded-For` value that is not a trusted proxy), never a raw
+  `X-Forwarded-For` from an untrusted peer
+  ([operating.md §6](operating.md#6-origin-allowlist-and-trusted-proxies)). The list is
+  only as good as that address: behind an ingress that puts its own address in place of
+  the caller's, every caller seems to come from the ingress's network.
 
-It fails closed. An unknown mode is `bearer` and an unknown cap is `read`, each with a
-warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
+It fails closed. An unknown mode is `bearer`, an unknown cap is `read` and a network
+list that is not one is empty, each with a warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
 verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
-While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
+While the mode is `disabled`, the agent logs a warning naming the networks and the cap. It logs it once,
 and again whenever the settings change, not on every request. Outward calls still stop
 at the approval gate in every mode.
 
@@ -265,11 +275,12 @@ Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
   ingress, JSON only), and `GET` passes `uiReadProblem`. The limitation stated there
   applies: this is not an approval, and anyone who can reach Settings can change the
   mode (spec §8.3, "Stated plainly").
-- It sets `bearer` or `disabled` and the cap. `oidc` is refused: it is on while the OIDC
+- It sets `bearer` or `disabled`, the cap and, when the page edited them, the networks.
+  A network that is not an IP address or CIDR range is a `400`. `oidc` is refused: it is on while the OIDC
   configuration is enabled (#262), not a value of this key.
-- Both keys are written in one transaction, so no request sees the new mode with the
-  old cap. The write is a compare-and-set: the body carries the stored mode and cap the
-  page showed (`expected`), and the transaction locks `ai_settings` against other writers,
+- The keys are written in one transaction, so no request sees the new mode with the
+  old cap or networks. The write is a compare-and-set: the body carries the stored mode,
+  cap and (with new networks) networks the page showed (`expected`), and the transaction locks `ai_settings` against other writers,
   re-reads them and answers `409` without writing when they differ. A stale Settings tab
   therefore cannot turn authentication off without the confirmation the current setting
   would have asked for.
@@ -284,7 +295,7 @@ Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
   stored `"oidc"` without an enabled configuration reads as `bearer`.
 - The UI asks for an explicit confirmation before it saves a change that lets
   unauthenticated callers do more: switching to `disabled`, or raising the anonymous
-  cap while `disabled` stays on. It asks while OIDC is on too, saying the choice applies
+  cap or adding a network while `disabled` stays on. It asks while OIDC is on too, saying the choice applies
   once OIDC is turned off. It shows a warning in the section while calls without a token
   are allowed, or would be once OIDC is turned off. **That confirmation is UI-only.** The `PUT` route does not require
   it, so a request that passes the interim gate changes the mode without one; a
@@ -875,13 +886,15 @@ outside ScadBuddy. These rules hold:
 
 - **Same auth as `/mcp`.** Each feed, zip and archive request passes `/mcp`'s transport
   gates and `authenticate()`: an `sbmcp_` token of any tier, an OIDC access token in
-  `oidc` mode, or anyone in `disabled` mode. A revoked or expired token stops reading at
+  `oidc` mode, or, in `disabled` mode, a caller from the anonymous networks. A revoked or expired token stops reading at
   once. A change to `/mcp`'s tokens, auth mode or anonymous cap changes the feed with it
   ([operating.md §9](operating.md#the-marketplace-feed-6933)).
 - **Public.** The feed prefix, `/mcp` and `/mcp/workspace/` are reached on the public URL
   with no sign-in at the ingress (eh-homelab/clusters#4017, merged 2026-11-25), so the
-  agent's bearer check is the only gate there. `disabled` mode then serves anyone on the
-  internet, not only the LAN. The zip URLs follow the request's origin, because Claude Code sends a marketplace's
+  agent's bearer check is the only gate there. `disabled` mode serves `anonymous` only to
+  a caller from `mcp_anonymous_networks` (#7767; private and loopback ranges by default),
+  so a caller from the internet still needs a token, as long as the ingress passes the
+  caller's own address on. The zip URLs follow the request's origin, because Claude Code sends a marketplace's
   `headers` only to its own origin.
 - **Only approved pins.** A package is listed only at its current approved pin; a pending
   re-pin, a draft or an unapproved package is 404. A hosted zip and an archive are served

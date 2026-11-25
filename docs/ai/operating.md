@@ -657,8 +657,9 @@ request's own origin must be the public URL, or the loopback pair from a loopbac
 and a `Sec-Fetch-Site` other than `same-origin` or `none` is refused. Every route
 answers `503` until the API lists the agent's CRUD areas (§5, "Readiness").
 
-Tokens can be managed in every auth mode. In `disabled` mode `/mcp` ignores them, and
-Settings warns about that; they take effect again when the mode returns to `bearer`.
+Tokens can be managed in every auth mode. In `disabled` mode a caller from the anonymous
+networks (§10) needs no token, and Settings warns about that. A caller from any other
+address still needs one, so the tokens keep working for them (#7767).
 The same tokens also read the plugin feed (§9, [The marketplace feed](#the-marketplace-feed-6933)):
 revoking one stops its feed reads too.
 The mode is stored in `ai_settings` and changed in Settings (§10, `GET`/`PUT /api/v1/ai/mcp/auth`, `agent/src/routes/mcpAuthMode.ts`); `bearer` is the default until it is set.
@@ -776,6 +777,16 @@ forwarded values are present, the **last** one is used: the one the nearest prox
 appended (`lastValue()`, `origins.ts`). The proxy must therefore append to these
 headers rather than pass the client's through unchanged. This is **unverified** for any
 particular ingress controller.
+
+**The caller's address** (`callerAddress()`, `origins.ts`, #7767) decides whether
+`disabled` mode serves a caller without a token (§10). From a peer that is not a trusted
+proxy, it is the peer itself, and `X-Forwarded-For` is ignored. From a trusted proxy, it
+is the right-most `X-Forwarded-For` value that is not itself in
+`SCADBUDDY_AGENT_TRUSTED_PROXIES`: the last address a trusted proxy saw. Values to its
+left came from that caller and can be forged. When every value is a trusted proxy, it is
+the left-most one. It is unknown when a trusted proxy sends no `X-Forwarded-For`, or when
+a value it must read is not a plain IP address; an unknown caller needs a token. The log
+line of a Settings change still names the last `X-Forwarded-For` value (`forwardedClient()`).
 
 Why an allowlist rather than "Origin equals Host" is explained in
 [security.md](security.md#dns-rebinding-defence). The backend's `/api/v1/ws` applies
@@ -1591,8 +1602,8 @@ agent service is deployed.
 
 ## 10. MCP auth mode
 
-The `/mcp` auth mode and the anonymous cap are `ai_settings` keys, never environment
-variables (spec §8.3, §9). They are read on every `/mcp` request by
+The `/mcp` auth mode, the anonymous cap and the anonymous networks are `ai_settings`
+keys, never environment variables (spec §8.3, §9). They are read on every `/mcp` request by
 `mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts),
 so a change applies to the next request on every replica, with no restart:
 
@@ -1600,26 +1611,47 @@ so a change applies to the next request on every replica, with no restart:
 |---|---|---|
 | `mcp_auth_mode` | `"bearer"`, `"disabled"` | `"bearer"` |
 | `mcp_anonymous_cap` | `"read"`, `"write"`, `"outward"` (used in `disabled` mode only) | `"outward"` |
+| `mcp_anonymous_networks` | a JSON list of IP addresses and CIDR ranges (used in `disabled` mode only) | loopback, RFC 1918 and IPv6 unique local addresses: `127.0.0.0/8`, `::1/128`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` |
+
+In `disabled` mode, `/mcp` serves a caller as `anonymous` only when the caller's address
+(§6, "The caller's address") is in `mcp_anonymous_networks` (#7767). An IPv4-mapped IPv6
+address (`::ffff:a.b.c.d`) matches as IPv4. A caller from any other address, or whose
+address is unknown, is handled as in `bearer` mode: a valid `sbmcp_` token works, and no
+token gets `401` with `WWW-Authenticate: Bearer realm="scadbuddy"`. `/mcp` and the plugin
+feed may be reached on the public URL with no sign-in at the ingress, so this list is
+what keeps `disabled` mode off the internet.
+
+The list is only as good as the address the ingress passes on. An ingress that replaces
+the caller's address with its own (a load balancer that masquerades connections, for
+example) makes every caller seem to come from the ingress's network, which is often in
+the default list. Behind such an ingress, set the list to the networks only your own
+clients use, or keep `bearer` mode.
 
 `oidc` is not chosen with this key: it is on while the OIDC configuration (`mcp_oidc`,
 [§6a](#6a-mcp-sign-in-with-oidc)) is enabled, and then it wins over `mcp_auth_mode`, even
 over `"disabled"`. A stored `"oidc"` without an enabled configuration reads as `bearer`.
 
-A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
-`disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
-this once, and again after any change to either key.
+A value outside those lists fails closed: `bearer`, or a `read` cap. A stored network
+list that is not a list of IP addresses and CIDR ranges is an empty list: no caller is
+served as `anonymous`. Each is logged as a warning. While the mode is `disabled`, the
+agent logs `mcp auth: MCP auth is DISABLED ...` with the networks and the cap. It logs
+this once, and again after any change to a key.
 
 Change them in Settings → MCP access → **Auth mode** (shown where AI is available, beside
 the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
 ([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
 choice is "Require an access token" (`bearer`) or "Allow calls without a token"
-(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token,
-or raising the anonymous access while they are allowed, asks for a confirmation first.
+(`disabled`), plus the access an anonymous caller gets and, while calls without a token
+are chosen, the networks they may come from (one per line, with the default shown).
+Allowing calls without a token, raising the anonymous access, or adding a network while
+they are allowed, asks for a confirmation first.
 While OIDC is enabled the section says so: OIDC applies whatever is stored here, and the
 stored choice (still confirmed) applies once OIDC is turned off.
 That confirmation is in the UI only; the route does not require it (a server-side
-approval for settings writes is #258). `PUT` writes both keys in one transaction, only if
-they still hold what the page showed (otherwise `409`, and the page reloads them), logs
+approval for settings writes is #258). `PUT` writes the keys in one transaction, only if
+they still hold what the page showed (otherwise `409`, and the page reloads them). The
+networks are sent only when they were edited, with the list the page showed; a network
+that is not an IP address or CIDR range is refused with `400`. It logs
 `mcp auth: mcp_auth_mode set to … (was …; from <client> via <ingress>)` as soon as it
 commits, and is guarded like the other Settings
 writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
@@ -1630,6 +1662,8 @@ string:
 ```sql
 INSERT INTO ai_settings (key, value) VALUES ('mcp_auth_mode', '"disabled"')
   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+INSERT INTO ai_settings (key, value) VALUES ('mcp_anonymous_networks', '["192.168.10.0/24"]')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 -- back to the default:
 DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 ```
@@ -1637,9 +1671,10 @@ DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 Outward tools still need a human approval in the UI in every mode (spec §8.2; see
 [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 
-The mode and the cap also govern the plugin feed, `/api/v1/ai/plugin-feeds/*` (§9,
-[The marketplace feed](#the-marketplace-feed-6933)): in `disabled` mode anyone on the LAN
-reads it.
+The mode, the cap and the networks also govern the plugin feed,
+`/api/v1/ai/plugin-feeds/*`, and the uploads, `/mcp/workspace/*` (§9,
+[The marketplace feed](#the-marketplace-feed-6933)): in `disabled` mode a caller from the
+anonymous networks reads the feed without a token.
 
 ## 11. Automatic Hindsight memory
 
