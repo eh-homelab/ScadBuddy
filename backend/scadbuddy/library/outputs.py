@@ -2484,7 +2484,7 @@ _RELEASE_ORPHANS = (
     " orphans AS (SELECT a.holder_id FROM aged a"
     "  WHERE NOT EXISTS (SELECT 1 FROM outputs o WHERE o.output_id = a.holder_id)"
     "  AND NOT EXISTS (SELECT 1 FROM output_claims c WHERE c.output_id = a.holder_id"
-    "   AND c.claimed_at >= now() - %(grace)s)),"
+    "   AND c.claimed_at >= clock_timestamp() - %(grace)s)),"
     " released AS (DELETE FROM blob_refs r USING orphans o"
     "  WHERE r.holder_kind = %(kind)s AND r.holder_id = o.holder_id RETURNING r.holder_id)"
     " SELECT DISTINCT holder_id FROM released ORDER BY holder_id"

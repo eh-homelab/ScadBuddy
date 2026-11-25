@@ -1085,7 +1085,9 @@ async def list_recent_outputs(
     what the filters select. Outputs carry no tags: `tag` matches the model's catalogue
     tags, case and accents folded. The storefront slice run's outputs are left out unless
     `include_storefront` (#6371). Once a row copy run has finished, the list reads the
-    ``outputs`` rows; before that, ``output_index`` (#7257)."""
+    ``outputs`` rows; before that, ``output_index`` (#7257). `OutputRows.copied` queries
+    only until it first reads true; it then answers from memory, so a request on a
+    copied store runs no query for it."""
     rows = outputs.rows
     run: Callable[[OutputQuery], tuple[list[str], int]]
     if rows is not None and await asyncio.to_thread(rows.copied):

@@ -467,7 +467,11 @@ kept only while they are younger than the grace.
 Release B's migration is to refuse to run while the mark is missing (unless `outputs`
 and `output_index` are both empty), and while any row has `bytes_at` NULL. The migration
 runs at the API's start, so a refused release B pod does not start, and the release A
-pods go on serving.
+pods go on serving. On `bambuddy` the mark is never written, so release B refuses every
+start on such an install that holds an output. This is the decision (plan D2, D7):
+outputs never go into Bambuddy's library (spec §6.4). The refusal's text names the cause
+and the remedy: move the store to `s3` or `local`, let release A run the copies until
+`cut_over_at` is set, then upgrade.
 
 Before release A's roll, read `GET /api/v1/outputs/copy-status`: the row copy's
 `not_copied` must be empty (fix or remove each folder first). Such a folder has no

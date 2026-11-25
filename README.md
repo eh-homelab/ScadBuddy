@@ -1106,6 +1106,9 @@ one API pod once the roll-out is done: its start runs the copy. Then check
 Both copies stop at the cut-over mark (#7257), which `copy-status` names as
 `cut_over_at`; after the roll-out of its first release, check that `cut_over_at` is set
 and `bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
+Check too that the last row copy run (`copy-status`'s `started_at`) started after the last
+pod of a build before phase 2 (#7256) went: a start writes the mark before it runs the row
+copy, so a write such a pod made in the files only after that run is never copied.
 
 ### Render worker (#424)
 
