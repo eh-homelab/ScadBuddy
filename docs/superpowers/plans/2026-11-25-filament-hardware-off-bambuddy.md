@@ -579,6 +579,6 @@ This writes to a real printer. Do not start it without the owner's written OK on
 
 ## Open questions for the owner
 
-1. A one-time import of Bambuddy's K-profile notes, slot presets and AMS labels into ScadBuddy (R-7276-16)? The owner's memory note allows "a one-time import"; R-7276-3 says nothing is read. Default here: no import.
-2. The OK and a window for Task 14's live H2C check (R-7276-5).
-3. R-7276-14: port the type profile fill's K read (`filament/profile_fetch.py`) in a follow-up issue?
+1. Settled by the controller (2026-11-25, recorded on #7276): no import (R-7276-16 stands). It keeps the port free of new Bambuddy reads; the cost is that a person re-enters a few notes and labels.
+2. Still open: the owner's written OK and a window for Task 14's live H2C check (R-7276-5).
+3. Settled by the controller: yes, the profile fill's K read moves in a follow-up, #7604 (R-7276-14).
