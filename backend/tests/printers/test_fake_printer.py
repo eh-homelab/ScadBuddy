@@ -28,6 +28,7 @@ import os
 import socket
 import ssl
 import sys
+import threading
 import urllib.request
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -949,6 +950,52 @@ async def test_a_cut_connect_is_shut(linked: _Linked, monkeypatch: pytest.Monkey
         await _ask(linked, ams_get_rfid(0, 0, "71"))
     assert len(shut) == 1
     assert len(held) == 1 and held[0] is not None and held[0].fileno() == -1
+
+
+async def test_a_late_executor_connect_is_shut(
+    linked: _Linked, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """aiomqtt connects in an executor thread, and a cut does not stop that thread (#7616).
+    The connect is held past `MQTT_TIMEOUT`, then let go: it opens a socket after the cut,
+    and that socket is closed when the thread ends, not left open."""
+    shut = _spy_force_close(monkeypatch)
+    go = threading.Event()
+    done = threading.Event()
+    held: list[Any] = []
+
+    class HeldInExecutor(aiomqtt.Client):
+        def _client_connect(self) -> None:
+            go.wait()
+            super()._client_connect()
+            held.append(self._client.socket())
+
+    loop = asyncio.get_running_loop()
+    run_in_executor = loop.run_in_executor
+
+    def tracked(executor: Any, func: Callable[..., Any], *args: Any) -> Any:
+        def run() -> Any:
+            try:
+                return func(*args)
+            finally:
+                done.set()
+
+        return run_in_executor(executor, run)
+
+    monkeypatch.setattr(loop, "run_in_executor", tracked)
+    monkeypatch.setattr(aiomqtt, "Client", HeldInExecutor)
+    monkeypatch.setattr(lan_module, "MQTT_TIMEOUT", 0.5)
+    try:
+        with pytest.raises(TimeoutError):
+            await _ask(linked, ams_get_rfid(0, 0, "91"))
+        assert len(shut) == 1
+    finally:
+        go.set()
+    assert await asyncio.to_thread(done.wait, 30.0)
+    assert len(held) == 1 and held[0] is not None
+    try:
+        assert held[0].fileno() == -1
+    finally:
+        held[0].close()
 
 
 async def test_a_cut_close_is_shut(linked: _Linked, monkeypatch: pytest.MonkeyPatch) -> None:
