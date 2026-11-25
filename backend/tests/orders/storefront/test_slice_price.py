@@ -879,7 +879,7 @@ OTHER_SHA = "d" * 64
 def last_row(
     pool: PgPool,
     key: str,
-    listing: str,
+    listing: str | None,
     filaments: list[str],
     *,
     setup: str | None = None,
@@ -976,6 +976,15 @@ def test_another_listings_last_price_needs_the_material_and_the_setup(
     # The listing's own row comes first, of whatever material.
     own = last_row(pool, "0", "mine", ["petg", "petg"], setup="s-1", minutes=60)
     assert last(prices) == own
+
+
+def test_a_row_of_no_listing_is_no_listings_last_price(prices: SlicePrices, pool: PgPool) -> None:
+    """#7530: a done row from before #6710 PR 3 names no listing. It is never a listing's
+    last price, of the chosen material and setup or not."""
+    last_listings(pool, "mine", "other")
+    last_row(pool, "a", None, ["red", "red"], setup="s-1")
+    last_row(pool, "b", None, ["red", "blue"])
+    assert last(prices) is None
 
 
 async def test_a_files_row_records_its_setup_and_a_templates_none(
