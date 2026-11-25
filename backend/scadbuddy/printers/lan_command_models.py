@@ -50,6 +50,10 @@ class LanCommandRun(BaseModel):
     """The commands of one request, run in order; the first failure stops the rest."""
 
     commands: list[LanCommandInput] = Field(min_length=1, max_length=3)
+    #: The route's body before the printer answered (an AMS slot route's, #7276 Task 8),
+    #: which its view completes from the outcome, so the command read route answers it too
+    #: (P37). Never sent to the printer.
+    answer: dict[str, Any] | None = None
 
 
 class LanCommandOutcome(BaseModel):

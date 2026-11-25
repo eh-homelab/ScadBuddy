@@ -11,7 +11,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.bambuddy.slot_control import SavedSlotPreset, SlotPresetBody
+from scadbuddy.printers.ams_slots import SavedSlotPreset, SlotPresetBody
 
 
 class PrinterCommandData:

@@ -17,7 +17,13 @@ import pytest
 
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.status import STALE_AFTER, hms_errors, status_from_report
+from scadbuddy.printers.status import (
+    STALE_AFTER,
+    decode_snow,
+    extruder_loaded,
+    hms_errors,
+    status_from_report,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "lan-report-h2c.json"
 
@@ -387,6 +393,59 @@ def test_a_numeric_string_ams_status_reads_as_a_number(report_h2c: LanReport) ->
     """Other report numbers (``tray_now``) may come as strings; ``ams_status`` reads alike."""
     report = _with_print(report_h2c, ams_status="768")
     assert status_from_report(row(), report, now=report.received_at).ams_status_main == 3
+
+
+def test_each_extruders_loaded_slot_from_snow(report_h2c: LanReport) -> None:
+    """P40: ``device.extruder.info[].snow`` is ``ams_id << 8 | slot``: the recorded H2C
+    feeds AMS-A slot 1 (``tray_now`` 1) and HT-A on the other extruder."""
+    status = status_from_report(row(), report_h2c, now=report_h2c.received_at)
+    assert status.tray_now == 1
+    assert status.extruder_loaded == [(0, 1), (128, 0)]
+
+
+def test_the_idle_h2c_has_nothing_loaded() -> None:
+    """The recorded idle H2C: 0xFFFF and 0xFEFF with ``tray_now`` 255."""
+    idle = json.loads((FIXTURE.parent / "lan-report-h2c-idle.json").read_text("utf-8"))["print"]
+    assert extruder_loaded(idle) == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("snow", "slot"),
+    [
+        (0x0003, (0, 3)),
+        (0x0302, (3, 2)),
+        (0x8000, (128, 0)),
+        (0x8700, (135, 0)),
+        ("257", (1, 1)),
+        (0xFFFF, None),
+        (0xFEFF, None),
+        (0xFE00, None),
+        (0xFF01, None),
+        (0x0400, None),
+        (-1, None),
+        (True, None),
+        ("x", None),
+        (None, None),
+        (1.5, None),
+    ],
+)
+def test_snow_decodes_an_ams_or_ams_ht_slot_only(snow: object, slot: object) -> None:
+    assert decode_snow(snow) == slot
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        None,
+        [],
+        [{"id": 0, "snow": 1}],
+        [{"id": 0, "snow": 1}, {"id": 1}],
+        [{"id": 0, "snow": 1}, {"id": "x", "snow": 2}],
+    ],
+)
+def test_fewer_than_two_extruders_snow_reads_as_none_reported(info: object) -> None:
+    """Bambuddy reads ``snow`` only from a two-extruder report (``bambu_mqtt.py`` L3551)."""
+    assert extruder_loaded({"device": {"extruder": {"info": info}}}) == []
 
 
 def test_each_tray_carries_its_cali_idx_and_k() -> None:

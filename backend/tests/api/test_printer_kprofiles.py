@@ -19,12 +19,12 @@ from scadbuddy.api import printer_kprofiles as kprofile_routes
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.kprofiles import KProfileSet, set_rows
-from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_commands import extrusion_cali_set
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.workflows import lan_command as lan_command_module
 from tests.api.test_send import BASE, configure
 from tests.printers.conftest import KEK
+from tests.support.lan_script import Scripted, script_printer
 from tests.support.no_bambuddy import forbid_bambuddy
 from tests.support.operations import press
 
@@ -73,44 +73,9 @@ TWO_NOZZLES = {
 }
 
 
-class Scripted:
-    """What the printer answers, and what reached it."""
-
-    def __init__(self) -> None:
-        self.published: list[dict[str, Any]] = []
-        self.replies: dict[str, dict[str, Any] | None] = {}
-
-    def reply(self, name: str, **fields: Any) -> None:
-        self.replies[name] = {"result": "success", **fields}
-
-    def refuse(self, name: str, reason: str) -> None:
-        self.replies[name] = {"result": "fail", "reason": reason}
-
-    def silent(self, name: str) -> None:
-        self.replies[name] = None
-
-
 @pytest.fixture
 def scripted(monkeypatch: pytest.MonkeyPatch) -> Scripted:
-    script = Scripted()
-
-    async def request(
-        self: LanPrinter,
-        command: dict[str, Any],
-        *,
-        name: str,
-        seq: str,
-        wait: float,
-        until: float | None = None,
-    ) -> dict[str, Any] | None:
-        script.published.append(command["print"])
-        answer = script.replies.get(name, {"result": "success"})
-        if answer is None:
-            return None
-        return {"command": name, "sequence_id": seq, **answer}
-
-    monkeypatch.setattr(LanPrinter, "request", request)
-    return script
+    return script_printer(monkeypatch)
 
 
 def printers_of(client: TestClient) -> Printers:

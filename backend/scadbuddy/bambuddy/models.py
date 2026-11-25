@@ -762,6 +762,12 @@ class PrinterStatus(BambuddyModel):
     #: 0 when idle, 1 while it changes filament, 2 while it reads a tag
     #: (``backend/app/services/bambu_mqtt.py`` line 1292, maziggy/bambuddy v1.3.1).
     tray_now: int | None = None
+    #: Each extruder's loaded slot as ``(ams_id, slot)``, by extruder id, from a LAN
+    #: report's ``device.extruder.info[].snow`` (`printers/status.py` `extruder_loaded`):
+    #: ``None`` for an extruder that holds nothing or a value not decoded, ``[]`` when the
+    #: report names no two extruders' ``snow`` (#7276 P40). ``tray_now`` names only the
+    #: active extruder's slot.
+    extruder_loaded: list[tuple[int, int] | None] = Field(default_factory=list)
     ams_status_main: int | None = None
     #: What the printer is doing now, whoever started it (#977). ``progress`` is a
     #: percentage and ``remaining_time`` minutes, as Bambu's MQTT ``mc_percent`` and

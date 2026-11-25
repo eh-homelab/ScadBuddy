@@ -8,7 +8,7 @@ from uuid import UUID
 import psycopg.errors
 import pytest
 
-from scadbuddy.bambuddy.slot_control import SlotPresetBody
+from scadbuddy.printers.ams_slots import SlotPresetBody
 from scadbuddy.printers.command_data import PrinterCommandData
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
