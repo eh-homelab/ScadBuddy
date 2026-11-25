@@ -73,7 +73,7 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
  ┌──────────────────────────────────────────────────────────────┐
  │  scadbuddy-core (Go)  :8080 and :8082                         │
  │    ported areas ──────────────► Postgres                      │
- │    the rest ─► unix socket ─► uvicorn (Python) ─► Postgres    │
+ │    the rest ─► 127.0.0.1:8090 ─► uvicorn (Python) ─► Postgres │
  │  agent sidecar ─► 127.0.0.1:8080                              │
  └──────────────────────────────────────────────────────────────┘
 ```
