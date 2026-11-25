@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -11,7 +12,7 @@ import pytest
 from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogStore
-from scadbuddy.filament.spools import FilamentSpoolStore, NoEmptyWeightError
+from scadbuddy.filament.spools import FilamentDefaults, FilamentSpoolStore, NoEmptyWeightError
 from tests.conftest import PgPool
 
 pg = pytest.mark.requires_postgres
@@ -25,7 +26,7 @@ H = timedelta(hours=1)
 
 def test_only_a_weighing_has_a_reading() -> None:
     with pytest.raises(ValueError, match="only a weighing has reading_g"):
-        m.SpoolEventAdd(kind="dried", reading_g=1180, temp_c=50, hours=4)
+        m.SpoolEventAdd(kind="dried", reading_g=1180, temp_c=50, hours=Decimal(4))
 
 
 def test_a_reading_below_the_grams_is_refused() -> None:
@@ -168,3 +169,50 @@ def test_detail_carries_the_newest_weighing(pg_pool: PgPool) -> None:
     detail = store.detail(spool)
     assert detail is not None and detail.last_weighing is not None
     assert detail.last_weighing.id == event.id
+
+
+# -- the spool's last drift and the notice (Task 3) ----------------------------------
+
+
+def _get(pool: PgPool, spool: UUID, **defaults: Any) -> m.Spool:
+    reader = lambda: FilamentDefaults(low_stock_pct=20, cost_per_kg=None, **defaults)  # noqa: E731
+    found = FilamentSpoolStore(pool, reader).get(spool)
+    assert found is not None
+    return found
+
+
+@pg
+def test_the_newest_weighings_drift_is_on_the_spool(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    _weigh(pg_pool, spool, reading_g=1180, grams=980)
+    assert _get(pg_pool, spool).last_drift_g == -12.0
+
+
+@pg
+def test_an_old_weighing_leaves_last_drift_null(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    _weigh(pg_pool, spool, reading_g=1180, grams=980)
+    _weigh(pg_pool, spool, grams=975)
+    assert _get(pg_pool, spool).last_drift_g is None
+    assert _get(pg_pool, spool).drift_notice is False
+
+
+@pg
+def test_a_back_dated_weighing_leaves_the_newest_ones_drift(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    _weigh(pg_pool, spool, reading_g=1180, grams=980)
+    _weigh(pg_pool, spool, reading_g=1190, grams=990, at=T0 + timedelta(minutes=30))
+    assert _get(pg_pool, spool).last_drift_g == -12.0
+
+
+@pg
+def test_drift_notice_follows_the_setting(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    _weigh(pg_pool, spool, reading_g=1180, grams=980)
+    assert _get(pg_pool, spool).drift_notice is True
+    assert _get(pg_pool, spool, drift_notice_g=20).drift_notice is False
+    assert _get(pg_pool, spool, drift_notice_g=12).drift_notice is True

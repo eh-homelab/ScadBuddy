@@ -346,6 +346,9 @@ def breakdown(
     the ledger expected and the drift, ``grams - expected``, to 0.1 g; both null with no
     ``expected``."""
     empty_g = reading_g - grams
+    source: str
+    basis: str | None
+    name: str | None
     if empty is not None and abs(empty_g - empty.grams) < 0.05:
         source, basis, name = empty.source, empty.basis, empty.name
     else:
@@ -490,12 +493,13 @@ def refresh_derived(
     last_dried = dried[-1] if dried else None
     conn.execute(
         "UPDATE filament_spools SET grams_left = %s, last_weighed_g = %s, last_weighed_at = %s,"
-        " last_dried_at = %s, last_dried_temp_c = %s, last_dried_hours = %s, last_used_at = %s"
-        " WHERE id = %s",
+        " last_drift_g = %s, last_dried_at = %s, last_dried_temp_c = %s, last_dried_hours = %s,"
+        " last_used_at = %s WHERE id = %s",
         (
             left,
             last_weighed.grams_after if last_weighed else None,
             last_weighed.at if last_weighed else None,
+            last_weighed.data.get("drift_g") if last_weighed else None,
             last_dried.at if last_dried else None,
             last_dried.data.get("temp_c") if last_dried else None,
             last_dried.data.get("hours") if last_dried else None,
@@ -540,7 +544,11 @@ def _book_on_top(
     ):
         sets["grams_left"] = max(value, 0.0)
     if _weighs(event):
-        sets |= {"last_weighed_g": event.grams_after, "last_weighed_at": event.at}
+        sets |= {
+            "last_weighed_g": event.grams_after,
+            "last_weighed_at": event.at,
+            "last_drift_g": event.data.get("drift_g"),
+        }
     if event.kind == "dried":
         sets |= {
             "last_dried_at": event.at,

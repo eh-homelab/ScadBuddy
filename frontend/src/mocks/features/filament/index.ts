@@ -350,6 +350,8 @@ function view(row: SpoolRow): FilamentSpool {
       location: state.locations.find((place) => place.id === row.location_id)?.name ?? null,
     },
     low_stock: row.grams_left != null && label != null ? row.grams_left < (label * pct) / 100 : false,
+    // #7682: the newest weighing's drift at or over the setting, either way.
+    drift_notice: row.last_drift_g != null && Math.abs(row.last_drift_g) >= (mockSettings().filament_weighing_drift_notice_g ?? 10),
     needs_drying: needsDrying(row, effective.material_id),
   }
 }
@@ -899,6 +901,7 @@ function newSpool(body: Record<string, unknown>): SpoolRow {
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
+    last_drift_g: null,
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,

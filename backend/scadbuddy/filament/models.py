@@ -1287,6 +1287,8 @@ class Spool(_Row):
     last_dried_temp_c: int | None
     last_dried_hours: Decimal | None
     last_used_at: datetime | None
+    #: The newest weighing's drift, ``data.drift_g`` (#7682); null when it has no breakdown.
+    last_drift_g: float | None = None
     archived_at: datetime | None
     #: The invoice line the spool was bought on, if any. An invoice line may fill a spool
     #: with none, costed or not; one with a line is refused (#6700).
@@ -1313,6 +1315,9 @@ class Spool(_Row):
     #: its place was not dry storage, and whether that passes its material's limit.
     hours_outside_dry: float = 0.0
     needs_drying: bool = False
+    #: Server-computed (#7682): ``last_drift_g`` is at or over the setting
+    #: ``filament_weighing_drift_notice_g``, either way.
+    drift_notice: bool = False
 
 
 # -- the trays (`filament/inventory.py`) ----------------------------------------------

@@ -79,6 +79,7 @@ export function sbSpool(look: Look): FilamentSpool {
     grams_left: look.grams_left,
     last_weighed_g: null,
     last_weighed_at: null,
+    last_drift_g: null,
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
@@ -89,6 +90,7 @@ export function sbSpool(look: Look): FilamentSpool {
     created_at: AT,
     updated_at: AT,
     low_stock: false,
+    drift_notice: false,
     overridden: [],
     names: { material: look.material, subtype: look.subtype ?? null, brand: look.brand },
     effective: { colour_name: look.colour_name, rgba: look.rgba, cost_per_kg: look.cost_per_kg, label_weight_g: 1000 },
@@ -351,7 +353,7 @@ const typeKValues = (): S['TypeKValue'][] => [
 // -- spools ---------------------------------------------------------------------------
 
 /** A spool's own columns, as `filament_spools` holds them: an override, or `null`. */
-export type SpoolRow = Omit<FilamentSpool, 'effective' | 'overridden' | 'names' | 'low_stock'>
+export type SpoolRow = Omit<FilamentSpool, 'effective' | 'overridden' | 'names' | 'low_stock' | 'drift_notice'>
 
 function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
   return {
@@ -385,6 +387,7 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
+    last_drift_g: null,
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,

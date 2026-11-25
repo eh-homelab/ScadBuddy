@@ -80,7 +80,15 @@ _SPOOL_FIELDS = tuple(
     f
     for f in m.Spool.model_fields
     if f
-    not in {"effective", "overridden", "names", "low_stock", "hours_outside_dry", "needs_drying"}
+    not in {
+        "effective",
+        "overridden",
+        "names",
+        "low_stock",
+        "hours_outside_dry",
+        "needs_drying",
+        "drift_notice",
+    }
 )
 _SPOOL_COLUMNS = ", ".join(_SPOOL_FIELDS)
 _TYPE_COLUMNS = ", ".join(m.SpoolType.model_fields)
@@ -226,12 +234,14 @@ class FilamentDefaults:
     under which a spool with none of its own is low (``filament_low_stock_pct``), the cost
     per kg of a spool and type that name none (``filament_default_cost_per_kg``), and the
     drying temperature and hours when nothing in the catalog sets them
-    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5)."""
+    (``filament_drying_temp_c``, ``filament_drying_hours``, #7156 R-7156-5), and the drift
+    at or over which a weighing is a notice (``filament_weighing_drift_notice_g``, #7682)."""
 
     low_stock_pct: int
     cost_per_kg: Decimal | None
     drying_temp_c: int | None = None
     drying_hours: Decimal | None = None
+    drift_notice_g: int = int(Settings.model_fields["filament_weighing_drift_notice_g"].default)
 
 
 #: The settings' own defaults, for a read that shows neither ``low_stock`` nor a value (a
@@ -324,6 +334,8 @@ def _hydrate(
                     "overridden": overridden(row),
                     "names": names,
                     "low_stock": _low_stock(row["grams_left"], own, default_pct),
+                    "drift_notice": row["last_drift_g"] is not None
+                    and abs(row["last_drift_g"]) >= defaults.drift_notice_g,
                 }
             )
         )
