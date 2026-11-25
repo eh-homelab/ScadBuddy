@@ -15,6 +15,7 @@ import {
   LISTED_TYPES,
   platePictures,
   sellMedia,
+  soldDesign,
   titleColours,
   withColourChoices,
   withoutWords,
@@ -118,7 +119,10 @@ export const storefrontTools: Tool[] = [
     description:
       'Draft a public storefront listing (#6131), unpublished, as the Storefront page\'s "Sell on storefront" fills one ' +
       'in: from a saved output (`output_id`: its design version, values and name) or from a model (`slug`, with ' +
-      '`values` for the parameters to set; the template defaults otherwise, at its current version). Free text is ' +
+      '`values` for the parameters to set; the template defaults otherwise, at its current version). For a template ' +
+      "with a pipeline (#5701), an output also brings the design's own inputs and their version, which the listing " +
+      'keeps fixed; a model brings none, and `notes` then says to set up the design in the editor before publish. ' +
+      'A parameter the pipeline sets itself is neither offered nor locked. Free text is ' +
       "the customer's to type and every colour is the customer's to choose, from the price book's filaments of the " +
       "design's material (any material when no colour matches one); everything else is locked at its value. `lock` " +
       'locks named parameters at their value, colours included, only when the person asked for that. Support ' +
@@ -196,14 +200,20 @@ export const storefrontTools: Tool[] = [
       )
       const book = await ok(backend.GET('/api/v1/orders/price-book'), 'read the price book')
       const filaments = book.filaments
+      // #5701: a parameter the pipeline sets itself (`pipeline_params`) is the design's, never the listing's.
+      const pipelineSet = schema.pipeline_params ?? []
       // A name the schema does not have would be dropped and leave the template's default, so
-      // it is refused, as `lock` refuses one.
+      // it is refused, as `lock` refuses one; so is one the pipeline sets, which would be dropped too.
       for (const name of Object.keys(values ?? {})) {
+        if (pipelineSet.includes(name)) throw new ToolError(`${name} is set by the design itself, so a listing cannot set it`)
         if (!(schema.parameters ?? []).some((p) => p.name === name)) throw new ToolError(`${name} is not a parameter of ${record.name}`)
       }
-      const given = (output?.params ?? values ?? {}) as Record<string, Value>
+      // #5701: an output's whole inputs are its values (`params`) and, for a pipeline template, its own inputs.
+      const sold = output ? soldDesign(schema, { ...output.inputs, params: output.params ?? {} }) : { values: (values ?? {}) as Record<string, Value>, design: {} }
+      const given = sold.values
       const listing = defaultsFor(schema, filaments, given)
       for (const name of lock ?? []) {
+        if (pipelineSet.includes(name)) throw new ToolError(`${name} is set by the design itself, so a listing cannot lock it`)
         const param = (schema.parameters ?? []).find((p) => p.name === name)
         if (!param) throw new ToolError(`${name} is not a parameter of ${record.name}`)
         const locked = given[name] ?? param.initial
@@ -234,10 +244,17 @@ export const storefrontTools: Tool[] = [
             // editor's "Materials allowed" changes them later, and an empty list means the shop's
             // default (Settings → Storefront pricing → Storefront materials).
             materials: draftMaterials(listing.colours, filaments),
+            ...sold.design,
           },
         }),
         `draft a storefront listing of ${name}`,
       )
+      const page = `/storefront/listings/${encodeURIComponent(made.id)}`
+      if (schema.pipeline && !output) {
+        notes.push(
+          `${record.name} has a design of its own to set up (its pipeline's inputs), which a model brings none of: open the listing at ${page} and press "Set up the design" before you publish it, or draft it from a saved output of that design.`,
+        )
+      }
       return json({
         listing_id: made.id,
         title: made.title,
@@ -245,7 +262,7 @@ export const storefrontTools: Tool[] = [
         offered: Object.keys(made.params ?? {}),
         colour_problems: colourProblems(listing, schema, filaments),
         notes,
-        page: `/storefront/listings/${encodeURIComponent(made.id)}`,
+        page,
       })
     },
   }),

@@ -105,7 +105,7 @@ from scadbuddy.orders.quote import (
     output_matches,
     reference_of,
 )
-from scadbuddy.orders.rendering import kit_output_ids
+from scadbuddy.orders.rendering import JobReads, kit_count, kit_output_ids
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.store import BlobStore
@@ -257,6 +257,7 @@ async def print_check(
     part_settings: dict[str, dict[str, Any]] | None = None,
     setup: Mapping[str, Any] | None = None,
     content: ContentStore | None = None,
+    jobs: JobReads | None = None,
 ) -> dict[str, Any]:
     """§5.4's refusals, from the rows and the quote's file, writing nothing: 404 for an
     unknown order or item; 409 ``order_not_submitted`` for a storefront cart (#5282),
@@ -265,8 +266,9 @@ async def print_check(
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
     `failed` (one already printing among them), ``print_in_flight`` while a test print of
     it is open, ``item_kit`` for an item whose render made several outputs (#5701 PR 5,
-    naming them in ``outputs``: one attempt would print one output and count the whole kit
-    made, so the order page prints each output and the shop records the attempt),
+    naming the saved ones in ``outputs``, or, with ``jobs``, one whose render job still
+    lists several: one attempt would print one output and count the whole kit made, so
+    the order page prints each output and the shop records the attempt),
     ``item_made`` when its attempts made its quantity already, and
     ``requote_needed`` when the accepted quote no longer stands
     for what would print: no accepted quote, the item's output gone or no longer its
@@ -303,12 +305,14 @@ async def print_check(
         )
     await _none_in_flight(store, item)
     if reference is not None and item.output_id is not None:
-        kit = await asyncio.to_thread(kit_output_ids, outputs, item.output_id)
-        if len(kit) > 1:
+        output_id = item.output_id
+        kit = await asyncio.to_thread(kit_output_ids, outputs, output_id)
+        count = await asyncio.to_thread(kit_count, outputs, jobs, output_id, len(kit))
+        if count > 1:
             # One attempt prints one output and would count the whole kit made.
             raise _refused(
                 "item_kit",
-                f"item {item.id} is a kit of {len(kit)} outputs: print each output from"
+                f"item {item.id} is a kit of {count} outputs: print each output from"
                 " the order page, then record the attempt",
                 items=[item.id],
                 outputs=kit,

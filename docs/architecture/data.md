@@ -106,7 +106,7 @@ deleted after a grace period.
 | Logical key | What | Code |
 |---|---|---|
 | 64-hex, `act-<40hex>`, `output-<32hex>-<n>` | a render job's pieces | `scadbuddy/api/crud_render.py:116` |
-| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save puts each under `<key>-save-<attempt>` first, `staged_save_key`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
+| `output-<id>-model`, `-preview`, `-thumbnail`, `-file-<hash>` | a saved output's bytes: `model.3mf`, `preview.glb`, `thumbnail.png`, and a `files/` entry, keyed by the first 32 hex digits of its name's sha256 (a save uploads each with no index row first, and the key is indexed in the row's transaction, `OutputBytes.put_folder`) | `scadbuddy/library/output_rows.py` `output_blob_key`, `output_file_key` |
 | `output-<id>-thumbnail-<sha256>`, `output-<id>-plate_cover-<sha256>` | a thumbnail upload before its key names it (held by nothing); the plate cover read once out of the output's 3MF | `scadbuddy/library/output_rows.py` `staged_thumbnail_key`, `plate_cover_key` |
 | `src-<slug>-<revision>` | a template's source snapshot | `scadbuddy/store/snapshots.py:65-66` |
 | `asset-<id>` | an uploaded template asset | `scadbuddy/store/assets.py:30` |
@@ -280,14 +280,15 @@ names the keys (`model_blob`, `preview_blob`, `thumbnail_blob`, and one `output_
 per `files/` name); `bytes_at` is set once the blobs hold the bytes, and NULL while only
 the files do. The folder `data/outputs/<slug>/<id>/` stays as the fallback until #7257: a
 save still writes it, and every reader reads the file when the row names no blob, or when
-the blob is lost (logged, never a 500). A save writes the folder, puts the bytes under
-keys of its own (`OutputBytes.put_folder`, `<key>-save-<attempt>`), then inserts the row,
-points the output's keys at those objects, and writes its `output_files` rows and its
-holds, in one transaction; then it deletes its staged keys. When the row fails (an id
+the blob is lost (logged, never a 500). A save writes the folder, uploads the bytes with no
+index row (`OutputBytes.put_folder`, `ContentStore.stage`), then inserts the row, writes the
+index rows of the output's keys naming those objects, its `output_files` rows and its holds,
+in one transaction. When the row fails (an id
 that another output holds, `orders/quote.py` `operation_output_id`, among the causes), the
-save fails, its folder is removed (`OutputStore._insert_row`) and its staged keys and
-their objects are deleted: no key of the other output moved, so that output keeps its
-bytes. A put into a full store is a 507. On `bambuddy` (spec §6.4) no output blob is
+save fails, its folder is removed (`OutputStore._insert_row`) and the objects it uploaded
+are removed (`OutputBytes.drop_staged`; an object it reused is another row's and stays): no
+key of the other output moved, so that output keeps its bytes. A put into a full store is a
+507. On `bambuddy` (spec §6.4) no output blob is
 written: the bytes stay files. The `local` backend has no content store, so the outputs
 get one of their own under `data/output-blobs/`, with the shared index and spool (#7257,
 plan D7); the byte copy runs there too. A store switch from `local` to `s3` (no store
@@ -298,17 +299,51 @@ is to answer 500 for them. This affects dev stores only. A store migration to `b
 and releases its byte holds in one transaction, then removes the folder; the content sweep
 removes the blobs after its grace (`OutputRows.delete`).
 
-A save's cost in commits: each put writes its index row in a transaction of its own
-(`ContentStore.put`), one each for `model.3mf`, `preview.glb`, `thumbnail.png` when there,
-and each `files/` entry, before the row's transaction, and the delete of each staged key
-commits once more after it. On prod a commit is known to take 1-2 s, so a save takes some
-seconds more than in phase 1. The save then files its 3MF in
+A save's cost in commits is one, however many files it has (#7477): the row's transaction
+writes every index row. Two cases each put once handled alone have a rule of their own.
+An object the save reused (the index named the same bytes already) is held only from that
+transaction on; when the sweep freed it first (`ReuseLostError`), the transaction rolls
+back whole, the save uploads its own copy of every object it reused
+(`OutputBytes.own_copies`), and writes the transaction once more, which then reuses
+nothing. A deadlock or a serialization failure runs the transaction again whole, up to
+three attempts (`OutputRows.insert`); the last one's error fails the save, which removes its
+folder and the objects it uploaded. Until the commit no row names an uploaded object. So
+from before each upload until its commit or its failure the save holds a session advisory
+lock on the object, shared (`store/index.py` `StageHold`, `object_lock_name`: one per
+backend and sha256, on one pooled connection, no transaction). Any release of an object
+(a failed save's, a replaced key's, the content sweep's) and the unrecorded sweep remove it
+only while they hold that lock exclusively, taken without waiting, and no row names it,
+checked under the lock (`ContentStore.claim_object`, `BlobIndex.claim_unnamed`): an object
+another save of the same bytes has uploaded and not indexed yet stays. These are the API's
+releases; the render worker's content store (over the CRUD routes) takes no lock, and its
+index never admits kind `output` (`api/crud_render.py` `READ_KINDS`), so it never removes
+an output's object. A connection whose unlock fails is closed, never given back to its
+pool with the lock. The holds take their connections from a small pool of their own
+(`scadbuddy-stage-locks`, `STAGE_LOCK_POOL_SIZE`, 4; `store/index.py` `StageLocks`), never
+the API's shared pool: a save waits for one of its `STAGE_LOCK_SLOTS` (3) before its first
+upload, so at most that many saves per pod are between their first upload and their
+commit, and none waits mid-save for a second lock connection. A removal's exclusive lock
+takes the pool's last connection (`CLAIM_LOCK_SLOTS`, 1; `StageLocks.claim_connection`),
+and checks the index on it too, since it holds the lock through the backend's remove (a
+round trip on S3 or Bambuddy): removals on one pod run one at a time, and none holds a
+connection of the shared pool (#7756 review). A save waits for a removal's lock at most
+`STAGE_LOCK_TRIES` (6) tries of `STAGE_LOCK_TIMEOUT_MS` (5 s), a `SET LOCAL lock_timeout`
+in each try's transaction; then it fails with `StageLockBusyError`, closing its hold and
+freeing its slot, so a hung remove never pins a save slot. On `local` the unrecorded sweep
+reads an object's mtime again under its claim and keeps one written since its cutoff (a
+plain put of the same bytes). A cancel cannot stop the row's transaction, which
+runs in a thread: the save keeps its locks until that thread ends, then the cancel stands.
+When a reuse is lost, the save removes the `meta.json` its first commit wrote before it
+puts its own copies, so a cancel meanwhile leaves a folder the hold reaper removes, as a
+cancel during the puts does. A save that dies before its commit drops its connection and
+so its locks; the blob sweep's unrecorded step (`main._sweep_unrecorded`, run with
+`claim`) then removes its objects once they are older than `sweep_grace`: on `s3`
+(`S3ContentBackend.sweep_unrecorded`, which lists the bucket, so it finds an object no row
+ever named) and on `local` in the outputs' own store (`LocalContentBackend.sweep_unrecorded`,
+which walks `data/output-blobs/`). The save then files its 3MF in
 the native library from the folder it wrote, the same bytes as the model blob, so it
 does not download the blob again (`scadbuddy/library/output_operations.py`). The filing's
-own put commits once more. Fewer commits would need a batch put in `ContentStore`:
-upload every file first, then write every index row in one transaction (or in the row's
-own transaction), with its own answer to a reused object that the sweep freed meanwhile
-(`ReuseLostError`) and to a deadlock.
+own put commits once more.
 
 What readers derive of the model (the geometry analysis and its attributed form, the
 asset ids, the plate names, the plate cover) is kept in `output_derived`, once per output.

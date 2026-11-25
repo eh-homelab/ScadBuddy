@@ -788,6 +788,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 part_settings=dumped(asked.part_settings),
                 setup=setup,
                 content=core.store.content,
+                jobs=core.render.store,
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))

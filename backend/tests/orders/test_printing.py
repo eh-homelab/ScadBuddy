@@ -440,6 +440,14 @@ def test_a_kit_item_is_printed_output_by_output(shop: Shop, pool: PgPool, tmp_pa
     assert refused.value.extensions["outputs"] == kit.ids
     assert refused.value.extensions["items"] == [item.id]
     assert _check(shop, order, item, blobs, Outputs(item))["output_id"] == item.output_id
+    # Review of #7790: an output set by another path saves none of the others, and its
+    # render job, while it can be read, still says it is one of several.
+    jobs = SimpleNamespace(read=lambda job_id: SimpleNamespace(outputs=[{}, {}]))
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(print_check(shop.rows, Outputs(item), blobs, order.id, item.id, jobs=jobs))
+    assert str(refused.value.type).endswith("/item_kit")
+    assert refused.value.extensions["outputs"] == [item.output_id]
+    assert "a kit of 2 outputs" in refused.value.detail
 
 
 def test_the_check_prints_what_is_left(shop: Shop, pool: PgPool, tmp_path: Path) -> None:

@@ -145,6 +145,12 @@ def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> 
     return {**inputs, "params": with_defaults(schema, params)}
 
 
+def rerendered_output_id(saved_as: str, job_id: str) -> str:
+    """The id an output saved under ``saved_as`` is saved under when job ``job_id``
+    renders it again (#7655): one per id and job, so the attempts of one render share it."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"scadbuddy:rerendered:{saved_as}:{job_id}").hex
+
+
 async def output_for_reference(
     reference: Reference,
     *,
@@ -157,6 +163,7 @@ async def output_for_reference(
     follow_every: float = FOLLOW_EVERY,
     item: AttachTo | None = None,
     source: OutputSource = BACK_OFFICE,
+    needs_job: bool = False,
 ) -> RenderedOutput:
     """The output for ``reference``: the item's own while it matches (with ``item``),
     else the output saved under ``saved_as`` while it matches, else the reference
@@ -169,17 +176,39 @@ async def output_for_reference(
     The save claims ``saved_as`` first (``OutputStore.claim``): a directory already
     there (another attempt's save still writing, or an output that does not match) is
     left alone, and the new output gets an id of its own. A render that fails or is
-    cancelled is a 409 that names its job and its error."""
+    cancelled is a 409 that names its job and its error.
+
+    With ``needs_job`` (a caller that reads the render job, as the storefront's slice
+    run does) an output is reused only while its job can still be read, done: after the
+    prune took it (#7655), the reference renders again and the new job's output is saved
+    under an id of its own, so the caller can read what it rendered."""
+
+    stale = False
+
+    async def stands(job_id: str | None) -> bool:
+        if not needs_job:
+            return True
+        if job_id is None:
+            return False
+        try:
+            job = await asyncio.to_thread(renders.read, job_id)
+        except JobNotFoundError:
+            return False
+        return job.state == "done"
+
     if item is not None and item.item.output_id is not None:
         own = await asyncio.to_thread(
             reference_matches, outputs, item.item.output_id, reference, schema
         )
-        if own is not None:
+        if own is not None and await stands(own.job_id):
             return RenderedOutput(
                 item.item.output_id, list(own.colors), reference.render_key, own.job_id
             )
     if saved_as is not None:
         earlier = await asyncio.to_thread(reference_matches, outputs, saved_as, reference, schema)
+        if earlier is not None and not await stands(earlier.job_id):
+            stale = True
+            earlier = None
         if earlier is not None:
             found = RenderedOutput(
                 saved_as, list(earlier.colors), reference.render_key, earlier.job_id
@@ -208,6 +237,16 @@ async def output_for_reference(
             + (f": {job.error}" if job.error else ""),
             job_id=job.id,
         )
+    if stale and saved_as is not None:
+        # The id is taken by the output of the job the prune took: the new job's output
+        # goes under an id of its own, the same for every attempt that renders to it.
+        saved_as = rerendered_output_id(saved_as, job.id)
+        again = await asyncio.to_thread(reference_matches, outputs, saved_as, reference, schema)
+        if again is not None and again.job_id == job.id:
+            found = RenderedOutput(saved_as, list(again.colors), reference.render_key, job.id)
+            if item is not None:
+                await attach_output(item, found)
+            return found
     made = await _saved(
         reference,
         job.id,
@@ -278,6 +317,27 @@ def kit_output_ids(outputs: OutputsRead, first: str) -> list[str]:
         found.append(output_id)
 
 
+class JobReads(Protocol):
+    """What :func:`kit_count` reads of a render job (``RenderService``'s store)."""
+
+    def read(self, job_id: str) -> Job: ...
+
+
+def kit_count(outputs: OutputsRead, jobs: JobReads | None, first: str, saved: int) -> int:
+    """How many outputs the render of the item's output ``first`` made: the ``saved`` ones
+    (:func:`kit_output_ids`), or more while its job can still be read and lists more. An
+    output set on the item by another path than the item's render or quote (a person's
+    pick of a later output, an item's add with an ``output_id``) saves none of the others;
+    its job tells, until the prune takes it (#5701 PR 5, #7780)."""
+    if jobs is None:
+        return saved
+    try:
+        job = jobs.read(outputs.get(first).job_id)
+    except (OutputNotFoundError, JobNotFoundError, OSError, ValueError):
+        return saved
+    return max(saved, len(job.outputs))
+
+
 async def outputs_for_reference(
     reference: Reference,
     *,
@@ -296,10 +356,12 @@ async def outputs_for_reference(
     §7.4): the first as :func:`output_for_reference` gives it, then each later output of
     the job it was saved from, under ``saved_as`` of its index, or with ``later_as`` under
     ``later_as(first output's id, index)``. One saved there by an earlier attempt is reused
-    while it matches. An output is named by its ``job_id``: the caller checks that all are
-    of one job, and that the job has no more than these. A job that cannot be read (pruned
-    since the first output was saved) gives the first alone. With ``item`` (the order
-    item's render, PR 5) the first output is set on the item as
+    while it matches and is of the same job. An output is named by its ``job_id``: the
+    caller checks that all are of one job, and that the job has no more than these. The
+    first is reused only while its job can be read (``needs_job``): a job the prune took
+    is rendered again (#7655), so the outputs are those of a job that can be read. A job
+    gone between that check and this read gives the first alone. With ``item`` (the order
+    item's render and its slice quote, #5701 PR 5) the first output is set on the item as
     :func:`output_for_reference` sets it, and the item's own output is reused while it
     matches; the later outputs are found from it by :func:`kit_output_ids`."""
     first = await output_for_reference(
@@ -313,6 +375,7 @@ async def outputs_for_reference(
         follow_every=follow_every,
         item=item,
         source=source,
+        needs_job=True,
     )
     if first.job_id is None:
         return [first]
@@ -321,15 +384,30 @@ async def outputs_for_reference(
     except JobNotFoundError:
         return [first]
     made = [first]
+    rerendered = first.output_id != saved_as(0)
     for index in range(1, len(job.outputs)):
-        output_id = saved_as(index) if later_as is None else later_as(first.output_id, index)
-        earlier = await asyncio.to_thread(reference_matches, outputs, output_id, reference, schema)
-        if earlier is not None:
-            made.append(
-                RenderedOutput(
+        # Its own id, then, when that holds an output of another job, the one for this
+        # job (#7655): only an output of the first's own job is part of its render. An id
+        # of the first's own (``later_as``) is one per job already.
+        if later_as is not None:
+            ids = [later_as(first.output_id, index)]
+        else:
+            ids = [saved_as(index), rerendered_output_id(saved_as(index), job.id)]
+            ids = ids[1:] if rerendered else ids
+        found: RenderedOutput | None = None
+        for output_id in ids:
+            earlier = await asyncio.to_thread(
+                reference_matches, outputs, output_id, reference, schema
+            )
+            if earlier is None:
+                break
+            if earlier.job_id == job.id:
+                found = RenderedOutput(
                     output_id, list(earlier.colors), reference.render_key, earlier.job_id
                 )
-            )
+                break
+        if found is not None:
+            made.append(found)
             continue
         made.append(
             await _saved(

@@ -75,7 +75,7 @@ function offersTestPrint(order: Order, item: OrderItemDetail): boolean {
 export function PrintItem({ order, item, onChanged, testRevision }: { order: Order; item: OrderItemDetail; onChanged: () => void; testRevision?: Revision }) {
   const [open, setOpen] = useState(false)
   if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !orderItemSource(item)) return null
-  if (!testRevision && isKit(item)) return <KitPrints item={item} />
+  if (!testRevision && isKit(item)) return <KitPrints item={item} onChanged={onChanged} />
   return (
     <>
       <Button variant="outline" onClick={() => setOpen(true)} data-testid={testRevision ? 'test-print-item' : 'print-item'}>
@@ -91,7 +91,7 @@ export function PrintItem({ order, item, onChanged, testRevision }: { order: Ord
  * record no attempt of the item, so the shop records it under Fulfilment once every output
  * is printed.
  */
-function KitPrints({ item }: { item: OrderItemDetail }) {
+function KitPrints({ item, onChanged }: { item: OrderItemDetail; onChanged: () => void }) {
   const [printing, setPrinting] = useState<string | null>(null)
   const outputs = item.kit_outputs ?? []
   const slug = item.reference?.slug
@@ -111,7 +111,7 @@ function KitPrints({ item }: { item: OrderItemDetail }) {
           </li>
         ))}
       </ul>
-      {printing && <PrintPicker open source={{ kind: 'output', output: { id: printing, slug } }} onClose={() => setPrinting(null)} onRan={() => undefined} />}
+      {printing && <PrintPicker open source={{ kind: 'output', output: { id: printing, slug } }} onClose={() => setPrinting(null)} onRan={onChanged} />}
     </div>
   )
 }
