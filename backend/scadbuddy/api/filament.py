@@ -2251,7 +2251,7 @@ def _no_job(job_id: UUID) -> ApiError:
     status_code=status.HTTP_201_CREATED,
     summary="Ask the phone page to read or write a tag",
     description=(
-        "Queues a tag read or write for the /filament/scan page (#7273 G4). `kind` is `read` "
+        "Queues a tag read or write for the /scan page (#7273 G4). `kind` is `read` "
         "(no `records`) or `write` (the NDEF `records` to write, 888 bytes at most). The job "
         "waits `ttl_s` seconds (default and most 600) for a person to arm it, then it is "
         "`expired`. Arming gives the run 60 seconds (`expires_at` moves). A write whose backup "
