@@ -96,6 +96,20 @@ describe('NFC job tools', () => {
     expect(firstText(got)).toEqual({ job_id: JOB, state: 'expired', result: null })
   })
 
+  it("nfc_write refuses a flow run's call and queues no job", async () => {
+    let posted = false
+    server.use(
+      http.post(JOBS, () => {
+        posted = true
+        return HttpResponse.json(job('pending'), { status: 201 })
+      }),
+    )
+    const got = await runTool(tool('nfc_write'), { records: [REC], timeout_s: 1 }, { ...ctx(), flowTurn: { run_id: 'r', call_id: 'c' } })
+    expect(got.isError).toBe(true)
+    expect(JSON.stringify(got.content)).toMatch(/cannot run in a flow run/)
+    expect(posted).toBe(false)
+  })
+
   it('nfc_write refuses records past 16', async () => {
     let posted = false
     server.use(

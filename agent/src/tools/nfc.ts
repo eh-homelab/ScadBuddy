@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import { ok } from './call.js'
-import { defineTool, json, type ToolContext } from './registry.js'
+import { defineTool, json, ToolError, type ToolContext } from './registry.js'
 
 // #7273 G4: an agent reads or writes a tag through the person's phone. The tool queues an
 // NFC job (backend filament/tags.py `create_job`); the /filament/scan page shows it, the
@@ -100,7 +100,8 @@ export const nfcTools = [
     label: 'Write an NFC tag',
     description:
       `Write NDEF records to an NFC tag through the user's phone, and wait up to timeout_s for it. ${HOW} The ` +
-      'job is done only when the tag reads back as the records sent; else it fails, with what the tag holds.',
+      'job is done only when the tag reads back as the records sent; else it fails, with what the tag holds. A flow ' +
+      'run cannot call it: the only approval is the person arming it on the page.',
     input: z.object({ records: z.array(RECORD).min(1).max(16), timeout_s: TIMEOUT }),
     risk: 'outward',
     // docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md, Constraints: "The person's
@@ -109,6 +110,11 @@ export const nfcTools = [
     source: SOURCE,
     routes: ROUTES,
     waitsMs: ({ timeout_s }) => timeout_s * 1000 + ARM_MS + ARMED_MARGIN_MS,
-    handler: async ({ records, timeout_s }, ctx) => runJob(ctx, { kind: 'write', records, ttl_s: timeout_s }),
+    handler: async ({ records, timeout_s }, ctx) => {
+      // Its one approval is a person's Arm on the scan page (`approval: 'none'`), so a flow run's
+      // call, which runs under the run's grant with no person in a session, never queues one.
+      if (ctx.flowTurn) throw new ToolError('nfc_write cannot run in a flow run: a person must ask for it in a session')
+      return runJob(ctx, { kind: 'write', records, ttl_s: timeout_s })
+    },
   }),
 ]
