@@ -2385,8 +2385,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST …/listings/{id}/price` (area `file-prices`; edge `/api/store/v1/listings/{id}/price`,
   counted as a read) takes `ListingPriceBody` (a listing colour per offered slot, one
   material, `file_choice`; a support slot takes the snapshot's lock) and answers
-  `slice_estimate` of `held_file.py` `priced_file(snapshot)`, or, while that is `pending`, the
-  file's last firm price as `last` (`SlicePrices.listing_last`); a read that would claim a new
+  `planned_estimate` of `held_file.py` `priced_file(snapshot)`, or, while that is `pending`, the
+  file's last firm price as `last` (`SlicePrices.listing_last`: the listing's own rows, the
+  chosen material's first, else another published listing's of the chosen material and the
+  same `setup_key`, #7523); over the limit that `last` carries the limit's `retry_after`, and
+  429 is only for a listing with none. A read that would claim a new
   slice first takes one render of the visitor's rates (`RenderLimits.admit_slice`, a
   `storefront_renders` row of `kind` `slice` with no job, which render concurrency never
   counts), refunded when it claims none or its start gives the claim back. The cart add
@@ -2578,7 +2581,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   a run of its own for the default combination only (`warm_default`, id
   `prepare-listing-default:<listing id>`, `default_only`, `TERMINATE_EXISTING`: the listing
   may have moved; `default_combination`, a listing with no colour parameter included), so
-  the instant read has a firm price before any visitor asks. A start that fails, or takes
+  the instant read has a firm price before any visitor asks. A file listing's run submits no
+  render and prices the colours its page opens on, with no visitor charge (`_warm_file`,
+  `file_prices.py` `default_choice`, `listings.py` `page_colours`, a copy of the page's
+  `fileParts.ts` `partFilaments` with no pick: change both together, #7523). A start that fails, or takes
   more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
   given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it

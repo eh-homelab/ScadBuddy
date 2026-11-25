@@ -14,6 +14,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
+from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from scadbuddy.bambuddy.choices import PrinterOpening
@@ -44,6 +45,7 @@ from scadbuddy.orders.storefront.slice_price import (
     plan_variant,
     price_key,
     price_variant,
+    setup_key,
 )
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.store.content import ContentStore
@@ -869,6 +871,143 @@ async def test_a_file_variant_slices_its_held_copy_once_and_reads_no_library(
     assert row.variant_key == "9" * 64
     assert row.slot_filaments == [shop.pla, shop.petg]
     assert row.output_id is None
+
+
+OTHER_SHA = "d" * 64
+
+
+def last_row(
+    pool: PgPool,
+    key: str,
+    listing: str,
+    filaments: list[str],
+    *,
+    setup: str | None = None,
+    sha: str = HELD_SHA,
+    minutes: int = 0,
+    template: bool = False,
+) -> str:
+    """A ``done`` row of ``listing``, ``minutes`` old; with ``template`` a template's."""
+    price_key = key * 64
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO storefront_slice_prices (price_key, model_sha256, status, currency,"
+            " unit_price_minor, total_minor, lines, listing_id, slot_filaments, setup_key,"
+            " variant_key, output_id, finished_at)"
+            " VALUES (%s, %s, 'done', 'USD', 100, 100, '[]', %s, %s, %s, %s, %s,"
+            " clock_timestamp() - make_interval(mins => %s))",
+            (
+                price_key,
+                sha,
+                listing,
+                Jsonb(filaments),
+                setup,
+                "7" * 64 if template else None,
+                "out-1" if template else None,
+                minutes,
+            ),
+        )
+    return price_key
+
+
+def last_listings(pool: PgPool, *published: str) -> None:
+    with pool.connection() as conn:
+        for listing in published:
+            conn.execute(
+                "INSERT INTO storefront_listings (id, source, title, position, published,"
+                " snapshot, library_file) VALUES (%s, 'library_file', 'Clip', 0, true, '{}',"
+                " '{}')",
+                (listing,),
+            )
+
+
+def last(prices: SlicePrices, listing: str = "mine", setup: str = "s-1") -> str | None:
+    """The listing's last price for choices of the red and blue PLA."""
+    row = prices.listing_last(listing, HELD_SHA, filaments={"red", "blue"}, setup_key=setup)
+    return None if row is None else row.price_key
+
+
+def test_a_listings_last_price_is_its_newest_of_the_chosen_material(
+    prices: SlicePrices, pool: PgPool
+) -> None:
+    """#7523: the listing's own rows, of any setup and any material, the newest whose
+    filaments are all of the chosen material first."""
+    last_listings(pool, "mine")
+    assert last(prices) is None
+    petg = last_row(pool, "a", "mine", ["petg", "petg"], setup="s-9")
+    assert last(prices) == petg
+    old = last_row(pool, "b", "mine", ["red", "red"], setup="s-9", minutes=20)
+    assert last(prices) == old
+    newer = last_row(pool, "c", "mine", ["red", "blue"], setup="s-1", minutes=10)
+    assert last(prices) == newer
+    # One slot of another material is another print.
+    last_row(pool, "d", "mine", ["red", "petg"], setup="s-1")
+    assert last(prices) == newer
+    # A row from before the column is the listing's own all the same.
+    before = last_row(pool, "e", "mine", ["blue", "blue"], minutes=5)
+    assert last(prices) == before
+
+
+def test_a_templates_row_of_the_same_bytes_is_no_files_last_price(
+    prices: SlicePrices, pool: PgPool
+) -> None:
+    """#7523: a listing that sold a template's render of the same bytes keeps that row."""
+    last_listings(pool, "mine", "other")
+    last_row(pool, "a", "mine", ["red", "red"], template=True)
+    last_row(pool, "b", "other", ["red", "red"], template=True)
+    assert last(prices) is None
+
+
+def test_another_listings_last_price_needs_the_material_and_the_setup(
+    prices: SlicePrices, pool: PgPool
+) -> None:
+    """#7523: another published listing's row only for the chosen material and the same
+    setup; a row with no setup key (from before the column) matches no other listing."""
+    last_listings(pool, "mine", "other")
+    last_row(pool, "a", "other", ["petg", "petg"], setup="s-1")
+    last_row(pool, "b", "other", ["red", "red"], setup="s-2")
+    last_row(pool, "c", "other", ["red", "red"])
+    last_row(pool, "d", "other", ["red", "red"], setup="s-1", sha=OTHER_SHA)
+    last_row(pool, "e", "unpublished", ["red", "red"], setup="s-1")
+    assert last(prices) is None
+    theirs = last_row(pool, "f", "other", ["red", "red"], setup="s-1", minutes=30)
+    assert last(prices) == theirs
+    assert last(prices, setup="s-2") == "b" * 64
+    # The listing's own row comes first, of whatever material.
+    own = last_row(pool, "0", "mine", ["petg", "petg"], setup="s-1", minutes=60)
+    assert last(prices) == own
+
+
+async def test_a_files_row_records_its_setup_and_a_templates_none(
+    shop: Shop, prices: SlicePrices, content: ContentStore
+) -> None:
+    """#7523: the setup key is the subject's kind and the slice request; filaments, rates
+    and the book are not in it."""
+    await hold(content)
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 0.0, 5.0])})
+    run = replace(slice_run(shop, prices, slicer), content=content)
+    variant = file_variant(shop)
+    row = await price_variant(run, variant)
+    assert row.status == "done" and row.setup_key == setup_key(variant)
+    template = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
+    other = await price_variant(slice_run(shop, prices, template), variant_of(shop))
+    assert other.status == "done" and other.setup_key is None
+
+
+def test_the_setup_key_moves_with_the_request_and_the_subject_only(shop: Shop) -> None:
+    variant = file_variant(shop)
+    key = setup_key(variant)
+    assert setup_key(variant.model_copy(update={"slot_filaments": [shop.petg]})) == key
+    assert setup_key(variant.model_copy(update={"machine_rate": RATE})) == key
+    assert setup_key(file_variant(shop, id=42)) == key
+    assert setup_key(file_variant(shop, library="native")) != key
+    walls = variant.slice.model_copy(update={"process_overrides": {"wall_loops": "5"}})
+    assert setup_key(variant.model_copy(update={"slice": walls})) != key
+    wide = variant.slice.model_copy(
+        update={"choices": PrintChoices(nozzles=[NozzleChoice(size="0.6")])}
+    )
+    assert setup_key(variant.model_copy(update={"slice": wide})) != key
+    assert setup_key(variant_of(shop)) != key
 
 
 async def test_a_used_slot_at_zero_grams_gives_no_price(
