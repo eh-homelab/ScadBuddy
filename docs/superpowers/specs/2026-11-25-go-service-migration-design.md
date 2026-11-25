@@ -78,11 +78,11 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
  └──────────────────────────────────────────────────────────────┘
 ```
 
-- **Ports.** Go listens on 8080 and, for CRUD callers, on 8082 (`SCADBUDDY_CORE_CRUD_LISTEN`),
+- **Ports** (#7702). Go listens on 8080 and, for CRUD callers, on 8082 (`SCADBUDDY_CORE_CRUD_LISTEN`),
   with 8082's path filter (`crud/listener.py` `serves`: a path `posixpath.normpath` changes is
   refused, not only a wrong prefix). Python listens on `127.0.0.1:8090`; its own CRUD listener
   moves to a free port (`SCADBUDDY_CRUD_PORT=0`) that no Service or policy names.
-- **The client address.** Go applies the trusted proxies (`SCADBUDDY_CORE_TRUSTED_PROXIES`, as
+- **The client address** (#7702). Go applies the trusted proxies (`SCADBUDDY_CORE_TRUSTED_PROXIES`, as
   `core/proxies.py`) and sends Python the client it finds as the one `X-Forwarded-For` value.
   Python trusts only `127.0.0.1`.
 - **Why loopback, not a socket** (changed 2026-11-25, to ship faster). `openscad-lsp` in
