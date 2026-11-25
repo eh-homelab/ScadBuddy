@@ -48,6 +48,9 @@ export type LabelSheet = Schemas['LabelSheet']
 export type LabelTemplateChoice = Schemas['LabelTemplateChoice']
 export type LabelsRequest = Schemas['LabelsRequest']
 export type LabelOutput = Schemas['LabelOutput']
+export type SavedLabelSheet = Schemas['SavedLabelSheet']
+export type SheetLayout = Schemas['SheetLayout']
+export type LabelSheetIn = Schemas['LabelSheetIn']
 export type PrinterLabel = Schemas['PrinterLabel']
 export type LocationNode = Schemas['LocationNode']
 export type LocationCreate = Schemas['LocationCreate']
@@ -468,6 +471,15 @@ export const printerLabels = (printerIds: string[] | null) =>
 
 /** #7157 — the label templates, and a custom label's bounds. */
 export const listLabelTemplates = () => request<LabelTemplates>(`${BASE}/label-templates`)
+
+/** #7216 — saves a new sheet grid (409 `label_sheet_name_taken` or `too_many_label_sheets`, 422 for a grid that does not fit its page). */
+export const createLabelSheet = (body: LabelSheetIn) => request<SavedLabelSheet>(`${BASE}/label-sheets`, json('POST', body))
+
+/** #7216 — replaces a saved sheet's name and layout; the next print uses the new grid. */
+export const replaceLabelSheet = (id: string, body: LabelSheetIn) => request<SavedLabelSheet>(`${BASE}/label-sheets/${seg(id)}`, json('PUT', body))
+
+/** #7216 — deletes a saved sheet; a choice that still names it is refused `label_sheet_gone` at the next print. */
+export const deleteLabelSheet = (id: string) => request<void>(`${BASE}/label-sheets/${seg(id)}`, { method: 'DELETE' })
 
 /**
  * #7157, #7216 — the labels file of these spools, then these places (`POST /filament/labels`), as the answer's bytes for

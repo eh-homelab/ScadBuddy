@@ -1,9 +1,10 @@
-import { act, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type * as embed from '../../lib/embed'
 import { downloadBlob } from '../../lib/embed'
+import { LABEL_TEMPLATES } from '../../mocks/features/filament'
 import { L } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
@@ -715,5 +716,131 @@ describe('the labels page', () => {
   it('goes back to the Locations tab from a place label', () => {
     renderPage(<LabelsPage />, { route: `/filament/labels?locations=${L.AMS_A1}` })
     expect(screen.getByRole('link', { name: /Locations/ })).toHaveAttribute('href', '/filament/locations')
+  })
+})
+
+describe('saved sheets (#7216)', () => {
+  const SHEET_ID = '22222222-2222-4222-8222-222222222222'
+  const sheet = (id: string, name: string, layout: object = {}) => ({
+    id,
+    name,
+    layout: { page: 'letter', width_mm: 60, height_mm: 30, cols: 2, rows: 5, top_mm: 10, left_mm: 5, col_gap_mm: 2, row_gap_mm: 1, ...layout },
+    created_at: '2026-11-25T10:00:00Z',
+    updated_at: '2026-11-25T10:00:00Z',
+  })
+
+  /** The template list with these saved sheets, read again at each GET. */
+  function serveSaved(list: () => object[]) {
+    server.use(http.get('*/api/v1/filament/label-templates', () => HttpResponse.json({ ...LABEL_TEMPLATES, saved: list() })))
+  }
+
+  it('lists saved sheets in the template picker', async () => {
+    serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    serveSaved(() => [sheet(SHEET_ID, 'Shelf strip')])
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'New sheet…' })).toBeInTheDocument())
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    await user.click(screen.getByRole('combobox', { name: 'Label' }))
+    const group = await screen.findByRole('group', { name: 'Saved sheets' })
+    expect(within(group).getByRole('option', { name: 'Shelf strip' })).toBeInTheDocument()
+  })
+
+  it('prints a saved sheet on its grid', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id', ({ params }) => HttpResponse.json(detail(String(params.id), 1))))
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    serveSaved(() => [sheet(SHEET_ID, 'Shelf strip')])
+    const ids = Array.from({ length: 22 }, (_, i) => `s${i}`).join(',')
+    renderPage(<LabelsPage />, { route: `/filament/labels?ids=${ids}` })
+    await waitFor(() => expect(screen.getAllByTestId('print-label')).toHaveLength(22))
+    // 2 x 5 a sheet: three pages.
+    await waitFor(() => expect(document.querySelectorAll('#label-print-root > [data-sheet-page]')).toHaveLength(3))
+    expect(screen.getAllByTestId('label')[0]!.getAttribute('style')).toMatch(/width: 60mm; height: 30mm/)
+    expect(document.querySelector('style')?.textContent).toContain('size: 215.9mm 279.4mm')
+    expect(document.querySelector('style')?.textContent).toContain('grid-template-columns: repeat(2, 60mm)')
+    expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Shelf strip')
+  })
+
+  it('saves a new sheet and chooses it', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'roll_50x25', width_mm: null, height_mm: null })
+    const sheets: object[] = []
+    serveSaved(() => sheets)
+    server.use(
+      http.post('*/api/v1/filament/label-sheets', async ({ request }) => {
+        const body = (await request.json()) as { name: string; layout: object }
+        const made = sheet(SHEET_ID, body.name, body.layout)
+        sheets.push(made)
+        return HttpResponse.json(made, { status: 201 })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('button', { name: 'New sheet…' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Name'), 'Drawer fronts')
+    await user.click(within(dialog).getByRole('button', { name: 'Save sheet' }))
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'saved', sheet_id: SHEET_ID } }]))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Drawer fronts'))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('keeps the sheet id of a stored saved choice when it saves the choice again', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    serveSaved(() => [sheet(SHEET_ID, 'Shelf strip')])
+    server.use(http.put('*/api/v1/filament/label-sheets/:id', async ({ request }) => HttpResponse.json(sheet(SHEET_ID, ((await request.json()) as { name: string }).name))))
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('button', { name: 'Edit sheet…' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Save sheet' }))
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'saved', sheet_id: SHEET_ID } }]))
+  })
+
+  it('deletes a saved sheet after a confirm', async () => {
+    serve()
+    const puts = serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    let sheets = [sheet(SHEET_ID, 'Shelf strip')]
+    serveSaved(() => sheets)
+    const deleted: string[] = []
+    server.use(
+      http.delete('*/api/v1/filament/label-sheets/:id', ({ params }) => {
+        deleted.push(String(params.id))
+        sheets = []
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    expect(deleted).toEqual([])
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Delete sheet' }))
+    await waitFor(() => expect(deleted).toEqual([SHEET_ID]))
+    // The page goes back to the default label and stores that choice.
+    await waitFor(() => expect(puts).toEqual([{ filament_label_template: { template: 'roll_50x25' } }]))
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Label' })).toHaveTextContent('Roll label 50 x 25 mm'))
+    await user.click(screen.getByRole('combobox', { name: 'Label' }))
+    await screen.findAllByRole('option')
+    expect(screen.queryByRole('option', { name: 'Shelf strip' })).toBeNull()
+  })
+
+  it('shows a note when the saved sheet is gone', async () => {
+    serve()
+    serveTemplate({ template: 'saved', sheet_id: SHEET_ID, width_mm: null, height_mm: null })
+    serveSaved(() => [])
+    let body: { template?: unknown } | null = null
+    server.use(
+      http.post('*/api/v1/filament/labels', async ({ request }) => {
+        body = (await request.json()) as { template?: unknown }
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'The saved sheet was deleted. Choose another template.', code: 'label_sheet_gone' },
+          { status: 409 },
+        )
+      }),
+    )
+    const { user } = renderPage(<LabelsPage />, { route: '/filament/labels?ids=a' })
+    expect(await screen.findByText('The saved sheet was deleted. Choose another template.')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('label').getAttribute('style')).toMatch(/width: 50mm; height: 25mm/))
+    expect(screen.queryByRole('button', { name: 'Edit sheet…' })).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download' })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: 'Download' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The saved sheet was deleted. Choose another template.')
+    expect(body!.template).toEqual({ template: 'saved', sheet_id: SHEET_ID })
   })
 })

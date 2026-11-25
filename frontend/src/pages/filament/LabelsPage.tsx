@@ -1,10 +1,11 @@
-import { ChevronLeftIcon, FileDownIcon, PrinterIcon } from 'lucide-react'
+import { ChevronLeftIcon, FileDownIcon, PencilIcon, PlusIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
 import { type FocusEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useSearchParams } from 'react-router'
-import { api } from '../../api/client'
+import { api, ApiError } from '../../api/client'
 import {
   fileName,
+  deleteLabelSheet,
   getLocation,
   getSpool,
   labelsFile,
@@ -13,17 +14,20 @@ import {
   type LabelTemplates,
   listLabelTemplates,
   printerLabels,
+  type SavedLabelSheet,
   type SpoolDetail,
 } from '../../api/filament'
 import { Label, LocationLabel } from '../../components/filament/Label'
 import { LabelOutputPicker } from '../../components/filament/LabelOutputPicker'
 import { LabelFieldsPicker } from '../../components/filament/LabelFieldsPicker'
+import { LabelSheetEditor } from '../../components/filament/LabelSheetEditor'
 import { DEFAULT_FIELDS, DEFAULT_SIZE, httpsOrigin, labelBase, type LabelField, labelPayload, type LabelSize, locationPayload, MAX_LABELS, MAX_PAYLOAD_BYTES, PAGE_MM, pagesOf, qrSvg, tickField } from '../../components/filament/labelSheet'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label as FieldLabel } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { downloadBlob } from '../../lib/embed'
 import { useSettingSaver } from '../../lib/useSettingSaver'
 import { filamentLinks } from '../../lib/filamentLinks'
@@ -81,16 +85,34 @@ const DEFAULT_OUTPUT: LabelOutput = { format: 'pdf', dpi: 300, fields: [...DEFAU
 /** What the Download button's `title` says it gives. */
 const outputTitle = (output: LabelOutput) => (output.format === 'png' ? `Download PNG images at ${output.dpi} dpi` : 'Download a PDF')
 
-/** A choice as the setting and the PDF take it: the sizes only for `custom`. */
+/** A choice as the setting and the PDF take it: the sizes only for `custom`, the sheet's id only for `saved` (#7216). */
 function cleanChoice(choice: LabelTemplateChoice): LabelTemplateChoice {
-  return choice.template === 'custom' ? { template: 'custom', width_mm: choice.width_mm, height_mm: choice.height_mm } : { template: choice.template }
+  if (choice.template === 'custom') return { template: 'custom', width_mm: choice.width_mm, height_mm: choice.height_mm }
+  if (choice.template === 'saved') return { template: 'saved', sheet_id: choice.sheet_id }
+  return { template: choice.template }
 }
 
-/** The size a choice draws at; a template not yet listed draws at the default until the list arrives. */
-function sizeOf(choice: LabelTemplateChoice, templates: LabelTemplates | null): LabelSize {
-  if (choice.template === 'custom' && choice.width_mm != null && choice.height_mm != null) return { widthMm: choice.width_mm, heightMm: choice.height_mm, sheet: null }
+/** The picker's value of a saved sheet: `saved:<id>`, apart from the template ids. */
+const SAVED_PREFIX = 'saved:'
+
+/** The saved sheet a choice names, when the list has it. */
+const savedSheetOf = (choice: LabelTemplateChoice, templates: LabelTemplates | null): SavedLabelSheet | null =>
+  (choice.template === 'saved' && templates?.saved.find((one) => one.id === choice.sheet_id)) || null
+
+/**
+ * The size a choice draws at; a template not yet listed draws at the default until the list arrives. A saved sheet
+ * (#7216) draws on its own grid; one the list no longer has draws at the default with `gone` (R-7216-12).
+ */
+function sizeOf(choice: LabelTemplateChoice, templates: LabelTemplates | null): LabelSize & { gone: boolean } {
+  if (choice.template === 'custom' && choice.width_mm != null && choice.height_mm != null) return { widthMm: choice.width_mm, heightMm: choice.height_mm, sheet: null, gone: false }
+  if (choice.template === 'saved') {
+    const sheet = savedSheetOf(choice, templates)
+    if (!sheet) return { ...DEFAULT_SIZE, gone: templates !== null }
+    const { page, width_mm, height_mm, cols, rows, top_mm, left_mm, col_gap_mm, row_gap_mm } = sheet.layout
+    return { widthMm: width_mm, heightMm: height_mm, sheet: { page, cols, rows, top_mm, left_mm, col_gap_mm, row_gap_mm }, gone: false }
+  }
   const found = templates?.templates.find((one) => one.id === choice.template)
-  return found ? { widthMm: found.width_mm, heightMm: found.height_mm, sheet: found.sheet ?? null } : DEFAULT_SIZE
+  return found ? { widthMm: found.width_mm, heightMm: found.height_mm, sheet: found.sheet ?? null, gone: false } : { ...DEFAULT_SIZE, gone: false }
 }
 
 /** How many spools or places the page reads at the same time. */
@@ -197,6 +219,11 @@ export function LabelsPage() {
   const [pdfProblem, setPdfProblem] = useState<string | null>(null)
   const [pdfBusy, setPdfBusy] = useState(false)
   const size = sizeOf(choice, templates)
+  // #7216 — the saved sheet chosen, the editor open (`new` or a sheet), and the sheet a delete waits to confirm.
+  const chosenSheet = savedSheetOf(choice, templates)
+  const [editing, setEditing] = useState<SavedLabelSheet | 'new' | null>(null)
+  const [deleting, setDeleting] = useState<SavedLabelSheet | null>(null)
+  const [sheetProblem, setSheetProblem] = useState<string | null>(null)
   // A choice saved on this page outranks the stored one that arrives after it. Opening the
   // custom fields saves nothing, so the stored choice still shows under them, and the
   // person's typing is kept.
@@ -312,7 +339,41 @@ export function LabelsPage() {
       return
     }
     setEditingCustom(false)
-    save({ template: value as LabelTemplateChoice['template'] })
+    save(value.startsWith(SAVED_PREFIX) ? { template: 'saved', sheet_id: value.slice(SAVED_PREFIX.length) } : { template: value as LabelTemplateChoice['template'] })
+  }
+
+  /** The template list read again after a sheet changed; a failed read keeps the list the page has. */
+  const readTemplates = () => {
+    listLabelTemplates()
+      .then(setTemplates)
+      .catch(() => {})
+  }
+
+  /** #7216 — a sheet saved in the editor is in the list at once, and it becomes the choice. */
+  const sheetSaved = (sheet: SavedLabelSheet) => {
+    setEditing(null)
+    setEditingCustom(false)
+    setTemplates((was) => was && { ...was, saved: [...was.saved.filter((one) => one.id !== sheet.id), sheet] })
+    save({ template: 'saved', sheet_id: sheet.id })
+    readTemplates()
+  }
+
+  /** #7216 — deletes a sheet after the confirm. When it was the choice, the page goes back to the default label. */
+  const removeSheet = async (sheet: SavedLabelSheet) => {
+    setDeleting(null)
+    setSheetProblem(null)
+    try {
+      await deleteLabelSheet(sheet.id)
+    } catch (cause) {
+      // A 404 is a sheet that is gone already: the result the person asked for.
+      if (!(cause instanceof ApiError && cause.status === 404)) {
+        setSheetProblem(cause instanceof Error ? cause.message : 'The sheet could not be deleted. Try again.')
+        return
+      }
+    }
+    setTemplates((was) => was && { ...was, saved: was.saved.filter((one) => one.id !== sheet.id) })
+    if (choice.template === 'saved' && choice.sheet_id === sheet.id) save(DEFAULT_CHOICE)
+    readTemplates()
   }
 
   /** A field left for the template picker saves nothing: the pick that follows decides. */
@@ -440,7 +501,8 @@ export function LabelsPage() {
   const readyPlaces = placeMode && places?.key === placesKey ? places : null
   const placeLabels = readyPlaces?.labels ?? []
   const count = placeMode ? placeLabels.length : labels.length
-  const pickerValue = editingCustom || choice.template === 'custom' ? 'custom' : choice.template
+  const pickerValue = editingCustom || choice.template === 'custom' ? 'custom' : choice.template === 'saved' ? `${SAVED_PREFIX}${choice.sheet_id ?? ''}` : choice.template
+  const savedSheets = templates?.saved ?? []
   /** The print copy's labels, in order: a sheet template lays them out a page at a time. */
   const printed: { key: string; node: ReactNode }[] = [
     ...labels.map(({ spool, svg }) => ({ key: spool.id, node: <Label spool={spool} svg={svg} size={size} fields={fields} testId="print-label" /> })),
@@ -509,6 +571,24 @@ export function LabelsPage() {
                 </SelectItem>
               ))}
               <SelectItem value="custom">Custom size</SelectItem>
+              {(savedSheets.length > 0 || size.gone) && (
+                <>
+                  <SelectSeparator />
+                  <SelectGroup>
+                    <SelectLabel>Saved sheets</SelectLabel>
+                    {savedSheets.map((one) => (
+                      <SelectItem key={one.id} value={`${SAVED_PREFIX}${one.id}`}>
+                        {one.name}
+                      </SelectItem>
+                    ))}
+                    {size.gone && (
+                      <SelectItem value={pickerValue} disabled>
+                        Deleted sheet
+                      </SelectItem>
+                    )}
+                  </SelectGroup>
+                </>
+              )}
             </SelectContent>
           </Select>
           {!size.sheet && (
@@ -585,6 +665,34 @@ export function LabelsPage() {
             {customProblem && <p className="pb-1.5 text-[13px] text-warn">{customProblem}</p>}
           </div>
         )}
+        <div className="-mt-2 mb-5 flex flex-wrap items-center gap-x-2 gap-y-1">
+          {chosenSheet && (
+            <p className="mr-auto text-[13px] text-muted-foreground">
+              {chosenSheet.layout.cols} x {chosenSheet.layout.rows} labels on {chosenSheet.layout.page === 'a4' ? 'A4' : 'Letter'}.
+            </p>
+          )}
+          <Button type="button" size="sm" variant="ghost" className={chosenSheet ? '' : 'ml-auto'} onClick={() => setEditing('new')}>
+            <PlusIcon /> New sheet…
+          </Button>
+          {chosenSheet && (
+            <>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(chosenSheet)}>
+                <PencilIcon /> Edit sheet…
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => setDeleting(chosenSheet)}>
+                <Trash2Icon /> Delete
+              </Button>
+            </>
+          )}
+        </div>
+        {size.gone && (
+          <p className="mb-4 rounded-md border border-border bg-muted/40 px-3 py-2 text-[13px] text-muted-foreground">The saved sheet was deleted. Choose another template.</p>
+        )}
+        {sheetProblem && (
+          <p role="alert" className="mb-4 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[13px] text-warn">
+            {sheetProblem}
+          </p>
+        )}
         {placeMode ? (
           <p className="mb-5 text-[13px] text-muted-foreground">A place label prints its code, its name and its QR code.</p>
         ) : (
@@ -643,6 +751,25 @@ export function LabelsPage() {
           ))}
         </div>
       </div>
+      {editing && <LabelSheetEditor sheet={editing === 'new' ? null : editing} onSaved={sheetSaved} onClose={() => setEditing(null)} />}
+      <AlertDialog open={deleting !== null} onOpenChange={(open) => !open && setDeleting(null)}>
+        <AlertDialogContent>
+          {deleting && (
+            <>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Delete the sheet “{deleting.name}”?</AlertDialogTitle>
+                <AlertDialogDescription>The sheet is deleted for every person on this ScadBuddy. When it is the label chosen, this page goes back to the roll label of 50 x 25 mm.</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Keep it</AlertDialogCancel>
+                <AlertDialogAction variant="destructive" onClick={() => void removeSheet(deleting)}>
+                  Delete sheet
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </>
+          )}
+        </AlertDialogContent>
+      </AlertDialog>
       {createPortal(
         <div id="label-print-root" aria-hidden="true">
           {size.sheet

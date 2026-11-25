@@ -395,6 +395,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   its id (`{template: "saved", sheet_id}`), and `POST /api/v1/filament/labels` reads the row
   at each request, so an edit applies to the next print, PDF or PNG. A choice of a deleted
   sheet answers 409 `label_sheet_gone`.
+  The labels page lists the saved sheets in the template picker under "Saved sheets". "New
+  sheet…" opens the sheet editor (`frontend/src/components/filament/LabelSheetEditor.tsx`:
+  the name, the page, the label width and height, the columns and rows, the top and left
+  margins and the column and row gaps, in mm, with a drawing of the grid on its page). The
+  server's 409 and 422 text is the only check the editor shows. A saved sheet becomes the
+  label choice, `filament_label_template` `{template: "saved", sheet_id}`. For a saved sheet
+  that is chosen, "Edit sheet…" changes it, and "Delete" deletes it after a confirm; the page
+  then goes back to the 50 x 25 mm roll label. After each save or delete, the page reads the
+  template list again. A saved sheet prints on its own grid, as a sheet template does. When
+  the stored choice names a sheet that is not in the list, the page draws at 50 x 25 mm and
+  says that the saved sheet was deleted; "Download" still sends the stored choice and shows
+  the 409.
 
 ## Tests
 
