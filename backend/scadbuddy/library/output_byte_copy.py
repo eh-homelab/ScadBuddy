@@ -332,11 +332,16 @@ async def copy_output_bytes(
         if got is None or not got[0]:
             logger.info("another replica copies the outputs' bytes; this one does not")
             return None
-        # Again under the lock: a byte run that ended meanwhile may have written the mark.
-        if await asyncio.to_thread(rows.cut_over):
-            logger.info(CUT_OVER_NOTHING_TO_COPY)
-            return None
-        return await _Copy(store, rows, content, stop).run()
+        try:
+            # Again under the lock: a byte run that ended meanwhile may have written the mark.
+            if await asyncio.to_thread(rows.cut_over):
+                logger.info(CUT_OVER_NOTHING_TO_COPY)
+                return None
+            return await _Copy(store, rows, content, stop).run()
+        finally:
+            # Released here, not by the close: the server frees a closed session's locks a
+            # moment later, and `_try_cut_over`, called next, checks both (#7769).
+            await lock.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (BYTES_LOCK,))
 
 
 class _FailedError(Exception):

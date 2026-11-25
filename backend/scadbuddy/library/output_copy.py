@@ -194,11 +194,16 @@ def copy_outputs(
         if got is None or not got[0]:
             logger.info("another replica copies the saved outputs; this one does not")
             return None
-        # Again under the lock: the mark may have been written since the first check.
-        if rows.cut_over():
-            logger.info(CUT_OVER_NOTHING_TO_COPY)
-            return None
-        return _copy(store, rows, stop)
+        try:
+            # Again under the lock: the mark may have been written since the first check.
+            if rows.cut_over():
+                logger.info(CUT_OVER_NOTHING_TO_COPY)
+                return None
+            return _copy(store, rows, stop)
+        finally:
+            # Released here, not by the close: the server frees a closed session's locks a
+            # moment later, and the cut-over's check of both locks may come first (#7769).
+            lock.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,))
 
 
 def _has_meta(directory: Path) -> bool:
