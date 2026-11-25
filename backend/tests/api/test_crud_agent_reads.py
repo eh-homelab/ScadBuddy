@@ -103,18 +103,21 @@ def _standing(
     expires_in: int = 3600,
     approval_id: str = "a1",
 ) -> None:
-    """A trigger's standing grant; a run grant `_grant(standing=...)` seeds from approval a1."""
+    """A trigger's standing grant; a run grant `_grant(standing=...)` seeds from approval a1.
+    Each on a trigger of its own: a trigger has one live standing grant
+    (`flow_trigger_grants_live`)."""
     _sql(
         client,
         "INSERT INTO flow_triggers (id, name, definition_id, kind, event, created_by)"
-        " VALUES ('trig-1', 'reads', 'def-1', 'event', '{}', '{}') ON CONFLICT DO NOTHING",
+        " VALUES (%s, %s, 'def-1', 'event', '{}', '{}')",
+        (f"trig-{grant_id}", grant_id),
     )
     _sql(
         client,
         "INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,"
-        " revoked_at, expires_at, approval_id) VALUES (%s, 'trig-1', 'approved', '{}', '{}',"
+        " revoked_at, expires_at, approval_id) VALUES (%s, %s, 'approved', '{}', '{}',"
         " CASE WHEN %s THEN now() END, now() + make_interval(secs => %s), %s)",
-        (grant_id, revoked, expires_in, approval_id),
+        (grant_id, f"trig-{grant_id}", revoked, expires_in, approval_id),
     )
 
 
