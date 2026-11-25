@@ -110,6 +110,7 @@ deleted after a grace period.
 | `font-<dir>` | a mirrored font | `scadbuddy/store/fonts.py:27` |
 | `slice-<library_file_id>-<digest>` | a sliced 3MF | `scadbuddy/slicing/store.py:63` |
 | `library-file-<id>`, `library-copy-<hash>`, `library-<id>` | print-library files and copies | `scadbuddy/print_library/native.py:52`, `scadbuddy/print_library/copy_models.py:51`, `scadbuddy/bambuddy/subject.py:102` |
+| `library-upload-<sha256>` | a library upload's bytes, put while the request is received and read by its run on any replica; released once the answer is final, else swept with the claims after a day (#7373) | `scadbuddy/operations/blob_claims.py:39` |
 | `quote-<sha256>`, `attachment-<sha256>` | order quotes and attachments | `scadbuddy/orders/quote.py:727`, `scadbuddy/orders/attachments.py:121` |
 | `customer-preview-<sha256>`, `customer-file-<sha256>`, `listing-media-<sha256>` | storefront uploads and listing media | `scadbuddy/orders/storefront/intake.py:74`, `scadbuddy/orders/storefront/order_page.py:163`, `scadbuddy/orders/storefront/listings.py:963` |
 | `workspace-<sha256>` | an agent workspace file | `scadbuddy/api/internal_workspace.py:43` |

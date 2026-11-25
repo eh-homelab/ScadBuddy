@@ -438,6 +438,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         paths=SimpleNamespace(),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        # #7373: no blob store, so no upload blobs to sweep.
+        store=SimpleNamespace(content=None),
         # #2718: the claims sweep prunes batch prints too.
         components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_batches)),
     )

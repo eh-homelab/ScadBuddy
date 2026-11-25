@@ -5,12 +5,13 @@ with an `Idempotency-Key`, so the operation kinds really run."""
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -35,16 +36,20 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
+from scadbuddy.operations.blob_claims import UPLOAD_KEY_PREFIX, sweep_upload_blobs, upload_key
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
+from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
-from scadbuddy.store.content import ContentStore
+from scadbuddy.store.content import BlobScope, ContentStore
 from scadbuddy.store.content_models import ReuseLostError, StoreFullError
 from tests.api.conftest import wait_for_job
 from tests.api.test_analyzers import SILK_REQUEST
@@ -738,6 +743,140 @@ def test_a_full_store_is_507(tiny_store_client: TestClient, three_mf: Path) -> N
     assert (
         tiny_store_client.get("/api/v1/print/library", params={"all": True}).json()["files"] == []
     )
+
+
+# --- #7373: an upload is a blob from the request on, never a file on the data volume -----
+
+
+def _upload_keys(client: TestClient) -> list[str]:
+    content = _content(client)
+    return [
+        s.key
+        for s in content.index.stats(["library"], backend=content.name)
+        if s.key.startswith(UPLOAD_KEY_PREFIX)
+    ]
+
+
+def _content(client: TestClient) -> ContentStore:
+    content: ContentStore | None = getattr(client.app.state, STATE_ATTR).store.content  # type: ignore[attr-defined]
+    assert content is not None
+    return content
+
+
+def _upload_kind_run(client: TestClient, request: dict[str, Any]) -> dict[str, Any]:
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    kind = state.components.get(OPERATIONS).kinds["library_file_upload"]
+    assert client.portal is not None
+    result: dict[str, Any] = client.portal.call(kind.run, request, {})
+    return result
+
+
+def test_an_upload_is_put_in_the_blob_store_while_it_is_received(
+    native_client: TestClient, three_mf: Path, paths: DataPaths, spans: InMemorySpanExporter
+) -> None:
+    """The body is spooled node-local and stored once, as a `library` blob the run reads
+    on any replica: no claim file, no second hash in the run (#7373)."""
+    spans.clear()
+    f = upload_via_route(native_client, three_mf)
+    names = [s.name for s in spans.get_finished_spans()]
+    assert "library.receive_upload" in names
+    assert "RunActivity:op.library_file_upload.run" in names
+    assert "store.digest" not in names  # hashed while it streamed in, never again
+    assert "library.hold_upload" in names and "claims.hold_file" not in names
+    assert not paths.claims.exists() or list(paths.claims.iterdir()) == []
+    # The upload's own row goes once the answer is final; the file's row names the bytes.
+    assert _upload_keys(native_client) == []
+    row = _native(native_client).rows.files_by_ids([f["id"]])[0]
+    assert row.sha256 == hashlib.sha256(three_mf.read_bytes()).hexdigest()
+    with native_client.stream("GET", f"/api/v1/print/library/{f['id']}/file") as r:
+        assert r.read() == three_mf.read_bytes()
+    assert native_client.get(f"/api/v1/print/library/{f['id']}/plates").json() != []
+
+
+def test_a_run_whose_upload_blob_is_gone_is_409(native_client: TestClient) -> None:
+    with pytest.raises(ApiError) as caught:
+        _upload_kind_run(
+            native_client, {"claim": "a" * 64, "filename": "gone.3mf", "store": "blob"}
+        )
+    assert caught.value.status == 409
+
+
+def test_a_claim_file_from_an_older_replica_still_uploads(
+    native_client: TestClient, paths: DataPaths
+) -> None:
+    """A rolling deploy: an older replica's route held the bytes as a claim file and
+    sent no `store`; this build's run still reads that file."""
+    payload = b"solid x\nendsolid x\n"
+    name = ClaimStore(paths.claims).put(payload)
+    made = _upload_kind_run(native_client, {"claim": name, "filename": "old.stl"})
+    with native_client.stream("GET", f"/api/v1/print/library/{made['id']}/file") as r:
+        assert r.read() == payload
+
+
+def test_an_upload_blob_nothing_released_goes_after_the_claims_age(
+    native_client: TestClient, tmp_path: Path
+) -> None:
+    content = _content(native_client)
+    assert native_client.portal is not None
+    old = tmp_path / "old.stl"
+    old.write_bytes(b"old upload")
+    young = tmp_path / "young.stl"
+    young.write_bytes(b"young upload")
+    for path in (old, young):
+        with path.open("rb") as data:
+            native_client.portal.call(
+                partial(
+                    content.put,
+                    "library",
+                    data,
+                    name=path.name,
+                    scope=BlobScope(),
+                    key=upload_key(hashlib.sha256(path.read_bytes()).hexdigest()),
+                )
+            )
+    old_key = upload_key(hashlib.sha256(old.read_bytes()).hexdigest())
+    with content.index._pool.connection() as conn:  # type: ignore[attr-defined]
+        conn.execute(
+            "UPDATE store_blobs SET touched_at = now() - interval '2 days' WHERE key = %s",
+            (old_key,),
+        )
+    # The native library's own sweep never takes an upload's blob: it is the claims'.
+    native = _native(native_client)
+    later = datetime.now(UTC) + timedelta(hours=2)
+    assert native_client.portal.call(partial(sweep_library, native, now=later)).orphans == 0
+    assert native_client.portal.call(sweep_upload_blobs, content) == 1
+    assert _upload_keys(native_client) == [
+        upload_key(hashlib.sha256(young.read_bytes()).hexdigest())
+    ]
+
+
+@respx.mock
+def test_an_upload_to_bambuddy_on_a_remote_store_goes_by_blob(
+    settings: Settings, s3: S3Settings, paths: DataPaths, spans: InMemorySpanExporter
+) -> None:
+    with TestClient(
+        create_app(_native_settings(settings, s3, library_backend="bambuddy"))
+    ) as client:
+        configure(client)
+        up = respx.post("https://bambuddy.test/api/v1/library/files").mock(
+            return_value=httpx.Response(200, json={"id": 50, "filename": "box.3mf"})
+        )
+        payload = b"PK\x03\x04" + os.urandom(300_000)
+        spans.clear()
+        response = client.post(
+            "/api/v1/print/library/files",
+            files={"file": ("box.3mf", payload, "application/octet-stream")},
+            data={"folder_id": "3"},
+            headers=press(),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json() == {"id": 50, "filename": "box.3mf", "folder_id": 3}
+        assert payload in up.calls.last.request.content
+        names = [s.name for s in spans.get_finished_spans()]
+        assert "store.digest" not in names
+        assert "library.hold_upload" in names and "claims.hold_file" not in names
+        assert not paths.claims.exists() or list(paths.claims.iterdir()) == []
+        assert _upload_keys(client) == []
 
 
 # --- Task 7a: printing a native file ------------------------------------------------------

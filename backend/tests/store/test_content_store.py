@@ -95,6 +95,33 @@ async def test_a_new_put_hashes_the_file_once(
     assert await content.read(ref) == path.read_bytes()
 
 
+async def test_a_put_given_its_digest_hashes_nothing(
+    content: ContentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A library upload is hashed while it streams in (#7373): the put reads it once,
+    to upload it, and never hashes it again."""
+    passes = 0
+
+    def counting(data: BlobData) -> tuple[str, int]:
+        nonlocal passes
+        passes += 1
+        return blob_digest(data)
+
+    for module in (content_module, local_module, s3_module):
+        monkeypatch.setattr(module, "blob_digest", counting)
+    path = tmp_path / "upload.3mf"
+    payload = os.urandom(1 << 16)
+    path.write_bytes(payload)
+    digest = (hashlib.sha256(payload).hexdigest(), len(payload))
+    with path.open("rb") as fh:
+        ref = await content.put(
+            "piece", fh, name="upload.3mf", scope=SCOPE, key=render_key("g"), digest=digest
+        )
+    assert passes == 0
+    assert (ref.sha256, ref.size) == digest
+    assert await content.read(ref) == payload
+
+
 class _ClosingBackend(LocalContentBackend):
     """Records each download whose generator was closed."""
 

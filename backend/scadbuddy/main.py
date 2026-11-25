@@ -135,6 +135,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
+from scadbuddy.operations.blob_claims import sweep_upload_blobs
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
 from scadbuddy.operations.kinds import OperationKind, Queue
@@ -1213,6 +1214,13 @@ async def _sweep_claims_and_batches_logged(state: AppState) -> None:
     except Exception as err:
         logger.exception("could not sweep operation claims")
         failed = err
+    try:
+        # #7373: a library upload's claim is a blob; one no release removed goes here.
+        if state.store.content is not None:
+            await sweep_upload_blobs(state.store.content)
+    except Exception as err:
+        logger.exception("could not sweep library uploads' blobs")
+        failed = failed or err
     try:
         # #2718 review: a batch print closed without Cancel or Done stays otherwise.
         pruned = await state.components.get(PRINT_BATCHES).prune(
