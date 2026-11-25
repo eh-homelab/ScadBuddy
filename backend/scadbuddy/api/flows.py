@@ -1263,12 +1263,13 @@ class Decided(BaseModel):
 
 
 def browser_only(
-    detail: str = "Only a person answers a flow's questions and approvals.",
+    detail: str = "Only a person decides a flow's approvals.",
     type_: str = ENTRY_BROWSER_ONLY,
 ) -> None:
-    # Spec §6.6, plan 6 Ruling 6: a flow's entries are answered on the Workflows page,
-    # never by an agent, whatever grant it holds; nor by a service credential or the
-    # agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
+    # Spec §6.6, plan 6 Ruling 6: a flow's approvals and grants are decided on the
+    # Workflows page, never by an agent, whatever grant it holds; nor by a service
+    # credential or the agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
+    # Its questions go by the setting `flow_answerers` (#7471, `answerer`, `admit`).
     if not by_a_person():
         raise ApiError(status.HTTP_403_FORBIDDEN, detail, type_=type_)
 

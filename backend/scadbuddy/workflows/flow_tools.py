@@ -85,7 +85,8 @@ _TASK_WRITE = timedelta(seconds=60)
 
 
 class HumanAnswer(BaseModel):
-    """A person's answer on the Workflows page."""
+    """The answer to a `wait_for_human`: a person's, or an assistant's that the setting
+    `flow_answerers` admitted (#7471)."""
 
     answer: str
 
