@@ -996,7 +996,8 @@ def test_a_waiting_import_holds_no_pool_connection(
         with lock:
             now = time.monotonic()
             spans = [*held, *((began, now) for began in open_since.values())]
-        return max((min(end, now) - max(began, since) for began, end in spans), default=0.0)
+        overlaps = [min(end, now) - max(began, since) for began, end in spans if end > since]
+        return max(overlaps, default=0.0)
 
     wait = 1.5
     polls_before, start = polls(), time.monotonic()
