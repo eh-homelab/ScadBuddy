@@ -632,35 +632,7 @@ class FlowStore:
         return Grant.model_validate(row)
 
     def _chain_in_force(self, conn: Connection[DictRow], grant: Grant) -> bool:
-        """Whether `grant` and every grant it inherits from (`parent_grant_id`) is in
-        force, and the standing grant any of them was seeded from is still in force under
-        the approval that seeded it (#4252)."""
-        rows = conn.execute(
-            "WITH RECURSIVE chain AS ("
-            " SELECT id, parent_grant_id, status, revoked_at, expires_at, standing_grant_id,"
-            " standing_approval_id, 0 AS depth FROM flow_grants WHERE id = %s"
-            " UNION ALL SELECT g.id, g.parent_grant_id, g.status, g.revoked_at, g.expires_at,"
-            " g.standing_grant_id, g.standing_approval_id, c.depth + 1"
-            " FROM flow_grants g JOIN chain c ON g.id = c.parent_grant_id WHERE c.depth < 64)"
-            " SELECT c.*, (t.status = 'approved' AND t.revoked_at IS NULL"
-            " AND t.expires_at > now() AND t.approval_id = c.standing_approval_id)"
-            " AS standing_in_force FROM chain c"
-            " LEFT JOIN flow_trigger_grants t ON t.id = c.standing_grant_id",
-            (grant.id,),
-        ).fetchall()
-        now = datetime.now(UTC)
-        return (
-            bool(rows)
-            and all(
-                row["status"] == "approved"
-                and row["revoked_at"] is None
-                and row["expires_at"] is not None
-                and now < row["expires_at"]
-                and (row["standing_grant_id"] is None or row["standing_in_force"] is True)
-                for row in rows
-            )
-            and any(row["parent_grant_id"] is None for row in rows)
-        )  # reached its root
+        return chain_in_force(conn, grant.id)
 
     def _get_grant(self, run_id: str) -> Grant | None:
         with self._pool.connection() as conn:
@@ -1547,3 +1519,36 @@ def _hops(hops: list[HopRecord]) -> Jsonb:
 
 def _seq(step: Any) -> int:
     return int(step.seq)
+
+
+def chain_in_force(conn: Connection[DictRow], grant_id: str) -> bool:
+    """Whether grant ``grant_id`` and every grant it inherits from (`parent_grant_id`) is in
+    force, and the standing grant any of them was seeded from is still in force under
+    the approval that seeded it (#4252). The one chain check: `FlowStore` and the agent's
+    reads (`flows/agent_reads.py`, #5685) both call it."""
+    rows = conn.execute(
+        "WITH RECURSIVE chain AS ("
+        " SELECT id, parent_grant_id, status, revoked_at, expires_at, standing_grant_id,"
+        " standing_approval_id, 0 AS depth FROM flow_grants WHERE id = %s"
+        " UNION ALL SELECT g.id, g.parent_grant_id, g.status, g.revoked_at, g.expires_at,"
+        " g.standing_grant_id, g.standing_approval_id, c.depth + 1"
+        " FROM flow_grants g JOIN chain c ON g.id = c.parent_grant_id WHERE c.depth < 64)"
+        " SELECT c.*, (t.status = 'approved' AND t.revoked_at IS NULL"
+        " AND t.expires_at > now() AND t.approval_id = c.standing_approval_id)"
+        " AS standing_in_force FROM chain c"
+        " LEFT JOIN flow_trigger_grants t ON t.id = c.standing_grant_id",
+        (grant_id,),
+    ).fetchall()
+    now = datetime.now(UTC)
+    return (
+        bool(rows)
+        and all(
+            row["status"] == "approved"
+            and row["revoked_at"] is None
+            and row["expires_at"] is not None
+            and now < row["expires_at"]
+            and (row["standing_grant_id"] is None or row["standing_in_force"] is True)
+            for row in rows
+        )
+        and any(row["parent_grant_id"] is None for row in rows)
+    )  # reached its root

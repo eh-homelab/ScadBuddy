@@ -82,13 +82,39 @@ def _grant(
     status: str = "approved",
     revoked: bool = False,
     expires_in: int = 3600,
+    parent: str | None = None,
+    standing: str | None = None,
 ) -> None:
     _sql(
         client,
         "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, revoked_at,"
-        " expires_at) VALUES (%s, %s, %s, '{}', '{}', CASE WHEN %s THEN now() END,"
-        " now() + make_interval(secs => %s))",
-        (grant_id, run_id, status, revoked, expires_in),
+        " expires_at, parent_grant_id, standing_grant_id, standing_approval_id)"
+        " VALUES (%s, %s, %s, '{}', '{}', CASE WHEN %s THEN now() END,"
+        " now() + make_interval(secs => %s), %s, %s, CASE WHEN %s IS NOT NULL THEN 'a1' END)",
+        (grant_id, run_id, status, revoked, expires_in, parent, standing, standing),
+    )
+
+
+def _standing(
+    client: TestClient,
+    grant_id: str,
+    *,
+    revoked: bool = False,
+    expires_in: int = 3600,
+    approval_id: str = "a1",
+) -> None:
+    """A trigger's standing grant; a run grant `_grant(standing=...)` seeds from approval a1."""
+    _sql(
+        client,
+        "INSERT INTO flow_triggers (id, name, definition_id, kind, event, created_by)"
+        " VALUES ('trig-1', 'reads', 'def-1', 'event', '{}', '{}') ON CONFLICT DO NOTHING",
+    )
+    _sql(
+        client,
+        "INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,"
+        " revoked_at, expires_at, approval_id) VALUES (%s, 'trig-1', 'approved', '{}', '{}',"
+        " CASE WHEN %s THEN now() END, now() + make_interval(secs => %s), %s)",
+        (grant_id, revoked, expires_in, approval_id),
     )
 
 
@@ -282,6 +308,50 @@ def test_a_grant_is_in_force_only_approved_unrevoked_and_unexpired(client: TestC
         answer = client.get(url, params={"grant_id": grant_id}, headers=agent)
         assert answer.status_code == 200, answer.text
         assert answer.json() == {"in_force": held}, grant_id
+
+
+def test_a_grant_holds_only_while_its_whole_chain_is_in_force(client: TestClient) -> None:
+    """#5685: both reads check the chain as the API does (`store.chain_in_force`): the
+    grants a run grant inherits from, and the standing grant it was seeded from."""
+    agent = token(client)
+    _run(client)
+    _grant(client, "parent", run_id="r-parent")
+    _grant(client, "child", run_id="r-child", parent="parent")
+    _grant(client, "parent-off", run_id="r-parent-off", revoked=True)
+    _grant(client, "child-off", run_id="r-child-off", parent="parent-off")
+    _standing(client, "t-on")
+    _standing(client, "t-revoked", revoked=True)
+    _standing(client, "t-expired", expires_in=-1)
+    _standing(client, "t-reapproved", approval_id="a2")
+    for name in ("t-on", "t-revoked", "t-expired", "t-reapproved"):
+        _grant(client, f"seeded-{name}", run_id=f"r-{name}", standing=name)
+    expected = {
+        "child": True,
+        "seeded-t-on": True,
+        "child-off": False,
+        "seeded-t-revoked": False,
+        "seeded-t-expired": False,
+        "seeded-t-reapproved": False,
+    }
+    for grant_id, held in expected.items():
+        _decision(client, f"flow:{grant_id}", responder=f"grant:{grant_id}")
+        answer = client.get(
+            f"{BASE}/flow-grants/in-force", params={"grant_id": grant_id}, headers=agent
+        )
+        assert answer.status_code == 200, answer.text
+        assert answer.json() == {"in_force": held}, grant_id
+        checks = client.get(
+            f"{BASE}/flow-decisions",
+            params={"request_id": f"flow:{grant_id}", "input_hash": "h1"},
+            headers=agent,
+        )
+        assert checks.status_code == 200, checks.text
+        assert checks.json() == {
+            "approved": held,
+            "approved_unresolved": held,
+            "by_person": False,
+            "lapsed": not held,
+        }, grant_id
 
 
 # -- a run's queue and the calls waiting on it ------------------------------------------
