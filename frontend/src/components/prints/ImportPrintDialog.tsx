@@ -206,6 +206,8 @@ function ImportForm({
   const [name, setName] = useState(archive.print_name ?? '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // What the check on focus said of the chosen file. Apart from `error`, so a check that passes clears no import's error.
+  const [checkError, setCheckError] = useState<string | null>(null)
 
   // #7335: files found deleted or replaced since the list was read, and the suggestions read after.
   const [goneIds, setGoneIds] = useState<ReadonlySet<number>>(new Set())
@@ -228,6 +230,7 @@ function ImportForm({
       setGone({ file: lost, replacement })
       setPickedFile(null)
       setError(null)
+      setCheckError(null)
       // Without the printer: that read reaches it. A failed read leaves the list without the gone file.
       const read = ++latestRead.current
       void api.getPrintSources(archive.id).then(
@@ -244,6 +247,7 @@ function ImportForm({
     setPickedFile(next)
     setGone(null)
     setError(null)
+    setCheckError(null)
   }
 
   // The library may change while the window is away: the chosen file is checked when it is back.
@@ -251,14 +255,21 @@ function ImportForm({
   useEffect(() => {
     if (!checked) return
     let current = true
+    let latest = 0
     const check = () => {
       if (document.visibilityState === 'hidden') return
-      api.checkImportTarget(checked.id).catch((caught: unknown) => {
-        if (!current || !(caught instanceof ApiError)) return
-        if (caught.problem.type === LIBRARY_FILE_GONE) markGone(checked, replacementOf(caught))
-        // A print's own copy stands, but is never a target.
-        else if (caught.status === 422) setError(errorText(caught))
-      })
+      const read = ++latest
+      api.checkImportTarget(checked.id).then(
+        () => {
+          if (current && read === latest) setCheckError(null)
+        },
+        (caught: unknown) => {
+          if (!current || !(caught instanceof ApiError)) return
+          if (caught.problem.type === LIBRARY_FILE_GONE) markGone(checked, replacementOf(caught))
+          // A print's own copy stands, but is never a target.
+          else if (caught.status === 422 && read === latest) setCheckError(errorText(caught))
+        },
+      )
     }
     window.addEventListener('focus', check)
     document.addEventListener('visibilitychange', check)
@@ -288,6 +299,7 @@ function ImportForm({
     }
     setBusy(true)
     setError(null)
+    setCheckError(null)
     try {
       onImported(await api.importPrint(archive.id, body))
     } catch (caught) {
@@ -441,9 +453,9 @@ function ImportForm({
             </RadioGroup>
           </fieldset>
 
-          {error && (
+          {(checkError ?? error) && (
             <p className="text-xs text-warn" role="alert">
-              {error}
+              {checkError ?? error}
             </p>
           )}
           <DialogFooter>
