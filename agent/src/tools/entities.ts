@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { BackendClient } from '../api/backend.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
@@ -6,6 +7,7 @@ import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
 import { blob, defineTool, image, json, ToolError } from './registry.js'
+import { IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
@@ -181,9 +183,10 @@ export const entityTools = [
     name: 'entity_attachment_get',
     label: "See an entity's file",
     description:
-      "One file kept on an entity, as entity_attachment_list lists it: a photo as an image you can see, any other " +
-      'file as its bytes. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything ' +
-      'else): use it when the full photo is over the inline limit, or when a glance is enough.',
+      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo as an image " +
+      'you can see; a HEIC or AVIF photo only as a note that you cannot view it; any other file as its bytes. ' +
+      '`thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use it when ' +
+      'the full photo is over the inline limit, or when a glance is enough.',
     input: z.object({
       entity,
       attachment_id: attachmentId,
@@ -195,10 +198,19 @@ export const entityTools = [
       const params = { params: { path: { ref, attachment_id } }, parseAs: 'stream' as const }
       const part = thumbnail ? 'thumbnail' : 'content'
       const path = `/api/v1/entities/${encodeURIComponent(ref)}/attachments/${encodeURIComponent(attachment_id)}/${part}`
-      const render = (bytes: ArrayBuffer, mimeType: string) =>
-        mimeType.startsWith('image/') && mimeType !== 'image/svg+xml'
-          ? image(bytes, mimeType)
-          : blob(`scadbuddy://entities/${ref}/attachments/${attachment_id}`, bytes, mimeType)
+      const render = (bytes: ArrayBuffer, mimeType: string): CallToolResult => {
+        if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) return image(bytes, mimeType)
+        // A HEIC or AVIF photo is kept as an image, but an image block of it is refused by the model.
+        if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {
+          return json({
+            viewable: false,
+            media_type: mimeType,
+            size_bytes: bytes.byteLength,
+            note: `A ${mimeType} photo, which you cannot view: only PNG, JPEG, GIF and WebP can be shown to you. Ask the person for a JPEG or PNG copy.`,
+          })
+        }
+        return blob(`scadbuddy://entities/${ref}/attachments/${attachment_id}`, bytes, mimeType)
+      }
       return binary(
         thumbnail
           ? ctx.backend.GET('/api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail', params)
@@ -234,7 +246,10 @@ export const entityTools = [
     handler: async ({ entity: ref, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'entity_attachment_add')
       const name = filename ?? uploadName(info.path)
-      const fields = changes({ role, caption }) as Record<string, string>
+      const fields = {
+        ...(role === undefined ? {} : { role }),
+        ...(caption === undefined ? {} : { caption }),
+      }
       const part = { name: 'file', filename: name, type: info.mediaType }
       const what = `attach ${name} to ${ref}`
       const answer = await command(ctx, what, (headers) =>

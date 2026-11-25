@@ -79,6 +79,29 @@ describe('entity attachment and link tools', () => {
     ])
   })
 
+  it('answers a HEIC or AVIF photo as a note, never as an image block the model would refuse', async () => {
+    for (const type of ['image/heic', 'image/avif']) {
+      server.use(http.get(`${base(SPOOL)}/attachments/${ID}/content`, () => new HttpResponse(Buffer.from('ftyp'), { headers: { 'Content-Type': type } })))
+      const result = await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())
+      expect(result.content.some((c) => c.type === 'image')).toBe(false)
+      expect(firstText(result)).toMatchObject({ viewable: false, media_type: type, size_bytes: 4 })
+    }
+  })
+
+  it("refuses an order's entity with the backend's use_order_route", async () => {
+    server.use(
+      http.post(`${base(`order:${ID}`)}/attachments`, () =>
+        HttpResponse.json({ type: 'https://scadbuddy.dev/problems/use_order_route', detail: "an order's files go through the order routes" }, { status: 409 }),
+      ),
+    )
+    const ws = memoryWorkspace({ 'a.jpg': Buffer.from('jpg') }, 'image/jpeg')
+    const c = { ...ctx(), workspace: ws.workspace } as ToolContext
+    await expect(tool('entity_attachment_add').execute({ entity: `order:${ID}`, ...ws.ref('a.jpg') }, c)).rejects.toMatchObject({
+      status: 409,
+      problem: 'use_order_route',
+    })
+  })
+
   it('attaches a workspace file to an entity as a command, with its role and caption', async () => {
     const seen: { key: string | null; fields: Record<string, string>; file: { name: string; size: number } }[] = []
     server.use(
