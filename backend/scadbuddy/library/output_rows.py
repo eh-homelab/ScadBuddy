@@ -735,7 +735,9 @@ class OutputRows:
         upload's file is there, and the key goes back), then the row names ``key`` and
         holds it. With an index row of ``key`` (an upload's, or a blob the store lost),
         the key stays and ``write`` writes the file alone, only when there is none.
-        Whether this draw is the thumbnail file now. Blocking."""
+        Whether this draw is the thumbnail file now; after the cut-over mark with no
+        folder, ``write`` writes nothing and answers True, so the answer is whether the
+        row decides for this draw (#7257). Blocking."""
 
         def step(conn: Connection[DictRow]) -> bool:
             try:

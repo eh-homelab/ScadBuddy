@@ -2145,8 +2145,10 @@ class OutputStore:
         the blob both. A failed put changes nothing and raises (`StoreFullError` among
         them). A failed file write raises too and leaves the old key and the old file,
         which still agree; the new blob is held by nothing, and the sweep removes it.
-        With no blob store or no row yet, the file only, under the same lock when there
-        is a database (`OutputRows.write_thumbnail_file`); the byte copy takes it later."""
+        After the cut-over mark a missing folder does not raise: the file step is skipped
+        and the key and the row take the blob (#7257). With no blob store or no row yet,
+        the file only, under the same lock when there is a database
+        (`OutputRows.write_thumbnail_file`); the byte copy takes it later."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is None:
             await asyncio.to_thread(self._write_thumbnail_file, output_id, png)
@@ -2235,8 +2237,10 @@ class OutputStore:
         nor the file is there; with the key there (a lost blob's), the file alone. A
         failed put is logged, and the file alone is written
         under the lock (True when it was this draw's): the row names no new blob, so
-        readers take the file, and the byte copy puts it later. With no blob store or no
-        row, the file alone, under the lock when there are rows."""
+        readers take the file, and the byte copy puts it later. After the cut-over mark
+        with no folder, a failed put writes no file, so the drawn thumbnail is lost
+        (#7257); the answer is still True. With no blob store or no row, the file alone,
+        under the lock when there are rows."""
         slug = await asyncio.to_thread(self._blob_slug, output_id)
         if slug is not None:
             assert self.bytes is not None and self.rows is not None
@@ -2480,8 +2484,10 @@ _RELEASE_ORPHANS = (
 
 def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
     """`reap_orphan_holds` after the cut-over mark (#7257): rows only, no folder and no
-    ``output_hold_slugs``. A save holds its claim from before its first hold until its
-    row commits, so its holds are kept while it runs."""
+    ``output_hold_slugs``. A save of this build holds its claim from before its first
+    hold until its row commits, so its holds are kept while the claim is younger than
+    ``grace``: a save that runs longer than ``grace`` can lose them. A phase 2 pod's save
+    takes no claim, so its holds are kept only while they are younger than ``grace``."""
     with refs.pool.connection() as conn:
         found = conn.execute(_RELEASE_ORPHANS, {"kind": OUTPUT_HOLDER, "grace": grace}).fetchall()
     orphans = [str(row["holder_id"]) for row in found]

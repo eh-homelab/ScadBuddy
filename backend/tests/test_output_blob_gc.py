@@ -329,3 +329,35 @@ async def test_reaper_after_cut_over_reads_rows_only(
     assert _holds(pool, gone.id) == set()
     assert _holds(pool, live.id) == live_holds
     assert _holds(pool, claimed) == {"piece-claimed"}
+
+
+async def test_reaper_after_cut_over_keeps_young_holds_and_drops_stale_claims(
+    tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
+) -> None:
+    """#7257 A5 review M1. A phase 2 pod's save takes no claim: its young holds stay
+    while they are younger than the grace. A claim older than the grace no longer
+    protects its old holds: they go with it."""
+    store, job, _ = await _with_files(tmp_path)
+    _wire(store, projection, content)
+    rows = store.rows
+    assert rows is not None
+    await store.save(job, name="live")
+    _mark(pool, rows)
+    refs = BlobRefs(pool)
+    unclaimed = "d" * 32
+    refs.add("piece-phase-2", OUTPUT_HOLDER, unclaimed)
+    stale = "e" * 32
+    assert rows.claim(stale, job.slug)
+    refs.add("piece-stale", OUTPUT_HOLDER, stale)
+    _age_holds(pool, stale)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE output_claims SET claimed_at = now() - interval '1 day' WHERE output_id = %s",
+            (stale,),
+        )
+    assert reap_orphan_holds(refs, store, grace=timedelta(hours=1)) == 1
+    assert _holds(pool, unclaimed) == {"piece-phase-2"}
+    assert _holds(pool, stale) == set()
+    with pool.connection() as conn:
+        left = conn.execute("SELECT 1 FROM output_claims WHERE output_id = %s", (stale,))
+        assert left.fetchone() is None

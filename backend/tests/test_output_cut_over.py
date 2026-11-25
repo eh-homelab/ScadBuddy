@@ -314,6 +314,19 @@ async def test_rename_without_folder_after_cut_over(
     assert not directory.exists()
 
 
+async def test_mark_storefront_without_folder_after_cut_over(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    store, meta, directory = await _without_folder(saved, content, projection)
+    marked = await asyncio.to_thread(store.mark_storefront, meta.id)
+    assert marked.source == "storefront"
+    row = _rows(store).get(meta.id)
+    assert row is not None and row.meta.source == "storefront"
+    assert not directory.exists()
+
+
 async def test_put_thumbnail_without_folder_after_cut_over(
     saved: tuple[OutputStore, list[OutputMeta]],
     content: ContentStore,
