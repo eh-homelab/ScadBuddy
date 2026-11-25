@@ -51,7 +51,7 @@ import re
 import socket
 import ssl
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, suppress
 from datetime import UTC, datetime
 from io import BytesIO
@@ -477,7 +477,10 @@ class LanPrinter:
         or a dropped connection is ``None``. The close ends by ``until`` (else within
         `MQTT_TIMEOUT`); a close that fails or overruns keeps the reply. A connect that
         never got in (cut by `MQTT_TIMEOUT` or failed inside ``__aenter__``) is shut by
-        force, as a cut close is (`_force_close`, P31)."""
+        force, as a cut close is (`_force_close`, P31), in one close queued on the loop. A
+        cut does not stop aiomqtt's connect in its executor thread. When that connect still
+        runs, it queues the close itself when it ends; else the cut queues it
+        (`_close_late_connect`, #7616)."""
         loop = asyncio.get_running_loop()
         may_be_sent = False
         reply: dict[str, Any] | None = None
@@ -486,12 +489,15 @@ class LanPrinter:
         try:
             async with asyncio.timeout(MQTT_TIMEOUT):
                 made = await self._client()
+                cut = _close_late_connect(made)
                 try:
                     client = await stack.enter_async_context(made)
                 except BaseException:
                     # aiomqtt leaves the socket open when its wait for the CONNACK is
                     # cancelled or times out: nothing was entered, so no close would run.
-                    _force_close(made)
+                    # The cut queues one close on the loop, or lets the connect thread
+                    # queue it when that thread still runs (`_close_late_connect`, #7616).
+                    cut()
                     raise
                 await client.subscribe(self.report_topic)
                 may_be_sent = True
@@ -629,16 +635,83 @@ async def _close(stack: AsyncExitStack, client: aiomqtt.Client | None, budget: f
             _force_close(client)
 
 
+def _close_late_connect(client: aiomqtt.Client) -> Callable[[], None]:
+    """Wrap ``client``'s connect, and return the cut for it. The cut queues exactly one
+    `_force_close` of ``client`` on the loop, after every ``add_reader`` and ``add_writer``
+    that the connect queued.
+
+    aiomqtt's ``__aenter__`` runs paho's blocking connect in an executor thread
+    (``await loop.run_in_executor(None, self._client_connect)``, aiomqtt 2.5.1
+    ``client.py:779``; ``_client_connect`` at ``client.py:752``). A cut does not stop that
+    thread. The thread does not register the socket itself: it queues ``add_reader`` and
+    ``add_writer`` on the loop with ``call_soon_threadsafe`` (aiomqtt 2.5.1
+    ``client.py:704`` and ``:738``). A close that runs before they are queued frees the fd.
+    Then the loop registers a closed fd number (EBADF) or another socket's. For the same
+    reason, the thread must not close the socket itself.
+
+    So the close goes on the loop, and one lock orders the cut against the thread:
+
+    - The thread has not started: the cut queues the close. When the thread starts, it
+      sees the cut and does not connect.
+    - The thread runs: the cut queues nothing. When the connect ends, the thread queues the
+      close. ``call_soon_threadsafe`` keeps FIFO order, so the close runs after every
+      registration that the thread queued. This includes one that the thread was about to
+      queue when the cut came (``client.py:704`` reads ``sock.fileno()`` before it queues
+      ``add_reader``).
+    - The thread has finished: its registrations are queued, so the cut queues the close.
+
+    This sets an attribute on this one instance only, and reaches into aiomqtt's private
+    names, as `_force_close` does (#7616)."""
+    loop = asyncio.get_running_loop()
+    lock = threading.Lock()
+    started = finished = is_cut = False
+    connect = client._client_connect
+
+    def connect_then_close_if_cut() -> None:
+        nonlocal started, finished
+        with lock:
+            if is_cut:
+                return  # the cut queued the close
+            started = True
+        try:
+            connect()
+        finally:
+            with lock:
+                finished = True
+                close = is_cut
+            if close:
+                with suppress(RuntimeError):  # the loop is closed
+                    loop.call_soon_threadsafe(_force_close, client)
+
+    def cut() -> None:
+        nonlocal is_cut
+        with lock:
+            is_cut = True
+            running = started and not finished
+        if not running:
+            loop.call_soon(_force_close, client)
+
+    client._client_connect = connect_then_close_if_cut  # type: ignore[method-assign]
+    return cut
+
+
 def _force_close(client: aiomqtt.Client) -> None:
     """Shut ``client``'s socket at once. A cancelled disconnect, or a connect cut while it
     waits for the CONNACK, leaves the socket open for seconds, holding one of the printer's
-    few LAN client slots. This reaches into aiomqtt's private paho client (aiomqtt 2.x);
-    `tests/printers/test_fake_printer.py` cuts both against a real broker, so a release that
-    renames these fails there rather than doing nothing."""
+    few LAN client slots. A connect cut while paho still connects in aiomqtt's executor
+    thread may have no socket yet: when that thread ends, it queues this close on the loop
+    for the socket it made (`_close_late_connect`). This reaches into aiomqtt's private paho
+    client (aiomqtt 2.x); `tests/printers/test_fake_printer.py` cuts all three against a
+    real broker, so a release that renames these fails there rather than doing nothing.
+
+    The socket closes first. A ``disconnect`` on an open socket queues its DISCONNECT, and
+    aiomqtt queues an ``add_writer`` for it with ``call_soon_threadsafe`` (aiomqtt 2.5.1
+    ``client.py:738``). That ran after the close, on a closed fd (EBADF), and the DISCONNECT
+    never went out. With no socket, ``disconnect`` only marks paho disconnected (#7616)."""
     with suppress(Exception):
         paho = client._client
-        paho.disconnect()
         paho._sock_close()
+        paho.disconnect()
 
 
 def _close_data(conn: socket.socket) -> None:
