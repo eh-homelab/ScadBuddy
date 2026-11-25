@@ -37,6 +37,7 @@ import { libraryCopyTools } from './libraryCopy.js'
 import { makerworldTools } from './makerworld.js'
 import { templateTools } from './templates.js'
 import { toolCallTools } from './toolCalls.js'
+import { printerKProfileTools } from './printerKProfiles.js'
 import { printerSlotTools } from './printerSlots.js'
 import { traySpoolTools } from './traySpools.js'
 import { workspaceTools } from './workspace.js'
@@ -74,6 +75,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...analyzerTools,
   ...traySpoolTools,
   ...printerSlotTools,
+  ...printerKProfileTools,
   ...filamentTools,
   ...filamentPurchasingTools,
   ...nfcTools,

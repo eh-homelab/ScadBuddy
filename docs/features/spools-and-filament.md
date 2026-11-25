@@ -255,7 +255,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
-- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`.
+- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`,
+  `printerKProfiles.ts`, `printerCommand.ts` (a printer command's 202, followed or read with `printer_command_get`).
 
 ## Data
 
@@ -354,7 +355,7 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
   the #7151 operations in `components/filament/BulkBar.test.tsx`, `pages/filament/LocationPage.test.tsx`,
   `pages/filament/SpoolsTab.search.test.tsx` and `pages/filament/TagsTab.test.tsx`.
-- Agent: `agent/test/printerSlots.test.ts`.
+- Agent: `agent/test/printerSlots.test.ts`, `agent/test/printerKProfiles.test.ts`.
 
 ## Limits and known issues
 
@@ -363,8 +364,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   Bambuddy API key can hold
   ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
   lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
-  `K-profiles (admin only)`. The assistant has no K-profile tool yet
-  ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
+  `K-profiles (admin only)`. The assistant's K-profile tools are `printer_kprofile*`
+  (`agent/src/tools/printerKProfiles.ts`, [#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
 - A slot preset's and an AMS label's writes need Bambuddy's `PRINTERS_UPDATE`, which no
   Bambuddy API key can hold
   ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
