@@ -179,7 +179,7 @@ an app whose renders never run uses `tests.conftest.UNUSED_TEMPORAL_ADDRESS`.
 `tests/api` renders on Temporal too, and skips without one: one dev server per session
 (`tests/api/conftest.py::temporal_address`), and each test's app runs its own in-process
 worker on a task queue of its own (the api `settings` fixture), because every test has
-its own data directory and schema. The render is the real pipeline behind the fake
+its own data directory and database (a clone of the migrated template, `pg_conninfo`). The render is the real pipeline behind the fake
 openscad (`FAKE_3MF`, `FAKE_STDERR` in `fake-env.json`; `width=999` fails). Every
 test's queue registers with one worker-deployment version, so the dev server raises
 `matching.maxTaskQueuesInDeploymentVersion` past Temporal's default of 100 (past it,
