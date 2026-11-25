@@ -38,6 +38,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.lan_models import LanStarted
+from tests.api.conftest import files_only
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -1988,6 +1989,7 @@ def test_an_output_prints_plates_that_cannot_be_read_leave_the_number(
 ) -> None:
     """#2097: an output whose model.3mf is gone or damaged still answers, unnamed."""
     configure(client)
+    files_only(client)
     output_id = make_output(client, model)
     link(client, output_id, 35, printer_id=1, plate_id=1)
     mock_archive(35)

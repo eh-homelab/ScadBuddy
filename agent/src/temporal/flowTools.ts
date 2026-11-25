@@ -33,9 +33,14 @@ async function tierOf(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>)
   return { name: tool.name, tier: effective.risk, disabled: effective.disabled }
 }
 
-/** Every tool a flow may call, at its effective tier now. */
+/**
+ * Every tool a flow may call, at its effective tier now: in one read of the overrides
+ * (`snapshot`), not one per tool, which made hundreds of CRUD calls a request (#7731).
+ */
 export async function flowToolTiers(tools: readonly Tool[], services: Pick<ToolServices, 'toolOverrides'>): Promise<FlowToolTier[]> {
-  return Promise.all(tools.filter(forFlows).map((tool) => tierOf(tool, services)))
+  const snapshot = await services.toolOverrides?.snapshot?.()
+  const read = snapshot ? { toolOverrides: snapshot } : services
+  return Promise.all(tools.filter(forFlows).map((tool) => tierOf(tool, read)))
 }
 
 /**

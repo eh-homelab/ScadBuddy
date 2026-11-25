@@ -39,7 +39,7 @@ from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
+from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, files_only, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
 from tests.support.saved_outputs import save_files
@@ -383,10 +383,11 @@ def test_an_upload_replaces_a_thumbnail_whole(client: TestClient, model: str) ->
 def _counting_draws(
     monkeypatch: pytest.MonkeyPatch, draw: Callable[..., bytes | None]
 ) -> list[str]:
+    """Each draw's preview: the output's file, or its blob's temporary copy (#7257)."""
     calls: list[str] = []
 
     def counted(glb: Path, *args: Any) -> bytes | None:
-        calls.append(glb.parent.name)
+        calls.append(str(glb))
         return draw(glb, *args)
 
     monkeypatch.setattr(outputs_api, "draw_view", counted)
@@ -411,7 +412,7 @@ def test_an_output_with_nothing_to_draw_shows_no_thumbnail(
     # Remembered: listed with no thumbnail, and not drawn again on the next read.
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
-    assert calls == [created["id"]]
+    assert len(calls) == 1
 
 
 def _until(condition: Callable[[], bool]) -> None:
@@ -446,7 +447,7 @@ def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
     assert store.draws_running == 1
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
-    assert calls == [created["id"]]
+    assert len(calls) == 1
 
     release.set()
     _until(lambda: store.draws_running == 0)
@@ -551,7 +552,7 @@ def test_a_timeout_that_lands_as_the_draw_ends_serves_the_drawing(
     # Not remembered as undrawable, and not announced: this read answered with it.
     assert state.outputs.drawable_thumbnail(created["id"]) is True
     assert _output_updates(published) == []
-    assert calls == [created["id"]]
+    assert len(calls) == 1
 
 
 def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
@@ -583,7 +584,7 @@ def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
         release.set()
         assert first.result().status_code == 404
         assert second.result().status_code == 404
-    assert calls == [created["id"]]
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize("outcome", ["timeout", "error"])
@@ -868,6 +869,7 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
 def test_the_geometry_of_an_output_without_a_3mf_is_404(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
@@ -885,6 +887,7 @@ def test_the_geometry_of_a_damaged_3mf_is_422(
 ) -> None:
     """A truncated object entry raises ``ET.ParseError`` -- a ``SyntaxError``, not a
     ``ValueError`` -- which must still come back as the documented 422, not a 500."""
+    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
@@ -907,6 +910,7 @@ def test_the_geometry_of_a_damaged_3mf_is_422(
 def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
@@ -1258,6 +1262,7 @@ def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: b
         source = (directory / "model.scad").read_text()
         stamped = built.model_copy(update={"generated_sha256": text_sha256(source)})
         (directory / SCENE_NAME).write_text(dump_scene(stamped))
+    files_only(client)
     created = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
@@ -1452,8 +1457,3 @@ def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
         time.sleep(0.1)
     last = rows.last_run()
     assert last is not None and last["finished_at"] is not None
-
-
-def test_local_store_keeps_output_bytes_in_files(client: TestClient) -> None:
-    # #7256, Ruling R1: the `local` store has no content store, so no output blobs.
-    assert getattr(client.app.state, STATE_ATTR).outputs.bytes is None  # type: ignore[attr-defined]

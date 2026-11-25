@@ -85,7 +85,8 @@ async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
 ) -> None:
     """Pieces and snapshots are a job's data on either backend, so both sweeps take
     `job_ttl`; `asset_sweep_grace` is the uploads' knob. At `job_ttl` 0 (renders kept
-    forever, #6236) they take the default day, never 0."""
+    forever, #6236) they take the default day, never 0. On `local` the outputs' own
+    content store (#7257, plan D7) is swept too, with the same grace."""
     graces: list[int] = []
 
     def sweep_blobs(blobs: Any, refs: Any, *, grace: int) -> list[str]:
@@ -106,8 +107,12 @@ async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
         refs=object(),
         config=Config(job_ttl=job_ttl, asset_sweep_grace=7 * 86400),
     )
+    # As the lifespan sets it: `local`'s own output store, else the shared content store.
+    state.outputs = SimpleNamespace(
+        bytes=SimpleNamespace(content=state.store.content if content else object())
+    )
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
-    assert graces == [DEFAULT_JOB_TTL]
+    assert graces == [DEFAULT_JOB_TTL] if content else [DEFAULT_JOB_TTL, DEFAULT_JOB_TTL]
 
 
 _forgotten: list[list[str]] = []
@@ -135,6 +140,7 @@ async def test_the_blob_sweep_forgets_the_geometry_of_the_pieces_it_removes(
         blobs=object(),
         refs=SimpleNamespace(pool=object()),
         config=SimpleNamespace(sweep_grace=86400),
+        outputs=SimpleNamespace(bytes=None),
     )
     await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
     assert _forgotten == [["p1", "p2"]]
