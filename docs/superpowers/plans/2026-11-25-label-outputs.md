@@ -156,6 +156,10 @@ read 2026-11-25 with `gh api`. No live BB and no printer was touched.
   hook, `useSettingSaver`, that the template and `filament_label_output` both use. — The same race
   exists for both settings. — If wrong: the hook is one file to change.
 
+- **P1 (pre-flight) Task 1 makes `filament_label_output` whole.** Task 1 stores `{format, dpi,
+  fields}`, with `fields` at the R-7216-9 default; Task 3 makes `fields` act. — One shape of the
+  setting from its first commit. — If wrong: none.
+
 ## Global Constraints
 
 - Only the API holds SQL. Add no database client, no read or write of another service's tables, no
