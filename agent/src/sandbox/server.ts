@@ -32,7 +32,8 @@ import { type SlotOptions, SlotManager } from './slots.js'
 // its token is one the agent made for this pod, which reaches only this pod. It runs each command
 // in `work` (the session's files, synced in and out by the agent, client.ts) with a bare
 // environment, kills the command's process group at its deadline and after it exits, and exits
-// itself after `idleMs` with no request, so the pod ends and the agent's sweep deletes it.
+// itself after `idleMs` with no request and no running background slot (slots.ts, #5916, #7310),
+// so the pod ends and the agent's sweep deletes it.
 
 export type SandboxServerOptions = {
   work: string

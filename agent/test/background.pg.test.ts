@@ -509,7 +509,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await mkdir(path.join(dir, '.claude-plugin'))
     await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'watch' }))
     const pkg = { name: 'watch', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['Monitor'] }
-    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    // The turn stays open while the test calls its tools: a call outside a turn has no signal to run under.
+    const scripted = scriptedRunner(() => ({ hang: true }))
     const boxes = new LocalSandboxes()
     const sandboxed = manager({
       sql: db.sql,
@@ -529,7 +530,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
       content: { text: string }[]
       isError?: boolean
     }
-    expect(watch.isError).toBeFalsy()
+    expect(watch.isError, watch.content[0]!.text).toBeFalsy()
     const spec = (await store.get(idOf(watch.content[0]!.text)))!.spec
     expect(spec).toMatchObject({ queue: 'agent-tools.pod-b', command: 'sleep 30', sandbox: { shell: 'bash' } })
     const box = boxes.started.get(session.id)!
