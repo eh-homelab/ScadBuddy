@@ -676,8 +676,9 @@ def expire_jobs(conn: Conn) -> None:
 
     The due jobs are locked first, in id order, with ``SKIP LOCKED``: a job another
     transaction holds (`back_up`'s ``FOR SHARE``, a finish or a cancel) is left for the next
-    call, so this never waits on a job's lock and cannot deadlock with another caller, and
-    a read never queues behind a begun write. The backups are read after, in later
+    call, so this never waits on a job's lock, and a read never queues behind a begun
+    write. A caller that then locks its own job can still meet a rare deadlock, which
+    Postgres ends by aborting one of the two. The backups are read after, in later
     statements, so each one sees what committed before its job was locked (#7419 rounds 3
     and 4)."""
     due = [
