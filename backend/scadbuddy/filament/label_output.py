@@ -1,12 +1,13 @@
 """The label output choice (#7216, plan `docs/superpowers/plans/2026-11-25-label-outputs.md`
 R-7216-6, R-7216-8 and R-7216-9): the stored-only setting `filament_label_output`. A
-request's own `format` and `dpi` outrank it."""
+request's own `format`, `dpi` and `fields` outrank it."""
 
 from __future__ import annotations
 
-from typing import Final, Literal
+from collections.abc import Sequence
+from typing import Annotated, Final, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 OutputFormat = Literal["pdf", "png"]
 #: The PNG resolutions, as Bambuddy's (`routes/labels.py` at v1.3.1,
@@ -26,8 +27,26 @@ LabelField = Literal[
     "added",
     "qr",
 ]
+#: Every field, in the order the lines print.
+ALL_FIELDS: Final[tuple[LabelField, ...]] = get_args(LabelField)
 #: What spool labels printed before #7216.
 DEFAULT_FIELDS: Final[tuple[LabelField, ...]] = ("number", "material", "colour", "brand", "qr")
+
+
+def in_order(fields: Sequence[LabelField]) -> list[LabelField]:
+    """``fields`` with no repeat, at least one, in ``ALL_FIELDS`` order (R-7216-9)."""
+    if not fields:
+        raise ValueError("choose at least one field")
+    if len(set(fields)) != len(fields):
+        raise ValueError("a field is named twice")
+    return [field for field in ALL_FIELDS if field in fields]
+
+
+Fields = Annotated[
+    list[LabelField],
+    Field(min_length=1, max_length=len(ALL_FIELDS)),
+    AfterValidator(in_order),
+]
 
 
 class LabelOutput(BaseModel):
@@ -37,5 +56,5 @@ class LabelOutput(BaseModel):
 
     format: OutputFormat = "pdf"
     dpi: Dpi = 300
-    #: Task 3 of the plan makes the fields act; until then the labels print the default set.
-    fields: list[LabelField] = Field(default_factory=lambda: list(DEFAULT_FIELDS), min_length=1)
+    #: The spool label's lines and its QR code (R-7216-9). A request's own `fields` outrank it.
+    fields: Fields = Field(default_factory=lambda: list(DEFAULT_FIELDS))

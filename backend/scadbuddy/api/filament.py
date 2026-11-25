@@ -2621,10 +2621,18 @@ async def list_label_templates() -> m.LabelTemplates:
     summary="The labels file",
     description=(
         "The labels of `spool_ids`, then `location_ids` (1 to 100 in all, in the order "
-        "sent; #7157), as Bambuddy's `POST /inventory/labels` gives. Each label carries what "
-        "the Labels page draws: a spool's number, material, colour name and brand with the "
-        "QR code `scadbuddy:spool:<id>`; a place's code and name with the QR code of "
-        "`<label address>/x/L-<n>`. `template` (else the setting `filament_label_template`) "
+        "sent; #7157), as Bambuddy's `POST /inventory/labels` gives. A spool label prints "
+        "`fields` (else the setting `filament_label_output`'s; #7216), one line each, top to "
+        "bottom in this order: `number`, `material` (with its subtype), `colour` (its name), "
+        "`hex` (`#RRGGBB`), `brand`, `location` (its place), `temps` (nozzle, "
+        "`190\N{EN DASH}230 °C`), `weight` (label weight, `1000 g`), `note` (its first "
+        "line), `added` (the day it was made, UTC); `qr` adds the QR code "
+        "`scadbuddy:spool:<id>`, and without it the text takes the QR code's room. The "
+        "lines that do not fit the label's height are left off from the bottom; a chosen "
+        "number always stays. The default is `number`, `material`, "
+        "`colour`, `brand` and `qr`. A place label always prints its code and name with the "
+        "QR code of `<label address>/x/L-<n>`. `template` (else the setting "
+        "`filament_label_template`) "
         "sets the size; `layout` `roll` is one label a page and `sheet` packs them on Letter "
         "paper, while a sheet template always prints on its own grid. `format` and `dpi` "
         "(else the setting `filament_label_output`; #7216) choose the file: `pdf` is "
@@ -2686,7 +2694,9 @@ async def render_labels(
     except LabelPayloadTooLongError as exc:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
     try:
-        pdf = await asyncio.to_thread(label_pdf.render_pdf, labels, template, body.layout)
+        pdf = await asyncio.to_thread(
+            label_pdf.render_pdf, labels, template, body.layout, body.fields or output.fields
+        )
     except label_fonts.LabelFontMissingError as exc:
         # R-7216-4: never Helvetica, which would print `?` for what DejaVu holds.
         raise ApiError(

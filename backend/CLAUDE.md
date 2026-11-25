@@ -1175,7 +1175,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `docs/superpowers/plans/2026-11-25-label-outputs.md` R-7216-5 to R-7216-8):
   `label_output.py` `LabelOutput` (`format` `pdf` or `png`, `dpi` 203, 300 or 600, and the
   spool label's `fields`), the stored-only setting `filament_label_output`, which a body's
-  own `format` and `dpi` outrank; `label_png.py` rasterises the PDF with pypdfium2, every
+  own `format`, `dpi` and `fields` outrank. The fields (R-7216-9, R-7216-10): `LabelField`,
+  `ALL_FIELDS` (`number`, `material`, `colour`, `hex`, `brand`, `location`, `temps`, `weight`,
+  `note`, `added`, `qr`, the order the lines print; a validator puts any list in it and
+  refuses none or a repeat), `DEFAULT_FIELDS` (`number`, `material`, `colour`, `brand`, `qr`,
+  what labels printed before); `labels.py` `pdf_labels` fills each value (`temps_text`;
+  `added` is the row's `created_at` day in UTC). `label_pdf.py` `fit_lines` drops the last
+  lines while the block is taller than the label less 2 x `PAD_MM`, from line heights only
+  (`NUMBER_MM`, `CODE_MM`, `FIELD_MM`, `LEADING`, `BIG_LEADING`, `GAP_MM`; the big text
+  counted at its full size), never a chosen number or a place's code; the browser label
+  (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use the same values.
+  With no `qr` the text column starts at `QUIET_MM`. Place labels ignore the fields.
+  `label_png.py` rasterises the PDF with pypdfium2, every
   PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), each page a
   greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
   pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's

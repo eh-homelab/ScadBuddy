@@ -31,6 +31,7 @@ from pydantic import (
 
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_output import Dpi, OutputFormat
+from scadbuddy.filament.label_output import Fields as LabelFields
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
 
@@ -573,6 +574,8 @@ class LabelsRequest(_In):
     #: #7216: ``None``: the stored setting `filament_label_output`'s.
     format: OutputFormat | None = None
     dpi: Dpi | None = None
+    #: The spool label's fields (R-7216-9), put in their print order; ``None``: the setting's.
+    fields: LabelFields | None = None
 
     @model_validator(mode="after")
     def _one_to_max(self) -> LabelsRequest:

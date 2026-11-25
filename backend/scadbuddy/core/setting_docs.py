@@ -478,7 +478,13 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Label output",
             "The file that the labels download gives: a PDF, or PNG images at 203, 300 or"
             " 600 dpi for label printer software. One page is one PNG; more pages come as a"
-            " ZIP of PNGs.",
+            " ZIP of PNGs. Also the fields a spool label prints, top to bottom: number,"
+            " material, colour name, colour hex, brand, location, nozzle temperatures, label"
+            " weight, the note's first line and the date it was added, and the QR code. The"
+            " default is the number, material, colour name, brand and QR code. Lines that do"
+            " not fit on the label are left off from the bottom; the number, when chosen,"
+            " stays. Without the QR code, the text uses its space. Place labels always print"
+            " their code, name and QR code.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",

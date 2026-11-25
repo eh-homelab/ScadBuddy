@@ -285,7 +285,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_template` (#7157, stored only: the label template the labels page and the
   labels PDF use; the 50 x 25 mm roll label by default),
   `filament_label_output` (#7216, stored only: the labels file's format, `pdf` or `png`, the
-  PNG's dpi, 203, 300 or 600, and the spool label's fields; a PDF at 300 dpi by default).
+  PNG's dpi, 203, 300 or 600, and the spool label's fields; a PDF at 300 dpi with the number,
+  material, colour, brand and QR code by default).
 - Bambuddy's spool fields (#7149, plan
   `docs/superpowers/plans/2026-11-23-spool-bb-fields.md`,
   migration `20261123T0609Z_filament_spool_bb_fields.sql`):
@@ -348,6 +349,19 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   more pages are `labels.zip`, a stored ZIP of `spool-<number>.png` and `L-<n>.png` (one label
   a page) or `sheet-<n>.png` (a sheet). Past 400 megapixels in all, the route answers 422
   `png_too_large`: choose PDF, a lower dpi or fewer labels.
+- The fields a spool label prints (#7216, R-7216-9 and R-7216-10): the body's `fields`, else
+  the setting `filament_label_output`'s, from `number`, `material` (with its subtype),
+  `colour` (its name), `hex` (the effective colour as `#RRGGBB`), `brand`, `location` (its
+  place's name), `temps` (the nozzle range, or one value), `weight` (the label weight in g),
+  `note` (its first line), `added` (the row's `created_at` day in UTC) and `qr`. The lines
+  print top to bottom in that order, whatever order the request sends. At least one field is
+  chosen (422 otherwise). The default is what labels printed before: `number`, `material`,
+  `colour`, `brand` and `qr`. The text block may be the label's height less twice `PAD_MM`
+  (1.5 mm); the last lines go until it fits, and a chosen number always stays. The fit counts
+  line heights only (`backend/scadbuddy/filament/label_pdf.py` `NUMBER_MM`, `FIELD_MM`,
+  `LEADING`, `BIG_LEADING`, `GAP_MM`), never glyph widths, so the browser label keeps the same
+  lines in its own font. Without `qr`, the text column starts at the quiet zone and takes the
+  QR code's width too. A place label ignores the fields: it prints its code, name and QR code.
 - What the labels file prints (#7216, R-7216-1 to R-7216-4): the text is DejaVu Sans, embedded,
   so a name in Latin, Cyrillic, Greek, Armenian, Georgian, Hebrew, Arabic or Lao prints as
   itself, not as `?`. A character DejaVu lacks takes the first Noto font of a fixed chain that

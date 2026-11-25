@@ -13,8 +13,10 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from scadbuddy.filament import label_pdf, label_png
 from scadbuddy.filament.label_fonts import width_mm
+from scadbuddy.filament.label_output import ALL_FIELDS, LabelOutput
 from scadbuddy.filament.label_pdf import PlaceLabel, SpoolLabel, render_pdf
 from scadbuddy.filament.label_templates import BY_ID, LabelTemplateChoice
+from scadbuddy.filament.labels import temps_text
 from tests.filament.test_label_fonts import needs_font
 
 MM = 72 / 25.4
@@ -23,6 +25,19 @@ SPOOL = SpoolLabel(
     number=12, material="PLA Basic", colour="Jade White", brand="Bambu Lab", qr="scadbuddy:spool:x"
 )
 PLACE = PlaceLabel(code="L-7", name="H2C AMS 1 slot 2", qr="https://sb.example/x/L-7")
+FULL = SpoolLabel(
+    number=12,
+    material="PLA Basic",
+    colour="Jade White",
+    brand="Bambu Lab",
+    qr="scadbuddy:spool:x",
+    hex="#00AE42",
+    location="Shelf A",
+    temps="190\N{EN DASH}230 °C",
+    weight="1000 g",
+    note="Dry first",
+    added="2026-11-20",
+)
 
 
 def _text(pdf: bytes) -> str:
@@ -328,3 +343,132 @@ def test_a_custom_choice_needs_both_sizes_in_bounds() -> None:
 def test_no_choice_is_the_old_50_by_25_roll() -> None:
     template = LabelTemplateChoice().resolved()
     assert (template.id, template.width_mm, template.height_mm) == ("roll_50x25", 50, 25)
+
+
+# -- #7216: the fields a spool label prints (R-7216-9, R-7216-10) -------------------------
+
+
+def test_the_default_fields_print_what_labels_printed_before() -> None:
+    text = _text(render_pdf([FULL], BY_ID["ams_holder_75x55"], "roll"))
+    assert all(s in text for s in ("#12", "PLA Basic", "Jade White", "Bambu Lab"))
+    assert not any(s in text for s in ("#00AE42", "Shelf A", "1000 g"))
+
+
+def test_only_the_chosen_fields_print_in_their_order() -> None:
+    text = _text(render_pdf([FULL], BY_ID["ams_holder_75x55"], "roll", ["weight", "number", "hex"]))
+    assert text.index("#12") < text.index("#00AE42") < text.index("1000 g")
+    assert "PLA Basic" not in text
+
+
+def test_every_field_prints_on_a_label_tall_enough() -> None:
+    lines = _lines(render_pdf([FULL], BY_ID["ams_holder_75x55"], "roll", list(ALL_FIELDS)))
+    assert lines == [
+        "#12",
+        "PLA Basic",
+        "Jade White",
+        "#00AE42",
+        "Bambu Lab",
+        "Shelf A",
+        "190\N{EN DASH}230 °C",
+        "1000 g",
+        "Dry first",
+        "2026-11-20",
+    ]
+
+
+def test_lines_that_do_not_fit_are_left_off_from_the_bottom() -> None:
+    pdf = render_pdf([FULL], BY_ID["roll_50x25"], "roll", list(ALL_FIELDS))
+    text = _text(pdf)
+    assert "#12" in text and "2026-11-20" not in text
+    # 22 mm of block on a 25 mm label: the number (9) and its gap (1), the material (4),
+    # the colour (3.75) and one small line (3.25) make 21 mm; one more line is 24.25 mm.
+    assert _lines(pdf) == ["#12", "PLA Basic", "Jade White", "#00AE42"]
+
+
+def test_the_lines_kept_come_from_line_heights_not_widths() -> None:
+    # A number that shrinks to fit a narrow column keeps as many lines as a short one: the
+    # fit counts the number at its full size, so the browser and the PDF agree.
+    template = LabelTemplateChoice(template="custom", width_mm=40, height_mm=25).resolved()
+    short = _lines(render_pdf([FULL], template, "roll", list(ALL_FIELDS)))
+    long = SpoolLabel(**(FULL.__dict__ | {"number": 123456}))
+    assert len(_lines(render_pdf([long], template, "roll", list(ALL_FIELDS)))) == len(short) == 4
+
+
+def test_the_number_line_stays_when_nothing_else_fits() -> None:
+    lines = label_pdf.fit_lines(
+        [
+            label_pdf._Line("#1", label_pdf.BOLD, 9, leading=1.0, big=True),
+            label_pdf._Line("x", label_pdf.PLAIN, 3.0, gap_mm=1.0),
+        ],
+        available=5,
+    )
+    assert [line.text for line in lines] == ["#1"]
+
+
+def test_a_number_not_chosen_does_not_print() -> None:
+    lines = _lines(render_pdf([FULL], BY_ID["roll_50x25"], "roll", ["material", "brand"]))
+    assert lines == ["PLA Basic", "Bambu Lab"]
+
+
+def test_without_the_qr_the_text_starts_at_the_quiet_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    drawn: list[str] = []
+    real = label_pdf._draw_qr
+    monkeypatch.setattr(label_pdf, "_draw_qr", lambda *a: drawn.append(a[1]))
+    pdf = render_pdf([FULL], BY_ID["roll_50x25"], "roll", ["number", "material"])
+    assert drawn == []
+    # The number's first glyph starts at the quiet zone. Its box starts at the glyph's ink,
+    # so the same "#" at the same size beside a QR code gives the side bearing.
+    alone = next(left for char, left, _ in _glyphs(pdf) if char == "#")
+    monkeypatch.setattr(label_pdf, "_draw_qr", real)
+    with_qr = render_pdf([FULL], BY_ID["roll_50x25"], "roll", ["number", "material", "qr"])
+    beside = next(left for char, left, _ in _glyphs(with_qr) if char == "#")
+    bearing = beside - (2 * label_pdf.QUIET_MM + label_pdf.QR_MM) * MM
+    assert 0 <= bearing < 1 * MM
+    assert alone == pytest.approx(label_pdf.QUIET_MM * MM + bearing, abs=0.01)
+
+
+def test_without_the_qr_the_column_takes_the_qrs_width_too() -> None:
+    long = SpoolLabel(**(FULL.__dict__ | {"material": "PLA Basic Silk Matte Galaxy Glow"}))
+    narrow = _lines(render_pdf([long], BY_ID["roll_50x25"], "roll", ["number", "material", "qr"]))
+    wide = _lines(render_pdf([long], BY_ID["roll_50x25"], "roll", ["number", "material"]))
+    assert narrow[1].endswith(label_pdf.ELLIPSIS)
+    assert len(wide[1]) > len(narrow[1])
+
+
+def test_a_spool_with_no_chosen_value_still_gets_its_page() -> None:
+    bare = SpoolLabel(number=3, material=None, colour=None, brand=None, qr="q")
+    assert len(_boxes(render_pdf([bare, bare], BY_ID["roll_50x25"], "roll", ["note"]))) == 2
+
+
+def test_place_labels_ignore_the_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    drawn: list[str] = []
+    real = label_pdf._draw_qr
+
+    def spy(canvas: object, payload: str, x: float, y: float) -> None:
+        drawn.append(payload)
+        real(canvas, payload, x, y)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(label_pdf, "_draw_qr", spy)
+    assert "L-7" in _text(render_pdf([PLACE], BY_ID["roll_50x25"], "roll", ["note"]))
+    assert drawn == [PLACE.qr]
+
+
+def test_label_output_puts_fields_in_order_and_refuses_none() -> None:
+    assert LabelOutput.model_validate({"fields": ["qr", "number"]}).fields == ["number", "qr"]
+    for bad in ([], ["number", "number"]):
+        with pytest.raises(ValidationError):
+            LabelOutput.model_validate({"fields": bad})
+
+
+@pytest.mark.parametrize(
+    ("low", "high", "want"),
+    [
+        (190, 230, "190\N{EN DASH}230 °C"),
+        (None, 220, "220 °C"),
+        (220, None, "220 °C"),
+        (220, 220, "220 °C"),
+        (None, None, None),
+    ],
+)
+def test_temps_text(low: int | None, high: int | None, want: str | None) -> None:
+    assert temps_text(low, high) == want

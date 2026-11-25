@@ -12,7 +12,7 @@ from __future__ import annotations
 import io
 import math
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -23,6 +23,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen.canvas import Canvas
 
 from scadbuddy.filament.label_fonts import Weight, runs, width_mm
+from scadbuddy.filament.label_output import ALL_FIELDS, DEFAULT_FIELDS, LabelField
 from scadbuddy.filament.label_templates import PAGE_MM, LabelSheet, LabelTemplate
 
 Layout = Literal["roll", "sheet"]
@@ -45,6 +46,30 @@ ELLIPSIS: Final = "…"
 BOLD: Final[Weight] = "bold"
 PLAIN: Final[Weight] = "regular"
 
+#: The line sizes, in mm, of the spool label's fields (#7216, R-7216-10). The big number and a
+#: place's code have a line height of their size (`BIG_LEADING`); every other line is
+#: `LEADING` times its size, and the first line under the big text has `GAP_MM` above it.
+#: The browser label (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use
+#: these same values, with `PAD_MM`, so it keeps the same lines as the PDF.
+NUMBER_MM: Final = 9.0
+CODE_MM: Final = 8.0
+PLACE_NAME_MM: Final = 3.2
+BIG_LEADING: Final = 1.0
+GAP_MM: Final = 1.0
+FIELD_MM: Final[Mapping[LabelField, float]] = {
+    "material": 3.2,
+    "colour": 3.0,
+    "hex": 2.6,
+    "brand": 2.6,
+    "location": 2.6,
+    "temps": 2.6,
+    "weight": 2.6,
+    "note": 2.6,
+    "added": 2.6,
+}
+#: The fields that print in bold; the rest are regular.
+BOLD_FIELDS: Final[frozenset[LabelField]] = frozenset({"material"})
+
 
 @dataclass(frozen=True)
 class SpoolLabel:
@@ -54,6 +79,18 @@ class SpoolLabel:
     brand: str | None
     #: What the QR code holds: `scadbuddy:spool:<id>`.
     qr: str
+    #: The effective colour as `#RRGGBB` (#7216, R-7216-9).
+    hex: str | None = None
+    #: The name of the spool's place.
+    location: str | None = None
+    #: The nozzle temperatures, the range or one value (`labels.temps_text`).
+    temps: str | None = None
+    #: The label weight, `1000 g`.
+    weight: str | None = None
+    #: The note's first line.
+    note: str | None = None
+    #: The day the row was made, in UTC, ISO.
+    added: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,10 +113,38 @@ class _Line:
     gap_mm: float = 0.0
     #: The line's height over its size: the big number and code are `leading-none`.
     leading: float = LEADING
+    #: The size the fit counts, when it is not ``size_mm``: the big text's full size, which
+    #: does not depend on how wide its glyphs are in a font (R-7216-10).
+    fit_size_mm: float | None = None
+    #: The big number or code: a fit never leaves it off.
+    big: bool = False
+
+    @property
+    def fit_height_mm(self) -> float:
+        """The space the line takes in the fit: its gap and its line box."""
+        size = self.size_mm if self.fit_size_mm is None else self.fit_size_mm
+        return self.gap_mm + size * self.leading
 
 
-def render_pdf(labels: Sequence[Label], template: LabelTemplate, layout: Layout) -> bytes:
-    """The PDF of ``labels`` at ``template``'s size, in their order."""
+def fit_lines(lines: Sequence[_Line], available: float) -> list[_Line]:
+    """``lines`` less the last ones while they are taller than ``available`` mm (R-7216-10).
+    The big number or code always stays. Only the line heights count, never a glyph's width,
+    so the browser label keeps the same lines in another font."""
+    kept = list(lines)
+    while kept and not kept[-1].big and sum(line.fit_height_mm for line in kept) > available + 1e-9:
+        kept.pop()
+    return kept
+
+
+def render_pdf(
+    labels: Sequence[Label],
+    template: LabelTemplate,
+    layout: Layout,
+    fields: Sequence[LabelField] = DEFAULT_FIELDS,
+) -> bytes:
+    """The PDF of ``labels`` at ``template``'s size, in their order. A spool label prints
+    ``fields`` (in ``ALL_FIELDS`` order); a place label always prints its code, name and QR
+    code."""
     buffer = io.BytesIO()
     width, height = template.width_mm, template.height_mm
     sheet = sheet_of(template, layout)
@@ -95,13 +160,14 @@ def render_pdf(labels: Sequence[Label], template: LabelTemplate, layout: Layout)
     canvas.setAuthor("ScadBuddy")
     per_page = sheet.cols * sheet.rows if sheet else 1
     for page_at in range(page_count(template, layout, len(labels))):
-        if page_at:
-            canvas.showPage()
         on_page = labels[page_at * per_page : (page_at + 1) * per_page]
         for at, label in enumerate(on_page):
             x, top = (0.0, 0.0) if sheet is None else _cell(sheet, at, width, height)
             # ReportLab's origin is the page's bottom left.
-            _draw_label(canvas, label, x, page[1] - top - height, width, height)
+            _draw_label(canvas, label, x, page[1] - top - height, width, height, fields)
+        # Each page is closed here: `save` closes the last page only when something is drawn
+        # on it, and a spool label with no chosen value draws nothing (#7216).
+        canvas.showPage()
     canvas.save()
     return buffer.getvalue()
 
@@ -144,16 +210,28 @@ def _cell(sheet: LabelSheet, index: int, width: float, height: float) -> tuple[f
 
 
 def _draw_label(
-    canvas: Canvas, label: Label, x: float, y: float, width: float, height: float
+    canvas: Canvas,
+    label: Label,
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+    fields: Sequence[LabelField],
 ) -> None:
-    """One label with its bottom left at (``x``, ``y``) mm."""
-    _draw_qr(canvas, label.qr, x + QUIET_MM, y + (height - QR_MM) / 2)
-    text_x = x + 2 * QUIET_MM + QR_MM
-    column = width - 2 * QUIET_MM - QR_MM - PAD_MM
-    lines = (
-        _spool_lines(label, column)
+    """One label with its bottom left at (``x``, ``y``) mm. A spool label with no `qr`
+    field has no QR code, and its text column starts at the quiet zone (R-7216-10)."""
+    if isinstance(label, PlaceLabel) or "qr" in fields:
+        _draw_qr(canvas, label.qr, x + QUIET_MM, y + (height - QR_MM) / 2)
+        text_x = x + 2 * QUIET_MM + QR_MM
+        column = width - 2 * QUIET_MM - QR_MM - PAD_MM
+    else:
+        text_x = x + QUIET_MM
+        column = width - QUIET_MM - PAD_MM
+    lines = fit_lines(
+        _spool_lines(label, column, fields)
         if isinstance(label, SpoolLabel)
-        else _place_lines(label, column)
+        else _place_lines(label, column),
+        height - 2 * PAD_MM,
     )
     block = sum(line.gap_mm + line.size_mm * line.leading for line in lines)
     top = y + (height + block) / 2
@@ -199,26 +277,34 @@ def _big_size(text: str, cap: float, column: float) -> float:
     return cap if at_cap <= column else cap * column / at_cap
 
 
-def _spool_lines(label: SpoolLabel, column: float) -> list[_Line]:
-    number = f"#{label.number}"
-    lines = [_Line(number, BOLD, _big_size(number, 9, column), leading=1.0)]
-    rows: tuple[tuple[str | None, Weight, float], ...] = (
-        (label.material, BOLD, 3.2),
-        (label.colour, PLAIN, 3.0),
-        (label.brand, PLAIN, 2.6),
-    )
-    for text, font, size in rows:
+def _big_line(text: str, cap: float, column: float) -> _Line:
+    size = _big_size(text, cap, column)
+    return _Line(text, BOLD, size, leading=BIG_LEADING, fit_size_mm=cap, big=True)
+
+
+def _spool_lines(label: SpoolLabel, column: float, fields: Sequence[LabelField]) -> list[_Line]:
+    """A line for each chosen field with a value, in ``ALL_FIELDS`` order: the big number
+    first when it is chosen, and `GAP_MM` under it."""
+    lines: list[_Line] = []
+    if "number" in fields:
+        lines.append(_big_line(f"#{label.number}", NUMBER_MM, column))
+    for field in ALL_FIELDS:
+        if field not in fields or field not in FIELD_MM:
+            continue
+        text = getattr(label, field)
         if text:
+            font = BOLD if field in BOLD_FIELDS else PLAIN
+            size = FIELD_MM[field]
             cut = _fit(text, font, size, column)
-            lines.append(_Line(cut, font, size, gap_mm=1.0 if len(lines) == 1 else 0.0))
+            under_big = len(lines) == 1 and lines[0].big
+            lines.append(_Line(cut, font, size, gap_mm=GAP_MM if under_big else 0.0))
     return lines
 
 
 def _place_lines(label: PlaceLabel, column: float) -> list[_Line]:
-    code = label.code
-    lines = [_Line(code, BOLD, _big_size(code, 8, column), leading=1.0)]
-    for at, text in enumerate(_wrap(label.name, BOLD, 3.2, column, 2)):
-        lines.append(_Line(text, BOLD, 3.2, gap_mm=1.0 if at == 0 else 0.0))
+    lines = [_big_line(label.code, CODE_MM, column)]
+    for at, text in enumerate(_wrap(label.name, BOLD, PLACE_NAME_MM, column, 2)):
+        lines.append(_Line(text, BOLD, PLACE_NAME_MM, gap_mm=GAP_MM if at == 0 else 0.0))
     return lines
 
 
