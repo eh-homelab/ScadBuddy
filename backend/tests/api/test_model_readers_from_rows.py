@@ -170,6 +170,35 @@ def test_library_associations_are_the_same_after_the_copy(
     assert read() == before
 
 
+def test_a_model_removed_by_hand_is_no_files_implied_source(
+    native_client: TestClient, paths: DataPaths, tmp_path: Path
+) -> None:
+    """#7631 review: a row whose folder is gone implies no `mesh_source` association,
+    as before the copy, when the walk did not find the folder."""
+    file: NativeFile = _upload(native_client, _three_mf(tmp_path / "fixed.3mf"))
+    _create(native_client, "meshy", {"name": "Meshy"})
+    _write_meta(
+        paths,
+        "meshy",
+        {
+            "name": "Meshy",
+            "mesh_source": {
+                "kind": "bambuddy_library",
+                "name": "fixed.3mf",
+                "sha256": "0" * 64,
+                "file_id": file.id,
+            },
+        },
+    )
+    _copy(native_client)
+    shutil.rmtree(paths.model_dir("meshy"))
+
+    response = native_client.get(f"/api/v1/print/library/{file.id}/associations")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["associations"] == []
+
+
 def test_activity_facets_name_models_after_the_copy(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

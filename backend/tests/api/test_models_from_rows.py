@@ -410,19 +410,39 @@ def test_a_meta_postgres_cannot_store_is_read_from_its_file(
     world: TestClient, paths: DataPaths
 ) -> None:
     """Review M2: a `model.json` jsonb refuses (NaN) has no `meta` in its row; its
-    record is read from the file, as before the copy."""
+    record, its place in the list (the tag filter and the facets too) and its summary
+    are read from the file, as before the copy (#7631 review)."""
     _create(world, "nan", {"name": "Not a number"})
-    paths.model_meta("nan").write_text('{"name": "Not a number", "ratio": NaN}', encoding="utf-8")
-    before = world.get("/api/v1/models/nan")
-    assert before.status_code == 200, before.text
+    paths.model_meta("nan").write_text(
+        '{"name": "Not a number", "tags": ["odd"], "ratio": NaN}', encoding="utf-8"
+    )
+    catalogue = _state(world).catalogue
+
+    def read() -> tuple[Any, ...]:
+        record = world.get("/api/v1/models/nan")
+        odd = world.get("/api/v1/models", params={"tag": "odd"})
+        return (
+            (record.status_code, record.json()),
+            _lists(world),
+            (odd.status_code, odd.json()),
+            world.get("/api/v1/model-facets").json(),
+            catalogue.list_summaries(),
+            catalogue.list_summaries(["nan", "widget"]),
+        )
+
+    before = read()
+    assert before[0][0] == 200, before[0][1]
+    assert "nan" in [model["slug"] for model in before[1][0][2]]
+    assert [model["slug"] for model in before[2][1]] == ["nan"]
+    assert "nan" in [summary.slug for summary in before[4]]
+    assert [summary.slug for summary in before[5]] == ["nan", "widget"]
 
     _copy(world)
 
     row = _rows(world).get("nan")
     assert row is not None and row.meta is None
     assert row.meta_error is not None and row.meta_error.startswith("not storable")
-    after = world.get("/api/v1/models/nan")
-    assert (after.status_code, after.json()) == (200, before.json())
+    assert read() == before
 
 
 def test_list_and_record_agree_on_upstream_state_with_no_row_version(world: TestClient) -> None:

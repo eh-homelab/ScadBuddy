@@ -1063,9 +1063,10 @@ class Catalogue:
         """The catalogue thumbnail, named by its source, or None (#7317, plan Task 9).
         From the template's row once the rows are copied: its own cover, else the
         first output's plate cover, else the preview, with no file read or stat
-        until ``read``. No row is :class:`ModelNotFoundError`, and so is a row whose
-        folder is gone, at ``read``. A row that lags its media
-        (`TemplateRow.media_newer`), and every template before the copy, is read
+        until ``read``. No row and no folder is :class:`ModelNotFoundError`, and so is
+        a row whose folder is gone, at ``read``. A row that lags its media
+        (`TemplateRow.media_newer`), a template with files but no row (a failed
+        refresh, as `record`), and every template before the copy, is read
         (`read_thumbnail`) and tagged by the bytes. The lookups and reads run in
         threads; the output's plate cover is read blob first (#7256)."""
         with span("catalogue.thumbnail_ref", attributes={"scadbuddy.slug": slug}) as current:
@@ -1095,6 +1096,10 @@ class Catalogue:
             assert self.rows is not None
             row = self.rows.get(slug)
             if row is None:
+                # A template with files but no row (a failed refresh) is read from its
+                # files, as `record` reads it (#7631 review).
+                if self.exists(slug):
+                    return False, None
                 raise ModelNotFoundError(slug)
         if row is None or row.media_newer:
             return False, None
@@ -1786,7 +1791,7 @@ class Catalogue:
         """:meth:`list_models` as summaries: the same templates, in the same order. From
         the rows once they are copied: one query, and no media, cover, preview or git
         work (#7317 Task 8). A row whose ``model.json`` does not read is left out, as
-        :meth:`list_models` leaves it out."""
+        :meth:`list_models` leaves it out; one Postgres cannot store reads its file."""
         with span("catalogue.list_summaries") as current:
             from_rows = self._from_rows()
             current.set_attribute("scadbuddy.from_rows", from_rows)
@@ -1809,10 +1814,13 @@ class Catalogue:
                 listed = [by_id[slug] for slug in slugs if slug in by_id]
             summaries: list[ModelSummary] = []
             for row in listed:
-                if row.meta is None:
+                # A row whose model.json Postgres cannot store reads its file, as
+                # `record` does (#7631 review).
+                raw = self._file_raw(row.template_id) if _not_storable(row) else row.meta
+                if raw is None:
                     continue
                 try:
-                    _, meta = self._parsed(row.template_id, row.meta)
+                    _, meta = self._parsed(row.template_id, raw)
                 except InvalidModelMetaError:
                     continue
                 summaries.append(
@@ -1840,7 +1848,9 @@ class Catalogue:
 
     def _list_rows(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
         """:meth:`list_models` from the rows: a fixed number of queries, and no file or
-        git call (#7317, spec §5.4). A template with no row is not listed (§7.6).
+        git call (#7317, spec §5.4). A template with no row is not listed (§7.6). A row
+        whose ``model.json`` Postgres cannot store is built from its files, as `record`
+        builds it (#7631 review).
         ``slugs`` (a page's window) loads only their rows and their upstreams' (Task 7
         review M5), so a page that takes several chunks never reads the whole table."""
         assert self.rows is not None
@@ -1881,6 +1891,12 @@ class Catalogue:
         records: list[ModelRecord] = []
         with span("catalogue.records", attributes={"scadbuddy.models": len(ids)}):
             for row in listed:
+                if _not_storable(row):
+                    # Read from its files, as `record` reads it (#7631 review).
+                    unstored = self._unstored_record(row.template_id, by_id, media, covers)
+                    if unstored is not None:
+                        records.append(unstored)
+                    continue
                 try:
                     records.append(
                         self._row_record(
@@ -1903,6 +1919,35 @@ class Catalogue:
                         extra={"slug": row.template_id},
                     )
         return records
+
+    def _unstored_record(
+        self,
+        slug: str,
+        by_id: Mapping[str, TemplateRow],
+        media: Mapping[str, list[MediaItem]],
+        covers: Mapping[str, str],
+    ) -> ModelRecord | None:
+        """The listing's record of a row whose ``model.json`` Postgres cannot store,
+        from its files, as the listing before the copy built it; None when it is gone
+        or does not parse."""
+
+        def version_of(asked: str) -> str | None:
+            found = by_id.get(asked)
+            return None if found is None else found.version
+
+        try:
+            return self._record(
+                slug,
+                version_of,
+                self._has_history,
+                lambda asked: media.get(asked, []),
+                covers.get,
+            )
+        except ModelNotFoundError:
+            return None
+        except InvalidModelMetaError as error:
+            logger.warning("left a model out of the listing: %s", error, extra={"slug": slug})
+            return None
 
     def _list_models(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
         if slugs is None:

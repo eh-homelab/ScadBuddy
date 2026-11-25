@@ -153,7 +153,9 @@ def _implied_for_file(
     for slug, raw in catalogue.raw_metas().items():
         if is_builtin(slug):
             continue
-        if _mesh_source_in(raw) == file.id:
+        # A row whose folder is gone (a hand removal) implies nothing, as before the
+        # copy: one `exists` per match, as `duplicates_of` (#7631 review).
+        if _mesh_source_in(raw) == file.id and catalogue.exists(slug):
             implied.append(
                 Association(
                     id=None,

@@ -150,18 +150,24 @@ def test_a_200_tags_what_it_read(world: TestClient) -> None:
     assert answer.headers["etag"] == f'"preview-{"e" * PREVIEW_ID_LENGTH}"'
 
 
-def test_no_row_is_404_with_no_stat(
-    world: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_template_with_no_row_falls_back_to_its_files(world: TestClient) -> None:
+    """#7631 review: a folder whose row is gone (a failed refresh) is read from its
+    files, as its record is; no row and no folder is 404."""
+    before = _thumbnail(world, "plain")
+    assert before.status_code == 200, before.text
     _copy(world)
-    # A folder whose row is gone (a failed refresh): 404 from the rows, as no folder.
     _rows(world).put([], ["plain"])
-    _no_reads(monkeypatch, paths)
 
-    for slug in ("plain", "nobody"):
-        answer = _thumbnail(world, slug)
-        assert answer.status_code == 404, answer.text
-        assert "no model named" in answer.json()["detail"]
+    answer = _thumbnail(world, "plain")
+    record = world.get("/api/v1/models/plain").json()
+
+    assert answer.status_code == 200, answer.text
+    assert answer.content == before.content
+    assert answer.headers["etag"] == f'"{hashlib.sha256(answer.content).hexdigest()}"'
+    assert record["thumbnail_source"] == "preview"
+    nobody = _thumbnail(world, "nobody")
+    assert nobody.status_code == 404, nobody.text
+    assert "no model named" in nobody.json()["detail"]
 
 
 def test_no_cover_is_404(world: TestClient) -> None:
