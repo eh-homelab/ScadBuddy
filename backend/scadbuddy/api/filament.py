@@ -169,6 +169,7 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
+    NoBelowLabelError,
     NoEmptyWeightError,
     OverrideKindError,
     ReadingBelowEmptyError,
@@ -1629,7 +1630,14 @@ async def list_spool_events(filament: FilamentDep, spool_id: UUID) -> list[m.Spo
         "(`grams - expected_g`). With `reading_g` and no `grams`, the filament is the reading "
         "less the spool's effective empty weight (its insert's, else its type's insert's); a "
         "spool with none is a 422 with `code` `no_empty_weight`, and a reading under the "
-        "empty weight one with `code` `reading_below_empty`. "
+        "empty weight one with `code` `reading_below_empty`. A new spool read under its "
+        "label weight sends `resolution` with `reading_g` alone (#7683): `tared` (the "
+        "filament is the reading), `short` (the reading less the empty weight; the spool "
+        "stops being added full) or `label_wrong` (the same filament, and the spool's own "
+        "`label_weight_g` becomes it, rounded), as `GET …/insert-weight-offer` offered it; "
+        "the side effect is an `edited` event before the weighing, and the event's `data` "
+        "keeps `resolution` and `shortfall_g`. A resolution the check does not offer now "
+        "is a 422 with `code` `no_below_label` and the check's `reason`; nothing is booked. "
         "`dried` takes `temp_c` and `hours`; "
         "one left out is the spool's `drying_defaults` value (its type's, else its "
         "subtype's, else its material's, else the setting `filament_drying_temp_c` or "
@@ -1662,6 +1670,13 @@ async def add_spool_event(
     except ReadingBelowEmptyError as exc:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="reading_below_empty"
+        ) from None
+    except NoBelowLabelError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            str(exc),
+            code="no_below_label",
+            reason=exc.reason,
         ) from None
     if made is None:
         raise _no_spool(spool_id)
