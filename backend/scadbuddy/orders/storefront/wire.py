@@ -22,6 +22,7 @@ from pydantic import (
     ConfigDict,
     Discriminator,
     Field,
+    JsonValue,
     StringConstraints,
     Tag,
     field_validator,
@@ -158,7 +159,8 @@ class ListingSnapshot(BaseModel):
     """What publish read from the commit, so a visitor's render needs no git (plan
     point 2): the schema, whether the template is a pipeline, its name, its library
     pins, the key of its source snapshot in the content store, and every value a render
-    of the listing uses that the customer does not choose."""
+    of the listing uses that the customer does not choose, a pipeline's own inputs among
+    them (#5701)."""
 
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
 
@@ -166,7 +168,7 @@ class ListingSnapshot(BaseModel):
     #: reads as this.
     kind: Literal["template"] = "template"
     schema_: CustomizerSchema = Field(alias="schema")
-    #: Always false for now: publish refuses a pipeline template.
+    #: Whether the template is a pipeline (#5701): its renders take ``inputs`` whole.
     pipeline: bool
     template_name: str
     libraries: list[ModelLibrary]
@@ -175,6 +177,11 @@ class ListingSnapshot(BaseModel):
     #: at this commit's default (plan point 13). Read this, never the row's ``fixed``,
     #: for what a published listing renders with.
     fixed: dict[str, ParamValue] = Field(default_factory=dict)
+    #: The pipeline's inputs as publish checked them, at ``inputs_version`` (#5701). Read
+    #: this, never the row's ``inputs``, for what a published listing renders with.
+    inputs: dict[str, JsonValue] = Field(default_factory=dict)
+    #: The commit's ``INPUTS_VERSION`` (0 for a template with no pipeline).
+    inputs_version: int = 0
 
 
 #: A sha256, lowercase hex: a file listing's pinned content (#6710).
@@ -316,6 +323,14 @@ class ListingInput(BaseModel):
     description: str = Field(default="", max_length=5000)
     params: dict[str, ParamBound] = Field(default_factory=dict)
     fixed: dict[str, ParamValue] = Field(default_factory=dict)
+    #: A pipeline template's own inputs (spec 2026-09-27 §4.3), without ``params`` and
+    #: ``v``: the shop sets them, and no customer changes them (#5701). Empty for a
+    #: template with no pipeline, and for a library file. At most 16 KiB serialised.
+    inputs: dict[str, JsonValue] = Field(default_factory=dict)
+    #: The inputs version ``inputs`` were made at (``inputs.v`` of the output or render
+    #: they came from). None: the commit's own ``INPUTS_VERSION``, which a save stores
+    #: (`listings.py` `with_inputs_version`).
+    inputs_v: int | None = Field(default=None, ge=0, le=2**31 - 1)
     #: Price-book filament ids (plan point 12).
     colours: list[str] = Field(default_factory=list)
     #: Ids of the template's media (``template_media``), in the order to show them; for a

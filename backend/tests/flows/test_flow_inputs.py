@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.core.input_schema import (
+    MAX_PATTERN,
     MAX_PATTERN_SIZE,
     MAX_PATTERNED_LENGTH,
     PATTERN_TIMEOUT_S,
@@ -208,6 +209,27 @@ def test_a_pattern_whose_counted_repeats_are_too_large_is_refused(
 )
 def test_a_pattern_whose_counted_repeats_fit_is_accepted(pattern: str) -> None:
     assert schema_problems(_patterned(pattern)) == []
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_an_array_items_pattern_whose_counted_repeats_are_too_large_is_refused(
+    stored: bool,
+) -> None:
+    """#7512: an array's ``items`` pattern goes through the same bound as a string's."""
+    prop = {"type": "array", "items": {"type": "string", "pattern": "^a{10001}$", "maxLength": 64}}
+    assert schema_problems({"type": "object", "properties": {"s": prop}}, stored=stored) == [
+        f"s: a pattern repeats at most {MAX_PATTERN_SIZE} times, nested counts multiplied"
+    ]
+
+
+@pytest.mark.parametrize("stored", [False, True])
+def test_an_array_items_pattern_that_is_too_long_is_refused(stored: bool) -> None:
+    """#7611: the other bound of the same loop, an ``items`` pattern over `MAX_PATTERN`."""
+    long = "^" + "a" * MAX_PATTERN + "$"
+    prop = {"type": "array", "items": {"type": "string", "pattern": long, "maxLength": 64}}
+    assert schema_problems({"type": "object", "properties": {"s": prop}}, stored=stored) == [
+        f"s: a pattern is at most {MAX_PATTERN} characters"
+    ]
 
 
 @pytest.mark.parametrize(

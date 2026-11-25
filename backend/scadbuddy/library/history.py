@@ -29,7 +29,9 @@ import tarfile
 import tempfile
 import threading
 from collections.abc import Callable, Sequence
+from functools import partial
 from pathlib import Path
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 from scadbuddy.core.gitrepo import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, FULL_ID, GitRepo
@@ -65,7 +67,7 @@ from scadbuddy.core.gitrepo import RevisionNotFoundError as RevisionNotFoundErro
 from scadbuddy.core.gitrepo import RevisionRange as RevisionRange
 from scadbuddy.core.gitrepo import git_env as git_env
 from scadbuddy.core.gitrepo import subject_line as subject_line
-from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
+from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME, model_path
 from scadbuddy.core.tracing import span
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,51 @@ def _gitignore_body(wrapper_prefix: str) -> str:
     )
 
 
+#: Why a template's row is refreshed outside a HEAD transaction (#7317): a commit with
+#: no coordinator, a change that committed nothing, or a catalogue without git.
+RefreshPath = Literal["commit", "no_commit", "no_git"]
+
+
+class TemplateRowsHook(Protocol):
+    """How the history keeps each template's ``templates`` row (#7317, model records
+    spec §5.2) with what it commits. Neither method raises: a failed refresh never
+    fails the write."""
+
+    def for_commit(self, models: list[str], commit: str) -> Callable[[Any], None] | None:
+        """Read the rows of ``models`` as ``commit`` left them, and answer what writes
+        them on the connection of the transaction that records the HEAD. None when
+        they could not be read: the HEAD is still recorded."""
+        ...
+
+    def refresh_locked(self, models: list[str], *, path: RefreshPath) -> None:
+        """Read and write the rows of ``models`` in a transaction of its own, under
+        the write lock."""
+        ...
+
+    def count_failure(self, path: str) -> None:
+        """Count one refresh under ``path`` that failed outside the hook's own calls;
+        the caller has logged it."""
+        ...
+
+
+class _RowsWrite:
+    """A commit's rows write (`TemplateRowsHook.for_commit`), and whether it raised:
+    a write that raised was counted by the hook, so a failed HEAD record does not count
+    it again (review of db7ef61)."""
+
+    def __init__(self, models: list[str], write: Callable[[Any], None]) -> None:
+        self.models = models
+        self.write = write
+        self.raised = False
+
+    def __call__(self, conn: Any) -> None:
+        try:
+            self.write(conn)
+        except Exception:
+            self.raised = True
+            raise
+
+
 class ModelHistory(GitRepo):
     """The git repository under ``data/models``.
 
@@ -162,6 +209,12 @@ class ModelHistory(GitRepo):
         #: `last_commits` as of a HEAD (#2289): the walk is the whole history, over NFS.
         self._last_commits: tuple[str, dict[str, str]] | None = None
         self._last_commits_lock = threading.Lock()
+        #: Writes each template's row with what touches it (#7317). Set once the
+        #: migrations have run; None writes no rows.
+        self.template_rows: TemplateRowsHook | None = None
+        #: The templates the running `commit` or `restore` names, under the write
+        #: lock: whose rows a commit refreshes when git cannot list what it touched.
+        self._writing: list[str] = []
 
     def _gitignore_body(self) -> str:
         return _gitignore_body(self.wrapper_prefix)
@@ -263,10 +316,79 @@ class ModelHistory(GitRepo):
         """:meth:`GitRepo.commit`, then the commit listener with the templates it
         touched."""
         with self._exclusive():
-            created = self._commit_action(message, paths, prepare=prepare, rollback=rollback)
+            self._writing = _ids_of(paths)
+            try:
+                created = self._commit_action(message, paths, prepare=prepare, rollback=rollback)
+            except Exception:
+                self._refresh_uncommitted(paths)
+                raise
+            finally:
+                self._writing = []
+            if created is None:
+                self._refresh_uncommitted(paths)
             touched = self._touched_by(created)
         self._announce(created, touched)
         return created
+
+    def _refresh_uncommitted(self, paths: Sequence[str]) -> None:
+        """Under the write lock: refresh the rows of ``paths`` when no commit landed
+        (#7317). A media caption or reorder changes rows and files git does not
+        track; a failed commit may have changed files all the same."""
+        ids = _ids_of(paths)
+        if self.template_rows is not None and ids:
+            self._guarded(ids, partial(self.template_rows.refresh_locked, ids, path="no_commit"))
+
+    def _guarded(self, models: Sequence[str] | None, call: Callable[[], Any]) -> Any:
+        """``call`` to the rows hook, which must not raise; one that does is logged,
+        never let replace a commit's own outcome (#7317, review B-M2)."""
+        try:
+            return call()
+        except Exception:
+            logger.exception("the template rows hook raised", extra={"templates": models})
+            return None
+
+    def _also_record(self, change: HeadChange) -> Callable[[Any], None] | None:
+        """The rows of the templates ``change`` touched, written in the transaction
+        that records it (#7317). When git could not list them (``models`` None), the
+        templates the write named (review of #7484); None when it named none, and the
+        copy run catches those."""
+        models = change.models if change.models is not None else list(self._writing)
+        if self.template_rows is None or not models:
+            return None
+        found: Callable[[Any], None] | None = self._guarded(
+            models, partial(self.template_rows.for_commit, models, change.commit)
+        )
+        return None if found is None else _RowsWrite(models, found)
+
+    def _unrecorded(self, change: HeadChange, also: Callable[[Any], None] | None) -> None:
+        """The HEAD record failed, and the rows written in its transaction rolled back
+        with it (review of db7ef61, Blocking 2): logged with the template ids and counted
+        under ``commit``. The copy run repairs them."""
+        if not isinstance(also, _RowsWrite) or also.raised or self.template_rows is None:
+            return
+        logger.error(
+            "a commit's template rows rolled back with its HEAD record",
+            extra={"commit": change.commit, "templates": also.models},
+        )
+        self._guarded(also.models, partial(self.template_rows.count_failure, "commit"))
+
+    def _landed_alone(self, commit: str) -> None:
+        """With no coordinator, the rows of ``commit`` in a transaction of their own,
+        still under the write lock (#7317, plan decision 3)."""
+        if self.template_rows is None:
+            return
+        try:
+            models = self._changed_models(commit)
+        except GitError:
+            logger.exception("could not list what a commit touched", extra={"commit": commit})
+            models = list(self._writing)
+            if not models:
+                # Nothing names its templates: none is refreshed, and the miss is
+                # counted (review of db7ef61); the copy run repairs them.
+                self._guarded(None, partial(self.template_rows.count_failure, "commit"))
+                return
+        if models:
+            self._guarded(models, partial(self.template_rows.refresh_locked, models, path="commit"))
 
     def _touched_by(self, commit: str | None) -> list[str]:
         """The templates ``commit`` changed, when anyone is listening for it."""
@@ -306,7 +428,16 @@ class ModelHistory(GitRepo):
             # Under the lock, once settled: a revision another replica just made is
             # not yet visible before (#2385).
             resolved = self.resolve(commit)
-            created = self._restore_locked(slug, resolved, f"Restore {slug} to {resolved[:7]}")
+            self._writing = _ids_of([slug])
+            try:
+                created = self._restore_locked(slug, resolved, f"Restore {slug} to {resolved[:7]}")
+            except Exception:
+                self._refresh_uncommitted([slug])
+                raise
+            finally:
+                self._writing = []
+            if created is None:
+                self._refresh_uncommitted([slug])
             touched = self._touched_by(created)
         self._announce(created, touched)
         if created is None:
@@ -456,6 +587,32 @@ class ModelHistory(GitRepo):
             for path in paths.splitlines():
                 model_id = _model_id(path)
                 if model_id:
+                    newest.setdefault(model_id, commit)
+        return newest
+
+    def last_commits_since(self, base: str, ids: Sequence[str]) -> dict[str, str]:
+        """The newest commit in ``base..HEAD`` that touched each of ``ids``, from one
+        ``git log`` (#7317, plan decision 5): what a copy run corrects its walk with
+        when HEAD moved since. An id no such commit touched is absent."""
+        if not ids:
+            return {}
+        wanted = set(ids)
+        log = self._out(
+            "log",
+            "--format=%x1e%H",
+            "--name-only",
+            f"{base}..HEAD",
+            "--",
+            *(model_path(model_id) for model_id in wanted),
+        )
+        newest: dict[str, str] = {}
+        for record in log.split(_RECORD):
+            commit, _, paths = record.strip().partition("\n")
+            if not commit:
+                continue
+            for path in paths.splitlines():
+                model_id = _model_id(path)
+                if model_id in wanted:
                     newest.setdefault(model_id, commit)
         return newest
 
@@ -680,6 +837,22 @@ def _model_id(path: str) -> str | None:
     if parts[0] == BUILTIN_DIR:
         return f"{BUILTIN_PREFIX}{parts[1]}" if len(parts) > 2 else None
     return parts[0] if len(parts) > 1 else None
+
+
+def _ids_of(paths: Sequence[str]) -> list[str]:
+    """The templates a change's paths name (#7317, plan decision 4): a slug itself,
+    ``_builtin/<slug>`` as ``builtin:<slug>``. The bare ``_builtin`` names none: the
+    start copy follows the built-in sync."""
+    ids: list[str] = []
+    for path in paths:
+        parts = path.strip("/").split("/")
+        if parts[0] == BUILTIN_DIR:
+            model_id = f"{BUILTIN_PREFIX}{parts[1]}" if len(parts) > 1 else None
+        else:
+            model_id = parts[0] if parts[0] and not parts[0].startswith(".") else None
+        if model_id is not None and model_id not in ids:
+            ids.append(model_id)
+    return ids
 
 
 def _reparent(member: tarfile.TarInfo, prefix: str) -> tarfile.TarInfo:

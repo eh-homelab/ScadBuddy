@@ -189,7 +189,7 @@ def test_a_save_whose_write_fails_holds_nothing(
     def full(*_: object, **__: object) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(OutputStore, "create", full)
+    monkeypatch.setattr(OutputStore, "prepare", full)
     # The base's answer for a copy that fails (#427), raised after the release.
     response = client.post("/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press())
     assert response.status_code == 404
@@ -234,7 +234,7 @@ def test_a_save_cancelled_mid_write_keeps_its_holds(
     def cancelled(*_: object, **__: object) -> None:
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(OutputStore, "create", cancelled)
+    monkeypatch.setattr(OutputStore, "prepare", cancelled)
     with TestClient(app, raise_server_exceptions=False) as client:
         client.post("/api/v1/models/demo/outputs", json={"job_id": job_id}, headers=press())
     assert {part for part, _ in held(pool)} == set(parts)
@@ -372,7 +372,7 @@ def test_overlapping_saves_under_one_id_never_touch_each_others_output(
     job_id, parts = finished(app, tmp_path)
     state: AppState = getattr(app.state, STATE_ATTR)
     kind = state.components.get(OPERATIONS).kinds["output_create"]
-    real = state.outputs.create
+    real = state.outputs.prepare
     inside = threading.Event()
     go = threading.Event()
     calls: list[str | None] = []
@@ -393,7 +393,7 @@ def test_overlapping_saves_under_one_id_never_touch_each_others_output(
         broken = job.model_copy(update={"outputs": [chosen.model_copy(update={"result": gone})]})
         return real(broken, **kwargs)
 
-    monkeypatch.setattr(state.outputs, "create", create)
+    monkeypatch.setattr(state.outputs, "prepare", create)
     shared = uuid.uuid4().hex
     body = {
         "slug": "demo",

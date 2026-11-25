@@ -1,8 +1,11 @@
 import { memo, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
+import { Link } from 'react-router'
 import { PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
+import { inventoryPaths } from '../../lib/inventoryLinks'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
-import { entityApi, entityParts, type EntityProperty, type KindPropertySchema, type PropertyValue } from './api'
+import { entityParts, entityApi, type EntityProperty, type KindPropertySchema, type PropertyValue } from './api'
+import { KindKeysForm } from './KindKeysForm'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -14,6 +17,9 @@ const TYPES = Object.keys(TYPE_LABELS) as ValueType[]
 
 type PropertySet = Record<string, PropertyValue | null>
 type Patch = (set: PropertySet) => Promise<void>
+
+/** The kind whose keys are each item kind's own. */
+const ITEM = 'item'
 
 /** What the schema says of a key: its JSON Schema `type` (one, or a union) and its description. */
 type KeyDoc = { type?: string | string[]; description?: string }
@@ -179,14 +185,16 @@ export const PropertiesPanel = memo(function PropertiesPanel({ entity, title }: 
 })
 
 function EntityProperties({ entity, title = 'Properties' }: { entity: string; title?: string }) {
-  const { kind } = entityParts(entity)
   const list = useAsync(() => entityApi.properties(entity), [entity])
-  const schema = useAsync(() => entityApi.propertySchema(kind), [kind])
+  // #7067 — per entity: an item's schema is its item kind's, which `GET /entity-kinds/item/…` refuses.
+  const schema = useAsync(() => entityApi.entityPropertySchema(entity), [entity])
   const properties = list.data ?? []
   const keys = new Set(properties.map((property) => property.key))
   const docs = keyDocs(schema.data)
   const suggestions = [...new Set([...Object.keys(docs), ...(schema.data?.keys_in_use ?? []).map((row) => row.key)])].sort()
   const keysId = useId()
+  const { kind } = entityParts(entity)
+  const [editingKeys, setEditingKeys] = useState(false)
   // One PATCH at a time for the whole panel: each reply is the entity's whole set, so a
   // second write in flight could answer first and the older reply would then show.
   const [writing, setWriting] = useState(false)
@@ -210,7 +218,29 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
 
   return (
     <section aria-label={title} className="flex flex-col gap-3">
-      <h3 className="text-[13px] font-medium">{title}</h3>
+      <div className="flex items-baseline justify-between gap-2">
+        <h3 className="text-[13px] font-medium">{title}</h3>
+        {kind === ITEM ? (
+          // An item's keys are its item kind's (409 `schema_owned_by_item_kind`).
+          <Link to={inventoryPaths.kinds} className="text-xs text-muted-foreground underline-offset-4 hover:underline">
+            Edit the kind&apos;s keys
+          </Link>
+        ) : (
+          <Button type="button" size="xs" variant="ghost" aria-expanded={editingKeys} onClick={() => setEditingKeys((open) => !open)}>
+            Edit the kind&apos;s keys
+          </Button>
+        )}
+      </div>
+      {editingKeys && (
+        <KindKeysForm
+          kind={kind}
+          onSaved={() => {
+            setEditingKeys(false)
+            schema.refresh()
+          }}
+          onCancel={() => setEditingKeys(false)}
+        />
+      )}
       <datalist id={keysId}>
         {suggestions.map((key) => (
           <option key={key} value={key} />

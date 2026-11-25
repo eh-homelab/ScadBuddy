@@ -522,9 +522,10 @@ def test_a_write_older_than_the_row_moves_nothing_back(
     assert reports.get(pid) == (FINISH_X, later)
     # Nothing is running, so the next report ends nothing a second time.
     assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
-    # A write as old as the row is the same write again: written, ending nothing.
+    # A write as old as the row is the same write again, ending nothing. It shows nothing
+    # new, so it is not written (#7389): the row keeps its ``seen_at``.
     assert reports.put(pid, FINISH_X, later + timedelta(seconds=1)) is None
-    assert reports.get(pid) == (FINISH_X, later + timedelta(seconds=1))
+    assert reports.get(pid) == (FINISH_X, later)
 
 
 def _camera(url: str | None, percent: int = 0) -> dict[str, Any]:

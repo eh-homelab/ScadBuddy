@@ -53,6 +53,20 @@ export function mulDecimal(a: string, intFactor: number): string {
   return fromScaled(toScaled(a, scale) * BigInt(intFactor), scale)
 }
 
+/** `a × b` of two decimal strings, exactly, with the places of both (#7067). */
+export function mulDecimals(a: string, b: string): string {
+  const scaleA = scaleOf(a)
+  const scaleB = scaleOf(b)
+  return fromScaled(toScaled(a, scaleA) * toScaled(b, scaleB), scaleA + scaleB)
+}
+
+/** `value` rounded half up (away from zero) to `places` decimals, with no trailing zeros (#7067). */
+export function roundDecimal(value: string, places: number): string {
+  const rounded = divDecimal(value, '1', places)
+  const text = rounded.includes('.') ? rounded.replace(/0+$/, '').replace(/\.$/, '') : rounded
+  return text === '-0' ? '0' : text
+}
+
 export function cmpDecimals(a: string, b: string): -1 | 0 | 1 {
   const scale = Math.max(scaleOf(a), scaleOf(b))
   const x = toScaled(a, scale)

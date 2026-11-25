@@ -36,6 +36,7 @@ from scadbuddy.store.content import (
     sweep_content,
 )
 from scadbuddy.store.content_models import blob_digest
+from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.refs import BlobRefs
@@ -95,6 +96,33 @@ async def test_a_new_put_hashes_the_file_once(
     assert await content.read(ref) == path.read_bytes()
 
 
+async def test_a_put_given_its_digest_hashes_nothing(
+    content: ContentStore, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A library upload is hashed while it streams in (#7373): the put reads it once,
+    to upload it, and never hashes it again."""
+    passes = 0
+
+    def counting(data: BlobData) -> tuple[str, int]:
+        nonlocal passes
+        passes += 1
+        return blob_digest(data)
+
+    for module in (content_module, local_module, s3_module):
+        monkeypatch.setattr(module, "blob_digest", counting)
+    path = tmp_path / "upload.3mf"
+    payload = os.urandom(1 << 16)
+    path.write_bytes(payload)
+    digest = (hashlib.sha256(payload).hexdigest(), len(payload))
+    with path.open("rb") as fh:
+        ref = await content.put(
+            "piece", fh, name="upload.3mf", scope=SCOPE, key=render_key("g"), digest=digest
+        )
+    assert passes == 0
+    assert (ref.sha256, ref.size) == digest
+    assert await content.read(ref) == payload
+
+
 class _ClosingBackend(LocalContentBackend):
     """Records each download whose generator was closed."""
 
@@ -151,6 +179,21 @@ async def test_altered_or_missing_bytes_are_reported_not_returned(content: Conte
         await store.read(ref)
     assert await store.stat(K) is None  # a vanished object drops its index row
     assert store.index.get(K) is None
+
+
+async def test_verify_reads_backend_not_cache(tmp_path: Path, pool: Pool) -> None:
+    """`verify` reads the backend's object past the download cache: a corrupt object
+    is False even while the cache keeps a whole copy that `read` still returns."""
+    store = local_content(tmp_path / "remote", pool)
+    store.downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    ref = await store.put("output", b"real", name="m.3mf", scope=SCOPE, key="output-o1-model")
+    await store.aclose()  # the copy into the cache is done
+    assert await store.verify(ref) is True
+    await overwrite_object(store, ref.backend_id, b"fake")
+    assert await store.read(ref) == b"real"  # from the cache
+    assert await store.verify(ref) is False
+    await store.backend.remove(ref.backend_id)
+    assert await store.verify(ref) is False
 
 
 async def test_replace_is_a_compare_and_swap(content: ContentStore) -> None:

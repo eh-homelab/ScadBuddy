@@ -12,6 +12,14 @@ Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record
 two halves, for a route whose write cannot be one callable. `stored` reads a reply with no
 lock, for a route that answers a retry before it does any other work; `has_reply` says
 whether a key holds one before the body is read.
+
+Every write that keeps a ledger row (`idempotent_write`, the report PUT
+`api/crud_print.py` `put_report`, the profile-fetch import's `finish`) commits in
+`core/tracing.py` `traced_transaction`, its COMMIT a span of its own (#7389). A route that
+runs `idempotent_write` inside `filament/spools.py` `FilamentSpoolStore.transaction` (the
+bulk spools and the CSV import in `api/filament.py`, a new spool at a tray in
+`api/tray_spools.py`) gets a savepoint there; the outer transaction is a
+`traced_transaction` too, so its COMMIT is the span.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.crud.guard import CrudCaller
 
 #: Who a ledger row is keyed under: a CRUD caller, or a public route's area whose
@@ -151,7 +160,7 @@ def idempotent_write(
     """``write`` once per ``key``, in one transaction with its ledger row: the stored reply
     of a key seen before, else ``write``'s, recorded. A ``write`` that raises records
     nothing, and nothing it wrote commits."""
-    with conn.transaction():
+    with traced_transaction(conn):
         stored = idempotent(conn, caller, key, route, body)
         if stored is not None:
             return stored

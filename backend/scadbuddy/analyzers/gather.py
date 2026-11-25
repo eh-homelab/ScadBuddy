@@ -17,6 +17,7 @@ import asyncio
 import logging
 import zipfile
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -82,8 +83,13 @@ async def gather_context(
     trays: Callable[[], Awaitable[FilamentOptions | None]] | None = None,
     refused: str | None = None,
     reads: SbRows | None = None,
+    stack: AsyncExitStack | None = None,
 ) -> AnalysisContext:
-    """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
+    """``stack`` holds the output's 3MF (`AnalysisContext.model_3mf`) while the caller
+    runs the analyzers: the model blob's temporary file, removed when the caller closes
+    it (#7256). Without one the 3MF is the output's NFS file.
+
+    ``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
     the plate's filament slots are read off an uploaded file. ``remembered`` is what the
     dialog reopens with for this subject.
 
@@ -110,7 +116,7 @@ async def gather_context(
         context.unavailable["output"] = "this configuration has not been rendered yet"
         context.unavailable["geometry"] = "this configuration has not been rendered yet"
     else:
-        context.model_3mf = await asyncio.to_thread(_model_path, outputs, meta)
+        context.model_3mf = await _model_path(outputs, meta, stack)
         await _read_geometry(context, outputs, meta)
 
     if route is not None:
@@ -163,7 +169,18 @@ async def gather_context(
     return context
 
 
-def _model_path(outputs: OutputStore, meta: OutputMeta) -> Path | None:
+async def _model_path(
+    outputs: OutputStore, meta: OutputMeta, stack: AsyncExitStack | None
+) -> Path | None:
+    """The output's 3MF as a path the analyzers read: with ``stack``, the model blob's
+    temporary file (removed when the caller closes ``stack``), else the NFS file
+    (#7256)."""
+    if stack is not None:
+        return await stack.enter_async_context(outputs.local_role(meta.id, "model"))
+    return await asyncio.to_thread(_model_file, outputs, meta)
+
+
+def _model_file(outputs: OutputStore, meta: OutputMeta) -> Path | None:
     path = outputs.directory(meta.id) / MODEL_NAME
     return path if path.is_file() else None
 
@@ -173,7 +190,7 @@ async def _read_geometry(context: AnalysisContext, outputs: OutputStore, meta: O
     # measured on its own, as ``GET /outputs/{id}/geometry?plate=`` does.
     plate = context.request.plate_id
     try:
-        context.geometry = await asyncio.to_thread(outputs.geometry, meta.id, plate)
+        context.geometry = await outputs.geometry(meta.id, plate)
     except NoSuchPlateError as error:
         context.unavailable["geometry"] = str(error)
     except FileNotFoundError:

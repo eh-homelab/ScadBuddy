@@ -42,6 +42,7 @@ from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
+from tests.support.saved_outputs import save_files
 from tests.test_geometry import carrot
 
 
@@ -847,8 +848,20 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
 
     cache = paths.output_dir(model, created["id"]) / "geometry.json"
     assert json.loads(cache.read_text(encoding="utf-8")) == body
-    # Served from the cache from then on: a doctored cache comes back as written.
-    cache.write_text(json.dumps({**body, "height_mm": 42}), encoding="utf-8")
+    # Served from the cache from then on: its row in `output_derived` (#7256), so a
+    # doctored row comes back as written.
+    rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
+    found = rows.derived(created["id"], "geometry", 1)
+    assert found is not None and found[1] == body
+    outputs = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
+    rows.write_derived(
+        created["id"],
+        "geometry",
+        1,
+        found[0],
+        {**body, "height_mm": 42},
+        model_sha=outputs.model_sha(created["id"]),
+    )
     assert client.get(f"/api/v1/outputs/{created['id']}/geometry").json()["height_mm"] == 42
 
 
@@ -1082,7 +1095,7 @@ def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     job = state.render.store.read(job_id)
     with pytest.raises(InputsError):
-        state.outputs.create(job, inputs={"params": {"width": "12"}})
+        save_files(state.outputs, job, inputs={"params": {"width": "12"}})
     output_dir = paths.outputs / model
     assert not output_dir.exists() or not any(output_dir.iterdir())
 
@@ -1189,13 +1202,13 @@ def test_a_result_swept_while_it_is_copied_is_a_404(
     job_id = _finished_job(client, model)
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     result = state.render.store.read(job_id).result
-    create = state.outputs.create
+    create = state.outputs.prepare
 
     def swept_first(*args: Any, **kwargs: Any) -> Any:
         (paths.root / getattr(result, swept)).unlink()
         return create(*args, **kwargs)
 
-    monkeypatch.setattr(state.outputs, "create", swept_first)
+    monkeypatch.setattr(state.outputs, "prepare", swept_first)
     response = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     )
@@ -1439,3 +1452,8 @@ def test_the_start_copies_the_saved_outputs_to_rows(client: TestClient) -> None:
         time.sleep(0.1)
     last = rows.last_run()
     assert last is not None and last["finished_at"] is not None
+
+
+def test_local_store_keeps_output_bytes_in_files(client: TestClient) -> None:
+    # #7256, Ruling R1: the `local` store has no content store, so no output blobs.
+    assert getattr(client.app.state, STATE_ATTR).outputs.bytes is None  # type: ignore[attr-defined]

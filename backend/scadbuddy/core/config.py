@@ -187,9 +187,9 @@ class Config:
     #: #7316: where this process spools whole files while it works on them. Under
     #: ``blob-spool``, the store's request-body spool (`ContentStore.spool`): a cached
     #: download's private copy, the slicer's and print worker's PUT bodies, slice
-    #: bodies, native thumbnail copies and an order's archive copy. Under
-    #: ``library-spool``, every read of a Bambuddy library file. Unset, under the data
-    #: volume's ``cache/``. Only files of this process's own go here (README
+    #: bodies, native thumbnail copies, a library upload's body and an order's archive
+    #: copy. Under ``library-spool``, every read of a Bambuddy library file. Unset, under
+    #: the data volume's ``cache/``. Only files of this process's own go here (README
     #: "Deploying" sizes it). `build_store` applies it on the API and on a render
     #: worker where it is set there. It reads it once, onto the download cache, so with
     #: no download cache (a cap of 0) a library read spools under ``cache/``.

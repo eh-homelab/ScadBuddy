@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import errno
 import hashlib
@@ -12,7 +13,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -49,7 +50,9 @@ from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
     LEGACY_PRESETS_NAME,
     MODEL_META_NAME,
+    README_NAME,
     SOURCE_NAME,
+    THUMBNAIL_NAME,
     DataPaths,
     is_builtin,
     model_path,
@@ -92,6 +95,15 @@ from scadbuddy.library.presets import (
 )
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
+from scadbuddy.library.template_rows import (
+    BIGINT_MAX,
+    BIGINT_MIN,
+    META_TEXT_MAX,
+    NOT_STORABLE,
+    TemplateRow,
+    TemplateRows,
+    template_stamp,
+)
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -111,11 +123,10 @@ if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
     # `render.provenance`, so a runtime import here would be circular.
     from scadbuddy.library.outputs import OutputStore
+    from scadbuddy.library.template_refresh import TemplateRefresh
 
 logger = logging.getLogger(__name__)
 
-THUMBNAIL_NAME = "thumbnail.png"
-README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
 #: A duplicate's staging folder under ``cache/`` (#156, #212).
@@ -259,6 +270,7 @@ class InvalidModelMetaError(ValueError):
     def __init__(self, slug: str, reason: str) -> None:
         super().__init__(f"the model.json of {slug!r} is not valid: {reason}")
         self.slug = slug
+        self.reason = reason
 
 
 #: A template's own interface: the directory its `ui` module and files live in.
@@ -540,18 +552,34 @@ def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
     return ModelMeta.model_validate({"name": default_name, **cleaned})
 
 
+def revision_meta(directory: Path, slug: str) -> ModelMeta | None:
+    """The template's model.json in ``directory`` (a revision's), read as the catalogue
+    reads it; None when it cannot be read."""
+    try:
+        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
+        return meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
+    except (OSError, ValueError, ValidationError):
+        return None
+
+
+def inputs_version_in(directory: Path, pipeline: PipelineDeclaration) -> int | None:
+    """The ``INPUTS_VERSION`` of the pipeline a template in ``directory`` (a revision's)
+    declares, read without running it (`inputs_version_of`); None for a module that cannot
+    be read."""
+    try:
+        return inputs_version_of((directory / pipeline.module).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def declares_pipeline(directory: Path, slug: str) -> bool:
     """Whether the template's model.json in ``directory`` (a revision's) declares a
     pipeline (spec 2026-09-27 §5.1), read as the catalogue reads it. A malformed
     declaration counts: the job then reaches the worker, whose `load_pipeline` names
     what is wrong with it. An unreadable model.json declares none, and the job renders
     `model.scad`'s parameters."""
-    try:
-        raw = json.loads((directory / MODEL_META_NAME).read_text(encoding="utf-8"))
-        meta = meta_from_raw(raw if isinstance(raw, dict) else {}, slug)
-    except (OSError, ValueError, ValidationError):
-        return False
-    return meta.pipeline is not None or meta.pipeline_raw is not None
+    meta = revision_meta(directory, slug)
+    return meta is not None and (meta.pipeline is not None or meta.pipeline_raw is not None)
 
 
 class ModelPatch(BaseModel):
@@ -595,6 +623,52 @@ class ThumbnailOrigin:
     source: ThumbnailSource | None = None
     output_id: str | None = None
     preview_id: str | None = None
+
+
+#: A thumbnail read: the image, its content type and the `ETag` of what was read.
+ThumbnailRead = tuple[bytes, str, str]
+#: A thumbnail's read, None for no image. It reads the files in threads.
+ThumbnailReader = Callable[[], Coroutine[Any, Any, ThumbnailRead | None]]
+
+
+@dataclass(frozen=True)
+class ThumbnailRef:
+    """Which thumbnail a template has now, named without reading it (#7317, spec §5.4):
+    ``etag`` names its source (an own cover's sha256, ``"output-<id>"``,
+    ``"preview-<id>"``), so a matching ``If-None-Match`` needs no read. ``read``
+    answers the bytes, the content type and the `ETag` of what it read, which can
+    differ when the source moved in between (plan decision 12); None for no image."""
+
+    etag: str
+    read: ThumbnailReader
+
+
+#: One thumbnail source: its `ETag` and its read, or None when it has no image.
+#: Blocking.
+_ThumbnailSource = Callable[[], tuple[str, ThumbnailReader] | None]
+
+
+def _first_source(sources: list[_ThumbnailSource]) -> ThumbnailRef | None:
+    """The first source that has an image, as a ref whose read falls through to the
+    later sources when that image is gone by the time it is read. Blocking."""
+    for index, source in enumerate(sources):
+        found = source()
+        if found is None:
+            continue
+        etag, read = found
+        return ThumbnailRef(etag, _read_through(read, sources[index + 1 :]))
+    return None
+
+
+def _read_through(read: ThumbnailReader, later: list[_ThumbnailSource]) -> ThumbnailReader:
+    async def first() -> ThumbnailRead | None:
+        image = await read()
+        if image is not None:
+            return image
+        fallback = await asyncio.to_thread(_first_source, later)
+        return None if fallback is None else await fallback.read()
+
+    return first
 
 
 class ModelRecord(ModelMeta):
@@ -658,6 +732,27 @@ class ModelRecord(ModelMeta):
     inputs_version: int = Field(default_factory=int)
 
 
+@dataclass(frozen=True)
+class ModelSummary:
+    """What a caller that only names, searches or filters models needs of one: no media,
+    cover, preview or revision work (#7317 Task 8, spec §5.4)."""
+
+    slug: str
+    origin: Literal["builtin", "mine"]
+    name: str
+    description: str
+    tags: list[str]
+
+
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when there is none."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
+
+
 class Catalogue:
     """``data/models/<slug>/`` — one directory per model, metadata in a JSON sidecar."""
 
@@ -703,6 +798,14 @@ class Catalogue:
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: Writes each template's ``templates`` row after a change that the history
+        #: does not refresh (#7317): with no git, and a built-in's added media. Set
+        #: once the migrations have run; None writes no rows.
+        self.refresh: TemplateRefresh | None = None
+        #: The ``templates`` rows (#7317 phase 2): `slugs`, `list_models` and `record`
+        #: read them once a copy run has finished (`_from_rows`). Set once the
+        #: migrations have run; None reads the files.
+        self.rows: TemplateRows | None = None
         #: Each template's `ui_version` and the HEAD it was read at: the walk it takes
         #: is made once per commit, not on every record of the template (#1469).
         self._ui_versions: dict[str, tuple[str, str | None]] = {}
@@ -723,7 +826,14 @@ class Catalogue:
 
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
-        -- a revision restored straight through the history."""
+        -- a revision restored straight through the history.
+
+        Without git it also refreshes the templates' rows (#7317, spec §5.2): there
+        is no history to do it, and no other replica."""
+        if self.refresh is not None and not self._has_history:
+            ids = [slug for slug in slugs if slug != BUILTIN_DIR]
+            if ids:
+                self.refresh.refresh_locked(ids, path="no_git")
         if self.on_change is None:
             return
         for slug in slugs:
@@ -743,18 +853,35 @@ class Catalogue:
         the way in is ordinary filesystem I/O -- a PVC that has gone read-only or
         full since boot would otherwise 500 a source edit that had already been
         written to disk, telling the client it failed when it did not.
+
+        A lock wait that fails leaves the rows unrefreshed (#7317, final review M1):
+        under the lock the history refreshes them whether or not a commit lands, but
+        here nothing does, so the miss is logged and counted under ``no_commit``.
         """
         try:
             if self.history is None or not self.history.available:
                 return None
+            locked = False
+
+            def held() -> None:
+                # Runs first under the write lock, on every commit attempt.
+                nonlocal locked
+                locked = True
+
             try:
-                return self.history.commit(message, *slugs)
+                return self.history.commit(message, *slugs, prepare=held)
             except (GitError, OSError):
                 # NOT `extra={"message": ...}`: `message` is a reserved LogRecord
                 # attribute, and logging raises KeyError on the collision -- which
                 # would turn this whole tolerate-and-continue branch into the crash
                 # it exists to prevent.
                 logger.exception("could not record a revision", extra={"revision_message": message})
+                if not locked and self.refresh is not None:
+                    logger.error(
+                        "could not refresh the templates' rows: the write lock was not taken",
+                        extra={"templates": list(slugs), "refresh_path": "no_commit"},
+                    )
+                    self.refresh.count_failure("no_commit")
                 return None
         finally:
             # The files are written whether or not the revision was recorded.
@@ -901,44 +1028,159 @@ class Catalogue:
                 return directory / item.poster, content_type_of(item.poster)
         return None
 
-    def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+    async def read_thumbnail(self, slug: str) -> tuple[bytes, str] | None:
         """The catalogue thumbnail and its content type: the template's cover, else
-        the first generated output's plate cover, else the default-render preview,
-        else None."""
+        the first generated output's plate cover (`OutputStore.read_plate_cover`, from
+        the output's blobs, #7256), else the default-render preview, else None. The file
+        reads run in threads."""
         with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
-            found = self._thumbnail(slug)
+            found = await asyncio.to_thread(self._own_cover, slug)
+            if found is None and self.outputs is not None:
+                plate = await self.outputs.read_plate_cover(slug)
+                found = (plate, "image/png") if plate is not None else None
+            if found is None:
+                found = await asyncio.to_thread(self._preview, slug)
             current.set_attribute("scadbuddy.found", found is not None)
             return found
 
-    def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+    def _own_cover(self, slug: str) -> tuple[bytes, str] | None:
+        """The template's own cover image and its content type. Blocking."""
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
             with contextlib.suppress(FileNotFoundError):
                 return cover[0].read_bytes(), cover[1]
-        if self.outputs is not None:
-            plate = self.outputs.plate_cover(slug)
-            if plate is not None:
-                return plate, "image/png"
+        return None
+
+    def _preview(self, slug: str) -> tuple[bytes, str] | None:
+        """The default-render preview, when it is served. Blocking."""
         if self.previews is None or not self.serve_previews:
             return None
         preview = self.previews.image(slug)
         return (preview, "image/png") if preview is not None else None
 
+    async def thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+        """The catalogue thumbnail, named by its source, or None (#7317, plan Task 9).
+        From the template's row once the rows are copied: its own cover, else the
+        first output's plate cover, else the preview, with no file read or stat
+        until ``read``. No row and no folder is :class:`ModelNotFoundError`, and so is
+        a row whose folder is gone, at ``read``. A row that lags its media
+        (`TemplateRow.media_newer`), a template with files but no row (a failed
+        refresh, as `record`), and every template before the copy, is read
+        (`read_thumbnail`) and tagged by the bytes. The lookups and reads run in
+        threads; the output's plate cover is read blob first (#7256)."""
+        with span("catalogue.thumbnail_ref", attributes={"scadbuddy.slug": slug}) as current:
+            from_rows, ref = await asyncio.to_thread(self._thumbnail_ref, slug)
+            if not from_rows:
+                ref = await self._files_thumbnail_ref(slug)
+            current.set_attribute("scadbuddy.found", ref is not None)
+            return ref
+
+    async def _files_thumbnail_ref(self, slug: str) -> ThumbnailRef | None:
+        found = await self.read_thumbnail(slug)
+        if found is None:
+            return None
+        image, content_type = found
+        # Over the bytes, so it changes exactly when the image does.
+        etag = f'"{hashlib.sha256(image).hexdigest()}"'
+
+        async def read() -> ThumbnailRead:
+            return image, content_type, etag
+
+        return ThumbnailRef(etag, read)
+
+    def _thumbnail_ref(self, slug: str) -> tuple[bool, ThumbnailRef | None]:
+        """Whether the row answers, and its ref when it does. Blocking."""
+        row: TemplateRow | None = None
+        if self._from_rows():
+            assert self.rows is not None
+            row = self.rows.get(slug)
+            if row is None:
+                # A template with files but no row (a failed refresh) is read from its
+                # files, as `record` reads it (#7631 review).
+                if self.exists(slug):
+                    return False, None
+                raise ModelNotFoundError(slug)
+        if row is None or row.media_newer:
+            return False, None
+        listed = row
+        ref = _first_source(
+            [
+                lambda: self._own_cover_source(listed),
+                lambda: self._output_cover_source(slug),
+                lambda: self._preview_source(slug),
+            ]
+        )
+        if ref is None:
+            return True, None
+        read = ref.read
+
+        async def read_if_there() -> ThumbnailRead | None:
+            # A row whose folder is gone (a hand removal) has no thumbnail, as
+            # `record` (final review M4). Only a read checks: a 304 stats nothing.
+            await asyncio.to_thread(self._require, slug)
+            return await read()
+
+        return True, ThumbnailRef(ref.etag, read_if_there)
+
+    def _own_cover_source(self, row: TemplateRow) -> tuple[str, ThumbnailReader] | None:
+        cover = row.cover
+        if cover is None:
+            return None
+
+        async def read() -> ThumbnailRead | None:
+            try:
+                image = await asyncio.to_thread((self.paths.root / cover["path"]).read_bytes)
+            except OSError:
+                return None
+            # The same tag as before the copy: the hash of the bytes.
+            return image, cover["content_type"], f'"{hashlib.sha256(image).hexdigest()}"'
+
+        return f'"{cover["sha256"]}"', read
+
+    def _output_cover_source(self, slug: str) -> tuple[str, ThumbnailReader] | None:
+        outputs = self.outputs
+        if outputs is None:
+            return None
+        output_id = outputs.plate_cover_output(slug)
+        if output_id is None:
+            return None
+        etag = f'"output-{output_id}"'
+
+        async def read() -> ThumbnailRead | None:
+            # Blob first, else the file, as `read_plate_cover` (#7256).
+            image = await outputs.plate_image(slug, output_id)
+            return None if image is None else (image, "image/png", etag)
+
+        return etag, read
+
+    def _preview_source(self, slug: str) -> tuple[str, ThumbnailReader] | None:
+        previews = self.previews
+        if previews is None or not self.serve_previews:
+            return None
+        preview_id = previews.preview_id(slug)
+        if preview_id is None:
+            return None
+
+        async def read() -> ThumbnailRead | None:
+            found = await asyncio.to_thread(previews.current_image, slug)
+            if found is None:
+                return None
+            current, image = found
+            return image, "image/png", f'"preview-{current}"'
+
+        return f'"preview-{preview_id}"', read
+
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)
         if not meta_path.is_file():
             return {}
-        try:
-            loaded: Any = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
-            raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
-        return loaded if isinstance(loaded, dict) else {}
+        return _raw_meta_of(slug, meta_path.read_bytes())
 
     def _meta(self, slug: str, raw: dict[str, Any]) -> ModelMeta:
         """``raw`` as this model's metadata, or :class:`InvalidModelMetaError`."""
         try:
-            return meta_from_raw(raw, slug.removeprefix(BUILTIN_PREFIX))
+            return meta_from_raw(raw, _default_name(slug))
         except ValidationError as error:
             problems = "; ".join(
                 f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
@@ -969,7 +1211,147 @@ class Catalogue:
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
+    def _from_rows(self) -> bool:
+        """Whether the readers answer from the ``templates`` rows: a copy run has
+        finished, so every template has one (#7317, spec §5.4)."""
+        return self.rows is not None and self.rows.copied()
+
     def record(self, slug: str) -> ModelRecord:
+        """The template's record. From its row once the rows are copied, with its
+        revision pair and ``ui_version`` still read from git; a template with no row
+        but files (a failed refresh, an older pod's create) is read from its files
+        (plan decision 11). A row whose folder is gone (a hand removal, a delete whose
+        row drop failed) is :class:`ModelNotFoundError`, as before the copy. A row whose
+        ``model.json`` Postgres cannot store (NaN, a lone surrogate) is read from its
+        file too, as before the copy."""
+        if not self._from_rows():
+            return self._fresh_record(slug)
+        assert self.rows is not None
+        row = self.rows.get(slug)
+        if not self.exists(slug):
+            raise ModelNotFoundError(slug)
+        if row is None:
+            logger.warning("a template has no row; read its files", extra={"slug": slug})
+            return self._fresh_record(slug)
+        if _not_storable(row):
+            logger.warning(
+                "a template's model.json cannot be stored in its row; read its files",
+                extra={"slug": slug},
+            )
+            return self._fresh_record(slug)
+        version, previous = self.version_pair(slug)
+        upstreams: dict[str, TemplateRow | None] = {}
+
+        def upstream_row(upstream_id: str) -> TemplateRow | None:
+            if upstream_id not in upstreams:
+                assert self.rows is not None
+                upstreams[upstream_id] = self.rows.get(upstream_id)
+            return upstreams[upstream_id]
+
+        def output_covers(slug: str) -> str | None:
+            return None if self.outputs is None else self.outputs.plate_cover_output(slug)
+
+        def preview_ids(slug: str) -> str | None:
+            return None if self.previews is None else self.previews.preview_id(slug)
+
+        return self._row_record(
+            row,
+            version=version,
+            history=self._has_history,
+            upstream_row=upstream_row,
+            media=self.media_store.items(slug),
+            cover=self.media_store.cover(slug) if is_builtin(slug) else None,
+            output_cover=output_covers,
+            preview_id=preview_ids,
+            ui_version=self.ui_version,
+            previous_version=previous,
+        )
+
+    def _row_record(
+        self,
+        row: TemplateRow,
+        *,
+        version: str | None,
+        history: bool,
+        upstream_row: Callable[[str], TemplateRow | None],
+        media: list[MediaItem],
+        cover: str | None,
+        output_cover: Callable[[str], str | None],
+        preview_id: Callable[[str], str | None],
+        ui_version: Callable[[str], str | None] | None,
+        previous_version: str | None,
+    ) -> ModelRecord:
+        """``row`` as a record, with no file read: the media views take their sizes
+        from the row's ``files``. A row whose ``model.json`` is not JSON, or does not
+        parse, is :class:`InvalidModelMetaError`, as its file is."""
+        slug = row.template_id
+        if row.meta is None:
+            raise InvalidModelMetaError(slug, row.meta_error or "not JSON")
+        raw, meta = self._parsed(slug, row.meta)
+        sizes = self._row_sizes(row)
+        listed, media_cover = self._media_listing(
+            slug, meta, lambda _: media, lambda _: cover, sizes=sizes
+        )
+        thumbnail = ThumbnailOrigin()
+        if self._cover(slug, listed) is not None:
+            thumbnail = ThumbnailOrigin("model")
+        elif (output_id := output_cover(slug)) is not None:
+            thumbnail = ThumbnailOrigin("output", output_id=output_id)
+        elif self.serve_previews and (preview := preview_id(slug)) is not None:
+            thumbnail = ThumbnailOrigin("preview", preview_id=preview)
+
+        def upstream_version(upstream_id: str) -> str | None:
+            found = upstream_row(upstream_id)
+            return None if found is None else found.version
+
+        return self._build_record(
+            slug,
+            raw,
+            meta,
+            version=version,
+            history=history,
+            upstream_version=upstream_version,
+            upstream_exists=lambda upstream_id: upstream_row(upstream_id) is not None,
+            updated_at=row.updated_at,
+            has_readme=row.has_readme,
+            inputs_version=row.inputs_version,
+            media=listed,
+            media_cover=media_cover,
+            thumbnail=thumbnail,
+            ui_version=ui_version(slug) if ui_version is not None and meta.ui is not None else None,
+            previous_version=previous_version,
+        )
+
+    def _row_sizes(self, row: TemplateRow) -> Callable[[Path], int | None]:
+        """A file's size as ``row.files`` records it, or None: what `_file_size`
+        answers from the disk, read from the row (`template_row` keys it so).
+
+        A media file the row does not record is stat'ed only while the row lags its
+        media rows (`TemplateRow.media_newer`): they commit before the template's row,
+        so a new item is on the disk and in `template_media` before its row knows it
+        (Task 7 review I1). Once the row is newer, a file it lacks was gone at its
+        refresh, and is missing with no stat (Task 8 review M1)."""
+        directory = self.paths.model_dir(row.template_id)
+        added = self.paths.builtin_media_dir(row.template_id)
+
+        def sizes(path: Path) -> int | None:
+            if path.is_relative_to(directory):
+                key = path.relative_to(directory).as_posix()
+            elif path.is_relative_to(added):
+                key = f"builtin-media/{path.relative_to(added).as_posix()}"
+            else:
+                return None
+            if key in row.files:
+                return row.files[key]
+            if row.media_newer and key.startswith((f"{MEDIA_DIR}/", "builtin-media/")):
+                return _file_size(path)
+            return None
+
+        return sizes
+
+    def _fresh_record(self, slug: str) -> ModelRecord:
+        """The template's record read from its files: what a write answers, so its
+        answer shows the write even when the row's refresh failed (plan decision 11)."""
         # One `git log` for the record's own pair (#2158); an upstream's is its own read.
         version, previous = self.version_pair(slug)
         return self._record(
@@ -983,17 +1365,33 @@ class Catalogue:
     def _inputs_version(self, slug: str, meta: ModelMeta) -> int:
         if meta.pipeline is None:
             return 0
-        path = self.paths.model_dir(slug) / meta.pipeline.module
-        try:
-            return inputs_version_of(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            return 0
+        return inputs_version_in(self.paths.model_dir(slug), meta.pipeline) or 0
 
     def print_settings(self, slug: str) -> dict[str, ProcessValue]:
         """The template's ``print_settings`` as its model.json has them now (#770);
         none for a template that is gone. One whose model.json is invalid is
-        :class:`InvalidModelMetaError`, naming the key."""
-        return self._meta(slug, self.read_raw_meta(slug)).print_settings
+        :class:`InvalidModelMetaError`, naming the key. From the row once the rows are
+        copied (#7317 Task 8)."""
+        return self._settings_meta(slug)[0].print_settings
+
+    def _settings_meta(self, slug: str) -> tuple[ModelMeta, TemplateRow | None]:
+        """The metadata the print settings are read from, and the row it came from.
+        Once the rows are copied: the row's ``meta``, or its ``meta_error`` as
+        :class:`InvalidModelMetaError`. The files, as before the copy, for a template
+        with no row but files and for a row whose ``model.json`` Postgres cannot store;
+        none for a template that is gone."""
+        if self._from_rows():
+            assert self.rows is not None
+            # One stat: a row whose folder is gone has none, as `record` is 404 for
+            # it (Task 8 review M2).
+            if not self.exists(slug):
+                return self._meta(slug, {}), None
+            row = self.rows.get(slug)
+            if row is not None and row.meta is not None:
+                return self._meta(slug, row.meta), row
+            if row is not None and not _not_storable(row):
+                raise InvalidModelMetaError(slug, row.meta_error or "not JSON")
+        return self._meta(slug, self.read_raw_meta(slug)), None
 
     def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
         """The template's ``part_print_settings`` as its model.json has them now
@@ -1002,26 +1400,29 @@ class Catalogue:
         A key that is not a ``// color`` parameter of the template's ``model.scad`` is
         refused too, naming it, so a typo never sets nothing in silence. A template
         with a pipeline (whose params need not be ``model.scad``'s) or with no
-        ``model.scad`` is only warned about."""
-        meta = self._meta(slug, self.read_raw_meta(slug))
+        ``model.scad`` is only warned about. From the row once the rows are copied: its
+        ``colour_params`` (NULL where ``model.scad`` could not be read)."""
+        meta, row = self._settings_meta(slug)
         declared = meta.part_print_settings
         if declared:
-            try:
-                source = self.paths.model_source(slug).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                source = None
-            colours = (
-                {n for n, a in find_annotations(source).items() if a.kind == "color"}
-                if source is not None
-                else set()
-            )
+            found: list[str] | None
+            if row is not None:
+                found = row.colour_params
+            else:
+                try:
+                    source = self.paths.model_source(slug).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    found = None
+                else:
+                    found = [n for n, a in find_annotations(source).items() if a.kind == "color"]
+            colours = set(found or ())
             unknown = [name for name in declared if name not in colours]
             if unknown:
                 problem = (
                     f"part_print_settings names {', '.join(map(repr, unknown))}, which is not a"
                     " // color parameter of model.scad"
                 )
-                if source is None or meta.pipeline is not None:
+                if found is None or meta.pipeline is not None:
                     logger.warning("template %s: %s", slug, problem)
                 else:
                     raise InvalidModelMetaError(slug, problem)
@@ -1043,26 +1444,8 @@ class Catalogue:
         chosen cover, from the listing's one query each; without them they are read
         for this template alone."""
         self._require(slug)
-        raw = self.read_raw_meta(slug)
-        if is_builtin(slug):
-            # Only `POST /models/import` sets `origin_url`, after fetching it over
-            # https, and the catalogue renders it as a link -- a bundled model.json
-            # never supplies one (#179). Dropped on read: the mirror must stay
-            # byte-identical to the image or it re-syncs on every boot.
-            raw.pop("origin_url", None)
-            # Nor is a built-in anything's duplicate (#156): only a duplicate of
-            # mine records an upstream.
-            raw.pop("upstream", None)
-        meta = self._meta(slug, raw)
+        raw, meta = self._parsed(slug, self.read_raw_meta(slug))
         version = version_of(slug)
-        upstream_state: UpstreamState | None = None
-        if meta.upstream is not None and history:
-            exists = self.exists(meta.upstream.id)
-            upstream_state = state_of(
-                meta.upstream,
-                exists=exists,
-                revision=version_of(meta.upstream.id) if exists else None,
-            )
         try:
             modified = self.paths.model_source(slug).stat().st_mtime
         except FileNotFoundError:
@@ -1073,28 +1456,190 @@ class Catalogue:
             modified = max(modified, self.paths.model_meta(slug).stat().st_mtime)
         media, media_cover = self._media_listing(slug, meta, media_of, cover_of)
         thumbnail = self.thumbnail_source(slug, media)
+        return self._build_record(
+            slug,
+            raw,
+            meta,
+            version=version,
+            history=history,
+            upstream_version=version_of,
+            upstream_exists=self.exists,
+            updated_at=datetime.fromtimestamp(modified, UTC),
+            has_readme=self.readme_path(slug).is_file(),
+            inputs_version=self._inputs_version(slug, meta),
+            media=media,
+            media_cover=media_cover,
+            thumbnail=thumbnail,
+            ui_version=ui_version_of(slug)
+            if ui_version_of is not None and meta.ui is not None
+            else None,
+            previous_version=previous_version_of(slug) if previous_version_of is not None else None,
+        )
+
+    def _parsed(self, slug: str, raw: dict[str, Any]) -> tuple[dict[str, Any], ModelMeta]:
+        """``raw`` as a record reads it (`_as_recorded`), and parsed: or
+        :class:`InvalidModelMetaError`."""
+        recorded = _as_recorded(slug, raw)
+        return recorded, self._meta(slug, recorded)
+
+    def _build_record(
+        self,
+        slug: str,
+        raw: dict[str, Any],
+        meta: ModelMeta,
+        *,
+        version: str | None,
+        history: bool,
+        upstream_version: Callable[[str], str | None],
+        upstream_exists: Callable[[str], bool],
+        updated_at: datetime,
+        has_readme: bool,
+        inputs_version: int,
+        media: list[MediaView],
+        media_cover: str | None,
+        thumbnail: ThumbnailOrigin,
+        ui_version: str | None,
+        previous_version: str | None,
+    ) -> ModelRecord:
+        """The record of ``slug`` from what was read, from its files (`_record`) or its
+        row (`_row_record`). ``raw`` and ``meta`` are `_parsed`'s."""
+        upstream_state: UpstreamState | None = None
+        if meta.upstream is not None and history:
+            exists = upstream_exists(meta.upstream.id)
+            upstream_state = state_of(
+                meta.upstream,
+                exists=exists,
+                revision=upstream_version(meta.upstream.id) if exists else None,
+            )
         return ModelRecord(
             **meta.model_dump(exclude={"media"}),
             media=media,
             media_cover=media_cover,
             ui_error=meta.ui_error,
             pipeline_error=meta.pipeline_error,
-            inputs_version=self._inputs_version(slug, meta),
+            inputs_version=inputs_version,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail.source is not None,
             thumbnail_source=thumbnail.source,
             thumbnail_output_id=thumbnail.output_id,
             thumbnail_preview_id=thumbnail.preview_id,
-            has_readme=self.readme_path(slug).is_file(),
-            updated_at=datetime.fromtimestamp(modified, UTC),
+            has_readme=has_readme,
+            updated_at=updated_at,
             version=version,
-            ui_version=ui_version_of(slug)
-            if ui_version_of is not None and meta.ui is not None
-            else None,
-            previous_version=previous_version_of(slug) if previous_version_of is not None else None,
+            ui_version=ui_version,
+            previous_version=previous_version,
             upstream_state=upstream_state,
             invalid_libraries=invalid_entries(raw.get("libraries")),
+        )
+
+    def template_row(
+        self, template_id: str, *, version: str | None, head: str | None
+    ) -> TemplateRow | None:
+        """The template's derived row, read from its files (#7317, model records spec
+        §5.1, §5.2), or None when its folder has no ``model.scad``. ``version`` is its
+        last commit and ``head`` the HEAD it was read at, both the caller's.
+
+        It reads ``model.json`` and the media rows once. A ``model.json`` that is not
+        JSON keeps its text (cut to `META_TEXT_MAX`) instead of ``meta``; one that does
+        not parse keeps ``meta``; both set ``meta_error``. Unlike `record`, it never
+        raises for either."""
+        directory = self.paths.model_dir(template_id)
+        models = self.paths.models
+        below = [directory, *directory.parents]
+        revalidate_dirs(*reversed([path for path in below if path.is_relative_to(models)]))
+        source = self.paths.model_source(template_id)
+        try:
+            info = source.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        modified = info.st_mtime
+        # A metadata edit writes model.json alone, and is as much a change (#947).
+        with contextlib.suppress(FileNotFoundError):
+            modified = max(modified, self.paths.model_meta(template_id).stat().st_mtime)
+
+        meta: dict[str, Any] | None = None
+        meta_error: str | None = None
+        meta_text: str | None = None
+        parsed: ModelMeta | None = None
+        # One read: a second could see another file, or none (review M1).
+        data = _read_regular(self.paths.model_meta(template_id))
+        try:
+            meta = {} if data is None else _raw_meta_of(template_id, data)
+            if (problem := _unstorable(meta)) is not None:
+                # Kept as if not JSON: Postgres refuses the dict (review I1).
+                raise InvalidModelMetaError(template_id, f"{NOT_STORABLE} ({problem})")
+        except InvalidModelMetaError as error:
+            assert data is not None
+            meta = None
+            meta_error = error.reason
+            meta_text = _storable_text(data.decode("utf-8", "replace")[:META_TEXT_MAX])
+        if meta is not None:
+            try:
+                parsed = self._meta(template_id, _as_recorded(template_id, meta))
+            except InvalidModelMetaError as error:
+                meta_error = error.reason
+        inputs_version = self._inputs_version(template_id, parsed) if parsed is not None else 0
+        # The column is bigint (review A-I1). Past its range the row keeps the value
+        # clamped to it, and its meta and name stay what `record` answers (#7317 Task 5).
+        inputs_version = min(max(inputs_version, BIGINT_MIN), BIGINT_MAX)
+
+        builtin = is_builtin(template_id)
+        rows = self.media_store.items(template_id)
+        chosen = self.media_store.cover(template_id) if builtin else None
+        files: dict[str, int] = {}
+        added_dir = self.paths.builtin_media_dir(template_id)
+
+        def sizes(path: Path) -> int | None:
+            size = _file_size(path)
+            if size is not None:
+                if path.is_relative_to(directory):
+                    files[path.relative_to(directory).as_posix()] = size
+                else:
+                    files[f"builtin-media/{path.relative_to(added_dir).as_posix()}"] = size
+            return size
+
+        sizes(self.thumbnail_path(template_id))
+        media: list[MediaView] = []
+        if parsed is not None or not builtin:
+            media = self._media_listing(
+                template_id, parsed, lambda _: rows, lambda _: chosen, sizes=sizes
+            )[0]
+        cover: dict[str, str] | None = None
+        found = self._cover(template_id, media)
+        if found is not None:
+            with contextlib.suppress(FileNotFoundError):
+                cover = {
+                    "path": found[0].relative_to(self.paths.root).as_posix(),
+                    "content_type": found[1],
+                    "sha256": hashlib.sha256(found[0].read_bytes()).hexdigest(),
+                }
+
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            colour_params = None
+        else:
+            colour_params = [n for n, a in find_annotations(text).items() if a.kind == "color"]
+
+        return TemplateRow(
+            template_id=template_id,
+            origin="builtin" if builtin else "mine",
+            meta=meta,
+            meta_error=None if meta_error is None else _storable_text(meta_error),
+            meta_text=meta_text,
+            name=_storable_text(parsed.name if parsed is not None else _default_name(template_id)),
+            version=version,
+            updated_at=datetime.fromtimestamp(modified, UTC),
+            has_readme=self.readme_path(template_id).is_file(),
+            inputs_version=inputs_version,
+            colour_params=colour_params,
+            files=files,
+            cover=cover,
+            files_stamp=template_stamp(self.paths, template_id, rows, chosen),
+            refreshed_head=head,
         )
 
     @property
@@ -1102,7 +1647,16 @@ class Catalogue:
         return self.history is not None and self.history.available
 
     def slugs(self) -> list[str]:
-        """Every template id, mine then the built-ins, without building records."""
+        """Every template id, mine then the built-ins, without building records: the
+        rows' ids once they are copied (in the walk's order, plan decision 14), else
+        the walk of the folders."""
+        if self._from_rows():
+            assert self.rows is not None
+            return self.rows.ids()
+        return self._walked_slugs()
+
+    def _walked_slugs(self) -> list[str]:
+        """:meth:`slugs` from the folders, whatever the rows say."""
         return _templates_in(self.paths.models) + [
             f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
         ]
@@ -1135,19 +1689,48 @@ class Catalogue:
         """Every readable pin of every model, by library name, reading each
         ``model.json`` once: what :meth:`library_pins` answers for one name, less the
         entries that cannot be read as a pin. One walk answers any number of names
-        (#253, review of #740)."""
-        # Every model's model.json on the NFS share: one span for the walk (#7245).
+        (#253, review of #740). From the rows' ``meta`` once they are copied (#7317
+        Task 8); a ``model.json`` that is not JSON pins nothing here, and one that does
+        not validate still pins."""
+        # Every model's model.json on the NFS share, or one query: one span (#7245).
         with span("catalogue.library_pin_index") as current:
-            slugs = self.slugs()
-            current.set_attribute("scadbuddy.models", len(slugs))
-            return self._library_pin_index(slugs)
+            raws = self.raw_metas()
+            current.set_attribute("scadbuddy.models", len(raws))
+            return self._library_pin_index(raws)
 
-    def _library_pin_index(self, slugs: list[str]) -> dict[str, list[tuple[str, ModelLibrary]]]:
+    def raw_metas(self, slugs: Sequence[str] | None = None) -> dict[str, dict[str, Any] | None]:
+        """Each template's ``model.json`` as a dict (`read_raw_meta`), None where it does
+        not read as one; every template's, or those of ``slugs``, in their order. From
+        the rows' ``meta`` once they are copied (one query, #7317 Task 8). A row whose
+        ``model.json`` Postgres cannot store, and one of ``slugs`` with no row (a failed
+        refresh; a template that is gone reads as ``{}``, as `read_raw_meta`), read the
+        file."""
+        if not self._from_rows():
+            return {
+                slug: self._file_raw(slug) for slug in (self.slugs() if slugs is None else slugs)
+            }
+        assert self.rows is not None
+        rows = self.rows.all() if slugs is None else self.rows.many(slugs)
+        found = {
+            row.template_id: self._file_raw(row.template_id) if _not_storable(row) else row.meta
+            for row in rows
+        }
+        if slugs is None:
+            return found
+        return {slug: found[slug] if slug in found else self._file_raw(slug) for slug in slugs}
+
+    def _file_raw(self, slug: str) -> dict[str, Any] | None:
+        try:
+            return self.read_raw_meta(slug)
+        except (InvalidModelMetaError, OSError):
+            return None
+
+    def _library_pin_index(
+        self, raws: Mapping[str, dict[str, Any] | None]
+    ) -> dict[str, list[tuple[str, ModelLibrary]]]:
         index: dict[str, list[tuple[str, ModelLibrary]]] = {}
-        for slug in slugs:
-            try:
-                raw = self.read_raw_meta(slug)
-            except InvalidModelMetaError:
+        for slug, raw in raws.items():
+            if raw is None:
                 continue
             entries = raw.get("libraries")
             if not isinstance(entries, list):
@@ -1172,7 +1755,9 @@ class Catalogue:
         # Every model's model.json on the NFS share: one span for the walk (#7245). Not
         # the library's name, which a person chose.
         with span("catalogue.library_entries") as current:
-            slugs = self.slugs()
+            # The folders, never the rows: a removal must count a template whose row a
+            # failed refresh left out (spec §7.4).
+            slugs = self._walked_slugs()
             current.set_attribute("scadbuddy.models", len(slugs))
             found = self._entries_naming(name, commit, slugs)
             current.set_attribute("scadbuddy.found", len(found))
@@ -1202,12 +1787,173 @@ class Catalogue:
                     break
         return found
 
+    def list_summaries(self, slugs: list[str] | None = None) -> list[ModelSummary]:
+        """:meth:`list_models` as summaries: the same templates, in the same order. From
+        the rows once they are copied: one query, and no media, cover, preview or git
+        work (#7317 Task 8). A row whose ``model.json`` does not read is left out, as
+        :meth:`list_models` leaves it out; one Postgres cannot store reads its file."""
+        with span("catalogue.list_summaries") as current:
+            from_rows = self._from_rows()
+            current.set_attribute("scadbuddy.from_rows", from_rows)
+            if not from_rows:
+                return [
+                    ModelSummary(
+                        slug=record.slug,
+                        origin=record.origin,
+                        name=record.name,
+                        description=record.description,
+                        tags=list(record.tags),
+                    )
+                    for record in self.list_models(slugs)
+                ]
+            assert self.rows is not None
+            if slugs is None:
+                listed = self.rows.all()
+            else:
+                by_id = {row.template_id: row for row in self.rows.many(slugs)}
+                listed = [by_id[slug] for slug in slugs if slug in by_id]
+            summaries: list[ModelSummary] = []
+            for row in listed:
+                # A row whose model.json Postgres cannot store reads its file, as
+                # `record` does (#7631 review). Its folder gone, it is left out, as
+                # `_list_rows` leaves it out (#7661).
+                if _not_storable(row):
+                    if not self.exists(row.template_id):
+                        continue
+                    raw = self._file_raw(row.template_id)
+                else:
+                    raw = row.meta
+                if raw is None:
+                    continue
+                try:
+                    _, meta = self._parsed(row.template_id, raw)
+                except InvalidModelMetaError:
+                    continue
+                summaries.append(
+                    ModelSummary(
+                        slug=row.template_id,
+                        origin=row.origin,
+                        name=meta.name,
+                        description=meta.description,
+                        tags=list(meta.tags),
+                    )
+                )
+            current.set_attribute("scadbuddy.models", len(summaries))
+            return summaries
+
     def list_models(self, slugs: list[str] | None = None) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
         is a template, so the ``_builtin`` mirror itself is never listed as one.
         ``slugs``, a window of :meth:`slugs`, builds only those records (#843)."""
         with span("catalogue.list_models") as current:
+            from_rows = self._from_rows()
+            current.set_attribute("scadbuddy.from_rows", from_rows)
+            if from_rows:
+                return self._list_rows(slugs, current)
             return self._list_models(slugs, current)
+
+    def _list_rows(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
+        """:meth:`list_models` from the rows: a fixed number of queries, and no file or
+        git call (#7317, spec §5.4). A template with no row is not listed (§7.6). A row
+        whose ``model.json`` Postgres cannot store is built from its files, as `record`
+        builds it (#7631 review).
+        ``slugs`` (a page's window) loads only their rows and their upstreams' (Task 7
+        review M5), so a page that takes several chunks never reads the whole table."""
+        assert self.rows is not None
+        if slugs is None:
+            listed = self.rows.all()
+            by_id = {row.template_id: row for row in listed}
+        else:
+            by_id = {row.template_id: row for row in self.rows.many(slugs)}
+            listed = [by_id[slug] for slug in slugs if slug in by_id]
+            upstreams = {
+                upstream_id
+                for row in listed
+                if (upstream_id := _upstream_id(row)) is not None and upstream_id not in by_id
+            }
+            if upstreams:
+                by_id.update({row.template_id: row for row in self.rows.many(sorted(upstreams))})
+        # Judged once for the listing, as `record` judges it (Task 7 review M3).
+        history = self._has_history
+        ids = [row.template_id for row in listed]
+        current.set_attribute("scadbuddy.models", len(ids))
+        media = self.media_store.items_for(ids)
+        builtins = [template_id for template_id in ids if is_builtin(template_id)]
+        covers = self.media_store.covers_for(builtins) if builtins else {}
+        output_covers: dict[str, str] = {}
+        if self.outputs is not None:
+            output_rows = self.outputs.rows
+            if output_rows is not None and output_rows.copied():
+                output_covers = output_rows.plate_covers_for(ids)
+            else:
+                # Until the outputs are copied, their folders, as today (plan decision 13).
+                for template_id in ids:
+                    found = self.outputs.plate_cover_output(template_id)
+                    if found is not None:
+                        output_covers[template_id] = found
+        previews: dict[str, str] = {}
+        if self.previews is not None and self.serve_previews:
+            previews = self.previews.preview_ids(ids)
+        records: list[ModelRecord] = []
+        with span("catalogue.records", attributes={"scadbuddy.models": len(ids)}):
+            for row in listed:
+                if _not_storable(row):
+                    # Read from its files, as `record` reads it (#7631 review).
+                    unstored = self._unstored_record(row.template_id, by_id, media, covers)
+                    if unstored is not None:
+                        records.append(unstored)
+                    continue
+                try:
+                    records.append(
+                        self._row_record(
+                            row,
+                            version=row.version,
+                            history=history,
+                            upstream_row=by_id.get,
+                            media=media.get(row.template_id, []),
+                            cover=covers.get(row.template_id),
+                            output_cover=output_covers.get,
+                            preview_id=previews.get,
+                            ui_version=None,
+                            previous_version=None,
+                        )
+                    )
+                except InvalidModelMetaError as error:
+                    logger.warning(
+                        "left a model out of the listing: %s",
+                        error,
+                        extra={"slug": row.template_id},
+                    )
+        return records
+
+    def _unstored_record(
+        self,
+        slug: str,
+        by_id: Mapping[str, TemplateRow],
+        media: Mapping[str, list[MediaItem]],
+        covers: Mapping[str, str],
+    ) -> ModelRecord | None:
+        """The listing's record of a row whose ``model.json`` Postgres cannot store,
+        from its files, as the listing before the copy built it; None when it is gone
+        or does not parse."""
+
+        def version_of(asked: str) -> str | None:
+            found = by_id.get(asked)
+            return None if found is None else found.version
+
+        try:
+            return self._record(
+                slug,
+                version_of,
+                self._has_history,
+                lambda asked: media.get(asked, []),
+                covers.get,
+            )
+        except ModelNotFoundError:
+            return None
+        except InvalidModelMetaError as error:
+            logger.warning("left a model out of the listing: %s", error, extra={"slug": slug})
+            return None
 
     def _list_models(self, slugs: list[str] | None, current: Span) -> list[ModelRecord]:
         if slugs is None:
@@ -1298,9 +2044,12 @@ class Catalogue:
                 self.history.commit(f"Add {slug}", slug)
             except (GitError, OSError):
                 _remove_tree(directory)
+                # The no-commit refresh read the folder before it went: refresh again,
+                # under the lock, so the row goes too (#7317, Task 4 review B-I1).
+                self._refresh_undone(slug)
                 raise
         self.notify_change(slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def duplicate(self, upstream_id: str, slug: str, name: str) -> ModelRecord:
         """Copy a template to a new one of mine at ``slug``, recording its upstream.
@@ -1410,7 +2159,7 @@ class Catalogue:
             self.sweep_duplicate_staging()
         except OSError:
             logger.exception("could not sweep duplicate staging")
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def _carry_overlay(
         self, upstream_id: str, listing: list[MediaView], staged: Path
@@ -1482,7 +2231,7 @@ class Catalogue:
                 (self.paths.model_dir(slug) / LEGACY_PRESETS_NAME).unlink(missing_ok=True)
 
         self._commit_change(f"Update {slug} metadata", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def _require_name_free(self, slug: str, current: str, name: str) -> None:
         """:class:`ModelNameTakenError` when ``name`` renames ``slug`` onto another
@@ -1491,15 +2240,35 @@ class Catalogue:
         wanted = name.casefold()
         if wanted == current.casefold():
             return
-        for other in self.slugs():
-            if other == slug:
-                continue
-            try:
-                taken = self._meta(other, self.read_raw_meta(other)).name
-            except (InvalidModelMetaError, OSError):
-                continue
-            if taken.casefold() == wanted:
+        for other, taken in self._other_names(slug):
+            # A row whose folder is gone holds no name (Task 8 review M2): one stat,
+            # for a match only.
+            if taken.casefold() == wanted and self.exists(other):
                 raise ModelNameTakenError(other, taken)
+
+    def _other_names(self, slug: str) -> Iterator[tuple[str, str]]:
+        """Every other template's name, where its ``model.json`` reads: from the rows
+        once they are copied (one query, #7317 Task 8), else from each file."""
+        if self._from_rows():
+            assert self.rows is not None
+            for other, taken, error in self.rows.names():
+                if other == slug:
+                    continue
+                if error is None:
+                    yield other, taken
+                elif error.startswith(NOT_STORABLE):
+                    yield from self._file_name(other)
+            return
+        for other in self.slugs():
+            if other != slug:
+                yield from self._file_name(other)
+
+    def _file_name(self, slug: str) -> Iterator[tuple[str, str]]:
+        """``slug`` and the name its ``model.json`` gives, or nothing where it does not read."""
+        try:
+            yield slug, self._meta(slug, self.read_raw_meta(slug)).name
+        except (InvalidModelMetaError, OSError):
+            return
 
     def pin_library(
         self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
@@ -1534,7 +2303,7 @@ class Catalogue:
 
         message = f"Pin {library.name} to {library.ref} ({library.commit[:7]}) for {slug}"
         self._commit_change(message, change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def unpin_library(self, slug: str, name: str, *, index: int | None = None) -> ModelRecord:
         """Take ``name`` off this model's libraries. :class:`KeyError` when the
@@ -1567,7 +2336,7 @@ class Catalogue:
             self.write_raw_meta(slug, raw)
 
         self._commit_change(f"Remove library {name} from {slug}", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
         """Set or replace the model's own thumbnail, as one revision. A default-render
@@ -1582,7 +2351,7 @@ class Catalogue:
             self._write_sidecar(slug, THUMBNAIL_NAME, png)
             self._drop_preview(slug)
             self._commit(f"Set {slug} thumbnail", slug)
-            return self.record(slug)
+            return self._fresh_record(slug)
         item_id = new_media_id()
         cover = MediaItem(id=item_id, file=f"{item_id}.png", kind="image")
 
@@ -1596,7 +2365,7 @@ class Catalogue:
 
         self._commit_change(f"Set {slug} thumbnail", change, slug)
         self._drop_preview(slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def has_own_thumbnail(self, slug: str) -> bool:
         """Whether :meth:`delete_thumbnail` has a thumbnail to remove: the model's
@@ -1615,7 +2384,7 @@ class Catalogue:
         if not self._stored_media(slug):
             self._remove_sidecar(slug, THUMBNAIL_NAME)
             self._commit(f"Remove {slug} thumbnail", slug)
-            return self.record(slug)
+            return self._fresh_record(slug)
 
         def change() -> None:
             edit = self._edit_media(slug)
@@ -1625,7 +2394,7 @@ class Catalogue:
             self._save_media(slug, edit)
 
         self._commit_change(f"Remove {slug} thumbnail", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     # ── media (#274) ──────────────────────────────────────────────────────────
 
@@ -1675,12 +2444,18 @@ class Catalogue:
         return self.media_store.items(slug)
 
     def _views(
-        self, slug: str, items: list[MediaItem], *, readonly: bool = False
+        self,
+        slug: str,
+        items: list[MediaItem],
+        *,
+        readonly: bool = False,
+        sizes: Callable[[Path], int | None] = _file_size,
     ) -> list[MediaView]:
         """``items`` (in ``media/``) with what the disk says of each. With none stored,
-        the model's ``thumbnail.png``, if any, is the one item (the legacy thumbnail)."""
+        the model's ``thumbnail.png``, if any, is the one item (the legacy thumbnail).
+        ``sizes`` answers a file's size, or None when there is none."""
         if not items:
-            size = _file_size(self.thumbnail_path(slug))
+            size = sizes(self.thumbnail_path(slug))
             if size is None:
                 return []
             return [
@@ -1693,16 +2468,22 @@ class Catalogue:
                     readonly=readonly,
                 )
             ]
-        return self._item_views(slug, items, self.media_dir(slug), readonly=readonly)
+        return self._item_views(slug, items, self.media_dir(slug), readonly=readonly, sizes=sizes)
 
     def _item_views(
-        self, slug: str, items: list[MediaItem], directory: Path, *, readonly: bool
+        self,
+        slug: str,
+        items: list[MediaItem],
+        directory: Path,
+        *,
+        readonly: bool,
+        sizes: Callable[[Path], int | None] = _file_size,
     ) -> list[MediaView]:
         views: list[MediaView] = []
         for item in items:
-            size = _file_size(self._media_file(slug, item.id, item.file, directory))
+            size = sizes(self._media_file(slug, item.id, item.file, directory))
             poster = item.poster
-            if poster is not None and _file_size(directory / poster) is None:
+            if poster is not None and sizes(directory / poster) is None:
                 poster = None
             views.append(
                 MediaView(
@@ -1722,6 +2503,7 @@ class Catalogue:
         meta: ModelMeta | None = None,
         media_of: Callable[[str], list[MediaItem]] | None = None,
         cover_of: Callable[[str], str | None] | None = None,
+        sizes: Callable[[Path], int | None] = _file_size,
     ) -> tuple[list[MediaView], str | None]:
         """The template's media as listed, and a built-in's chosen cover.
 
@@ -1731,8 +2513,8 @@ class Catalogue:
         item other than the first, is moved to the front: the first item is the
         cover everywhere else too."""
         if not is_builtin(slug):
-            return self._views(slug, self._stored_media(slug, meta, media_of)), None
-        shipped = self._shipped(slug, meta)
+            return self._views(slug, self._stored_media(slug, meta, media_of), sizes=sizes), None
+        shipped = self._shipped(slug, meta, sizes)
         rows = media_of(slug) if media_of is not None else self.media_store.items(slug)
         cover = cover_of(slug) if cover_of is not None else self.media_store.cover(slug)
         taken = {view.id for view in shipped}
@@ -1741,6 +2523,7 @@ class Catalogue:
             [row for row in rows if row.id not in taken],
             self.paths.builtin_media_dir(slug),
             readonly=False,
+            sizes=sizes,
         )
         listed = [*shipped, *added]
         chosen = next((view for view in listed if view.id == cover), None)
@@ -1748,11 +2531,16 @@ class Catalogue:
             return listed, None
         return [chosen, *(view for view in listed if view is not chosen)], chosen.id
 
-    def _shipped(self, slug: str, meta: ModelMeta | None = None) -> list[MediaView]:
+    def _shipped(
+        self,
+        slug: str,
+        meta: ModelMeta | None = None,
+        sizes: Callable[[Path], int | None] = _file_size,
+    ) -> list[MediaView]:
         """What a built-in ships: its bundled model.json's media, or its legacy
         ``thumbnail.png``."""
         meta = meta or self._meta(slug, self.read_raw_meta(slug))
-        return self._views(slug, meta.media, readonly=True)
+        return self._views(slug, meta.media, readonly=True, sizes=sizes)
 
     def list_media(self, slug: str) -> list[MediaView]:
         """The template's images and videos, in order; the first is the cover."""
@@ -1938,7 +2726,7 @@ class Catalogue:
 
         kind = "video" if upload.kind == "video" else "image"
         self._commit_change(f"Add {kind} {item_id} to {slug}", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def set_caption(self, slug: str, item_id: str, caption: str) -> ModelRecord:
         self._require(slug)
@@ -1968,7 +2756,7 @@ class Catalogue:
             self._save_media(slug, edit)
 
         self._commit_change(f"Caption {item_id} in {slug}", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def reorder(self, slug: str, ids: list[str]) -> ModelRecord:
         """Put the items in the order of ``ids``, which must name each exactly
@@ -1990,7 +2778,7 @@ class Catalogue:
             self._save_media(slug, edit)
 
         self._commit_change(f"Reorder {slug} media", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def remove_media(self, slug: str, item_id: str) -> ModelRecord:
         """Remove one item and its files, as one revision. An entry whose file is
@@ -2010,7 +2798,7 @@ class Catalogue:
             self._save_media(slug, edit)
 
         self._commit_change(f"Remove {item_id} from {slug}", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def set_cover(self, slug: str, item_id: str | None) -> ModelRecord:
         """Make ``item_id`` the cover.
@@ -2042,7 +2830,7 @@ class Catalogue:
             self._save_media(slug, edit)
 
         self._commit_change(f"Make {item_id} the cover of {slug}", change, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     # ── a built-in's added media (#722) ───────────────────────────────────────
 
@@ -2051,9 +2839,31 @@ class Catalogue:
         commit: nothing it touches is in the models repository, so the built-in's
         revision never moves."""
         with self._overlay_write_lock():
-            change()
+            try:
+                change()
+            finally:
+                # Under the lock (#7317): no commit lands, so the history refreshes
+                # nothing. Without git, `notify_change` refreshes it.
+                if self.refresh is not None and self._has_history:
+                    self.refresh.refresh_locked([slug], path="no_commit")
         self.notify_change(slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
+
+    def _refresh_undone(self, slug: str) -> None:
+        """Refresh ``slug``'s row under the write lock after a write undid its files.
+        Never raises: the write's own error is what the caller raises. A failure is
+        logged and counted under ``no_commit``; the next copy run repairs the row."""
+        if self.refresh is None or not self._has_history:
+            return
+        assert self.history is not None
+        try:
+            with self.history.write_lock():
+                self.refresh.refresh_locked([slug], path="no_commit")
+        except Exception:
+            logger.exception(
+                "could not refresh an undone template's row", extra={"templates": [slug]}
+            )
+            self.refresh.count_failure("no_commit")
 
     def _overlay_write_lock(self) -> AbstractContextManager[Any]:
         """The lock every write to a built-in's added media takes: the history's
@@ -2177,7 +2987,7 @@ class Catalogue:
         if expected_version is None:
             self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
             self._commit(message, slug)
-            return self.record(slug)
+            return self._fresh_record(slug)
         self._require(slug)
         history = self.history
         if history is None or not history.available:
@@ -2211,12 +3021,12 @@ class Catalogue:
         finally:
             if written:
                 self.notify_change(slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def delete_readme(self, slug: str) -> ModelRecord:
         self._remove_sidecar(slug, README_NAME)
         self._commit(f"Remove {slug} README", slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def _write_sidecar(self, slug: str, name: str, payload: bytes) -> None:
         """Swap one of the model's files in atomically, as `write_source` does.
@@ -2280,7 +3090,7 @@ class Catalogue:
             self._write_edit(
                 slug, source, message or f"Edit {slug} source", expected_version=expected_version
             )
-            return self.record(slug)
+            return self._fresh_record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
 
@@ -2291,7 +3101,7 @@ class Catalogue:
             self._advance_base(slug, upstream, base)
 
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def _write_edit(
         self, slug: str, source: str, message: str, *, expected_version: str | None = None
@@ -2462,7 +3272,7 @@ class Catalogue:
         message = message or f"{verb} {slug}/{name}"
         if expected_version is None:
             self._commit_change(message, change, slug)
-            return self.record(slug)
+            return self._fresh_record(slug)
         # A base check against a revision that never moved would pass a second write
         # over this one unseen, so a failed commit is not logged and kept (review of
         # #741, `_write_edit`; review of #1069 for this one). `change` still counts the
@@ -2473,7 +3283,7 @@ class Catalogue:
         finally:
             if written:
                 self.notify_change(slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def update_files(
         self,
@@ -2526,7 +3336,7 @@ class Catalogue:
         if history is None or not history.available:
             change()
             self.notify_change(slug)
-            return self.record(slug)
+            return self._fresh_record(slug)
         # A commit that fails undoes the files and raises, as `write_file`'s based
         # write does, so no half-applied state waits for the next commit to sweep it.
         try:
@@ -2534,7 +3344,7 @@ class Catalogue:
         finally:
             if applied:
                 self.notify_change(slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────
 
@@ -2629,7 +3439,7 @@ class Catalogue:
                 self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
             except _StaleMergeError:
                 continue
-            return self.record(slug), plan
+            return self._fresh_record(slug), plan
         raise UpstreamStateError(
             f"{slug!r} or its upstream kept changing while the merge was worked out; try again",
             state,
@@ -2670,7 +3480,7 @@ class Catalogue:
             self._write_upstream(slug, upstream.model_copy(update={"dismissed": revision}))
 
         self._commit_change(f"Dismiss {upstream_id} update in {slug}", dismiss, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def detach_upstream(self, slug: str) -> ModelRecord:
         """Forget an upstream that is gone; the template carries on as a plain one of mine."""
@@ -2685,19 +3495,29 @@ class Catalogue:
             self._write_upstream(slug, None)
 
         self._commit_change(f"Detach {slug} from {upstream_id}", detach, slug)
-        return self.record(slug)
+        return self._fresh_record(slug)
 
     def duplicates_of(self, model_id: str) -> list[str]:
-        """The templates of mine whose upstream is ``model_id``."""
-        found: list[str] = []
-        for slug in _templates_in(self.paths.models):
+        """The templates of mine whose upstream is ``model_id``: from the rows once
+        they are copied (one query, #7317 Task 8), else from each ``model.json``. A row
+        whose ``model.json`` Postgres cannot store is judged by its file."""
+        if self._from_rows():
+            assert self.rows is not None
+            found, candidates = self.rows.duplicates_of(model_id)
+            # A row whose folder is gone (a hand removal) is no duplicate, as
+            # before the copy (final review M4): one `exists` per row found.
+            found = [slug for slug in found if self.exists(slug)]
+        else:
+            found, candidates = [], _templates_in(self.paths.models)
+        for slug in candidates:
             try:
                 upstream = self.read_raw_meta(slug).get("upstream")
             except (OSError, ValueError):
                 continue
             if isinstance(upstream, dict) and upstream.get("id") == model_id:
                 found.append(slug)
-        return found
+        # The walk's order (`_templates_in` sorts), with the files' answers merged in.
+        return sorted(found)
 
     def delete(self, slug: str) -> None:
         self._require(slug)
@@ -3217,13 +4037,99 @@ class _MediaEdit:
     legacy: MediaItem | None
 
 
-def _file_size(path: Path) -> int | None:
-    """The size of a regular file, or None when there is none."""
+def _default_name(slug: str) -> str:
+    """The name a template whose ``model.json`` names none shows: its slug."""
+    return slug.removeprefix(BUILTIN_PREFIX)
+
+
+def _read_regular(path: Path) -> bytes | None:
+    """The bytes of ``path``, or None when it is missing or not a regular file. It is
+    opened without blocking and checked on the open descriptor, so a FIFO placed there
+    never blocks the read, and the file checked is the file read."""
     try:
-        info = path.stat()
-    except OSError:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
         return None
-    return info.st_size if stat.S_ISREG(info.st_mode) else None
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        return handle.read()
+
+
+def _raw_meta_of(slug: str, data: bytes) -> dict[str, Any]:
+    """The ``model.json`` bytes ``data`` as `Catalogue.read_raw_meta` answers them."""
+    try:
+        loaded: Any = json.loads(data.decode("utf-8"))
+    # `ValueError` covers `UnicodeDecodeError`, `JSONDecodeError` and an integer too long
+    # for Python's int parser (review A-M1, #7317).
+    except (ValueError, RecursionError) as error:
+        raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _storable_text(text: str) -> str:
+    """``text`` as a Postgres text column takes it: no NUL, lone surrogates replaced."""
+    return text.replace("\x00", "").encode("utf-8", "replace").decode("utf-8")
+
+
+def _has_nul(value: Any) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(_has_nul(key) or _has_nul(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_has_nul(item) for item in value)
+    return False
+
+
+def _unstorable(meta: dict[str, Any]) -> str | None:
+    """Why jsonb refuses ``meta`` (#7317, review I1), or None when it takes it: a NaN
+    or an infinity, a lone surrogate, or a NUL in a key or a string."""
+    try:
+        text = json.dumps(meta, allow_nan=False, ensure_ascii=False)
+    except ValueError:
+        return "a number that is NaN or infinite"
+    except RecursionError:
+        return "nested too deeply"
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return "a lone surrogate"
+    if _has_nul(meta):
+        return "a NUL character"
+    return None
+
+
+def _not_storable(row: TemplateRow) -> bool:
+    """Whether the row's ``model.json`` is JSON that Postgres could not store, so its
+    readers read the file (Task 7 review M2)."""
+    return row.meta is None and (row.meta_error or "").startswith(NOT_STORABLE)
+
+
+def _upstream_id(row: TemplateRow) -> str | None:
+    """The upstream a row of mine's ``model.json`` names, if any (a built-in's is
+    dropped on read, `_as_recorded`)."""
+    if is_builtin(row.template_id) or row.meta is None:
+        return None
+    upstream = row.meta.get("upstream")
+    found = upstream.get("id") if isinstance(upstream, dict) else None
+    return found if isinstance(found, str) else None
+
+
+def _as_recorded(slug: str, raw: dict[str, Any]) -> dict[str, Any]:
+    """``raw`` as a record reads it: a built-in's without ``origin_url`` and ``upstream``."""
+    if not is_builtin(slug):
+        return raw
+    raw = dict(raw)
+    # Only `POST /models/import` sets `origin_url`, after fetching it over
+    # https, and the catalogue renders it as a link -- a bundled model.json
+    # never supplies one (#179). Dropped on read: the mirror must stay
+    # byte-identical to the image or it re-syncs on every boot.
+    raw.pop("origin_url", None)
+    # Nor is a built-in anything's duplicate (#156): only a duplicate of
+    # mine records an upstream.
+    raw.pop("upstream", None)
+    return raw
 
 
 def _routable(slug: str) -> bool:

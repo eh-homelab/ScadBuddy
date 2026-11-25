@@ -26,11 +26,13 @@ Goals
 
 - The off-box copy is complete: a clone plus `git lfs pull` gives every byte.
 - Every template keeps its slug and its files, byte for byte.
+- Every version of every template, deleted ones included, has a new id. (Changed on
+  2026-11-25: the first design kept the pinned and the current versions only. On prod 638 of
+  916 outputs had another version, and all versions add one mesh to the copy.)
 - Every revision an order item, an order revision or a listing pins still resolves.
 
 Non-goals
 
-- Old revisions that nothing pins. The owner accepts their loss.
 - Moving the catalogue to Postgres and the blob store.
 
 Anti-goals
@@ -82,28 +84,46 @@ as it is. A push of a repository that uses LFS runs `git lfs push` first, with `
 derived from the remote's own URL.
 
 **Builder.** A command in the API's image. It makes `data/models-next`. It is idempotent
-and reads the old repository only. It commits each pinned (slug, commit) and the current
-version of every template and built-in, in the order of the old history, with the original
-author and date. (As built: one order for all of them, not the pins first. An upstream is
-older than the `model.json` that names it, so its new id is known when that file is
-written.) Each commit has an `Imported-From: <old id>` trailer, so git itself holds the id
+and reads the old repository only. It commits every version of each template and built-in,
+in the order of the old history, with the original author and date. An upstream is older
+than the `model.json` that names it, so its new id is known when that file is written. A
+delete is a commit too. A revision that the old HEAD does not reach is kept where an order,
+a listing, an output or a `model.json`'s upstream names it. Each file keeps its time, so a
+template's "Updated" stays. Each
+commit has an `Imported-From: <old id>` trailer, so git itself holds the id
 map. It also copies ignored files that are data (videos in `media/`), and not `.renders/`
 or wrappers. It points each `model.json` upstream at the new id. An id that the new history
 does not have stays as it was.
 
-**Check.** Every file's sha256, current and pinned, old against new. Every mesh model
-renders. Push to a branch of the remote, clone, pull, compare again.
+**Check.** Every file's sha256, in every version, old against new. Every mesh model
+renders. Push to a branch of the remote, clone, pull, compare again. (As built: the
+command's `push` sends it to a `models-trial` branch, with the app's own push.)
 
-**Switch.** All API replicas at 0. Run the builder again for the last changes. The
-transaction: set `models_repo_head`, delete the `models` row of `git_remote_pushes`, and
-set `commit` in `order_items`, `order_item_revisions` and `storefront_listings`. A published
-listing keeps its stored snapshot blob and its hold. Rename `models` to `models-old` and
-`models-next` to `models`. Start. The SQL runs only in the API's image with the API's
-credential (root `CLAUDE.md`, "Database access"). The order is: dump the rows, then the
-renames, then the transaction, then start. A crash after the renames leaves the rows as
-they were: run the transaction again, or rename back. A crash in the transaction leaves
-no change in the rows. So the transaction is the point of no return, and after it a roll
-back is: stop, rename back, restore the rows from the dump.
+**Switch.** (Changed on 2026-11-25, from a trace of main `4911d1da0`; read from code, not
+run.) Only the `scadbuddy` Deployment mounts `data/models`. Argo CD has `selfHeal` on, so
+its automated sync is off first. All API replicas are at 0, and nothing is running: render
+jobs, operations, slice prices, template pipelines, listing preparations, backfills. Then:
+
+1. Run the builder and the check again. Dump the rows, and copy each `meta.json`, that the
+   next steps change.
+2. Rename `models` to `models-old` and `models-next` to `models`. Check that the new HEAD is
+   the one that was built and that every slug is there. No API may start while `data/models`
+   is missing or empty: its sweep would delete the outputs and presets (#7649).
+3. Set `model_version` in the `meta.json` of each output whose id is in the map.
+4. One transaction: `commit` and `render_key` in `order_items` and `order_item_revisions`
+   (`render_key` is a hash of the commit: by the rule of `render_key_of`); `commit` in
+   `storefront_listings`, and not `updated_at`, which drops its prices; `model_version` in
+   `outputs.meta`; `scope_key` and `body` of the `template_version` rows of
+   `analyzer_decisions`; `models_repo_head`; no row in `templates` and `template_copy_runs`,
+   which the start copy makes again; and no `models` row in `git_remote_pushes`.
+5. Start one replica and check it, then the rest, then Argo CD.
+
+A published listing keeps its snapshot blob and its hold. The SQL runs only in the API's
+image with the API's credential (root `CLAUDE.md`, "Database access"). Each step can run
+again. A crash before step 4 leaves the rows as they were: go on, or rename back and put
+the `meta.json` files back. A crash in step 4 leaves no change in the rows. After it, a roll
+back is: stop, rename back, put the rows and the files back. What was saved since the switch
+names a new id, so a roll back is for the first minutes only.
 
 **After.** An output of a revision that is gone must open with a clear message, and not
 a 500. `models-old` stays until the owner says to delete it.

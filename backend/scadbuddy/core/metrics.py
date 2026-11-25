@@ -574,6 +574,17 @@ class Metrics:
         self.filament = FilamentCollector()
         if role == "api":
             r.register(self.filament)
+        # The templates' rows (#7317): each failed refresh. The API alone writes them.
+        self.template_refresh_failures = Counter(
+            "scadbuddy_template_refresh_failures_total",
+            "Refreshes of templates' rows that failed (#7317, model records spec §5.2), by"
+            " path: commit (in the HEAD transaction, or a commit with no coordinator),"
+            " no_commit (a change that committed nothing, or a create undone after its commit"
+            " failed) or no_git. The write's own outcome stands; the next copy run repairs"
+            " the rows.",
+            ["path"],
+            registry=r,
+        )
         # A customer's staged files (#6133): the backstop's repairs, each a bug signal.
         self.staged_files_repaired = Counter(
             "scadbuddy_staged_files_repaired",

@@ -834,7 +834,7 @@ async def preview_view(
     Off the loop and under the render budget, for the reasons `plate_thumbnails`
     gives: it is seconds of numpy on a large mesh, and has no child to kill.
     """
-    if not glb.is_file():
+    if not await asyncio.to_thread(glb.is_file):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
     try:
         png = await asyncio.wait_for(
@@ -915,7 +915,9 @@ async def migrate_inputs(
     history: HistoryDep,
 ) -> MigrateResult:
     """Bring saved inputs up to the template's `INPUTS_VERSION` (§8.2)."""
-    record = require_model(catalogue, slug)  # 404 for an unknown template, as `get_model`
+    # 404 for an unknown template, as `get_model`. Off the loop: it reads the row, the
+    # files and git (#7317 Task 7 review M5).
+    record = await asyncio.to_thread(require_model, catalogue, slug)
     v = body.inputs.get("v", 0)
     if record.pipeline is None and record.pipeline_raw is None:
         # No pipeline, so no `migrate` to run, at any revision: the inputs are as they are.

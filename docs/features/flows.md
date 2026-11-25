@@ -106,7 +106,9 @@ So no operation record and no Temporal history holds it in the clear. The operat
 names the task, and `GET /api/v1/tasks/{task_id}` has the answer.
 
 **Two answers.** The run's `workflow_run_decisions` row picks the winner
-(`FlowStore.record_decision`), and the other answer is refused with a 409. The task's row is
+(`FlowStore.record_decision`), and the other answer is refused with a 409. The exception
+is a row whose answer never reached the run and that nothing may still send: a later answer
+takes it over (`backend/scadbuddy/flows/operations.py` `take_over`, #7575). The task's row is
 marked after the run has the answer. So for a moment an answered task can read `open`, and
 so can the `state` of a 409 `not-open`. The operation's mark is best effort. The run's own
 mark (`flow_task_answered`, `final`) is of the answer that the script gets. It replaces

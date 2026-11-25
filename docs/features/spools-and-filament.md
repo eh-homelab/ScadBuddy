@@ -179,13 +179,18 @@ records in the tag's own format (else the `filament_tag_format` setting), reads 
 and binds it only when the read-back equals what was sent. Every write keeps a backup, which
 the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
 `nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
-and holds a tag.
+and holds a tag. A job waits `timeout_s` for a person to arm it; arming gives the run 60 seconds
+(`ARM_SECONDS`) for the tap. Once the page has backed the tag up for a write (`write_begun`), the
+job is never cancelled or expired: it ends with the write's result (its read-back, or the
+page's error), or, when none comes within 10 minutes of the backup, `failed` with `result.code`
+`no_read_back` (the tag may hold the new records, and its backup can restore it). The agent
+waits for either.
 
 ### Properties (#7026)
 
 Design: [inventory spec §6.3a](../superpowers/specs/2026-11-21-inventory-and-purchasing-design.md), D17.
 
-A spool and a spool type can hold properties: free key-value pairs, such as a part number,
+A spool, a spool type and a catalog row (such as an insert type) can hold properties: free key-value pairs, such as a part number,
 barcodes or a lot number. The store is generic and works for any entity, so it is not
 specific to filament. A value is a string, a number, a boolean or a list of strings. A key
 matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per string,
@@ -210,7 +215,11 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `schema_owned_by_item_kind` for `item` (`backend/scadbuddy/api/entity_properties.py`).
 - UI: the section "Files, links and properties" of the spool and type pages
   (`frontend/src/components/entities/PropertiesPanel.tsx`; the spool page's anchor
-  `#files-and-links` stays). A list value has one field per item. A rename or an add onto a key the entity
+  `#files-and-links` stays), and the same three panels under a catalog row's edit form in the
+  Catalog tab (`frontend/src/components/filament/CatalogList.tsx`). A kind's own keys are edited
+  from the panel's "Edit the kind's keys" and the Catalog tab's "Property keys"
+  (`frontend/src/components/entities/KindKeysForm.tsx`, #7656); an item's are its item kind's,
+  on `/inventory/kinds`. A list value has one field per item. A rename or an add onto a key the entity
   already has asks first, since it replaces that key's value.
 - Search: the Spools and Types tabs' search also matches property values, beside the hex
   match on a spool's tag UID and tray UUID (#7151)

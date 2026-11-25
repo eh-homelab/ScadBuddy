@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from typing import Any, Literal
 
 from psycopg import Connection
@@ -251,6 +251,18 @@ class TaskStore:
             for row in rows:
                 self._announce(conn, row)
             return len(rows)
+
+    def delete_for_run_in(self, conn: Connection[DictRow], run_id: str) -> Sequence[DictRow]:
+        """Delete the run's tasks with the run, in the caller's transaction. The ones that
+        were open, for `announce_cancelled_in` once the caller has taken its row locks."""
+        rows = conn.execute(
+            f"DELETE FROM tasks WHERE run_id = %s RETURNING {_MOVED}", (run_id,)
+        ).fetchall()
+        return [row for row in rows if row["state"] == "open"]
+
+    def announce_cancelled_in(self, conn: Connection[DictRow], rows: Sequence[DictRow]) -> None:
+        for row in rows:
+            self._announce(conn, {**row, "state": "cancelled"})
 
     def match_waiting_in(
         self,

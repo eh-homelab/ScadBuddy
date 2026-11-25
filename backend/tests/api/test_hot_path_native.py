@@ -33,7 +33,6 @@ from scadbuddy.bambuddy.catalogue import stop_refreshes
 from scadbuddy.bambuddy.filaments import gather_plate_options
 from scadbuddy.bambuddy.print_run import run_route
 from scadbuddy.bambuddy.trays import tray_spool_id
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.filament.component import FILAMENT, Filament
 from scadbuddy.filament.inventory import PoolSbSpoolReads, read_sb_spools
@@ -71,6 +70,7 @@ from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.no_bambuddy import BambuddyCalledError, forbid_bambuddy
 from tests.support.operations import press
+from tests.support.saved_outputs import rewrite_model
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal, *needs_fake_lan]
 
@@ -360,17 +360,18 @@ def test_a_native_run_of_two_copies_prints_both_and_asks_bambuddy_nothing(
     assert len(names) == 2 and names[1] == f"{names[0]}-c2"
 
 
-def _a_colour_a_plate(paths: DataPaths, output: str) -> None:
+def _a_colour_a_plate(client: TestClient, output: str) -> None:
     """The output's 3MF laid out as an arranged one is (#4710): plate 1 prints only slot
     1 and plate 2 only slot 2, both of the file's two filaments."""
-    [output_3mf] = paths.outputs.glob(f"*/{output}/model.3mf")
     colours = ["#F5547C", "#FFFFFF"]
     parts = [
         ColourPart(index, f"Color {index + 1}", colour, trimesh.creation.box(extents=(10, 10, 5)))
         for index, colour in enumerate(colours)
     ]
     plates = [PlateParts((parts[0],), (1,)), PlateParts((parts[1],), (2,))]
-    write_plates_3mf(plates, colours, output_3mf, thumbnails=None)
+    rewrite_model(
+        client, output, lambda path: write_plates_3mf(plates, colours, path, thumbnails=None)
+    )
 
 
 def _preview_plans(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
@@ -671,7 +672,6 @@ def test_the_preview_and_the_run_resolve_one_slice(
 def test_one_plate_of_several_slices_with_only_its_own_slots(
     native_app: TestClient,
     model: str,
-    paths: DataPaths,
     spans: InMemorySpanExporter,
     fake_lan: FakeLan,
     slicer: FakeSlicer,
@@ -683,7 +683,7 @@ def test_one_plate_of_several_slices_with_only_its_own_slots(
     row = lan_row(native_app, fake_lan)
     held_spool(native_app)
     output = make_output(native_app, model)
-    _a_colour_a_plate(paths, output)
+    _a_colour_a_plate(native_app, output)
     body = {
         "printer": row,
         "copies": 1,

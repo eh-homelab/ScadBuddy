@@ -127,6 +127,8 @@ class Item(_Decimals):
     #: Some lot with stock on hand, or some unit in stock, has no known cost.
     cost_unknown: bool
     low: bool
+    #: Its unarchived supplier offers (R-P2-37).
+    offer_count: int
 
     @field_serializer("low_stock", "life_hours", "on_hand", "stock_value_minor")
     def _decimals(self, value: Decimal | None) -> str | None:
@@ -182,6 +184,11 @@ def _blank_none(text: str | None) -> str | None:
     return None if text is None or not text.strip() else text
 
 
+def _plain(value: Decimal) -> str:
+    """A decimal with no trailing zeros, as `_Decimals` writes one (R-P2-40): `"5.99"`."""
+    return format(value.normalize(), "f")
+
+
 class OfferPricePoint(BaseModel):
     id: UUID
     #: The price of one pack, in `currency`.
@@ -190,6 +197,10 @@ class OfferPricePoint(BaseModel):
     on_date: date
     source: Literal["invoice", "manual"]
     invoice_line_id: UUID | None
+
+    @field_serializer("price")
+    def _price(self, value: Decimal) -> str:
+        return _plain(value)
 
 
 class Offer(BaseModel):
@@ -206,6 +217,10 @@ class Offer(BaseModel):
     archived_at: datetime | None
     #: The newest price point by date.
     latest_price: OfferPricePoint | None
+
+    @field_serializer("pack_size")
+    def _pack_size(self, value: Decimal) -> str:
+        return _plain(value)
 
 
 class OfferInput(BaseModel):
@@ -505,22 +520,41 @@ class UnitStatusInput(BaseModel):
     note: Text = Field(default="", max_length=4000)
 
 
-class RecostedItem(BaseModel):
+class RecostedItem(_Decimals):
     model_config = ConfigDict(extra="forbid")
 
     order_id: str | None
     order_item_id: str
-    #: The order item's parts cost (`-sum(amount_minor)` of its `use` and `return` moves),
-    #: before and after the re-cost.
+    #: The order item's parts cost as job cost reads it (`-sum(amount_minor)` of its
+    #: known-cost `use` and `return` moves, `stock.parts_moved`), before and after.
     before_minor: Decimal
     after_minor: Decimal
-    #: Some of those moves were of unknown cost, before and after.
+    #: A `use` not given back was of unknown cost, before and after.
     before_unknown: bool = False
     after_unknown: bool = False
 
+    @field_serializer("before_minor", "after_minor")
+    def _decimals(self, value: Decimal) -> str | None:
+        return self._decimal(value)
 
-class RecostResult(BaseModel):
+
+class RecostResult(_Decimals):
+    #: The lot's item, and the lot's cost now (and whether it is unknown), which every
+    #: re-costed move took.
+    item_id: UUID
+    unit_cost_minor: Decimal
+    cost_unknown: bool
+    #: The distinct unit costs the changed moves had before, lowest first.
+    before_unit_costs_minor: list[Decimal]
     #: The moves whose snapshot changed.
     moves: int
     #: The order items whose parts cost or its unknown flag changed.
     orders: list[RecostedItem]
+
+    @field_serializer("unit_cost_minor")
+    def _cost(self, value: Decimal) -> str | None:
+        return self._decimal(value)
+
+    @field_serializer("before_unit_costs_minor")
+    def _costs(self, values: list[Decimal]) -> list[str | None]:
+        return [self._decimal(v) for v in values]

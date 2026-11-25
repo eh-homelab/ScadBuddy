@@ -337,7 +337,9 @@ def listing_reference(
     slot for each of ``chosen`` (slot to filament id). Each chosen filament must be one
     of the listing's that ``filaments`` still has and a customer may pick (never a support
     material, `customer_filaments`, #6152), else `InputOutsideListingError`
-    (``colours.<slot>``, ``colour``). ``values`` are `listing_values`' answer."""
+    (``colours.<slot>``, ``colour``). ``values`` are `listing_values`' answer. A pipeline
+    template's reference holds the listing's own inputs too, as publish settled them, and
+    their version (#5701): a customer's values reach ``params`` only."""
     slug, commit, snapshot = listing.design
     slots: list[ColourSlot] = []
     for slot, filament_id in sorted(chosen.items()):
@@ -350,7 +352,11 @@ def listing_reference(
         slots.append(
             ColourSlot(slot=slot, colour=filaments[filament_id].colour, filament_id=filament_id)
         )
-    inputs = {"params": with_defaults(snapshot.schema_, values), "v": 0}
+    inputs = {
+        **snapshot.inputs,
+        "params": with_defaults(snapshot.schema_, values),
+        "v": snapshot.inputs_version,
+    }
     reference = Reference(
         slug=slug,
         commit=commit,
@@ -527,7 +533,7 @@ def slot_filaments(
 ) -> dict[int, str]:
     """``chosen`` (slot to filament id), with each slot it lacks filled with the
     resolved material's filament of the slot's colour in the render
-    (``job.result.colors``), casefolded (#6258). A locked colour that is not support
+    (`slice_price.py` `kit_colours`), casefolded (#6258). A locked colour that is not support
     always has one: `resolve_choice` chooses only a material that offers each locked
     colour (#6302 review). A slot that material has no filament of (a locked support
     colour) stays out, and the shop picks it."""

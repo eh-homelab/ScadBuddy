@@ -29,6 +29,7 @@ from scadbuddy.library.catalogue import Catalogue, declares_pipeline, meta_from_
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, ModelLibrary
 from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError, OutputStore
+from scadbuddy.library.slugs import is_model_id
 from scadbuddy.orders.models import ColourSlot, Reference
 from scadbuddy.render.inputs import InputsError, inputs_key, normalize_inputs
 from scadbuddy.render.job_models import render_key
@@ -208,6 +209,9 @@ async def resolve_reference(
     if inputs is None:
         inputs = {}
 
+    if not is_model_id(slug):
+        # Before any path is made of it: `catalogue.exists` joins it as it is.
+        raise ReferenceError("slug", f"no model named {slug!r}")
     if not await asyncio.to_thread(catalogue.exists, slug):
         remembered = (
             await asyncio.to_thread(history.last_commit, model_path(slug))

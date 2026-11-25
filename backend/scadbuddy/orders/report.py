@@ -8,7 +8,8 @@ same computation as its own ``GET /orders/{id}/costs``; nothing here is a second
 Rows are per currency, never summed across currencies, and per product: an item with a
 model ``slug`` is in that model's row, else an item with a ``sku`` in that SKU's row, else
 in the ``custom`` row ("Custom, no SKU"). A row's figures are its items' figures, summed:
-charged (``revenue_minor``), real cost, and waste, the cost of its test and failed
+charged (``revenue_minor``), real cost (with its parts taken from stock, ``parts_minor``,
+#7067), and waste, the cost of its test and failed
 attempts. An order's own entries, its shipments' cost and its charges are on no item, so
 they are the ``order`` row: the order's figures less its items', over the orders that have
 any. No list filter matches those orders, so the page gives that row no link. A
@@ -76,6 +77,8 @@ class ProfitRow(BaseModel):
     #: Items not cancelled with no charged figure (no accepted quote), in no sum.
     uncharged_items: int = 0
     cost_minor: Money = 0
+    #: The parts taken from stock, in ``cost_minor`` (#7067, ``costs.py`` ``parts_minor``).
+    parts_minor: Money = 0
     margin_minor: Money | None = None
     margin_percent: float | None = None
     margin_state: MarginState | None = None
@@ -140,6 +143,7 @@ class _Sum:
         self.charged = False
         self.uncharged = 0
         self.cost = 0
+        self.parts = 0
         self.waste = 0
         self.estimated = False
         self.unknown: list[CostPart] = []
@@ -153,12 +157,14 @@ class _Sum:
         units: int = 0,
         uncharged: int = 0,
         waste: Money = 0,
+        parts: Money = 0,
         estimated: bool = False,
         unknown: list[CostPart] | None = None,
     ) -> None:
         self.orders.add(order_id)
         self.units += units
         self.cost += cost
+        self.parts += parts
         self.waste += waste
         self.uncharged += uncharged
         if revenue is not None:
@@ -192,6 +198,7 @@ class _Sum:
             revenue_minor=self.revenue,
             uncharged_items=self.uncharged,
             cost_minor=self.cost,
+            parts_minor=self.parts,
             margin_minor=view.margin_minor,
             margin_percent=view.margin_percent,
             margin_state=view.margin_state,
@@ -223,6 +230,7 @@ class _Currency:
                 units=line.quantity if open_ else 0,
                 uncharged=1 if open_ and line.revenue_minor is None else 0,
                 waste=_waste(line),
+                parts=line.parts_minor,
                 estimated=bool(line.estimated),
                 unknown=line.unknown,
             )
@@ -247,6 +255,7 @@ class _Currency:
                 if line.status != "cancelled" and line.revenue_minor is None
             ),
             waste=sum(_waste(line) for line in costs.items),
+            parts=costs.parts_minor,
             estimated=bool(costs.estimated),
             unknown=costs.unknown,
         )

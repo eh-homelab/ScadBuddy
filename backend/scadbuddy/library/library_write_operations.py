@@ -30,8 +30,10 @@ upload the store has no room for is a 507, as ``api/assets.py`` answers it.
 from __future__ import annotations
 
 import asyncio
+import tempfile
+from contextlib import aclosing
 from datetime import timedelta
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import status
 from pydantic import BaseModel, Field, StringConstraints
@@ -52,12 +54,13 @@ from scadbuddy.library.library_file_operations import (
     refuse_queued,
 )
 from scadbuddy.library.operations import PIN_TIMEOUT
+from scadbuddy.operations.blob_claims import BlobClaims
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.copies import release_moved
 from scadbuddy.print_library.store import Unset, UnsetType
-from scadbuddy.store.content_models import StoreFullError
+from scadbuddy.store.content_models import BlobMissingError, ReuseLostError, StoreFullError
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -80,6 +83,8 @@ TRASH_NOT_WHOLE = (
 )
 NOT_MOVED_OUT = "Bambuddy moves only files its API key's user added; the folder was kept"
 MOVED_TO_TOP = "It was moved to the top level of the library first."
+#: Not "send it again": a re-send with the same key replays this answer.
+UPLOAD_GONE = "this request's upload is no longer held; upload the file again"
 
 
 class LibraryFileUpdate(BaseModel):
@@ -95,11 +100,16 @@ class LibraryEntryUpdated(BaseModel):
 
 
 class LibraryFileUpload(BaseModel):
-    """The kind's request: the file's bytes are held by claim (``operations/claims.py``)."""
+    """The kind's request: the file's bytes are held by claim, named by their sha256.
+    ``store`` says where (#7373): ``blob``, the upload blob in the blob store
+    (``operations/blob_claims.py``), which this build's route writes on a remote store;
+    ``file``, a claim file on the data volume (``operations/claims.py``), which the local
+    store's route writes, and an older build's on any store."""
 
     claim: str = Field(pattern=r"^[0-9a-f]{64}$")
     filename: Name
     folder_id: int | None = Field(default=None, ge=1)
+    store: Literal["file", "blob"] = "file"
 
 
 class LibraryFolderCreate(BaseModel):
@@ -446,18 +456,54 @@ def library_write_kinds(state: Core, components: Components) -> list[OperationKi
         LibraryFileUpload.model_validate(request)
         return {}
 
+    async def upload_blob_run(body: LibraryFileUpload) -> dict[str, Any]:
+        """The bytes are in the blob store already: the native library indexes the same
+        object under its file's key, and Bambuddy gets them streamed from a copy under
+        the spool (a download-cache hit on the replica that received them)."""
+        content = state.store.content
+        try:
+            if content is None:
+                raise LookupError("no blob store")
+            ref = await BlobClaims(content).ref(body.claim)
+        except LookupError:
+            raise ApiError(status.HTTP_409_CONFLICT, UPLOAD_GONE) from None
+        native = await library.serving_native()
+        try:
+            if native is not None:
+                row = await native.adopt(body.filename, ref, body.folder_id)
+                return LibraryEntryUpdated(
+                    id=row.id, filename=row.name, folder_id=row.folder_id
+                ).model_dump(mode="json")
+            await asyncio.to_thread(content.spool.mkdir, parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=content.spool) as copy:
+                async with aclosing(content.get(ref)) as chunks:
+                    async for chunk in chunks:
+                        await asyncio.to_thread(copy.write, chunk)
+                await asyncio.to_thread(copy.seek, 0)
+                async with client_for(await settings()) as client:
+                    made = await client.upload_library_file(
+                        body.filename,
+                        copy,
+                        folder_id=body.folder_id,
+                        media_type="application/octet-stream",
+                    )
+        except (ReuseLostError, BlobMissingError):
+            raise ApiError(status.HTTP_409_CONFLICT, UPLOAD_GONE) from None
+        folder_id = made.folder_id if made.folder_id is not None else body.folder_id
+        return LibraryEntryUpdated(
+            id=made.id, filename=made.filename, folder_id=folder_id
+        ).model_dump(mode="json")
+
     async def upload_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFileUpload.model_validate(request)
+        if body.store == "blob":
+            return await upload_blob_run(body)
         try:
             # Streamed from the claim, never read whole: an upload may be 256 MB, and
             # this worker runs inside the API process.
             held = await asyncio.to_thread(ClaimStore(state.paths.claims).open, body.claim)
         except LookupError:
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                # Not "send it again": a re-send with the same key replays this answer.
-                "this request's upload is no longer held; upload the file again",
-            ) from None
+            raise ApiError(status.HTTP_409_CONFLICT, UPLOAD_GONE) from None
         native = await library.serving_native()
         if native is not None:
             with held:

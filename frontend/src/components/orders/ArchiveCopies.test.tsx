@@ -1,5 +1,5 @@
-import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { act, screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
@@ -168,6 +168,335 @@ describe('ArchiveCopies', () => {
     expect(within(archives).queryByRole('button')).toBeNull()
     await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 2)
     expect(reads).toHaveLength(1)
+  })
+
+  it(`waits ${ARCHIVE_READ_MS / 1000} s after each answer, so a read slower than that is not dropped`, async () => {
+    const attempt = printedAttempt()
+    const offer = (attached: boolean): ArchiveOffer => ({
+      archive_id: 8001,
+      status: 'completed',
+      finish_photos: ['finish_8001.jpg'],
+      finished_attachment_id: attached ? 'att-photo' : null,
+      timelapse: false,
+      completed_at: '2026-11-01T12:00:00Z',
+      finished_too_large: false,
+      timelapse_too_large: false,
+    })
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, async () => {
+        const n = ++reads
+        // The second read takes longer than the wait between reads and sees the photo
+        // attached; a third would answer much later and see nothing new.
+        if (n === 2) await delay(ARCHIVE_READ_MS * 1.5)
+        if (n > 2) await delay(ARCHIVE_READ_MS * 100)
+        return HttpResponse.json<AttemptArchives>({ linked: true, attempt, archives: [offer(n === 2)] })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS)
+    await waitFor(() => expect(reads).toBe(2))
+    // act flushes React's work after each step, so a re-read due at 20 s starts before 25 s.
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS / 2))
+    await waitFor(() => expect(archives).toHaveTextContent('Finish photo attached'))
+    expect(reads).toBe(2)
+  })
+
+  it('reads again when the timelapse wait ends, and then says the archive has no timelapse', async () => {
+    const attempt = printedAttempt()
+    const completed = new Date(Date.now() - 50 * 60_000).toISOString()
+    const reads = answer(attempt, { finished_attachment_id: 'att-photo', timelapse: false, completed_at: completed })
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('waiting for Bambuddy to process the timelapse'))
+    expect(reads).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    await waitFor(() => expect(reads).toHaveLength(2))
+    await waitFor(() => expect(archives).toHaveTextContent('no timelapse in Bambuddy for this print'))
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 2)
+    expect(reads).toHaveLength(2)
+  })
+
+  it('offers "Read again" when the read at the end of the timelapse wait fails', async () => {
+    const attempt = printedAttempt()
+    const completed = new Date(Date.now() - 50 * 60_000).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        reads += 1
+        if (reads === 2) return HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              finished_attachment_id: 'att-photo',
+              timelapse: false,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    const { user } = render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('waiting for Bambuddy to process the timelapse'))
+    await act(() => vi.advanceTimersByTimeAsync(10 * 60_000))
+    await within(archives).findByRole('alert')
+    expect(reads).toBe(2)
+    await user.click(within(archives).getByRole('button', { name: 'Read again' }))
+    await waitFor(() => expect(archives).toHaveTextContent('no timelapse in Bambuddy for this print'))
+    expect(within(archives).queryByRole('alert')).toBeNull()
+    expect(within(archives).queryByRole('button', { name: 'Read again' })).toBeNull()
+    expect(reads).toBe(3)
+  })
+
+  it(`keeps the ${ARCHIVE_READS}-read cap when the timelapse wait ends and brings nothing new`, async () => {
+    const attempt = printedAttempt()
+    const completed = new Date(Date.now() - 50 * 60_000).toISOString()
+    // The finish photo stays offered and never attaches; the timelapse never comes.
+    const reads = answer(attempt, { timelapse: false, completed_at: completed })
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    for (let n = 1; n <= ARCHIVE_READS; n++) {
+      await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+      await waitFor(() => expect(reads).toHaveLength(1 + n))
+    }
+    expect(await within(archives).findByRole('button', { name: 'Copy finish photo' })).toBeEnabled()
+    await act(() => vi.advanceTimersByTimeAsync(10 * 60_000))
+    await waitFor(() => expect(archives).toHaveTextContent('no timelapse in Bambuddy for this print'))
+    for (let n = 0; n < 3; n++) await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    expect(reads).toHaveLength(1 + ARCHIVE_READS + 1)
+    expect(within(archives).getByRole('button', { name: 'Copy finish photo' })).toBeEnabled()
+  })
+
+  it('reads again when the timelapse wait ends and newly offers a timelapse', async () => {
+    const attempt = printedAttempt()
+    const completed = new Date(Date.now() - 50 * 60_000).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        reads += 1
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              finished_attachment_id: 'att-photo',
+              timelapse: reads > 1,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('waiting for Bambuddy to process the timelapse'))
+    await act(() => vi.advanceTimersByTimeAsync(10 * 60_000))
+    await waitFor(() => expect(archives).toHaveTextContent('Importing timelapse'))
+    for (let n = 1; n <= ARCHIVE_READS; n++) await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await waitFor(() => expect(reads).toBe(2 + ARCHIVE_READS))
+    expect(await within(archives).findByRole('button', { name: 'Copy timelapse' })).toBeEnabled()
+  })
+
+  it('reads again when an ordinary re-read newly offers a timelapse', async () => {
+    const attempt = printedAttempt()
+    // The print ended 5 minutes ago: the timelapse wait is far from over.
+    const completed = new Date(Date.now() - 5 * 60_000).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        const n = ++reads
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              // The fifth re-read is the first to offer the timelapse.
+              timelapse: n >= 6,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    for (let n = 1; n <= ARCHIVE_READS; n++) {
+      await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+      await waitFor(() => expect(reads).toBe(1 + n))
+    }
+    // A newly offered timelapse is a change: the sixth re-read is not the last.
+    await waitFor(() => expect(archives).toHaveTextContent('Importing timelapse'))
+    expect(within(archives).queryByRole('button', { name: 'Copy timelapse' })).toBeNull()
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await waitFor(() => expect(reads).toBe(2 + ARCHIVE_READS))
+  })
+
+  it('reads again when a re-read after a failed wait-end read newly offers a timelapse', async () => {
+    const attempt = printedAttempt()
+    // The wait ends 55 s after the page opens, after the fifth 10 s re-read.
+    const completed = new Date(Date.now() - 60 * 60_000 + 55_000).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        const n = ++reads
+        // The wait-end read fails; the re-read after it is the first to offer the timelapse.
+        if (n === 7) return HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              timelapse: n > 7,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    for (let n = 1; n <= 5; n++) {
+      await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+      await waitFor(() => expect(reads).toBe(1 + n))
+    }
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS / 2))
+    await within(archives).findByRole('alert')
+    expect(reads).toBe(7)
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await waitFor(() => expect(reads).toBe(8))
+    // A newly offered timelapse is a change: it gets its own re-reads, not a copy at once.
+    await waitFor(() => expect(archives).toHaveTextContent('Importing timelapse'))
+    expect(within(archives).queryByRole('button', { name: 'Copy timelapse' })).toBeNull()
+  })
+
+  it('drops the pending re-read when the read at the end of the timelapse wait starts', async () => {
+    const attempt = printedAttempt()
+    // The wait ends 5 s after the page opens, while the 10 s re-read is pending.
+    const completed = new Date(Date.now() - 60 * 60_000 + ARCHIVE_READ_MS / 2).toISOString()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, async () => {
+        const n = ++reads
+        // The wait-end read is slow: it answers 10 s after it starts.
+        if (n === 2) await delay(ARCHIVE_READ_MS)
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              timelapse: false,
+              completed_at: completed,
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS / 2))
+    await waitFor(() => expect(reads).toBe(2))
+    // The 10 s re-read was due here; the wait-end read is still out.
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 0.7))
+    expect(reads).toBe(2)
+    // The wait-end read answers at 15 s; the next re-read waits 10 s from then.
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS * 0.5))
+    await waitFor(() => expect(archives).toHaveTextContent('no timelapse in Bambuddy for this print'))
+    expect(reads).toBe(2)
+    await act(() => vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS))
+    await waitFor(() => expect(reads).toBe(3))
+  })
+
+  it('"Read again" clears the error and shows the read until it answers', async () => {
+    const attempt = printedAttempt()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, async () => {
+        reads += 1
+        if (reads === 1) return HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+        await delay(ARCHIVE_READ_MS / 2)
+        return HttpResponse.json<AttemptArchives>({ linked: true, attempt, archives: [] })
+      }),
+    )
+    const { user } = render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await within(archives).findByRole('alert')
+    await user.click(within(archives).getByRole('button', { name: 'Read again' }))
+    await waitFor(() => expect(archives).toHaveTextContent("Reading Bambuddy's archives…"))
+    expect(within(archives).queryByRole('alert')).toBeNull()
+    expect(within(archives).queryByRole('button', { name: 'Read again' })).toBeNull()
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS / 2)
+    await waitFor(() => expect(archives).toHaveTextContent("Bambuddy has not linked this print's archive yet."))
+    expect(reads).toBe(2)
+  })
+
+  it('reads again after a re-read that failed', async () => {
+    const attempt = printedAttempt()
+    let reads = 0
+    server.use(
+      http.get(ARCHIVES, () => {
+        reads += 1
+        if (reads === 2) return HttpResponse.json({ detail: 'Bambuddy did not answer' }, { status: 502 })
+        return HttpResponse.json<AttemptArchives>({
+          linked: true,
+          attempt,
+          archives: [
+            {
+              archive_id: 8001,
+              status: 'completed',
+              finish_photos: ['finish_8001.jpg'],
+              finished_attachment_id: reads > 2 ? 'att-photo' : null,
+              timelapse: false,
+              completed_at: '2026-11-01T12:00:00Z',
+              finished_too_large: false,
+              timelapse_too_large: false,
+            },
+          ],
+        })
+      }),
+    )
+    render()
+    const archives = await screen.findByLabelText("Attempt 1's Bambuddy archives")
+    await waitFor(() => expect(archives).toHaveTextContent('Importing finish photo'))
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS)
+    await within(archives).findByRole('alert')
+    await vi.advanceTimersByTimeAsync(ARCHIVE_READ_MS)
+    await waitFor(() => expect(archives).toHaveTextContent('Finish photo attached'))
+    expect(reads).toBe(3)
   })
 
   it('is not shown for an attempt recorded by hand that names no archive', async () => {

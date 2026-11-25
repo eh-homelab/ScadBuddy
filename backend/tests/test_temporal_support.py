@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 import time
 import uuid
@@ -163,3 +164,28 @@ async def test_a_cancel_that_never_lands_fails_the_recorder_by_name(
     monkeypatch.setattr(support, "CANCEL_RECORDED_WITHIN", 0.2)
     with pytest.raises(TimeoutError, match="no cancel request"):
         await cancel_recorded(_NeverCancelled())  # type: ignore[arg-type]
+
+
+async def test_a_failed_cancel_wait_runs_the_recorders_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7554: when the wait fails, the recorder's gate is opened and its pending start
+    is cancelled before the error propagates, so asyncio has no pending task to warn
+    about over the error."""
+    import tests.support.temporal as support
+
+    monkeypatch.setattr(support, "CANCEL_RECORDED_WITHIN", 0.2)
+    gate = asyncio.Event()
+    pending = asyncio.create_task(gate.wait())
+    try:
+        with pytest.raises(TimeoutError, match="no cancel request"):
+            await cancel_recorded(_NeverCancelled(), gate=gate, pending=pending)  # type: ignore[arg-type]
+        assert gate.is_set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    finally:
+        # A failed assertion above must not leave the task pending: its warning would
+        # bury the failure (#7602). Awaited too, so it ends inside the test (#7612).
+        pending.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pending

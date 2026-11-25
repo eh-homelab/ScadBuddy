@@ -19,6 +19,7 @@ from tests.api.test_orders_reopen import item_of
 from tests.api.test_orders_unfulfil import accepted_order
 from tests.api.test_printers import create as create_printer
 from tests.api.test_versions import SLUG
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
 
@@ -348,3 +349,28 @@ def test_each_attempt_says_which_machine_rate_priced_it(
         None,
     )
     assert costs["machine_rate_bases"] == ["price_book", "printer_actuals"]
+
+
+def test_the_costs_carry_the_parts_taken_from_stock(client: TestClient) -> None:
+    """#7067 Task 8: `parts_minor` is the item's `use` moves, in its cost and the order's."""
+    hook = client.post(
+        "/api/v1/inventory/items",
+        json={"kind_id": "hardware", "name": "Job cost hook"},
+        headers=press(),
+    ).json()
+    lot = client.post(
+        f"/api/v1/inventory/items/{hook['id']}/lots",
+        json={"qty": "10", "unit_cost_minor": "12.5"},
+        headers=press(),
+    )
+    assert lot.status_code == 201, lot.text
+    order_id, [item_id] = accepted_order(client)
+    parts = {"parts": [{"item_id": hook["id"], "per_unit": 2}]}
+    assert client.put(f"/api/v1/orders/{order_id}/items/{item_id}/parts", json=parts).is_success
+    fulfil(client, order_id, item_id, 1)
+
+    costs = client.get(f"/api/v1/orders/{order_id}/costs").json()
+
+    assert (costs["items"][0]["parts_minor"], costs["parts_minor"]) == (25, 25)
+    assert costs["items"][0]["other_minor"] == 0
+    assert "parts" not in costs["unknown"]

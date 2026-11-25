@@ -897,27 +897,31 @@ async def slice_and_price(
     currency: str,
     priced_for: Callable[[list[Plate]], Awaitable[PriceSlots]],
     keep: Callable[[bytes], Awaitable[tuple[str, str]]] | None = None,
+    place: Callable[[int, Plate], Plate] | None = None,
     follow_every: float = FOLLOW_EVERY,
 ) -> SlicedPrice:
     """The one slice and price (#6153). A back-office quote (:func:`quote_run`) and a
     storefront price (``orders/storefront/slice_price.py``) both run it. Every plate is
     sliced (``start``) and followed to its end. Each sliced file is fetched and read
     (:func:`read_plate`: a :class:`QuoteError` comes before anything is kept), then kept
-    with ``keep`` when it is given (its blob key and sha256 go on the plate).
-    ``priced_for`` checks the plates and gives the filament of each slot. The plates are
-    then priced with :func:`price_plates` at the policy of :func:`rated_policy` for the
-    printer ``request`` slices for."""
+    with ``keep`` when it is given (its blob key and sha256 go on the plate). ``place``,
+    when it is given, takes each plate read with its position among them (from 0) and gives
+    the one to price: a render of several outputs (#5701) numbers its plates and slots
+    across them. ``priced_for`` checks the plates and gives the filament of each slot. The
+    plates are then priced with :func:`price_plates` at the policy of :func:`rated_policy`
+    for the printer ``request`` slices for."""
     started = await start()
     sliced = await _follow(slicer, started, subject, follow_every)
     plates: list[Plate] = []
-    for plate in sliced:
+    for position, plate in enumerate(sliced):
         payload = await slicer.fetch(plate)
         # Read before it is kept: a file that cannot be priced is never held.
         read_plate(payload, plate.plate_id)
         key = sha256 = None
         if keep is not None:
             key, sha256 = await keep(payload)
-        plates.append(read_plate(payload, plate.plate_id, blob_key=key, sha256=sha256))
+        read = read_plate(payload, plate.plate_id, blob_key=key, sha256=sha256)
+        plates.append(read if place is None else place(position, read))
     slots = await priced_for(plates)
     policy, rate = await rated_policy(book, machine_rate, request.printer, request.printer_id)
     priced = await asyncio.to_thread(

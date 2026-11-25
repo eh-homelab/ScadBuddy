@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { expect, test } from '@playwright/test'
 import { L, spoolId, T } from '../src/mocks/features/filament/seed'
 import { INVOICE, SUPPLIER } from '../src/mocks/features/filamentPurchasingSeed'
+import { INVENTORY } from '../src/mocks/features/inventorySeed'
 
 // #2454 review — every routed page names its tab from its <h1> (usePageTitle). A page
 // with no <h1> inside <main> would quietly get the bare "ScadBuddy" title: one per route
@@ -34,7 +35,7 @@ const PAGES = [
   '/orders',
   // The profit report (#5329): its tab is "Profit by model · ScadBuddy".
   '/orders/profit',
-  // The parts inventory (#5543): its tab is "Parts · ScadBuddy".
+  // The old parts inventory (#5543) opens the Inventory on the Part kind (#7067).
   '/orders/parts',
   '/orders/0e5a3c1e-1111-4222-8333-944455556661',
   '/customers',
@@ -70,6 +71,13 @@ const PAGES = [
   '/filament/labels',
   // The phone page that reads tags (#7273): without Web NFC it shows how to open it on a phone.
   '/filament/scan',
+  // The Inventory area (#7067), with the mock's seeded items (src/mocks/features/inventorySeed.ts).
+  '/inventory',
+  '/inventory/kinds',
+  `/inventory/items/${INVENTORY.HOOK}`,
+  `/inventory/units/${INVENTORY.NOZZLE_UNIT}`,
+  // A lot opens its item's page, which names the tab.
+  `/inventory/lots/${INVENTORY.HOOK_LOT}`,
   // The component gallery (#3653): in the mocked build only, which this spec runs on.
   '/ui-gallery',
 ]
@@ -97,9 +105,10 @@ test('/prints/queue/260 is the queue item, not a print', async ({ page }) => {
   await expect(page).toHaveTitle(waiting('Bracket.gcode.3mf · ScadBuddy'))
 })
 
-test('/orders/parts is the parts inventory, not an order', async ({ page }) => {
+test('/orders/parts opens the Inventory on the Part kind, not an order (#7067)', async ({ page }) => {
   await page.goto('/orders/parts')
-  await expect(page).toHaveTitle(waiting('Parts · ScadBuddy'))
+  await expect(page).toHaveURL(/\/inventory\?kind=part$/)
+  await expect(page).toHaveTitle(waiting('Inventory · ScadBuddy'))
 })
 
 test('covers every route App.tsx declares', () => {

@@ -29,6 +29,7 @@ from scadbuddy.orders.storefront.listings import (
     listing_not_found,
     publish,
     unpublish,
+    with_inputs_version,
 )
 from scadbuddy.orders.storefront.mail import MailConnectionUnsetError
 from scadbuddy.orders.storefront.prepare import (
@@ -102,10 +103,11 @@ async def list_listings(orders: OrdersDep, query: Annotated[ListingQuery, Query(
     status_code=status.HTTP_201_CREATED,
     summary="Make a storefront listing",
 )
-async def create_listing(body: ListingInput, orders: OrdersDep) -> Listing:
+async def create_listing(body: ListingInput, orders: OrdersDep, state: StateDep) -> Listing:
     """A new listing, unpublished, after every other one. Nothing is checked against
-    the template until it is published."""
-    return await asyncio.to_thread(orders.listings.create, body)
+    the template until it is published. ``inputs`` sent with no ``inputs_v`` are kept as
+    of the commit's inputs version (#5701)."""
+    return await asyncio.to_thread(orders.listings.create, await with_inputs_version(state, body))
 
 
 # Before `/listings/{listing_id}`, which would match `order` too.
@@ -137,11 +139,17 @@ async def move_listing(listing_id: str, body: ListingMove, orders: OrdersDep) ->
 
 
 @router.put("/listings/{listing_id}", response_model=Listing, summary="Edit a storefront listing")
-async def update_listing(listing_id: str, body: ListingUpdate, orders: OrdersDep) -> Listing:
+async def update_listing(
+    listing_id: str, body: ListingUpdate, orders: OrdersDep, state: StateDep
+) -> Listing:
     """The listing replaced whole, and unpublished: a change is not live until the shop
-    publishes it again. 409 ``listing_changed`` unless ``updated_at`` is the listing's."""
+    publishes it again. 409 ``listing_changed`` unless ``updated_at`` is the listing's.
+    ``inputs`` sent with no ``inputs_v`` are kept as ``POST`` keeps them."""
     return await asyncio.to_thread(
-        orders.listings.update, listing_id, body.listing, expected_updated_at=body.updated_at
+        orders.listings.update,
+        listing_id,
+        await with_inputs_version(state, body.listing),
+        expected_updated_at=body.updated_at,
     )
 
 
@@ -224,7 +232,12 @@ async def publish_listing(listing_id: str, orders: OrdersDep, state: StateDep) -
     ``listing_media_unknown``, ``listing_material_not_allowed``,
     ``listing_locked_colours_unprintable``: no allowed material offers every locked colour
     and a choice of each offered colour,
-    ``listing_reference``, ``listing_pipeline_unsupported``,
+    ``listing_reference``; of a pipeline template's own inputs (#5701)
+    ``listing_inputs_undeclared``: the template declares no shape for them,
+    ``listing_inputs_invalid`` (with ``reason``) and ``listing_inputs_reserved`` (each
+    with ``name``, such as ``inputs.house.cols``), ``listing_inputs_migration_failed``
+    and ``listing_param_pipeline_set``: the pipeline sets that parameter itself, or
+    ``listing_inputs_unexpected``: inputs on a template with no pipeline;
     ``listing_material_unsliceable``: the shop slice profile has no filament type for a material
     of the listing's filaments, #6153); 409 ``listing_publishing``
     while another publish of it runs; 503 ``listing_publish_busy`` while this process

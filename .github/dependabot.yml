@@ -120,6 +120,7 @@ updates:
     directories:
       - "/tools/go/scadbuddy-client"
       - "/tools/go/bambuddy-fs"
+      - "/tools/go/core"
     schedule:
       interval: "weekly"
       day: "monday"

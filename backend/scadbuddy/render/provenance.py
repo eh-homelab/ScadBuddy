@@ -26,8 +26,7 @@ from xml.sax.saxutils import escape
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.models import ProcessValue
-from scadbuddy.core.paths import MODEL_META_NAME, RENDERS_DIR_NAME
-from scadbuddy.library.catalogue import README_NAME, THUMBNAIL_NAME
+from scadbuddy.core.paths import MODEL_META_NAME, README_NAME, RENDERS_DIR_NAME, THUMBNAIL_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE
 from scadbuddy.library.media import MEDIA_DIR
 from scadbuddy.render.bambu3mf import CORE_NS, PROJECT_SETTINGS_NAME, ZIP_TIMESTAMP

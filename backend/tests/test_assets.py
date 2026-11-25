@@ -12,6 +12,7 @@ from typing import NoReturn
 import pytest
 from PIL import Image, PngImagePlugin
 
+from scadbuddy.core.paths import THUMBNAIL_NAME
 from scadbuddy.library.assets import (
     MAX_ASSET_BYTES,
     MAX_PNG_PIXELS,
@@ -29,7 +30,6 @@ from scadbuddy.library.assets import (
     sniff,
     with_samples,
 )
-from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from tests.conftest import PgPool
 

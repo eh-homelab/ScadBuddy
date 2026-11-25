@@ -422,11 +422,11 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
   })
 
   it('shows why a publish is refused', async () => {
-    const detail = "'name-keychain' is a pipeline template; the storefront cannot list one yet"
+    const detail = "'name-keychain' declares no shape for its inputs (model.json pipeline.inputs)"
     server.use(
       http.post('/api/v1/storefront/listings/:id/publish', () =>
         HttpResponse.json(
-          { type: 'https://scadbuddy.dev/problems/storefront/listing_pipeline_unsupported', title: 'Unprocessable Content', status: 422, detail },
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_inputs_undeclared', title: 'Unprocessable Content', status: 422, detail },
           { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
         ),
       ),

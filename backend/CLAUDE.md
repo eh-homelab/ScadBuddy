@@ -296,7 +296,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
   `copy_outputs`, as the API's start does once, so the writes of pods on an older build
   reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
-  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
+  second run at once do nothing. The byte copy (#7256, `OUTPUT_BYTES_SWEEP`, after
+  `OUTPUT_COPY_SWEEP`, behind `OUTPUT_BYTES_PATCH`, timeout `OUTPUT_BYTES_TIMEOUT`, 30
+  min) runs `library/output_byte_copy.py` `copy_output_bytes` the same way, after the
+  row copy at start: it puts the files' bytes as `output` blobs, refuses on `local`,
+  `bambuddy` or a store past its caps, and its session advisory lock holds one autocommit
+  connection of its own for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -494,7 +499,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   Routes `api/hosted_plugins.py` (`/hosted-plugins`, `api` class; `GET /{name}/versions` lists
   the versions newest first for Settings' editor, #6937) and the agent's area
   `hosted-plugins` in `api/crud_agent_packages.py` (a plugin's latest version, a version's
-  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. A marketplace
+  zip). Tests `tests/hosted_plugins/`, `tests/api/test_hosted_plugins.py`. Each committed
+  hosted-plugin create, change, publish and delete, and each `plugin-packages` write (install,
+  re-pin, discard, approve, enable, delete), publishes `plugin_packages.changed`
+  (`core/events.py` `PluginPackagesChanged`, the name only) on the realtime topic
+  `plugin-packages`, which Settings → Tools & plugins follows (#7460). A marketplace
   feed's packages are `ai_plugin_feed_packages` (#6933; a package's delete removes its rows),
   read by the agent through area `plugin-feeds` (`GET …/agent/plugin-feeds/{feed}`, the same
   module: each package at its current pin, whether it is approved, and a hosted one's version
@@ -646,7 +655,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the answer is final: only what its own `hold` created, unless a later put rewrote it
   or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
-  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  them). A library upload (`POST /print/library/files`) on a remote store is claimed in
+  the blob store instead (#7373, `operations/blob_claims.py` `BlobClaims`): its body is
+  spooled node-local (`ContentStore.spool`), hashed as it streams and put once as the
+  `library` blob `library-upload-<sha256>` (`ContentStore.put(..., digest=)`, so no second
+  hash), and the run reads that blob on any replica (`store: "blob"` in the request; a
+  native file indexes the same object, `NativeLibrary.adopt`). A release removes the row
+  only while its `touched_at` is the request's own put; the claims sweep removes one older
+  than `CLAIM_MAX_AGE` (`sweep_upload_blobs`), and `sweep_library` leaves it alone. A
+  request with no `store` (the local store's, or an older build's) is a claim file, as
+  before. `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
   with 413. A kind reads the state when it runs, never a route dependency, so a test
   replaces a store on the state (`state.libraries = store`). `api/operations.py`
   `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the
@@ -942,7 +960,9 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `api/filament.py`, `api/filament_purchasing.py` and `api/tray_spools.py` and after a
   settings save that changes `filament_sync`; capture, `sync_ams_weights` and the worker's
   CRUD `filament` writes are not nudged and reach Bambuddy on the timer, and the Bambuddy
-  import and the RFID scan (`api/filament.py` `NOT_NUDGED`) have nothing to push, and the printer
+  import (`api/filament.py` `NOT_NUDGED`) has nothing to push, nor have the phone's tag routes
+  (#7273, also in `NOT_NUDGED`: the backups, `tag-records`, the restore and the NFC job
+  routes), and `POST /tags/reads` nudges only when it binds (`SKIP_NUDGE` otherwise), and the printer
   labels (#6955, also in `NOT_NUDGED`) make only places capture makes too. The print worker
   reaches SB through the CRUD area `filament-sync` (`api/crud_print.py`, `…/print/filament/sync/directions`, `plan`, `results` and `pass`;
   client `RemoteFilamentSync` in `crud/print.py`), and the routes `GET /filament/sync/status`
@@ -1487,8 +1507,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `.lfsconfig` says (`tests/test_history_lfs.py`).
   `library/models_next.py` (`python -m scadbuddy.library.models_next build` and `check`,
   in the API's image) makes a second such repository from an older one, in
-  `data/models-next`: the versions the orders and listings pin and the current ones, each
-  with an `Imported-From` trailer. It only reads the old one and the database.
+  `data/models-next`: every version of every template, and the lost ones that an order, a
+  listing, an output or a `model.json` names, each with an `Imported-From` trailer. It only
+  reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
+  the build to the git remote in Settings, and to no other branch.
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
@@ -1508,6 +1530,36 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes;
   a render worker's `RemoteAssetStore` keeps its copies and reads the rows through CRUD routes, #5298).
+  Saved outputs (outputs-in-Postgres spec 2026-11-23): the record is an `outputs` row
+  (`output_rows.py` `OutputRows`, #7255), and the bytes (`model.3mf`, `preview.glb`,
+  `thumbnail.png`, `files/`) are blobs of kind `output` held by `(output, <id>)`
+  (`output_bytes.py` `OutputBytes`, #7256). The folder `data/outputs/<slug>/<id>/` stays
+  the fallback until #7257: a save still writes it, and a reader reads the file when the
+  row names no blob (`bytes_at` NULL) or the blob is lost. A reader that needs a path
+  opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
+  file under `ContentStore.spool`, #7316, else the NFS file) and runs its sync reader in a thread; there
+  is no blocking helper for sync callers. What a reader derives of the model is kept in `output_derived`, and
+  a derive writes only while the model sha256 it read is the row's
+  (`OutputRows.write_derived_many`); the plate cover's key names its own sha256
+  (`plate_cover_key`). The render worker's blob-index allowlist (`api/crud_render.py` `READ_KINDS`) never
+  admits `output`.
+  Template records (#7317, spec `2026-11-25-model-records-in-postgres-design.md`, phase 1;
+  `docs/architecture/data.md` "Template records"): `template_rows.py` (`TemplateRows`, the
+  derived `templates` rows and the `template_copy_runs` ledger; git stays the record),
+  `template_refresh.py` (`TemplateRefresh`, the models history's hook: a commit's rows in
+  its HEAD transaction, a no-commit write's under the write lock; a failure is logged and
+  counted in `scadbuddy_template_refresh_failures_total`, never raised) and
+  `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
+  `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
+  of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
+  skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
+  Phase 2: once a copy run has finished (`Catalogue._from_rows`), the catalogue's readers
+  read the rows, not the files (the list, the record, the ids, `list_summaries`,
+  `raw_metas`, the pin index, the print settings, the name check, `duplicates_of`);
+  `library_users` and `library_pins` still read the files. The thumbnail's `ETag` names
+  its source (`Catalogue.thumbnail_ref`: the cover's sha256, `"output-<id>"`,
+  `"preview-<id>"`), so a 304 reads no file (except for a row that lags its media,
+  `TemplateRow.media_newer`, which is read from the files); a 200 tags what it read.
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
@@ -1616,12 +1668,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
   `components/activity/` (table, filters, drawer, `ActivityBell`) and
   `mocks/features/activity.ts`.
+- `backend/scadbuddy/inventory/` — the item core (#7067, spec
+  `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.4-6.6; page
+  `docs/features/inventory.md`): `models.py` (the Pydantic models), `kinds.py` (`KindStore`, the
+  `item_kinds` tree and its inherited `attribute_schema`), `items.py` (`ItemStore`; a `filament`
+  kind's items are refused until phase 3), `offers.py` (`OfferStore`: `supplier_offers` and
+  `offer_price_points`), `stock.py` (`StockStore`: lots, units and moves; `_fifo`, `take`,
+  `give_back`, `count_item`, `recost_lot`; `parts_moved`, the one reader of job cost's parts figure;
+  the lock order of R-P2-32: `lock_items` takes, per item in `item_id` order, the item `FOR SHARE`,
+  then `_open_lock` (the advisory lock every lot insert takes first), then the lots `FOR UPDATE` in
+  FIFO order), `part_alias.py` (`PartAliases`: the `/parts` routes over the inventory, for one
+  release), `problems.py` (the 4xx problems, `refused`) and `component.py` (`InventoryComponent`).
+  Only filament reaches Bambuddy: nothing here calls it, and `bb_sync_plan._suppliers()` keeps a
+  supplier made for offers out of it (D16, R-P2-8 to R-P2-10). Tests: `backend/tests/inventory/`.
 - `backend/scadbuddy/entities/` — files, links and key-value properties on any row
   (#6950, #7026, inventory spec
   `docs/superpowers/specs/2026-11-21-inventory-and-purchasing-design.md` §6.1-6.3a, plan
   `docs/superpowers/plans/2026-11-21-inventory-phase-1-entities.md`): `refs.py`
   (`EntityRef`, the `kind:ref` form), `registry.py` (`KINDS`, each kind's owner table,
-  `item`, `lot` and `unit` among them since #7067; `EntityStore`: an `entities` row made by
+  `item`, `lot` and `unit` among them since #7067, and one kind per filament catalog, such
+  as `insert_type`; `EntityStore`: an `entities` row made by
   `ensure` only for an owner row that exists, and `orphans`, the rows whose owner is gone
   and that no stock move names; `repoint_entity` also moves a merged entity's stock moves),
   `attachments.py` (`EntityAttachmentStore` over
@@ -2121,15 +2187,26 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `pages/ProfitPage.tsx` (`/orders/profit`, tab `components/orders/OrdersTabs.tsx`, links
   `components/orders/profit.ts`; mock `mocks/features/orders/report.ts`); agent
   `orders_profit_report` (read) and `order_list`'s new filters.
-  Job cost phase 6, parts (#5543, §11): `orders/parts.py` (`PartStore`, the `parts`,
-  `part_stock_moves`, `model_part_rules` and `order_item_parts` rows; a unit cost is a
-  `numeric` rate, each cost entry rounded once), routes `api/parts.py` (`/parts…`,
-  `GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`). `Lifecycle.add_item` copies
-  the model's rule; `accept_fulfilment` making an item `fulfilled` takes its parts out of stock
-  as `material` cost entries `part:<item>:<part>` (`parts.used`), `unfulfil_item` gives them
-  back (`parts.returned`); a fulfilled item's parts are fixed (`item_parts_used`). The
-  unit-cost history takes `item_id` (`parts_unit_minor`). Agent `part_list`, `part_stock_add`,
-  `order_item_parts_set`.
+  Job cost phase 6, parts (#5543, §11; since #7067 a part is an inventory item whose kind
+  tracks lots): `orders/parts.py` (`PartStore`: the `model_part_rules` and `order_item_parts`
+  rows, over `item_id`; `part_id` is read the same for one release), routes `api/parts.py`
+  (`GET /orders/{id}/parts`, `PUT /orders/{id}/items/{item}/parts`, the rule routes). The
+  part-row routes (`/parts`, `/parts/{id}`, its `stock`, `adjust` and `moves`) are aliases
+  of the inventory for one release (`inventory/part_alias.py` `PartAliases`): a part is an
+  item of kind `hardware`, its pack and price its newest offer and price point. A part with
+  no supplier has no offer: it reads as a pack of 1 at 0, a pack on a create or an edit is 422
+  (R-P2-34), and Add stock takes the body's price and writes no price point (R-P2-25). The
+  unit cost leaves out lots of unknown cost with no cost entered; with none on hand and no
+  price point it is `cost_unknown` (R-P2-35).
+  `Lifecycle.add_item` copies the model's rule; `accept_fulfilment` or `fulfil_items` making an
+  item `fulfilled` takes its parts from the lots (`StockStore.take`, the part items locked
+  first in `item_id` order by `lock_items`: each item, the lock every lot insert takes, then
+  its lots, so no receive or count adds a lot under it; `parts.used`), and `unfulfil_item` gives each use back to its lot
+  at its cost (`parts.returned`); no cost entry is written: job cost reads the moves as
+  `parts_minor` (`costs.py`). A fulfilled item's parts are fixed (`item_parts_used`).
+  `POST /inventory/lots/{id}/recost` runs `Lifecycle.recost_lot` (`item.parts_recosted`). The
+  unit-cost history takes `item_id` (`parts_unit_minor`, `parts_unknown`). Agent `part_list`,
+  `part_stock_add`, `order_item_parts_set`.
   The machine rate (#4625, order operations spec 2026-11-07 §6): per registry printer,
   `orders/machine_rate.py` (`compute`, pure; `MachineRateStore` over
   `printer_cost_profiles`, `printer_wear_parts` and `printer_maintenance_costs`, each in
@@ -2207,13 +2284,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
   with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
   before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
-  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  drops the slug's `outputs` rows, #7255, and releases their byte holds, #7256, and a
+  failure there keeps the directory); the
   API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
   gone is dropped as it is read. Each output has a `source` (#6371; `OutputMeta.source`
   in `meta.json`, `output_index.source`): `back_office`, or `storefront` for the outputs
-  the storefront slice run saves (`output_for_reference`'s `source`, which only
+  the storefront slice run saves (`outputs_for_reference`'s `source`, which only
   `slice_price.py` sets; an order's render and a quote keep the default). `GET /outputs`
   and `GET /models/{slug}/outputs` leave the storefront's out unless `include_storefront`
   is true, and so do the agent's `list_recent_outputs` and `list_outputs`; a read by id
@@ -2384,7 +2462,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   slice, `read_plate` and `price_plates` a quote uses, at the book's policy and the profile
   printer's machine rate, `MachineRates.for_quote`), never a second formula
   (`test_slice_price.py` checks a storefront price equals a quote to the cent). The variant
-  is rendered to an output by `rendering.py` `output_for_reference` (saved as
+  is rendered to an output by `rendering.py` `outputs_for_reference` (saved as
   `library/outputs.py` `storefront_output_id(render_key)`, `source` `storefront`, #6371) and sliced by `operations.py` `PreviewSlicer`, so the
   template gives the support and process settings. A variant names one subject
   (`SliceVariant.reference` or `.library_file`, #6710 §7.1): a file listing's file is a
@@ -2397,6 +2475,19 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `of_version`), so a held copy and a live copy, recorded under one `library:<id>`, are
   never reused, read or superseded for each other. A file's used slots (from 0) reach the
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
+  A pipeline template's listing (#5701, `orders/storefront/pipeline_inputs.py`, spec
+  2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
+  `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
+  ones on the render worker, and `listing_reference` writes the snapshot's around the
+  customer's `params`. A price, a preview and a cart line are of the listing's design while
+  `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
+  render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,
+  one slot across the outputs), `kit_digest` (every output's 3MF), each output saved under
+  `storefront_output_id(render_key, index)` and sliced whole with its own slots' presets, and
+  one `price_plates` over every plate (`slice_and_price`'s `place`). No visitor gets that
+  price until #5701's PR 5, whose order makes every output: `renders.py` `one_output` refuses
+  it on every path. A pipeline's cart line needs its row's `every_output`. A file listing has
+  no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`
@@ -2522,7 +2613,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `slice` when that key has a `done` row, else that row's price as `last`, else
   `none`; each read runs `_planned`, whose live rate and printer opening are kept
   `RATE_TTL` per process), `preview` (that row's output, while it is of
-  the listing's slug and commit, as `/api/store/v1/variants/{key}/preview.glb`, which
+  the listing's design (`shows_design`), as `/api/store/v1/variants/{key}/preview.glb`, which
   `…/variants/{key}/preview.glb` streams; 404 `variant_not_found` for none, or when the
   row's listing is not published; never the output id), `render` (the visitor's own render of these choices while it is held) and
   `values`. `last` is never a line's price: `firm_price` and `line_prices.py` read by key
@@ -2539,7 +2630,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   draft view answers each item's `price` (`firm` with `unit_price_minor` and
   `total_minor`, else `by_hand` and no number) and `pay_now` (every item firm). The
   submit prices each line again (`reprice`: a fresh key from the kept variant, no price
-  when the listing is gone, unpublished or at another slug or commit, or a slot
+  when the listing is gone, unpublished or of another design (`shows_design`), or a slot
   filament is gone or archived). A price that changed, came or went is written and
   refused 409 `prices_changed`, with `items` of `{id, price}` (`firm` or `by_hand`), so
   the customer sees a price that went before the shop prices the line; the next submit
@@ -2612,11 +2703,20 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the instant read has a firm price before any visitor asks. A file listing's run submits no
   render and prices the colours its page opens on, with no visitor charge (`_warm_file`,
   `file_prices.py` `default_choice`, `listings.py` `page_colours`, a copy of the page's
-  `fileParts.ts` `partFilaments` with no pick: change both together, #7523). A start that fails, or takes
+  `fileParts.ts` `partFilaments` with no pick, both tested on
+  `test-fixtures/storefront/file-page-colours.json`, #7523). A start that fails, or takes
   more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
-  given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
+  given up on is logged as given up: it may still have reached Temporal). What publish did
+  not price (a listing published before #6922, a failed start, a run that ended with no
+  price) the housekeeping sweep does (#7665, `warm_unpriced`, `WARM_LISTINGS_SWEEP`, both
+  Schedules, behind `WARM_LISTINGS_PATCH`): a published listing, template or file, whose
+  default choices have no `done` row gets its default run (`restart=False`, which joins an
+  open one), at most `WARM_SWEEP_BATCH` (2) open at once. It keeps no table: a listing whose
+  newest default run Temporal holds started since its `updated_at` is left alone, so one
+  with no price to find is tried once per version and again only past Temporal's
+  retention. `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it
-  on) switches both.
+  on) switches all three.
 - A customer's own models (#6133, spec 2026-11-13; migration
   `20261113T1547Z_storefront_customer_models.sql`): `orders/storefront/model_requests.py`,
   CRUD area `models`, the edge's `POST /api/store/v1/uploads` and `…/draft/models`. The files

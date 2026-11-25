@@ -129,27 +129,29 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   {
     operation: 'POST /api/v1/parts',
-    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+    reason:
+      'Alias of POST /inventory/items with its offer and price (#7067, spec §6.11); it goes after one release. The assistant adds an item with inventory_item_upsert, its offer with inventory_offer_upsert and its stock with inventory_lot_receive.',
   },
   {
     operation: 'PATCH /api/v1/parts/{part_id}',
-    reason: "The Parts page's own management (#5543, job cost spec §11): the owner chose part_list, part_stock_add and order_item_parts_set as the assistant's parts tools.",
+    reason:
+      'Alias of PATCH /inventory/items/{item_id} and its offer (#7067, spec §6.11); it goes after one release. The assistant edits an item with inventory_item_upsert and its offer with inventory_offer_upsert.',
   },
   {
     operation: 'POST /api/v1/parts/{part_id}/adjust',
-    reason: "A person's count of the shelf (#5543, job cost spec §11), with a note why it differs; the assistant cannot count stock.",
+    reason: 'Alias of POST /inventory/items/{item_id}/count (#7067, spec §6.11); it goes after one release. The assistant records a count with inventory_move_count.',
   },
   {
     operation: 'GET /api/v1/parts/{part_id}/moves',
-    reason: "The Parts page's stock line (#5543); part_list gives each part's stock now.",
+    reason: 'Alias of GET /inventory/moves?item_id= (#7067, spec §6.11); it goes after one release. The assistant reads moves with inventory_move_list.',
   },
   {
     operation: 'GET /api/v1/parts/rules/{slug}',
-    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'PUT /api/v1/parts/rules/{slug}',
-    reason: "The Parts page's model rules (#5543, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
+    reason: "The model rules in Inventory, under the Part kind (#5543, #7067, job cost spec §11): a new item takes its rule, and order_item_parts_set changes an item's parts.",
   },
   {
     operation: 'GET /api/v1/print/library-copies',
@@ -475,6 +477,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'The same UI files at a pinned revision, for the browser (#425).',
   },
   {
+    operation: 'GET /api/v1/model-records/copy-status',
+    reason:
+      "The last run of the copy of the templates' files to rows (#7317), at an API start or in a " +
+      "housekeeping sweep: an operator's check after a deploy. The copy runs by itself, so an agent has " +
+      'nothing to act on; the templates it copied are in the model tools.',
+  },
+  {
     operation: 'PUT /api/v1/settings',
     reason:
       'The one write path for every stored setting (#322): the Bambuddy URL and API key and the Google Fonts ' +
@@ -790,48 +799,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Hosted plugins (#6937). The spec gives the assistant no versions tool (2026-11-21 §6.2): an offer always ' +
       "takes the plugin's latest_version (§6.3), which the plugin's own read answers.",
   },
-  // Temporary (#7067, layer 2 of 6): layer 5 adds the inventory_* tools and drops these entries.
-  ...(
-    [
-      'GET /api/v1/inventory/kinds',
-      'POST /api/v1/inventory/kinds',
-      'PATCH /api/v1/inventory/kinds/{kind_id}',
-      'POST /api/v1/inventory/kinds/{kind_id}/archive',
-      'POST /api/v1/inventory/kinds/{kind_id}/restore',
-      'GET /api/v1/inventory/kinds/{kind_id}/schema',
-      'GET /api/v1/inventory/items',
-      'POST /api/v1/inventory/items',
-      'GET /api/v1/inventory/items/{item_id}',
-      'PATCH /api/v1/inventory/items/{item_id}',
-      'POST /api/v1/inventory/items/{item_id}/archive',
-      'POST /api/v1/inventory/items/{item_id}/restore',
-      'GET /api/v1/inventory/items/{item_id}/offers',
-      'GET /api/v1/inventory/suppliers/{supplier_id}/offers',
-      'POST /api/v1/inventory/offers',
-      'PATCH /api/v1/inventory/offers/{offer_id}',
-      'POST /api/v1/inventory/offers/{offer_id}/archive',
-      'GET /api/v1/inventory/offers/{offer_id}/prices',
-      'POST /api/v1/inventory/offers/{offer_id}/prices',
-      'GET /api/v1/inventory/items/{item_id}/lots',
-      'POST /api/v1/inventory/items/{item_id}/lots',
-      'GET /api/v1/inventory/lots/{lot_id}',
-      'PATCH /api/v1/inventory/lots/{lot_id}',
-      'POST /api/v1/inventory/lots/{lot_id}/adjust',
-      'POST /api/v1/inventory/items/{item_id}/use',
-      'POST /api/v1/inventory/items/{item_id}/count',
-      'GET /api/v1/inventory/items/{item_id}/units',
-      'POST /api/v1/inventory/items/{item_id}/units',
-      'GET /api/v1/inventory/units/{unit_id}',
-      'PATCH /api/v1/inventory/units/{unit_id}',
-      'POST /api/v1/inventory/units/{unit_id}/status',
-      'GET /api/v1/inventory/moves',
-      'GET /api/v1/entities/{ref}/property-schema',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      'Inventory phase 2 (#7067, spec §6.4–6.6); its `inventory_*` tools follow in layer 5 of the same stack, which drops these entries.',
-  })),
 ]
 
 /**

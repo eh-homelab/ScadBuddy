@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import pytest
 
+from scadbuddy.inventory.items import ItemStore
+from scadbuddy.inventory.models import ItemInput
 from scadbuddy.orders.lifecycle import FulfilLine, FulfilmentInput, Lifecycle, LifecycleError
 from scadbuddy.orders.models import LibraryFileRef
-from scadbuddy.orders.parts import ItemPart, PartInput
+from scadbuddy.orders.parts import ItemPart
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.orders.storefront.visitors import VisitorStore, visitor_actor
 from scadbuddy.store.refs import BlobRefs
@@ -185,12 +187,12 @@ def test_a_request_item_is_duplicated(shop: Shop) -> None:
 def test_a_duplicate_keeps_the_parts_set_by_hand(shop: Shop) -> None:
     order = shop.order()
     item = shop.item(order)
-    body = PartInput(name="Key ring", pack_size=100, pack_price_minor=599, on_hand=50)
-    ring = shop.lifecycle.parts.create(body, currency="USD", by=BY).id
-    shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(part_id=ring, per_unit=2)], BY)
+    items = ItemStore(shop.rows._pool, shop.rows._entities)
+    ring = str(items.create(ItemInput(kind_id="hardware", name="Key ring"), BY).id)
+    shop.lifecycle.set_item_parts(order.id, item.id, [ItemPart(item_id=ring, per_unit=2)], BY)
     copy = shop.lifecycle.duplicate_item(order.id, item.id, BY)
     rows = shop.lifecycle.parts.item_parts([copy.id])[copy.id]
-    assert [(r.part_id, r.per_unit) for r in rows] == [(ring, 2)]
+    assert [(r.item_id, r.per_unit) for r in rows] == [(ring, 2)]
 
 
 def test_bulk_fulfil_returns_a_failed_item_and_refuses_a_printed_one(shop: Shop) -> None:

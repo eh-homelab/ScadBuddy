@@ -20,6 +20,7 @@ import {
   tier,
 } from './print.js'
 import { messageArguments, openChecked } from '../orders/messaging.js'
+import { withInventoryPaths } from './inventoryLinks.js'
 import { defineTool, idempotencyKey, json, type Tool, type ToolContext, ToolError } from './registry.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
@@ -915,7 +916,8 @@ export const orderTools: Tool[] = [
       'Each product row is one model `slug` (`group` `model`), one custom item `sku` (`sku`), or the custom items ' +
       'with no SKU (`custom`), with its `orders`, `units`, what was charged (`revenue_minor`), the real cost ' +
       '(`cost_minor`), `margin_minor`, `margin_percent`, `margin_state` and the waste (`waste_minor`, ' +
-      '`waste_percent`: the cost of test and failed prints). Each item counts as order_costs gives it. The `order` ' +
+      '`waste_percent`: the cost of test and failed prints) and `parts_minor` (the parts taken from stock). Each ' +
+      'item counts as order_costs gives it. The `order` ' +
       "row is the orders' own entries, shipments' cost and charges (its `orders` counts only the orders that have " +
       "any; no order_list filter matches them), and the `total` row each currency's sum. Pass a product " +
       "row's `product`, `period_from`, `period_to` and `currency` to order_list for its orders. With `complete` " +
@@ -1299,7 +1301,9 @@ export const orderTools: Tool[] = [
       "An order's real cost and margin (#4251, #5326): per item, its accepted quote beside every attempt, failed " +
       'ones included, each costed in filament and machine time (`estimated` names a figure taken from the quote ' +
       "or today's settings; `unknown` an attempt with no source), its labour (`time_entries`, else a default, " +
-      '`labour_default`), its `cost_entries`, what it was charged (`revenue_minor`) and its `margin_minor`, ' +
+      "`labour_default`), its `cost_entries`, its parts taken from stock (`parts_minor`, at their lots' costs; " +
+      '`parts` is unknown while a use of unknown cost is not given back), what it was charged (`revenue_minor`) ' +
+      'and its `margin_minor`, ' +
       '`margin_percent` and `margin_state` (`ok`, `thin`, `loss`, `unknown`); the order adds its own entries, its ' +
       "shipments' cost and every charge but tax. `bambuddy_cost` is Bambuddy's own cost of an attempt, shown and " +
       'never in any sum.',
@@ -1564,16 +1568,23 @@ export const orderTools: Tool[] = [
       ),
   }),
   // Parts inventory (#5543, job cost spec §11): the hooks, rings and magnets an item uses
-  // beside its filament. Making a part, editing it, correcting a count, its stock line and
-  // a model's rule are the Parts page's (coverage.ts).
+  // beside its filament. Since #7067 a part is an inventory item of a kind under `part`, and
+  // part_list and part_stock_add are aliases of inventory_item_list and inventory_lot_receive.
+  // They keep their old answers, which only the `/parts` alias routes build (the pack, its
+  // price and its currency, inventory/part_alias.py), so they call those; both the tools
+  // and the routes go after one release (spec §6.11).
   defineTool({
     name: 'part_list',
     label: 'List parts',
     description:
-      'The parts inventory (keychain hooks, rings, magnets): each part\'s pack, its unit cost (a decimal string in ' +
-      'minor units, the weighted average of the stock on hand), what is `on_hand` (below zero when more was used ' +
+      'Alias of inventory_item_list; goes after one release (#7067): use inventory_item_list with `kind: "part"`. ' +
+      'The parts inventory (keychain hooks, rings, magnets), each part an inventory item: its pack, its unit cost (a ' +
+      'decimal string in minor units, the weighted average of the stock on hand of known cost; `cost_unknown` when ' +
+      'nothing says what a unit costs), what is `on_hand` (below zero when more was used ' +
       'than recorded) and `low` at or below its low-stock level. With `low`, only the low ones. With `order_id`, ' +
-      "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand.",
+      "that order's items' parts per unit and `short`: the parts its open items need beyond what is on hand " +
+      "(there `on_hand` and `short` are decimal strings, the lots summed). Without `order_id`, each part has `ui_path`, " +
+      "its item's page in ScadBuddy's UI; link its name with it.",
     input: z.object({
       low: z.boolean().default(false),
       order_id: orderId.optional(),
@@ -1589,18 +1600,22 @@ export const orderTools: Tool[] = [
           ),
         )
       }
-      return json(await ok(backend.GET('/api/v1/parts', { params: { query: { low } } }), 'list the parts'))
+      return json(withInventoryPaths(await ok(backend.GET('/api/v1/parts', { params: { query: { low } } }), 'list the parts'), 'item'))
     },
   }),
   defineTool({
     name: 'part_stock_add',
     label: 'Add stock to a part',
     description:
-      "Record packs bought: `packs` of the part's pack join the stock, at `pack_price_minor` each (with tax, in " +
-      "the part's currency's minor units) when given, which becomes the part's pack price. The unit cost becomes " +
-      'the weighted average of the stock on hand and the new packs; orders already fulfilled keep their cost.',
+      'Alias of inventory_lot_receive; goes after one release (#7067): use inventory_lot_receive with the cost of ' +
+      "the whole quantity. Record packs bought: `packs` of the part's pack join the stock as one lot, at " +
+      "`pack_price_minor` each (with tax, in the part's currency's minor units) when given, which becomes the part's " +
+      'pack price. A part with no supplier has no pack: `packs` are single units at `pack_price_minor`, no price point ' +
+      'is written, and with no price the stock is of unknown cost. A part priced in another currency than the ' +
+      "shop's receives a lot of unknown cost. Orders already fulfilled keep their cost. Answers the part, with " +
+      "`ui_path`, its item's page.",
     input: z.object({
-      part_id: ID.describe('A part id, as part_list returns it'),
+      part_id: ID.describe('A part id (its inventory item id), as part_list returns it'),
       packs: z.number().int().min(1).max(10_000).default(1),
       pack_price_minor: z.number().int().min(0).optional(),
       note: z.string().max(1000).default(''),
@@ -1610,9 +1625,9 @@ export const orderTools: Tool[] = [
     title: ({ part_id, packs }) => `Add ${packs} pack(s) to part ${part_id}`,
     handler: async ({ part_id, ...body }, { backend }) =>
       json(
-        await ok(
-          backend.POST('/api/v1/parts/{part_id}/stock', { params: { path: { part_id } }, body }),
-          `add stock to part ${part_id}`,
+        withInventoryPaths(
+          await ok(backend.POST('/api/v1/parts/{part_id}/stock', { params: { path: { part_id } }, body }), `add stock to part ${part_id}`),
+          'item',
         ),
       ),
   }),
@@ -1620,15 +1635,27 @@ export const orderTools: Tool[] = [
     name: 'order_item_parts_set',
     label: "Set a line item's parts",
     description:
-      'The parts one unit of a line item uses, replaced whole (an empty list clears them). A new item takes its ' +
-      "model's rule; this changes it. When the item is fulfilled its parts times its quantity leave stock as a " +
-      '`material` cost entry, and come back when it is unfulfilled. Refused (409 `item_parts_used`) for a ' +
-      'fulfilled item. Stock never blocks: it can go below zero.',
+      'The parts one unit of a line item uses, replaced whole (an empty list clears them). Each part is an inventory ' +
+      'item whose kind tracks lots, named `item_id` (inventory_item_list with `kind: "part"` lists them; `part_id` is ' +
+      "its old name, read the same for one release). A new item takes its model's rule; this changes it. When the item is fulfilled " +
+      "its parts times its quantity leave the item's lots (FIFO, at each lot's cost), and job cost counts them as " +
+      "the item's `parts_minor`; they come back to the same lots when it is unfulfilled. Refused (409 " +
+      '`item_parts_used`) for a fulfilled item, and 409 `part_not_found` for an item that does not exist or does ' +
+      'not track lots. Stock never blocks: it can go below zero.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
       parts: z
-        .array(z.object({ part_id: ID.describe('A part id, as part_list returns it'), per_unit: z.number().int().min(1).max(1000) }).strict())
+        .array(
+          z
+            .object({
+              item_id: ID.optional().describe('An inventory item id, as inventory_item_list returns it'),
+              part_id: ID.optional().describe('The old name of `item_id`, for one release'),
+              per_unit: z.number().int().min(1).max(1000),
+            })
+            .strict()
+            .refine((row) => (row.item_id === undefined) !== (row.part_id === undefined), 'give each part its item_id (or part_id), not both'),
+        )
         .max(50),
     }),
     risk: 'write',
@@ -1639,7 +1666,7 @@ export const orderTools: Tool[] = [
         await ok(
           backend.PUT('/api/v1/orders/{order_id}/items/{item_id}/parts', {
             params: { path: { order_id, item_id } },
-            body: { parts },
+            body: { parts: parts.map((row) => ({ item_id: (row.item_id ?? row.part_id)!, per_unit: row.per_unit })) },
           }),
           `set the parts of item ${item_id}`,
         ),

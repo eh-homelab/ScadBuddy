@@ -28,6 +28,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore
+from scadbuddy.inventory.stock import PartsMoved, parts_moved, parts_moves
 from scadbuddy.orders.models import (
     IMPORT_STUCK,
     Actor,
@@ -110,6 +111,10 @@ class CostRows:
     cost_entries: dict[str, list[CostEntry]] = field(default_factory=dict)
     shipping_minor: dict[str, int] = field(default_factory=dict)
     charges: dict[str, list[Charge]] = field(default_factory=dict)
+    #: Each order item's parts (#7067), from its `use` and `return` moves: the known-cost
+    #: ones' ``-sum(amount_minor)``, whether a use not given back is of unknown cost, and
+    #: whether any use is not given back.
+    parts: dict[str, PartsMoved] = field(default_factory=dict)
 
 
 class UnsetType(Enum):
@@ -2634,6 +2639,14 @@ class OrderStore:
             ).fetchall():
                 charge = Charge.model_validate(row)
                 rows.charges.setdefault(charge.order_id, []).append(charge)
+            # One reading with a re-cost's (`parts_moved`, R-P2-31).
+            items = [
+                r["id"]
+                for r in c.execute(
+                    "SELECT id FROM order_items WHERE order_id = ANY(%s)", (ids,)
+                ).fetchall()
+            ]
+            rows.parts.update(parts_moved(parts_moves(c, items)))
         return rows
 
     # -- shipments (§6.3) -------------------------------------------------------------

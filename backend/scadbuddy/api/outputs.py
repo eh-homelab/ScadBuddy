@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import tarfile
 import zipfile
-from collections.abc import Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -72,6 +73,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
+from scadbuddy.api.output_streams import attachment, blob_not_modified, stream_response
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.download import download_3mf
@@ -98,14 +100,13 @@ from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
 from scadbuddy.core.tracing import span, traced_thread
+from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
+from scadbuddy.library.output_rows import Role
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
-    MODEL_NAME,
     OUTPUT_ID_PATTERN,
-    PREVIEW_NAME,
-    THUMBNAIL_NAME,
     BackfillState,
     OutputMeta,
     OutputNotFoundError,
@@ -150,6 +151,9 @@ class OutputSummary(OutputMeta):
     #: draw replaces it, so a page can put it in the URL and fetch the new one. None
     #: while there is no file, also when ``has_thumbnail`` says one would be drawn.
     thumbnail_version: str | None = None
+    #: Which mesh `/outputs/{id}/preview.glb` serves, as ``thumbnail_version`` for the
+    #: thumbnail: its ``v``. None while there is no preview.
+    preview_version: str | None = None
     #: Every copy of ``model.3mf`` ScadBuddy has put in Bambuddy's file library (#316),
     #: in upload order, read from `BambuddyUploadStore` (#455). One per (folder,
     #: target): a project's folder keeps the file each of its prints came from.
@@ -225,10 +229,13 @@ def detail(
     library_files: list[LibraryCopy],
     *,
     failed_before_queueing: bool = False,
+    versions: Mapping[tuple[str, Role], str] | None = None,
 ) -> OutputDetail:
+    """``versions``: the listing's blob versions, read for all its outputs at once
+    (`OutputStore.blob_versions`); a role left out reads its own."""
     # One read of the output's row for every part below (#7255).
     with store.reading(meta.id):
-        return _detail(store, meta, library_files, failed_before_queueing)
+        return _detail(store, meta, library_files, failed_before_queueing, versions or {})
 
 
 def _detail(
@@ -236,13 +243,19 @@ def _detail(
     meta: OutputMeta,
     library_files: list[LibraryCopy],
     failed_before_queueing: bool,
+    versions: Mapping[tuple[str, Role], str],
 ) -> OutputDetail:
+    def version(role: Role) -> str | None:
+        known = versions.get((meta.id, role))
+        return known if known is not None else store.role_version(meta.id, role)
+
     params = store.params(meta.id)
-    thumbnail_version = _thumbnail_version(store.thumbnail_path(meta.id))
+    thumbnail_version = version("thumbnail")
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
         thumbnail_version=thumbnail_version,
+        preview_version=version("preview"),
         params=params,
         inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
@@ -254,16 +267,6 @@ def _detail(
         library_files=library_files,
         failed_before_queueing=failed_before_queueing,
     )
-
-
-def _thumbnail_version(path: Path) -> str | None:
-    """The file's identity: every write puts a new file in place (a new inode, by a
-    rename or a link), and its time and size tell apart an inode used again."""
-    try:
-        stat = path.stat()
-    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
-        return None
-    return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
 
 
 async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
@@ -287,12 +290,27 @@ async def _details(
     # The thumbnail check and params read are file IO: off the event loop. A span of
     # their own (#2755): on the NAS share they were most of a listing's time.
     with span("output.details", attributes={"scadbuddy.outputs": len(metas)}):
-        return await asyncio.to_thread(
-            lambda: [
-                detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
-                for meta in metas
-            ]
+        return await asyncio.to_thread(_listed, store, metas, copies, failed)
+
+
+def _listed(
+    store: OutputStore,
+    metas: list[OutputMeta],
+    copies: Mapping[str, list[LibraryCopy]],
+    failed: set[str],
+) -> list[OutputDetail]:
+    """Each output's detail; the blob versions of all of them in one query. Blocking."""
+    versions = store.blob_versions([meta.id for meta in metas])
+    return [
+        detail(
+            store,
+            meta,
+            copies[meta.id],
+            failed_before_queueing=meta.id in failed,
+            versions=versions,
         )
+        for meta in metas
+    ]
 
 
 @router.post(
@@ -1072,7 +1090,7 @@ async def list_recent_outputs(
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
     slugs: list[str] | None = list(slug) if slug else None
     if tag is not None:
-        records = await asyncio.to_thread(catalogue.list_models)
+        records = await asyncio.to_thread(catalogue.list_summaries)
         tagged = [record.slug for record in select_models(records, None, [tag], None)]
         slugs = tagged if slugs is None else [s for s in slugs if s in tagged]
     query = OutputQuery(
@@ -1114,6 +1132,52 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
     return metas
 
 
+#: How many damaged rows `GET /outputs/copy-status` names (``bytes.damaged_sample``).
+DAMAGED_SAMPLE = 50
+
+
+class OutputBytesStatus(BaseModel):
+    """The last run of the copy of the saved outputs' bytes to the blob store (#7256): at an
+    API start, or in a housekeeping sweep."""
+
+    started_at: datetime
+    #: ``None`` while the run goes on, when it stopped before its end, when an output
+    #: ``failed``, when it is ``incomplete``, or when it was ``refused``.
+    finished_at: datetime | None
+    #: A folder could not be read (a failed stat), an output's folder is missing, or the
+    #: outputs folder is missing or lists no slug folder while rows exist (the run then
+    #: writes nothing). The next run tries again.
+    incomplete: bool
+    #: Why the run copied nothing: no blob store (``local``), the ``bambuddy`` store, or
+    #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
+    refused: str | None
+    #: Outputs whose row the run wrote with a blob it put or a key the row did not name
+    #: before.
+    copied: int
+    verified: int
+    #: Outputs whose files did not change since the copy put their bytes.
+    skipped: int
+    #: What the outputs still in files need of the quota, or more, never less: blobs that a
+    #: failed run already put are counted again until the sweep removes them.
+    needed_bytes: int
+    needed_count: int
+    #: ``{output_id, role, error}`` for each output whose bytes could not be read, put or
+    #: verified. The output gets no write; the next run tries again.
+    failed: list[dict[str, Any]]
+    #: ``{output_id, role, error}`` for each missing byte file this run found, and
+    #: ``names`` too for a ``files/`` folder with a name an output may not hold. A later
+    #: run skips an output whose files did not change, so it does not name it again:
+    #: read ``damaged_rows`` and ``damaged_sample`` for every output that is damaged now.
+    damaged: list[dict[str, Any]]
+    #: How many rows the files still hold the bytes of now.
+    pending: int
+    #: How many rows name damage now (their ``damaged`` is not empty), from every run.
+    damaged_rows: int = 0
+    #: ``{output_id, damaged}`` of the first `DAMAGED_SAMPLE` of those rows, by output
+    #: id: each ``damaged`` is ``[{role, error}]`` (``names`` too for ``files``).
+    damaged_sample: list[dict[str, Any]] = []
+
+
 class OutputCopyStatus(BaseModel):
     """The last run of the copy of the saved outputs' files to rows (#7255): at an API start,
     or in a housekeeping sweep."""
@@ -1133,6 +1197,8 @@ class OutputCopyStatus(BaseModel):
     not_copied: list[str]
     #: ``{output_id, slug, file, error}`` for each side file left out of its row.
     damaged: list[dict[str, Any]]
+    #: The last run of the byte copy (#7256); ``None`` before any.
+    bytes: OutputBytesStatus | None = None
 
 
 # Before `/outputs/{output_id}`, which would take `copy-status` for an id.
@@ -1145,12 +1211,18 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
     """The last run of the copy of the outputs' files to rows (#7255), at an API start or in
     a housekeeping sweep: when it started and finished, what it copied, refreshed and
     dropped, the folders it could not copy and the side files it left out. 404 before any
-    run."""
+    run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), how
+    many rows the files still hold the bytes of, and the rows that name damage now."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
-    if last is None:
+    if rows is None or last is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "no copy of the outputs to rows has run")
-    return OutputCopyStatus.model_validate(last)
+    byte_run = await asyncio.to_thread(rows.last_byte_run)
+    if byte_run is not None:
+        byte_run["pending"] = await asyncio.to_thread(rows.pending_bytes)
+        count, sample = await asyncio.to_thread(rows.damage, DAMAGED_SAMPLE)
+        byte_run["damaged_rows"], byte_run["damaged_sample"] = count, sample
+    return OutputCopyStatus.model_validate({**last, "bytes": byte_run})
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
@@ -1167,7 +1239,7 @@ async def get_output(
     response_model=EditTarget,
     summary="Resolve an edit deep link",
 )
-def get_edit_target(
+async def get_edit_target(
     output_id: OutputIdPath, catalogue: CatalogueDep, outputs: OutputsDep
 ) -> EditTarget:
     """Where ``/edit/{output_id}`` should land, and with which values.
@@ -1177,15 +1249,15 @@ def get_edit_target(
     link keeps working from the file alone.
     """
     try:
-        meta = outputs.get(output_id)
+        meta = await asyncio.to_thread(outputs.get, output_id)
     except OutputNotFoundError:
-        stamped = outputs.provenance(output_id)
+        stamped = await outputs.provenance(output_id)
         if stamped is None:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
                 f"no output with id {output_id!r}, and no 3MF left to read it from",
             ) from None
-        require_model(catalogue, stamped.model)
+        await asyncio.to_thread(require_model, catalogue, stamped.model)
         return EditTarget(
             output_id=output_id,
             slug=stamped.model,
@@ -1198,6 +1270,12 @@ def get_edit_target(
     # Every other route through a slug asks the catalogue first. A link is allowed to
     # outlive its output — that is the point of the 3MF fallback — but not its model:
     # answering 200 would send the customizer somewhere it cannot load.
+    return await asyncio.to_thread(_recorded_target, catalogue, outputs, meta)
+
+
+def _recorded_target(catalogue: Catalogue, outputs: OutputStore, meta: OutputMeta) -> EditTarget:
+    """The edit target from the output's record. Blocking."""
+    output_id = meta.id
     require_model(catalogue, meta.slug)
     params = outputs.params(output_id)
     return EditTarget(
@@ -1250,20 +1328,34 @@ def _no_content(result: dict[str, Any] | Operation) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+#: The ``v`` of a byte route that may be cached for good.
+VERSION_QUERY = (
+    "The version of the bytes asked for: the output's `thumbnail_version` for its "
+    "thumbnail, its `preview_version` for its preview. When it is the current one, "
+    "the answer is cached as `immutable`."
+)
+
+
 @router.get(
     "/outputs/{output_id}/model.3mf",
     response_class=Response,
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-async def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
-    meta = require_output(outputs, output_id)
-    path = outputs.directory(output_id) / MODEL_NAME
-    if not path.is_file():
+async def download_output(
+    output_id: OutputIdPath, outputs: OutputsDep, request: Request
+) -> Response:
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await outputs.blob_sha(output_id, "model")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
+        return unchanged
+    stream = await outputs.open_role(output_id, "model")
+    if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    # The saved file as it is (#2652): its presets and print settings were written when
-    # it was saved.
-    return download_3mf(path, meta)
+    # The saved bytes as they are (#2652): its presets and print settings were written
+    # when it was saved.
+    return download_3mf(stream, meta, if_none_match=if_none_match)
 
 
 @router.get(
@@ -1276,11 +1368,13 @@ async def get_output_preview(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     budget: ReadBudgetDep,
+    request: Request,
     plate: Annotated[int | None, Query(ge=1)] = None,
+    v: Annotated[str | None, Query(description=VERSION_QUERY)] = None,
 ) -> Response:
     """The output's preview mesh, or with ``plate`` that one plate of its 3MF, where the
     file places it: what the print dialog's pane shows for a plate clicked (#2169)."""
-    require_output(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
     if plate is not None:
         payload = await outputs.model_3mf(output_id)
         if payload is None:
@@ -1295,10 +1389,16 @@ async def get_output_preview(
             # #2767: the refusal a library file's plate gives for the same read (library_view.py).
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         return Response(data, media_type=GLB_MEDIA_TYPE)
-    path = outputs.directory(output_id) / PREVIEW_NAME
-    if not path.is_file():
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await outputs.blob_sha(output_id, "preview")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match, v=v)) is not None:
+        return unchanged
+    stream = await outputs.open_role(output_id, "preview")
+    if stream is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")
-    return FileResponse(path, media_type=GLB_MEDIA_TYPE)
+    return stream_response(
+        stream, media_type=GLB_MEDIA_TYPE, headers={}, if_none_match=if_none_match, v=v
+    )
 
 
 @router.get(
@@ -1306,19 +1406,25 @@ async def get_output_preview(
     response_class=FileResponse,
     summary="Download one of a pipeline output's extra files",
 )
-def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> FileResponse:
+async def output_file(
+    output_id: OutputIdPath, name: str, outputs: OutputsDep, request: Request
+) -> Response:
     """An extra file a pipeline wrote (§10): served as a download, never as a page."""
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await outputs.file_blob_sha(output_id, name)
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match)) is not None:
+        return unchanged
     try:
-        path = outputs.file_path(output_id, name)
+        stream = await outputs.open_file(output_id, name)
     except OutputNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"no file {name!r} on output {output_id}"
         ) from None
-    return FileResponse(
-        path,
-        filename=name,
-        headers=UI_FILE_HEADERS,
+    return stream_response(
+        stream,
+        headers={**UI_FILE_HEADERS, "content-disposition": attachment(name)},
         media_type="image/svg+xml" if name.endswith(".svg") else "application/octet-stream",
+        if_none_match=if_none_match,
     )
 
 
@@ -1334,17 +1440,31 @@ def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> File
     ),
 )
 async def get_output_thumbnail(
-    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep, events: EventsDep
-) -> FileResponse:
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    config: ConfigDep,
+    events: EventsDep,
+    request: Request,
+    v: Annotated[str | None, Query(description=VERSION_QUERY)] = None,
+) -> Response:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
-    path = await asyncio.to_thread(lambda: outputs.directory(output_id) / THUMBNAIL_NAME)
-    if not await asyncio.to_thread(path.is_file):
-        await _draw_thumbnail(outputs, meta, path, config, events)
-    return FileResponse(path, media_type="image/png")
+    if_none_match = request.headers.get("if-none-match")
+    sha256 = await outputs.blob_sha(output_id, "thumbnail")
+    if (unchanged := blob_not_modified(sha256, if_none_match=if_none_match, v=v)) is not None:
+        return unchanged
+    stream = await outputs.open_role(output_id, "thumbnail")
+    if stream is None:
+        await _draw_thumbnail(outputs, meta, config, events)
+        stream = await outputs.open_role(output_id, "thumbnail")
+    if stream is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
+    return stream_response(
+        stream, media_type="image/png", headers={}, if_none_match=if_none_match, v=v
+    )
 
 
 async def _draw_thumbnail(
-    outputs: OutputStore, meta: OutputMeta, path: Path, config: Config, events: EventBus
+    outputs: OutputStore, meta: OutputMeta, config: Config, events: EventBus
 ) -> None:
     """#4775: a thumbnail for an output saved with none (the agent's, a flow's, an order
     quote's), from its preview mesh, as the `iso` view draws it. Lazy, so outputs saved
@@ -1362,10 +1482,11 @@ async def _draw_thumbnail(
     # would announce the thumbnail to the page that got it.
     await slots.acquire()
     try:
-        # Another read drew it, or its draw came to nothing, while this one waited.
-        drawn_meanwhile, drawable = await asyncio.to_thread(
-            lambda: (path.is_file(), outputs.drawable_thumbnail(output_id))
-        )
+        # Another read drew it, or its draw came to nothing, while this one waited. A
+        # thumbnail counts only when it can be read: a blob the index names but the store
+        # lost, with no file, is drawn again.
+        drawn_meanwhile = await _readable(outputs, output_id)
+        drawable = await asyncio.to_thread(outputs.drawable_thumbnail, output_id)
     except BaseException:
         slots.release()
         raise
@@ -1374,10 +1495,11 @@ async def _draw_thumbnail(
         if drawn_meanwhile:
             return
         raise missing
-    # The slot goes back when the thread ends, not when this read stops waiting for
-    # it: `wait_for` cannot stop a thread, and a draw past its budget still runs.
+    # The slot goes back when the draw ends (its thread, then its puts), not when this
+    # read stops waiting for it: `wait_for` cannot stop a thread, and a draw past its
+    # budget still runs. The shield keeps a cancelled read from cancelling it.
     outputs.draws_running += 1
-    drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
+    drawing = asyncio.ensure_future(_draw_and_keep(outputs, output_id))
     _DRAWING.add(drawing)
     gave_up = False
 
@@ -1421,6 +1543,15 @@ async def _draw_thumbnail(
         raise missing
 
 
+async def _readable(outputs: OutputStore, output_id: str) -> bool:
+    """Whether the output's thumbnail can be read now (`OutputStore.open_role`)."""
+    stream = await outputs.open_role(output_id, "thumbnail")
+    if stream is None:
+        return False
+    await stream.aclose()
+    return True
+
+
 def _drawn(drawing: asyncio.Future[bool]) -> bool:
     return (
         drawing.done()
@@ -1438,14 +1569,19 @@ RETRY_DRAW_AFTER = 600.0
 _DRAWING: set[asyncio.Future[bool]] = set()
 
 
-def _draw_and_keep(outputs: OutputStore, output_id: str, path: Path) -> bool:
-    """The `iso` view of the output's preview mesh, kept as its thumbnail unless one
-    landed first; False, and remembered, when the mesh has nothing to draw."""
-    png = draw_view(path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None)
+async def _draw_and_keep(outputs: OutputStore, output_id: str) -> bool:
+    """The `iso` view of the output's preview mesh (its blob's temporary file, else its
+    file), drawn in a thread and kept as its thumbnail, file and blob
+    (`put_drawn_thumbnail`), unless one landed first; False, and remembered, when the
+    mesh has nothing to draw. False, not remembered, when the preview is gone."""
+    async with outputs.local_role(output_id, "preview") as glb:
+        if glb is None:
+            return False
+        png = await asyncio.to_thread(draw_view, glb, "iso", PLATE_PNG_SIZE, None)
     if png is None:
         outputs.remember_undrawable(output_id)
         return False
-    outputs.write_drawn_thumbnail(output_id, png)
+    await outputs.put_drawn_thumbnail(output_id, png)
     return True
 
 
@@ -1468,34 +1604,36 @@ async def get_output_view(
     camera: ViewCamera,
     size: ViewSize = PLATE_PNG_SIZE,
 ) -> Response:
-    require_output(outputs, output_id)
-    return await preview_view(
-        outputs.directory(output_id) / PREVIEW_NAME,
-        view,
-        size,
-        config=config,
-        owner=f"output {output_id!r}",
-        camera=camera,
-    )
+    await asyncio.to_thread(require_output, outputs, output_id)
+    owner = f"output {output_id!r}"
+    async with outputs.local_role(output_id, "preview") as glb:
+        if glb is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
+        return await preview_view(glb, view, size, config=config, owner=owner, camera=camera)
 
 
-def _model_3mf(outputs: OutputStore, output_id: str) -> Path:
-    path = outputs.directory(output_id) / MODEL_NAME
-    if not path.is_file():
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    return path
+@contextlib.asynccontextmanager
+async def _model_3mf(outputs: OutputStore, output_id: str) -> AsyncIterator[Path]:
+    """A path that holds the output's 3MF while the block runs (`local_role`); a 404
+    when it has none."""
+    async with outputs.local_role(output_id, "model") as path:
+        if path is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
+        yield path
 
 
 @router.get(
     "/outputs/{output_id}/plates", response_model=list[OutputPlate], summary="The 3MF's plates"
 )
-def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[OutputPlate]:
+async def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[OutputPlate]:
     """What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
     one plate unless the template asks for more (#289)."""
-    require_output(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
+    async with _model_3mf(outputs, output_id) as path:
+        plates = await asyncio.to_thread(plates_of, path)
     return [
         OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None, name=plate.name)
-        for plate in plates_of(_model_3mf(outputs, output_id))
+        for plate in plates
     ]
 
 
@@ -1505,20 +1643,29 @@ def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[Outp
     responses={200: {"content": {"image/png": {}}}},
     summary="A plate's cover image",
 )
-def get_output_plate_thumbnail(
+async def get_output_plate_thumbnail(
     output_id: OutputIdPath, index: int, outputs: OutputsDep
 ) -> Response:
     """The plate's own cover from inside the 3MF, the one Bambu Studio would show."""
-    require_output(outputs, output_id)
-    path = _model_3mf(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
+    async with _model_3mf(outputs, output_id) as path:
+        image = await asyncio.to_thread(_plate_cover, path, index)
+    if image is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
+    return Response(image, media_type="image/png")
+
+
+def _plate_cover(path: Path, index: int) -> bytes | None:
+    """Plate ``index``'s cover image in the 3MF at ``path``; ``None`` when it has none.
+    Blocking."""
     cover = next(
         (plate.thumbnail for plate in plates_of(path) if plate.index == index and plate.thumbnail),
         None,
     )
     if cover is None:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
+        return None
     with zipfile.ZipFile(path) as archive:
-        return Response(archive.read(cover), media_type="image/png")
+        return archive.read(cover)
 
 
 @router.get(
@@ -1542,9 +1689,12 @@ async def get_output_geometry(
     the preview. A 3MF with more than one plate (#289) is measured a plate at a time;
     ``plates`` in the result says how many there are. Computed on first ask and cached
     beside the output."""
-    require_output(outputs, output_id)
+    await asyncio.to_thread(require_output, outputs, output_id)
+    # The model the analysis is read from, read first: a key that moves since names other
+    # bytes, and the attributed analysis is then not kept.
+    model_sha = await asyncio.to_thread(outputs.model_sha, output_id)
     try:
-        analysis = await asyncio.to_thread(outputs.geometry, output_id, plate)
+        analysis = await outputs.geometry(output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except NoSuchPlateError as error:
@@ -1554,7 +1704,9 @@ async def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
-    return await _attributed(analysis, outputs, output_id, plate, paths=paths, history=history)
+    return await _attributed(
+        analysis, outputs, output_id, plate, model_sha, paths=paths, history=history
+    )
 
 
 async def _attributed(
@@ -1562,6 +1714,7 @@ async def _attributed(
     outputs: OutputStore,
     output_id: str,
     plate: int,
+    model_sha: str | None,
     *,
     paths: DataPaths,
     history: ModelHistory,
@@ -1608,7 +1761,9 @@ async def _attributed(
         return analysis
     named = await asyncio.to_thread(attribute, analysis, directory)
     if named is not analysis:
-        await asyncio.to_thread(outputs.write_attributed, output_id, plate, version, named)
+        await asyncio.to_thread(
+            outputs.write_attributed, output_id, plate, version, named, model_sha=model_sha
+        )
     return named
 
 

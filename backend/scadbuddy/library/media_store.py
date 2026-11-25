@@ -22,6 +22,11 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.library.media import MediaItem
 
+#: Marks the template's row (#7317) as older than its media, in the media write's own
+#: transaction: a read then reads the media from the files until the row is refreshed
+#: (final review M3). A template with no row has nothing to mark.
+_MARK = "UPDATE templates SET media_changed_at = now() WHERE template_id = %s"
+
 
 class MediaStore(Protocol):
     def items(self, template_id: str) -> list[MediaItem]: ...
@@ -98,11 +103,13 @@ class PostgresMediaStore:
                         for index, item in enumerate(items)
                     ],
                 )
+            conn.execute(_MARK, (template_id,))
 
     def delete(self, template_id: str) -> None:
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM template_media WHERE template_id = %s", (template_id,))
             conn.execute("DELETE FROM template_media_cover WHERE template_id = %s", (template_id,))
+            conn.execute(_MARK, (template_id,))
 
     def cover(self, template_id: str) -> str | None:
         """The item a built-in's overlay made its cover, or None."""
@@ -126,7 +133,7 @@ class PostgresMediaStore:
 
     def set_cover(self, template_id: str, item_id: str | None) -> None:
         """Choose ``item_id`` as the cover, or with None go back to the list's order."""
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
             if item_id is None:
                 conn.execute(
                     "DELETE FROM template_media_cover WHERE template_id = %s", (template_id,)
@@ -137,3 +144,4 @@ class PostgresMediaStore:
                     " ON CONFLICT (template_id) DO UPDATE SET item_id = EXCLUDED.item_id",
                     (template_id, item_id),
                 )
+            conn.execute(_MARK, (template_id,))

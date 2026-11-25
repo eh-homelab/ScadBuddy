@@ -19,10 +19,13 @@ type S = components['schemas']
  * tag's backups in memory, append-only; a backup covers a write for 10 minutes. `tag-records`
  * answers one OpenSpool record built from the spool; `tag-written` checks the backup, the
  * read-back and the records, then binds and gives the spool the `openspool` origin and the
- * write's time. Both check the backup before they look the spool up, as the routes do.
+ * write's time. Both look the spool up first (404), then check the backup, as the routes do.
  *
  * The agents' NFC jobs (`tags.py` `claim_job`, `finish_job`, `cancel_job`) live in memory too;
- * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request. A read
+ * `seedNfcJob` queues one. A job past its `expires_at` is `expired` at the next request, but for an
+ * armed one whose `agent_write` backup exists (`write_begun`), which no cancel ends and which fails
+ * `no_read_back` once its newest backup is over 10 minutes old; arming sets `expires_at`
+ * `ARM_SECONDS` ahead. A read
  * job's result is the reading's answer, as `/tags/reads` gives it, with the tag marked seen by
  * the agent.
  */
@@ -123,15 +126,25 @@ export function seedNfcJob(job: { kind: Job['kind']; records?: S['NdefRecord'][]
     created_at: created.toISOString(),
     expires_at: new Date(created.getTime() + (job.ttl_s ?? 600) * 1000).toISOString(),
     armed_by: null,
+    write_begun: false,
   }
   jobs.push(made)
   return made
 }
 
-/** `expire_jobs`: every open job whose time is up ends as `expired`. */
+/** `ARM_SECONDS`: how long an armed run has. */
+const ARM_MS = 60_000
+
+/** `expire_jobs`: every open job whose time is up ends as `expired`, but a begun write, which fails `no_read_back` once its newest backup is too old. */
 function expireJobs() {
   const now = Date.now()
-  for (const job of jobs) if ((job.state === 'pending' || job.state === 'armed') && Date.parse(job.expires_at) <= now) job.state = 'expired'
+  for (const job of jobs) {
+    if ((job.state !== 'pending' && job.state !== 'armed') || Date.parse(job.expires_at) > now) continue
+    const newest = backups.filter((one) => one.job_id === job.id && one.reason === 'agent_write').at(-1)
+    if (!newest) job.state = 'expired'
+    else if (job.state === 'armed' && now - Date.parse(newest.at) > BACKUP_TTL_MS)
+      Object.assign(job, { state: 'failed', result: { error: 'no read-back came within 10 minutes of the backup', code: 'no_read_back', backup_id: newest.id } })
+  }
 }
 
 const jobOf = (id: string) => {
@@ -215,12 +228,13 @@ export const handlers = [
     if (job.records === null) {
       if (sha !== null) return problem(422, 'a read job takes no records_sha256', 'records_sha256_not_taken')
     } else if (sha?.toLowerCase() !== (await recordsSha256(job.records))) return conflict('records_mismatch', 'the records are not the ones the page showed')
-    Object.assign(job, { state: 'armed', armed_by: 'owner@example.com' })
+    Object.assign(job, { state: 'armed', armed_by: 'owner@example.com', expires_at: new Date(Date.now() + ARM_MS).toISOString() })
     return HttpResponse.json(job)
   }),
   http.post(`${BASE}/nfc-jobs/:id/cancel`, ({ params }) => {
     const job = jobOf(String(params.id))
     if (!job) return problem(404, `no NFC job ${String(params.id)}`)
+    if (job.write_begun && job.state === 'armed') return conflict('write_begun', 'the write has begun: the job ends only with its result')
     if (job.state === 'pending' || job.state === 'armed') job.state = 'cancelled'
     return HttpResponse.json(job)
   }),
@@ -250,29 +264,31 @@ export const handlers = [
     const tag = seenTag(uid, decodeOpenSpool(body.records) ? 'ntag_openspool' : null)
     const backup: Backup = { id: newId(), tag_id: tag.id, uid, records: body.records, reason: body.reason, job_id: body.job_id ?? null, actor: 'owner@example.com', at: new Date().toISOString() }
     backups.push(backup)
+    const job = backup.job_id === null ? undefined : jobs.find((one) => one.id === backup.job_id)
+    if (job && backup.reason === 'agent_write') job.write_begun = true
     return HttpResponse.json({ backup_id: backup.id } satisfies S['TagBackupMade'], { status: 201 })
   }),
   http.get(`${BASE}/tags/:id/backups`, ({ params }) => {
     if (!tagOf(String(params.id))) return problem(404, `no tag ${String(params.id)}`)
     return HttpResponse.json(backups.filter((one) => one.tag_id === params.id).reverse().slice(0, 50))
   }),
-  // `records_for_spool` and `written` check the backup first, then look the spool up.
+  // `records_for_spool` and `written` look the spool up first, then check the backup.
   http.post(`${BASE}/spools/:id/tag-records`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagRecordsIn']
-    const backup = covering(body, 'spool_write')
-    if (backup instanceof Response) return backup
     const spool = spoolViewOf(String(params.id))
     if (!spool) return problem(404, `no spool ${String(params.id)}`)
+    const backup = covering(body, 'spool_write')
+    if (backup instanceof Response) return backup
     return HttpResponse.json(openSpoolRecords(spool))
   }),
   http.post(`${BASE}/spools/:id/tag-written`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagWrittenIn']
+    const spool = spoolViewOf(String(params.id))
+    if (!spool) return problem(404, `no spool ${String(params.id)}`)
     const backup = covering(body, 'spool_write')
     if (backup instanceof Response) return backup
     if (!sameRecords(body.read_back, body.sent)) return conflict('read_back_mismatch', 'the tag does not hold what was sent')
     if (body.sent.length !== 1 || !decodeOpenSpool(body.sent)) return problem(422, 'the records sent are in no known format', 'unknown_format')
-    const spool = spoolViewOf(String(params.id))
-    if (!spool) return problem(404, `no spool ${String(params.id)}`)
     if (!sameRecords(body.sent, openSpoolRecords(spool).records)) return conflict('sent_mismatch', 'sent is not what the spool gives now')
     // The read-back gives the tag its format's kind (R13).
     seenTag(backup.uid, 'ntag_openspool')

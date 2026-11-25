@@ -637,14 +637,8 @@ export type UnitCostHistory = Schemas['UnitCostHistory']
 /** #5329, job cost spec §6.4 — `GET /orders/reports/profit`: the profit report by model. */
 export type ProfitReport = Schemas['ProfitReport']
 export type ProfitRow = Schemas['ProfitRow']
-/** #5543, job cost spec §11 — the parts inventory: hooks, rings, magnets. `unit_cost_minor`
- * is a decimal string in minor units (a rate with its fraction), never an amount. */
-export type InventoryPart = Schemas['InventoryPart']
-export type PartCreate = Defaulted<Schemas['PartInput'], 'supplier' | 'link' | 'low_stock' | 'on_hand'>
-export type PartPatch = Partial<Schemas['PartPatch']>
-export type StockAdd = Partial<Schemas['StockAdd']>
-export type StockAdjust = Schemas['StockAdjust']
-export type StockMove = Schemas['StockMove']
+/** #5543, job cost spec §11 — an order item's parts and a model's parts rule. A part is an
+ * inventory item of a kind tracked in lots (#7067, `pages/inventory/api.ts`). */
 export type PartRule = Schemas['PartRule']
 export type PartRuleLine = Schemas['PartRuleLine']
 export type ItemPart = Schemas['ItemPart']

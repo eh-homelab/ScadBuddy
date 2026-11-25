@@ -218,7 +218,7 @@ def _suggestions(catalogue: Catalogue, archive: ArchiveDetail) -> list[ModelSugg
     slugs = suggested_slugs(catalogue.slugs(), archive.print_name or archive.filename)
     if not slugs:
         return []
-    records = {record.slug: record for record in catalogue.list_models(slugs)}
+    records = {model.slug: model for model in catalogue.list_summaries(slugs)}
     return [
         ModelSuggestion(slug=slug, name=records[slug].name) for slug in slugs if slug in records
     ]

@@ -11,7 +11,7 @@ import type { LoggedEvent } from '../sessions/eventLog.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
-import { type Origin, ORIGINS, type Owner, ownerSeenBy, type QueuedEntry, SESSION_MODES, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { type Origin, ORIGINS, type Owner, ownerSeenBy, type QueuedEntry, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { SessionBrowserInput } from '../sessions/browserOptions.js'
 import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
@@ -102,9 +102,9 @@ function manager(ctx: ToolContext): SessionManager {
  * Whether a session this call starts or forks, or a turn it sends, goes without the background
  * built-ins (#5870): a flow run's call, or a call from a session whose turn has none (a flow's
  * session, a Workflow agent's chat), so neither reaches CronCreate, ScheduleWakeup, Workflow or
- * Monitor through another session.
+ * Monitor through another session. nfc_write reads it too: such a call has no person behind it.
  */
-async function withoutBackground(ctx: ToolContext, sessions: SessionManager): Promise<boolean> {
+export async function withoutBackground(ctx: ToolContext, sessions: SessionManager): Promise<boolean> {
   if (ctx.flowTurn) return true
   return ctx.session !== undefined && !(await sessions.keepsBackgroundTools(ctx.session))
 }
@@ -405,7 +405,7 @@ export const sessionTools: Tool[] = [
       'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
       "`browser` sets what the session's browser reports (user agent, viewport, locale); the session keeps it for its life, " +
       'and its forks keep it too. A value out of bounds is refused, naming the field and the bound it broke. ' +
-      'Every session runs as a Temporal workflow that survives restarts; `mode` is accepted only for compatibility and ignored: omit it.',
+      'Every session runs as a Temporal workflow that survives restarts.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
       // #2477: references only, as sessions_send's, sent with the prompt.
@@ -420,10 +420,6 @@ export const sessionTools: Tool[] = [
         })
         .optional()
         .describe('What the session is about (spec §6 "scope"), recorded with it.'),
-      mode: z
-        .enum(SESSION_MODES)
-        .optional()
-        .describe('Taken and ignored: every session runs as a Temporal workflow that survives restarts.'),
       browser: SessionBrowserInput.optional(),
       wait_seconds: waitSeconds,
     }),

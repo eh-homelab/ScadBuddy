@@ -367,9 +367,10 @@ class Settings(BaseSettings):
     download_cache_private: bool = False
     # #7316: where this process spools whole files while it works on them: blob-spool/
     # (the store's request-body spool: cached downloads' private copies, the slicer's
-    # and print worker's PUT bodies, slice bodies, thumbnail copies, an order's archive
-    # copy) and library-spool/ (every read of a Bambuddy library file). The API's, and
-    # a render worker's where it is set there. Unset, under the data volume's cache/.
+    # and print worker's PUT bodies, slice bodies, thumbnail copies, a library upload's
+    # body, an order's archive copy) and library-spool/ (every read of a Bambuddy
+    # library file). The API's, and a render worker's where it is set there. Unset,
+    # under the data volume's cache/.
     spool_dir: Path | None = None
     # #7318: the piece cache's root on a remote store (a node-local emptyDir); unset, the
     # data volume's blobs/. Ignored on the local store, where blobs/ is the record.

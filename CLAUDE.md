@@ -32,6 +32,9 @@ reach the database. Every other process (the render, print and projects workers,
 agent services, agent-durable) is an HTTP client of the CRUD service, with a short-lived
 service credential (PR #5211). The owner decided this on 2026-11-05.
 
+- One exception (the owner, 2026-11-25, #7667): `tools/go/core`, the API's move to Go, is a
+  second database client with the API's own role while the move lasts. It runs no untrusted
+  code. No other process may be one.
 - Never add a new database client, a read or write of another service's tables, or a
   cross grant. A role per caller in one database is not a boundary: a table owner's
   triggers, rules, defaults and builtin-shadowing functions run with the other role's
