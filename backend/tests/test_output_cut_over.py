@@ -142,7 +142,7 @@ async def test_each_copy_frees_its_lock_before_it_returns(
     """#7769: a copy releases its advisory lock before it returns, not when the server
     ends its closed session a moment later, so the cut-over's check of both locks, made
     at once, finds them free. Several times, as the race is short: without the fix it
-    failed 2 of 3 runs of 25 loops (#7769), so 10 still catch it (#7823)."""
+    failed 2 of 3 runs of 25 loops (#7769); 10 keep the shard balanced (#7823)."""
     store, _ = saved
     rows = _rows(store)
     for _ in range(10):
