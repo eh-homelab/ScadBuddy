@@ -283,7 +283,8 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `filament_label_base_url` (an https origin of at most 64 characters, live; unset, labels use
   `public_url` reduced to its https origin, then the page's own origin),
   `filament_label_template` (#7157, stored only: the label template the labels page and the
-  labels PDF use; the 50 x 25 mm roll label by default),
+  labels PDF use; the 50 x 25 mm roll label by default; a saved sheet grid by its
+  `sheet_id`, #7216),
   `filament_label_output` (#7216, stored only: the labels file's format, `pdf` or `png`, the
   PNG's dpi, 203, 300 or 600, and the spool label's fields; a PDF at 300 dpi with the number,
   material, colour, brand and QR code by default).
@@ -371,6 +372,20 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   Indic scripts print with no shaping, and Hebrew and Arabic print in stored order, not right
   to left. When the server lacks DejaVu Sans, the route answers 503 `label_font_missing`,
   which names the missing file. The browser print keeps the browser's own fonts.
+- Saved sheet grids (#7216, R-7216-11 to R-7216-13): a person names a sheet layout (the page,
+  `a4` or `letter`; the label size; the columns, rows, margins and gaps) and saves it. The API
+  keeps it in the table `label_sheets` (`backend/scadbuddy/filament/label_sheets.py`), and no
+  other process reads it. A name is 1 to 100 characters after trim and NFC, and unique with
+  case ignored (409 `label_sheet_name_taken`). An install keeps at most 100 sheets (409
+  `too_many_label_sheets`). A label is 40 to 190 mm wide and 25 to 190 mm tall; the grid has
+  1 to 20 columns and 1 to 40 rows and must fit its page with 0.01 mm of slack (422
+  otherwise). `GET /api/v1/filament/label-templates` lists them as `saved`;
+  `POST /api/v1/filament/label-sheets` saves one, and `PUT` and `DELETE
+  /api/v1/filament/label-sheets/{id}` replace and delete it. These writes do not nudge the
+  Bambuddy sync, which has nothing of them to push. A label choice names a saved sheet by
+  its id (`{template: "saved", sheet_id}`), and `POST /api/v1/filament/labels` reads the row
+  at each request, so an edit applies to the next print, PDF or PNG. A choice of a deleted
+  sheet answers 409 `label_sheet_gone`.
 
 ## Tests
 

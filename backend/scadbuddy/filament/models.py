@@ -32,6 +32,7 @@ from pydantic import (
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_output import Dpi, OutputFormat
 from scadbuddy.filament.label_output import Fields as LabelFields
+from scadbuddy.filament.label_sheets import SavedLabelSheet
 from scadbuddy.filament.label_templates import LabelTemplate, LabelTemplateChoice
 from scadbuddy.slicing.own_presets import sb_id
 
@@ -593,10 +594,12 @@ class CustomLabelBounds(BaseModel):
 
 
 class LabelTemplates(BaseModel):
-    """#7157: the label templates, and a custom label's bounds."""
+    """#7157: the label templates, and a custom label's bounds. #7216: the saved sheets."""
 
     templates: list[LabelTemplate]
     custom: CustomLabelBounds
+    #: The saved sheet grids, by name with case ignored (R-7216-13).
+    saved: list[SavedLabelSheet]
 
 
 Reading = Annotated[float, Field(allow_inf_nan=False)]

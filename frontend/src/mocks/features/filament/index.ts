@@ -253,6 +253,8 @@ export const LABEL_TEMPLATES: S['LabelTemplates'] = {
     },
   ],
   custom: { min_width_mm: 40, min_height_mm: 25, max_width_mm: 190, max_height_mm: 190 },
+  // #7216 — the saved sheet grids; none in the mocks until the Labels page saves one.
+  saved: [],
 }
 
 const TITLES = { 404: 'Not Found', 409: 'Conflict', 422: 'Unprocessable Content', 428: 'Precondition Required' } as const

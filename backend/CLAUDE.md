@@ -1202,7 +1202,17 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   once. No shaping, no right-to-left order and no CJK font: #7707. The tests read the text back
   with pypdfium2; a test that needs a Noto file skips when it is absent, and fails instead with
   `SCADBUDDY_TEST_FONTS_REQUIRED=1`, which CI's `backend-pytest` sets (the `test` image has
-  `fonts-noto-core`). Agent tools: `filament_code_resolve`, `filament_location_get`,
+  `fonts-noto-core`). Saved sheet grids (#7216 R-7216-11 to R-7216-13): `label_sheets.py`
+  (`LabelSheetStore`, the API's own table `label_sheets`, through `Filament.label_sheets` on the
+  filament pool; `SheetLayout` holds the bounds and the fit on the page; a name is unique by
+  `name_key`, NFC then casefold, a unique index; a create counts and inserts under a
+  transaction advisory lock, at most `MAX_SAVED_SHEETS`). `LabelTemplateChoice` takes
+  `template` `saved` with `sheet_id`, and `resolve` reads the row once per labels request, so
+  the PDF and the PNG use one grid and an edit applies to the next print; a deleted sheet is
+  409 `label_sheet_gone`. Routes `POST /filament/label-sheets`, `PUT` and `DELETE
+  /filament/label-sheets/{sheet_id}` (409 `label_sheet_name_taken`, `too_many_label_sheets`;
+  in `NOT_NUDGED`); `GET /filament/label-templates` lists them as `saved`. Agent tools:
+  `filament_code_resolve`, `filament_location_get`,
   `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`

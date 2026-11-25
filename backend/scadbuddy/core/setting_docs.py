@@ -471,8 +471,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "filament_label_template": SettingDoc(
             "Label template",
             "The size of a printed label, for spools and for printer, AMS and slot places:"
-            " a roll or box label, an AMS holder, an Avery sheet, or a custom size of 40 to"
-            " 190 mm wide and 25 to 190 mm tall. The Labels page saves the last one chosen.",
+            " a roll or box label, an AMS holder, an Avery sheet, a sheet grid you saved, or a"
+            " custom size of 40 to 190 mm wide and 25 to 190 mm tall. The Labels page saves the"
+            " last one chosen. A saved sheet is read at each print, so an edit applies to the"
+            " next print; when it is deleted, labels are refused until you choose another"
+            " template.",
         ),
         "filament_label_output": SettingDoc(
             "Label output",

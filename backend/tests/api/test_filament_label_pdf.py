@@ -98,8 +98,9 @@ def test_the_template_setting_round_trips(client: TestClient) -> None:
         "template": "roll_50x25",
         "width_mm": None,
         "height_mm": None,
+        "sheet_id": None,
     }
-    custom = {"template": "custom", "width_mm": 80, "height_mm": 40}
+    custom = {"template": "custom", "width_mm": 80, "height_mm": 40, "sheet_id": None}
     assert client.put(SETTINGS, json={name: custom}).status_code == 200
     assert client.get(SETTINGS).json()[name] == custom
     assert client.put(SETTINGS, json={name: {"template": "custom"}}).status_code == 422
