@@ -1,6 +1,6 @@
 import { ChevronRightIcon, PencilIcon, RotateCwIcon } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
-import { api, ApiError } from '../../api/client'
+import { api, ApiError, mayHaveRun } from '../../api/client'
 import { listSpools } from '../../api/filament'
 import type { AmsUnitView, AmsView, PrinterRow, SlotCommandSent, SlotConfigureBody, SlotPresetBody, SlotView } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
@@ -19,13 +19,18 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ChoiceSelect, LabeledInput, LoadingLines } from './form'
 import { Spinner } from '../ui/spinner'
+import { Said, stopped, usePrinterCommand } from './usePrinterCommand'
 
 /**
- * #7153 — a printer's AMS slots, controlled through Bambuddy (`backend/scadbuddy/api/printer_slots.py`,
- * plan 2026-11-23-ams-slot-control). Closed until opened: the read asks Bambuddy's live status
- * (R-7153-9). Every write that reaches the printer asks first, in a dialog naming the printer and the
- * slot (R-7153-10), and the route refuses it while the printer prints (R-7153-3), so the buttons are
- * off then too. A unit's label is Bambuddy's and names ScadBuddy's place of the unit (R-7153-8).
+ * #7153, #7276 — a printer's AMS slots, controlled over ScadBuddy's own LAN link
+ * (`backend/scadbuddy/api/printer_slots.py`), shown on a printer whose row is `lan_linked`. Closed
+ * until opened: the read is the printer's latest LAN report (R-7153-9). Every write that reaches the
+ * printer asks first, in a dialog naming the printer and the slot (R-7153-10), and the route refuses
+ * it while the printer prints (R-7153-3), so the buttons are off then too. A write goes once under
+ * one key (`printerCommand`, which follows a slow command's 202, P44): the saved preset follows the
+ * configure's answer only. A press that repeats a command the page stopped following sends its key
+ * again (P55, `usePrinterCommand`), and closing the panel stops every follow. A unit's label names
+ * ScadBuddy's place of the unit (R-7153-8).
  */
 
 type Action = SlotCommandSent['action']
@@ -56,6 +61,12 @@ function problem(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
 
+/** A write's `message` is `sent` when the printer acknowledged it, else it says it did not. */
+const unconfirmed = (message: string) => message !== 'sent'
+
+/** #7276 — a write the printer has not answered yet (its route's 202): it was sent, and runs. */
+const WAITING = { text: 'Sent to the printer. Waiting for it to answer.', warn: false }
+
 export function PrinterAmsSlots({ row }: { row: PrinterRow }) {
   const [open, setOpen] = useState(false)
   return (
@@ -81,6 +92,7 @@ interface Pending {
 
 function AmsBody({ row }: { row: PrinterRow }) {
   const ams = useAsync(() => api.printerAms(row.id), [row.id])
+  const commands = usePrinterCommand(row.id)
   const [picked, setPicked] = useState<{ ams: number; tray: number } | null>(null)
   const [configuring, setConfiguring] = useState(false)
   const [asking, setAsking] = useState<Pending | null>(null)
@@ -92,19 +104,30 @@ function AmsBody({ row }: { row: PrinterRow }) {
     setBusy(true)
     setMessage(null)
     const { unit, slot } = pending
+    const onWaiting = () => setMessage(WAITING)
+    const target = `${unit.ams_id}/${slot.tray_id}`
     try {
       if (pending.action === 'configure' && pending.body) {
-        const sent = await api.configureSlot(row.id, unit.ams_id, slot.tray_id, pending.body)
+        const body = pending.body
+        // The answer is the route's own (`printerCommand` follows a 202): a 202's body never reaches here.
+        const sent = await commands.send(target, 'configure', body, (options) =>
+          api.configureSlot(row.id, unit.ams_id, slot.tray_id, body, { ...options, onWaiting }),
+        )
         let text = `Configured ${slot.label}: ${sent.material} ${sent.preset_name}.`
         let warn = false
+        if (unconfirmed(sent.message)) {
+          text = `Configure: sent to ${slot.label}; the printer did not confirm it. Read the AMS before you send it again.`
+          warn = true
+        }
         try {
-          // The saved preset follows what the slot was sent: a spool's type preset too, and none clears it.
-          // A spool's preset carries its source from the backend; the form's choice is for an id typed by hand.
+          // The saved preset follows what the slot was sent: a spool's type preset too, and none (a
+          // material with no generic id answers "") clears it. Its source is the form's choice for an
+          // id typed by hand; a spool's preset has none to send (the backend keeps no source, P17).
           if (sent.preset_id) {
             await api.setSlotPreset(row.id, unit.ams_id, slot.tray_id, {
               preset_id: sent.preset_id,
               preset_name: sent.preset_name,
-              preset_source: sent.preset_source ?? pending.presetSource ?? 'cloud',
+              ...(pending.presetSource ? { preset_source: pending.presetSource } : {}),
               tray_info_idx: sent.preset_id,
             })
           } else if (slot.saved_preset) {
@@ -112,16 +135,31 @@ function AmsBody({ row }: { row: PrinterRow }) {
           }
         } catch (cause) {
           warn = true
-          text += ` The slot’s saved preset was not changed: ${problem(cause, 'Bambuddy refused it.')}`
+          text += ` The slot’s saved preset was not changed: ${problem(cause, 'it could not be saved.')}`
         }
         setMessage({ text, warn })
         setConfiguring(false)
       } else {
-        const sent = await api.slotCommand(row.id, unit.ams_id, slot.tray_id, pending.action)
-        setMessage({ text: `${ASKS[pending.action].title}: sent to ${slot.label}. ${sent.message}`.trim(), warn: false })
+        const action = pending.action
+        const sent = await commands.send(target, action, null, (options) =>
+          api.slotCommand(row.id, unit.ams_id, slot.tray_id, action, { ...options, onWaiting }),
+        )
+        const title = ASKS[pending.action].title
+        setMessage(
+          unconfirmed(sent.message)
+            ? { text: `${title}: sent to ${slot.label}; the printer did not confirm it. Read the AMS before you send it again.`, warn: true }
+            : { text: `${title}: sent to ${slot.label}.`, warn: false },
+        )
       }
       ams.refresh()
     } catch (cause) {
+      if (stopped(cause)) {
+        // The follow is over: leave the status empty rather than a stale "Waiting…".
+        setMessage(null)
+        return
+      }
+      // A command that may have reached the printer closes the form, so it is not sent again.
+      if (mayHaveRun(cause)) setConfiguring(false)
       setMessage({ text: problem(cause, `Could not ${ASKS[pending.action].verb.toLowerCase()} ${slot.label}.`), warn: true })
     } finally {
       setBusy(false)
@@ -161,7 +199,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
           {problem(ams.error, 'The AMS could not be read.')}
         </p>
       ) : !view ? (
-        <LoadingLines label="Reading the AMS from Bambuddy" />
+        <LoadingLines label="Reading the AMS from the printer’s last report" />
       ) : (
         view.units.map((u) => (
           <UnitBlock
@@ -231,11 +269,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
         />
       )}
 
-      {message && (
-        <p role="status" className={cn('text-xs', message.warn ? 'text-warn' : 'text-muted-foreground')}>
-          {message.text}
-        </p>
-      )}
+      <Said message={message} />
 
       <AlertDialog open={asking !== null} onOpenChange={(next) => !next && setAsking(null)}>
         <AlertDialogContent>
@@ -245,7 +279,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
             </AlertDialogTitle>
             <AlertDialogDescription>
               {asking
-                ? `This ${ASKS[asking.action].does}. It goes to the printer through Bambuddy now, and the printer may move.`
+                ? `This ${ASKS[asking.action].does}. ScadBuddy sends it to the printer now, and the printer may move.`
                 : ''}
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -268,7 +302,12 @@ function AmsBody({ row }: { row: PrinterRow }) {
 }
 
 function StateLine({ view }: { view: AmsView }) {
-  if (!view.connected) return <span className="text-warn">Bambuddy is not connected to {view.name}. Slot changes wait until it is.</span>
+  if (!view.connected)
+    return (
+      <span className="text-warn">
+        ScadBuddy has not heard from {view.name} lately. Slot changes wait until it reports again.
+      </span>
+    )
   if (view.printing)
     return <span className="text-warn">{view.name} is printing. Slot changes wait until the print has ended.</span>
   if (view.ams_busy) return <span className="text-warn">The AMS is busy. Slot changes wait until it is idle.</span>
@@ -333,7 +372,7 @@ function UnitBlock({
         )}
       </header>
       {renaming && (
-        <form onSubmit={submit} className="flex flex-wrap items-end gap-2">
+        <form onSubmit={submit} aria-label={`Label ${unit.unit}`} className="flex flex-wrap items-end gap-2">
           <LabeledInput
             label={`Label for ${unit.unit}`}
             value={label}
@@ -352,6 +391,9 @@ function UnitBlock({
           <Button size="xs" type="button" variant="ghost" disabled={saving} onClick={() => setRenaming(false)}>
             Cancel
           </Button>
+          <p className="basis-full text-xs text-muted-foreground">
+            The label also names this unit’s place in ScadBuddy.
+          </p>
         </form>
       )}
       <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">

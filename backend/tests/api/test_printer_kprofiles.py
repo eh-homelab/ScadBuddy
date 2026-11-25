@@ -120,6 +120,21 @@ def test_the_list_is_the_printers_reply(client: TestClient, scripted: Scripted, 
     assert sent(scripted, "extrusion_cali_get")[0]["nozzle_diameter"] == "0.4"
 
 
+def test_the_list_says_how_many_extruders_the_printer_has(
+    client: TestClient, scripted: Scripted
+) -> None:
+    """P54: the panel's dual-nozzle shape comes from the stored report, not Bambuddy."""
+    scripted.reply("extrusion_cali_get", nozzle_diameter="0.4", filaments=[ROW_04])
+    one = lan_printer(client)
+    assert client.get(base(one)).json()["extruders"] == 1
+    two = printers_of(client).store.create(PrinterCreate(serial="01P00A000000072", name="H2D"))
+    printers_of(client).store.link_lan(
+        two.id, LanLink(host="10.0.0.8", access_code="12345678"), cert_sha256="cd" * 32
+    )
+    printers_of(client).reports.put(two.id, TWO_NOZZLES, datetime.now(UTC))
+    assert client.get(base(two.id)).json()["extruders"] == 2
+
+
 def test_a_list_with_no_answer_is_502(client: TestClient, scripted: Scripted, pid: str) -> None:
     scripted.silent("extrusion_cali_get")
     response = client.get(base(pid))
