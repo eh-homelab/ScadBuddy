@@ -219,6 +219,9 @@ func (a *Approvals) prepared(r *http.Request, _ crud.Params) (any, error) {
 	return rowsAnswer{found}, nil
 }
 
+// list is a session's approvals (pending only with pending), or with none every pending MCP
+// prepare. A session's row is no one's to decide here (#7323), so none takes a place under
+// the cap.
 func (a *Approvals) list(r *http.Request, _ crud.Params) (any, error) {
 	b, err := crud.ReadBody(r, "session_id", "pending")
 	if err != nil {
@@ -233,7 +236,7 @@ func (a *Approvals) list(r *http.Request, _ crud.Params) (any, error) {
 	switch {
 	case sid == nil:
 		found, err = rows(r.Context(), a.Pool, `SELECT `+columns+` FROM ai_approvals
-			WHERE decision IS NULL ORDER BY created_at, id LIMIT $1`, listMax)
+			WHERE decision IS NULL AND session_id IS NULL ORDER BY created_at, id LIMIT $1`, listMax)
 	case !audit.IsUUID(*sid):
 		found = []Row{}
 	default:

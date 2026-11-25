@@ -158,7 +158,7 @@ type Row struct {
 	Scope       json.RawMessage `json:"scope"`
 	Browser     json.RawMessage `json:"browser"`
 	ParentID    *string         `json:"parent_id"`
-	Runtime     *string         `json:"runtime"`
+	Runtime     string          `json:"runtime"`
 	MaxTurns    int64           `json:"max_turns"`
 	BudgetUSD   float64         `json:"budget_usd"`
 	CostUSD     float64         `json:"cost_usd"`
@@ -441,18 +441,18 @@ func (s *Sessions) list(r *http.Request, _ crud.Params) (any, error) {
 }
 
 type newSession struct {
-	id, origin, title         string
-	owner                     owner
-	tags                      []string
-	scope                     json.RawMessage
-	parent, runtime, budgetOf *string
-	maxTurns                  int64
-	budget                    float64
-	forkParent                *string
-	forkCut                   *int64
-	background                *bool
-	browser                   []byte
-	limit                     *[2]int64
+	id, origin, title, runtime string
+	owner                      owner
+	tags                       []string
+	scope                      json.RawMessage
+	parent, budgetOf           *string
+	maxTurns                   int64
+	budget                     float64
+	forkParent                 *string
+	forkCut                    *int64
+	background                 *bool
+	browser                    []byte
+	limit                      *[2]int64
 }
 
 func (s *Sessions) create(r *http.Request, _ crud.Params) (any, error) {
@@ -478,7 +478,11 @@ func (s *Sessions) create(r *http.Request, _ crud.Params) (any, error) {
 		}
 	}
 	n.parent = body.Get("parent_id").OptString(0, 1<<30, UUIDPattern)
-	n.runtime = body.Get("runtime").OptEnum("durable", "unified")
+	// Absent or null is unified: an older agent pod may send null during a roll (#7323).
+	n.runtime = "unified"
+	if runtime := body.Get("runtime").OptEnum("durable", "unified"); runtime != nil {
+		n.runtime = *runtime
+	}
 	n.maxTurns = body.Get("max_turns").Int(1, maxTurnsMax, false)
 	n.budget = body.Get("budget_usd").Float(0, false, budgetMaxUSD)
 	n.budgetOf = body.Get("budget_of").OptString(0, 1<<30, UUIDPattern)

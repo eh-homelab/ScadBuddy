@@ -94,6 +94,17 @@ func TestASessionApprovalIsMadeWithItsEvents(t *testing.T) {
 	expect(t, a.post("/approvals/visible-pending", askerWho)["approvals"], []any{})
 }
 
+// A session's row is no one's to decide through this list (#7323): it takes no place under the
+// cap, so leftover rows never hide an MCP prepare.
+func TestThePendingListHoldsMCPPreparesOnly(t *testing.T) {
+	a := pendingAPI(t)
+	a.post("/approvals/create", newApproval(a.gateSession("running"), nil))
+	body := map[string]any{"approval": newApproval(nil, nil), "per_principal": 5, "total": 50, "evict_reason": "full"}
+	prepare := a.post("/approvals/create-prepared", body)["approval"].(map[string]any)["id"].(string)
+	listed := a.post("/approvals/list", map[string]any{"session_id": nil, "pending": true})["approvals"]
+	expect(t, ids(listed), []string{prepare})
+}
+
 func TestADecisionIsWrittenOnceWithItsAuditRow(t *testing.T) {
 	a := pendingAPI(t)
 	session := a.gateSession("running")

@@ -79,6 +79,15 @@ func TestASessionIsInsertedAndReadBack(t *testing.T) {
 	expect(t, gone.body["reason"], "parent_gone")
 }
 
+// An agent pod of an earlier release may send null during a roll (#7323).
+func TestASessionThatNamesNoRuntimeIsUnified(t *testing.T) {
+	a := agentAPI(t)
+	absent := newSession()
+	delete(absent, "runtime")
+	expect(t, a.create(absent)["runtime"], "unified")
+	expect(t, a.create(newSession("runtime", nil))["runtime"], "unified")
+}
+
 func TestABadSessionIsRefusedByField(t *testing.T) {
 	a := agentAPI(t)
 	for name, c := range map[string]struct {

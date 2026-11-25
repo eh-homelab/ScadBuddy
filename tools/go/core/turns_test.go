@@ -102,7 +102,7 @@ func TestOnlyTheAgentReachesTheTurnRoutes(t *testing.T) {
 
 func TestASendClaimsAFreeRowAndGivesItBack(t *testing.T) {
 	a := turnsAPI(t)
-	sid := a.row("failed", nil, map[string]any{"runtime": nil})
+	sid := a.row("failed", nil, nil)
 	turn := uuid()
 	path := "/sessions/" + sid + "/turn/"
 	claim := func(turn string) string {

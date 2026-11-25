@@ -141,6 +141,8 @@ func TestATabWaitIsAnAgentSessionsOnly(t *testing.T) {
 	session := a.gateSession("running")
 	attention := map[string]any{"reason": "tab_disconnected", "on_timeout": nil}
 	a.post("/gate/open", openBody(session, "run-1", "answer", "toolu_1", map[string]any{"attention": attention}))
+	// A row names its runtime since #7323 ('unified' by default): a 'durable' one waits for no tab.
+	a.sql(`UPDATE ai_sessions SET runtime = 'durable' WHERE id = $1::text::uuid`, session)
 	expect(t, a.get("/pending-input/tab-wait", "session_id", session), map[string]any{"waits": false})
 	a.sql(`UPDATE ai_sessions SET runtime = 'unified' WHERE id = $1::text::uuid`, session)
 	expect(t, a.get("/pending-input/tab-wait", "session_id", session), map[string]any{"waits": true})

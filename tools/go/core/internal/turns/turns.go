@@ -187,8 +187,8 @@ func tiersJSON(a author, tiers []string, given bool) (*string, error) {
 }
 
 type claimed struct {
-	PriorStatus string  `json:"prior_status"`
-	Runtime     *string `json:"runtime"`
+	PriorStatus string `json:"prior_status"`
+	Runtime     string `json:"runtime"`
 }
 
 // sendClaim is durable.ts #send's claim: the row runs turn_id while author owns it and it is
@@ -220,8 +220,7 @@ func (t *Turns) sendClaim(r *http.Request, p crud.Params) (any, error) {
 			 FOR UPDATE)
 			 UPDATE ai_sessions SET status = 'running', turn_tiers = $2::jsonb,
 			 durable_turn_id = $3::text::uuid, turn_flow = $4, updated_at = now(),
-			 turn_started_at = now(), interrupt_requested = false,
-			 runtime = coalesce(runtime, 'unified')
+			 turn_started_at = now(), interrupt_requested = false
 			 FROM prior
 			 WHERE id = $1::text::uuid AND owner_kind = $5
 			 AND (owner_id = $6 OR owner_kind = 'browser')
@@ -288,7 +287,7 @@ type state struct {
 	TurnAttempt        *string `json:"turn_attempt"`
 	InterruptRequested bool    `json:"interrupt_requested"`
 	OwnerKind          string  `json:"owner_kind"`
-	Runtime            *string `json:"runtime"`
+	Runtime            string  `json:"runtime"`
 	EventSeq           string  `json:"event_seq"`
 	CostUSD            float64 `json:"cost_usd"`
 	// Settled is no write for grace_ms.
@@ -489,14 +488,14 @@ type begun struct {
 }
 
 // whyNot is finishActivity.ts whyNot: why the session cannot run a queued message now.
-func whyNot(status string, archived bool, runtime *string, ownerKind, ownerID string,
+func whyNot(status string, archived bool, runtime string, ownerKind, ownerID string,
 	spent, budget float64, a author) string {
 	switch {
 	case status == "done":
 		return "the session is done"
 	case archived:
 		return "the session is archived"
-	case runtime != nil && *runtime == "durable":
+	case runtime == "durable":
 		return "the session's conversation ended with the old session runtime"
 	case !(ownerKind == a.kind && (ownerID == a.id || ownerKind == "browser")):
 		return "the session was handed off"
@@ -511,7 +510,8 @@ func whyNot(status string, archived bool, runtime *string, ownerKind, ownerID st
 // an error event that says why, when the session cannot run it.
 func claimQueued(ctx context.Context, tx pgx.Tx, session string, n *next) (begun, error) {
 	var status, ownerKind, ownerID string
-	var turn, runtime *string
+	var turn *string
+	var runtime string
 	var archived bool
 	var spent *float64
 	var budget float64
