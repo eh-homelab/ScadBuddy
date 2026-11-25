@@ -356,8 +356,10 @@ def test_a_blank_note_deletes_it(client: TestClient, pid: str) -> None:
         {"setting_id": "PF1", "note": "x" * 2001},
         {"setting_id": "PF1", "note": "a\x00b"},
         {"setting_id": "a\x00b", "note": "x"},
+        {"setting_id": ".", "note": "x"},
+        {"setting_id": "..", "note": "x"},
     ],
-    ids=["empty-key", "slash", "long-key", "long-note", "nul-note", "nul-key"],
+    ids=["empty-key", "slash", "long-key", "long-note", "nul-note", "nul-key", "dot", "dot-dot"],
 )
 def test_a_bad_note_is_422_not_500(client: TestClient, pid: str, body: dict[str, Any]) -> None:
     response = client.put(f"{base(pid)}/notes", json=body)
@@ -376,6 +378,13 @@ def test_a_note_key_with_a_slash_cannot_be_deleted(client: TestClient, pid: str)
     assert client.delete(f"{base(pid)}/notes/a%2Fb").status_code in (404, 422)
     long = "k" * 257
     assert client.delete(f"{base(pid)}/notes/{long}").status_code == 422
+
+
+@pytest.mark.parametrize("key", ["%2E", "%2E%2E"], ids=["dot", "dot-dot"])
+def test_a_dot_note_key_cannot_be_deleted(client: TestClient, pid: str, key: str) -> None:
+    # A key of `.` or `..` could be saved by no PUT, so none is left that a DELETE cannot
+    # reach (a path segment of `.` or `..` is normalised away by a client).
+    assert client.delete(f"{base(pid)}/notes/{key}").status_code == 422
 
 
 def test_notes_of_an_unknown_printer_are_404(client: TestClient) -> None:
