@@ -38,8 +38,9 @@ API_POOLS = {
     "scadbuddy-rack-usage": 2,
     "scadbuddy-listener": 1,
     "scadbuddy-preview-follows": 1,
+    "scadbuddy-stage-locks": 4,
 }
-API_FIXED = 14
+API_FIXED = 18
 #: psycopg_pool's classes (httpcore's ``AsyncConnectionPool`` is HTTP, not Postgres).
 POOL_CLASSES = {"ConnectionPool", "AsyncConnectionPool", "NullConnectionPool"}
 

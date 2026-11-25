@@ -14,6 +14,7 @@ from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.insert_weights import (
     InsertWeightStore,
     NoInsertWeightOfferError,
+    below_label,
     checked_by_default,
     is_placeholder,
     mean_weight,
@@ -83,6 +84,30 @@ def test_an_offer_needs_a_reading_above_the_label_and_a_derived_weight_at_most_i
     assert offer_reason(1000, 1000) == "not_above_label"
     assert offer_reason(2600, 1000) == "derived_too_heavy"
     assert offer_reason(2000, 1000) is None
+
+
+def test_below_label_lists_the_three_with_their_numbers() -> None:
+    shortfall, found, default = below_label(900, 1000, 200)
+    assert shortfall == 100 and default == "tared"
+    assert [(r.kind, r.filament_g, r.new_label_weight_g) for r in found] == [
+        ("tared", 900, None),
+        ("short", 700, None),
+        ("label_wrong", 700, 700),
+    ]
+
+
+def test_a_large_shortfall_defaults_to_short() -> None:
+    assert below_label(800, 1000, 200)[2] == "short"
+
+
+def test_under_the_empty_weight_offers_only_tared() -> None:
+    _, found, default = below_label(150, 1000, 200)
+    assert [r.kind for r in found] == ["tared"] and default == "tared"
+
+
+def test_the_new_label_is_the_filament_rounded_half_up_at_least_one() -> None:
+    assert below_label(700.5, 1000, 200)[1][2].new_label_weight_g == 501
+    assert below_label(200.2, 1000, 200)[1][2].new_label_weight_g == 1
 
 
 def test_the_weight_is_the_mean_rounded_half_up() -> None:
@@ -255,6 +280,50 @@ def test_a_spool_with_no_offer_says_why(pg_pool: PgPool) -> None:
         store.accept(used, 1150)
     assert refused.value.reason == "used"
     assert _insert_row(pg_pool, insert).empty_weight_g == 200
+
+
+@pg
+def test_at_the_label_is_not_below_it(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    spool = _spool(pg_pool, _insert(pg_pool))
+    for reading in (1000, 999.8):
+        check = store.check(spool, reading)
+        assert check is not None
+        assert (check.reason, check.shortfall_g, check.resolutions, check.default) == (
+            "not_above_label",
+            None,
+            [],
+            None,
+        )
+
+
+@pg
+def test_a_new_spool_under_its_label_answers_below_label(pg_pool: PgPool) -> None:
+    check = _store(pg_pool).check(_spool(pg_pool, _insert(pg_pool)), 900)
+    assert check is not None
+    assert (check.reason, check.offer, check.shortfall_g, check.default) == (
+        "below_label",
+        None,
+        100,
+        "tared",
+    )
+    assert [r.kind for r in check.resolutions] == ["tared", "short", "label_wrong"]
+    assert (check.empty_weight_g, check.filament_g) == (200, 700)
+
+
+@pg
+def test_a_used_spool_under_its_label_is_used(pg_pool: PgPool) -> None:
+    store = _store(pg_pool)
+    used = _spool(pg_pool, _insert(pg_pool))
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_spool_events (spool_id, kind, source, delta_g)"
+            " VALUES (%s, 'print_ended', 'print_actual', -12)",
+            (used,),
+        )
+    check = store.check(used, 900)
+    assert check is not None
+    assert (check.reason, check.resolutions, check.default) == ("used", [], None)
 
 
 @pg
