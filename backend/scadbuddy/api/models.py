@@ -2052,9 +2052,15 @@ async def get_schema(
 #: version, the thumbnail's source and its covering output): that key is not proven
 #: to change with the bytes. `version` is None wherever git is not available, so
 #: there a replaced thumbnail keeps the key it had; and the model directory and the
-#: outputs are plain files on a volume anyone with access can change. A strong
-#: ETag over the bytes served costs one hash and saves the whole download instead,
-#: without ever serving a stale image.
+#: outputs are plain files on a volume anyone with access can change. A strong ETag
+#: saves the download instead. Once the template rows are copied (#7317), the tag
+#: names the image's source: the cover's sha256 as its row's last refresh took it,
+#: ``output-<id>`` or ``preview-<id>``. Then a matching ``If-None-Match`` is a 304
+#: that reads no file. Before the copy, and for a row that lags its media
+#: (`TemplateRow.media_newer`), the tag is the sha256 of the bytes served. So a cover
+#: that someone replaces by hand on the volume, with no refresh, keeps its old tag:
+#: a client that holds it gets 304 and the old image until the next refresh or copy
+#: sweep repairs the row (model records spec §10).
 THUMBNAIL_CACHE_CONTROL = "no-cache"
 
 
@@ -2078,9 +2084,11 @@ def etag_matches(if_none_match: str | None, etag: str) -> bool:
         "The model's cover -- its first media image, or the poster of its first "
         "video -- or, when it has none, the plate image of its first generated "
         "output, or else its default-render preview. 404 when there is none of the "
-        "three. Carries a strong `ETag` that names the image (the cover's sha256, "
-        "`output-<id>` or `preview-<id>`) and `Cache-Control: no-cache`; a matching "
-        "`If-None-Match` is answered 304 with no body."
+        "three. Carries a strong `ETag` that names the image and `Cache-Control: "
+        "no-cache`; a matching `If-None-Match` is answered 304 with no body. Once the "
+        "template rows are copied, the tag is the cover's sha256, `output-<id>` or "
+        "`preview-<id>`; before that, and while a template's row lags its media, it "
+        "is the sha256 of the image."
     ),
 )
 def get_thumbnail(
@@ -2098,7 +2106,10 @@ def get_thumbnail(
     if etag_matches(if_none_match, ref.etag):
         headers = {"ETag": ref.etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
-    found = ref.read()
+    try:
+        found = ref.read()
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
     image, content_type, etag = found

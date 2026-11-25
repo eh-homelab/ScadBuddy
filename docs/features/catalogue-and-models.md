@@ -26,7 +26,8 @@ checkout's removal always read the files (spec §7.4). The catalogue thumbnail
 (`GET /api/v1/models/{slug}/thumbnail`) is named from the row too: its `ETag` is the
 template's own cover's sha256 (the same value as before the copy), `"output-<id>"` for an
 output's plate cover or `"preview-<id>"` for the default-render preview, so a matching
-`If-None-Match` answers 304 with no file read; a 200 carries the tag of the image it read.
+`If-None-Match` answers 304 with no file read (except for a row that lags its media, which
+is read from the files); a 200 carries the tag of the image it read.
 Every catalogue write refreshes its templates' rows under the models write
 lock: a commit writes them in the transaction that records the models HEAD, and a write
 that commits nothing writes them in a transaction of its own. A failed refresh never fails

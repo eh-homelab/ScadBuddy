@@ -6,6 +6,7 @@ read (plan decision 12)."""
 from __future__ import annotations
 
 import hashlib
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.previews import PREVIEW_ID_LENGTH, PreviewStore
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_models_from_rows import (
+    BUILTIN,
     COVER,
     PREVIEW,
     _copy,
@@ -190,3 +192,61 @@ def test_a_cover_the_row_does_not_know_yet_is_served(
     assert (answer.status_code, answer.content) == (200, image)
     assert answer.headers["etag"] == f'"{hashlib.sha256(image).hexdigest()}"'
     assert paths.model_dir("plain").is_dir()
+
+
+def _media_ids(client: TestClient, slug: str) -> list[str]:
+    record = client.get(f"/api/v1/models/{slug}")
+    assert record.status_code == 200, record.text
+    return [item["id"] for item in record.json()["media"]]
+
+
+def test_a_media_list_emptied_while_the_row_lags_gets_no_304(
+    world: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review M3 (a): every item is removed while the refresh fails. The row
+    still names the old cover, but the removal marks the row as lagging, so the old
+    tag gets no 304."""
+    _copy(world)
+    etag = _thumbnail(world, "widget").headers["etag"]
+    _refresh_fails(monkeypatch)
+    for item_id in _media_ids(world, "widget"):
+        removed = world.delete(f"/api/v1/models/widget/media/{item_id}", headers=press())
+        assert removed.status_code == 200, removed.text
+    row = _rows(world).get("widget")
+    assert row is not None and row.cover is not None
+
+    answer = _thumbnail(world, "widget", etag)
+
+    assert answer.status_code == 404, answer.text
+
+
+def test_a_builtin_cover_choice_while_the_row_lags_gets_no_304(
+    world: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Final review M3 (b): a built-in's cover is chosen while the refresh fails. The
+    choice writes no `template_media` row, but it marks the row as lagging too."""
+    _copy(world)
+    etag = _thumbnail(world, BUILTIN).headers["etag"]
+    _refresh_fails(monkeypatch)
+    added = _media_ids(world, BUILTIN)[-1]
+    chosen = world.put(f"/api/v1/models/{BUILTIN}/media/cover", json={"id": added}, headers=press())
+    assert chosen.status_code == 200, chosen.text
+
+    answer = _thumbnail(world, BUILTIN, etag)
+
+    assert (answer.status_code, answer.content) == (200, PNG_BYTES + b"!")
+    assert answer.headers["etag"] != etag
+
+
+def test_a_row_whose_folder_is_gone_has_no_thumbnail(world: TestClient, paths: DataPaths) -> None:
+    """Final review M4: a row left by a hand removal answers 404, as `record` does,
+    and not the preview that its row still points at."""
+    _copy(world)
+    shutil.rmtree(paths.model_dir("plain"))
+    assert _rows(world).get("plain") is not None
+    assert world.get("/api/v1/models/plain").status_code == 404
+
+    answer = _thumbnail(world, "plain")
+
+    assert answer.status_code == 404, answer.text
+    assert "no model named" in answer.json()["detail"]

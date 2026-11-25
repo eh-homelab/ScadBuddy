@@ -1525,7 +1525,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `raw_metas`, the pin index, the print settings, the name check, `duplicates_of`);
   `library_users` and `library_pins` still read the files. The thumbnail's `ETag` names
   its source (`Catalogue.thumbnail_ref`: the cover's sha256, `"output-<id>"`,
-  `"preview-<id>"`), so a 304 reads no file; a 200 tags what it read.
+  `"preview-<id>"`), so a 304 reads no file (except for a row that lags its media,
+  `TemplateRow.media_newer`, which is read from the files); a 200 tags what it read.
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with

@@ -25,7 +25,7 @@ from scadbuddy.library.template_rows import (
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import PgPool
-from tests.support.media import MemoryMediaStore
+from tests.support.media import MemoryMediaStore, thumbnail_of
 
 pytestmark = pytest.mark.requires_git
 
@@ -156,7 +156,7 @@ def _assert_cover_is_the_thumbnail(
     catalogue: Catalogue, template_id: str, path: str
 ) -> TemplateRow:
     row = _row(catalogue, template_id)
-    thumbnail = catalogue.thumbnail(template_id)
+    thumbnail = thumbnail_of(catalogue, template_id)
     assert thumbnail is not None
     assert row.cover == {
         "path": path,

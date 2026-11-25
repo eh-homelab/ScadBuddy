@@ -153,22 +153,31 @@ outputs' `?tag=`); before that, they read the files. `library_users` and `librar
 always read the files (spec §7.4).
 
 - A row whose folder is gone (a hand removal, a delete whose row drop failed) is a 404 for
-  `record`, has no print settings and holds no name in the name check: each of these
-  single-template readers makes one stat for it (`Catalogue.exists`). The list keeps such a
-  row until the next copy run drops it (spec §10).
-- A media file that the row's `files` lacks is stat'ed only while one of the template's
-  `template_media` rows is newer than the row's `refreshed_at` (`TemplateRow.media_newer`,
-  read with the row): the media rows commit before the template's row, so a new item is on
-  the disk first. Once the row is newer, such a file is `missing` with no stat.
+  `record` and for its thumbnail's 200, has no print settings, holds no name in the name
+  check and is no duplicate in `duplicates_of`: each of these readers makes one
+  `Catalogue.exists` check for it (a hit is one stat; a miss also revalidates the
+  directories). A thumbnail 304 makes no check, so a client that holds the tag gets 304
+  until the next copy run drops the row. The list keeps such a row until then too
+  (spec §10).
+- A media file that the row's `files` lacks is stat'ed only while the template's media
+  changed after the row's `refreshed_at` (`TemplateRow.media_newer`, read with the row from
+  `templates.media_changed_at`): every media write (an add, a removal, a reorder, a
+  built-in's cover choice) sets that column in its own transaction, before the template's
+  row is refreshed, so a new item is on the disk first. Once the row is newer, such a file
+  is `missing` with no stat. An older pod's media write during a roll sets no
+  `media_changed_at`.
 - The catalogue thumbnail reads `Catalogue.thumbnail_ref`: the row's `cover`, else the
   output's plate cover (`OutputStore.plate_cover_output`), else the preview
   (`PreviewStore.preview_id`). Its `ETag` names the source: the cover's `sha256` (the hash
   of the bytes, as before the copy), `"output-<id>"` or `"preview-<id>"`. A matching
-  `If-None-Match` is a 304 with no file read or stat. A 200 reads the source
+  `If-None-Match` is a 304 with no file read or stat, except for a row that lags its media,
+  which is read from the files. A 200 reads the source
   (`OutputStore.plate_image`, `PreviewStore.current_image`, which reads the preview's id and
   image from one row) and carries the tag of what it read (plan decision 12). No row is a
-  404 with no stat; a row that lags its media rows is read from the files, tagged by the
-  bytes (`scadbuddy/api/models.py` `get_thumbnail`).
+  404 with no stat; a row that lags its media is read from the files, tagged by the bytes
+  (`scadbuddy/api/models.py` `get_thumbnail`). A cover that someone replaces by hand on the
+  volume keeps its row's old tag, so it is served stale until the next refresh or copy run
+  repairs the row (spec §10).
 
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,

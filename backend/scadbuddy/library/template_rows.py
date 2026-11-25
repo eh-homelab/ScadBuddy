@@ -75,12 +75,12 @@ _UPSERT = (
     + ", refreshed_at = clock_timestamp()"
 )
 
-#: What a read selects: the columns, then whether one of the template's media rows was
-#: written after the row was refreshed (`TemplateRow.media_newer`). `template_media`
-#: rows are replaced as a whole, so ``created_at`` is when the list last changed.
+#: What a read selects: the columns, then whether the template's media changed after
+#: the row was refreshed (`TemplateRow.media_newer`). Every media write sets
+#: ``media_changed_at`` in its own transaction (`media_store.py` ``_MARK``), a
+#: removal and a built-in's cover choice included; a refresh never writes it.
 _SELECTED = (
-    ", ".join(_COLUMNS) + ", COALESCE((SELECT max(m.created_at) FROM template_media m"
-    " WHERE m.template_id = templates.template_id) > refreshed_at, false) AS media_newer"
+    ", ".join(_COLUMNS) + ", COALESCE(media_changed_at > refreshed_at, false) AS media_newer"
 )
 
 #: Mine first, then the built-ins, each in byte order, as Python's `sorted` of the ids.
@@ -106,9 +106,10 @@ class TemplateRow:
     cover: dict[str, str] | None
     files_stamp: str
     refreshed_head: str | None
-    #: Read, never written: a media row of the template is newer than this row's
-    #: refresh, so a media file ``files`` lacks may be on the disk already (Task 8
-    #: review M1). Not compared: a row built from the files and its read are equal.
+    #: Read, never written: the template's media changed after this row's refresh
+    #: (an add, a removal, a reorder or a built-in's cover choice), so ``files`` and
+    #: ``cover`` may be old (Task 8 review M1, final review M3). Not compared: a row
+    #: built from the files and its read are equal.
     media_newer: bool = field(default=False, compare=False)
 
 

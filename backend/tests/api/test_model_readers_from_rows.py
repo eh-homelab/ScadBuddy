@@ -347,6 +347,26 @@ def test_duplicates_of_reads_rows(client: TestClient, monkeypatch: pytest.Monkey
     assert catalogue.duplicates_of("widget-copy") == []
 
 
+def test_a_duplicate_whose_folder_is_gone_is_not_counted(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """Final review M4: a duplicate's row left by a hand removal is no duplicate, so
+    the delete check does not answer 409 naming a template that is not there."""
+    _create(client, "widget", {"name": "Widget"})
+    duplicated = client.post(
+        "/api/v1/models/widget/duplicate", json={"name": "Widget copy"}, headers=press()
+    )
+    assert duplicated.status_code == 201, duplicated.text
+    _copy(client)
+    shutil.rmtree(paths.model_dir("widget-copy"))
+    catalogue = _catalogue(client)
+    assert catalogue.rows is not None and catalogue.rows.get("widget-copy") is not None
+
+    assert catalogue.duplicates_of("widget") == []
+    deleted = client.delete("/api/v1/models/widget", headers=press())
+    assert deleted.status_code in (200, 204), deleted.text
+
+
 def test_a_row_whose_folder_is_gone_has_no_settings_and_holds_no_name(
     client: TestClient, paths: DataPaths
 ) -> None:

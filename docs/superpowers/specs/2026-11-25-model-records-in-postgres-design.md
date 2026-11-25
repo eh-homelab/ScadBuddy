@@ -194,6 +194,9 @@ One migration file, `<timestamp>_templates.sql`.
   merged).
 - `refreshed_at` timestamptz default `clock_timestamp()`, `refreshed_head` text (the
   HEAD the row was read at).
+- `media_changed_at` timestamptz (phase 2, final review M3): when the template's media
+  last changed. Every media write sets it in its own transaction; a refresh never writes
+  it. A read compares it to `refreshed_at` to know that the row lags its media.
 
 `template_copy_runs`: one row per copy run, as `output_copy_runs` (#7360, not yet merged):
 `started_at`, `finished_at` (set only when the walk saw every folder), `incomplete`,

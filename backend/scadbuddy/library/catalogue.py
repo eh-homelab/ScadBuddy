@@ -1026,16 +1026,10 @@ class Catalogue:
                 return directory / item.poster, content_type_of(item.poster)
         return None
 
-    def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
-        """The catalogue thumbnail and its content type: the template's cover, else
-        the first generated output's plate cover, else the default-render preview,
-        else None."""
-        with span("catalogue.thumbnail", attributes={"scadbuddy.slug": slug}) as current:
-            found = self._thumbnail(slug)
-            current.set_attribute("scadbuddy.found", found is not None)
-            return found
-
     def _thumbnail(self, slug: str) -> tuple[bytes, str] | None:
+        """The catalogue thumbnail from the files and its content type: the
+        template's cover, else the first generated output's plate cover, else the
+        default-render preview, else None."""
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
@@ -1054,9 +1048,10 @@ class Catalogue:
         """The catalogue thumbnail, named by its source, or None (#7317, plan Task 9).
         From the template's row once the rows are copied: its own cover, else the
         first output's plate cover, else the preview, with no file read or stat
-        until ``read``. No row is :class:`ModelNotFoundError`. A row that lags its
-        media rows (`TemplateRow.media_newer`), and every template before the copy,
-        is read from its files as :meth:`thumbnail`, tagged by the bytes."""
+        until ``read``. No row is :class:`ModelNotFoundError`, and so is a row whose
+        folder is gone, at ``read``. A row that lags its media
+        (`TemplateRow.media_newer`), and every template before the copy, is read
+        from its files, tagged by the bytes."""
         with span("catalogue.thumbnail_ref", attributes={"scadbuddy.slug": slug}) as current:
             ref = self._thumbnail_ref(slug)
             current.set_attribute("scadbuddy.found", ref is not None)
@@ -1078,13 +1073,24 @@ class Catalogue:
             etag = f'"{hashlib.sha256(image).hexdigest()}"'
             return ThumbnailRef(etag, lambda: (image, content_type, etag))
         listed = row
-        return _first_source(
+        ref = _first_source(
             [
                 lambda: self._own_cover_source(listed),
                 lambda: self._output_cover_source(slug),
                 lambda: self._preview_source(slug),
             ]
         )
+        if ref is None:
+            return None
+        read = ref.read
+
+        def read_if_there() -> ThumbnailRead | None:
+            # A row whose folder is gone (a hand removal) has no thumbnail, as
+            # `record` (final review M4). Only a read checks: a 304 stats nothing.
+            self._require(slug)
+            return read()
+
+        return ThumbnailRef(ref.etag, read_if_there)
 
     def _own_cover_source(
         self, row: TemplateRow
@@ -3424,6 +3430,9 @@ class Catalogue:
         if self._from_rows():
             assert self.rows is not None
             found, candidates = self.rows.duplicates_of(model_id)
+            # A row whose folder is gone (a hand removal) is no duplicate, as
+            # before the copy (final review M4): one `exists` per row found.
+            found = [slug for slug in found if self.exists(slug)]
         else:
             found, candidates = [], _templates_in(self.paths.models)
         for slug in candidates:

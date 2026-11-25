@@ -39,7 +39,7 @@ from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.support.media import MemoryMediaStore
+from tests.support.media import MemoryMediaStore, thumbnail_of
 
 
 @pytest.mark.parametrize(
@@ -490,7 +490,7 @@ def test_a_built_ins_cover_is_a_choice_of_its_own(
 
     assert [item.id for item in record.media] == [added.id, "front"]
     assert record.media_cover == added.id
-    assert catalogue.thumbnail(builtin) is not None
+    assert thumbnail_of(catalogue, builtin) is not None
     # The first shipped item is the cover without a choice.
     record = catalogue.set_cover(builtin, "front")
     assert record.media_cover is None
