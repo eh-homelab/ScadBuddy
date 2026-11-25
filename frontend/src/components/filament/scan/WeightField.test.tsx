@@ -18,7 +18,18 @@ describe('WeightField (#7273)', () => {
     await user.click(screen.getByRole('button', { name: 'Save weight' }))
     expect(await screen.findByText('Saved')).toBeInTheDocument()
     const event = await lastWeighing(spool.id)
-    expect(event).toMatchObject({ kind: 'weighed', source: 'person', grams_after: 1000 })
+    // #7682: the reading goes with the grams, so the event keeps its breakdown.
+    expect(event).toMatchObject({ kind: 'weighed', source: 'person', grams_after: 1000, data: { reading_g: 1250, empty_g: 250 } })
+  })
+
+  it('sends a decimal reading alone, so the server takes the insert off it (#7682)', async () => {
+    const spool = await getSpool(spoolId(3))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '1250.4')
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    const event = await lastWeighing(spool.id)
+    expect(event).toMatchObject({ grams_after: expect.closeTo(1000.4, 5), data: { reading_g: 1250.4, empty_source: 'insert', empty_name: 'Bambu reusable spool' } })
   })
 
   it('takes the filament weight when the empty spool is unknown', async () => {
@@ -30,6 +41,7 @@ describe('WeightField (#7273)', () => {
     await user.type(field, '432')
     await user.click(screen.getByRole('button', { name: 'Save weight' }))
     await waitFor(async () => expect(await lastWeighing(spool.id)).toMatchObject({ grams_after: 432, source: 'person' }))
+    expect((await lastWeighing(spool.id))?.data).not.toHaveProperty('reading_g')
   })
 
   it.each(['1e3', '0x10', '1,243', '-5', '12 kg'])('refuses %s as a weight', async (typed) => {

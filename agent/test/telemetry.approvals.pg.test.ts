@@ -29,10 +29,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
     await drop()
   })
 
+  /** A pending MCP prepare (#251): every approval now has no session (#7323). */
   async function orphan(traceparent?: string) {
-    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
     const approval = await m.approvals.create({
-      sessionId: session.id,
+      sessionId: null,
       turnId: null,
       toolUseId: 'toolu_1',
       tool: 'mcp__stub__print',
@@ -41,7 +41,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
       requestedBy: agentA,
       ...(traceparent ? { traceparent } : {}),
     })
-    return { session, approval }
+    return { approval }
   }
 
   it('stores the parked span’s context, and never shows it in the approval view', async () => {

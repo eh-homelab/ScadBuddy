@@ -203,7 +203,7 @@ class SendClaim(_Body):
 
 class Claimed(BaseModel):
     prior_status: Status
-    runtime: Literal["durable", "unified"] | None
+    runtime: Literal["durable", "unified"]
 
 
 class SendClaimed(BaseModel):
@@ -253,7 +253,7 @@ class TurnState(BaseModel):
     turn_attempt: str | None
     interrupt_requested: bool
     owner_kind: str
-    runtime: str | None
+    runtime: str
     event_seq: str
     cost_usd: float
     #: No write for ``grace_ms``.

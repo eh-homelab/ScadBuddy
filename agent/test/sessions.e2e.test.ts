@@ -531,17 +531,17 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
   })
 
   /** The runtime a session's row records (`ai_sessions.runtime`). */
-  const runtimeOf = async (id: string) => (await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${id}`)[0]?.runtime
+  const runtimeOf = async (id: string) => (await db.sql<{ runtime: string }[]>`SELECT runtime FROM ai_sessions WHERE id = ${id}`)[0]?.runtime
   const AGENT_SESSION = { type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE }
 
   /**
    * A classic session as an earlier release left one: its turns in ai_session_entries and its
-   * events in the log, no runtime and no workflow. A fork's copy of `parentId` is exactly that,
-   * once its row has no runtime.
+   * events in the log, and no workflow. Migration 20261124T0215Z_session_runtime_not_null.sql
+   * (#7323) recorded its runtime. A fork's copy of `parentId` is exactly that.
    */
   async function classicSession(m: SessionManager, parentId: string): Promise<string> {
     const copy = await m.fork(parentId, agentA)
-    await db.sql`UPDATE ai_sessions SET runtime = NULL WHERE id = ${copy.id}`
+    expect(await runtimeOf(copy.id)).toBe('unified')
     await expect(sessionWorkflow(copy.id)).rejects.toThrow()
     return copy.id
   }
@@ -570,7 +570,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     expect(sent).toContain('remember the word teapot')
     expect(sent).toContain('answer 1')
     expect(sent).toContain('what was the word?')
-    // From this send on it is an AgentSession.
+    // This send started its workflow.
     expect(await runtimeOf(id)).toBe('unified')
     expect(await sessionWorkflow(id)).toEqual(AGENT_SESSION)
   }, 90_000)

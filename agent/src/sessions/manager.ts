@@ -124,15 +124,16 @@ import { FlowQueue } from '../flows/queue.js'
 // refused `unavailable` (spec 2026-10-13 §10.1). The claim is one conditional UPDATE, so
 // two sends, on one replica or two, cannot both win; the loser gets SessionError 'busy'.
 // A turn takes no lease: its end is the workflow's `finish_turn`, and a turn whose
-// workflow cannot end it is the sweep's (durableSweep.ts). A session row with no `runtime`
-// (one an earlier release started) goes on as an AgentSession at its next send, its turns
-// read from its transcript. On SIGTERM, `stopTurns` drains: no new send here, and the warm
+// workflow cannot end it is the sweep's (durableSweep.ts). A session a classic release
+// started goes on as an AgentSession at its next send, its turns read from its transcript
+// (its row's `runtime` is `unified` since #7323). On SIGTERM, `stopTurns` drains: no new send here, and the warm
 // processes close.
 //
 // Approvals (#258). A turn's outward call parks in the gate (`ai_pending_input`, spec
 // 2026-10-01 §6.6) until a person decides through the pending-input route; interrupt and
 // handoff cancel a session's parked calls through its workflow. `approvals` (ai_approvals)
-// keeps the grants and the classic rows an earlier release left, which expire.
+// keeps the /mcp prepares and the grants; a session's row an earlier release left there is
+// shown to no one and expires (#7323).
 //
 // Budget and turns. Each session gets `max_turns` and `budget_usd` from
 // ai_settings at start (keys below; defaults from harness/run.ts). max_turns
@@ -469,10 +470,10 @@ export type SessionRecord = {
   browser: SessionBrowser | null
   parentId: string | null
   /**
-   * The workflow a durable session runs as (`ai_sessions.runtime`, durable.ts): AgentSession
-   * (`unified`), DurableSession (`durable`), or null until its first send picks one.
+   * The workflow a session runs as (`ai_sessions.runtime`, durable.ts): AgentSession
+   * (`unified`), or a closed DurableSession (`durable`).
    */
-  runtime: SessionRuntime | null
+  runtime: SessionRuntime
   maxTurns: number
   /** The budget this session spends from, shared with its forks and its parent's lineage (#823). */
   budgetUsd: number
@@ -1169,8 +1170,8 @@ export class SessionManager {
       tags: string[]
       scope: Record<string, unknown>
       parentId: string | null
-      /** Fixed now rather than at the first send: a fork of an AgentSession session is one too. */
-      runtime?: SessionRuntime
+      /** Every new session is an AgentSession (#7323). */
+      runtime: 'unified'
       /** A fork that reads its parent's transcript through the cut (store.ts): the parent, and how many of its entries. */
       forkOf?: { parentId: string; cut: number }
       /** `ai_sessions.background_tools` (#5870): false given; else the parent's, for a session with one; else true. */
@@ -1194,7 +1195,7 @@ export class SessionManager {
       tags: fields.tags,
       scope: fields.scope,
       parentId: fields.parentId,
-      runtime: fields.runtime ?? null,
+      runtime: fields.runtime,
       maxTurns,
       budgetUsd,
       ...(from ? { budgetOf: from.id } : {}),
@@ -1322,8 +1323,8 @@ export class SessionManager {
     // Never unarchived by a send (#1885): unarchiving is the owner's explicit PATCH.
     if (before.archivedAt !== null) throw archivedError(id)
     const turnId = randomUUID()
-    // Every turn runs as an AgentSession on a worker (plan Step 6.3), a classic session's too;
-    // a DurableSession that has run a turn keeps its workflow (durable.ts).
+    // Every turn runs as an AgentSession on a worker (plan Step 6.3); a DurableSession's row is
+    // refused `closed` (durable.ts).
     const turn = await this.durableOrRefuse().send(before, {
       turnId,
       prompt,

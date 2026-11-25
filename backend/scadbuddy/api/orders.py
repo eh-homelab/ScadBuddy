@@ -721,7 +721,8 @@ def _order_page(
                 continue
             if len(found) == limit:
                 last = found[-1]
-                return OrderPage(items=found, next_cursor=encode_cursor(last.created_at, last.id))
+                at = last.submitted_at or last.created_at
+                return OrderPage(items=found, next_cursor=encode_cursor(at, last.id))
             found.append(_row(order, margins[order.id]))
         if more is None:
             return OrderPage(items=found, next_cursor=None)
@@ -754,7 +755,9 @@ async def list_orders(
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
-    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. ``status``
+    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. An order's
+    place is when it was placed: a storefront order's ``submitted_at``, else its
+    ``created_at`` (#7722); ``from`` and ``to`` bound that time too. ``status``
     may be repeated, for orders of any of them (#5276). Each row carries its margin
     (``margin_minor``, ``margin_percent``, ``margin_state``, ``margin_estimated``): the
     figures ``GET /orders/{id}/costs`` gives the order, read from Postgres only (job cost

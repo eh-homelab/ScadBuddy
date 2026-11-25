@@ -191,7 +191,7 @@ def insert(
     tags: list[str],
     scope: dict[str, Any],
     parent_id: str | None,
-    runtime: str | None,
+    runtime: str,
     max_turns: int,
     budget_usd: float,
     budget_of: str | None,

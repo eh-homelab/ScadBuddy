@@ -95,6 +95,7 @@ def _build(core: Core, components: Components) -> Filament:
                 "filament_default_cost_per_kg",
                 "filament_drying_temp_c",
                 "filament_drying_hours",
+                "filament_weighing_drift_notice_g",
             }
         )
         return FilamentDefaults(
@@ -102,6 +103,7 @@ def _build(core: Core, components: Components) -> Filament:
             cost_per_kg=read["filament_default_cost_per_kg"],
             drying_temp_c=read["filament_drying_temp_c"],
             drying_hours=read["filament_drying_hours"],
+            drift_notice_g=int(read["filament_weighing_drift_notice_g"]),
         )
 
     def shop_currency() -> str:

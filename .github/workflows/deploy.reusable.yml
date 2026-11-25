@@ -46,6 +46,11 @@ name: Deploy (reusable)
 #      to `ghcr.io/eh-homelab/scadbuddy-playwright-mcp:<version>@sha256:<its
 #      digest>`, in playwright-mcp.yaml, once that file exists; a build
 #      that published no playwright-mcp image keeps the pin and warns.
+#      The API in Go (#7667), the `core` container in the API's pod, is pinned
+#      like the slicer's, to
+#      `ghcr.io/eh-homelab/scadbuddy-core:<version>@sha256:<its digest>`, in
+#      scadbuddy.yaml, once that file names it; a build that published no core
+#      image keeps the pin and warns.
 #      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
 #      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
 #      And, when clusters has it, the vendored copy of this repo's
@@ -155,6 +160,10 @@ env:
   # profile-fetch worker, so its absence for a build keeps the pin.
   PLAYWRIGHT_MCP_IMAGE: ghcr.io/eh-homelab/scadbuddy-playwright-mcp
   MANIFEST_PLAYWRIGHT_MCP: applications/scadbuddy/playwright-mcp.yaml
+  # The API in Go (#7667), same run, same tags: the `core` container in
+  # $MANIFEST. Optional until that file names it; resolved and pinned like the
+  # slicer, so its absence for a build keeps the pin.
+  CORE_IMAGE: ghcr.io/eh-homelab/scadbuddy-core
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
@@ -178,8 +187,8 @@ jobs:
     runs-on: ubuntu-latest
     # The agent wait below can take up to 10 of these, the open deploy PR's
     # 45 (90 when the first round times out, #6368), the agent-durable one
-    # 20, the slicer 10, the profile-fetch worker 10, playwright-mcp 10.
-    timeout-minutes: 160
+    # 20, the slicer 10, the profile-fetch worker 10, playwright-mcp 10, core 10.
+    timeout-minutes: 170
     # The one place the two callers can race: this job waits for the open
     # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
     # branch and opens a new PR. Job-level, so deploy-release's image wait and
@@ -547,6 +556,36 @@ jobs:
           fi
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The API in Go (#7667), resolved like the slicer: only when the API's
+      # manifest names the image, and an image its continue-on-error job did
+      # not publish is a warning and an empty digest.
+      - name: Resolve the core image
+        id: core
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! grep -sqE "^\s*(- )?image:.*${CORE_IMAGE//./\\.}" "clusters/${MANIFEST}"; then
+            echo "clusters/${MANIFEST} does not run ${CORE_IMAGE}; not resolving it"
+            echo "digest=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ref="${CORE_IMAGE}:${VERSION}"
+          digest=""
+          for _ in $(seq 60); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}' || true)
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] && break
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 10
+          done
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "$ref -> $digest"
+          else
+            echo "::warning::could not resolve $ref (got '$digest'); the core pin stays as it is"
+            digest=""
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
       # The sessions' shell sandbox (#5864), resolved like the slicer, but only
       # when a file under the manifests' or the overlay's directory names it.
       - name: Resolve the sandbox image
@@ -668,6 +707,7 @@ jobs:
           SLICER_DIGEST: ${{ steps.slicer.outputs.digest }}
           PROFILE_FETCH_DIGEST: ${{ steps.profile-fetch.outputs.digest }}
           PLAYWRIGHT_MCP_DIGEST: ${{ steps.playwright-mcp.outputs.digest }}
+          CORE_DIGEST: ${{ steps.core.outputs.digest }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
@@ -838,6 +878,35 @@ jobs:
             playwright_mcp=pinned
           }
 
+          # The API in Go's line (#7667), the `core` container in the API's
+          # manifest, as the slicer's: optional until the manifest names it,
+          # then exactly one line, and a build with no image keeps the pin and
+          # warns. Sets $core to `pinned`, `kept` or (no line) `none`.
+          core=none
+          pin_core() { # manifest
+            local target=$1 n
+            local core_line="^(\s*)image: ${CORE_IMAGE//./\\.}[:@][^[:space:]]*\$"
+            n=$(grep -cE "$core_line" "$target" || true)
+            if [ "$n" -eq 0 ]; then
+              # An image line for it that the pattern misses (no tag or
+              # digest, a trailing comment) is a near miss, not "not run yet".
+              if grep -qE "^\s*(- )?image:.*${CORE_IMAGE//./\\.}" "$target"; then
+                echo "::error file=$target::has an image line for ${CORE_IMAGE} that is not exactly 'image: ${CORE_IMAGE}:<tag>@<digest>'"; exit 1
+              fi
+              echo "::notice::${target} does not run core yet; not pinning it"
+              return 0
+            fi
+            expect_one "$target" "$core_line" "core image"
+            if [[ ! "${CORE_DIGEST:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::warning file=$target::no ${CORE_IMAGE} image was published for ${VERSION}; keeping the core pin as it is"
+              core=kept
+              return 0
+            fi
+            sed -i -E "s|${core_line}|\1image: ${CORE_IMAGE}:${VERSION}@${CORE_DIGEST}|" "$target"
+            expect_one "$target" "^\s*image: ${CORE_IMAGE//./\\.}:${VERSION//./\\.}@${CORE_DIGEST}\$" "pinned core image"
+            core=pinned
+          }
+
           # True when transformers[] holds a NamespaceTransformer with
           # `unsetOnly` the YAML boolean true: as a map, as an inline YAML
           # string, or as a relative path (resolved against the overlay's
@@ -984,6 +1053,8 @@ jobs:
           manifests=("$MANIFEST")
           pin "$MANIFEST" scadbuddy
           pin_agent "$MANIFEST"
+          pin_core "$MANIFEST"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
           # Every other file that runs the agent image, found by the image
           # rather than by name (#5037): scadbuddy-agent-worker.yaml, the
           # agent's Temporal workers in a Deployment of their own (#2726 Step
@@ -1115,13 +1186,14 @@ jobs:
           # workflow does not resolve, or a second copy of a pin outside its
           # file fails the deploy here, rather than staying on its old build.
           # The exceptions are a slicer pin kept on purpose (pin_slicer), a
-          # profile-fetch and playwright-mcp pins kept the same way, and the
-          # sandbox pins.
+          # profile-fetch, playwright-mcp and core pins kept the same way, and
+          # the sandbox pins.
           allowed=("${IMAGE}:${VERSION}@${DIGEST}" "${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}")
           [ "$durable" != pinned ] || allowed+=("${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}")
           [ "$slicer" != pinned ] || allowed+=("${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}")
           [ "$profile_fetch" != pinned ] || allowed+=("${PROFILE_FETCH_IMAGE}:${VERSION}@${PROFILE_FETCH_DIGEST}")
           [ "$playwright_mcp" != pinned ] || allowed+=("${PLAYWRIGHT_MCP_IMAGE}:${VERSION}@${PLAYWRIGHT_MCP_DIGEST}")
+          [ "$core" != pinned ] || allowed+=("${CORE_IMAGE}:${VERSION}@${CORE_DIGEST}")
           [ "$sandbox" != pinned ] || allowed+=("${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}")
           stale=0
           while IFS= read -r f; do
@@ -1134,6 +1206,7 @@ jobs:
               if [ "$slicer" = kept ] && [ "$f" = "$MANIFEST_SLICER" ] && [[ "$ref" == "${SLICER_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$profile_fetch" = kept ] && [ "$f" = "$MANIFEST_PROFILE_FETCH" ] && [[ "$ref" == "${PROFILE_FETCH_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$playwright_mcp" = kept ] && [ "$f" = "$MANIFEST_PLAYWRIGHT_MCP" ] && [[ "$ref" == "${PLAYWRIGHT_MCP_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$core" = kept ] && [ "$f" = "$MANIFEST" ] && [[ "$ref" == "${CORE_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$sandbox" = kept ] && [[ "$ref" == "${SANDBOX_IMAGE}"[:@]* ]]; then ok=true; fi
               if [ "$ok" != true ]; then
                 echo "::error file=$f::names ${ref}, which this deploy does not move to ${VERSION}; deploy.reusable.yml must pin this file"
@@ -1170,6 +1243,8 @@ jobs:
           PROFILE_FETCH: ${{ steps.edit.outputs.profile_fetch }}
           PLAYWRIGHT_MCP_DIGEST: ${{ steps.playwright-mcp.outputs.digest }}
           PLAYWRIGHT_MCP: ${{ steps.edit.outputs.playwright_mcp }}
+          CORE_DIGEST: ${{ steps.core.outputs.digest }}
+          CORE: ${{ steps.edit.outputs.core }}
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
           SANDBOX: ${{ steps.edit.outputs.sandbox }}
           VERSION: ${{ inputs.version }}
@@ -1223,6 +1298,11 @@ jobs:
             kept)   playwright_mcp_note="kept at its current pin: no image was published for ${VERSION}" ;;
             *)      playwright_mcp_note="not run in clusters yet (#7027)" ;;
           esac
+          case "$CORE" in
+            pinned) core_note="\`${CORE_IMAGE}:${VERSION}@${CORE_DIGEST}\`" ;;
+            kept)   core_note="kept at its current pin: no image was published for ${VERSION}" ;;
+            *)      core_note="not run in clusters yet (#7667)" ;;
+          esac
           case "$SANDBOX" in
             pinned) sandbox_note="\`${SANDBOX_IMAGE}:${VERSION}@${SANDBOX_DIGEST}\`" ;;
             kept)   sandbox_note="kept at its current pins: no image was published for ${VERSION}" ;;
@@ -1235,7 +1315,7 @@ jobs:
 
           Pin ${IMAGE}:${VERSION}@${DIGEST}
           and ${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}
-          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; playwright-mcp: ${playwright_mcp_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
+          (agent-durable: ${durable_note}; slicer: ${slicer_note}; profile-fetch: ${profile_fetch_note}; playwright-mcp: ${playwright_mcp_note}; core: ${core_note}; sandbox: ${sandbox_note}; dashboard: ${dashboard_note})
           built from eh-homelab/ScadBuddy@${REVISION} (${KIND}),
           in ${manifest_files[*]}.
 
@@ -1259,6 +1339,7 @@ jobs:
           - **Slicer:** ${slicer_note}
           - **Profile-fetch:** ${profile_fetch_note}
           - **Playwright MCP:** ${playwright_mcp_note}
+          - **Core:** ${core_note}
           - **Sandbox:** ${sandbox_note}
           - **Dashboard:** ${dashboard_note}
           - **Files:** ${listed}

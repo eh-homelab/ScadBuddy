@@ -23,14 +23,17 @@ amd64 only:
 | `profile-fetch` (`Dockerfile:654`) | `ghcr.io/eh-homelab/scadbuddy-profile-fetch` | `tini` then the browser service by default (`Dockerfile:728-729`); the worker's Deployment runs `python -m scadbuddy.profile_fetch` ([processes.md](processes.md#profile-fetch-worker-and-browser)) | `profile-fetch` (`build-image.yml:657`) |
 | `playwright-mcp` (#7027; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` | `tini -s -- node /opt/scadbuddy-playwright-mcp/server.mjs`: `@playwright/mcp` with each MCP session's context built from the `X-ScadBuddy-Browser` header (`workers/playwright-mcp/`) | `playwright-mcp` (`build-image.yml:542` after `67d7ff6`) |
 | `camera-relay`, `camera-recorder` (after `67d7ff6`, #7328) | `ghcr.io/eh-homelab/scadbuddy-camera-relay`, `ghcr.io/eh-homelab/scadbuddy-camera-recorder` | `tini` then the controller; each pod runs the image a second time as `mediamtx` ([processes.md](processes.md#camera-relay-and-recorders)) | `camera` (one leg per image) |
+| `tools/go/core/Dockerfile` (#7667; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-core` | `scadbuddy-core`, the API in Go, run as the `core` container in the API's pod | `core` |
 
 `openscad-lsp` (`Dockerfile:767`) and `libraries` (`Dockerfile:829`) are internal stages
 copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gates the
 workflow: every other job is `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
-a `main.go` (`build-go-image.yml:46`, `:133`): today `scadbuddy-bambuddy-fs` and `scadbuddy-core`. Nothing
-deploys it ([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)).
+a `main.go` (`build-go-image.yml:46`, `:133`): today `scadbuddy-bambuddy-fs` only. Nothing
+deploys it ([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
+`tools/go/core`: `build-image.yml`'s `core` job publishes `scadbuddy-core` with every
+build, and the deploy pins it (#7667).
 
 ## How an image reaches prod
 
@@ -48,7 +51,7 @@ sequenceDiagram
     BI-->>DM: workflow_run completed (main only)
     DM->>GHCR: digest of scadbuddy:sha-<7>
     DM->>DR: digest, version, revision
-    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp digests
+    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp, core digests
     DR->>CL: PR on deploy/scadbuddy, image@sha256 pins, auto-merge armed
     CL->>Argo: merge (after clusters' own checks)
     Argo->>Argo: sync the scadbuddy Application
@@ -70,7 +73,9 @@ sequenceDiagram
    source annotations (`:666-672`), in the API manifest (required) and, where they exist,
    the render, print, projects, storefront, intake, agent-worker, agent-durable, slicer,
    sandbox, profile-fetch and playwright-mcp manifests (`:116-158`, `:924-1030`; the
-   playwright-mcp pin in `applications/scadbuddy/playwright-mcp.yaml` since #7546). Where clusters keeps a
+   playwright-mcp pin in `applications/scadbuddy/playwright-mcp.yaml` since #7546). It also
+   pins the `core` image line in the API manifest once that manifest names it (#7667); a
+   build with no core image keeps the pin and warns. Where clusters keeps a
    copy of `deploy/grafana`, it replaces that copy with the files at the deployed revision
    and writes the revision into its `.revision` file (`:818-831`, `:997`). It fails on any `ghcr.io/eh-homelab/scadbuddy*` reference
    it did not pin (`:1044-1071`), then opens or replaces the PR on the fixed branch

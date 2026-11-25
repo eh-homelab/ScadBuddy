@@ -8,8 +8,9 @@ missing or dead credential is 401 ``â€¦/auth/signed-out``; any other is 403 ``â€
 
 A database error that passes (`psycopg.OperationalError`: out of reach, a cancelled
 statement, a deadlock, a serialization failure) is a 503 with reason
-``database-unavailable``. A body whose schema default's pattern ran out of the check's
-shared budget (`PatternsTimedOutError`, a prompt's task, #7437) is a 503 too, with reason
+``database-unavailable``. A body whose schema default's pattern ran out of time (its own
+`PATTERN_TIMEOUT_S` or the shared `PATTERNS_BUDGET_S`: `PatternsTimedOutError`, a prompt's
+task, #7437, #7688) is a 503 too, with reason
 ``pattern-timeout``, so the client sends it again. An exception the app has a handler
 for gets that handler's answer; any other is a 500. Every response of a CRUD router, a
 refusal and an error's included, carries ``X-ScadBuddy-Crud: 1`` and

@@ -134,9 +134,12 @@ def copy_templates(
     refresh: TemplateRefresh,
     pool: ConnectionPool[Connection[DictRow]],
     stop: threading.Event | None = None,
+    *,
+    quiet: bool = False,
 ) -> TemplateCopyResult | None:
     """One run of the copy; ``None`` when another replica runs one. ``stop`` ends it
-    between batches and leaves its run unfinished.
+    between batches and leaves its run unfinished. ``quiet`` logs no line when another
+    replica runs one: the start's wait for that run polls, and logs the wait once.
 
     The advisory lock holds one connection of ``pool`` for the whole run. That is fine:
     the connection is autocommit, so it is never idle in a transaction and holds no row
@@ -146,7 +149,8 @@ def copy_templates(
             "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS got", (COPY_LOCK,)
         ).fetchone()
         if got is None or not got["got"]:
-            logger.info("another replica copies the templates to rows; this one does not")
+            if not quiet:
+                logger.info("another replica copies the templates to rows; this one does not")
             return None
         try:
             return _Copy(catalogue, rows, refresh, stop).run()

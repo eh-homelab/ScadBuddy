@@ -57,6 +57,12 @@ class StoreBundle:
             await self.remote.aclose()
 
 
+def blob_spool(config: Config, paths: DataPaths) -> Path:
+    """Where a content store makes its temporary files: under ``SCADBUDDY_SPOOL_DIR``
+    when set (node-local on prod), else the data volume's ``cache/``."""
+    return (config.spool_dir or paths.cache) / "blob-spool"
+
+
 def build_store(
     *,
     backend: StoreBackend,
@@ -114,7 +120,7 @@ def build_store(
         max_count=config.store_max_count,
         metrics=metrics,
         downloads=downloads,
-        spool=spool_root / "blob-spool",
+        spool=blob_spool(config, paths),
     )
     # #7318: on a remote store the pieces here are a cache (the backend is the record),
     # so `SCADBUDDY_BLOB_CACHE_DIR` may put them on a node-local volume.

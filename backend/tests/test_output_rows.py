@@ -5,13 +5,24 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import threading
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
+from psycopg.rows import dict_row
 
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library import output_rows
+from scadbuddy.library.output_index import OutputIndex
+from scadbuddy.library.output_query import AfterNotListedError, OutputQuery, params_text
 from scadbuddy.library.output_rows import (
+    BYTES_LOCK,
+    COPY_LOCK,
     ByteWrite,
     OutputBlobs,
     OutputFileBlob,
@@ -20,7 +31,7 @@ from scadbuddy.library.output_rows import (
     output_blob_key,
     output_file_key,
 )
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.outputs import STOREFRONT, OutputMeta, OutputSource
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.projection import JobProjection
 
@@ -606,3 +617,291 @@ def test_pending_bytes_counts_rows_without_bytes_at(rows: OutputRows) -> None:
     assert rows.pending_bytes() == 2
     rows.write_byte_copy([ByteWrite("copied", _blobs("copied"), "s", [])])
     assert rows.pending_bytes() == 1
+
+
+# Phase 3 release A (#7257, spec §4.2, §4.5): the list's columns on `outputs`, the
+# cut-over mark and the id claims.
+
+
+def _column(projection: JobProjection, output_id: str, column: str) -> object:
+    with projection.pool.connection() as conn:
+        found = conn.execute(
+            f"SELECT {column} AS value FROM outputs WHERE output_id = %s", (output_id,)
+        ).fetchone()
+    assert found is not None
+    return found["value"]
+
+
+def test_name_and_source_follow_meta(rows: OutputRows, projection: JobProjection) -> None:
+    rows.insert(make_row("o1", name="Old"))
+    assert _column(projection, "o1", "name") == "Old"
+    assert _column(projection, "o1", "source") == "back_office"
+    renamed = make_row("o1", name="New").meta.model_copy(update={"source": STOREFRONT})
+    rows.update_meta("o1", renamed)
+    assert _column(projection, "o1", "name") == "New"
+    assert _column(projection, "o1", "source") == "storefront"
+    # A meta from before `source` is the back office's.
+    with projection.pool.connection() as conn:
+        conn.execute("UPDATE outputs SET meta = meta - 'source' - 'name' WHERE output_id = 'o1'")
+    assert _column(projection, "o1", "name") is None
+    assert _column(projection, "o1", "source") == "back_office"
+
+
+def test_insert_writes_params_text_and_drops_claim(rows: OutputRows) -> None:
+    assert rows.claim("o1", "cube") is True
+    rows.insert(dataclasses.replace(make_row("o1"), params_text="width=20"))
+    got = rows.get("o1")
+    assert got is not None and got.params_text == "width=20"
+    # The save's transaction took the claim: once the row goes, the id is free again.
+    rows.delete("o1")
+    assert rows.claim("o1", "cube") is True
+
+
+def _end_byte_run(rows: OutputRows, **changes: Any) -> int:
+    run = rows.start_byte_run()
+    values: dict[str, Any] = {
+        "finished": True,
+        "incomplete": False,
+        "refused": None,
+        "copied": 0,
+        "verified": 0,
+        "skipped": 0,
+        "needed_bytes": 0,
+        "needed_count": 0,
+        "failed": [],
+        "damaged": [],
+    }
+    rows.end_byte_run(run, **{**values, **changes})
+    return run
+
+
+def _finish_row_copy(rows: OutputRows) -> None:
+    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+
+
+def test_try_cut_over_needs_every_condition(rows: OutputRows, projection: JobProjection) -> None:
+    def fresh() -> OutputRows:
+        # A new object each time: `cut_over` stays True once it read True.
+        return OutputRows(projection.pool)
+
+    rows.insert(dataclasses.replace(make_row("saved"), blobs=_blobs("saved")))
+    # No byte run and no row copy run.
+    assert fresh().try_cut_over() is False
+    _end_byte_run(rows)
+    # No row copy run has finished.
+    assert fresh().try_cut_over() is False
+    _finish_row_copy(rows)
+    # The last byte run was refused.
+    _end_byte_run(rows, finished=False, refused="a bambuddy store")
+    assert fresh().try_cut_over() is False
+    # The last byte run names a failure.
+    _end_byte_run(rows, failed=[{"output_id": "x", "error": "boom"}])
+    assert fresh().try_cut_over() is False
+    # The last byte run did not finish.
+    _end_byte_run(rows, finished=False, incomplete=True)
+    assert fresh().try_cut_over() is False
+    # A row whose bytes the files still hold.
+    last = _end_byte_run(rows)
+    rows.insert(make_row("files"))
+    assert fresh().try_cut_over() is False
+    assert fresh().cut_over() is False and fresh().cut_over_at() is None
+    # Every condition holds.
+    rows.write_byte_copy([ByteWrite("files", _blobs("files"), "s", [])])
+    assert fresh().try_cut_over() is True
+    assert fresh().cut_over() is True
+    assert fresh().cut_over_at() is not None
+    with projection.pool.connection() as conn:
+        mark = conn.execute("SELECT byte_run_id FROM output_cutover").fetchone()
+    assert mark is not None and mark["byte_run_id"] == last
+
+
+@pytest.mark.parametrize("lock", [COPY_LOCK, BYTES_LOCK], ids=["row copy", "byte copy"])
+def test_try_cut_over_waits_for_a_running_copy(
+    rows: OutputRows, projection: JobProjection, pg_conninfo: str, lock: str
+) -> None:
+    """A2 review: a copy that holds its lock may still write a row with ``bytes_at``
+    NULL, so no mark is written while it runs."""
+    _finish_row_copy(rows)
+    _end_byte_run(rows)
+    with psycopg.connect(pg_conninfo, autocommit=True) as copy:
+        copy.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (lock,))
+        assert rows.try_cut_over() is False
+        assert rows.cut_over_at() is None
+        copy.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock,))
+    assert rows.try_cut_over() is True
+
+
+def test_try_cut_over_needs_the_last_row_copy_run_finished(rows: OutputRows) -> None:
+    """A2 review: an earlier finished row copy run is not enough; the last one must be."""
+    _finish_row_copy(rows)
+    rows.start_run()
+    _end_byte_run(rows)
+    assert rows.try_cut_over() is False
+    _finish_row_copy(rows)
+    assert rows.try_cut_over() is True
+
+
+def test_try_cut_over_is_written_once(rows: OutputRows, projection: JobProjection) -> None:
+    _finish_row_copy(rows)
+    first = _end_byte_run(rows)
+    assert rows.try_cut_over() is True
+    at = rows.cut_over_at()
+    _end_byte_run(rows)
+    # The mark exists: this call wrote nothing, so it answers False; `cut_over` is the state.
+    other = OutputRows(projection.pool)
+    assert other.try_cut_over() is False
+    assert other.cut_over() is True
+    assert rows.cut_over_at() == at
+    with projection.pool.connection() as conn:
+        marks = conn.execute("SELECT byte_run_id FROM output_cutover").fetchall()
+    assert [mark["byte_run_id"] for mark in marks] == [first]
+    # Once True, it stays True for the object, as `copied` does.
+    with projection.pool.connection() as conn:
+        conn.execute("DELETE FROM output_cutover")
+    assert rows.cut_over() is True
+
+
+def _listed(
+    output_id: str,
+    slug: str,
+    *,
+    age: timedelta,
+    name: str | None = None,
+    params: dict[str, Any] | None = None,
+    source: OutputSource = "back_office",
+) -> OutputRow:
+    row = make_row(output_id, slug, age, name=name)
+    return dataclasses.replace(
+        row,
+        meta=row.meta.model_copy(update={"source": source}),
+        params=params or {},
+        params_text=params_text(params or {}, {}),
+    )
+
+
+def test_query_on_outputs_matches_index_query(
+    rows: OutputRows, projection: JobProjection, tmp_path: Path
+) -> None:
+    """The rows of `tests/test_output_index.py`'s query tests: `OutputRows.query` lists
+    what `OutputIndex.query` lists, in the same order, with the same totals."""
+    index = OutputIndex(projection.pool, DataPaths(root=tmp_path))
+    listed = [
+        _listed("1" * 32, "sign", age=timedelta(days=3), name="Door", params={"w": 30}),
+        _listed("2" * 32, "sign", age=timedelta(hours=5), params={"label": "Ada"}),
+        _listed("3" * 32, "tag", age=timedelta(minutes=5), name="Gift", params={"w": 10}),
+        _listed("e" * 32, "sign", age=timedelta(hours=1)),
+        _listed(
+            "f" * 32, "sign", age=timedelta(hours=6), name="Storefront: Sign", source=STOREFRONT
+        ),
+    ]
+    for row in listed:
+        rows.insert(row)
+        index.record(row.meta, row.params, {})
+    # A row a phase 2 pod saved has no `params_text`: it is listed, and `q` passes it
+    # by, as the index's empty text does.
+    # Its index row was written before its row, so no `record` filled its text.
+    old = _listed("4" * 32, "sign", age=timedelta(days=4), params={"w": 40})
+    index.record(old.meta, {}, {})
+    rows.insert(dataclasses.replace(old, params_text=None))
+    got = rows.get("4" * 32)
+    assert got is not None and got.params_text is None
+    cases: list[tuple[OutputQuery, tuple[list[str], int]]] = [
+        (OutputQuery(since=NOW - timedelta(days=1)), (["3" * 32, "e" * 32, "2" * 32], 3)),
+        (OutputQuery(until=NOW - timedelta(days=1)), (["1" * 32, "4" * 32], 2)),
+        (OutputQuery(slugs=["sign"]), (["e" * 32, "2" * 32, "1" * 32, "4" * 32], 4)),
+        (OutputQuery(slugs=[]), ([], 0)),
+        (OutputQuery(q="door"), (["1" * 32], 1)),
+        (OutputQuery(q="ada"), (["2" * 32], 1)),
+        (OutputQuery(q="w="), (["3" * 32, "1" * 32], 2)),
+        (OutputQuery(q="%"), ([], 0)),
+        (OutputQuery(limit=2), (["3" * 32, "e" * 32], 5)),
+        (OutputQuery(limit=2, after="e" * 32), (["2" * 32, "1" * 32], 5)),
+        (
+            OutputQuery(include_storefront=True),
+            (["3" * 32, "e" * 32, "2" * 32, "f" * 32, "1" * 32, "4" * 32], 6),
+        ),
+        (OutputQuery(ordered=True), ([], 0)),
+        (OutputQuery(ordered=False, limit=1), (["3" * 32], 5)),
+    ]
+    for query, expected in cases:
+        assert rows.query(query) == expected, query
+        assert index.query(query) == expected, query
+    # `after` must be an id the filters list: an unknown one, or the storefront's
+    # output in the back office's list.
+    for missing in ("9" * 32, "f" * 32):
+        with pytest.raises(AfterNotListedError):
+            rows.query(OutputQuery(after=missing))
+        with pytest.raises(AfterNotListedError):
+            index.query(OutputQuery(after=missing))
+
+
+def test_index_record_fills_params_text(
+    rows: OutputRows, projection: JobProjection, tmp_path: Path
+) -> None:
+    rows.insert(make_row("o1"))
+    index = OutputIndex(projection.pool, DataPaths(root=tmp_path))
+    index.record(make_row("o1").meta, {"width": 20, "depth": 5}, {"depth": 5})
+    got = rows.get("o1")
+    assert got is not None and got.params_text == "width=20"
+    # An output with no row yet (no copy read it): the index row alone.
+    index.record(make_row("o2").meta, {"width": 1}, {})
+    assert rows.get("o2") is None
+    assert index.query(OutputQuery(q="width=1")) == (["o2"], 1)
+
+
+def test_claim_refused_while_claimed_or_saved(rows: OutputRows) -> None:
+    """Review Focus 4: one claim wins; a released claim can be taken again; an id that
+    has a row cannot be claimed."""
+    assert rows.claim("o1", "cube") is True
+    assert rows.claim("o1", "cube") is False
+    assert rows.claim("o1", "ball") is False
+    rows.release_claim("o1")
+    assert rows.claim("o1", "cube") is True
+    rows.insert(make_row("o2"))
+    assert rows.claim("o2", "cube") is False
+    rows.release_claim("missing")
+
+
+def test_claim_refused_while_a_save_commits(
+    rows: OutputRows, projection: JobProjection, pg_conninfo: str
+) -> None:
+    """A save that holds the claim of an id inserts its row and deletes its claim, and
+    then commits (1-2 s on prod). A claim of that id in this window waits on the deleted
+    claim row; after the commit it is refused, and it leaves no claim row."""
+    assert rows.claim("o1", "cube") is True
+    answers: list[bool] = []
+    with psycopg.connect(pg_conninfo, row_factory=dict_row) as save:
+        with save.transaction():
+            output_rows._insert(save, projection.pool, make_row("o1"))
+            claimer = threading.Thread(target=lambda: answers.append(rows.claim("o1", "ball")))
+            claimer.start()
+            deadline = time.monotonic() + 10
+            # Only a backend that the save's own connection blocks: another xdist worker's
+            # wait must not end this one early (A3 review M3).
+            with projection.pool.connection() as conn:
+                while not conn.execute(
+                    "SELECT 1 FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                    (save.info.backend_pid,),
+                ).fetchone():
+                    assert time.monotonic() < deadline, "the claim never waited on the save"
+                    time.sleep(0.02)
+        claimer.join(timeout=10)
+    assert answers == [False]
+    with projection.pool.connection() as conn:
+        left = conn.execute("SELECT count(*) AS n FROM output_claims").fetchone()
+    assert left is not None and left["n"] == 0
+    assert rows.get("o1") is not None
+
+
+def test_prune_claims_drops_only_old_claims(rows: OutputRows, projection: JobProjection) -> None:
+    assert rows.claim("old", "cube") is True
+    assert rows.claim("new", "cube") is True
+    with projection.pool.connection() as conn:
+        conn.execute(
+            "UPDATE output_claims SET claimed_at = clock_timestamp() - interval '2 hours'"
+            " WHERE output_id = 'old'"
+        )
+    assert rows.prune_claims(timedelta(hours=1)) == 1
+    assert rows.claim("old", "cube") is True
+    assert rows.claim("new", "cube") is False
+    assert rows.prune_claims(timedelta(0)) == 2

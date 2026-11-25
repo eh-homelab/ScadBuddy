@@ -26,13 +26,20 @@ const tray = (event: SpoolEvent) => (event.ams_id != null && event.tray_id != nu
 
 /** The short text after an event's kind: its grams, where it went, how it was dried. */
 function detail(event: SpoolEvent, names: EventNames): string {
-  const data = event.data as { temp_c?: number | null; hours?: string | number | null; reason?: string | null; from?: string | null; to?: string | null; bb_status?: string | null }
+  const data = event.data as { temp_c?: number | null; hours?: string | number | null; reason?: string | null; from?: string | null; to?: string | null; bb_status?: string | null; reading_g?: number | null; empty_g?: number | null; drift_g?: number | null }
   const source = event.source ? SOURCE[event.source] : undefined
   const parts: (string | null | undefined)[] = []
   switch (event.kind) {
     case 'weighed':
     case 'ams_reading':
-      parts.push(event.grams_after != null ? grams(event.grams_after) : null, source, event.delta_g ? `${grams(Math.abs(event.delta_g))} ${event.delta_g < 0 ? 'less' : 'more'} than the last value` : null)
+      parts.push(event.grams_after != null ? grams(event.grams_after) : null, source)
+      if (data.reading_g != null) {
+        // #7682: the breakdown and the drift against what the ledger expected.
+        parts.push(`reading ${grams(data.reading_g)}`, data.empty_g != null ? `spool ${grams(data.empty_g)}` : null)
+        if (data.drift_g != null) parts.push(Math.abs(data.drift_g) < 1 ? 'matches the ledger' : `${grams(Math.abs(data.drift_g))} ${data.drift_g < 0 ? 'less' : 'more'} than expected`)
+      } else {
+        parts.push(event.delta_g ? `${grams(Math.abs(event.delta_g))} ${event.delta_g < 0 ? 'less' : 'more'} than the last value` : null)
+      }
       break
     case 'print_started':
     case 'print_ended':

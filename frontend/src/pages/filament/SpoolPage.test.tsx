@@ -54,6 +54,37 @@ describe('the spool page', () => {
     expect(screen.getByRole('combobox', { name: 'Go to section' })).toBeInTheDocument()
   })
 
+  it('says what the newest weighing was made of (#7682)', async () => {
+    open(1)
+    await heading(1)
+    const weight = screen.getByRole('region', { name: 'Weight' })
+    expect(await within(weight).findByText(/filament 640 g \+ spool 250 g \(Bambu reusable spool, from the catalog\)\./)).toBeInTheDocument()
+    expect(within(weight).getByText(/The ledger expected 652 g\. The scale found 12 g less than the prints accounted for\./)).toBeInTheDocument()
+    expect(within(weight).queryByText(/Measured 640 g/)).toBeNull()
+    expect(within(weight).queryByText(/unexplained/)).toBeNull()
+  })
+
+  it('names the drift in the heading and on the timeline when it is a notice (#7682)', async () => {
+    open(1)
+    await heading(1)
+    expect(screen.getByRole('heading', { level: 1 }).parentElement).toHaveTextContent(/Drift −12 g/)
+    const history = screen.getByRole('region', { name: 'History' })
+    expect(await within(history).findByText(/reading 890 g, spool 250 g, 12 g less than expected/)).toBeInTheDocument()
+  })
+
+  it('names no drift for a spool whose newest weighing has no breakdown (#7682)', async () => {
+    open(2)
+    await heading(2)
+    expect(screen.getByRole('heading', { level: 1 }).parentElement).not.toHaveTextContent(/Drift/)
+  })
+
+  it('says the start gap of an added-full spool whose grams came from Bambuddy (#7682)', async () => {
+    open(4)
+    await heading(4)
+    const weight = screen.getByRole('region', { name: 'Weight' })
+    expect(await within(weight).findByText('Started at the label weight 1000 g. Bambuddy reported 268 g; 732 g unexplained.')).toBeInTheDocument()
+  })
+
   it('says how the tag came in and when it was written (#7149)', async () => {
     open(4)
     await heading(4)
@@ -243,7 +274,7 @@ describe('the spool page', () => {
     // #7280: the button waits for the reading's insert weight check.
     await waitFor(() => expect(screen.getByRole('button', { name: 'Record weighing' })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: 'Record weighing' }))
-    await waitFor(() => expect(posts).toEqual([{ kind: 'weighed', grams: 650, source: 'scale' }]))
+    await waitFor(() => expect(posts).toEqual([{ kind: 'weighed', grams: 650, source: 'scale', reading_g: 900 }]))
     await waitFor(async () => expect((await getSpool(spoolId(1))).grams_left).toBe(650))
   })
 

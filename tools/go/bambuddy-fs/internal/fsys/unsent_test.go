@@ -497,16 +497,42 @@ func TestListUnsent(t *testing.T) {
 }
 
 // The save an app makes with a temp file and a rename, over a file the library has.
+// Its EINTR retry relies on the temp file being still unsent when it is renamed (a
+// queued-save rename changes nothing when it answers EINTR); a rename of an uploaded
+// one goes to the library and may apply before it answers EINTR (#7718).
 func saveByRename(t *testing.T, dir, data string) {
 	t.Helper()
 	tmp := filepath.Join(dir, "X.3mf.tmp")
 	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if err := syscall.Rename(tmp, filepath.Join(dir, "X.3mf")); err != nil {
+	if err := retryEINTR(func() error { return syscall.Rename(tmp, filepath.Join(dir, "X.3mf")) }); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 }
+
+// retryEINTR calls a raw syscall through the mount again while it answers EINTR, as Go's
+// os package does. A FUSE request that a signal interrupts (Go's preemption signal under
+// -race) is cancelled and answers EINTR (api.Errno, #7718). Retry only calls that have
+// changed nothing when they answer it: the wait in tree.list before Rename changes
+// anything, a rename of a queued save or one refused before a library call, and the
+// xattr and statfs handlers. A stored-file or folder rename whose library call was cancelled in
+// flight may already have been applied, so a test of one must not retry it blindly.
+// After eintrTries EINTR answers in a row it returns the last one, so a mount that
+// always answers EINTR fails the test with that error instead of spinning to its
+// timeout (#7753).
+func retryEINTR(call func() error) error {
+	var err error
+	for range eintrTries {
+		if err = call(); !errors.Is(err, syscall.EINTR) {
+			return err
+		}
+	}
+	return err
+}
+
+// eintrTries is how many EINTR answers in a row retryEINTR takes before it gives up.
+const eintrTries = 100
 
 func TestASaveByRenameReplacesTheStoredFile(t *testing.T) {
 	lib := newFakeLibrary()
@@ -1027,6 +1053,9 @@ func TestASaveByRenameWhileScadBuddyIsDownIsQueuedAndSentLater(t *testing.T) {
 	if rec, err := readRecord(q[0].Path); err != nil || len(rec.Bases) != 1 || rec.Bases[0].ID != 10 {
 		t.Fatalf("bases: %+v %v", rec.Bases, err)
 	}
+	// The refresh logs the outage after it releases the tree's lock: wait for the line,
+	// then count it (#7589).
+	eventually(t, "the outage logged", func() bool { return strings.Contains(log.String(), "ScadBuddy is not answering") })
 	if n := strings.Count(log.String(), "ScadBuddy is not answering"); n != 1 {
 		t.Fatalf("outage logged %d times: %s", n, log.String())
 	}
@@ -1041,9 +1070,7 @@ func TestASaveByRenameWhileScadBuddyIsDownIsQueuedAndSentLater(t *testing.T) {
 	if got := names(t, top); !slices.Equal(got, []string{"X.3mf", "Y.3mf"}) {
 		t.Fatalf("listed after: %v", got)
 	}
-	if !strings.Contains(log.String(), "ScadBuddy answers again") {
-		t.Fatalf("recovery not logged: %s", log.String())
-	}
+	eventually(t, "the recovery logged", func() bool { return strings.Contains(log.String(), "ScadBuddy answers again") })
 }
 
 // At a start with ScadBuddy down there is no listing to serve: the top level is EIO.
@@ -1274,5 +1301,25 @@ func TestAQueuedEntrysSizeEndsWithARefusal(t *testing.T) {
 	q.finish(sent)
 	if size, ok := q.size(sent); !ok || size != 4 {
 		t.Errorf("sent: %d %v, want 4 true", size, ok)
+	}
+}
+
+// retryEINTR stops after eintrTries EINTR answers and returns the last one (#7753).
+func TestRetryEINTRGivesUpAfterItsTries(t *testing.T) {
+	calls := 0
+	err := retryEINTR(func() error { calls++; return syscall.EINTR })
+	if !errors.Is(err, syscall.EINTR) || calls != eintrTries {
+		t.Fatalf("err %v after %d calls, want EINTR after %d", err, calls, eintrTries)
+	}
+	calls = 0
+	err = retryEINTR(func() error {
+		calls++
+		if calls < 3 {
+			return syscall.EINTR
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("err %v after %d calls, want nil after 3", err, calls)
 	}
 }
