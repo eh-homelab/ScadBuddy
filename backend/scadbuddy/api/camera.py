@@ -28,7 +28,7 @@ from pydantic import BaseModel
 
 from scadbuddy.api.deps import StateDep
 from scadbuddy.api.operations import PROBLEM_SCHEMA
-from scadbuddy.api.printing import _ClosingStreamingResponse
+from scadbuddy.api.streaming import ClosingStreamingResponse
 from scadbuddy.camera.models import CameraFeed
 from scadbuddy.camera.store import CameraStore
 from scadbuddy.core.events import CameraReconnectEvent, emit
@@ -152,7 +152,8 @@ LIVE_RESPONSES: dict[int | str, dict[str, Any]] = {
     502: {
         **_PROBLEM,
         "description": "`camera-edge-unreachable`: the edge did not answer;"
-        " `camera-edge-refused`: it refused the API's read user.",
+        " `camera-edge-refused`: it refused the API's read user, or redirected outside"
+        " the printer's path.",
     },
     503: {**_PROBLEM, "description": "`camera-edge-unset`: no live edge is set up."},
 }
@@ -212,7 +213,8 @@ async def _check_refused(printer_id: str, response: httpx.Response) -> None:
         return
     await response.aread()
     with suppress(ValueError):
-        if response.json().get("error") == "session not found":
+        answer = response.json()
+        if isinstance(answer, dict) and answer.get("error") == "session not found":
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
                 "The live session has ended; start again at index.m3u8.",
@@ -383,8 +385,21 @@ async def live_camera_hls(
         await stack.aclose()
         raise
     headers = {**NO_STORE, "X-Accel-Buffering": "no"}
-    location = response.headers.get("location")
-    if location is not None and (rewritten := _hls_location(location, printer)) is not None:
+    if 300 <= response.status_code < 400:
+        location = response.headers.get("location")
+        rewritten = None if location is None else _hls_location(location, printer)
+        if rewritten is None:
+            await stack.aclose()
+            # A redirect elsewhere is never passed, and a bare 3xx would leave the player stuck.
+            logger.warning(
+                "the live camera edge redirected outside the printer's path",
+                extra={"printer_id": printer, "status": response.status_code},
+            )
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                "The live camera edge answered with a redirect elsewhere.",
+                type_=EDGE_REFUSED,
+            )
         headers["Location"] = rewritten
 
     async def body() -> AsyncIterator[bytes]:
@@ -400,7 +415,7 @@ async def live_camera_hls(
         finally:
             await stack.aclose()
 
-    return _ClosingStreamingResponse(
+    return ClosingStreamingResponse(
         body(),
         status_code=response.status_code,
         media_type=response.headers.get("content-type"),

@@ -317,13 +317,16 @@ def test_a_relative_redirect_stays_relative(client: TestClient, edge: Edge, prin
 
 
 @pytest.mark.parametrize(
-    "location", ["http://evil.example/x.m3u8", "//evil.example/x.m3u8", "/other/index.m3u8"]
+    "location", ["http://evil.example/x.m3u8", "//evil.example/x.m3u8", "/other/index.m3u8", None]
 )
-def test_a_redirect_elsewhere_is_not_passed(
-    client: TestClient, edge: Edge, printer: str, location: str
+def test_a_redirect_elsewhere_is_a_502(
+    client: TestClient, edge: Edge, printer: str, location: str | None
 ) -> None:
-    edge.answer = lambda request: httpx.Response(302, headers={"Location": location})
+    headers = {} if location is None else {"Location": location}
+    edge.answer = lambda request: httpx.Response(302, headers=headers)
     response = client.get(f"/api/v1/camera/live/{printer}/hls/index.m3u8", follow_redirects=False)
+    assert response.status_code == 502
+    assert response.json()["type"].endswith("/camera-edge-refused")
     assert "location" not in response.headers
 
 
@@ -405,6 +408,20 @@ def test_the_edge_refusing_the_proxy_is_a_502(client: TestClient, edge: Edge, pr
     assert response.status_code == 502
     assert response.json()["type"].endswith("/camera-edge-refused")
     assert "www-authenticate" not in response.headers
+
+
+@pytest.mark.parametrize(
+    "body", [b'["session not found"]', b'"session not found"', b"null", b"<x>"]
+)
+def test_an_edge_refusal_of_another_body_is_a_502(
+    client: TestClient, edge: Edge, printer: str, body: bytes
+) -> None:
+    edge.answer = lambda request: httpx.Response(
+        401, content=body, headers={"Content-Type": "application/json"}
+    )
+    response = client.get(f"/api/v1/camera/live/{printer}/hls/video1_stream.m3u8?session=x")
+    assert response.status_code == 502
+    assert response.json()["type"].endswith("/camera-edge-refused")
 
 
 def test_an_ended_hls_session_is_a_404(client: TestClient, edge: Edge, printer: str) -> None:
