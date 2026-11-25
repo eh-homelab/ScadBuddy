@@ -518,13 +518,21 @@ func saveByRename(t *testing.T, dir, data string) {
 // anything, a rename of a queued save or one refused before a library call, and the
 // xattr and statfs handlers. A stored-file or folder rename whose library call was cancelled in
 // flight may already have been applied, so a test of one must not retry it blindly.
+// After eintrTries EINTR answers in a row it returns the last one, so a mount that
+// always answers EINTR fails the test with that error instead of spinning to its
+// timeout (#7753).
 func retryEINTR(call func() error) error {
-	for {
-		if err := call(); !errors.Is(err, syscall.EINTR) {
+	var err error
+	for range eintrTries {
+		if err = call(); !errors.Is(err, syscall.EINTR) {
 			return err
 		}
 	}
+	return err
 }
+
+// eintrTries is how many EINTR answers in a row retryEINTR takes before it gives up.
+const eintrTries = 100
 
 func TestASaveByRenameReplacesTheStoredFile(t *testing.T) {
 	lib := newFakeLibrary()
@@ -1293,5 +1301,25 @@ func TestAQueuedEntrysSizeEndsWithARefusal(t *testing.T) {
 	q.finish(sent)
 	if size, ok := q.size(sent); !ok || size != 4 {
 		t.Errorf("sent: %d %v, want 4 true", size, ok)
+	}
+}
+
+// retryEINTR stops after eintrTries EINTR answers and returns the last one (#7753).
+func TestRetryEINTRGivesUpAfterItsTries(t *testing.T) {
+	calls := 0
+	err := retryEINTR(func() error { calls++; return syscall.EINTR })
+	if !errors.Is(err, syscall.EINTR) || calls != eintrTries {
+		t.Fatalf("err %v after %d calls, want EINTR after %d", err, calls, eintrTries)
+	}
+	calls = 0
+	err = retryEINTR(func() error {
+		calls++
+		if calls < 3 {
+			return syscall.EINTR
+		}
+		return nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("err %v after %d calls, want nil after 3", err, calls)
 	}
 }
