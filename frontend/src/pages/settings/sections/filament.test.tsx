@@ -446,6 +446,18 @@ describe('Filament (#6262)', () => {
       expect(await within(filament).findByText('3 links reset. A full pass now links the new Bambuddy.')).toBeInTheDocument()
     })
 
+    it('does not say the presets are copied again while the preset mirror is off (#7544)', async () => {
+      linkOtherBambuddy()
+      leaveOnlyPresetLinks()
+      await api.putSettings({ filament_preset_mirror: false })
+      const { user, filament } = await withSync()
+      await user.click(await within(filament).findByRole('button', { name: 'Reset Bambuddy links' }))
+      const dialog = await screen.findByRole('alertdialog', { name: 'Reset the Bambuddy links?' })
+      const items = within(within(dialog).getByRole('list', { name: 'What the reset deletes' })).getAllByRole('listitem')
+      expect(items.map((item) => item.textContent)).toEqual(['3 filament preset links'])
+      expect(dialog).not.toHaveTextContent('Each filament preset is then copied')
+    })
+
     it('warns that an untagged spool can end up twice when the Bambuddy is another one', async () => {
       linkOtherBambuddy()
       const { user, filament } = await withSync()
