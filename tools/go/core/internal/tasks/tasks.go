@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"regexp"
 	"time"
@@ -173,20 +174,20 @@ func (t *Tasks) create(r *http.Request, _ crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	session := body.Match("session_id", uuidPattern)
-	kind := body.Enum("kind", kinds...)
+	session := body.Match("session_id", 0, math.MaxInt, uuidPattern)
+	kind := body.Choice("kind", kinds...)
 	description := body.Text("description", 1, 500)
 	spec := body.Dict("spec")
 	var createdBy []byte
 	if _, given := body.Required("created_by"); given {
 		if o := body.Object("created_by", "kind", "id", "label"); o == nil {
-			body.Fail([]string{"created_by"}, "Input should be a valid dictionary or object to extract fields from")
+			body.FailAt([]string{"created_by"}, "Input should be a valid dictionary or object to extract fields from")
 		} else {
 			owner := struct {
 				Kind  string `json:"kind"`
 				ID    string `json:"id"`
 				Label string `json:"label"`
-			}{o.Enum("kind", ownerKinds...), o.Text("id", 0, nameMax), o.Text("label", 0, nameMax)}
+			}{o.Choice("kind", ownerKinds...), o.Text("id", 0, nameMax), o.Text("label", 0, nameMax)}
 			o.Done()
 			createdBy, _ = json.Marshal(owner)
 		}
@@ -306,8 +307,8 @@ func (t *Tasks) finish(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	state := body.Enum("state", "done", "cancelled", "failed")
-	detail := body.OptText("detail", 0, detailMax)
+	state := body.Choice("state", "done", "cancelled", "failed")
+	detail := body.OptText("detail", 0, detailMax, nil)
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
@@ -335,7 +336,7 @@ func (t *Tasks) event(r *http.Request, p crud.Params) (any, error) {
 		return nil, err
 	}
 	text := body.Text("text", 0, noticeMaxChars)
-	notice := body.OptBool("notice", false)
+	notice := body.Bool("notice", false)
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
@@ -429,7 +430,7 @@ func (t *Tasks) delivered(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	upTo := body.Match("up_to", seqText)
+	upTo := body.Match("up_to", 0, math.MaxInt, seqText)
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
@@ -490,11 +491,11 @@ func (t *Tasks) journal(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	key := body.Match("key", callKey)
+	key := body.Match("key", 0, math.MaxInt, callKey)
 	occurrence := body.IntIn("occurrence", 0, occurrenceMax, nil)
 	result := body.Any("result")
-	ok := body.Bool("ok")
-	child := body.OptMatch("child_id", uuidPattern)
+	ok := body.RequiredBool("ok")
+	child := body.OptText("child_id", 0, math.MaxInt, uuidPattern)
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
@@ -516,7 +517,7 @@ func (t *Tasks) child(r *http.Request, p crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	child := body.Match("child_id", uuidPattern)
+	child := body.Match("child_id", 0, math.MaxInt, uuidPattern)
 	if err := body.Err(); err != nil {
 		return nil, err
 	}

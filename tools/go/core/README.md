@@ -38,6 +38,19 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `operations:read` | `GET /operations/{id}` and `…/by-key/{key}`. The insert and the end stay Python's: they write the activity row |
 | `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
 | `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles`. The status, the bytes, a write, a copy and the move to blobs stay Python's: they need the blob store or the KEK |
+| `activity-kinds` | `POST /activity-kinds` |
+| `browser-origins` | `GET` `/browser-origins`, `…/approved`; `POST` `…/approve`, `…/revoke` |
+| `bridge-tabs` | `/session-tabs`, `/tab-owners` and its `claim`, `refresh`, `release`, `release-all`; `PUT /tab-images/{name}`, `POST …/{name}/take` |
+| `pairings` | `/pairings` and every route under it |
+| `mcp-tokens` | `/mcp-tokens` and every route under it |
+| `plugins` | `POST` `/plugins/{name}/delete`, `/plugin-oauth/grants/{plugin}/mark`, `…/forget` only. The rest seal or open with the KEK, and stay Python's |
+| `plugin-packages` | `/plugin-packages` and every route under it |
+| `hosted-plugins:read` | `GET /hosted-plugins/{name}`. A version's zip (the blob store) stays Python's |
+| `plugin-feeds` | `GET /plugin-feeds/{feed}`; `PUT`, `DELETE` `…/packages/{name}` |
+
+Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
+`plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
+is Python's.
 
 `internal/seal` is the agent's sealed format (`backend/scadbuddy/core/secrets.py`), the payload
 codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
@@ -67,6 +80,13 @@ A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always o
 - The approvals' input hash refuses JSON past 512 levels; Python's parser goes to about 1000.
 - A gate response with a lone surrogate (`\ud800`) reads as U+FFFD; Python's validator refuses
   it.
+- A token's `expires_at` is read by Postgres, so it takes most of what `timestamptz` takes. Its
+  special values (`infinity`, `now`, `today`, `tomorrow`, `yesterday`, `epoch`) are refused, as
+  pydantic refused them; a value Postgres does not take is a 422 at `["body", "expires_at"]`.
+- A package write's `plugin_packages.changed` is logged and NOTIFYed after the commit, in the
+  request's handler but not under its cancellation. Python queued it on its outbox.
+- A re-pin whose review's `name` is a list or an object names it as JSON in the 409's detail,
+  not as Python's `repr`.
 
 ## Tests
 

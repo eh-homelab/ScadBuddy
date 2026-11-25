@@ -70,7 +70,7 @@ func (b *Blobs) sessionDelete(r *http.Request, _ crud.Params) (any, error) {
 // sessionBlob is the image, its media type the answer's. A fork's is its own, else an
 // ancestor's that an event it reads through its chain names.
 func (b *Blobs) sessionBlob(r *http.Request, _ crud.Params) (any, error) {
-	session, err := crud.QueryUUID(r, "session_id")
+	session, err := crud.QueryPyUUID(r, "session_id")
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +78,7 @@ func (b *Blobs) sessionBlob(r *http.Request, _ crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out crud.Bytes
+	out := &crud.Reply{Status: http.StatusOK}
 	err = b.Pool.QueryRow(r.Context(),
 		`WITH RECURSIVE chain (id, parent, cut, bound, depth) AS (
 		 SELECT id, fork_parent_id, fork_event_cut, NULL::bigint, 0
@@ -110,12 +110,12 @@ func readOwner(b *crud.Body) owner {
 		return owner{}
 	}
 	if string(raw) == "null" {
-		b.Fail([]string{"owner"}, "Field required")
+		b.FailAt([]string{"owner"}, "Field required")
 		return owner{}
 	}
 	o := b.Object("owner", "kind", "id")
 	defer o.Done()
-	return owner{o.Enum("kind", ownerKinds...), o.Text("id", 1, 1000)}
+	return owner{o.Choice("kind", ownerKinds...), o.Text("id", 1, 1000)}
 }
 
 type preview struct {
@@ -150,8 +150,8 @@ func (b *Blobs) attachmentPut(r *http.Request, _ crud.Params) (any, error) {
 		return nil, err
 	}
 	who := readOwner(body)
-	mediaType := body.Enum("media_type", attachmentTypes...)
-	previewType := body.Enum("preview_media_type", previewTypes...)
+	mediaType := body.Choice("media_type", attachmentTypes...)
+	previewType := body.Choice("preview_media_type", previewTypes...)
 	if err := done(body); err != nil {
 		return nil, err
 	}
@@ -252,7 +252,7 @@ func (b *Blobs) attachmentPart(column, media string) crud.Handler {
 		if err != nil {
 			return nil, err
 		}
-		kind, err := crud.QueryEnum(r, "owner_kind", ownerKinds...)
+		kind, err := crud.QueryChoice(r, "owner_kind", ownerKinds...)
 		if err != nil {
 			return nil, err
 		}
@@ -260,7 +260,7 @@ func (b *Blobs) attachmentPart(column, media string) crud.Handler {
 		if err != nil {
 			return nil, err
 		}
-		var out crud.Bytes
+		out := &crud.Reply{Status: http.StatusOK}
 		err = b.Pool.QueryRow(r.Context(),
 			`SELECT `+media+`, `+column+` FROM ai_attachments
 			 WHERE id = $1::text::uuid AND owner_kind = $2 AND owner_id = $3 AND expires_at > now()`,
@@ -315,7 +315,7 @@ func (b *Blobs) bodySave(r *http.Request, _ crud.Params) (any, error) {
 	url := body.Text("url", 0, urlMax)
 	contentType := body.NullText("content_type", contentTypeMax)
 	size := body.IntIn("size_bytes", 0, 1<<63-1, nil)
-	complete := body.Bool("complete")
+	complete := body.RequiredBool("complete")
 	session := body.PyUUID("session_id")
 	id := body.PyUUID("id")
 	if err := done(body); err != nil {
@@ -352,11 +352,11 @@ func (b *Blobs) bodySave(r *http.Request, _ crud.Params) (any, error) {
 }
 
 func bodyKey(r *http.Request) (string, string, error) {
-	session, err := crud.QueryUUID(r, "session_id")
+	session, err := crud.QueryPyUUID(r, "session_id")
 	if err != nil {
 		return "", "", err
 	}
-	id, err := crud.QueryUUID(r, "id")
+	id, err := crud.QueryPyUUID(r, "id")
 	return session, id, err
 }
 
@@ -406,7 +406,7 @@ func (b *Blobs) bodyBytes(r *http.Request, _ crud.Params) (any, error) {
 	if !given {
 		length = httpBodyMax
 	}
-	out := crud.Bytes{MediaType: "application/octet-stream"}
+	out := &crud.Reply{Status: http.StatusOK, MediaType: "application/octet-stream"}
 	// substring() is 1-based; past the end it is empty.
 	err = b.Pool.QueryRow(r.Context(),
 		`SELECT substring(data FROM $1::int4 FOR $2::int4) FROM ai_session_http_bodies

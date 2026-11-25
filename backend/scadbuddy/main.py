@@ -129,6 +129,7 @@ from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.output_byte_copy import copy_output_bytes
 from scadbuddy.library.output_bytes import OutputBytes, usable
 from scadbuddy.library.output_copy import copy_outputs
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import reap_orphan_holds
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import (
@@ -187,11 +188,12 @@ from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.backends import UnrecordedSweeper
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
-from scadbuddy.store.content import sweep_content
+from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.download_cache import DOWNLOADS_DIRNAME
-from scadbuddy.store.factory import build_store
+from scadbuddy.store.factory import blob_spool, build_store
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.store.index import BlobIndex
+from scadbuddy.store.local import LocalContentBackend
 from scadbuddy.store.migrate import migrate_activity
 from scadbuddy.worker import (
     MAKE_CURRENT_BACKOFF,
@@ -528,6 +530,15 @@ async def _sweep_blobs_logged(state: AppState) -> None:
             removed = await asyncio.to_thread(
                 sweep_blobs, state.blobs, state.refs, grace=state.config.sweep_grace
             )
+            if state.outputs.bytes is not None:
+                # `local`'s output store (#7257, plan D7): a deleted output's blobs.
+                outputs_swept = await sweep_content(
+                    state.outputs.bytes.content, state.refs, grace=state.config.sweep_grace
+                )
+                if outputs_swept:
+                    logger.info(
+                        "removed unreferenced output blobs", extra={"count": len(outputs_swept)}
+                    )
         else:
             failed = False
             try:
@@ -687,14 +698,19 @@ async def _copy_outputs_logged(state: AppState, *, stop: threading.Event) -> Non
 async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> None:
     """One run of the byte copy of the saved outputs to the blob store (#7256,
     `copy_output_bytes`), logged. It takes the copy's advisory lock, so one replica copies
-    at a time; a run that does not get it does nothing. On the `local` and `bambuddy`
-    stores it records a refused run. A failure is logged, then raised."""
+    at a time; a run that does not get it does nothing. On `local` it copies to the
+    outputs' own content store (#7257, plan D7); on `bambuddy` it records a refused run.
+    A failure is logged, then raised."""
     rows = state.outputs.rows
     if rows is None:
         return
+    # On `local` the outputs' own content store (plan D7), else the shared one.
+    content = (
+        state.outputs.bytes.content if state.outputs.bytes is not None else state.store.content
+    )
     try:
         result = await copy_output_bytes(
-            state.outputs, rows, state.store.content, state.projection.conninfo, stop
+            state.outputs, rows, content, state.projection.conninfo, stop
         )
     except Exception:
         logger.exception(
@@ -715,6 +731,26 @@ async def _copy_output_bytes_once(state: AppState, stop: threading.Event) -> Non
                 "stopped": stop.is_set(),
             },
         )
+        if result.refused is None and not result.incomplete and not stop.is_set():
+            await _try_cut_over(rows)
+
+
+async def _try_cut_over(rows: OutputRows) -> bool:
+    """Write the cut-over mark (#7257, plan D2) when the copies are done, best effort:
+    whether it exists now. Only the call that wrote the mark logs it (another replica may
+    write it meanwhile); a failure is logged only, and the next byte run or start tries
+    again."""
+    try:
+        if await asyncio.to_thread(rows.cut_over):
+            return True
+        if not await asyncio.to_thread(rows.try_cut_over):
+            return await asyncio.to_thread(rows.cut_over)
+        at = await asyncio.to_thread(rows.cut_over_at)
+    except Exception:
+        logger.exception("could not write the cut-over mark; the next byte run or start retries")
+        return False
+    logger.info("the outputs are cut over (#7257)", extra={"at": at})
+    return True
 
 
 async def _copy_output_bytes_logged(state: AppState, *, stop: threading.Event) -> None:
@@ -729,11 +765,16 @@ async def _copy_outputs_and_bytes_logged(state: AppState, *, stop: threading.Eve
     """The start's copies: the rows (#7255), then the bytes (#7256), which walk the rows
     the first copy wrote. The bytes are copied only when the last row copy run finished:
     a run that is ``incomplete`` (an outputs volume not there) or did not end leaves the
-    byte copy to the sweep `OUTPUT_BYTES_SWEEP`."""
+    byte copy to the sweep `OUTPUT_BYTES_SWEEP`.
+
+    It tries the cut-over mark first (#7257): when the copies were done before this start,
+    the mark is written now, and neither copy runs."""
+    rows = state.outputs.rows
+    if rows is not None and await _try_cut_over(rows):
+        return
     await _copy_outputs_logged(state, stop=stop)
     if stop.is_set():
         return
-    rows = state.outputs.rows
     if rows is None:
         return
     try:
@@ -2606,9 +2647,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise
     state.blobs = state.store.blobs
     state.render.snapshots = state.store.snapshots
-    # #7256: the outputs' bytes are read from the blob store first, never on `local`
-    # (no content store) or `bambuddy`.
-    if usable(state.store.content):
+    # #7256: the outputs' bytes are read from the blob store first, never on `bambuddy`.
+    # #7257 plan D7: `local` has no content store, so outputs get one of their own under
+    # `data/output-blobs/`, with the shared index and spool. It has no caps, as the `local`
+    # store has none.
+    #: `local`'s output store, which the bundle does not close.
+    output_content: ContentStore | None = None
+    if state.store.backend == "local":
+        output_content = ContentStore(
+            LocalContentBackend(state.paths.output_blobs),
+            BlobIndex(pool),
+            spool=blob_spool(state.config, state.paths),
+        )
+        state.outputs.bytes = OutputBytes(output_content)
+    elif usable(state.store.content):
         assert state.store.content is not None
         state.outputs.bytes = OutputBytes(state.store.content)
     # From the store's construction to the `try` below, whose `finally` owns shutdown:
@@ -2624,7 +2676,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "switched migrated blobs",
                 extra={"backend": current.store_backend, "rows": switched},
             )
-        state.paths.ensure()
+        state.paths.ensure(output_blobs=output_content is not None)
         # Before the built-in sync: an existing models directory becomes revision 1,
         # so what a newer image changes in a built-in is a commit on top of it rather
         # than an unversioned overwrite.
@@ -2791,6 +2843,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with AsyncExitStack() as closing:
             closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
             closing.push_async_callback(state.store.aclose)
+            if output_content is not None:
+                closing.push_async_callback(output_content.aclose)
             closing.push_async_callback(state.events.aclose)
             closing.push_async_callback(asyncio.to_thread, state.presets.close)
             closing.push_async_callback(asyncio.to_thread, state.projection.close)

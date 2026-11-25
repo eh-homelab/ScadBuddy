@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"slices"
@@ -230,11 +231,11 @@ func (b *Blobs) sessionPut(r *http.Request, _ crud.Params) (any, error) {
 	var images []image
 	metas, ok := body.Raw("images")
 	if !ok {
-		body.Fail([]string{"images"}, "Field required")
+		body.FailAt([]string{"images"}, "Field required")
 	} else {
 		images = readImages(body, metas)
 	}
-	toolUseID := body.OptText("tool_use_id", 1, toolUseIDMax)
+	toolUseID := body.OptText("tool_use_id", 1, toolUseIDMax, nil)
 	fenced := readFence(body)
 	if err := done(body); err != nil {
 		return nil, err
@@ -327,23 +328,23 @@ func (b *Blobs) sessionPut(r *http.Request, _ crud.Params) (any, error) {
 func readImages(body *crud.Body, raw []byte) []image {
 	var items []json.RawMessage
 	if json.Unmarshal(raw, &items) != nil || items == nil {
-		body.Fail([]string{"images"}, "Input should be a valid list")
+		body.FailAt([]string{"images"}, "Input should be a valid list")
 		return nil
 	}
 	if len(items) > imagesPerWrite {
-		body.Fail([]string{"images"}, fmt.Sprintf("List should have at most %d items after validation", imagesPerWrite))
+		body.FailAt([]string{"images"}, fmt.Sprintf("List should have at most %d items after validation", imagesPerWrite))
 		return nil
 	}
 	out := make([]image, len(items))
 	for i, item := range items {
 		one, err := crud.ParseBody(item, "name", "media_type")
 		if err != nil {
-			body.Fail([]string{"images", fmt.Sprint(i)}, "Input should be a valid dictionary or object to extract fields from")
+			body.FailAt([]string{"images", fmt.Sprint(i)}, "Input should be a valid dictionary or object to extract fields from")
 			continue
 		}
-		out[i] = image{name: one.Match("name", blobName), mediaType: one.Enum("media_type", blobTypes...)}
+		out[i] = image{name: one.Match("name", 0, math.MaxInt, blobName), mediaType: one.Choice("media_type", blobTypes...)}
 		if msg := one.First(); msg != "" {
-			body.Fail([]string{"images", fmt.Sprint(i)}, msg)
+			body.FailAt([]string{"images", fmt.Sprint(i)}, msg)
 		}
 	}
 	return out

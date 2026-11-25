@@ -91,6 +91,11 @@ func WriteJSONStatus(w http.ResponseWriter, status int, v any) error {
 	return nil
 }
 
+// WriteBytes answers status with body as mediaType.
+func WriteBytes(w http.ResponseWriter, status int, mediaType string, body []byte) {
+	write(w, status, mediaType, body)
+}
+
 // WriteProblem answers p, its members in problems.py's order.
 func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 	kind := p.Type
@@ -131,11 +136,6 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 		w.Header().Set(k, v)
 	}
 	write(w, p.Status, "application/problem+json", b.Bytes())
-}
-
-// WriteBytes answers 200 with body, of mediaType.
-func WriteBytes(w http.ResponseWriter, mediaType string, body []byte) {
-	write(w, http.StatusOK, mediaType, body)
 }
 
 func write(w http.ResponseWriter, status int, mediaType string, body []byte) {

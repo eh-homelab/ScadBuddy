@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"slices"
@@ -183,7 +184,7 @@ func (ws *Workspace) files(r *http.Request, _ crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	prefix, err := crud.QueryOptText(r, "prefix", pathMax+64)
+	prefix, err := crud.QueryOptText(r, "prefix", 0, pathMax+64)
 	if err != nil {
 		return nil, err
 	}
@@ -394,8 +395,8 @@ func (ws *Workspace) delete(r *http.Request, _ crud.Params) (any, error) {
 	}
 	workspace := body.Text("workspace", 1, workspaceMax)
 	path := body.Text("path", 1, pathMax+64)
-	expected := body.OptMatch("expected_sha256", sha256Hex)
-	events := body.OptTexts("events", eventsMax, eventBytesMax)
+	expected := body.OptText("expected_sha256", 0, math.MaxInt, sha256Hex)
+	events := body.Strings("events", true, 0, eventsMax, 0, eventBytesMax)
 	if err := body.Err(); err != nil {
 		return nil, err
 	}

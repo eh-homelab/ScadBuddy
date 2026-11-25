@@ -96,11 +96,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		if b, ok := answer.(Bytes); ok {
-			httpx.WriteBytes(w, b.MediaType, b.Body)
-		} else {
-			err = httpx.WriteJSONStatus(w, status, answer)
-		}
+		err = writeAnswer(w, status, answer)
 	}
 	if err != nil {
 		httpx.WriteProblem(w, r, problemOf(r, err))
