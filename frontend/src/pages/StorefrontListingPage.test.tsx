@@ -440,6 +440,24 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
     expect(screen.queryByText('Published')).toBeNull()
   })
 
+  it('names the parameter of a refusal while the design’s settings are not read (#7660 review)', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/versions/:commit/schema', () => HttpResponse.json({ detail: 'down' }, { status: 503 })),
+      http.post('/api/v1/storefront/listings/:id/publish', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/storefront/listing_param_pipeline_set', title: 'Unprocessable Content', status: 422, detail: 'set by the pipeline', name: 'params.text_size' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const listing = await seed('Open')
+    const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Open'))
+    await user.click(screen.getByRole('button', { name: 'Publish' }))
+    // No Design block note exists without the schema, so the alert does not point there.
+    expect(await screen.findByText('Not published: “text_size” needs a change. See the note under it below.')).toBeInTheDocument()
+  })
+
   describe('a pipeline design (#5701)', () => {
     const HOUSE = { cols: 3, rows: 1, storeys: 2, windows: 4 }
     const seedHouse = (house: Record<string, number>, over: object = {}) =>

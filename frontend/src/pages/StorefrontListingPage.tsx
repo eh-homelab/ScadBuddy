@@ -173,8 +173,9 @@ function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefi
   // #5701 — a save is refused too (what it cannot store), so it says nothing of publishing.
   if (refusal.kind === 'inputs') return 'The design needs a change. See the note under “Design” below.'
   const param = schema?.parameters?.find((p) => p.name === refusal.name)
-  // #5701: a parameter the design sets itself has no row of its own.
-  if (refusal.kind === 'param' && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
+  // #5701: a parameter the design sets itself has no row of its own. Until the schema is
+  // read, the Design block shows no note, so the alert names the parameter instead.
+  if (refusal.kind === 'param' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
   return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
 
