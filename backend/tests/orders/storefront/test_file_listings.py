@@ -131,6 +131,23 @@ def published(store: ListingStore, pool: PgPool, sha: str = SHA) -> Listing:
             },
             "fixed",
         ),
+        # #5701: a file has no pipeline, so a file listing has no inputs.
+        (
+            {
+                "source": "library_file",
+                "library_file": {"id": 1, "library": "native"},
+                "inputs": {"house": {}},
+            },
+            "inputs",
+        ),
+        (
+            {
+                "source": "library_file",
+                "library_file": {"id": 1, "library": "native"},
+                "inputs_v": 0,
+            },
+            "inputs_v",
+        ),
         (
             {
                 "source": "library_file",

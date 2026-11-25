@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -99,6 +100,17 @@ class Fixes:
     ) -> PrintRunRequest:
         if not request.accepted_fixes:
             return request
+        # Holds the output's 3MF from the blob store while the analyzers run (#7256).
+        async with AsyncExitStack() as stack:
+            return await self._judged(request, output_id, library_file_id, stack)
+
+    async def _judged(
+        self,
+        request: PrintRunRequest,
+        output_id: str | None,
+        library_file_id: int | None,
+        stack: AsyncExitStack,
+    ) -> PrintRunRequest:
         from scadbuddy.api.analyzers import AnalysisTarget, analysis_context
 
         analysis = analysis_request(request)
@@ -116,6 +128,7 @@ class Fixes:
             self.printers,
             self.filament.inventory,
             reads=self.filament.reads,
+            stack=stack,
         )
         try:
             stored = await asyncio.to_thread(self.decisions.list, scopes=context.scopes())
@@ -127,7 +140,8 @@ class Fixes:
                 "the accepted fixes this print names cannot be checked",
                 type_=DATABASE_UNAVAILABLE_PROBLEM,
             ) from None
-        diagnostics, _ = run_checks(context)
+        # The checks read the 3MF (a blob's temporary file): in a thread, off the loop.
+        diagnostics, _ = await asyncio.to_thread(run_checks, context)
         apply_decisions(diagnostics, stored, context)
         fixes = accepted_fixes(request.accepted_fixes, diagnostics)
         return amend(request, [item for fix in fixes for item in fix.changes])

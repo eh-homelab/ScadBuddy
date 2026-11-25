@@ -186,6 +186,8 @@ function fields(body: StorefrontListingInput, found?: StorefrontListing) {
     description: body.description ?? '',
     params: storedBounds(body.params ?? {}),
     fixed: body.fixed ?? {},
+    inputs: body.inputs ?? {},
+    inputs_v: body.inputs_v ?? null,
     colours: body.colours ?? [],
     media_ids: body.media_ids ?? [],
     materials: body.materials ?? [],
@@ -445,6 +447,9 @@ export const handlers = [
         snapshot_key: `src-${found.slug}-${found.commit}`,
         // The backend fills every unnamed parameter's default in here; the mock has no schema.
         fixed: { ...found.fixed },
+        // #5701: the mock lists no pipeline template, so a listing has no inputs.
+        inputs: {},
+        inputs_version: 0,
       },
     }
     listings = listings.map((l) => (l.id === id ? published : l))

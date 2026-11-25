@@ -477,17 +477,6 @@ def test_a_failed_republish_leaves_only_the_published_holds(
     assert listing_holds(client, listing["id"]) == held
 
 
-def test_a_pipeline_template_is_not_listed_yet(
-    client: TestClient, template: dict[str, Any], pla_red: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(listings_module, "declares_pipeline", lambda directory, slug: True)
-    listing = create(client, listing_body(template, pla_red))
-    refused = client.post(f"{LISTINGS}/{listing['id']}/publish")
-    assert refused.status_code == 422, refused.text
-    assert refused.json()["type"] == STOREFRONT_PROBLEMS + "listing_pipeline_unsupported"
-    assert listing_holds(client, listing["id"]) == set()
-
-
 def test_a_second_publish_of_a_listing_waits_for_none(
     client: TestClient, template: dict[str, Any], pla_red: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

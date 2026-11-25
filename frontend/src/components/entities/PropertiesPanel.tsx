@@ -2,7 +2,7 @@ import { memo, useEffect, useId, useRef, useState, type FormEvent, type Keyboard
 import { PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
-import { entityApi, entityParts, type EntityProperty, type KindPropertySchema, type PropertyValue } from './api'
+import { entityApi, type EntityProperty, type KindPropertySchema, type PropertyValue } from './api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -179,9 +179,9 @@ export const PropertiesPanel = memo(function PropertiesPanel({ entity, title }: 
 })
 
 function EntityProperties({ entity, title = 'Properties' }: { entity: string; title?: string }) {
-  const { kind } = entityParts(entity)
   const list = useAsync(() => entityApi.properties(entity), [entity])
-  const schema = useAsync(() => entityApi.propertySchema(kind), [kind])
+  // #7067 — per entity: an item's schema is its item kind's, which `GET /entity-kinds/item/…` refuses.
+  const schema = useAsync(() => entityApi.entityPropertySchema(entity), [entity])
   const properties = list.data ?? []
   const keys = new Set(properties.map((property) => property.key))
   const docs = keyDocs(schema.data)

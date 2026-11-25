@@ -266,6 +266,11 @@ def _broken(error: Exception) -> Callable[..., Any]:
     return fail
 
 
+def _wait_for(stop: threading.Event) -> None:
+    while not stop.wait(0.01):
+        pass
+
+
 async def _broken_async(*args: Any, **kwargs: Any) -> None:
     raise RuntimeError("the projection is gone")
 
@@ -312,8 +317,12 @@ async def test_a_failing_sweep_fails_its_activity(
     monkeypatch.setattr(main, "sweep_orphan_entities", _broken(OSError("the database is gone")))
     # #7255: the copy of the saved outputs' files to rows.
     monkeypatch.setattr(main, "copy_outputs", _broken(OSError("the volume is gone")))
+    # #7256: the copy of the saved outputs' bytes to the blob store.
+    monkeypatch.setattr(main, "copy_output_bytes", _broken_async)
     # #7234: the order attempts' missed media, one read and a start per attempt.
     monkeypatch.setattr(main, "sweep_media", _broken_async)
+    # #7317: the copy of the templates' files to rows.
+    monkeypatch.setattr(main, "copy_templates", _broken(OSError("the volume is gone")))
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -325,7 +334,9 @@ async def test_a_failing_sweep_fails_its_activity(
         blobs=object(),
         refs=object(),
         config=SimpleNamespace(sweep_grace=60.0),
-        catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
+        catalogue=SimpleNamespace(
+            sweep_duplicate_staging=_broken(staging_error), refresh=SimpleNamespace(rows=object())
+        ),
         paths=SimpleNamespace(claims=None),
         events=None,
         components=SimpleNamespace(
@@ -438,6 +449,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         paths=SimpleNamespace(),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        # #7373: no blob store, so no upload blobs to sweep.
+        store=SimpleNamespace(content=None),
         # #2718: the claims sweep prunes batch prints too.
         components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_batches)),
     )
@@ -701,13 +714,13 @@ async def test_a_stop_at_one_shutdown_does_not_stop_the_next_workers_sweep(
     entered = threading.Event()
     stops: list[threading.Event] = []
 
-    def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
+    async def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
         assert stop is not None
         stops.append(stop)
         if len(stops) == 1:
             entered.set()
-            while not stop.wait(0.01):
-                pass
+            # A sweep's thread half, as `sweep_assets` runs its reads.
+            await asyncio.to_thread(_wait_for, stop)
         return []
 
     monkeypatch.setattr(main, "sweep_assets", sweeping)

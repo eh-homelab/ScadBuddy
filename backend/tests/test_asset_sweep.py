@@ -48,7 +48,11 @@ async def test_the_sweep_drops_then_reconciles_and_backfills(
     """The Schedule's sweep is the only one (review #1095 1): it drops what it removed,
     then converges with the store."""
     remote = _Remote()
-    monkeypatch.setattr(main, "sweep_assets", lambda state, stop=None: ["a1"])
+
+    async def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
+        return ["a1"]
+
+    monkeypatch.setattr(main, "sweep_assets", sweeping)
     state = SimpleNamespace(store=SimpleNamespace(remote_assets=remote), assets=object())
     await main._sweep_assets_logged(state)  # type: ignore[arg-type]
     assert remote.calls == ["drop", "reconcile", "backfill"]
@@ -63,7 +67,7 @@ async def test_a_stopped_sweep_marks_what_it_removed_and_converges_nothing(
     remote = _Remote()
     stop = threading.Event()
 
-    def sweeping(state: Any, stop_: threading.Event | None = None) -> list[str]:
+    async def sweeping(state: Any, stop_: threading.Event | None = None) -> list[str]:
         assert stop_ is stop
         stop.set()
         return ["a1"]

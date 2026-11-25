@@ -53,6 +53,7 @@ from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import KProfile
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import traced_transaction
 from scadbuddy.crud.idempotency import Replay, idempotent, record, stored
 from scadbuddy.filament.models import TypeKValue, TypePreset
 from scadbuddy.filament.preset_mirror import mirror_pending
@@ -879,7 +880,7 @@ async def _import_once(
     first_presets: list[bool] = []
 
     def finish() -> Replay:
-        with pool.connection() as conn, conn.transaction():
+        with pool.connection() as conn, traced_transaction(conn):
             again = idempotent(conn, "profile-fetch", key, IMPORT_ROUTE, asked)
             if again is not None:
                 return again

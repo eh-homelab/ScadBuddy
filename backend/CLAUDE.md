@@ -296,7 +296,12 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   behind its patch, the sweeps' Schedule only) runs `library/output_copy.py`
   `copy_outputs`, as the API's start does once, so the writes of pods on an older build
   reach the `outputs` rows at the next housekeeping sweep; its advisory lock makes a
-  second run at once do nothing. Sweeps off (`asset_sweep_interval` 0) deletes the
+  second run at once do nothing. The byte copy (#7256, `OUTPUT_BYTES_SWEEP`, after
+  `OUTPUT_COPY_SWEEP`, behind `OUTPUT_BYTES_PATCH`, timeout `OUTPUT_BYTES_TIMEOUT`, 30
+  min) runs `library/output_byte_copy.py` `copy_output_bytes` the same way, after the
+  row copy at start: it puts the files' bytes as `output` blobs, refuses on `local`,
+  `bambuddy` or a store past its caps, and its session advisory lock holds one autocommit
+  connection of its own for the run (docs/architecture/data.md "The byte copy"). Sweeps off (`asset_sweep_interval` 0) deletes the
   first, so only `PRUNE_SWEEPS` still run; the print dialog's background slices
   (`housekeeping_sweep_preview_slices`) are not among them. A new periodic pass is an
   activity in its `SWEEPS`, never a loop in the API. The preview backfill (#1054): `previews.py`
@@ -646,7 +651,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the answer is final: only what its own `hold` created, unless a later put rewrote it
   or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
-  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  them). A library upload (`POST /print/library/files`) on a remote store is claimed in
+  the blob store instead (#7373, `operations/blob_claims.py` `BlobClaims`): its body is
+  spooled node-local (`ContentStore.spool`), hashed as it streams and put once as the
+  `library` blob `library-upload-<sha256>` (`ContentStore.put(..., digest=)`, so no second
+  hash), and the run reads that blob on any replica (`store: "blob"` in the request; a
+  native file indexes the same object, `NativeLibrary.adopt`). A release removes the row
+  only while its `touched_at` is the request's own put; the claims sweep removes one older
+  than `CLAIM_MAX_AGE` (`sweep_upload_blobs`), and `sweep_library` leaves it alone. A
+  request with no `store` (the local store's, or an older build's) is a claim file, as
+  before. `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
   with 413. A kind reads the state when it runs, never a route dependency, so a test
   replaces a store on the state (`state.libraries = store`). `api/operations.py`
   `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the
@@ -1508,8 +1522,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `.lfsconfig` says (`tests/test_history_lfs.py`).
   `library/models_next.py` (`python -m scadbuddy.library.models_next build` and `check`,
   in the API's image) makes a second such repository from an older one, in
-  `data/models-next`: the versions the orders and listings pin and the current ones, each
-  with an `Imported-From` trailer. It only reads the old one and the database.
+  `data/models-next`: the versions the orders and listings pin, the current ones, and the
+  upstream revisions their `model.json` names, each with an `Imported-From` trailer. It
+  only reads the old one and the database. Its `push --branch models-trial[-<name>]` sends
+  the build to the git remote in Settings, and to no other branch.
   The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
   `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
   lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
@@ -1529,6 +1545,29 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   parameters (`assets.py`: the bytes under `data/assets/`, the metadata, last use and
   usage in the `assets` table (#591); a blob with no row is an orphan the sweep removes;
   a render worker's `RemoteAssetStore` keeps its copies and reads the rows through CRUD routes, #5298).
+  Saved outputs (outputs-in-Postgres spec 2026-11-23): the record is an `outputs` row
+  (`output_rows.py` `OutputRows`, #7255), and the bytes (`model.3mf`, `preview.glb`,
+  `thumbnail.png`, `files/`) are blobs of kind `output` held by `(output, <id>)`
+  (`output_bytes.py` `OutputBytes`, #7256). The folder `data/outputs/<slug>/<id>/` stays
+  the fallback until #7257: a save still writes it, and a reader reads the file when the
+  row names no blob (`bytes_at` NULL) or the blob is lost. A reader that needs a path
+  opens `OutputStore.local_role` or `read_role` (`async with`: the blob as a temporary
+  file under `ContentStore.spool`, #7316, else the NFS file) and runs its sync reader in a thread; there
+  is no blocking helper for sync callers. What a reader derives of the model is kept in `output_derived`, and
+  a derive writes only while the model sha256 it read is the row's
+  (`OutputRows.write_derived_many`); the plate cover's key names its own sha256
+  (`plate_cover_key`). The render worker's blob-index allowlist (`api/crud_render.py` `READ_KINDS`) never
+  admits `output`.
+  Template records (#7317, spec `2026-11-25-model-records-in-postgres-design.md`, phase 1;
+  `docs/architecture/data.md` "Template records"): `template_rows.py` (`TemplateRows`, the
+  derived `templates` rows and the `template_copy_runs` ledger; git stays the record),
+  `template_refresh.py` (`TemplateRefresh`, the models history's hook: a commit's rows in
+  its HEAD transaction, a no-commit write's under the write lock; a failure is logged and
+  counted in `scadbuddy_template_refresh_failures_total`, never raised) and
+  `template_copy.py` (`copy_templates`, at each API start and in the housekeeping sweep
+  `TEMPLATE_COPY_SWEEP`, under the advisory lock `COPY_LOCK`, `BATCH` templates per hold
+  of the write lock; `GET /model-records/copy-status` answers its last run). A test's app
+  skips the start copy unless the test is marked `template_copy` (`tests/conftest.py`).
 - `backend/scadbuddy/editor/` — the language server's guards (#95): `nonet.py`, the
   launcher every openscad-lsp start goes through (`nonet.command`; a seccomp filter, no
   network sockets), and `component.py`, the per-client session cap (on only with
@@ -2239,7 +2278,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   writes on save (a failure is logged), rename and delete, and whose rows of a model go
   with its outputs directory (`Catalogue._forget_outputs` → `OutputStore.forget_indexed`,
   before the directory goes: a model's delete, the orphan sweep and a reused slug; it also
-  drops the slug's `outputs` rows, #7255, and a failure there keeps the directory); the
+  drops the slug's `outputs` rows, #7255, and releases their byte holds, #7256, and a
+  failure there keeps the directory); the
   API's start runs
   `OutputIndex.sync` in the background (adds a row for any output with none, drops rows
   whose output is gone, `main._index_outputs_logged`), and a listed row whose files are
@@ -2429,6 +2469,15 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `of_version`), so a held copy and a live copy, recorded under one `library:<id>`, are
   never reused, read or superseded for each other. A file's used slots (from 0) reach the
   slicer as slot ids from 1, each in its filament's colour (`SliceVariant.slot_colours`).
+  A pipeline template's listing (#5701, `orders/storefront/pipeline_inputs.py`, spec
+  2026-11-17) keeps the pipeline's own inputs (`ListingInput.inputs`, less `params` and
+  `v`): publish checks them against the commit's `pipeline.inputs` schema, migrates older
+  ones on the render worker, and `listing_reference` writes the snapshot's around the
+  customer's `params`. A price, a preview and a cart line are of the listing's design while
+  `shows_design` says so: the slug and commit, and a pipeline's own inputs and `v` by value. A
+  render of several outputs (`renders.py` `one_output`) has no firm price on any path until
+  #5701's PR 5, and a pipeline's cart line needs its row's `every_output`. A file listing has
+  no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`
@@ -2554,7 +2603,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `slice` when that key has a `done` row, else that row's price as `last`, else
   `none`; each read runs `_planned`, whose live rate and printer opening are kept
   `RATE_TTL` per process), `preview` (that row's output, while it is of
-  the listing's slug and commit, as `/api/store/v1/variants/{key}/preview.glb`, which
+  the listing's design (`shows_design`), as `/api/store/v1/variants/{key}/preview.glb`, which
   `…/variants/{key}/preview.glb` streams; 404 `variant_not_found` for none, or when the
   row's listing is not published; never the output id), `render` (the visitor's own render of these choices while it is held) and
   `values`. `last` is never a line's price: `firm_price` and `line_prices.py` read by key
@@ -2571,7 +2620,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   draft view answers each item's `price` (`firm` with `unit_price_minor` and
   `total_minor`, else `by_hand` and no number) and `pay_now` (every item firm). The
   submit prices each line again (`reprice`: a fresh key from the kept variant, no price
-  when the listing is gone, unpublished or at another slug or commit, or a slot
+  when the listing is gone, unpublished or of another design (`shows_design`), or a slot
   filament is gone or archived). A price that changed, came or went is written and
   refused 409 `prices_changed`, with `items` of `{id, price}` (`firm` or `by_hand`), so
   the customer sees a price that went before the shop prices the line; the next submit
@@ -2644,7 +2693,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the instant read has a firm price before any visitor asks. A file listing's run submits no
   render and prices the colours its page opens on, with no visitor charge (`_warm_file`,
   `file_prices.py` `default_choice`, `listings.py` `page_colours`, a copy of the page's
-  `fileParts.ts` `partFilaments` with no pick: change both together, #7523). A start that fails, or takes
+  `fileParts.ts` `partFilaments` with no pick, both tested on
+  `test-fixtures/storefront/file-page-colours.json`, #7523). A start that fails, or takes
   more than `WARM_START_TIMEOUT` (5 s), is logged, never the publish's error (a start
   given up on is logged as given up: it may still have reached Temporal). `SCADBUDDY_STOREFRONT_WARM_PRICES` (a bootstrap field, on by
   default, off in the tests' settings; `tests/api/test_storefront_warm_prices.py` turns it

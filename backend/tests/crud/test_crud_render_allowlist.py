@@ -176,6 +176,20 @@ def test_the_worker_reads_what_it_renders_from(key: str) -> None:
     crud_render._worker_readable(key)
 
 
+@pytest.mark.parametrize("key", ["output-" + "a" * 32 + "-model", "output-" + "a" * 32 + "-file-0"])
+def test_render_worker_cannot_read_output_kind(key: str) -> None:
+    """A saved output's bytes are the API's (#7256): the render worker neither reads,
+    holds nor writes them, nor lists their kind."""
+    assert crud_render.HELD_KEY.fullmatch(key) is None
+    with pytest.raises(ApiError) as refused:
+        crud_render._worker_readable(key)
+    assert refused.value.status == 403
+    with pytest.raises(ApiError):
+        crud_render._worker_writable(key)
+    with pytest.raises(ApiError):
+        crud_render._worker_kinds(["output"])
+
+
 def test_the_worker_holds_its_pieces_and_the_library_objects_it_lays_out() -> None:
     for key in [*RENDER, LIBRARY_PIECE]:
         assert crud_render.HELD_KEY.fullmatch(key) is not None

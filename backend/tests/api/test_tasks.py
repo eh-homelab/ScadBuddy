@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +19,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from temporal_agent_harness.harness.agent_client import AgentClient, CallbackResultError
-from temporalio.client import Client
+from temporalio.client import (
+    Client,
+    WorkflowUpdateHandle,
+    WorkflowUpdateRPCTimeoutOrCancelledError,
+)
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import tasks as tasks_api
@@ -172,7 +177,7 @@ def test_a_valid_answer_resolves_the_callback_and_marks_the_task_answered(
     assert body["schema"] == EMAIL
     [(call_id, result, update_id)] = harness.sends
     assert (call_id, result) == (task, {"answer": GOOD})
-    assert update_id is not None and update_id.endswith(f":{task}")
+    assert update_id is not None and f":{task}:" in update_id
     assert rows.decisions(task) == [{"answer": GOOD}]
     assert rows.task(task) == ("answered", GOOD, "browser")
     assert client.get(f"/api/v1/tasks/{task}").json() == body
@@ -371,6 +376,94 @@ def test_a_send_that_failed_is_retried_and_marked_once_it_landed(
     assert response.status_code == 200, response.text
     assert len(harness.sends) == 2
     assert rows.task(task)[:2] == ("answered", GOOD)
+
+
+def never_lands(
+    client: TestClient,
+    rows: Rows,
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    url: str,
+    body: dict[str, Any],
+) -> None:
+    """The first answer, recorded: each attempt's send ends with no answer from Temporal,
+    which cannot say either whether it landed."""
+    original = WorkflowUpdateHandle.result
+
+    async def silent(self: WorkflowUpdateHandle[Any], **kwargs: Any) -> Any:
+        if not self.id.startswith("flow:"):
+            return await original(self, **kwargs)
+        raise WorkflowUpdateRPCTimeoutOrCancelledError() from RPCError(
+            "deadline", RPCStatusCode.DEADLINE_EXCEEDED, b""
+        )
+
+    harness.fails = [RPCError("away", RPCStatusCode.UNAVAILABLE, b"") for _ in range(3)]
+    with monkeypatch.context() as away:
+        away.setattr(WorkflowUpdateHandle, "result", silent)
+        response = client.post(url, json=body, headers={"Idempotency-Key": "first"})
+        assert response.status_code != 200, response.text
+        deadline = time.monotonic() + 60
+        while rows.conn.execute("SELECT 1 FROM operations WHERE status = 'running'").fetchone():
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+    assert len(harness.sends) == 3
+    assert harness.resolved == {}
+    harness.sends.clear()
+
+
+def test_an_answer_that_never_landed_does_not_block_the_task(
+    client: TestClient,
+    task: str,
+    rows: Rows,
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = {"answer": {"email": "first@example.com"}}
+    never_lands(client, rows, harness, monkeypatch, f"/api/v1/tasks/{task}/answer", first)
+    assert rows.decisions(task) == [first]
+    response = post(client, task, GOOD, "second")
+    assert response.status_code == 200, response.text
+    assert [send[1] for send in harness.sends] == [{"answer": GOOD}]
+    assert rows.decisions(task) == [{"answer": GOOD}]
+    assert rows.task(task)[:2] == ("answered", GOOD)
+
+
+def test_of_two_answers_after_one_that_never_landed_one_wins(
+    client: TestClient,
+    task: str,
+    rows: Rows,
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = {"answer": {"email": "first@example.com"}}
+    never_lands(client, rows, harness, monkeypatch, f"/api/v1/tasks/{task}/answer", first)
+    harness.delay = 2.0
+    answers = [{"email": "a@example.com"}, {"email": "b@example.com"}]
+    with ThreadPoolExecutor(2) as pool:
+        got = list(pool.map(lambda n: post(client, task, answers[n], f"k{n}"), range(2)))
+    assert sorted(r.status_code for r in got) == [200, 409], [r.text for r in got]
+    won = next(n for n, r in enumerate(got) if r.status_code == 200)
+    assert [send[1] for send in harness.sends] == [{"answer": answers[won]}]
+    assert rows.decisions(task) == [{"answer": answers[won]}]
+    assert rows.task(task)[:2] == ("answered", answers[won])
+
+
+def test_an_answer_that_never_landed_does_not_block_a_question(
+    client: TestClient, rows: Rows, harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`wait_for_human`, answered through the flow's own route."""
+    run_id, call_id = parked(client)
+    url = f"/api/v1/workflow-runs/{run_id}/answer"
+    first = {"call_id": call_id, "answer": "first"}
+    never_lands(client, rows, harness, monkeypatch, url, first)
+    response = client.post(
+        url,
+        json={"call_id": call_id, "answer": "second"},
+        headers={"Idempotency-Key": "second"},
+    )
+    assert response.status_code == 200, response.text
+    assert [send[1] for send in harness.sends] == [{"answer": "second"}]
+    assert rows.decisions(call_id) == [{"answer": "second"}]
 
 
 def test_the_clear_answer_is_in_no_record_no_history_and_no_log(

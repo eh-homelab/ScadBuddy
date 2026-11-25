@@ -337,7 +337,9 @@ def listing_reference(
     slot for each of ``chosen`` (slot to filament id). Each chosen filament must be one
     of the listing's that ``filaments`` still has and a customer may pick (never a support
     material, `customer_filaments`, #6152), else `InputOutsideListingError`
-    (``colours.<slot>``, ``colour``). ``values`` are `listing_values`' answer."""
+    (``colours.<slot>``, ``colour``). ``values`` are `listing_values`' answer. A pipeline
+    template's reference holds the listing's own inputs too, as publish settled them, and
+    their version (#5701): a customer's values reach ``params`` only."""
     slug, commit, snapshot = listing.design
     slots: list[ColourSlot] = []
     for slot, filament_id in sorted(chosen.items()):
@@ -350,7 +352,11 @@ def listing_reference(
         slots.append(
             ColourSlot(slot=slot, colour=filaments[filament_id].colour, filament_id=filament_id)
         )
-    inputs = {"params": with_defaults(snapshot.schema_, values), "v": 0}
+    inputs = {
+        **snapshot.inputs,
+        "params": with_defaults(snapshot.schema_, values),
+        "v": snapshot.inputs_version,
+    }
     reference = Reference(
         slug=slug,
         commit=commit,

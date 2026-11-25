@@ -13,6 +13,7 @@ from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
 from scadbuddy.render.job_models import BomEntry, Job, PipelineOutput, now
 from scadbuddy.workflows.models import Layout, LayoutPlate, OutputRequest, Placed
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from tests.support.saved_outputs import save_files
 from tests.test_packing_and_outputs import _deps, _record, _render
 
 
@@ -69,7 +70,7 @@ async def saved_output(
     tmp_path: Path, *, width: int = 12, count: int = 2, name: str = "two"
 ) -> tuple[DataPaths, OutputMeta, PipelineOutput]:
     paths, job, written = await finished_job(tmp_path, width=width, count=count, name=name)
-    meta = OutputStore(paths).create(job, name=name, index=0)
+    meta = save_files(OutputStore(paths), job, name=name, index=0)
     return paths, meta, written
 
 

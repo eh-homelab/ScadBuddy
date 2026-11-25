@@ -18,6 +18,7 @@ import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
 import { hostedPluginTools } from './hostedPlugins.js'
 import { inspectTools } from './inspect.js'
+import { inventoryTools } from './inventory.js'
 import { libraryTools } from './libraries.js'
 import { meshModelTools } from './meshModels.js'
 import { nfcTools } from './nfc.js'
@@ -88,6 +89,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,
+  ...inventoryTools,
   ...entityTools,
   ...storefrontTools,
   ...hostedPluginTools,

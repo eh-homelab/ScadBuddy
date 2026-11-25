@@ -9,8 +9,10 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import ValidationError
 
+from scadbuddy.core.tracing import COMMIT_SPAN
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.models import (
     Material,
@@ -435,3 +437,14 @@ def test_a_retried_event_with_the_same_ref_is_idempotent(pg_pool: PgPool) -> Non
         ("created", "invoice_line", str(ref)),
         ("edited", "invoice_line", str(ref)),
     ]
+
+
+def test_the_spool_transactions_commit_is_a_span(
+    pg_pool: PgPool, spans: InMemorySpanExporter
+) -> None:
+    # #7389: routes run `idempotent_write` inside it, so its COMMIT is the write's.
+    store = FilamentSpoolStore(pg_pool)
+    spans.clear()
+    with store.transaction() as conn:
+        conn.execute("SELECT 1")
+    assert [s.name for s in spans.get_finished_spans()].count(COMMIT_SPAN) == 1

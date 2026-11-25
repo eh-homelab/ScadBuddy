@@ -251,7 +251,8 @@ TASK_PLACE_MAX = 100
 
 class TaskChanged(BaseEvent):
     """A task (a typed question a flow asks a person, #7364) was opened or moved to
-    another state: re-read it. ``place`` is where it is shown, if anywhere."""
+    another state: re-read it. ``place`` is where it is shown, if anywhere. An open task
+    whose run was forgotten is ``cancelled`` here, and is gone when it is read."""
 
     kind: Literal["task.changed"] = "task.changed"
     task_id: str

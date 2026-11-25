@@ -7,9 +7,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+from fastapi import status
 from psycopg.errors import ForeignKeyViolation
 
-from scadbuddy.library.outputs import OutputMeta, download_filename
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import OutputMeta, OutputStore, download_filename
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.store import FolderGoneError, NativeFile
 from scadbuddy.store.bambuddy import folder_name
@@ -30,8 +32,11 @@ async def file_output(
     existing = await asyncio.to_thread(native.rows.filed_rows_for_output, meta.id)
     if existing:
         return existing[0]
-    with model_3mf.open("rb") as data:
+    data = await asyncio.to_thread(model_3mf.open, "rb")
+    try:
         row = await native.stage(download_filename(meta), data, None, output_id=meta.id, filed=True)
+    finally:
+        data.close()
     try:
         filed, inserted = await asyncio.to_thread(
             native.rows.file_for_output, row, folder_name(title)
@@ -58,8 +63,11 @@ async def put_in_folder(
     there = await asyncio.to_thread(native.rows.live_copy_in_folder, meta.id, folder_id)
     if there is not None:
         return there, False
-    with model_3mf.open("rb") as data:
+    data = await asyncio.to_thread(model_3mf.open, "rb")
+    try:
         row = await native.stage(f"{stem}.3mf", data, folder_id, output_id=meta.id)
+    finally:
+        data.close()
     try:
         placed, inserted = await asyncio.to_thread(native.rows.put_for_output, row, folder_id, stem)
     except (FolderGoneError, ForeignKeyViolation):
@@ -72,6 +80,25 @@ async def put_in_folder(
     if not inserted:
         await native.content.delete(row.blob_key)
     return placed, inserted
+
+
+async def put_saved_in_folder(
+    native: NativeLibrary, outputs: OutputStore, meta: OutputMeta, folder_id: int, stem: str
+) -> tuple[NativeFile, bool]:
+    """`put_in_folder` of the output's 3MF: its model blob through a temporary file, else
+    its NFS file (#7256). 404 when it has neither. A copy already in the folder answers
+    with no download of the 3MF."""
+    there = await asyncio.to_thread(native.rows.live_copy_in_folder, meta.id, folder_id)
+    if there is not None:
+        return there, False
+    async with outputs.local_role(meta.id, "model") as model_3mf:
+        if model_3mf is None:
+            raise _no_3mf(meta)
+        return await put_in_folder(native, meta, model_3mf, folder_id, stem)
+
+
+def _no_3mf(meta: OutputMeta) -> ApiError:
+    return ApiError(status.HTTP_404_NOT_FOUND, f"output {meta.id!r} has no 3MF")
 
 
 async def trash_filed(native: NativeLibrary, output_id: str) -> list[int]:

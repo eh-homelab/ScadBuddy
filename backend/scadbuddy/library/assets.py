@@ -26,6 +26,7 @@ anywhere -- OpenSCAD reads them where they are, as it does any bundled file.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -42,7 +43,7 @@ from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import psycopg
 from lxml import etree
@@ -54,12 +55,15 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.core.metrics import Metrics
-from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
+from scadbuddy.core.paths import LEGACY_PRESETS_NAME, THUMBNAIL_NAME, DataPaths
 from scadbuddy.core.tracing import span
-from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
 from scadbuddy.render.solids import WRAPPER_PREFIX
+
+if TYPE_CHECKING:
+    from scadbuddy.library.output_rows import OutputRows
+    from scadbuddy.library.outputs import OutputStore
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +115,10 @@ LAST_USED_MAX = 500
 #: harmless, one that misses a reference destroys an output's provenance. Matching
 #: raw text rather than parsed JSON also reads a file too damaged to parse.
 _ID_IN_TEXT = re.compile(rb"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
+#: The version of the asset ids kept per output (`output_derived` kind ``asset_ids``,
+#: #7256). Change it with `_ID_IN_TEXT` or `_ids_in_archive`: every output's 3MF is then
+#: read once again.
+ASSET_IDS_VERSION = "1"
 
 #: The largest upload read. An SVG this size is already far past a logo or a mask.
 MAX_ASSET_BYTES = 8 * 1024 * 1024
@@ -1171,6 +1179,10 @@ def asset_ids_in(params: Mapping[str, object]) -> set[str]:
     return _ids_in(json.dumps(params, sort_keys=True).encode())
 
 
+class DamagedArchiveError(OSError):
+    """A 3MF that opens as a file but cannot be read as a 3MF."""
+
+
 def _ids_in_archive(archive: Path) -> set[str]:
     """The ids in a 3MF's root model, where its provenance is stamped.
 
@@ -1178,7 +1190,8 @@ def _ids_in_archive(archive: Path) -> set[str]:
     for none at all, which is right for "Edit in ScadBuddy" and wrong here -- a
     damaged or foreign-version stamp must still keep what it names. So the root
     model's raw text is matched, as a JSON record's is. An archive that cannot be
-    opened at all raises OSError, which skips the whole sweep.
+    read as a 3MF raises `DamagedArchiveError`, an OSError. The folder walk and the
+    rows' scan skip that output only (`_skip_damaged`).
     """
     try:
         with zipfile.ZipFile(archive) as opened:
@@ -1186,7 +1199,18 @@ def _ids_in_archive(archive: Path) -> set[str]:
     except FileNotFoundError:  # removed since the listing: it keeps nothing now
         return set()
     except (KeyError, zipfile.BadZipFile) as error:
-        raise OSError(f"cannot read {archive} for the asset ids it names: {error}") from None
+        raise DamagedArchiveError(
+            f"cannot read {archive} for the asset ids it names: {error}"
+        ) from None
+
+
+def _skip_damaged(output_id: str, error: DamagedArchiveError) -> None:
+    """Log the output whose 3MF can never be read. The sweep goes on without it, so one
+    damaged output does not stop every sweep (#7256)."""
+    logger.warning(
+        "skipped an output whose 3MF cannot be read for its asset ids",
+        extra={"output_id": output_id, "error": str(error)},
+    )
 
 
 def stopped(stop: threading.Event | None) -> bool:
@@ -1195,15 +1219,20 @@ def stopped(stop: threading.Event | None) -> bool:
     return stop is not None and stop.is_set()
 
 
-def referenced_asset_ids(
+async def referenced_asset_ids(
     paths: DataPaths,
     records: Iterable[Mapping[str, Any]] = (),
+    outputs: OutputStore | None = None,
 ) -> set[str]:
     """Every asset id something keeps (#296): the sweep removes nothing in here.
 
-    - every output's records (``params.json`` and the rest of its JSON), and for an
-      output whose ``params.json`` is gone, the root model of its 3MF, where the
-      provenance "Edit in ScadBuddy" falls back to is stamped;
+    - every output's records, and for an output whose ``params`` is empty or gone, the
+      root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to is
+      stamped. Once ``outputs`` has finished a copy into its rows (#7255), its rows'
+      JSON is scanned. The ids such a 3MF names are kept in ``output_derived`` (kind
+      ``asset_ids``, `ASSET_IDS_VERSION`), so a 3MF, which is never rewritten, is read
+      once: from its model blob through a temporary file, else its file (#7256). Before
+      that copy, the folders' JSON files and 3MFs;
     - ``records``: JSON records from Postgres, each scanned whole: every saved
       preset's and every job's inputs (the ``render_jobs`` projection, finished or
       not), and every order item's (#4249, orders spec §3.3) -- their ``params`` and
@@ -1213,8 +1242,83 @@ def referenced_asset_ids(
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
     every reference must not remove anything, so the caller skips the whole sweep
-    rather than guessing.
+    rather than guessing. One exception: a 3MF that can never be read as a 3MF
+    (`DamagedArchiveError`) skips its own output, logged, so that one damaged output
+    does not stop every sweep (#7256). The rows' scan keeps an empty ``asset_ids`` row
+    for it, so it is read, and logged, once. The ids read before a raise are still
+    kept. Every read runs in a thread.
     """
+    rows = outputs.rows if outputs is not None else None
+    if outputs is None or rows is None or not await asyncio.to_thread(rows.copied):
+        return await asyncio.to_thread(_referenced_in_tree, paths, list(records))
+    # One span for the scan, with what it read (#7245), as the folder walk has.
+    with span("assets.referenced") as current:
+        found, read, bare = await asyncio.to_thread(_referenced_in_rows, paths, records, rows)
+        kept: list[tuple[str, list[str], str | None]] = []
+        try:
+            for output_id in bare:
+                async with outputs.read_role(output_id, "model") as model:
+                    archive = model.path
+                    if archive is None:
+                        continue
+                    read["archives"] += 1
+                    try:
+                        ids = await asyncio.to_thread(_ids_in_archive, archive)
+                    except DamagedArchiveError as error:
+                        # A 3MF is never rewritten: it names nothing now or later.
+                        _skip_damaged(output_id, error)
+                        ids = set()
+                    found.update(ids)
+                    kept.append((output_id, sorted(ids), model.sha256))
+        finally:
+            # One write for the whole scan, also when a read raised; a 3MF read here
+            # is not read again.
+            await asyncio.to_thread(
+                rows.write_derived_many, "asset_ids", 0, ASSET_IDS_VERSION, kept
+            )
+        for name, count in read.items():
+            current.set_attribute(f"scadbuddy.{name}", count)
+        current.set_attribute("scadbuddy.assets", len(found))
+    return found
+
+
+def _referenced_in_rows(
+    paths: DataPaths, records: Iterable[Mapping[str, Any]], rows: OutputRows
+) -> tuple[set[str], dict[str, int], list[str]]:
+    """The ids in every output row's JSON, the templates' files and ``records``, what was
+    read, and the outputs whose 3MF is still to scan (``params`` empty, and its ids not
+    kept yet). Blocking."""
+    found: set[str] = set()
+    read = {"files": 0, "archives": 0, "outputs": 0}
+    bare: list[str] = []
+    for output_id, empty, text, kept in rows.documents(ASSET_IDS_VERSION):
+        read["outputs"] += 1
+        found.update(_ids_in(text.encode()))
+        if kept is not None:
+            found.update(kept)
+        elif empty:
+            bare.append(output_id)
+    found.update(_template_ids(paths, read))
+    for document in records:
+        found.update(_ids_in(json.dumps(document).encode()))
+    return found, read, bare
+
+
+def _template_ids(paths: DataPaths, read: dict[str, int]) -> set[str]:
+    """The ids every template's shipped presets and ``model.json`` name. Blocking."""
+    found: set[str] = set()
+    for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
+        for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
+            read["files"] += 1
+            # Removed since the listing: it keeps nothing now.
+            with suppress(FileNotFoundError):
+                found.update(_ids_in(template_file.read_bytes()))
+    return found
+
+
+def _referenced_in_tree(paths: DataPaths, records: Iterable[Mapping[str, Any]]) -> set[str]:
+    """`referenced_asset_ids` from the output folders, before a copy into rows
+    finished. Blocking."""
     found: set[str] = set()
     read = {"files": 0, "archives": 0, "outputs": 0}
 
@@ -1234,10 +1338,11 @@ def referenced_asset_ids(
             archive = directory / "model.3mf"
             if not (directory / "params.json").is_file() and archive.is_file():
                 read["archives"] += 1
-                found.update(_ids_in_archive(archive))
-        for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
-            for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
-                scan(template_file)
+                try:
+                    found.update(_ids_in_archive(archive))
+                except DamagedArchiveError as error:
+                    _skip_damaged(directory.name, error)
+        found.update(_template_ids(paths, read))
         for document in records:
             found.update(_ids_in(json.dumps(document).encode()))
         for name, count in read.items():

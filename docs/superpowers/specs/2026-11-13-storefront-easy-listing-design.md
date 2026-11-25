@@ -194,7 +194,9 @@ So "put the navy owl on the store" is: find the output, draft, then publish afte
 
 ## 7. Out of scope
 
-- Pipeline templates (publish refuses them, `listing_pipeline_unsupported`): #5701.
+- Pipeline templates: #5701
+  ([2026-11-17](2026-11-17-storefront-pipeline-listings-design.md)). Publish takes one that
+  declares its inputs; this page does not set them yet.
 - Adding the output's render as a model picture from the editor (Generate → Rendered image…
   already adds one to the model's media).
 - Prices: the storefront prices each order from its quote, not the listing.

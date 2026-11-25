@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { addDecimals, cmpDecimals, divDecimal, formatCost, mulDecimal, parseDecimal, subDecimals } from './decimal'
+import { addDecimals, cmpDecimals, divDecimal, formatCost, mulDecimal, mulDecimals, parseDecimal, roundDecimal, subDecimals } from './decimal'
 
 describe('parseDecimal', () => {
   it('accepts a whole number, a dot and a comma, and says the dot form', () => {
@@ -62,5 +62,14 @@ describe('formatCost', () => {
   it('shows no decimals at exponent 0 unless the string has them', () => {
     expect(formatCost('1500', 'JPY', 0)).toMatch(/1,500(?![.,]\d)/)
     expect(formatCost('1500.25', 'JPY', 0)).toContain('1,500.25')
+  })
+
+  it('multiplies two decimals exactly and rounds half up with no trailing zeros (#7067)', () => {
+    expect(mulDecimals('5.99', '0.01')).toBe('0.0599')
+    expect(mulDecimals('-4', '2.5')).toBe('-10.0')
+    expect(roundDecimal('11.9800', 6)).toBe('11.98')
+    expect(roundDecimal('0.0000005', 6)).toBe('0.000001')
+    expect(roundDecimal('-2.5', 0)).toBe('-3')
+    expect(roundDecimal('-0.0000001', 6)).toBe('0')
   })
 })

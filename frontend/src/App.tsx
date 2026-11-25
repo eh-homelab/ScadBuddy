@@ -2,6 +2,7 @@ import { Suspense, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { Skeleton } from '@/components/ui/skeleton'
 import { AppShell } from './components/AppShell'
+import { inventoryPaths } from './lib/inventoryLinks'
 import { lazyRetry } from './lib/lazyRetry'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
@@ -27,13 +28,17 @@ const ScanPage = lazyRetry(async () => ({ default: (await import('./pages/filame
 const SupplierPage = lazyRetry(async () => ({ default: (await import('./pages/filament/SupplierPage')).SupplierPage }))
 const InvoicePage = lazyRetry(async () => ({ default: (await import('./pages/filament/InvoicePage')).InvoicePage }))
 const FilamentPage = lazyRetry(async () => ({ default: (await import('./pages/filament/FilamentPage')).FilamentPage }))
+const InventoryPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/InventoryPage')).InventoryPage }))
+const ItemPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/ItemPage')).ItemPage }))
+const UnitPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/UnitPage')).UnitPage }))
+const LotPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/LotPage')).LotPage }))
+const KindsPage = lazyRetry(async () => ({ default: (await import('./pages/inventory/KindsPage')).KindsPage }))
 const FlowPage = lazyRetry(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
 const HistoryPage = lazyRetry(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
 const LibraryPage = lazyRetry(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
 const OrderPage = lazyRetry(async () => ({ default: (await import('./pages/OrderPage')).OrderPage }))
 const OrdersPage = lazyRetry(async () => ({ default: (await import('./pages/OrdersPage')).OrdersPage }))
 const ProfitPage = lazyRetry(async () => ({ default: (await import('./pages/ProfitPage')).ProfitPage }))
-const PartsPage = lazyRetry(async () => ({ default: (await import('./pages/PartsPage')).PartsPage }))
 const PrintDetailPage = lazyRetry(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
 const QueueItemPage = lazyRetry(async () => ({ default: (await import('./pages/QueueItemPage')).QueueItemPage }))
 // Two pages of one module, so one chunk.
@@ -138,10 +143,17 @@ export function App() {
         <Route path="filament/metrics" element={<FilamentPage tab="metrics" />} />
         <Route path="filament/shopping-list" element={<FilamentPage tab="shopping-list" />} />
         <Route path="filament/ledger" element={<FilamentPage tab="ledger" />} />
+        {/* #7067 — the Inventory area; a lot opens its item's page at the lot's row. */}
+        <Route path="inventory" element={<InventoryPage />} />
+        <Route path="inventory/kinds" element={<KindsPage />} />
+        <Route path="inventory/items/:id" element={<ItemPage />} />
+        <Route path="inventory/units/:id" element={<UnitPage />} />
+        <Route path="inventory/lots/:id" element={<LotPage />} />
         <Route path="x/:code" element={<CodePage />} />
         <Route path="orders" element={<OrdersPage />} />
         <Route path="orders/profit" element={<ProfitPage />} />
-        <Route path="orders/parts" element={<PartsPage />} />
+        {/* #7067, spec §6.11 — the parts page moved into the Inventory, on the Part kind. */}
+        <Route path="orders/parts" element={<Navigate to={inventoryPaths.kind('part')} replace />} />
         <Route path="orders/:id" element={<OrderPage />} />
         <Route path="customers" element={<CustomersPage />} />
         <Route path="customers/:id" element={<CustomerPage />} />

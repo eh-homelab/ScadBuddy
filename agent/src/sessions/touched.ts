@@ -333,6 +333,22 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // Parts (#5543): a part's stock line and the order's audit line record them.
   part_stock_add: () => [],
   order_item_parts_set: () => [],
+  // The inventory (#7067): kinds, items, offers, lots and units are records of their own, on
+  // the Inventory pages; every stock change is a move in the item's own stock line, and a
+  // re-cost writes an event to each order it changes.
+  inventory_kind_upsert: () => [],
+  inventory_item_upsert: () => [],
+  inventory_item_archive: () => [],
+  inventory_offer_upsert: () => [],
+  inventory_offer_price_add: () => [],
+  inventory_lot_receive: () => [],
+  inventory_lot_update: () => [],
+  inventory_lot_recost: () => [],
+  inventory_unit_receive: () => [],
+  inventory_unit_update: () => [],
+  inventory_unit_status: () => [],
+  inventory_move_use: () => [],
+  inventory_move_count: () => [],
   order_ship: () => [],
   order_close: () => [],
   order_cancel: () => [],

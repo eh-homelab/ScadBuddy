@@ -135,13 +135,33 @@ describe('entity property tools', () => {
     const expected: Record<string, [string, string]> = {
       entity_property_list: ['read', 'GET /api/v1/entities/{ref}/properties'],
       entity_property_set: ['write', 'PATCH /api/v1/entities/{ref}/properties'],
-      entity_property_schema_get: ['read', 'GET /api/v1/entity-kinds/{kind}/property-schema'],
       entity_property_schema_set: ['write', 'PUT /api/v1/entity-kinds/{kind}/property-schema'],
     }
     for (const [name, [risk, route]] of Object.entries(expected)) {
       expect(tool(name).risk, name).toBe(risk)
       expect(tool(name).routes, name).toEqual([route])
     }
+    expect(tool('entity_property_schema_get').risk).toBe('read')
+    expect(tool('entity_property_schema_get').routes).toEqual([
+      'GET /api/v1/entity-kinds/{kind}/property-schema',
+      'GET /api/v1/entities/{ref}/property-schema',
+    ])
+  })
+
+  it("reads an entity's own schema: an item's is its kind's (#7067)", async () => {
+    const ITEM = 'item:ab700000-0000-4000-8000-000000000001'
+    const schema = { type: 'object', properties: { thread: { type: 'string' } } }
+    server.use(
+      http.get(`${base(ITEM)}/property-schema`, () => HttpResponse.json({ kind: 'item', schema, keys_in_use: [] })),
+    )
+    expect(firstText(await tool('entity_property_schema_get').execute({ entity: ITEM }, ctx()))).toEqual({
+      kind: 'item',
+      schema,
+      keys_in_use: [],
+      entity_ui_path: '/inventory/items/ab700000-0000-4000-8000-000000000001',
+    })
+    await expect(tool('entity_property_schema_get').execute({}, ctx())).rejects.toThrow('give one of `kind` or `entity`')
+    await expect(tool('entity_property_schema_get').execute({ kind: 'spool', entity: ITEM }, ctx())).rejects.toThrow('`kind` or `entity`')
   })
 
   it('lists the properties with the entity page, and renames a key in one call', async () => {

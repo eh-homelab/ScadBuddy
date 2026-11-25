@@ -32,8 +32,8 @@ visitor's render row keeps it, and the ``done`` price of its render records it. 
 instant read (`instant_variant`, ``POST …/listings/{id}/variant``) takes the render's body
 and answers at once, with no render and no slice started: the price of the choices
 (`slice_price.py` `instant_price`), the preview of the output a slice of them saved
-(`variant_preview` streams it), and the visitor's own render of them while the shop holds
-it.
+(`variant_output` finds it, and the CRUD route streams it), and the visitor's own render
+of them while the shop holds it.
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import status
@@ -56,7 +55,7 @@ from temporalio.client import WorkflowUpdateFailedError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.crud.idempotency import Replay, idempotent_write
-from scadbuddy.library.outputs import PREVIEW_NAME, OutputMeta, OutputNotFoundError
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.orders.component import ORDERS, OrdersComponent
 from scadbuddy.orders.estimate import StoreEstimate
 from scadbuddy.orders.models import Filament, Reference
@@ -76,6 +75,7 @@ from scadbuddy.orders.storefront.inputs import (
 )
 from scadbuddy.orders.storefront.limits import OwnedRender, RenderLimited, RenderLimits
 from scadbuddy.orders.storefront.listings import page_outdated, problem, published_listing
+from scadbuddy.orders.storefront.pipeline_inputs import shows_design
 from scadbuddy.orders.storefront.slice_price import (
     NO_PRICE,
     PriceRow,
@@ -650,9 +650,9 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
     ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
     (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
-    colour of the render has no listing filament, or the render is of another design
-    than the listing's now (its slug or commit moved since, #6370 review): the price
-    is never of a design the visitor does not see."""
+    colour of the render has no listing filament, the render made several outputs
+    (`one_output`), or it is of another design than the listing's now (`shows_design`,
+    #6370 review): the price is never of a design the visitor does not see."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
@@ -678,9 +678,12 @@ async def estimate_of(
     ``colours`` and ``material``, whose choices have ``variant_key``. The shop's warming of
     a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
     through the visitor's own path. ``pending`` with no ``price_key`` while its files are
-    fetched."""
-    if job.slug != listing.slug or job.model_version != listing.commit:
+    fetched. ``none``, with no slice started, for a render of another design than the
+    listing's now (`shows_design`), or of several outputs (`one_output`)."""
+    if not shows_design(listing, job.slug, job.model_version, job.inputs):
         # The shop moved the listing since this render: the page renders again.
+        return NO_PRICE
+    if not one_output(job):
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
@@ -693,6 +696,13 @@ async def estimate_of(
         variant_key=variant_key,
         listing_id=listing.id,
     )
+
+
+def one_output(job: Job) -> bool:
+    """Whether the first output of ``job`` is the whole render. A pipeline's render of
+    several has no firm price yet: an order makes the first only, so the shop prices it
+    by hand (#5701, spec 2026-11-17 §7.4)."""
+    return len(job.outputs) <= 1
 
 
 async def variant_of(
@@ -769,17 +779,22 @@ def preview_path(key: str) -> str:
 
 def output_of(state: AppState, row: PriceRow, listing: Listing) -> OutputMeta | None:
     """The output a ``done`` row's slice saved, while it is there with its preview mesh
-    and is of the design ``listing`` shows (its slug and commit). Blocking: call it in a
+    and is of the design ``listing`` shows (`shows_design`). Blocking: call it in a
     thread."""
     if row.output_id is None:
         return None
     try:
         meta = state.outputs.get(row.output_id)
+        snapshot = listing.template_snapshot
+        # Only a pipeline's design is its inputs too, so no other listing reads them.
+        pipeline = snapshot is not None and snapshot.pipeline
+        inputs = state.outputs.inputs(row.output_id) if pipeline else {}
     except OutputNotFoundError:
         return None
-    if (meta.slug, meta.model_version) != (listing.slug, listing.commit):
+    if not shows_design(listing, meta.slug, meta.model_version, inputs):
         return None
-    if not (state.outputs.directory(row.output_id) / PREVIEW_NAME).is_file():
+    # A preview blob in the index, else its file (#7256).
+    if not state.outputs.has_role(row.output_id, "preview"):
         return None
     return meta
 
@@ -834,11 +849,11 @@ def variant_not_found() -> ApiError:
     )
 
 
-async def variant_preview(state: AppState, key: str) -> Path:
-    """The preview mesh of the output the priced slice of variant ``key`` saved (#6921,
-    `SlicePrices.variant_row`); 404 ``variant_not_found`` for a key that names none, one
-    whose output is gone, or one whose listing is no longer published or no longer shows
-    the output's design (#6921 review)."""
+async def variant_output(state: AppState, key: str) -> str:
+    """The id of the output the priced slice of variant ``key`` saved, with its preview
+    mesh. 404 ``variant_not_found`` for a key that names none, one whose output or its
+    preview is gone, or one whose listing is no longer published or no longer shows the
+    output's design (#6921 review)."""
     orders = _orders(state)
     row = await asyncio.to_thread(orders.slice_prices.variant_row, key)
     if row is None or row.output_id is None or row.listing_id is None:
@@ -851,7 +866,7 @@ async def variant_preview(state: AppState, key: str) -> Path:
     meta = await asyncio.to_thread(output_of, state, row, listing)
     if meta is None:
         raise variant_not_found()
-    return state.outputs.directory(row.output_id) / PREVIEW_NAME
+    return row.output_id
 
 
 async def variant_colours(state: AppState, key: str) -> list[str] | None:
