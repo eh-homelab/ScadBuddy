@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import tempfile
 import time
 import uuid
@@ -184,5 +185,7 @@ async def test_a_failed_cancel_wait_runs_the_recorders_cleanup(
             await pending
     finally:
         # A failed assertion above must not leave the task pending: its warning would
-        # bury the failure (#7602).
+        # bury the failure (#7602). Awaited too, so it ends inside the test (#7612).
         pending.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await pending
