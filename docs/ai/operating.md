@@ -1186,10 +1186,10 @@ every cap includes `read`). So an operator who revokes a token, changes the auth
 the anonymous cap, or turns OIDC on or off, changes who reads the feed too. Settings that
 cannot be read fail closed.
 
-**Both hosts.** The feed is reached on the LAN host and on the SSO host, as `/mcp` is.
-On the SSO host, `/api/v1/ai/plugin-feeds/`, `/mcp` and `/mcp/workspace/` are public
-Pomerium routes, so Pomerium does not check the caller; the agent's bearer check is the
-only gate (owner decision on eh-homelab/clusters#4017, merged 2026-11-25). The zip URLs and `marketplace_url` are made from the origin the request came
+**Both hosts.** The feed is reached on the LAN host and on the public URL, as `/mcp` is.
+On the public URL, the ingress does no sign-in for `/api/v1/ai/plugin-feeds/`, `/mcp` and
+`/mcp/workspace/`, so the agent's bearer check is the only gate (owner decision on
+eh-homelab/clusters#4017, merged 2026-11-25). The zip URLs and `marketplace_url` are made from the origin the request came
 on, not `SCADBUDDY_PUBLIC_URL`, because Claude Code sends a marketplace's `headers` only to
 that origin.
 
