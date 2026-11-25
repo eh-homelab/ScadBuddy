@@ -351,7 +351,7 @@ export function FilamentsEditor({
               }
               if (f.archived_at) return <span className="text-xs text-muted-foreground">None</span>
               return (
-                <Button size="xs" variant="outline" disabled={busy} onClick={() => void makeType(f)} aria-label={`Make a type from ${filamentLabel(f)}`}>
+                <Button size="xs" variant="outline" disabled={busy || typeKeys.loading} onClick={() => void makeType(f)} aria-label={`Make a type from ${filamentLabel(f)}`}>
                   Make a type
                 </Button>
               )

@@ -6,7 +6,7 @@ import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { entityApi, type PropertyValue } from '../../components/entities/api'
 import { DefinedFields } from '../../components/entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, type FieldErrors } from '../../components/entities/definedProperties'
+import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, type FieldErrors } from '../../components/entities/definedProperties'
 import { useAsync } from '../../lib/useAsync'
 import { api, ApiError } from '../../api/client'
 import {
@@ -417,7 +417,7 @@ export function TypePage() {
         if (Object.keys(properties).length > 0) patch.properties = properties
         if (Object.keys(patch).length > 0) await upsertType(patch, typeId)
       }
-      setDefinedBefore(defined)
+      setDefinedBefore(sentValues(defined))
       if (JSON.stringify(draft.presets) !== JSON.stringify(presetsWere)) await setTypePresets(typeId, draft.presets)
       if (JSON.stringify(draft.k_values) !== JSON.stringify(kWere)) await setTypeKValues(typeId, draft.k_values)
       setNotice('Saved')

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import type { PropertyValue } from './api'
 import { DefinedFields } from './DefinedFields'
 import { fieldErrorsOf, propertiesPatch, refusalText, requiredOf, type FieldErrors } from './definedProperties'
@@ -24,6 +24,14 @@ export function RequiredKeysDialog({ schema, title, action, open, onCancel, onSu
   const [errors, setErrors] = useState<FieldErrors | undefined>()
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+
+  // Each opening starts empty: nothing typed or refused for the last row carries over.
+  useEffect(() => {
+    if (!open) return
+    setValues({})
+    setErrors(undefined)
+    setError(null)
+  }, [open])
 
   async function submit(event: FormEvent) {
     event.preventDefault()

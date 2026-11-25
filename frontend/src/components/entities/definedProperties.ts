@@ -39,6 +39,9 @@ export function definedKeys(schema: Record<string, unknown>): string[] {
 const cleaned = (value: PropertyValue | undefined): PropertyValue | undefined =>
   Array.isArray(value) ? value.map((item) => item.trim()).filter(Boolean) : value
 
+/** The defined values as a save sends them: the `before` of the next save (#7809 review). */
+export const sentValues = (values: Values): Values => Object.fromEntries(Object.entries(values).map(([key, value]) => [key, cleaned(value)]))
+
 /**
  * The `properties` a save sends for the defined keys: a changed value, `null` for a key that
  * had a value and now has none, and nothing for a key left as it was or still empty.

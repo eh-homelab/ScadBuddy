@@ -538,5 +538,15 @@ describe('the 3DFP id and fetch (#6625)', () => {
       expect(patches.at(-1)).toEqual({ note: 'x', properties: { mpn: 'A00-W1' } })
       expect((await getType(T.JADE)).note).toBe('x')
     })
+
+    // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.
+    it('is clean after saving a list with a blank trailing item', async () => {
+      const { user } = render(`/filament/types/${T.JADE}`)
+      await user.type(await screen.findByLabelText('gtin item 1'), '0123')
+      await user.click(screen.getByRole('button', { name: 'Add gtin item' }))
+      await user.click(screen.getByRole('button', { name: 'Save type' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool_type:${T.JADE}`)?.map((p) => [p.key, p.value])).toEqual([['gtin', ['0123']]]))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save type' })).toBeDisabled())
+    })
   })
 })

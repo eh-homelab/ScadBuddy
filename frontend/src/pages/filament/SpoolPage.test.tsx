@@ -868,6 +868,17 @@ describe("the spool page's Advanced toggle", () => {
       expect(patches).toEqual([{ properties: { lot_number: 'L-9' } }])
     })
 
+    // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.
+    it('is clean after saving a list with a blank trailing item', async () => {
+      entityMock.schemas.spool = { type: 'object', properties: { barcodes: { type: 'array', items: { type: 'string' } } } }
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('barcodes item 1'), ' x')
+      await user.click(screen.getByRole('button', { name: 'Add barcodes item' }))
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'barcodes')?.value).toEqual(['x']))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save spool' })).toBeDisabled())
+    })
+
     it('resets a field to its type on a spool its required keys leave incomplete', async () => {
       await patchSpool(spoolId(3), { rgba: '#112233FF' })
       entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }

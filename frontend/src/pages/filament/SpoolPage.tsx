@@ -62,7 +62,7 @@ import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
 import { entityApi, type PropertyValue } from '../../components/entities/api'
 import { DefinedFields } from '../../components/entities/DefinedFields'
-import { fieldErrorsOf, propertiesPatch, refusalText, requiredOf, type FieldErrors } from '../../components/entities/definedProperties'
+import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, requiredOf, type FieldErrors } from '../../components/entities/definedProperties'
 import { RequiredKeysDialog } from '../../components/entities/RequiredKeysDialog'
 import { useAsync } from '../../lib/useAsync'
 import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
@@ -661,7 +661,7 @@ export function SpoolPage() {
       }
       const patch = { ...changed(body, bodyOf(base)), ...withProperties }
       if (Object.keys(patch).length > 0) await patchSpool(spoolId, patch)
-      setDefinedBefore(defined)
+      setDefinedBefore(sentValues(defined))
       if (draft.location_id !== base.location_id) await moveSpool(spoolId, draft.location_id || null)
       // The first type drops the carried-over presets: the form's copy of them is not written back.
       if (!firstType && JSON.stringify(draft.presets) !== JSON.stringify(base.presets)) await setSpoolPresets(spoolId, draft.presets)
@@ -918,7 +918,7 @@ export function SpoolPage() {
                       type="button"
                       size="xs"
                       variant="outline"
-                      disabled={busy || dirty}
+                      disabled={busy || dirty || typeKeys.loading}
                       onClick={() =>
                         requiredOf(typeSchema).length > 0 ? setAskType(true) : void act(async () => { await makeTypeFromSpool(saved); await reload(false) }, 'Type created')
                       }
