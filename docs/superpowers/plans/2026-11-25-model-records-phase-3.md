@@ -69,7 +69,7 @@ PR title `feat(models): the readers read only template rows, phase 3 (#7317)`, b
 - Produces, in `main.py`:
   - `async def _copy_templates_once(state: AppState, stop: threading.Event) -> TemplateCopyResult | None` (it answers `copy_templates`' result; None when another replica holds the lock or `refresh` is None).
   - `FIRST_COPY_WAIT = 120.0` (amended from 300.0, D4), `FIRST_COPY_POLL = 1.0` (seconds).
-  - `async def _first_template_copy(state: AppState, stop: threading.Event) -> None`: D4. Every SQL and the copy run in threads.
+  - `async def _first_template_copy(state: AppState, stop: threading.Event) -> bool`: D4. It answers whether this start copied. Every SQL and the copy run in threads.
 - Produces, in `tests/support/template_rows.py`:
   - `def sync_template_rows(client: TestClient) -> TemplateCopyResult`: runs `copy_templates(state.catalogue, refresh.rows, refresh, state.projection.pool)` on the app's state and asserts a result that is not None and not `incomplete`. A test calls it after it writes template files with no catalogue write (a hand edit).
   - `def open_template_rows(catalogue: Catalogue, pool: PgPool) -> TemplateRows`: for a test that makes its own `Catalogue`: sets `catalogue.refresh = TemplateRefresh(catalogue, TemplateRows(pool))`, `catalogue.rows = catalogue.refresh.rows` and, when the catalogue has a history, `history.template_rows = catalogue.refresh`; then runs one `copy_templates` and answers the rows.
@@ -151,7 +151,7 @@ Read on prod with `deploy/CLAUDE.md` "Prod checks" (`kubectl -n bambuddy exec sc
 
 1. `SELECT id, started_at, finished_at, incomplete, added, refreshed, dropped, jsonb_array_length(unreadable) FROM template_copy_runs WHERE started_at > '2026-11-25T12:25Z' AND (added + refreshed + dropped > 0 OR incomplete OR finished_at IS NULL) ORDER BY id`.
 2. Match each row to a roll-out: the `scadbuddy` Argo CD app's `status.history[].deployedAt` (`kubectl -n argocd get application scadbuddy -o json`). A repair outside a roll-out window is a writer that §5.2 misses: file an issue with the template ids (`SELECT template_id, refreshed_at FROM templates ORDER BY refreshed_at DESC LIMIT 20`) and fix it before this merge.
-3. `scadbuddy_template_refresh_failures_total` did not increase in the week (Grafana, by `path`).
+3. `scadbuddy_template_refresh_failures_total` did not increase since the phase 1 deploy (Grafana, by `path`).
 4. `SELECT count(*) FROM templates WHERE meta_error LIKE 'not storable%'`: note the count in the PR (D3: each is read from its file).
 5. Post the result on #7317.
 

@@ -182,11 +182,12 @@ def _lists(client: TestClient) -> list[tuple[int, str | None, Any]]:
 
 
 def _from_files(client: TestClient) -> tuple[list[str], list[ModelRecord]]:
-    """Every template id, and the record the files give of each one a listing holds:
-    `_fresh_record` with the fields a listing leaves out. A template whose `model.json`
-    cannot be read is not listed."""
+    """Every template id from a walk of the folders (never the rows, so a template the
+    copy did not write is still expected), and the record the files give of each one a
+    listing holds: `_fresh_record` with the fields a listing leaves out. A template whose
+    `model.json` cannot be read is not listed."""
     catalogue = _state(client).catalogue
-    slugs = catalogue.slugs()
+    slugs = catalogue._walked_slugs()
     records = []
     for slug in slugs:
         try:

@@ -233,8 +233,9 @@ only in the copy. `library_users` and `library_pins` always read the files (spec
   git did not name a version, so the row keeps its stored one.
 - Each API start copies the files to rows once (`scadbuddy/library/template_copy.py`
   `copy_templates`, one replica at a time under the advisory lock `COPY_LOCK`; a run that
-  does not get it does nothing). It runs in the background after the app serves, except
-  on a start whose first copy (above) finished: that start does not copy again. The housekeeping sweep `housekeeping_copy_templates`
+  does not get it does nothing). It starts in the background during the lifespan, before
+  the app serves, and goes on while the app serves, except on a start whose first copy
+  (above) finished: that start does not copy again. The housekeeping sweep `housekeeping_copy_templates`
   (`workflows/housekeeping.py` `TEMPLATE_COPY_SWEEP`, directly after the activity sweep, behind
   `TEMPLATE_COPY_PATCH`) copies again on each run of the sweeps' Schedule. Each run is a
   row of `template_copy_runs`. The copy reconciles: outside the write lock it walks the
@@ -249,6 +250,11 @@ only in the copy. `library_users` and `library_pins` always read the files (spec
   or whose walk of the history failed (each row then keeps its stored version, so only a
   template whose stamp changed is read again) drops no row and ends `incomplete`, with no `finished_at`. A stopped run has no
   `finished_at` either.
+- A new run deletes the runs that started more than `RUN_KEPT` (30 days) before it
+  (`scadbuddy/library/template_rows.py` `TemplateRows.start_run`). If every run ends
+  incomplete for that period, the finished runs are deleted: `TemplateRows.copied()`
+  answers false at the next start, and each start then copies before it serves (as on a
+  new database).
 - `GET /api/v1/model-records/copy-status` answers the last run: `started_at`,
   `finished_at`, `incomplete`, `added`, `refreshed`, `dropped`, and `unreadable`, each
   walked template whose row has a `meta_error`: its `model.json` is not JSON, cannot be
