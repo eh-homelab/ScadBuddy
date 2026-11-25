@@ -963,10 +963,15 @@ export async function command<T>(
 export const PRINTER_COMMAND_RUNNING = 'urn:scadbuddy:printer-command-running'
 
 export interface PrinterCommandOptions {
-  /** The write's key; a new one per press. A read sends none. */
+  /**
+   * The write's key: a new one per press, unless the press repeats a command that may still run
+   * (P55: the panel passes that command's key, so the backend joins its run). A read sends none.
+   */
   key?: string
   /** Told once, with the command's id, when the route answered 202: the command was sent and runs. */
   onWaiting?: (commandId: string) => void
+  /** Stops the request and its follow (the panel closed, or its nozzle changed); the command itself is not stopped. */
+  signal?: AbortSignal
 }
 
 /**
@@ -983,15 +988,15 @@ export async function printerCommand<T>(
   printerId: string,
   path: string,
   init: RequestInit = {},
-  { key = newRequestId(), onWaiting }: PrinterCommandOptions = {},
+  { key = newRequestId(), onWaiting, signal: stop }: PrinterCommandOptions = {},
 ): Promise<T> {
-  const signal = init.signal ?? undefined
+  const signal = stop ?? init.signal ?? undefined
   const write = (init.method ?? 'GET').toUpperCase() !== 'GET'
   const headers: Record<string, string> = {
     ...(init.headers as Record<string, string> | undefined),
     ...(write ? { 'Idempotency-Key': key } : {}),
   }
-  let answer = await reattach(() => requestWithStatus<T | LanCommandPending>(path, { ...init, headers }), signal)
+  let answer = await reattach(() => requestWithStatus<T | LanCommandPending>(path, { ...init, headers, signal }), signal)
   const began = performance.now()
   let told = false
   while (answer.status === 202) {
@@ -2541,8 +2546,13 @@ export const api = {
    * #7154, #7276: a printer's K table for one nozzle, read from the printer over ScadBuddy's LAN
    * link. Every K-profile and slot command goes through `printerCommand`, which follows a 202.
    */
-  listKProfiles: (id: string, nozzle: string) =>
-    printerCommand<KProfileTable>(id, `/printers/${seg(id)}/kprofiles?nozzle_diameter=${encodeURIComponent(nozzle)}`),
+  listKProfiles: (id: string, nozzle: string, options?: PrinterCommandOptions) =>
+    printerCommand<KProfileTable>(
+      id,
+      `/printers/${seg(id)}/kprofiles?nozzle_diameter=${encodeURIComponent(nozzle)}`,
+      {},
+      options,
+    ),
   kProfileNotes: (id: string) => request<KProfileNotes>(`/printers/${seg(id)}/kprofiles/notes`),
   /** The writes are commands, each sent once under one key (R-7154-5). */
   setKProfile: (id: string, body: KProfileSet, options?: PrinterCommandOptions) =>

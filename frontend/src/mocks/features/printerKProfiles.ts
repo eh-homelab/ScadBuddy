@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { KProfile, KProfileNotes, KProfileRemove, KProfileSet, KProfileTable, KProfileWriteResult } from '../../api/types'
-import { commandAnswer, keyRequired, lanRefusal } from './printerCommands'
+import { commandAnswer, joined, keyRequired, lanRefusal } from './printerCommands'
 import { printersState } from './printers'
 
 /**
@@ -126,7 +126,7 @@ export const handlers = [
     noPrinter(String(params.id)) ?? HttpResponse.json({ notes: state.notes } satisfies KProfileNotes),
   ),
   http.post('/api/v1/printers/:id/kprofiles', async ({ params, request }) => {
-    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request)
+    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request) ?? joined(String(params.id), request)
     if (refused) return refused
     const row = (await request.json()) as KProfileSet
     const slot = row.slot_id ?? 0
@@ -142,14 +142,14 @@ export const handlers = [
     return commandAnswer(String(params.id), request, answer('K-profile updated successfully'))
   }),
   http.post('/api/v1/printers/:id/kprofiles/batch', async ({ params, request }) => {
-    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request)
+    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request) ?? joined(String(params.id), request)
     if (refused) return refused
     const { profiles } = (await request.json()) as { profiles: KProfileSet[] }
     profiles.forEach(add)
     return commandAnswer(String(params.id), request, answer(`Added ${profiles.length} K-profiles`))
   }),
   http.post('/api/v1/printers/:id/kprofiles/delete', async ({ params, request }) => {
-    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request)
+    const refused = lanRefusal(String(params.id), FEATURE) ?? keyRequired(request) ?? joined(String(params.id), request)
     if (refused) return refused
     const row = (await request.json()) as KProfileRemove
     state.profiles = state.profiles.filter(

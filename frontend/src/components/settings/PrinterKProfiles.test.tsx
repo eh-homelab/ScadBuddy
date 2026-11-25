@@ -3,7 +3,12 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { printRunPoll } from '../../api/client'
 import type { PrinterRow } from '../../api/types'
-import { printerCommandKeys, setPrinterCommandSlow } from '../../mocks/features/printerCommands'
+import {
+  latchPrinterCommands,
+  printerCommandKeys,
+  printerCommandsPublished,
+  setPrinterCommandSlow,
+} from '../../mocks/features/printerCommands'
 import {
   mockKProfileNotes,
   mockKProfiles,
@@ -13,6 +18,7 @@ import {
 import { initialPrinters, setLanLinked } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
+import { said } from '../../test/said'
 import { renderPage } from '../../test/utils'
 import { flowOf, noteKeys, PrinterKProfiles, shownK } from './PrinterKProfiles'
 
@@ -116,7 +122,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.type(within(form).getByLabelText('Note'), 'slow walls')
     await user.click(within(form).getByRole('button', { name: 'Add K-profile' }))
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Added Silk PLA.')
+    await said('Added Silk PLA.')
     expect(sent).toEqual([
       {
         profiles: [0, 1].map((extruder_id) => ({
@@ -147,7 +153,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.type(within(form).getByLabelText('Filament id'), 'GFA00')
     await choose(user, within(form).getByRole('combobox', { name: 'Flow' }), 'High flow')
     await user.click(within(form).getByRole('button', { name: 'Add K-profile' }))
-    await screen.findByRole('status')
+    await said()
     expect(mockKProfiles().find((row) => row.name === 'HF PLA')?.nozzle_id).toBe('HH00-0.4')
   })
 
@@ -161,7 +167,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.clear(within(form).getByLabelText('Note'))
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved Bambu PLA Basic.')
+    await said('Saved Bambu PLA Basic.')
     expect(mockKProfiles().find((row) => row.slot_id === 1)?.k_value).toBe('0.025000')
     // A cleared note is deleted, under the key it was read from.
     expect(mockKProfileNotes().PFUS1).toBeUndefined()
@@ -179,7 +185,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.type(within(form).getByLabelText('Note'), 'wet spool')
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved the note on High Flow_Bambu PETG HF.')
+    await said('Saved the note on High Flow_Bambu PETG HF.')
     expect(writes.every((path) => path.endsWith('/kprofiles/notes'))).toBe(true)
     expect(mockKProfiles().find((row) => row.slot_id === 2)?.k_value).toBe('0.034500')
     expect(mockKProfileNotes()['slot_2_GFG02_1']).toBe('wet spool')
@@ -196,7 +202,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.clear(within(form).getByLabelText('K value'))
     await user.type(within(form).getByLabelText('K value'), '0.034512')
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
-    await screen.findByRole('status')
+    await said()
     expect(sent).toEqual([expect.objectContaining({ slot_id: 2, k_value: '0.034512', nozzle_id: 'HH00-0.4' })])
   })
 
@@ -215,7 +221,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.clear(within(form).getByLabelText('K value'))
     await user.type(within(form).getByLabelText('K value'), '0.03')
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
-    await screen.findByRole('status')
+    await said()
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Deleted Bambu PLA Basic.'))
@@ -237,7 +243,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.type(within(form).getByLabelText('Note'), ' again')
     await user.click(within(form).getByRole('button', { name: 'Save K-profile' }))
 
-    expect(await screen.findByRole('status')).toHaveTextContent('Saved Bambu PLA Basic, but not its note')
+    await said('Saved Bambu PLA Basic, but not its note')
     expect(screen.queryByRole('form', { name: 'Edit Bambu PLA Basic' })).not.toBeInTheDocument()
   })
 
@@ -246,7 +252,7 @@ describe('PrinterKProfiles (#7154)', () => {
     await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
     expect(mockKProfiles()).toHaveLength(2)
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('Deleted Bambu PLA Basic.')
+    await said('Deleted Bambu PLA Basic.')
     expect(mockKProfiles().map((row) => row.name)).toEqual(['High Flow_Bambu PETG HF'])
     await waitFor(() => expect(screen.queryByRole('row', { name: 'K-profile Bambu PLA Basic' })).not.toBeInTheDocument())
   })
@@ -256,7 +262,7 @@ describe('PrinterKProfiles (#7154)', () => {
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
-    const status = await screen.findByRole('status')
+    const status = await said()
     expect(status).toHaveTextContent('Sent; the printer did not confirm it.')
     expect(status).not.toHaveTextContent('Deleted')
   })
@@ -283,25 +289,117 @@ describe('PrinterKProfiles (#7154)', () => {
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
-    await screen.findByRole('status')
+    await said()
     // The reads (GET) carry none; the one delete carries one.
     expect(printerCommandKeys().filter(Boolean)).toEqual([expect.stringMatching(/^[0-9a-f]{32}$/)])
   })
 
   it('follows a slow read and a slow write to their answers, saying the write was sent meanwhile', async () => {
-    printRunPoll.intervalMs = 150
-    setPrinterCommandSlow(2)
+    printRunPoll.intervalMs = 5
     const deletes: string[] = []
     server.events.on('request:start', ({ request }) => {
       if (new URL(request.url).pathname.endsWith('/kprofiles/delete')) deletes.push(request.method)
     })
+    // The read stays at 202 until it is released: the table waits for it.
+    let release = latchPrinterCommands()
     const { user } = await opened()
-    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }, { timeout: 3000 }))
+    await waitFor(() => expect(printerCommandKeys()).toHaveLength(1))
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    release()
+    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    // So does the delete: it says it was sent, and nothing more, until the printer answers.
+    release = latchPrinterCommands()
     await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
-    const status = await screen.findByRole('status')
-    expect(status).toHaveTextContent('Sent to the printer. Waiting for it to answer.')
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Deleted Bambu PLA Basic.'), { timeout: 3000 })
+    const status = await said('Sent to the printer. Waiting for it to answer.')
+    expect(status).not.toHaveTextContent('Deleted')
+    release()
+    await said('Deleted Bambu PLA Basic.')
     expect(deletes).toEqual(['POST'])
+  })
+
+  it('keeps one empty live region from the start, so the first message is announced', async () => {
+    const { user } = await opened()
+    await screen.findByRole('table', { name: 'K-profiles at 0.4 mm' })
+    const status = screen.getByRole('status')
+    expect(status).toHaveAttribute('aria-live', 'polite')
+    expect(status).toBeEmptyDOMElement()
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    // The same element, now holding the text: never a region added with its text in it.
+    expect(await said('Sent to the printer.')).toBe(status)
+    release()
+  })
+
+  it('sends the same key when a delete the page gave up on is pressed again, so the printer gets it once (P55)', async () => {
+    printRunPoll.intervalMs = 1
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    printRunPoll.printerCommandFollowMs = 20
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await said('Do not send it again')
+    release()
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await said('Deleted Bambu PLA Basic.')
+    const [first, again] = printerCommandKeys().filter(Boolean)
+    expect(first).toMatch(/^[0-9a-f]{32}$/)
+    expect(again).toBe(first)
+    expect(printerCommandsPublished()).toBe(1)
+  })
+
+  it('gives another command a new key after the page gave up on one (P55)', async () => {
+    printRunPoll.intervalMs = 1
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    printRunPoll.printerCommandFollowMs = 20
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Delete Bambu PLA Basic' }))
+    await said('Do not send it again')
+    release()
+    await user.click(screen.getByRole('button', { name: 'Delete High Flow_Bambu PETG HF' }))
+    await user.click(screen.getByRole('button', { name: 'Delete High Flow_Bambu PETG HF' }))
+    await said('Deleted High Flow_Bambu PETG HF.')
+    const [first, other] = printerCommandKeys().filter(Boolean)
+    expect(other).toMatch(/^[0-9a-f]{32}$/)
+    expect(other).not.toBe(first)
+    expect(printerCommandsPublished()).toBe(2)
+  })
+
+  it('stops following when the panel closes', async () => {
+    printRunPoll.intervalMs = 5
+    const follows: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname.includes('/commands/')) follows.push(request.url)
+    })
+    const release = latchPrinterCommands()
+    const { unmount } = await opened()
+    await waitFor(() => expect(follows.length).toBeGreaterThan(1))
+    unmount()
+    const seen = follows.length
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(follows).toHaveLength(seen)
+    release()
+  })
+
+  it("stops following the old nozzle's read when the nozzle changes", async () => {
+    printRunPoll.intervalMs = 5
+    const follows: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      const path = new URL(request.url).pathname
+      if (path.includes('/commands/')) follows.push(path.split('/').at(-1)!)
+    })
+    const release = latchPrinterCommands()
+    const { user } = await opened()
+    await waitFor(() => expect(follows.length).toBeGreaterThan(1))
+    const [old] = follows
+    await choose(user, screen.getByRole('combobox', { name: 'Nozzle diameter' }), '0.6 mm')
+    await waitFor(() => expect(follows.some((id) => id !== old)).toBe(true))
+    const seen = follows.filter((id) => id === old).length
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(follows.filter((id) => id === old)).toHaveLength(seen)
+    release()
   })
 
   it('says not to send it again when the printer has not answered in time', async () => {

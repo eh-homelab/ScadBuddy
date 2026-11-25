@@ -8,8 +8,11 @@ import { printersState } from './printers'
  * printer's row: 404 for none, 409 `not_lan_linked` for one that `lan_linked` is false on
  * (`lanRefusal`). It answers 200 with its model, or, while `setPrinterCommandSlow(n)` is on,
  * 202 `LanCommandPending`, which `GET /printers/{id}/commands/{command_id}` answers 202 for
- * `n` more reads and then with the same model (P27, P37). Every command's `Idempotency-Key`
- * is kept, in order (`printerCommandKeys`).
+ * `n` more reads and then with the same model (P27, P37). While `latchPrinterCommands()` holds,
+ * every command is a 202 and its follow stays 202 until the test calls the release it returned.
+ * Every command's `Idempotency-Key` is kept, in order (`printerCommandKeys`). A key sent again
+ * joins the run it started (P38, P41): a handler asks `joined` before it changes anything, and
+ * the command is published once (`printerCommandsPublished`).
  */
 
 interface Running {
@@ -18,18 +21,63 @@ interface Running {
   body: JsonBodyType
 }
 
+interface Started {
+  workflowId?: string
+  body: JsonBodyType
+}
+
 const state = {
   slow: 0,
+  latched: false,
   seq: 0,
   running: new Map<string, Running>(),
+  started: new Map<string, Started>(),
   keys: [] as (string | null)[],
+  published: 0,
 }
 
 export function reset(): void {
   state.slow = 0
+  state.latched = false
   state.seq = 0
   state.running = new Map()
+  state.started = new Map()
   state.keys = []
+  state.published = 0
+}
+
+/**
+ * Every command answers 202, and every follow 202, until the returned release is called: then
+ * each command's next follow answers its model.
+ */
+export function latchPrinterCommands(): () => void {
+  state.latched = true
+  return () => {
+    state.latched = false
+    state.running.forEach((run) => (run.reads = 0))
+  }
+}
+
+/** How many writes the mock published to the printer: a key sent again publishes none. */
+export function printerCommandsPublished(): number {
+  return state.published
+}
+
+const startedKey = (printer: string, key: string) => `${printer}\n${key}`
+
+/**
+ * The answer to a command whose `Idempotency-Key` already started one on `printer`: the same
+ * run, followed again while it runs, else its answer. None for a new key.
+ */
+export function joined(printer: string, request: Request): Response | undefined {
+  const key = request.headers.get('Idempotency-Key')
+  const first = key ? state.started.get(startedKey(printer, key)) : undefined
+  if (!first) return undefined
+  state.keys.push(key)
+  if (first.workflowId && state.running.has(first.workflowId)) {
+    return HttpResponse.json({ workflow_id: first.workflowId } satisfies LanCommandPending, { status: 202 })
+  }
+  return HttpResponse.json(first.body)
 }
 
 /** Every command answers 202, and its follow 202 `reads` times more before the answer; 0 turns it off. */
@@ -70,10 +118,16 @@ export function keyRequired(request: Request): Response | undefined {
 
 /** The command's answer: `body` at once, or a 202 while `setPrinterCommandSlow` is on. */
 export function commandAnswer(printer: string, request: Request, body: JsonBodyType): Response {
-  state.keys.push(request.headers.get('Idempotency-Key'))
-  if (state.slow <= 0) return HttpResponse.json(body)
+  const key = request.headers.get('Idempotency-Key')
+  state.keys.push(key)
+  if (request.method !== 'GET') state.published += 1
+  if (state.slow <= 0 && !state.latched) {
+    if (key) state.started.set(startedKey(printer, key), { body })
+    return HttpResponse.json(body)
+  }
   const workflow_id = `lan-command-mock-${++state.seq}`
   state.running.set(workflow_id, { printer, reads: state.slow, body })
+  if (key) state.started.set(startedKey(printer, key), { workflowId: workflow_id, body })
   return HttpResponse.json({ workflow_id } satisfies LanCommandPending, { status: 202 })
 }
 
@@ -81,10 +135,11 @@ export const handlers = [
   http.get('/api/v1/printers/:id/commands/:command_id', ({ params }) => {
     const run = state.running.get(String(params.command_id))
     if (!run || run.printer !== params.id) return problem(404, `no command ${String(params.command_id)}`, 'command_not_found')
-    if (run.reads > 0) {
-      run.reads -= 1
+    if (state.latched || run.reads > 0) {
+      run.reads = Math.max(0, run.reads - 1)
       return HttpResponse.json({ workflow_id: String(params.command_id) } satisfies LanCommandPending, { status: 202 })
     }
+    state.running.delete(String(params.command_id))
     return HttpResponse.json(run.body)
   }),
 ]

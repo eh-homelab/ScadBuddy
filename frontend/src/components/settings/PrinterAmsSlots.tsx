@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ChoiceSelect, LabeledInput, LoadingLines } from './form'
 import { Spinner } from '../ui/spinner'
+import { Said, stopped, usePrinterCommand } from './usePrinterCommand'
 
 /**
  * #7153, #7276 — a printer's AMS slots, controlled over ScadBuddy's own LAN link
@@ -27,7 +28,9 @@ import { Spinner } from '../ui/spinner'
  * printer asks first, in a dialog naming the printer and the slot (R-7153-10), and the route refuses
  * it while the printer prints (R-7153-3), so the buttons are off then too. A write goes once under
  * one key (`printerCommand`, which follows a slow command's 202, P44): the saved preset follows the
- * configure's answer only. A unit's label names ScadBuddy's place of the unit (R-7153-8).
+ * configure's answer only. A press that repeats a command the page stopped following sends its key
+ * again (P55, `usePrinterCommand`), and closing the panel stops every follow. A unit's label names
+ * ScadBuddy's place of the unit (R-7153-8).
  */
 
 type Action = SlotCommandSent['action']
@@ -89,6 +92,7 @@ interface Pending {
 
 function AmsBody({ row }: { row: PrinterRow }) {
   const ams = useAsync(() => api.printerAms(row.id), [row.id])
+  const commands = usePrinterCommand(row.id)
   const [picked, setPicked] = useState<{ ams: number; tray: number } | null>(null)
   const [configuring, setConfiguring] = useState(false)
   const [asking, setAsking] = useState<Pending | null>(null)
@@ -100,11 +104,15 @@ function AmsBody({ row }: { row: PrinterRow }) {
     setBusy(true)
     setMessage(null)
     const { unit, slot } = pending
-    const options = { onWaiting: () => setMessage(WAITING) }
+    const onWaiting = () => setMessage(WAITING)
+    const target = `${unit.ams_id}/${slot.tray_id}`
     try {
       if (pending.action === 'configure' && pending.body) {
+        const body = pending.body
         // The answer is the route's own (`printerCommand` follows a 202): a 202's body never reaches here.
-        const sent = await api.configureSlot(row.id, unit.ams_id, slot.tray_id, pending.body, options)
+        const sent = await commands.send(target, 'configure', body, (options) =>
+          api.configureSlot(row.id, unit.ams_id, slot.tray_id, body, { ...options, onWaiting }),
+        )
         let text = `Configured ${slot.label}: ${sent.material} ${sent.preset_name}.`
         let warn = false
         if (unconfirmed(sent.message)) {
@@ -131,7 +139,10 @@ function AmsBody({ row }: { row: PrinterRow }) {
         setMessage({ text, warn })
         setConfiguring(false)
       } else {
-        const sent = await api.slotCommand(row.id, unit.ams_id, slot.tray_id, pending.action, options)
+        const action = pending.action
+        const sent = await commands.send(target, action, null, (options) =>
+          api.slotCommand(row.id, unit.ams_id, slot.tray_id, action, { ...options, onWaiting }),
+        )
         const title = ASKS[pending.action].title
         setMessage(
           unconfirmed(sent.message)
@@ -141,6 +152,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
       }
       ams.refresh()
     } catch (cause) {
+      if (stopped(cause)) return
       // A command that may have reached the printer closes the form, so it is not sent again.
       if (mayHaveRun(cause)) setConfiguring(false)
       setMessage({ text: problem(cause, `Could not ${ASKS[pending.action].verb.toLowerCase()} ${slot.label}.`), warn: true })
@@ -252,11 +264,7 @@ function AmsBody({ row }: { row: PrinterRow }) {
         />
       )}
 
-      {message && (
-        <p role="status" className={cn('text-xs', message.warn ? 'text-warn' : 'text-muted-foreground')}>
-          {message.text}
-        </p>
-      )}
+      <Said message={message} />
 
       <AlertDialog open={asking !== null} onOpenChange={(next) => !next && setAsking(null)}>
         <AlertDialogContent>

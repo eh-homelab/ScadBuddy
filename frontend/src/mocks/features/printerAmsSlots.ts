@@ -10,7 +10,7 @@ import type {
   SlotPresetBody,
   SlotView,
 } from '../../api/types'
-import { commandAnswer, lanRefusal } from './printerCommands'
+import { commandAnswer, joined, lanRefusal } from './printerCommands'
 import { printersState } from './printers'
 
 /**
@@ -171,7 +171,7 @@ export const handlers = [
   http.get('/api/v1/printers/:id/ams', ({ params }) => lanRefusal(String(params.id), FEATURE) ?? HttpResponse.json(view())),
   http.post('/api/v1/printers/:id/trays/:ams/:tray/:action', async ({ params, request }) => {
     const id = String(params.id)
-    const refused = lanRefusal(id, FEATURE)
+    const refused = lanRefusal(id, FEATURE) ?? joined(id, request)
     if (refused) return refused
     const action = String(params.action) as SlotCommandSent['action']
     const ams = Number(params.ams)

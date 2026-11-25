@@ -10,10 +10,16 @@ import {
   setAmsTrayNow,
   setAmsUnconfirmed,
 } from '../../mocks/features/printerAmsSlots'
-import { printerCommandKeys, setPrinterCommandSlow } from '../../mocks/features/printerCommands'
+import {
+  latchPrinterCommands,
+  printerCommandKeys,
+  printerCommandsPublished,
+  setPrinterCommandSlow,
+} from '../../mocks/features/printerCommands'
 import { initialPrinters, setLanLinked } from '../../mocks/features/printers'
 import { server } from '../../mocks/server'
 import { choose } from '../../test/select'
+import { said } from '../../test/said'
 import { renderPage } from '../../test/utils'
 import { PrinterAmsSlots } from './PrinterAmsSlots'
 
@@ -71,7 +77,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(screen.getByRole('button', { name: 'Load' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
     await waitFor(() => expect(amsSent()).toEqual(['load 0/1']))
-    expect(await screen.findByRole('status')).toHaveTextContent('Load: sent to AMS-A slot 2')
+    await said('Load: sent to AMS-A slot 2')
   })
 
   it('cannot load an empty slot', async () => {
@@ -179,7 +185,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     const { user } = await opened()
     const form = await configureForm(user, 'AMS-A slot 2')
     await confirm(user, form, 'AMS-A slot 2')
-    const status = await screen.findByRole('status')
+    const status = await said()
     await waitFor(() => expect(status).toHaveTextContent('The slot’s saved preset was not changed'))
     expect(status).toHaveClass('text-warn')
   })
@@ -189,7 +195,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
     await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')
     await user.click(screen.getByRole('button', { name: 'Save label' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('Labelled AMS-A “Left rack”.')
+    await said('Labelled AMS-A “Left rack”.')
     expect(await screen.findByRole('heading', { name: 'Left rack' })).toBeInTheDocument()
   })
 
@@ -203,7 +209,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
     await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')
     await user.click(screen.getByRole('button', { name: 'Save label' }))
-    const status = await screen.findByRole('status')
+    const status = await said()
     expect(status).toHaveTextContent('Its place was not named: the printer was deleted meanwhile.')
     expect(status).toHaveClass('text-warn')
   })
@@ -245,7 +251,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(await screen.findByRole('button', { name: 'Rename AMS-A' }))
     await user.type(screen.getByLabelText('Label for AMS-A'), 'Left rack')
     await user.click(screen.getByRole('button', { name: 'Save label' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('The label must hold printable characters only')
+    await said('The label must hold printable characters only')
   })
 
   it('says the label names the unit’s place in ScadBuddy', async () => {
@@ -289,13 +295,83 @@ describe('PrinterAmsSlots (#7153)', () => {
     expect(amsSent()).toEqual(['load 0/1'])
   })
 
+  it('sends the same key when a load the page gave up on is pressed again, so the printer gets it once (P55)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.printerCommandFollowMs = 20
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    await said('Do not send it again')
+    release()
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    await said('Load: sent to AMS-A slot 2.')
+    const [first, again] = printerCommandKeys()
+    expect(again).toBe(first)
+    expect(printerCommandsPublished()).toBe(1)
+    expect(amsSent()).toEqual(['load 0/1'])
+  })
+
+  it('gives another slot command a new key after the page gave up on one (P55)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.printerCommandFollowMs = 20
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    await said('Do not send it again')
+    release()
+    await user.click(screen.getByRole('button', { name: 'Reset' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Reset' }))
+    await said('Reset: sent to AMS-A slot 2.')
+    const [first, other] = printerCommandKeys()
+    expect(other).not.toBe(first)
+    expect(printerCommandsPublished()).toBe(2)
+  })
+
+  it('stops following a slot command when the panel closes', async () => {
+    printRunPoll.intervalMs = 5
+    const follows: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (new URL(request.url).pathname.includes('/commands/')) follows.push(request.url)
+    })
+    const { user, unmount } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    await waitFor(() => expect(follows.length).toBeGreaterThan(1))
+    unmount()
+    const seen = follows.length
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    expect(follows).toHaveLength(seen)
+    release()
+  })
+
+  it('keeps one empty live region from the start, so the first message is announced', async () => {
+    const { user } = await opened()
+    await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
+    const status = screen.getByRole('status')
+    expect(status).toHaveAttribute('aria-live', 'polite')
+    expect(status).toBeEmptyDOMElement()
+    const release = latchPrinterCommands()
+    await user.click(screen.getByRole('button', { name: 'Load' }))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
+    expect(await said('Sent to the printer.')).toBe(status)
+    release()
+    await said('Load: sent to AMS-A slot 2.')
+  })
+
   it('says when the printer did not confirm a slot command', async () => {
     setAmsUnconfirmed(true)
     const { user } = await opened()
     await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
     await user.click(screen.getByRole('button', { name: 'Load' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
-    const status = await screen.findByRole('status')
+    const status = await said()
     expect(status).toHaveTextContent('Load: sent to AMS-A slot 2; the printer did not confirm it.')
     expect(status).toHaveClass('text-warn')
   })
@@ -305,7 +381,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
     await user.click(screen.getByRole('button', { name: 'Unload' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Unload' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('H2C is not loaded from AMS-A slot 2')
+    await said('H2C is not loaded from AMS-A slot 2')
   })
 
   it('sends each slot command with an Idempotency-Key', async () => {
@@ -313,7 +389,7 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(await screen.findByRole('button', { name: 'AMS-A slot 2' }))
     await user.click(screen.getByRole('button', { name: 'Load' }))
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Load' }))
-    await screen.findByRole('status')
+    await said()
     expect(printerCommandKeys()).toEqual([expect.stringMatching(/^[0-9a-f]{32}$/)])
   })
 

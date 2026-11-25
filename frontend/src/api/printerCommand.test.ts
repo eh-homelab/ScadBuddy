@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
 import { ApiError, mayHaveRun, PRINTER_COMMAND_RUNNING, printerCommand, printRunPoll } from './client'
 
@@ -98,5 +98,30 @@ describe('printerCommand', () => {
     expect((error as ApiError).detail).toMatch(/Do not send it again/)
     expect(mayHaveRun(error)).toBe(true)
     expect(sends).toBe(1)
+  })
+
+  it('sends the key it is given, and stops following when its signal aborts', async () => {
+    printRunPoll.intervalMs = 5
+    const keys: (string | null)[] = []
+    let follows = 0
+    server.use(
+      http.post(`/api/v1${PATH}`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return HttpResponse.json({ workflow_id: 'lan-command-10' }, { status: 202 })
+      }),
+      http.get(`/api/v1/printers/${PRINTER}/commands/lan-command-10`, () => {
+        follows++
+        return HttpResponse.json({ workflow_id: 'lan-command-10' }, { status: 202 })
+      }),
+    )
+    const controller = new AbortController()
+    const running = printerCommand(PRINTER, PATH, { method: 'POST', body: '{}' }, { key: 'k1', signal: controller.signal })
+    await vi.waitFor(() => expect(follows).toBeGreaterThan(0))
+    controller.abort()
+    await expect(running).rejects.toMatchObject({ name: 'AbortError' })
+    const seen = follows
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(follows).toBe(seen)
+    expect(keys).toEqual(['k1'])
   })
 })
