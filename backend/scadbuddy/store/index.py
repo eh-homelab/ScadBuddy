@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from psycopg import Connection
-from psycopg.errors import DeadlockDetected
+from psycopg.errors import DeadlockDetected, LockNotAvailable
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -64,6 +64,38 @@ def _drop_or_discard(conn: Connection[DictRow], query: str, params: tuple[str, .
         conn.close()
 
 
+#: How long a stage hold waits for one object's lock, a try, while a removal's claim
+#: holds it (#7756 review): a claim lasts one backend remove, so a hung remove must not
+#: pin a save's slot. `StageHold.take` tries `STAGE_LOCK_TRIES` times, then gives up.
+STAGE_LOCK_TIMEOUT_MS = 5000
+STAGE_LOCK_TRIES = 6
+
+
+class StageLockBusyError(Exception):
+    """A removal held an object's lock for every try of `StageHold.take`: the save fails,
+    and may be sent again."""
+
+
+def _lock_shared(conn: Connection[DictRow], name: str) -> None:
+    """Take the session lock ``name`` shared on ``conn``, waiting `STAGE_LOCK_TIMEOUT_MS`
+    a try, `STAGE_LOCK_TRIES` tries. Each try is a transaction whose ``SET LOCAL`` ends
+    with it, so the pooled connection keeps no timeout; the session lock outlives the
+    commit."""
+    for _ in range(STAGE_LOCK_TRIES):
+        try:
+            with conn.transaction():
+                conn.execute(
+                    "SELECT set_config('lock_timeout', %s, true)", (f"{STAGE_LOCK_TIMEOUT_MS}ms",)
+                )
+                conn.execute(
+                    "SELECT pg_advisory_lock_shared(hashtextextended(%s, 0))", (name,)
+                ).fetchone()
+            return
+        except LockNotAvailable:
+            logger.info("an object's stage lock is claimed by a removal; trying again")
+    raise StageLockBusyError(f"a removal held {name} for {STAGE_LOCK_TRIES} tries")
+
+
 def object_lock_name(backend: str, sha256: str) -> str:
     """The text whose ``hashtextextended(…, 0)`` keys the session advisory lock of the
     objects of ``sha256`` on ``backend`` (#7477). A stager holds it shared from before its
@@ -90,7 +122,9 @@ class StageHold:
 
     def take(self, backend: str, sha256: str) -> None:
         """Hold the objects of ``sha256`` on ``backend`` shared; it waits only while a
-        release holds them (`BlobIndex.claim_unnamed`), which never waits itself."""
+        release holds them (`BlobIndex.claim_unnamed`), which never waits itself, and at
+        most `STAGE_LOCK_TRIES` tries of `STAGE_LOCK_TIMEOUT_MS`: then
+        `StageLockBusyError`, and the caller closes the hold as on any failure."""
         name = object_lock_name(backend, sha256)
         with self._lock:
             if self._closed:
@@ -99,9 +133,7 @@ class StageHold:
                 return
             if self._conn is None:
                 self._conn = self._pool.getconn()
-            self._conn.execute(
-                "SELECT pg_advisory_lock_shared(hashtextextended(%s, 0))", (name,)
-            ).fetchone()
+            _lock_shared(self._conn, name)
             self._held.add(name)
 
     def close(self) -> None:

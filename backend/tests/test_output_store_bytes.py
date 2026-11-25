@@ -14,6 +14,7 @@ from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO
 
+import psycopg
 import pytest
 from botocore.exceptions import ClientError, EndpointConnectionError
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -23,6 +24,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 import scadbuddy.library.outputs as outputs_module
+import scadbuddy.store.index as index_module
 from scadbuddy.api.outputs import _listed
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes
@@ -50,7 +52,14 @@ from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.content_models import ReuseLostError, StoreFullError
-from scadbuddy.store.index import CLAIM_LOCK_SLOTS, BlobIndex, Pool, StageLocks
+from scadbuddy.store.index import (
+    CLAIM_LOCK_SLOTS,
+    BlobIndex,
+    Pool,
+    StageLockBusyError,
+    StageLocks,
+    object_lock_name,
+)
 from scadbuddy.store.local import LocalContentBackend
 from tests.support.arrange import finished_job
 from tests.support.output_blobs import put_folder_at_keys
@@ -897,6 +906,55 @@ async def test_save_put_failure_removes_folder_and_row(
             "SELECT key FROM store_blobs WHERE starts_with(key, %s)", (f"output-{output_id}-",)
         ).fetchall()
     assert found == []
+
+
+async def test_a_save_whose_stage_lock_stays_claimed_fails_and_frees_its_slot(
+    tmp_path: Path,
+    projection: JobProjection,
+    content: ContentStore,
+    pool: Pool,
+    pg_conninfo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7756 review: a removal's claim that never ends (a hung remove) fails the save
+    that waits for one of its objects' locks, once `STAGE_LOCK_TRIES` tries of
+    `STAGE_LOCK_TIMEOUT_MS` ran out: no row, no folder, nothing it uploaded, and its
+    stage-lock slot free for the next save."""
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TIMEOUT_MS", 50)
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TRIES", 2)
+    paths, job, files = await _with_files(tmp_path)
+    store = _store(paths, projection.pool, content)
+    upload = content.backend.upload
+    uploaded: list[str] = []
+
+    async def recorded(*args: Any, **kwargs: Any) -> str:
+        backend_id = await upload(*args, **kwargs)
+        uploaded.append(backend_id)
+        return backend_id
+
+    monkeypatch.setattr(content.backend, "upload", recorded)
+    busy = hashlib.sha256(b"b stl").hexdigest()
+    claimed = psycopg.connect(pg_conninfo, autocommit=True)
+    output_id = "d" * 32
+    try:
+        claimed.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s, 0))",
+            (object_lock_name(content.name, busy),),
+        )
+        with pytest.raises(StageLockBusyError):
+            await store.save(job, name="first", files_dir=files, output_id=output_id)
+    finally:
+        claimed.close()
+    assert uploaded
+    for backend_id in uploaded:
+        assert not await content.backend.exists(backend_id)
+    assert not paths.output_dir(job.slug, output_id).exists()
+    assert store.rows is not None and store.rows.get(output_id) is None
+    assert _holds(pool, output_id) == set()
+    async with asyncio.timeout(30):
+        meta = await store.save(job, name="second", files_dir=files)
+    row = store.rows.get(meta.id)
+    assert row is not None and row.bytes_at is not None
 
 
 async def test_a_save_that_loses_on_the_id_keeps_the_outputs_bytes(

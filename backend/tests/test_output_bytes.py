@@ -21,6 +21,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
+import scadbuddy.store.index as index_module
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputFileNameError, usable
 from scadbuddy.library.output_rows import (
     OutputBlobs,
@@ -41,6 +42,7 @@ from scadbuddy.store.index import (
     STAGE_LOCK_SLOTS,
     BlobIndex,
     Pool,
+    StageLockBusyError,
     StageLocks,
     object_lock_name,
 )
@@ -681,3 +683,102 @@ async def test_a_claim_takes_its_lock_connection_from_the_stage_lock_pool(
                         assert free
         finally:
             shared.putconn(held)
+
+
+async def test_the_local_unrecorded_sweep_keeps_an_object_written_again_before_its_claim(
+    pool: Pool, tmp_path: Path
+) -> None:
+    """#7756 review: the sweep reads an object's mtime before its claim, and a plain put
+    (no stage hold) may write the same bytes again in between, which gives the file a
+    fresh mtime. The sweep reads the mtime again under the claim and keeps it."""
+    backend = LocalContentBackend(tmp_path / "remote")
+    content = ContentStore(backend, BlobIndex(pool))
+    content.spool = tmp_path / "spool"
+    try:
+        ref, _ = await content.stage("output", b"orphan", name="o", scope=BlobScope(slug="c"))
+        path = backend.root / ref.backend_id
+        old = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+        os.utime(path, (old, old))
+
+        def claim(backend_id: str) -> Any:
+            # What a plain put of the same bytes does meanwhile: a fresh file.
+            os.utime(path)
+            return content.claim_object(backend_id)
+
+        swept = await backend.sweep_unrecorded(
+            cutoff=datetime.now(UTC) - timedelta(hours=1),
+            recorded=partial(content.index.shares_backend_id, backend.backend),
+            claim=claim,
+        )
+        assert swept == 0
+        assert await backend.exists(ref.backend_id)
+    finally:
+        await content.aclose()
+
+
+@pytest.fixture
+def lock_pool(pg_conninfo: str) -> Iterator[Pool]:
+    with ConnectionPool(
+        pg_conninfo,
+        min_size=0,
+        max_size=1,
+        timeout=2,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    ) as opened:
+        yield opened
+
+
+def _claimed(conninfo: str, name: str) -> psycopg.Connection[Any]:
+    """A session that holds the lock ``name`` exclusively, as a removal's claim does."""
+    conn = psycopg.connect(conninfo, autocommit=True)
+    conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (name,))
+    return conn
+
+
+async def test_a_stage_hold_gives_up_on_a_claim_that_never_ends(
+    lock_pool: Pool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7756 review: a removal's claim lasts as long as its backend's remove; one that
+    hangs must not pin a save's slot. `take` waits `STAGE_LOCK_TIMEOUT_MS` a try, at most
+    `STAGE_LOCK_TRIES` tries, then raises `StageLockBusyError`. The hold still closes,
+    its slot is free, and its pooled connection keeps no lock and no timeout."""
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TIMEOUT_MS", 50)
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TRIES", 2)
+    locks = StageLocks(lock_pool, 1)
+    busy, free = "a" * 64, "b" * 64
+    claimed = _claimed(pg_conninfo, object_lock_name("local", busy))
+    try:
+        async with locks.hold() as hold:
+            await asyncio.to_thread(hold.take, "local", free)
+            with pytest.raises(StageLockBusyError):
+                await asyncio.to_thread(hold.take, "local", busy)
+    finally:
+        claimed.close()
+    assert _lock_free(pg_conninfo, object_lock_name("local", free))
+    async with asyncio.timeout(5), locks.hold() as hold:
+        await asyncio.to_thread(hold.take, "local", busy)
+    with lock_pool.connection() as conn:
+        assert conn.execute("SHOW lock_timeout").fetchone() == {"lock_timeout": "0"}
+
+
+async def test_a_stage_hold_takes_the_lock_once_a_claim_ends_within_its_tries(
+    lock_pool: Pool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7756 review: a claim that ends while `take` still has tries left costs the save
+    a wait, not its failure."""
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TIMEOUT_MS", 200)
+    monkeypatch.setattr(index_module, "STAGE_LOCK_TRIES", 10)
+    sha = "c" * 64
+    name = object_lock_name("local", sha)
+    claimed = _claimed(pg_conninfo, name)
+    timer = threading.Timer(0.3, claimed.close)
+    timer.start()
+    try:
+        async with StageLocks(lock_pool, 1).hold() as hold:
+            await asyncio.to_thread(hold.take, "local", sha)
+            assert not _lock_free(pg_conninfo, name)
+    finally:
+        timer.cancel()
+        claimed.close()
+    assert _lock_free(pg_conninfo, name)

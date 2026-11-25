@@ -186,7 +186,8 @@ class LocalContentBackend:
         if cutoff.tzinfo is None:
             cutoff = cutoff.replace(tzinfo=UTC)
         removed = 0
-        for backend_id in await asyncio.to_thread(self._older_than, cutoff.timestamp()):
+        limit = cutoff.timestamp()
+        for backend_id in await asyncio.to_thread(self._older_than, limit):
             if await asyncio.to_thread(recorded, backend_id):
                 continue
             if claim is None:
@@ -194,10 +195,19 @@ class LocalContentBackend:
                 removed += 1
                 continue
             async with claim(backend_id) as free:
-                if free:
+                # Read again under the claim: a plain put (no stage hold) of the same
+                # bytes may have written the file afresh since `_older_than` (#7756 review).
+                if free and await asyncio.to_thread(self._written_before, backend_id, limit):
                     await self.remove(backend_id)
                     removed += 1
         return removed
+
+    def _written_before(self, backend_id: str, limit: float) -> bool:
+        """Whether the object is still there, last written before ``limit``."""
+        try:
+            return self._path(backend_id).stat().st_mtime < limit
+        except FileNotFoundError:
+            return False
 
     def _older_than(self, limit: float) -> list[str]:
         """The objects (not a write's staging file) last written before ``limit``."""
