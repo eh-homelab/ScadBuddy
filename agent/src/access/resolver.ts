@@ -1,6 +1,6 @@
 import type { RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
-import type { Tool, ToolOverrides } from '../tools/registry.js'
+import type { Tool, ToolOverride, ToolOverrides } from '../tools/registry.js'
 import { builtinItem, itemKindIn, strictest } from './items.js'
 import { type AccessRow, BUILTIN_SOURCES, isToolAccess, packageSource, registrySource, type StoredOverrides, type ToolAccess } from './model.js'
 import { isRegistrySource, pluginOverrides, registryOverrides, sourceEnabled, toolAccess } from './resolve.js'
@@ -50,6 +50,23 @@ export class AccessResolver {
         return { ...(access === own ? {} : { tier: access }), disabled: false }
       },
       disabled: async () => new Set((await this.registry()).disabled_tools),
+      snapshot: async () => {
+        const sources = [BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser]
+        const rows = this.reader ? await this.reader.rows(sources) : []
+        const browserOn = sourceEnabled(BUILTIN_SOURCES.browser, rows)
+        // As `of` above, from the one read's rows: no read per tool (#7731).
+        const of = (tool: string): ToolOverride => {
+          const own = this.risk.get(tool)
+          if (own === undefined || !this.reader) return { disabled: false }
+          const source = registrySource(tool)
+          const row = rows.find((r) => r.source === source && r.item === tool)
+          const access = source === BUILTIN_SOURCES.browser && !browserOn ? 'off' : toolAccess(own, row, isRegistrySource(source))
+          if (access === 'off') return { disabled: true }
+          return { ...(access === own ? {} : { tier: access }), disabled: false }
+        }
+        const disabled = new Set(registryOverrides(this.tools, rows).disabled_tools)
+        return { of: async (tool) => of(tool), disabled: async () => disabled }
+      },
     }
   }
 

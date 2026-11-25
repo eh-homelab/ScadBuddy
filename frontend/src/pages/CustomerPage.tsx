@@ -53,7 +53,7 @@ export function CustomerPage() {
       ),
     },
     { key: 'status', header: 'Status', cell: (o) => <OrderStatusBadge status={o.status} onHold={o.on_hold} /> },
-    { key: 'made', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (o) => timeAgo(o.created_at) },
+    { key: 'made', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (o) => timeAgo(o.submitted_at ?? o.created_at) },
   ]
 
   return (

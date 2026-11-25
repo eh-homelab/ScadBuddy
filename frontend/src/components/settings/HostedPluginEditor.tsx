@@ -123,11 +123,14 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
   // The versions' own order: only the mount and topic reads read them, so a save's draft read
   // (`reloadDraft`) never stops a newer list of versions from landing (#7672).
   const versionReads = useRef(0)
+  /** #7735 — orders the reads of the files: the mount read's and each save's (`reloadDraft`). */
+  const fileReads = useRef(0)
 
   const reloadDraft = useCallback(async () => {
     const mine = ++diffReads.current
+    const mineFiles = ++fileReads.current
     const [nextFiles, nextDiff] = await Promise.all([hostedPlugins.files(name), hostedPlugins.draftDiff(name)])
-    setFiles(nextFiles)
+    if (mineFiles === fileReads.current) setFiles(nextFiles)
     if (mine === diffReads.current) setDiff(nextDiff)
   }, [name])
 
@@ -138,6 +141,7 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     let live = true
     const mine = ++diffReads.current
     const mineVersions = ++versionReads.current
+    const mineFiles = ++fileReads.current
     const { record, result } = recordRead(
       () => Promise.all([hostedPlugins.files(name), hostedPlugins.draftDiff(name), hostedPlugins.versions(name)]),
       // A read whose diff a newer one replaced vouches for nothing.
@@ -147,7 +151,7 @@ export function HostedPluginEditor({ plugin, pkg, onPlugin, onPackage, onDeleted
     result.then(
       ([f, d, v]) => {
         if (!live) return
-        setFiles(f)
+        if (mineFiles === fileReads.current) setFiles(f)
         if (mineVersions === versionReads.current) setVersions(v)
         if (mine === diffReads.current) setDiff(d)
       },

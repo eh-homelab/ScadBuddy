@@ -12,12 +12,8 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.output_index import (
-    AfterNotListedError,
-    OutputIndex,
-    OutputQuery,
-    params_text,
-)
+from scadbuddy.library.output_index import OutputIndex
+from scadbuddy.library.output_query import AfterNotListedError, OutputQuery, params_text
 from scadbuddy.library.outputs import (
     INPUTS_NAME,
     META_NAME,

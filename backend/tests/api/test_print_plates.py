@@ -23,7 +23,7 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.printers.component import PRINTERS, Printers
-from tests.api.conftest import read_stored, set_plate_image, wait_for_job
+from tests.api.conftest import files_only, read_stored, set_plate_image, wait_for_job
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_kept, slice_routes
@@ -37,6 +37,13 @@ from tests.support.printers import linked_printer
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
+
+
+@pytest.fixture(autouse=True)
+def outputs_as_files(client: TestClient) -> None:
+    """These tests add plates to an output's file after its save: reads take the files
+    (`files_only`, #7257)."""
+    files_only(client)
 
 
 def _output_3mf(paths: DataPaths, output_id: str) -> Path:

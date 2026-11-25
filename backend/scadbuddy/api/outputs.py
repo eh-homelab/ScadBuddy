@@ -6,7 +6,7 @@ import logging
 import re
 import tarfile
 import zipfile
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
@@ -102,7 +102,7 @@ from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiErro
 from scadbuddy.core.tracing import span, traced_thread
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.output_index import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
+from scadbuddy.library.output_query import DEFAULT_LIMIT, AfterNotListedError, OutputQuery
 from scadbuddy.library.output_rows import Role
 from scadbuddy.library.outputs import (
     BACK_OFFICE,
@@ -1084,9 +1084,17 @@ async def list_recent_outputs(
     an output id; a page is `limit` outputs (50 when omitted) and `X-Total-Count` counts
     what the filters select. Outputs carry no tags: `tag` matches the model's catalogue
     tags, case and accents folded. The storefront slice run's outputs are left out unless
-    `include_storefront` (#6371)."""
-    index = outputs.index
-    if index is None:
+    `include_storefront` (#6371). Once a row copy run has finished, the list reads the
+    ``outputs`` rows; before that, ``output_index`` (#7257). `OutputRows.copied` queries
+    only until it first reads true; it then answers from memory, so a request on a
+    copied store runs no query for it."""
+    rows = outputs.rows
+    run: Callable[[OutputQuery], tuple[list[str], int]]
+    if rows is not None and await asyncio.to_thread(rows.copied):
+        run, on_index = rows.query, False
+    elif outputs.index is not None:
+        run, on_index = outputs.index.query, True
+    else:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
     slugs: list[str] | None = list(slug) if slug else None
     if tag is not None:
@@ -1104,20 +1112,22 @@ async def list_recent_outputs(
         limit=limit,
     )
     try:
-        ids, total = await asyncio.to_thread(index.query, query)
+        ids, total = await asyncio.to_thread(run, query)
     except AfterNotListedError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"no output {after!r} is listed any more to page after; list again without `after`",
         ) from None
     response.headers[TOTAL_COUNT_HEADER] = str(total)
-    metas = await asyncio.to_thread(_metas_or_forget, outputs, ids)
+    metas = await asyncio.to_thread(_metas_or_forget, outputs, ids, forget=on_index)
     return await _details(outputs, uploads, state.print_runs.store, metas)
 
 
-def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
-    """The outputs ``ids`` name, in order; a row whose output is gone (its model deleted
-    with its directory) is dropped from the index and from the page."""
+def _metas_or_forget(outputs: OutputStore, ids: list[str], *, forget: bool) -> list[OutputMeta]:
+    """The outputs ``ids`` name, in order; a row whose output is gone is left off the
+    page. With ``forget`` (the list read ``output_index``) it is dropped from the index
+    too: its model was deleted with its directory. An ``outputs`` row is the record, so
+    the list on rows forgets nothing (#7257)."""
     metas: list[OutputMeta] = []
     gone: list[str] = []
     for output_id in ids:
@@ -1127,7 +1137,7 @@ def _metas_or_forget(outputs: OutputStore, ids: list[str]) -> list[OutputMeta]:
             gone.append(output_id)
         except (OSError, ValueError):
             logger.warning("outputs: %s is unreadable; left out of the list", output_id)
-    if gone and outputs.index is not None:
+    if forget and gone and outputs.index is not None:
         outputs.index.forget(*gone)
     return metas
 
@@ -1148,7 +1158,7 @@ class OutputBytesStatus(BaseModel):
     #: outputs folder is missing or lists no slug folder while rows exist (the run then
     #: writes nothing). The next run tries again.
     incomplete: bool
-    #: Why the run copied nothing: no blob store (``local``), the ``bambuddy`` store, or
+    #: Why the run copied nothing: no content store, the ``bambuddy`` store, or
     #: a quota the bytes do not fit in (with the shortfall). ``None`` when it ran.
     refused: str | None
     #: Outputs whose row the run wrote with a blob it put or a key the row did not name
@@ -1199,6 +1209,9 @@ class OutputCopyStatus(BaseModel):
     damaged: list[dict[str, Any]]
     #: The last run of the byte copy (#7256); ``None`` before any.
     bytes: OutputBytesStatus | None = None
+    #: When the cut-over mark was written (#7257): the copies are done and stopped, and
+    #: the files are no longer the record. ``None`` before it.
+    cut_over_at: datetime | None = None
 
 
 # Before `/outputs/{output_id}`, which would take `copy-status` for an id.
@@ -1212,7 +1225,8 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
     a housekeeping sweep: when it started and finished, what it copied, refreshed and
     dropped, the folders it could not copy and the side files it left out. 404 before any
     run. ``bytes``: the last run of the copy of their bytes to the blob store (#7256), how
-    many rows the files still hold the bytes of, and the rows that name damage now."""
+    many rows the files still hold the bytes of, and the rows that name damage now.
+    ``cut_over_at``: when the cut-over mark was written (#7257); the copies stop at it."""
     rows = outputs.rows
     last = None if rows is None else await asyncio.to_thread(rows.last_run)
     if rows is None or last is None:
@@ -1222,7 +1236,8 @@ async def output_copy_status(outputs: OutputsDep) -> OutputCopyStatus:
         byte_run["pending"] = await asyncio.to_thread(rows.pending_bytes)
         count, sample = await asyncio.to_thread(rows.damage, DAMAGED_SAMPLE)
         byte_run["damaged_rows"], byte_run["damaged_sample"] = count, sample
-    return OutputCopyStatus.model_validate({**last, "bytes": byte_run})
+    cut_over_at = await asyncio.to_thread(rows.cut_over_at)
+    return OutputCopyStatus.model_validate({**last, "bytes": byte_run, "cut_over_at": cut_over_at})
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")

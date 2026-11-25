@@ -111,7 +111,9 @@ Anti-goals (a failure even if it works)
   `outputs` has the record columns (`output_id`, `slug`, `meta`, `params`, `inputs`,
   `record`, `manifest`, `bom`, `arranged_from`, `backfill`, `has_plate_cover`,
   `created_at`), plus `copied_at` and `files_stamp` for the copy (§6.5). `name`,
-  `source` and `params_text` stay in `output_index` until #7257. The blob key columns,
+  `source` and `params_text` stay in `output_index` in this phase (phase 3a adds them to
+  `outputs`, below; the storefront rule `saved_by_storefront_run` and the list's query
+  are in `library/output_query.py` since then). The blob key columns,
   `output_files` and `output_derived` come with #7256, the phase whose code writes them.
   Its indexes are `(slug, created_at)` and one on the rows with a `backfill`. Each run
   of the copy is a row of `output_copy_runs`.
@@ -124,6 +126,15 @@ Anti-goals (a failure even if it works)
   `attributed`, `asset_ids`, `plate_names` and `plate_cover` (plate 0 is the whole
   output; a plate cover row names the key of a small blob, or none). Each run of the
   byte copy is a row of `output_byte_runs`.
+- As built in phase 3a (#7257, `migrations/20261125T0758Z_outputs_cut_over.sql`):
+  `outputs` gains `name` and `source` (stored columns generated from `meta`; `source` is
+  `back_office` when `meta` has none) and `params_text` (a plain column, filled from
+  `output_index` and written by each save and each `OutputIndex.record`; NULL for a row
+  that a phase 2 pod saves), with the index `outputs_created` (`created_at`,
+  `output_id`, both descending). `output_cutover` holds the cut-over mark, one row (key
+  column `one`, as `ONLY` is a reserved word), with its time and the byte run it
+  followed. `output_claims` holds the id claims (`output_id`, `slug`, `claimed_at`).
+  `output_index` and `output_hold_slugs` stay until phase 3b drops them.
 
 ### 4.3 Blobs
 
@@ -200,8 +211,10 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    keys in batches. Before any put it checks the store's caps against the bytes and
    count of the rows still in files; past one it is `refused` and names the shortfall.
    That count can be more than it adds, never less: blobs a failed run already put are
-   counted again until the sweep removes them. It is refused on `local` (no content store, plan
-   Ruling R1) and on `bambuddy` (§6.4); a store migration to `bambuddy` is refused while
+   counted again until the sweep removes them. It is refused on `bambuddy` (§6.4). Phase 2
+   refused it on `local` too (no content store, plan Ruling R1); since phase 3a, `local`
+   keeps the outputs' blobs in a content store of their own under `data/output-blobs/`,
+   with no caps, and the copy runs there (#7257); a store migration to `bambuddy` is refused while
    any `output` blob exists. `GET /outputs/copy-status` answers its last run as `bytes`,
    with `pending`, the rows whose bytes the files still hold, and the rows' damage from
    every run (`damaged_rows`, `damaged_sample`). A missing file never drops a key the row
@@ -221,6 +234,28 @@ The fallback cover of a model becomes a query: the oldest output of the slug wit
    reapers' directory scans (they read rows), `OutputIndex.sync`'s glob, and
    `output_index`. The NFS folder is left in place, unread, as a backup; deleting it is
    the owner's step, outside this work.
+
+   As built: two releases (plan `docs/superpowers/plans/2026-11-25-outputs-cutover-phase-3.md`,
+   D1), because a phase 2 pod writes into an output's folder during a roll and fails when
+   it is missing. Release 3a keeps the phase 2 reads and every folder write. The API
+   writes the cut-over mark (`output_cutover`) when it gets both copies' advisory locks,
+   the last row copy run and the last byte run finished (the byte run with no `refused`
+   and no `failed`), and no row has `bytes_at` NULL. It tries at each start and after
+   each byte run that ended. After the mark, both copies do nothing (checked before and
+   under their locks); `GET /outputs/copy-status` names it as `cut_over_at`. After the
+   mark, a write into a missing folder skips its file step, and the hold reaper reads
+   rows only. The list and the print links read `outputs`. A save that names its id (a
+   quote's attempt, #5390) claims it in `output_claims` before its folder. Other saves
+   take a new id and no claim. As with a phase 2 pod's save, their holds are kept only
+   while they are younger than the grace. A claim ends with the save's row, a failed
+   save's release, or the reaper's prune past `ORPHAN_HOLD_GRACE`, which is so the claim's
+   lease: a save longer than that can lose its claim (phase 3b keeps a live save's claim). A
+   phase 2 pod that saves after the mark takes no table claim; its holds are kept only
+   within the grace. A phase 2 pod's row copy after the mark can leave a row with
+   `bytes_at` NULL; the runbook in `docs/architecture/data.md` "The cut-over" checks
+   `pending` and names the recovery. Release 3b (not built yet) is to remove the rest,
+   and its migration is to refuse to run without the mark or while a row has `bytes_at`
+   NULL.
 
 Each phase ships as one or more PRs, each releasable on its own.
 
