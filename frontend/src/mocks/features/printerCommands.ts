@@ -65,7 +65,9 @@ export function printerCommandsPublished(): number {
   return state.published
 }
 
-const startedKey = (printer: string, key: string) => `${printer}\n${key}`
+/** A run is keyed by its route as well as its printer and key, as the backend puts the action in the workflow id. */
+const startedKey = (printer: string, request: Request, key: string) =>
+  `${printer}\n${new URL(request.url).pathname}\n${key}`
 
 /**
  * The answer to a command whose `Idempotency-Key` already started one on `printer`: the same
@@ -73,7 +75,7 @@ const startedKey = (printer: string, key: string) => `${printer}\n${key}`
  */
 export function joined(printer: string, request: Request): Response | undefined {
   const key = request.headers.get('Idempotency-Key')
-  const first = key ? state.started.get(startedKey(printer, key)) : undefined
+  const first = key ? state.started.get(startedKey(printer, request, key)) : undefined
   if (!first) return undefined
   state.keys.push(key)
   if (first.workflowId && state.running.get(first.workflowId)?.done === false) {
@@ -124,12 +126,12 @@ export function commandAnswer(printer: string, request: Request, body: JsonBodyT
   state.keys.push(key)
   if (request.method !== 'GET') state.published += 1
   if (state.slow <= 0 && !state.latched) {
-    if (key) state.started.set(startedKey(printer, key), { body })
+    if (key) state.started.set(startedKey(printer, request, key), { body })
     return HttpResponse.json(body)
   }
   const workflow_id = `lan-command-mock-${++state.seq}`
   state.running.set(workflow_id, { printer, reads: state.slow, body, done: false })
-  if (key) state.started.set(startedKey(printer, key), { workflowId: workflow_id, body })
+  if (key) state.started.set(startedKey(printer, request, key), { workflowId: workflow_id, body })
   return HttpResponse.json({ workflow_id } satisfies LanCommandPending, { status: 202 })
 }
 
