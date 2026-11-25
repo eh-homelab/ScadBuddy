@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { EntityAttachment, EntityLink, EntityLinkInput, EntityLinkPatch, EntityAttachmentPatch, EntityProperty, PropertyValue } from '../../components/entities/api'
-import { ORDER_KINDS, PRINT_ARCHIVE, entityParts } from '../../components/entities/api'
+import { ORDER_KINDS, PRINT_ARCHIVE, REQUIRED_KINDS, entityParts } from '../../components/entities/api'
 import { THUMBNAILED } from '../../components/entities/attachmentMedia'
 import { parts, sha256, sniff } from './orders/attachments'
 import { itemSchemaOf, itemsTypedLike } from './inventory'
@@ -260,9 +260,20 @@ function keyProblem(sub: unknown, where: string, item: boolean): string | null {
   return null
 }
 
-export function schemaProblem(schema: Record<string, unknown> | undefined): string | null {
+export function schemaProblem(schema: Record<string, unknown> | undefined, kind?: string): string | null {
   if (!schema || typeof schema !== 'object') return 'a schema is a JSON object'
-  for (const k of Object.keys(schema)) if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
+  for (const k of Object.keys(schema)) {
+    if (k === 'required' && kind !== undefined && REQUIRED_KINDS.has(kind)) continue
+    if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
+  }
+  if ('required' in schema) {
+    // `_check_required`: a list of distinct keys the schema defines (#7703).
+    const required = schema.required
+    if (!Array.isArray(required) || required.some((k) => typeof k !== 'string') || new Set(required).size !== required.length) return '"required" is a list of distinct keys'
+    const defined = (schema.properties ?? {}) as Record<string, unknown>
+    const undefinedKey = required.find((k) => !(k in defined))
+    if (undefinedKey !== undefined) return `"required" names '${undefinedKey}', which "properties" does not define`
+  }
   if (schema.type !== 'object') return 'a schema\'s "type" is "object"'
   if ('additionalProperties' in schema && schema.additionalProperties !== true) return '"additionalProperties" may only be true'
   if ('$schema' in schema && schema.$schema !== DRAFT_2020_12) return `"$schema" may only be "${DRAFT_2020_12}"`
@@ -429,7 +440,7 @@ export const handlers = [
     if (kind === ITEM) return schemaOwnedByItemKind(request)
     const body = (await request.json()) as { schema?: Record<string, unknown> }
     const schema = body.schema
-    const problem = schemaProblem(schema)
+    const problem = schemaProblem(schema, kind)
     if (problem || !schema) return coded(request, 422, 'bad_property_schema', problem ?? 'a property schema is an object schema')
     entityMock.schemas[kind] = schema
     return HttpResponse.json({ kind, schema, keys_in_use: keysInUse(kind) })
