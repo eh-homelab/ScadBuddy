@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { getSpool, listSpoolEvents } from '../../../api/filament'
 import { spoolId } from '../../../mocks/features/filament/seed'
+import { server } from '../../../mocks/server'
 import { renderPage } from '../../../test/utils'
 import { WeightField } from './WeightField'
 
@@ -123,6 +125,20 @@ describe('WeightField (#7273)', () => {
     await user.click(screen.getByRole('button', { name: 'Save weight' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Type the weight first.')
     expect(await listSpoolEvents(spool.id)).toHaveLength(count)
+  })
+
+  it('still records the weighing when the check fails, as a plain reading (#7683)', async () => {
+    server.use(http.get('/api/v1/filament/spools/:id/insert-weight-offer', () => HttpResponse.json({ title: 'down' }, { status: 503 })))
+    const spool = await getSpool(spoolId(9))
+    const { user } = renderPage(<WeightField spool={spool} />)
+    await user.type(await screen.findByLabelText('Gross weight (g)'), '900')
+    // Tapped within the check's wait: the inline read fails too, and the weighing goes as today.
+    await user.click(screen.getByRole('button', { name: 'Save weight' }))
+    expect(await screen.findByText('Saved')).toBeInTheDocument()
+    const event = await lastWeighing(spool.id)
+    expect(event).toMatchObject({ grams_after: 720, data: { reading_g: 900, empty_source: 'insert' } })
+    expect(event?.data).not.toHaveProperty('resolution')
+    expect(screen.queryByRole('group', { name: /What is up/ })).toBeNull()
   })
 
   it('a Save before the check answered shows the question first and books nothing (#7683)', async () => {

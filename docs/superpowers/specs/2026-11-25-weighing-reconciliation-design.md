@@ -144,7 +144,7 @@ The change:
 spool reads at or under its label weight, and the page then books the reading less the
 placeholder empty weight. The change:
 
-- For a spool that is new by #7280's rule (added full, nothing consumed, grams left at
+- For a spool that is new by #7280's rule (nothing consumed, grams left at
   the label), a reading under the label weight makes the check answer `below_label`
   with `shortfall_g = label - reading` and three resolutions, each with its filament
   grams:
@@ -178,6 +178,10 @@ placeholder empty weight. The change:
 - As built in #7683: a weighing with a `resolution` keeps `expected_g` (what the ledger
   believed) and records `drift_g` null, so `last_drift_g` stays null and no Drift mark
   appears: the person just explained the gap (the owner's call of 2026-11-25).
+- As built in #7683: "new" is what `check_on` reads, the ledger's consumption and the grams
+  left at the label (`insert_weights.consumed` and `full`), never `added_full`; a spool
+  added with `added_full` false or unknown and its label's grams is new too, and `short`
+  on one already not added full books no `edited` event.
 
 ### 5.4 End of life (slice C, #7684)
 

@@ -201,7 +201,7 @@ def test_detail_carries_the_newest_weighing(pg_pool: PgPool) -> None:
 
 
 def _new_spool(pool: PgPool, **over: Any) -> UUID:
-    """A new spool by #7280's rule: added full, 1000 g left of a 1000 g label."""
+    """A new spool by #7280's rule: 1000 g left of a 1000 g label, nothing consumed."""
     return _spool(pool, _insert(pool), grams_left=1000, added_full=True, **over)
 
 
@@ -240,6 +240,17 @@ def test_short_marks_the_spool_not_added_full(pg_pool: PgPool) -> None:
     changes = _changes(pg_pool, spool)
     assert changes[-2] == ("edited", {"added_full": [True, False]})
     assert changes[-1][0] == "weighed"
+    assert FilamentSpoolStore(pg_pool).get(spool).added_full is False  # type: ignore[union-attr]
+
+
+@pg
+def test_short_on_a_spool_not_added_full_books_no_edit(pg_pool: PgPool) -> None:
+    """New by the check's reading of it (nothing consumed, grams at the label) though not
+    added full: `short` changes nothing on the row, so no `edited` event is booked."""
+    spool = _spool(pg_pool, _insert(pg_pool), grams_left=1000, added_full=False)
+    event = _weigh(pg_pool, spool, reading_g=800, resolution="short")
+    assert event.grams_after == 600 and event.data["resolution"] == "short"
+    assert [k for k, _ in _changes(pg_pool, spool)] == ["created", "weighed"]
     assert FilamentSpoolStore(pg_pool).get(spool).added_full is False  # type: ignore[union-attr]
 
 

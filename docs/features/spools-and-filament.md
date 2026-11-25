@@ -195,7 +195,7 @@ name). Design: `docs/superpowers/specs/2026-11-25-weighing-reconciliation-design
 
 ### A new spool's first weighing under the label weight (#7683)
 
-When a spool that is new by #7280's rule (added full, nothing consumed, grams left at the
+When a spool that is new by #7280's rule (nothing consumed, grams left at the
 label) reads under its label weight, the insert weight check
 (`GET /filament/spools/{id}/insert-weight-offer`) answers `reason` `below_label` with
 `shortfall_g` (the label less the reading), `resolutions` and `default`. Each resolution

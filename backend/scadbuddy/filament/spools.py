@@ -1423,10 +1423,10 @@ class FilamentSpoolStore:
         none and `ReadingBelowEmptyError` when the reading is under it. One with a
         ``resolution`` (#7683) is checked again under the row locks
         (`insert_weights.check_on`), `NoBelowLabelError` unless the check offers that
-        resolution now; ``short`` first writes ``added_full`` false and ``label_wrong``
-        the spool's own ``label_weight_g``, each with an ``edited`` event at the
-        weighing's time, in the same transaction; it keeps ``expected_g`` and records no
-        ``drift_g``, since the person explained the gap."""
+        resolution now; ``short`` first writes ``added_full`` false (unless it is false
+        already) and ``label_wrong`` the spool's own ``label_weight_g``, each with an
+        ``edited`` event at the weighing's time, in the same transaction; it keeps
+        ``expected_g`` and records no ``drift_g``, since the person explained the gap."""
         data: dict[str, Any] = {} if body.note is None else {"note": body.note}
         grams = body.grams
         # Read before the store takes its connection (`FilamentDefaults`' rule).
@@ -1519,7 +1519,7 @@ class FilamentSpoolStore:
         if check.reason != "below_label" or chosen is None:
             raise NoBelowLabelError(check.reason)
         changes: dict[str, list[Any]] | None = None
-        if chosen.kind == "short":
+        if chosen.kind == "short" and spool["added_full"] is not False:
             conn.execute(
                 "UPDATE filament_spools SET added_full = false, updated_at = now() WHERE id = %s",
                 (spool_id,),

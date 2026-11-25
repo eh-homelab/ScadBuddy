@@ -245,7 +245,7 @@ def test_a_reading_alone_needs_an_empty_weight(client: TestClient) -> None:
 
 
 def _new_spool(client: TestClient) -> dict[str, object]:
-    """New by #7280's rule: added full, 1000 g left of a 1000 g label, on a 200 g insert."""
+    """New by #7280's rule: 1000 g left of a 1000 g label, nothing consumed, on a 200 g insert."""
     return _spool(
         client,
         label_weight_g=1000,
