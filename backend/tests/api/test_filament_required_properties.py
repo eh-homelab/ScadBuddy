@@ -199,3 +199,28 @@ def test_a_catalog_save_is_checked_but_a_re_order_and_an_archive_are_not(
     saved = client.patch(path, json={"name": "Acme 2", "properties": {"site": "acme.test"}})
     assert saved.status_code == 200, saved.text
     assert saved.json()["missing_properties"] == []
+
+
+def test_an_invoice_line_proposed_type_takes_no_properties(client: TestClient) -> None:
+    supplier = client.post(f"{URL}/suppliers", json={"name": "Acme"}).json()["id"]
+    proposed = {
+        "code": "PLA-WHT",
+        "material_id": _material_id(client),
+        "rgba": "#FFFFFF",
+        "label_weight_g": 1000,
+        "properties": {"mpn": "M1"},
+    }
+    line = {"description": "x", "quantity": 1, "unit_price": "40.00", "proposed_type": proposed}
+    body = {
+        "supplier_id": supplier,
+        "invoice_date": "2026-11-01",
+        "currency": "USD",
+        "subtotal": "40.00",
+        "shipping": "0",
+        "tax": "0",
+        "total": "40.00",
+        "lines": [line],
+    }
+    refused = client.post(f"{URL}/invoices", json=body)
+    assert refused.status_code == 422, refused.text
+    assert "properties" in refused.text

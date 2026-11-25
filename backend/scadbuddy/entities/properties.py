@@ -50,8 +50,8 @@ TOP_KEYWORDS = frozenset(
     }
 )
 #: The kinds whose create and save check required keys (#7703, spec 6.3b): only their
-#: schema may hold `required`, so a mark never promises a check that does not run. An item's
-#: is its item kind's `attribute_schema`.
+#: schema may hold `required`, so a mark never promises a check that does not run. Items join
+#: when their create and save check too.
 REQUIRED_KINDS = frozenset(
     {
         "spool",
@@ -65,7 +65,6 @@ REQUIRED_KINDS = frozenset(
         "insert_type",
         "colour",
         "location_kind",
-        "item",
     }
 )
 #: The only keywords a known key's subschema may use. `enum`, `const`, `default` and

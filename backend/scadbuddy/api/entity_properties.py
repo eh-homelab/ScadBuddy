@@ -250,13 +250,17 @@ async def get_property_schema(kind: KindPath, entities: EntitiesDep) -> KindProp
         "Replaces the schema. It is a Draft 2020-12 object schema in a small subset that "
         "documents keys and never refuses one. Top level: `type` `object`, `properties`, "
         "`additionalProperties` `true`, `$schema` (the 2020-12 URI), `$comment`, `title`, "
-        "`description`, `examples`. Per key: `type` (string, number, integer, boolean, array, "
+        "`description`, `examples`, and, for a spool, a spool type or a filament catalog kind "
+        "only, `required` (distinct keys of `properties`, #7703). Per key: `type` (string, "
+        "number, integer, boolean, array, "
         'or a list of them with `"null"`), annotations, `enum`, `const`, number and length '
         "bounds, `format` (an annotation, not `regex`), `items` (strings), `minItems`, "
         "`maxItems`, `uniqueItems`; an `enum` or `const` must fit its key, and no bound may "
         "cross its pair or a cap. Anything else is 422 "
-        "`bad_property_schema`, naming the keyword, and the old schema stays. Values already "
-        "stored are not checked again. An item's schema is its item kind's "
+        "`bad_property_schema`, naming the keyword, and the old schema stays. The PUT rewrites "
+        "and refuses no stored value; for the kinds that may hold `required`, reads mark a "
+        "stored value that no longer fits (`invalid_properties`) and the row's next checked "
+        "save refuses it. An item's schema is its item kind's "
         "`attribute_schema`, so `item` is 409 `schema_owned_by_item_kind`."
     ),
     responses={
