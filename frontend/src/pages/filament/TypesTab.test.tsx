@@ -153,11 +153,17 @@ describe('the Types tab', () => {
 
     // #7159 — a row whose brand and colour a type has opens a choice instead of a duplicate.
     describe('when a type of the brand and colour exists (#7159)', () => {
-      /** The type PATCH bodies sent while `run` runs; the listener is dropped whatever happens. */
+      /**
+       * The bodies of the writes to a type while `run` runs: a PATCH, or the cost-only PUT that
+       * linking uses since #7703. The listener is dropped whatever happens.
+       */
       async function typePatches(run: () => Promise<void>): Promise<unknown[]> {
         const bodies: Promise<unknown>[] = []
         server.events.on('request:start', ({ request }) => {
-          if (request.method === 'PATCH' && request.url.includes('/filament/types/')) bodies.push(request.clone().json())
+          const path = new URL(request.url).pathname
+          const patch = request.method === 'PATCH' && /\/filament\/types\/[^/]+$/.test(path)
+          const cost = request.method === 'PUT' && /\/filament\/types\/[^/]+\/cost-per-kg$/.test(path)
+          if (patch || cost) bodies.push(request.clone().json())
         })
         try {
           await run()
@@ -232,11 +238,11 @@ describe('the Types tab', () => {
         expect(within(screen.getByTestId(`filament-${row.id}`)).getByRole('button', { name: /Make a type/ })).toBeInTheDocument()
       })
 
-      // #7344: the dialog's warning is a forecast of the server's match; the PATCH answer's `filament_id` is the truth.
+      // #7344: the dialog's warning is a forecast of the server's match; the write's answer `filament_id` is the truth.
       it('says which row the server linked, not what the dialog forecast', async () => {
         const row = await api.createFilament({ material: 'PLA', brand: 'Elegoo', colour: '#D4AF37', cost_per_kg: '21' })
         server.use(
-          http.patch('/api/v1/filament/types/:id', async ({ request, params }) => {
+          http.put('/api/v1/filament/types/:id/cost-per-kg', async ({ request, params }) => {
             const type = (await listTypes()).find((one) => one.id === params.id)
             return HttpResponse.json({ ...type, ...((await request.json()) as object), filament_id: row.id })
           }),
