@@ -5,7 +5,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { printerKProfileTools } from '../src/tools/printerKProfiles.js'
 import { printerSlotTools } from '../src/tools/printerSlots.js'
-import { idempotencyKey, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { idempotencyKey, type Tool, type ToolContext, ToolError } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #7162, #7276 Task 10: a printer's K-profiles over ScadBuddy's LAN link
@@ -205,6 +205,155 @@ describe('K-profile tools (#7162)', () => {
     const del = tool('printer_kprofile_note_delete')
     await del.execute(del.parse({ printer_id: PRINTER, setting_id: 'PF00000000000000001' }), ctx())
     expect(deleted).toEqual(['PF00000000000000001'])
+  })
+
+  it('fails a follow that gets no answer with the command id, the chance it was applied and printer_command_get', async () => {
+    let follows = 0
+    server.use(
+      http.post(`${BASE}/kprofiles`, () => HttpResponse.json({ workflow_id: COMMAND }, { status: 202 })),
+      http.get(`${BASE}/commands/:command_id`, () => {
+        follows++
+        return new HttpResponse('bad gateway', { status: 502 })
+      }),
+    )
+    const t = tool('printer_kprofile_set')
+    const failure = await t.execute(t.parse({ printer_id: PRINTER, ...PROFILE }), ctx()).then(
+      () => undefined,
+      (e: unknown) => e,
+    )
+    expect(failure).toBeInstanceOf(ToolError)
+    const text = (failure as Error).message
+    expect(text).toContain(COMMAND)
+    expect(text).toMatch(/may already have reached the printer/)
+    expect(text).toMatch(/printer_command_get/)
+    expect(follows).toBeGreaterThan(1)
+  })
+
+  for (const [status, code] of [
+    [404, 'command_not_found'],
+    [409, 'printer_refused'],
+  ] as const) {
+    it(`makes a follow that answers ${status} \`${code}\` a ToolError`, async () => {
+      server.use(
+        http.post(`${BASE}/kprofiles`, () => HttpResponse.json({ workflow_id: COMMAND }, { status: 202 })),
+        http.get(`${BASE}/commands/:command_id`, () =>
+          HttpResponse.json(
+            { title: 'Refused', status, detail: `the command: ${code}`, code },
+            { status, headers: { 'content-type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const t = tool('printer_kprofile_set')
+      const failure = await t.execute(t.parse({ printer_id: PRINTER, ...PROFILE }), ctx()).then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+      expect(failure).toBeInstanceOf(ToolError)
+      expect((failure as Error).message).toMatch(new RegExp(`HTTP ${status}`))
+    })
+  }
+
+  it('ends the call when it is aborted during the follow sleep', async () => {
+    const abort = new AbortController()
+    let follows = 0
+    server.use(
+      http.post(`${BASE}/kprofiles`, () => {
+        setTimeout(() => abort.abort(), 20)
+        return HttpResponse.json({ workflow_id: COMMAND }, { status: 202 })
+      }),
+      http.get(`${BASE}/commands/:command_id`, () => {
+        follows++
+        return HttpResponse.json({ workflow_id: COMMAND }, { status: 202 })
+      }),
+    )
+    const t = tool('printer_kprofile_set')
+    const began = performance.now()
+    await expect(
+      t.execute(t.parse({ printer_id: PRINTER, ...PROFILE }), ctx({ signal: abort.signal, pollIntervalMs: 60_000 })),
+    ).rejects.toThrow()
+    expect(performance.now() - began).toBeLessThan(10_000)
+    expect(follows).toBe(0)
+  })
+
+  it('sends a set whose answer was lost again under the same key, and it is applied once', async () => {
+    const keys: (string | null)[] = []
+    const applied = new Set<string | null>()
+    let publishes = 0
+    server.use(
+      http.post(`${BASE}/kprofiles`, ({ request }) => {
+        const key = request.headers.get('Idempotency-Key')
+        keys.push(key)
+        // The backend answers a key it has seen from its first run (P38).
+        if (!applied.has(key)) {
+          applied.add(key)
+          publishes++
+        }
+        if (keys.length === 1) return HttpResponse.error()
+        return HttpResponse.json({ success: true, confirmed: true, message: '' })
+      }),
+    )
+    const t = tool('printer_kprofile_set')
+    const call = ctx({ callKey: 'call-lost' })
+    const result = await t.execute(t.parse({ printer_id: PRINTER, ...PROFILE }), call)
+    expect(firstText(result)).toEqual({ success: true, confirmed: true, message: '' })
+    expect(keys).toEqual([idempotencyKey(call), idempotencyKey(call)])
+    expect(publishes).toBe(1)
+  })
+
+  it('counts a name and a note key in code points, as the backend does', () => {
+    const set = tool('printer_kprofile_set')
+    const astral = '\u{1F600}'
+    expect(() => set.parse({ printer_id: PRINTER, ...PROFILE, name: astral.repeat(64) })).not.toThrow()
+    expect(() => set.parse({ printer_id: PRINTER, ...PROFILE, name: astral.repeat(65) })).toThrow()
+    const note = tool('printer_kprofile_note_set')
+    expect(() => note.parse({ printer_id: PRINTER, setting_id: astral.repeat(256), note: 'x' })).not.toThrow()
+    expect(() => note.parse({ printer_id: PRINTER, setting_id: astral.repeat(257), note: 'x' })).toThrow()
+  })
+
+  it('refuses a note key of . or .., which no DELETE could reach', () => {
+    const set = tool('printer_kprofile_note_set')
+    const del = tool('printer_kprofile_note_delete')
+    for (const key of ['.', '..']) {
+      expect(() => set.parse({ printer_id: PRINTER, setting_id: key, note: 'x' })).toThrow()
+      expect(() => del.parse({ printer_id: PRINTER, setting_id: key })).toThrow()
+    }
+    expect(() => set.parse({ printer_id: PRINTER, setting_id: '...', note: 'x' })).not.toThrow()
+    expect(() => del.parse({ printer_id: PRINTER, setting_id: '...' })).not.toThrow()
+  })
+
+  it('names every refusal of the LAN link in each printer command tool', () => {
+    const commands = [
+      'printer_kprofiles_get',
+      'printer_kprofile_set',
+      'printer_kprofile_batch_set',
+      'printer_kprofile_delete',
+      'printer_slot_configure',
+      'printer_slot_reset',
+      'printer_slot_refresh',
+      'printer_slot_load',
+      'printer_slot_unload',
+    ]
+    for (const name of commands) {
+      const { description } = tool(name)
+      expect(description, name).toMatch(/409 `not_lan_linked`|`not_lan_linked`/)
+      expect(description, name).toMatch(/`printer_cert_changed`[^.]*Settings > Printers/)
+      expect(description, name).toMatch(/502 `printer_unreachable`/)
+      expect(description, name).toMatch(/503 `lan_unavailable`/)
+    }
+  })
+
+  it('marks every printer write keyed, and nothing else here (P53)', () => {
+    const keyed = [...printerKProfileTools, ...printerSlotTools].filter((t) => t.keyed).map((t) => t.name).sort()
+    expect(keyed).toEqual([
+      'printer_kprofile_batch_set',
+      'printer_kprofile_delete',
+      'printer_kprofile_set',
+      'printer_slot_configure',
+      'printer_slot_load',
+      'printer_slot_refresh',
+      'printer_slot_reset',
+      'printer_slot_unload',
+    ])
   })
 
   it('no slot or K-profile tool says Bambuddy', () => {

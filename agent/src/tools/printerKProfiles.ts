@@ -14,7 +14,8 @@ export const SOURCE = LAN_SOURCE
 const printerId = z.string().uuid().describe("A registry printer's id (the `id` get_printers_now lists)")
 const nozzleDiameter = z.enum(['0.2', '0.4', '0.6', '0.8'])
 
-// The backend's bounds (printers/kprofiles.py).
+// The backend's bounds (printers/kprofiles.py). A string's `max` counts code points, as pydantic's
+// does: zod 4 measures a string over the bound by `util.codePointLength` (zod/v4/core/checks.js).
 const NOZZLE_ID = /^([A-Z]{2}[0-9]{2}(-[0-9]\.[0-9])?)?$/
 const FILAMENT_ID = /^[A-Za-z0-9_.+-]{1,64}$/
 const SETTING_ID = /^[A-Za-z0-9_.+-]{0,64}$/
@@ -30,7 +31,9 @@ const NOTE_KEY_MAX = 256
 const STATE =
   ' ScadBuddy reaches the printer over its LAN link: 409 `not_lan_linked` for a printer not linked over the ' +
   'LAN, `printer_offline` when it has not been heard from lately, `printer_refused` when it refuses the ' +
-  'command; 502 `printer_unreachable`; 404 for an unknown printer. A slow printer answers `status: "running"` ' +
+  'command, `printer_cert_changed` when it presents another certificate (re-link the printer in Settings > ' +
+  'Printers); 502 `printer_unreachable`; 503 `lan_unavailable` when ScadBuddy cannot use its LAN link now; 404 ' +
+  'for an unknown printer. A slow printer answers `status: "running"` ' +
   'with a `command_id`: read it with printer_command_get.'
 const ONCE =
   ' Sent once under this call\'s key: a lost answer is sent again under the same key and reaches the printer ' +
@@ -56,6 +59,9 @@ const noteKey = z
   .max(NOTE_KEY_MAX)
   .regex(PRINTABLE)
   .refine((key) => !key.includes('/'), 'cannot hold a /')
+  // A path segment of `.` or `..` is normalised away before the DELETE reaches its route, so
+  // a note under one could never be deleted; the backend refuses both (printers/kprofiles.py).
+  .refine((key) => key !== '.' && key !== '..', 'cannot be . or ..')
   .describe("The note's key: the profile's `setting_id`, else `slot_<slot>_<filament>_<extruder>`, else `name_<name>_<filament>`")
 
 export const printerKProfileTools: Tool[] = [
@@ -109,6 +115,7 @@ export const printerKProfileTools: Tool[] = [
     description: 'Add a K-profile to the printer (`slot_id` 0), or edit the profile in a slot.' + ONCE + STATE,
     input: profile.extend({ printer_id: printerId }),
     risk: 'outward',
+    keyed: true,
     source: SOURCE,
     routes: ['POST /api/v1/printers/{printer_id}/kprofiles'],
     summarize: ({ printer_id, name, k_value, nozzle_diameter, slot_id }) =>
@@ -138,6 +145,7 @@ export const printerKProfileTools: Tool[] = [
         .refine((rows) => new Set(rows.map((row) => row.nozzle_diameter)).size === 1, 'every profile has the same nozzle_diameter'),
     }),
     risk: 'outward',
+    keyed: true,
     source: SOURCE,
     routes: ['POST /api/v1/printers/{printer_id}/kprofiles/batch'],
     summarize: ({ printer_id, profiles }) =>
@@ -169,6 +177,7 @@ export const printerKProfileTools: Tool[] = [
       setting_id: z.string().regex(SETTING_ID).optional(),
     }),
     risk: 'outward',
+    keyed: true,
     source: SOURCE,
     routes: ['POST /api/v1/printers/{printer_id}/kprofiles/delete'],
     summarize: ({ printer_id, slot_id, filament_id, nozzle_diameter }) =>

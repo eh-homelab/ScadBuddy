@@ -26,7 +26,9 @@ const SOURCE = LAN_SOURCE
 const STATE =
   " The backend reads the printer's latest LAN report first and refuses with 409 and a `code`: `not_lan_linked` " +
   '(the printer is not linked over the LAN), `printer_offline` (not heard from lately), `printer_busy` (a print ' +
-  'is active), `ams_busy`, `no_slot`; `printer_refused` when the printer refuses the command.'
+  'is active), `ams_busy`, `no_slot`; `printer_refused` when the printer refuses the command, ' +
+  '`printer_cert_changed` when it presents another certificate (re-link the printer in Settings > Printers); ' +
+  '502 `printer_unreachable`; 503 `lan_unavailable` when ScadBuddy cannot use its LAN link now.'
 const ASK =
   " Sent once under this call's key: a lost answer is sent again under the same key and reaches the printer " +
   'once. A slow printer answers `status: "running"` with a `command_id`: read it with printer_command_get, ' +
@@ -43,6 +45,7 @@ function slotCommand(action: Action, label: string, description: string): Tool {
     description: description + STATE + ASK,
     input: slotInput,
     risk: 'outward',
+    keyed: true,
     source: SOURCE,
     routes: [`POST /api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/${action}`],
     summarize: ({ printer_id, ams_id, tray_id }) => `${label}: slot ${ams_id}/${tray_id} of printer ${printer_id}`,
@@ -115,6 +118,7 @@ export const printerSlotTools: Tool[] = [
       k_value: z.number().min(0).lt(10).optional(),
     }),
     risk: 'outward',
+    keyed: true,
     source: SOURCE,
     routes: ['POST /api/v1/printers/{printer_id}/trays/{ams_id}/{tray_id}/configure'],
     summarize: ({ printer_id, ams_id, tray_id }) => `Configure slot ${ams_id}/${tray_id} of printer ${printer_id}`,

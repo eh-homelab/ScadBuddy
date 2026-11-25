@@ -64,6 +64,8 @@ export async function printerCommand<T>(
           signal: ctx.signal,
         }),
       `read ${what}`,
+      ` Command ${command_id} may already have reached the printer: read its outcome with ` +
+        `printer_command_get (printer_id, command_id) before anything else; do not send it again.`,
     )
   }
   return (await ok(Promise.resolve(result), what)) as T
