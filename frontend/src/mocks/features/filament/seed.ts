@@ -79,6 +79,7 @@ export function sbSpool(look: Look): FilamentSpool {
     grams_left: look.grams_left,
     last_weighed_g: null,
     last_weighed_at: null,
+    last_drift_g: null,
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
@@ -89,6 +90,7 @@ export function sbSpool(look: Look): FilamentSpool {
     created_at: AT,
     updated_at: AT,
     low_stock: false,
+    drift_notice: false,
     overridden: [],
     names: { material: look.material, subtype: look.subtype ?? null, brand: look.brand },
     effective: { colour_name: look.colour_name, rgba: look.rgba, cost_per_kg: look.cost_per_kg, label_weight_g: 1000 },
@@ -351,7 +353,7 @@ const typeKValues = (): S['TypeKValue'][] => [
 // -- spools ---------------------------------------------------------------------------
 
 /** A spool's own columns, as `filament_spools` holds them: an override, or `null`. */
-export type SpoolRow = Omit<FilamentSpool, 'effective' | 'overridden' | 'names' | 'low_stock'>
+export type SpoolRow = Omit<FilamentSpool, 'effective' | 'overridden' | 'names' | 'low_stock' | 'drift_notice'>
 
 function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
   return {
@@ -385,6 +387,7 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
     grams_left: null,
     last_weighed_g: null,
     last_weighed_at: null,
+    last_drift_g: null,
     last_dried_at: null,
     last_dried_temp_c: null,
     last_dried_hours: null,
@@ -400,7 +403,8 @@ function spool(number: number, values: Partial<SpoolRow>): SpoolRow {
 
 function spools(): SpoolRow[] {
   return [
-    spool(1, { type_id: T.JADE, grams_left: 640, location_id: L.SHELF_A, last_weighed_g: 640, last_weighed_at: '2026-11-14T18:00:00Z' }),
+    // #7682: its newest weighing has a breakdown (`events()`), so its drift is on the row.
+    spool(1, { type_id: T.JADE, grams_left: 640, location_id: L.SHELF_A, last_weighed_g: 640, last_weighed_at: '2026-11-14T18:00:00Z', last_drift_g: -12 }),
     spool(2, { type_id: T.ORANGE, created_at: '2026-11-01T09:00:00Z', grams_left: 820, location_id: L.DRY_BOX, last_weighed_g: 820, last_weighed_at: '2026-11-13T09:00:00Z', last_used_at: '2026-11-09T11:00:00Z', hours_outside_dry: 61.5, last_dried_at: '2026-11-12T09:00:00Z', last_dried_temp_c: 65, last_dried_hours: '8' }),
     spool(3, { type_id: T.PINK, grams_left: 930, location_id: L.SHELF_A }),
     // Bambuddy added it when its AMS read the tag (#7149: `data_origin`).
@@ -482,7 +486,8 @@ function events(): S['SpoolEvent'][] {
   })
   const printer = { printer_id: H2C.printer_id, ams_id: 0, tray_id: 0 }
   return [
-    ...spools().map((row) => event(row.number, '2026-11-01T09:00:00Z', 'created')),
+    // #4 came from a Bambuddy pull (#7682: its anchor is Bambuddy's grams, not a reading).
+    ...spools().map((row) => event(row.number, '2026-11-01T09:00:00Z', 'created', row.number === 4 ? { source: 'bb', grams_after: 268, ref_kind: 'bb_spool', ref_id: 'bb-4', actor: 'bambuddy' } : {})),
     event(19, '2026-11-01T10:00:00Z', 'tag_bound', { data: { tag_id: TAG.MOVED } }),
     event(4, '2026-11-02T09:00:00Z', 'tag_bound', { data: { tag_id: TAG.BLACK } }),
     event(4, '2026-11-02T09:10:00Z', 'loaded', { ...printer, source: 'person' }),
@@ -495,7 +500,8 @@ function events(): S['SpoolEvent'][] {
     event(3, '2026-10-30T10:00:00Z', 'print_ended', { source: 'print_actual', delta_g: -20, ref_kind: 'print_run', ref_id: 'run1/job-a/0', actor: null, data: { job: 'job-a' } }),
     event(3, '2026-10-30T10:01:00Z', 'print_ended', { source: 'print_actual', delta_g: -20, ref_kind: 'bb_usage', ref_id: 'usage-a', actor: null, data: { job: 'job-a' } }),
     event(10, '2026-10-30T11:00:00Z', 'print_started', { source: 'print_estimate', delta_g: -30, ref_kind: 'print_run', ref_id: 'run2/job-b/0', actor: null, data: { job: 'job-b' } }),
-    event(1, '2026-11-14T18:00:00Z', 'weighed', { source: 'scale', grams_before: 655, grams_after: 640, delta_g: -15 }),
+    // #7682: a weighing with its breakdown: the reading, the insert taken off, what the ledger expected.
+    event(1, '2026-11-14T18:00:00Z', 'weighed', { source: 'scale', grams_before: 655, grams_after: 640, delta_g: -15, data: { reading_g: 890, empty_g: 250, empty_source: 'insert', empty_basis: 'catalog', empty_name: 'Bambu reusable spool', expected_g: 652, drift_g: -12 } }),
     // #6269 — #2's life, for its timeline and grams chart: readings the grams anchor on, a
     // Bambuddy plate with its print (archive 41), a plate of an order's run, a failed plate,
     // a move, an assistant's edit and a person's reset, a type's edit, a drying, and an AMS

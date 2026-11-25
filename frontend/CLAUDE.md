@@ -419,7 +419,9 @@ same way, `vite.config.ts`).
   an unapproved install or a re-pin, never an approval. Offer runs the same install for a version
   a failed offer left unoffered. Publish, Offer and Delete are `USER_ONLY`. Close, or Edit on
   another plugin, asks before it drops unsaved files. The two
-  package panels tell each other of a change (`packagesChanged.ts`). Mocks
+  package panels tell each other of a change (`packagesChanged.ts`), and both, with the open
+  editor, read again on the realtime topic `plugin-packages` (`plugin_packages.changed`, #7460),
+  so a publish, re-pin, approval or delete made elsewhere shows without a reload. Mocks
   `src/mocks/features/hostedPlugins.ts` (seeds `print-notes`, version 1 never offered), which
   tell `mocks/aiPlugins.ts` what an Offer installs (`setHostedLookup`). e2e `e2e/hosted-plugins.spec.ts`.
 - `frontend/src/lib/appLinks.ts` (`appUrl`, `useAppUrl`, `components/AppLink.tsx`) — links

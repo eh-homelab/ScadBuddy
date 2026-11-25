@@ -153,7 +153,9 @@ def test_native_spools_uses_and_tags_are_copied(pg_conninfo: str) -> None:
             ("print_ended", "print_actual", 0, "print_run", "r3/s/2", "not_applied"),
         ]
 
-        # A first refresh from the ledger does not move the copied value.
+        # A first refresh from the ledger does not move the copied value. Today's
+        # `refresh_derived` writes every derived column, so the rest of the schema first.
+        migrate(conn, MIGRATIONS)
         conn.commit()
     with psycopg.connect(pg_conninfo, row_factory=dict_row) as rows:
         refresh_derived(rows, live[0])

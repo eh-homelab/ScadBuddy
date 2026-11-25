@@ -381,3 +381,42 @@ def test_a_schema_check_keeps_the_deadline_that_is_set() -> None:
     finally:
         patterns_deadline.reset(token)
     assert "to check together" in problem
+
+
+def _past_deadline(schema: dict[str, Any], **kwargs: Any) -> list[str]:
+    token = patterns_deadline.set(time.monotonic() - 1)
+    try:
+        return schema_problems(schema, **kwargs)
+    finally:
+        patterns_deadline.reset(token)
+
+
+def test_a_default_whose_pattern_times_out_raises_for_a_retry() -> None:
+    """#7437: a prompt's task tries again; the message never quotes the value."""
+    nested = _top(
+        o={"type": "object", "additionalProperties": False, "properties": {"x": SLOW_DEFAULT}}
+    )
+    for schema, kwargs in ((_top(x=SLOW_DEFAULT), {}), (nested, {"objects": True})):
+        with pytest.raises(input_schema.PatternsTimedOutError) as err:
+            _past_deadline(schema, retry_timeouts=True, **kwargs)
+        assert str(SLOW_DEFAULT["default"]) not in str(err.value)
+
+
+def test_a_timed_out_default_is_refused_when_the_schema_has_another_problem() -> None:
+    bad = {"type": "string", "pattern": "^a$", "maxLength": 5, "default": 3}
+    problems = _past_deadline(_top(x=SLOW_DEFAULT, y=bad), retry_timeouts=True)
+    assert problems == ["y: default does not fit: 3 is not of type 'string'"]
+
+
+def test_a_timed_out_default_is_refused_without_retry_timeouts() -> None:
+    [problem] = _past_deadline(_top(x=SLOW_DEFAULT))
+    assert problem.startswith("x: default does not fit:")
+
+
+def test_a_default_with_a_timeout_and_a_real_error_names_the_real_error() -> None:
+    """#7688: the refusal is jsonschema's pick among the real errors, so a timeout does
+    not hide a value that is too long; and it is a refusal, not a retry."""
+    both = {**SLOW_DEFAULT, "maxLength": 8}
+    [problem] = _past_deadline(_top(x=both), retry_timeouts=True)
+    assert problem.startswith("x: default does not fit:") and "too long" in problem
+    assert "to check" not in problem

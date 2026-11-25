@@ -62,6 +62,9 @@ _DECISION = (
     " input_hash, hops, created_at"
 )
 _DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
+#: The decision that a row has, by `_decided`'s values.
+_IS = "outcome = %s AND response = %s::jsonb AND responder = %s"
+_SAME = f"({_IS} AND input_hash IS NOT DISTINCT FROM %s)"
 #: An operation on a run's parked call: a task's id is its prompt's call id.
 _ON_CALL = "subject = %s AND coalesce(request->>'task_id', request->>'call_id') = %s"
 _GRANT = (
@@ -439,21 +442,23 @@ class FlowStore:
         """Every operation on record for the call; a running one with its request."""
         return await asyncio.to_thread(self._call_operations, run_id, call_id)
 
-    async def take_over_answer(
+    async def take_over_decision(
         self, decision: Decision, *, held: Decision, seen: list[str] | None
     ) -> bool:
-        """Put `decision`'s answer in the row of `held` (#7575), only while the row has
-        `held`'s answer and the call has no operation but those `seen`, under the row's
-        lock. With `seen` None, whatever operations it has: `decision`'s answer is in the
-        run. True too when the row has `decision`'s answer already; False otherwise."""
-        return await asyncio.to_thread(self._take_over_answer, decision, held, seen)
+        """Put a person's `decision` in the row of `held`, another of theirs (#7575, #7588),
+        only while the row has `held` and the call has no operation but those `seen`, under
+        the row's lock. An approval or denial only while the call waits too, under the run's
+        lock. With `seen` None, whatever operations it has: `decision`'s Update is in the
+        run; an approval is never put back so. True too when the row has `decision` already;
+        False otherwise."""
+        return await asyncio.to_thread(self._take_over_decision, decision, held, seen)
 
-    async def withdraw_answer(self, decision: Decision) -> None:
-        """Undo an answer that did not land, only while the row has that very answer."""
-        await asyncio.to_thread(self._withdraw_answer, decision)
+    async def withdraw_decision(self, decision: Decision) -> None:
+        """Undo a decision that did not land, only while the row has that very decision."""
+        await asyncio.to_thread(self._withdraw_decision, decision)
 
     async def delete_decision(self, request_id: str) -> None:
-        """Undo a decision the harness refused: no `approved` row for a call it never ran."""
+        """Undo whatever decision the row has. For a worker from before #7588."""
         await asyncio.to_thread(self._delete_decision, request_id)
 
     async def withdraw_grant_decision(self, request_id: str) -> None:
@@ -935,10 +940,11 @@ class FlowStore:
                 return True
             # In SQL: jsonb writes some numbers (1e23) another way than they came. Locked: a
             # take-over under way ends first, and a later one sees this caller's operation.
+            # With no hash: a worker from before #7588, which resent an approval so.
             held = conn.execute(
-                "SELECT outcome = %s AND response = %s::jsonb AS same"
+                f"SELECT {_IS} AND (%s::text IS NULL OR input_hash = %s) AS same"
                 " FROM workflow_run_decisions WHERE request_id = %s FOR SHARE",
-                (decision.outcome, Jsonb(decision.response), decision.request_id),
+                (*_decided(decision), decision.input_hash, decision.request_id),
             ).fetchone()
         return held is not None and bool(held["same"])
 
@@ -949,6 +955,26 @@ class FlowStore:
                 (request_id,),
             ).fetchone()
         return Decision.model_validate(row) if row else None
+
+    def _waits(self, conn: Connection[DictRow], decision: Decision) -> bool:
+        """Whether the decision's call waits for one in the run's current execution. The
+        run's row stays locked: a call that is let through takes itself off it before it
+        reads its decision (`flow_tools._approved`)."""
+        row = conn.execute(
+            f"SELECT {_RUN}, waiting_done FROM workflow_runs WHERE id = %s FOR SHARE",
+            (decision.run_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        run = Run.model_validate(row)
+        execution = decision.workflow_run_id
+        return (
+            run.status not in TERMINAL
+            and run.workflow_run_id == execution
+            and any(w.call_id == decision.call_id and w.kind == "approval" for w in run.waiting_on)
+            # A late copy of the call's park lists it again.
+            and not _ended(run, _done(row), decision.call_id, execution)
+        )
 
     def _record_grant_decision(self, decision: Decision) -> bool:
         grant_id = decision.responder.removeprefix("grant:")
@@ -1120,22 +1146,32 @@ class FlowStore:
     def _call_operations(self, run_id: str, call_id: str) -> list[CallOperation]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, CASE WHEN status = 'running' THEN request END AS request"
+                "SELECT id, workflow_id, CASE WHEN status = 'running' THEN request END AS request"
                 f" FROM operations WHERE {_ON_CALL}",
                 (f"flow:{run_id}", call_id),
             ).fetchall()
         return [CallOperation.model_validate(row) for row in rows]
 
-    def _take_over_answer(self, decision: Decision, held: Decision, seen: list[str] | None) -> bool:
+    def _take_over_decision(
+        self, decision: Decision, held: Decision, seen: list[str] | None
+    ) -> bool:
+        if decision.responder != "browser":
+            return False
+        # A call that is let through may have read its row. One that is denied reads none.
+        if decision.kind == "approval" and seen is None and decision.outcome != "denied":
+            return False
         with self._pool.connection() as conn, conn.transaction():
+            # The run's row first, as `_record_decision` locks them.
+            waits = decision.kind == "answer" or seen is None or self._waits(conn, decision)
             row = conn.execute(
-                "SELECT response = %s::jsonb AS same, response = %s::jsonb AS held"
-                " FROM workflow_run_decisions WHERE request_id = %s AND kind = 'answer'"
+                f"SELECT {_SAME} AS same, {_SAME} AS held"
+                " FROM workflow_run_decisions WHERE request_id = %s AND kind = %s"
                 " AND responder = %s FOR UPDATE",
                 (
-                    Jsonb(decision.response),
-                    Jsonb(held.response),
+                    *_decided(decision),
+                    *_decided(held),
                     decision.request_id,
+                    decision.kind,
                     decision.responder,
                 ),
             ).fetchone()
@@ -1149,21 +1185,28 @@ class FlowStore:
                 f"SELECT 1 FROM operations WHERE {_ON_CALL} AND NOT id = ANY(%s::text[]) LIMIT 1",
                 (f"flow:{decision.run_id}", decision.call_id, seen),
             ).fetchone()
-            if not row["held"] or unseen is not None:
+            if not waits or not row["held"] or unseen is not None:
                 return False
             conn.execute(
-                "UPDATE workflow_run_decisions SET response = %s,"
-                " created_at = coalesce(%s, now()) WHERE request_id = %s",
-                (Jsonb(decision.response), decision.created_at, decision.request_id),
+                "UPDATE workflow_run_decisions SET outcome = %s, response = %s, input_hash = %s,"
+                " hops = %s, created_at = coalesce(%s, now()) WHERE request_id = %s",
+                (
+                    decision.outcome,
+                    Jsonb(decision.response),
+                    decision.input_hash,
+                    _hops(decision.hops),
+                    decision.created_at,
+                    decision.request_id,
+                ),
             )
         return True
 
-    def _withdraw_answer(self, decision: Decision) -> None:
+    def _withdraw_decision(self, decision: Decision) -> None:
         with self._pool.connection() as conn:
             conn.execute(
-                "DELETE FROM workflow_run_decisions WHERE request_id = %s AND kind = 'answer'"
-                " AND response = %s::jsonb",
-                (decision.request_id, Jsonb(decision.response)),
+                "DELETE FROM workflow_run_decisions WHERE request_id = %s AND kind = %s"
+                f" AND {_SAME}",
+                (decision.request_id, decision.kind, *_decided(decision)),
             )
 
     def _delete_decision(self, request_id: str) -> None:
@@ -1491,6 +1534,11 @@ class FlowStore:
             # Last: it takes the event log's lock, and everything above takes row locks.
             self._tasks.announce_cancelled_in(conn, tasks)
         return cur.rowcount > 0
+
+
+def _decided(decision: Decision) -> tuple[Any, ...]:
+    """The values of `_SAME`."""
+    return (decision.outcome, Jsonb(decision.response), decision.responder, decision.input_hash)
 
 
 def _hops(hops: list[HopRecord]) -> Jsonb:

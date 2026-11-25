@@ -31,8 +31,10 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES, follow_operation
 from tests.api.test_model_operations import _workflow_ids
+from tests.conftest import PgPool
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import accepted, press
+from tests.support.template_rows import open_template_rows
 
 pytestmark = pytest.mark.requires_git
 
@@ -411,8 +413,9 @@ def test_a_template_without_an_upstream_has_none(client: TestClient, model: str)
         )
 
 
-def test_without_history_there_is_no_upstream_state(paths: DataPaths) -> None:
+def test_without_history_there_is_no_upstream_state(paths: DataPaths, pg_pool: PgPool) -> None:
     catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
     catalogue.create("keychain", SOURCE, ModelMeta(name="Keychain"))
     catalogue.duplicate("keychain", "copy", "Copy")
 
@@ -421,13 +424,15 @@ def test_without_history_there_is_no_upstream_state(paths: DataPaths) -> None:
         catalogue.upstream_status("copy")
 
 
-def _racing(paths: DataPaths) -> Catalogue:
-    """A duplicate of a template that has moved since, in a catalogue with history."""
+def _racing(paths: DataPaths, pool: PgPool) -> Catalogue:
+    """A duplicate of a template that has moved since, in a catalogue with history and
+    rows (#7317 phase 3: the readers read only rows)."""
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
     catalogue = Catalogue(
         paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
     )
+    open_template_rows(catalogue, pool)
     catalogue.create("keychain", SOURCE, ModelMeta(name="Keychain"))
     catalogue.duplicate("keychain", "copy", "Copy")
     catalogue.write_source("keychain", SOURCE.replace("width = 40;", "width = 50;"))
@@ -436,9 +441,9 @@ def _racing(paths: DataPaths) -> Catalogue:
 
 @pytest.mark.parametrize("action", ["dismiss", "resolve"])
 def test_upstream_changes_and_metadata_edits_racing_both_land(
-    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, action: str
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, pg_pool: PgPool, action: str
 ) -> None:
-    catalogue = _racing(paths)
+    catalogue = _racing(paths, pg_pool)
     revision = catalogue.upstream_status("copy").revision
     assert revision is not None
     write = Catalogue.write_raw_meta
@@ -490,11 +495,11 @@ def _edit_after_planning(
 
 
 def test_a_merge_is_worked_out_again_when_the_template_moves_before_it_is_written(
-    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, pg_pool: PgPool
 ) -> None:
     """#228: planned outside the write lock, a merge the template has moved under
     must not write its stale result over the edit."""
-    catalogue = _racing(paths)
+    catalogue = _racing(paths, pg_pool)
     edited = SOURCE.replace('layout = "row";', 'layout = "column";')
     _edit_after_planning(monkeypatch, catalogue, [edited])
 
@@ -508,9 +513,9 @@ def test_a_merge_is_worked_out_again_when_the_template_moves_before_it_is_writte
 
 
 def test_a_merge_the_template_keeps_moving_under_is_refused(
-    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, pg_pool: PgPool
 ) -> None:
-    catalogue = _racing(paths)
+    catalogue = _racing(paths, pg_pool)
     base = catalogue.upstream_status("copy").upstream.base
     edits = [SOURCE.replace('layout = "row";', f'layout = "{n}";') for n in range(MERGE_ATTEMPTS)]
     _edit_after_planning(monkeypatch, catalogue, list(edits))
@@ -527,11 +532,11 @@ def test_a_merge_the_template_keeps_moving_under_is_refused(
 
 
 def test_an_edit_racing_a_merges_write_waits_for_it(
-    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, pg_pool: PgPool
 ) -> None:
     """#370: a plain edit arriving after a merge's staleness check but before its
     write must not land in between, where the merge would overwrite it."""
-    catalogue = _racing(paths)
+    catalogue = _racing(paths, pg_pool)
     history = catalogue.history
     assert history is not None
     edited = SOURCE.replace("hole = 3;", "hole = 5;")

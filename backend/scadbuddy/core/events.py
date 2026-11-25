@@ -381,6 +381,17 @@ class SettingsChanged(BaseEvent):
     section: SettingsSection
 
 
+class PluginPackagesChanged(BaseEvent):
+    """A plugin package's pin or a hosted plugin changed (#7460): a package installed,
+    re-pinned, its re-pin discarded, approved, switched on or off, or removed; a hosted
+    plugin created, changed, published or deleted. ``name`` is the package's or the hosted
+    plugin's (they share names). Re-read the packages and hosted plugins. Published on
+    ``plugin-packages``."""
+
+    kind: Literal["plugin_packages.changed"] = "plugin_packages.changed"
+    name: str
+
+
 class AnalyzerDecisionEvent(BaseEvent):
     """A print-analyzer decision (accept, ignore, suppress) was recorded or removed
     (#284). The ids say which rule at which scope; re-read the decisions for the rest."""
@@ -468,6 +479,7 @@ Event = Annotated[
     | FontInstalled
     | PresetsChanged
     | SettingsChanged
+    | PluginPackagesChanged
     | AnalyzerDecisionEvent
     | SessionBusEvent
     | BusResync,

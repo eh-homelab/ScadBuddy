@@ -8,7 +8,8 @@ import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable, Iterable, Mapping
+import uuid
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 
 import psycopg
@@ -149,16 +150,16 @@ def subjects(root: Path, *paths: str) -> list[str]:
 # ── the builder ───────────────────────────────────────────────────────────────
 
 
-def test_each_pin_and_the_current_version_is_a_commit_oldest_first(old: Old, dest: Path) -> None:
+def test_each_version_is_a_commit_oldest_first(old: Old, dest: Path) -> None:
     first = old.save("a", "one", scad="cube(1);\n")
-    old.save("a", "two", scad="cube(2);\n")
+    second = old.save("a", "two", scad="cube(2);\n")
     third = old.save("a", "three", scad="cube(3);\n")
     other = old.save("b", "b one", scad="sphere();\n")
     last = old.save("a", "four", scad="cube(4);\n")
     new = made(old, dest, ("a", third), ("a", first))
-    assert subjects(dest) == ["Initial revision", "one", "three", "b one", "four"]
+    assert subjects(dest) == ["Initial revision", "one", "two", "three", "b one", "four"]
     found = ids(dest)
-    assert set(found) == {("a", first), ("a", third), ("a", last), ("b", other)}
+    assert set(found) == {("a", i) for i in (first, second, third, last)} | {("b", other)}
     assert new.show(found["a", first], "a/model.scad") == b"cube(1);\n"
     assert new.show(found["a", third], "a/model.scad") == b"cube(3);\n"
     assert new.last_commit("a") == found["a", last] and new.head() == found["a", last]
@@ -190,15 +191,17 @@ def test_a_pin_that_is_the_current_version_is_one_commit(old: Old, dest: Path) -
     assert subjects(dest, "a") == ["Save"]
 
 
-def test_pins_of_one_tree_are_one_commit(old: Old, dest: Path) -> None:
-    """Back to a first version: a commit that changed nothing would be no revision of it."""
+def test_one_tree_one_after_the_other_is_one_commit(old: Old, dest: Path) -> None:
+    """A commit that changed nothing would be no revision of the template."""
     first = old.save("a", "one", scad="cube(1);\n")
+    other = old.save("b", "other", scad="sphere();\n")
     old.save("a", "two", scad="cube(2);\n")
     back = old.save("a", "back", scad="cube(1);\n")
-    made(old, dest, ("a", first))
+    made(old, dest, ("a", other))
     found = ids(dest)
-    assert found["a", first] == found["a", back]
-    assert problems(old, dest, ("a", first)) == []
+    assert found["a", first] == found["a", other] != found["a", back]
+    assert subjects(dest, "a") == ["one", "two", "back"]
+    assert problems(old, dest, ("a", other)) == []
 
 
 def test_a_pin_at_a_commit_of_another_template(old: Old, dest: Path) -> None:
@@ -229,7 +232,7 @@ def test_a_pin_of_a_deleted_template_resolves_and_is_not_current(old: Old, dest:
     new = made(old, dest, ("a", pinned))
     commit = ids(dest)["a", pinned]
     assert new.show(commit, f"a/{MESH}") == ONE
-    assert subjects(dest, "a") == ["one", "Delete a"]
+    assert subjects(dest, "a") == ["one", "two", "Delete a"]
     assert ("a", gone) not in ids(dest)
     assert not (dest / "a").exists()
     with pytest.raises(RevisionNotFoundError):
@@ -238,12 +241,75 @@ def test_a_pin_of_a_deleted_template_resolves_and_is_not_current(old: Old, dest:
 
 
 def test_a_template_made_again_after_its_delete(old: Old, dest: Path) -> None:
-    pinned = old.save("a", "one", scad="cube(1);\n")
+    first = old.save("a", "one", scad="cube(1);\n", mesh=ONE)
+    gone = old.delete("a")
+    again = old.save("a", "again", scad="cube(1);\n", mesh=ONE)
+    new = made(old, dest)
+    found = ids(dest)
+    assert subjects(dest, "a") == ["one", "Delete a", "again"]
+    assert new.last_commit("a") == found["a", again] != found["a", first]
+    assert ("a", gone) not in found
+    assert problems(old, dest) == []
+
+
+def test_a_commit_of_several_templates_is_one_of_each(old: Old, dest: Path) -> None:
+    old.save("c", scad="cube();\n")
+    for path in ("a", "b", "_builtin/d"):
+        old.write(path, {"model.scad": f"cube({len(path)});\n"})
+    shutil.rmtree(old.root / "c")
+    both = old.commit("Recover uncommitted changes")
+    new = made(old, dest)
+    found = ids(dest)
+    assert {slug for slug, commit in found if commit == both} == {"a", "b", "builtin:d"}
+    for slug, path in (("a", "a"), ("b", "b"), ("builtin:d", "_builtin/d")):
+        assert new.last_commit(path) == found[slug, both]
+        assert subjects(dest, path) == ["Recover uncommitted changes"]
+    assert subjects(dest, "c") == ["Save", "Recover uncommitted changes"]
+    assert problems(old, dest) == []
+
+
+def test_no_version_of_the_old_one_is_lost(old: Old, dest: Path) -> None:
+    for at in range(4):
+        old.save("a", scad=f"cube({at});\n", mesh=bytes([at]) * 4096)
+        old.save("_builtin/b", scad=f"sphere({at});\n")
     old.delete("a")
-    again = old.save("a", "again", scad="cube(2);\n")
-    new = made(old, dest, ("a", pinned))
-    assert subjects(dest, "a") == ["one", "again"]
-    assert new.last_commit("a") == ids(dest)["a", again]
+    log = ("log", "--format=%H", "--reverse", "HEAD", "--")
+    made(old, dest)
+    found = ids(dest)
+    for slug, path in (("a", "a"), ("builtin:b", "_builtin/b")):
+        commits = git(old.root, *log, path).decode().split()
+        kept = [c for c in commits if git(old.root, "ls-tree", c, path)]
+        assert {c for s, c in found if s == slug} == set(kept)
+    # A lost one fails the check, though nothing pins it.
+    plan = models_next._plan
+
+    def short(objects: models_next._Objects, pins: Sequence[Pin]) -> models_next._Plan:
+        made = plan(objects, pins)
+        made.versions = [v for v in made.versions if v.source != log_first]
+        return made
+
+    log_first = git(old.root, *log, "a").decode().split()[0]
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(models_next, "_plan", short)
+        build(old.root, dest, [], live=old.root)
+    assert any(log_first in line for line in problems(old, dest))
+
+
+def test_each_file_keeps_its_time(old: Old, dest: Path) -> None:
+    old.save("a", scad="cube();\n", mesh=ONE, meta=meta(None))
+    (old.root / "a/link").symlink_to("model.scad")
+    old.commit("link")
+    for at, name in enumerate(("model.scad", "model.json", MESH)):
+        os.utime(old.root / "a" / name, (1_600_000_000 + at, 1_600_000_000 + at))
+    new = made(old, dest)
+    # The index has the new times: nothing is read again to say it is clean.
+    left = git(dest, "-c", "filter.lfs.clean=false", "diff-files", "--name-only")
+    assert left == b""
+    for name in ("model.scad", "model.json", MESH, "link"):
+        was, now = (old.root / "a" / name).lstat(), (dest / "a" / name).lstat()
+        assert now.st_mtime_ns == was.st_mtime_ns
+    assert new.clean(".")
+    assert problems(old, dest) == []
 
 
 @pytest.mark.parametrize("kind", ["no commit", "no template", "no template there"])
@@ -478,12 +544,12 @@ def test_modes_links_and_odd_names(old: Old, dest: Path) -> None:
     old.write("a", {"model.scad": "cube();\n", "run.sh": "#!/bin/sh\n", odd: "x"})
     (old.root / "a/run.sh").chmod(0o755)
     (old.root / "a/link").symlink_to("model.scad")
-    old.commit("one")
+    first = old.commit("one")
     # A commit that changes only such a name is still the template's last one.
     old.write("a", {odd: "y"})
     last = old.commit("two")
     new = made(old, dest)
-    assert list(ids(dest)) == [("a", last)]
+    assert set(ids(dest)) == {("a", first), ("a", last)}
     assert os.access(dest / "a/run.sh", os.X_OK) and not os.access(dest / "a/model.scad", os.X_OK)
     assert (dest / "a/link").readlink() == Path("model.scad")
     assert (dest / "a" / odd).read_text() == "y"
@@ -883,6 +949,13 @@ def seed(conninfo: str, pins: list[tuple[str, str, str]]) -> None:
         )
         for place, slug, commit in pins:
             fields = {"slug": slug, "commit": commit}
+            if place == "outputs":
+                conn.execute(
+                    "INSERT INTO outputs (output_id, slug, created_at, meta) VALUES (%(id)s,"
+                    " %(slug)s, now(), jsonb_build_object('model_version', %(commit)s::text))",
+                    {**fields, "id": uuid.uuid4().hex},
+                )
+                continue
             if place == "storefront_listings":
                 conn.execute(
                     "INSERT INTO storefront_listings (slug, commit, title, position)"
@@ -907,7 +980,7 @@ def seed(conninfo: str, pins: list[tuple[str, str, str]]) -> None:
 
 
 @pytest.mark.requires_postgres
-def test_the_pins_are_the_orders_the_revisions_and_the_listings(pg_conninfo: str) -> None:
+def test_the_pins_are_the_orders_the_listings_and_the_outputs(pg_conninfo: str) -> None:
     seed(
         pg_conninfo,
         [
@@ -916,6 +989,9 @@ def test_the_pins_are_the_orders_the_revisions_and_the_listings(pg_conninfo: str
             ("order_item_revisions", "a", "d" * 40),
             ("storefront_listings", "a", "c" * 40),
             ("storefront_listings", "builtin:b", "f" * 40),
+            ("outputs", "a", "c" * 40),
+            ("outputs", "g", "b" * 40),
+            ("outputs", "g", "sha256:" + "b" * 64),
         ],
     )
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
@@ -925,10 +1001,11 @@ def test_the_pins_are_the_orders_the_revisions_and_the_listings(pg_conninfo: str
             " requires_printing) VALUES ('o', 2, 1, 't', 'custom', false)"
         )
     assert read_pins(pg_conninfo) == [
-        Pin("a", "c" * 40, ("order_items", "storefront_listings")),
+        Pin("a", "c" * 40, ("order_items", "outputs", "storefront_listings")),
         Pin("a", "d" * 40, ("order_items",)),
         Pin("a", "e" * 40, ("order_item_revisions",)),
         Pin("builtin:b", "f" * 40, ("storefront_listings",)),
+        Pin("g", "b" * 40, ("outputs",)),
     ]
 
 

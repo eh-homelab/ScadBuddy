@@ -204,7 +204,7 @@ async def _priced_variant(
         return None
     if await asyncio.to_thread(output_of, state, row, listing) is None:
         return None
-    # Only `estimate_of` records a variant key, and it refuses a render of several outputs.
+    # Only `estimate_of` records a variant key, with `variant_of`'s digest of every output.
     return Variant(listing.id, row.model_sha256, tuple(row.slot_filaments), every_output=True)
 
 

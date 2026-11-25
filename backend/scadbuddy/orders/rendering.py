@@ -14,7 +14,9 @@ with no second render. ``saved_as`` is the id a new output is saved under: an ou
 that id that matches the reference is an earlier attempt's save, and is reused as it is.
 
 The slice quote's run (``orders/quote.py`` ``ensure_output``) and the item's render
-(the ``order_item_render`` operation, ``orders/operations.py``) call it.
+(the ``order_item_render`` operation, ``orders/operations.py``) call it. It answers with
+the first output of a pipeline's render; :func:`outputs_for_reference` answers with every
+one, for the storefront's price (#5701).
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from scadbuddy.orders.models import Actor, Order, OrderItem, Reference
 from scadbuddy.orders.problems import refused
 from scadbuddy.orders.reference import colours_of, is_commit_id
 from scadbuddy.render.inputs import inputs_key
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.render.runner import with_defaults
 from scadbuddy.render.schema import CustomizerSchema
 
@@ -204,22 +206,102 @@ async def output_for_reference(
             + (f": {job.error}" if job.error else ""),
             job_id=job.id,
         )
+    made = await _saved(
+        reference,
+        job.id,
+        0,
+        create_output=create_output,
+        name=name,
+        saved_as=saved_as,
+        source=source,
+    )
+    if item is not None:
+        await attach_output(item, made)
+    return made
+
+
+async def _saved(
+    reference: Reference,
+    job_id: str,
+    index: int,
+    *,
+    create_output: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    name: str,
+    saved_as: str | None,
+    source: OutputSource,
+) -> RenderedOutput:
+    """Output ``index`` of the done job, saved as ``POST /outputs`` saves one."""
     saved = await create_output(
         {
             "slug": reference.slug,
-            "job_id": job.id,
-            "index": 0,
+            "job_id": job_id,
+            "index": index,
             "inputs": reference.inputs,
             "name": name,
             "source": source,
             **({"output_id": saved_as} if saved_as is not None else {}),
         }
     )
-    made = RenderedOutput(
-        str(saved["id"]), list(saved.get("colors") or []), reference.render_key, job.id
+    return RenderedOutput(
+        str(saved["id"]), list(saved.get("colors") or []), reference.render_key, job_id
     )
-    if item is not None:
-        await attach_output(item, made)
+
+
+async def outputs_for_reference(
+    reference: Reference,
+    *,
+    outputs: OutputsRead,
+    renders: Renders,
+    create_output: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    name: str,
+    saved_as: Callable[[int], str],
+    follow_every: float = FOLLOW_EVERY,
+    source: OutputSource = BACK_OFFICE,
+) -> list[RenderedOutput]:
+    """Every output of ``reference``'s one render, in output order (#5701, spec 2026-11-17
+    §7.4): the first as :func:`output_for_reference` gives it, then each later output of
+    the job it was saved from, under ``saved_as`` of its index. One saved there by an
+    earlier attempt is reused while it matches. An output is named by its ``job_id``: the
+    caller checks that all are of one job, and that the job has no more than these. A job
+    that cannot be read (pruned since the first output was saved) gives the first alone."""
+    first = await output_for_reference(
+        reference,
+        outputs=outputs,
+        renders=renders,
+        create_output=create_output,
+        name=name,
+        saved_as=saved_as(0),
+        follow_every=follow_every,
+        source=source,
+    )
+    if first.job_id is None:
+        return [first]
+    try:
+        job = await asyncio.to_thread(renders.read, first.job_id)
+    except JobNotFoundError:
+        return [first]
+    made = [first]
+    for index in range(1, len(job.outputs)):
+        output_id = saved_as(index)
+        earlier = await asyncio.to_thread(reference_matches, outputs, output_id, reference)
+        if earlier is not None:
+            made.append(
+                RenderedOutput(
+                    output_id, list(earlier.colors), reference.render_key, earlier.job_id
+                )
+            )
+            continue
+        made.append(
+            await _saved(
+                reference,
+                job.id,
+                index,
+                create_output=create_output,
+                name=name,
+                saved_as=output_id,
+                source=source,
+            )
+        )
     return made
 
 

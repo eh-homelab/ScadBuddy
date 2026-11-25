@@ -14,13 +14,13 @@ const entity = z
   .string()
   .min(1)
   .max(200)
-  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `order:<id>`')
+  .describe('The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `order:<id>`, `insert_type:<id>` (or another filament catalog\'s row: `material`, `subtype`, `brand`, `category`, `effect`, `insert_material`, `colour`, `location_kind`)')
 /** An order's files change only on its order page (order_attachment_update/_delete). */
 const fileOwner = z
   .string()
   .min(1)
   .max(200)
-  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`. Not an order's: change those with order_attachment_update/order_attachment_delete")
+  .describe("The entity, `kind:ref`: `spool:<id>`, `printer:<id>`, `spool_type:<id>`, `supplier:<id>`, `invoice:<id>`, `location:<id>`, `item:<id>`, `lot:<id>`, `unit:<id>`, `customer:<id>`, `insert_type:<id>` (or another filament catalog's row: `material`, `subtype`, `brand`, `category`, `effect`, `insert_material`, `colour`, `location_kind`). Not an order's: change those with order_attachment_update/order_attachment_delete")
 const attachmentId = z.string().min(1).max(100).describe("An attachment's id, as entity_attachment_list gives it")
 const linkId = z.string().min(1).max(100).describe("A link's id, as entity_link_list gives it")
 const role = z.string().regex(/^[a-z_]{1,32}$/).describe('Open text: `reference`, `issue`, `finished`, `packed`, `receipt`, `invoice`, `manual`, `photo`, `label`, `other`')
@@ -67,7 +67,7 @@ export const SCHEMA_KEY_KEYWORDS = [
   'minItems', 'maxItems', 'uniqueItems',
 ]
 
-const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, ...')
+const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, `insert_type`, ...')
 
 /**
  * Sets `set` on `ref` and answers its properties. With `saved` (the type or spool whose own write
@@ -100,7 +100,20 @@ export function propertyChanges(set: PropertySet | undefined): string {
   return `; properties: ${parts.join('; ')}`
 }
 
-/** The page of an entity that has one (the filament and inventory kinds); others have none. */
+/** The catalog of each filament catalog row's entity kind (backend/scadbuddy/entities/registry.py `KINDS`). */
+const CATALOG_OF: ReadonlyMap<string, string> = new Map([
+  ['material', 'materials'],
+  ['subtype', 'subtypes'],
+  ['brand', 'brands'],
+  ['category', 'categories'],
+  ['effect', 'effects'],
+  ['insert_material', 'insert-materials'],
+  ['insert_type', 'insert-types'],
+  ['colour', 'colours'],
+  ['location_kind', 'location-kinds'],
+])
+
+/** The page of an entity that has one (the filament and inventory kinds; a catalog row's is its catalog); others have none. */
 function uiPath(ref: string): string | undefined {
   const at = ref.indexOf(':')
   const kind = ref.slice(0, at)
@@ -123,8 +136,10 @@ function uiPath(ref: string): string | undefined {
       return inventoryPaths.lot(id)
     case 'unit':
       return inventoryPaths.unit(id)
-    default:
-      return undefined
+    default: {
+      const catalog = CATALOG_OF.get(kind)
+      return catalog === undefined ? undefined : filamentPaths.catalog(catalog)
+    }
   }
 }
 

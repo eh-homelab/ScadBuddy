@@ -21,7 +21,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import wait_for_job
+from tests.api.conftest import files_only, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
 from tests.support.printers import linked_printer
@@ -448,6 +448,7 @@ def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
 ) -> None:
     configure(client, printer_id=1)
     plate_routes(printer_id=1, model="A1 mini")
+    files_only(client)
     output_id = make_output(client, model)
     # 200 mm across does not fit an A1 mini's 180 mm bed.
     write_bambu_3mf(
@@ -533,6 +534,7 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
         )
     )
     configure(client, printer_id=1)
+    files_only(client)
     output_id = make_output(client, model)
     upload_route()
     assert (

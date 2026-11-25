@@ -533,7 +533,7 @@ def slot_filaments(
 ) -> dict[int, str]:
     """``chosen`` (slot to filament id), with each slot it lacks filled with the
     resolved material's filament of the slot's colour in the render
-    (``job.result.colors``), casefolded (#6258). A locked colour that is not support
+    (`slice_price.py` `kit_colours`), casefolded (#6258). A locked colour that is not support
     always has one: `resolve_choice` chooses only a material that offers each locked
     colour (#6302 review). A slot that material has no filament of (a locked support
     colour) stays out, and the shop picks it."""
