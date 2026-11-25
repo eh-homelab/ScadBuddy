@@ -1042,9 +1042,11 @@ async def put_report(
     Only a write that answers an end or a start keeps a ledger row (#5298 final review
     M2): the watch puts about once a `watch.py` `write_every` (1 s) while a printer
     reports, so a row per write was tens of thousands a day per printer. A plain write
-    sent again needs none: the row then holds that report at that ``seen_at``, which never
-    moves back, so the resend ends and starts nothing, the same answer as the first
-    send's; one older than the row is `stale` and answers nothing too.
+    sent again needs none: the row then holds that report at that ``seen_at``, or one with
+    the same `read_view` at an earlier ``seen_at`` (a write that showed nothing new was
+    skipped), and ``seen_at`` never moves back, so the resend ends and starts nothing,
+    the same answer as the first send's; one older than the row is `stale` and answers
+    nothing too.
 
     The ledger row stays for a write that ends or starts a print (#7389): that write moves
     ``running_subtask``, so the same body sent again without it would end and start

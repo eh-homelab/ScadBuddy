@@ -416,6 +416,9 @@ class PrinterReportStore:
             )
         ):
             return Advance()
+        # Read the row again under its lock and throw the first read's results away: a
+        # touch can commit between the two reads, and the unlocked `old` must never be
+        # reused for the write.
         old = conn.execute(f"{read} WHERE printer_id = %s FOR UPDATE", (printer_id,)).fetchone()
         if old is not None and stale(old["seen_at"], seen_at, old["now"]):
             return Advance()  # a touch committed between the two reads

@@ -14,8 +14,12 @@ lock, for a route that answers a retry before it does any other work; `has_reply
 whether a key holds one before the body is read.
 
 Every write that keeps a ledger row (`idempotent_write`, the report PUT
-`api/crud_print.py` `put_report`, the profile-fetch import's `finish`) runs in
-`core/tracing.py` `traced_transaction`, its COMMIT a span of its own (#7389).
+`api/crud_print.py` `put_report`, the profile-fetch import's `finish`) commits in
+`core/tracing.py` `traced_transaction`, its COMMIT a span of its own (#7389). A route that
+runs `idempotent_write` inside `filament/spools.py` `FilamentSpoolStore.transaction` (the
+bulk spools and the CSV import in `api/filament.py`, a new spool at a tray in
+`api/tray_spools.py`) gets a savepoint there; the outer transaction is a
+`traced_transaction` too, so its COMMIT is the span.
 """
 
 from __future__ import annotations
