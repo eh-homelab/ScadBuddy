@@ -21,14 +21,17 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/access"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/workspace"
 )
 
 const (
@@ -116,7 +119,8 @@ type areaRoutes func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Rout
 
 // areaPackages are the packages whose areas the switch below does not name.
 var areaPackages = []areaRoutes{
-	access.Areas, mcprelay.Areas, notify.Areas, secrets.Areas, transcripts.Areas,
+	access.Areas, blobs.Areas, mcprelay.Areas, notify.Areas, secrets.Areas, tasks.Areas,
+	transcripts.Areas, workspace.Areas,
 }
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.

@@ -96,7 +96,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		err = httpx.WriteJSONStatus(w, status, answer)
+		if b, ok := answer.(Bytes); ok {
+			httpx.WriteBytes(w, b.MediaType, b.Body)
+		} else {
+			err = httpx.WriteJSONStatus(w, status, answer)
+		}
 	}
 	if err != nil {
 		httpx.WriteProblem(w, r, problemOf(r, err))
@@ -291,6 +295,11 @@ func ReadBody(r *http.Request, names ...string) (*Body, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseBody(raw, names...)
+}
+
+// ParseBody is raw as an object whose members are all among names.
+func ParseBody(raw []byte, names ...string) (*Body, error) {
 	if len(raw) == 0 {
 		return nil, httpx.Invalid(httpx.Issue{Loc: []string{"body"}, Msg: "Field required"})
 	}

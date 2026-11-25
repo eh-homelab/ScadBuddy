@@ -133,6 +133,11 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 	write(w, p.Status, "application/problem+json", b.Bytes())
 }
 
+// WriteBytes answers 200 with body, of mediaType.
+func WriteBytes(w http.ResponseWriter, mediaType string, body []byte) {
+	write(w, http.StatusOK, mediaType, body)
+}
+
 func write(w http.ResponseWriter, status int, mediaType string, body []byte) {
 	w.Header().Set("Content-Type", mediaType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))

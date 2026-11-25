@@ -27,6 +27,17 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. It is n
 | `access`, `access:read` | `/access/rows`, `/access/row`, `/access/write`, `/tool-listings/*`, `/leases/{key}` |
 | `plugin-sessions`, `plugin-sessions:read` | `/plugin-sessions/seen`, `…/ended`, `…/mark`, `…/dead`, `…/own` |
 | `mcp-relay` | `POST /mcp-relay/*` |
+| `session-blobs:read` | `GET /session-blobs` |
+| `session-blobs` | that, and `POST /session-blobs` and `…/deletes` |
+| `attachments:read` | `GET /attachments/{id}/image` and `…/preview` |
+| `attachments` | those, and `POST /attachments`, `…/resolve`, `…/deletes` and `…/sweeps` |
+| `http-bodies:read` | `GET /http-bodies/meta` and `…/bytes` |
+| `http-bodies` | those, and `POST /http-bodies` |
+| `background-tasks:read` | every `GET` under `/background-tasks` |
+| `background-tasks` | every route under `/background-tasks` |
+| `operations:read` | `GET /operations/{id}` and `…/by-key/{key}`. The insert and the end stay Python's: they write the activity row |
+| `workspace:read` | `GET /workspace/files`, `…/file`, `…/usage`, and `POST …/session-files` |
+| `workspace:sql` | those, and `POST /workspace/file-deletes`, `…/sweeps` and `…/reconciles`. The status, the bytes, a write, a copy and the move to blobs stay Python's: they need the blob store or the KEK |
 
 `internal/seal` is the agent's sealed format (`backend/scadbuddy/core/secrets.py`), the payload
 codec's subjects and payloads, and the canonical JSON of the input and response hashes; its tests
@@ -46,11 +57,13 @@ A request that reaches Python carries `X-ScadBuddy-Peer`, the TCP peer, always o
 - The KEK files are read once, at the start. Python reads them again after a failed read, and
   answers 503 `kek-missing` while it has none; here a sealed area without a KEK does not start.
 - Times are written in UTC. Python writes them in the database session's time zone, which is UTC
-  on prod.
+  on prod. A time sent with no offset is read as UTC, not in the database's zone.
 - A body bound refuses a body with no `Content-Length` (411) on the routes with one. Python's
-  JSON gate counts a chunked body instead.
+  JSON gate counts a chunked body instead. A multipart write with no `Content-Length` is 411
+  before its Content-Type is checked.
 - A number, boolean or UUID in a body is read strictly: pydantic's lax mode also takes a numeric
-  string. A UUID in another spelling is still read and written lower-case with hyphens.
+  string. A UUID in another spelling is still read and written lower-case with hyphens. `5.0`
+  for an integer is refused (422), as is a time given as a number.
 - The approvals' input hash refuses JSON past 512 levels; Python's parser goes to about 1000.
 - A gate response with a lone surrogate (`\ud800`) reads as U+FFFD; Python's validator refuses
   it.
