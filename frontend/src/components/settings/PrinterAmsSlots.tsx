@@ -120,13 +120,14 @@ function AmsBody({ row }: { row: PrinterRow }) {
           warn = true
         }
         try {
-          // The saved preset follows what the slot was sent: a spool's type preset too, and none clears it.
-          // A spool's preset carries its source from the backend; the form's choice is for an id typed by hand.
+          // The saved preset follows what the slot was sent: a spool's type preset too, and none (a
+          // material with no generic id answers "") clears it. Its source is the form's choice for an
+          // id typed by hand; a spool's preset has none to send (the backend keeps no source, P17).
           if (sent.preset_id) {
             await api.setSlotPreset(row.id, unit.ams_id, slot.tray_id, {
               preset_id: sent.preset_id,
               preset_name: sent.preset_name,
-              preset_source: sent.preset_source ?? pending.presetSource ?? 'cloud',
+              ...(pending.presetSource ? { preset_source: pending.presetSource } : {}),
               tray_info_idx: sent.preset_id,
             })
           } else if (slot.saved_preset) {

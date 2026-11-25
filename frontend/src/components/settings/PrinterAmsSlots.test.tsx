@@ -151,13 +151,11 @@ describe('PrinterAmsSlots (#7153)', () => {
     await user.click(within(form).getByRole('combobox', { name: 'From a spool' }))
     const [, first] = await screen.findAllByRole('option')
     await user.click(first!)
-    // The spool's preset names its own source, so the form offers none.
+    // A spool's preset has no source to choose, and none is sent for it: the backend keeps none (P17).
     expect(within(form).queryByRole('combobox', { name: 'Preset source' })).not.toBeInTheDocument()
     await confirm(user, form, 'AMS-A slot 4')
     await waitFor(() =>
-      expect(amsPresetsSaved()).toEqual([
-        { preset_id: 'GFL99', preset_name: 'Shop PLA', preset_source: 'cloud', tray_info_idx: 'GFL99' },
-      ]),
+      expect(amsPresetsSaved()).toEqual([{ preset_id: 'GFL99', preset_name: 'Shop PLA', tray_info_idx: 'GFL99' }]),
     )
     const slot = await screen.findByRole('button', { name: 'AMS-A slot 4' })
     await waitFor(() => expect(slot).toHaveTextContent('Saved: Shop PLA'))
