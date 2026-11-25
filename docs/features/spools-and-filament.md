@@ -181,9 +181,10 @@ the page can write back. An agent reads or writes a tag through an NFC job (`nfc
 `nfc_write`): the page shows the job and its records, and nothing runs until a person arms it
 and holds a tag. A job waits `timeout_s` for a person to arm it; arming gives the run 60 seconds
 (`ARM_SECONDS`) for the tap. Once the page has backed the tag up for a write (`write_begun`), the
-job is never cancelled or expired: it ends with the write's read-back, or, when none comes within
-10 minutes of the backup, `failed` with `result.code` `no_read_back` (the tag may hold the new
-records, and its backup can restore it). The agent waits for either.
+job is never cancelled or expired: it ends with the write's result (its read-back, or the
+page's error), or, when none comes within 10 minutes of the backup, `failed` with `result.code`
+`no_read_back` (the tag may hold the new records, and its backup can restore it). The agent
+waits for either.
 
 ### Properties (#7026)
 

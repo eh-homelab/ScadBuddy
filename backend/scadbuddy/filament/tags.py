@@ -178,7 +178,8 @@ def seen_on(conn: Conn, read: TagRead) -> tuple[UUID | None, UUID | None]:
     finds it. An AMS report skips the mark when the tag row is locked: its caller holds
     spools, and binding locks the tag before them, so waiting could deadlock. An AMS mark
     keeps the records a phone or an agent last read, and is skipped when the tag was last
-    seen by an AMS within `AMS_SEEN_THROTTLE_SECONDS`, since it would change nothing."""
+    seen by an AMS within `AMS_SEEN_THROTTLE_SECONDS`, which leaves `last_seen_at` at most
+    that much behind."""
     uid = clean_tag_uid(read.uid)
     tray = clean_tray_uuid(read.tray_uuid)
     if read.source == "ams":
@@ -647,8 +648,8 @@ _JOB_COLUMNS: Final = (
 
 #: The error a begun write ends with when no read-back came within `BACKUP_TTL`.
 NO_READ_BACK: Final = (
-    "no read-back came within 10 minutes of the backup: the tag may hold the new records,"
-    " and its backup can restore it"
+    f"no read-back came within {BACKUP_TTL.total_seconds() / 60:g} minutes of the backup:"
+    " the tag may hold the new records, and its backup can restore it"
 )
 
 

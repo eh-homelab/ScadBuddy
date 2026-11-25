@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
+import { readFileSync } from 'node:fs'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { TOUCHES_NOTHING } from '../src/sessions/touched.js'
@@ -310,5 +311,27 @@ describe('NFC job tools', () => {
     for (const name of ['nfc_read', 'nfc_write']) {
       expect(tool(name).routes).toContain('POST /api/v1/filament/nfc-jobs/{job_id}/cancel')
     }
+  })
+})
+
+// #7575: the tools' waits copy the backend's `ARM_SECONDS` and `BACKUP_TTL`
+// (backend/scadbuddy/filament/tags.py); this keeps the copies equal.
+describe("the NFC tools' waits follow the backend", () => {
+  const py = readFileSync(new URL('../../backend/scadbuddy/filament/tags.py', import.meta.url), 'utf8')
+  const armMs = Number(/^ARM_SECONDS: Final = (\d+)$/m.exec(py)?.[1]) * 1000
+  const ttlMs = Number(/^BACKUP_TTL: Final = timedelta\(minutes=(\d+)\)$/m.exec(py)?.[1]) * 60_000
+
+  it('reads both constants', () => {
+    expect(armMs).toBeGreaterThan(0)
+    expect(ttlMs).toBeGreaterThan(0)
+  })
+
+  it('waits the armed window and, for a write, the backup window', () => {
+    const c = { ...ctx(), toolDeadlineMs: 0 }
+    const read = tool('nfc_read').deadlineMs({ timeout_s: 30 }, c) - 30_000
+    const write = tool('nfc_write').deadlineMs({ timeout_s: 30, records: [REC] }, c) - 30_000
+    // read = ARM + margin; write = ARM + TTL + 2 * margin.
+    expect(write - 2 * read + armMs).toBe(ttlMs)
+    expect(tool('nfc_read').description).toContain(`${armMs / 1000} seconds for the tap`)
   })
 })
