@@ -44,6 +44,7 @@ from scadbuddy.printers.lan_commands import (
     wire_slot,
 )
 from scadbuddy.printers.lan_models import BUSY_STATES
+from scadbuddy.printers.status import extruder_entries
 from scadbuddy.slicing.own_presets import sb_id
 from scadbuddy.workflows.print_models import LAN_REPLY_WAIT_AMS
 
@@ -686,15 +687,13 @@ def _temp(value: Any) -> int:
 def nozzle_temps(report: Mapping[str, Any]) -> tuple[int, int]:
     """The temperatures an unload and an Ext-R load are sent at, as Bambuddy reads them
     (``nozzle`` and ``nozzle_2``): on a printer with two extruders in
-    ``device.extruder.info``, the left's (id 1) and the right's (id 0), else
-    ``nozzle_temper`` and none; 0 for one not reported, which the builders replace with
-    their defaults:
+    ``device.extruder.info``, the left's (id 1) and the right's (id 0), read by ``id``
+    as `extruder_loaded` reads them (`extruder_entries`), else ``nozzle_temper`` and
+    none; 0 for one not reported, which the builders replace with their defaults:
     https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L5181-L5330"""
-    device = report.get("device")
-    extruder = device.get("extruder") if isinstance(device, dict) else None
-    info = extruder.get("info") if isinstance(extruder, dict) else None
-    if isinstance(info, list) and len(info) >= 2 and all(isinstance(e, dict) for e in info[:2]):
-        return _temp(info[1].get("temp")), _temp(info[0].get("temp"))
+    by_id = extruder_entries(report)
+    if 0 in by_id and 1 in by_id:
+        return _temp(by_id[1].get("temp")), _temp(by_id[0].get("temp"))
     return _temp(report.get("nozzle_temper")), 0
 
 

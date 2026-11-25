@@ -189,6 +189,16 @@ def test_an_external_holder_reads_tray_now_only() -> None:
             },
             (40, 218),
         ),
+        (
+            {
+                "device": {
+                    "extruder": {
+                        "info": [{"id": 1, "temp": 40}, {"id": 0, "temp": 220 * 65536 + 218}]
+                    }
+                },
+            },
+            (40, 218),
+        ),
         ({}, (0, 0)),
     ],
 )

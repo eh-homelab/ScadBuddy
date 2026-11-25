@@ -29,6 +29,7 @@ A field that is not the type it should be reads as absent, never as a failed sta
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -331,18 +332,18 @@ def decode_snow(value: Any) -> tuple[int, int] | None:
     return None
 
 
-def extruder_loaded(report: dict[str, Any]) -> list[tuple[int, int] | None]:
-    """Each extruder's loaded slot (`decode_snow`) from ``device.extruder.info``, by
-    extruder id; ``[]`` unless two or more entries carry an ``id`` and a ``snow``. Bambuddy
-    reads ``snow`` only from two extruders' entries (``bambu_mqtt.py`` L3551-L3575 and
-    the unload's dual-nozzle gate at L8473-L8493, d3be761f): nobody has read a
-    single-nozzle printer's ``snow``, so one with one entry keeps ``tray_now``."""
-    info = _device(report, "extruder").get("info")
+def extruder_entries(report: Mapping[str, Any]) -> dict[int, dict[str, Any]]:
+    """The entries of ``device.extruder.info`` by their ``id`` (0 the right extruder, 1
+    the left). An entry that is not an object, or whose ``id`` is not 0 or 1, is left out.
+    The list order is not used: a report can list the extruders in either order."""
+    device = report.get("device")
+    block = device.get("extruder") if isinstance(device, dict) else None
+    info = block.get("info") if isinstance(block, dict) else None
     if not isinstance(info, list):
-        return []
-    by_id: dict[int, tuple[int, int] | None] = {}
+        return {}
+    by_id: dict[int, dict[str, Any]] = {}
     for entry in info:
-        if not isinstance(entry, dict) or "snow" not in entry:
+        if not isinstance(entry, dict):
             continue
         ext_id = entry.get("id")
         if isinstance(ext_id, bool) or not isinstance(ext_id, int | str):
@@ -350,7 +351,22 @@ def extruder_loaded(report: dict[str, Any]) -> list[tuple[int, int] | None]:
         key = _int(ext_id)
         if key is None or not 0 <= key <= 1:
             continue
-        by_id[key] = decode_snow(entry["snow"])
+        by_id[key] = entry
+    return by_id
+
+
+def extruder_loaded(report: dict[str, Any]) -> list[tuple[int, int] | None]:
+    """Each extruder's loaded slot (`decode_snow`) from ``device.extruder.info``, by
+    extruder id (`extruder_entries`); ``[]`` unless two or more entries carry an ``id``
+    and a ``snow``. Bambuddy
+    reads ``snow`` only from two extruders' entries (``bambu_mqtt.py`` L3551-L3575 and
+    the unload's dual-nozzle gate at L8473-L8493, d3be761f): nobody has read a
+    single-nozzle printer's ``snow``, so one with one entry keeps ``tray_now``."""
+    by_id = {
+        key: decode_snow(entry["snow"])
+        for key, entry in extruder_entries(report).items()
+        if "snow" in entry
+    }
     if len(by_id) < 2:
         return []
     return [by_id[key] for key in sorted(by_id)]
