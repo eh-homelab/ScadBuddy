@@ -9,6 +9,7 @@ import asyncio
 import logging
 import signal
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -209,7 +210,10 @@ def test_a_sigterm_stops_the_first_copy(
         task = asyncio.create_task(
             scadbuddy_main._first_template_copy(_state_on(pg_pool), threading.Event())
         )
-        await asyncio.sleep(0.2)
+        # The copy runs in a thread: wait until it has started, with a bound.
+        deadline = time.monotonic() + 10
+        while not stops and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
         assert stops and not stops[0].is_set()
         signal.raise_signal(signal.SIGTERM)
         await asyncio.wait_for(task, 2)
@@ -217,6 +221,54 @@ def test_a_sigterm_stops_the_first_copy(
     asyncio.run(scenario())
     assert stops[0].is_set()
     assert sigterm_seen == [signal.SIGTERM]
+
+
+def test_a_waiting_replica_logs_its_wait_once(
+    pg_pool: PgPool,
+    copy_lock: None,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The wait polls the copy lock often; it logs the wait once, not once a poll."""
+    monkeypatch.setattr(scadbuddy_main, "FIRST_COPY_POLL", 0.01)
+    monkeypatch.setattr(scadbuddy_main, "FIRST_COPY_WAIT", 0.5)
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scadbuddy_main._first_template_copy(_state_on(pg_pool), threading.Event()))
+    waits = [r for r in caplog.records if "another replica copies" in r.getMessage()]
+    assert len(waits) == 1
+
+
+def test_a_handler_set_from_c_is_passed_on_and_put_back_as_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python reads a handler set from C as None: it is treated as SIG_DFL."""
+    before = signal.getsignal(signal.SIGTERM)
+    real = signal.getsignal
+    asked: list[int] = []
+
+    def from_c(signum: int) -> Any:
+        if signum == signal.SIGTERM and not asked:
+            asked.append(signum)
+            return None
+        return real(signum)
+
+    raised: list[int] = []
+    monkeypatch.setattr(signal, "getsignal", from_c)
+    monkeypatch.setattr(signal, "raise_signal", raised.append)
+    stop = threading.Event()
+    try:
+        with scadbuddy_main._stop_on_signal(stop):
+            handler = real(signal.SIGTERM)
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+            # The pass-on put SIG_DFL in place and raised the signal again.
+            assert real(signal.SIGTERM) == signal.SIG_DFL
+            signal.signal(signal.SIGTERM, handler)
+        assert stop.is_set()
+        assert raised == [signal.SIGTERM]
+        assert real(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, before)
 
 
 def test_first_copy_takes_the_lock_when_the_other_run_ends_incomplete(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib
 import logging
 import pkgutil
@@ -621,17 +622,25 @@ async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> No
         logger.exception("could not index the saved outputs; the next start retries")
 
 
-async def _copy_templates_once(state: AppState, stop: threading.Event) -> TemplateCopyResult | None:
+async def _copy_templates_once(
+    state: AppState, stop: threading.Event, *, quiet: bool = False
+) -> TemplateCopyResult | None:
     """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
     logged, and its result. It takes the copy's advisory lock, so one replica copies at a
     time; a run that does not get it does nothing and answers None, as it does when the
-    catalogue has no rows. A failure is logged, then raised."""
+    catalogue has no rows (``quiet``: with no log line for that). A failure is logged,
+    then raised."""
     refresh = state.catalogue.refresh
     if refresh is None:
         return None
     try:
         result = await asyncio.to_thread(
-            copy_templates, state.catalogue, refresh.rows, refresh, state.projection.pool, stop
+            functools.partial(copy_templates, quiet=quiet),
+            state.catalogue,
+            refresh.rows,
+            refresh,
+            state.projection.pool,
+            stop,
         )
     except Exception:
         logger.exception("could not copy the templates to rows; the next sweep or start retries")
@@ -678,7 +687,11 @@ def _stop_on_signal(stop: threading.Event) -> Iterator[None]:
         return
     replaced: dict[int, Any] = {}
     for sig in STOP_SIGNALS:
+        # None: a handler set from C, which Python cannot call or put back. It is treated
+        # as SIG_DFL, for the pass-on and for the restore.
         previous = signal.getsignal(sig)
+        if previous is None:
+            previous = signal.SIG_DFL
 
         def handler(signum: int, frame: FrameType | None, previous: Any = previous) -> None:
             if previous == signal.SIG_IGN:
@@ -691,7 +704,8 @@ def _stop_on_signal(stop: threading.Event) -> Iterator[None]:
                 signal.signal(signum, signal.SIG_DFL)
                 signal.raise_signal(signum)
 
-        replaced[sig] = signal.signal(sig, handler)
+        signal.signal(sig, handler)
+        replaced[sig] = previous
     ours = {sig: signal.getsignal(sig) for sig in replaced}
     try:
         yield
@@ -738,16 +752,22 @@ async def _first_template_copy(state: AppState, stop: threading.Event) -> bool:
         try:
             if await asyncio.to_thread(rows.copied):
                 return False
-            result = await _copy_templates_once(state, stop)
+            result = await _copy_templates_once(state, stop, quiet=True)
             if result is not None:
                 return _first_copy_finished(result, stop)
+            # Logged once here and once at the end, not at each poll.
+            logger.info(
+                "another replica copies the templates to rows; this one waits for its run",
+                extra={"wait_s": FIRST_COPY_WAIT},
+            )
             deadline = time.monotonic() + FIRST_COPY_WAIT
             while time.monotonic() < deadline and not stop.is_set():
                 await asyncio.sleep(FIRST_COPY_POLL)
                 if await asyncio.to_thread(rows.copied):
+                    logger.info("another replica's first copy of the templates finished")
                     return False
                 # The other replica's run ended unfinished and released the lock.
-                result = await _copy_templates_once(state, stop)
+                result = await _copy_templates_once(state, stop, quiet=True)
                 if result is not None:
                     return _first_copy_finished(result, stop)
             if stop.is_set():

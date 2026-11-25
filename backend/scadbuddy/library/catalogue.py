@@ -1423,8 +1423,8 @@ class Catalogue:
         ui_version_of: Callable[[str], str | None] | None = None,
         previous_version_of: Callable[[str], str | None] | None = None,
     ) -> ModelRecord:
-        """``version_of`` answers a template's revision -- per call, or from the one
-        walk a listing makes -- and is asked for an upstream's as well as this one's.
+        """``version_of`` answers a template's revision -- per call, or from the
+        listing's rows -- and is asked for an upstream's as well as this one's.
         ``media_of`` answers a template's media rows, and ``cover_of`` a built-in's
         chosen cover, from the listing's one query each; without them they are read
         for this template alone."""
