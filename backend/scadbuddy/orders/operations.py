@@ -14,6 +14,7 @@ run's failure, recorded with its text.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
 import uuid
@@ -99,7 +100,8 @@ from scadbuddy.orders.storefront.slice_price import (
     SliceRun,
     SliceUnavailableError,
     SliceVariant,
-    model_digest,
+    job_results,
+    kit_digest,
     price_variant,
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -1151,18 +1153,21 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         async def create_output(body: dict[str, Any]) -> dict[str, Any]:
             return await create.run(body, {})
 
-        async def rendered_sha256(rendered: RenderedOutput) -> str | None:
-            if rendered.job_id is None:
+        async def rendered_sha256(rendered: Sequence[RenderedOutput]) -> str | None:
+            job_id = rendered[0].job_id
+            if job_id is None or any(one.job_id != job_id for one in rendered):
                 return None
             try:
-                job = await asyncio.to_thread(core.render.store.read, rendered.job_id)
+                job = await asyncio.to_thread(core.render.store.read, job_id)
             except JobNotFoundError:
                 return None
-            if job.result is None:
+            # Every output of the job, or the price would leave one out (#5701).
+            if job.result is None or len(rendered) != len(job_results(job)):
                 return None
-            await materialize_result(core.store.blobs, job.result)
-            path = result_file(core.store.blobs, core.paths.root, job.result.model_3mf)
-            return await asyncio.to_thread(model_digest, job.id, path)
+            for result in job_results(job):
+                await materialize_result(core.store.blobs, result)
+            file = functools.partial(result_file, core.store.blobs, core.paths.root)
+            return await asyncio.to_thread(kit_digest, job, file)
 
         run = SliceRun(
             prices=orders.slice_prices,
