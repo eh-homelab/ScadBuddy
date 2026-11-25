@@ -646,7 +646,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   the answer is final: only what its own `hold` created, unless a later put rewrote it
   or a running operation names the digest; the rest go to the
   `housekeeping_sweep_claims` sweep (on the prune Schedule, so sweeps off still sweeps
-  them). `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
+  them). A library upload (`POST /print/library/files`) on a remote store is claimed in
+  the blob store instead (#7373, `operations/blob_claims.py` `BlobClaims`): its body is
+  spooled node-local (`ContentStore.spool`), hashed as it streams and put once as the
+  `library` blob `library-upload-<sha256>` (`ContentStore.put(..., digest=)`, so no second
+  hash), and the run reads that blob on any replica (`store: "blob"` in the request; a
+  native file indexes the same object, `NativeLibrary.adopt`). A release removes the row
+  only while its `touched_at` is the request's own put; the claims sweep removes one older
+  than `CLAIM_MAX_AGE` (`sweep_upload_blobs`), and `sweep_library` leaves it alone. A
+  request with no `store` (the local store's, or an older build's) is a claim file, as
+  before. `run_operation` refuses an inline request over `MAX_REQUEST_BYTES` (128 KB)
   with 413. A kind reads the state when it runs, never a route dependency, so a test
   replaces a store on the state (`state.libraries = store`). `api/operations.py`
   `run_operation` is how a route runs a kind (`Idempotency-Key` header; 202 with the

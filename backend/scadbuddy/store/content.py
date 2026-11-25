@@ -103,7 +103,8 @@ class ContentStore:
         self.downloads = downloads
         #: Where a read's private copy of a cached blob is made, never the shared
         #: directory, which holds only entries and fills; callers spool their request
-        #: bodies here too (internal PUTs, slice bodies, thumbnail and archive copies).
+        #: bodies here too (internal PUTs, slice bodies, thumbnail and archive copies, a
+        #: library upload's body, #7373).
         #: The data volume's ``cache/blob-spool`` unless ``SCADBUDDY_SPOOL_DIR`` names
         #: another (#7316).
         self.spool = spool if spool is not None else Path(tempfile.gettempdir())
@@ -156,15 +157,20 @@ class ContentStore:
         name: str,
         scope: BlobScope,
         lost_reuse: bool = False,
+        digest: tuple[str, int] | None = None,
     ) -> tuple[BlobRef, bool]:
         """The stored object, and whether it is an existing one reused. Its row must then
         be written with ``reuse=True``, which fails if a release freed it meanwhile.
         ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
-        like the re-put it replaces, no room check."""
-        # Hashes the whole file: a span of its own (#7245), with the thread wait.
-        sha, size = await traced_thread(
-            "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
-        )
+        like the re-put it replaces, no room check. ``digest`` is ``data``'s sha256 and
+        size when the caller hashed it already (a library upload, hashed while it
+        streamed in, #7373): the file is then not read to hash it."""
+        if digest is None:
+            # Hashes the whole file: a span of its own (#7245), with the thread wait.
+            digest = await traced_thread(
+                "store.digest", blob_digest, data, attributes={"scadbuddy.blob_kind": kind}
+            )
+        sha, size = digest
         existing = (
             None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
         )
@@ -202,8 +208,10 @@ class ContentStore:
         scope: BlobScope,
         key: str | None = None,
         meta: dict[str, Any] | None = None,
+        digest: tuple[str, int] | None = None,
     ) -> BlobRef:
-        ref, reused = await self._store(kind, data, name=name, scope=scope)
+        """``digest``: see `_store`."""
+        ref, reused = await self._store(kind, data, name=name, scope=scope, digest=digest)
         key = key or content_index_key(kind, ref.sha256)
         try:
             try:
@@ -212,7 +220,14 @@ class ContentStore:
                 )
             except ReuseLostError:
                 # Freed between the lookup and this row: store this put's own copy.
-                ref, reused = await self._store(kind, data, name=name, scope=scope, lost_reuse=True)
+                ref, reused = await self._store(
+                    kind,
+                    data,
+                    name=name,
+                    scope=scope,
+                    lost_reuse=True,
+                    digest=(ref.sha256, ref.size),
+                )
                 previous = await asyncio.to_thread(
                     self.index.put, key, ref, slug=scope.slug, meta=meta or {}
                 )
