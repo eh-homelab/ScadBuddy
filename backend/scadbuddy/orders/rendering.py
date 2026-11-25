@@ -261,9 +261,9 @@ async def outputs_for_reference(
     """Every output of ``reference``'s one render, in output order (#5701, spec 2026-11-17
     §7.4): the first as :func:`output_for_reference` gives it, then each later output of
     the job it was saved from, under ``saved_as`` of its index. One saved there by an
-    earlier attempt is reused while it matches. An output is named by its ``job_id``: the
-    caller checks that all are of one job, and that the job has no more than these. A job
-    that cannot be read (pruned since the first output was saved) gives the first alone."""
+    earlier attempt is reused while it matches and is of that job. The caller checks that
+    the job has no more outputs than these: a job that cannot be read (pruned since the
+    first output was saved) gives the first alone."""
     first = await output_for_reference(
         reference,
         outputs=outputs,
@@ -284,11 +284,9 @@ async def outputs_for_reference(
     for index in range(1, len(job.outputs)):
         output_id = saved_as(index)
         earlier = await asyncio.to_thread(reference_matches, outputs, output_id, reference)
-        if earlier is not None:
+        if earlier is not None and earlier.job_id == job.id:
             made.append(
-                RenderedOutput(
-                    output_id, list(earlier.colors), reference.render_key, earlier.job_id
-                )
+                RenderedOutput(output_id, list(earlier.colors), reference.render_key, job.id)
             )
             continue
         made.append(

@@ -312,6 +312,20 @@ async def test_an_attempt_that_stopped_part_way_saves_only_what_is_missing(shop:
     assert outputs.created == [made[2].output_id] and len(renders.submitted) == 1
 
 
+async def test_a_later_output_of_another_job_is_saved_again(shop: Shop) -> None:
+    """The first output was rendered again since: an output of the job before it is left as
+    it is, so the answer is of one job."""
+    outputs = SavedOutputs()
+    renders = SeveralRenders(2)
+    before = await every_output(shop, outputs, renders)
+    outputs.metas[before[1].output_id].job_id = "job-0"
+    made = await every_output(shop, outputs, renders)
+    assert made[0] == before[0] and made[1].output_id != before[1].output_id
+    assert {one.job_id for one in made} == {"job-1"}
+    assert outputs.metas[before[1].output_id].job_id == "job-0"
+    assert len(renders.submitted) == 1
+
+
 async def test_the_outputs_of_a_pruned_job_are_not_known(shop: Shop) -> None:
     """The first is the answer, and the caller's check of the job (`SliceRun`
     ``rendered_sha256``) finds that it is not known to be the whole render."""

@@ -658,8 +658,9 @@ for the first. `materialize_result` does not raise for a key the store no longer
 -> list[RenderedOutput]` gets the first output through `output_for_reference` (one submit
 and wait, or the output saved before). It then reads the job that output was saved from,
 saves each later entry of `job.outputs` with `"index": k` under `saved_as(k)`, in index
-order, and reuses an output already saved there while it `reference_matches`. A job that
-was pruned since gives the first output alone, which the check below refuses.
+order, and reuses an output already saved there while it `reference_matches` and is of
+that job (one of another job stays, and the new one gets an id of its own). A job that was
+pruned since gives the first output alone, which the check below refuses.
 `output_for_reference` stays as it is for the order's render and the quote.
 `storefront_output_id(render_key, index=0)` keeps today's id for index 0. For a
 later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
@@ -725,9 +726,11 @@ other outputs of an ordered kit are found by the job: each saved output records 
 `job_id`, and the job lists every output. The cart line has every slot of the kit, so
 until PR 5 a back-office slice quote of it, which slices output 0 alone, is refused for a
 slot that only another output uses (`quote.py` `unsliced_slots`): the shop types the
-price. An order page that renders and prints every output of an item is part of this build (PR 5, §11). **No customer pays for an output the
-order cannot make:** until PR 5 lands, a render with more than one output still answers
-`none`, so such a kit is priced by hand. PR 4 builds the kit price, and PR 5 turns it on
+price. The item's print asks for a spool of each kit slot too (`spools.py` `fill_plan`, 409
+`needs_spool_choice`), output 0's or not, so list no template with several outputs before
+PR 5. An order page that renders and prints every output of an item is part of this build
+(PR 5, §11). **No customer pays for an output the order cannot make:** until PR 5 lands, a
+render with more than one output still answers `none`, so such a kit is priced by hand. PR 4 builds the kit price, and PR 5 turns it on
 together with the order's every-output render and print. The dollhouse makes one output
 (fact 2), so no listed template meets this today.
 
