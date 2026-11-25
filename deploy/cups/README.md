@@ -20,15 +20,22 @@ the client.
   | `CUPS_PRINTER_INFO` | description clients show (optional) |
   | `CUPS_DEFAULT_PAGE_SIZE` | a PageSize of the PPD: `w144h72` is 2 x 1 in, `w288h432` is 4 x 6 in (default) |
 
-- Your own config instead: leave `CUPS_PRINTER_NAME` unset and `start.sh` touches nothing
-  in `/etc/cups`, so a mounted `printers.conf`, `ppd/` and `cupsd.conf` are used as they
-  are. `cupsd.conf` can be replaced either way (`start.sh` never writes it). cupsd rewrites
-  `printers.conf` when a queue changes, so mount the directory writable (a ConfigMap
-  copied into an emptyDir by an init container), not a read-only file.
+- State: `/var/lib/cups/etc` is cupsd's ServerRoot (queues, PPDs, TLS files) and
+  `/var/lib/cups/spool` its RequestRoot (jobs not yet printed). Mount one durable volume
+  at `/var/lib/cups`; `start.sh` creates both subdirectories and copies in each default
+  file that is missing, so a PVC whose root belongs to root (with `fsGroup: 10001`) works.
+  cupsd must own and chmod those directories, which is why they are not the volume's
+  root. The cache (`/var/cache/cups`) is rebuilt at start and needs no volume.
+- Configuration: `/etc/cups/cupsd.conf` and `cups-files.conf`, the image's. Mount a file
+  over either to replace it. Leave `CUPS_PRINTER_NAME` unset and `start.sh` declares no
+  queue: the queues in `/var/lib/cups/etc` (on the volume, or set by `lpadmin` inside
+  the pod) are the deployment's own. This supports any printer the image has a driver
+  for: CUPS's sample drivers (Zebra ZPL, EPL, CPCL, Dymo, generic PCL and ESC/P) and
+  driverless IPP Everywhere and AirPrint printers through cups-filters.
 - `cupsd.conf` lets a network client print, see jobs and cancel one job. Every
   administration and operator operation is refused (a remote `lpadmin` gets `Forbidden`,
-  checked by the CI smoke), so with the image's `cupsd.conf` the queue is set only by env
-  or a mounted config.
+  checked by the CI smoke), so with the image's `cupsd.conf` the queue is set only by env,
+  the volume or a mounted config.
   Connections from inside the pod are trusted as local; nothing else runs there.
 - TLS ends at the shared Envoy Gateway; cupsd serves plain HTTP. Clients add the printer
   as `ipps://cups.internal.nullreference.io/printers/S-EDCDU03`.

@@ -803,6 +803,7 @@ CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.
 # `sample.drv` that makes the "Zebra ZPL Label Printer" PPD, and `cups-filters` (with its
 # core drivers) the PDF and image to raster filters (`dpkg -S` in debian 13.7, 2026-11-25).
 # start.sh declares the one queue from env and runs cupsd in the foreground, without root.
+# /var/lib/cups may be a volume (deploy/cups/README.md, "State").
 FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS cups
 
 # hadolint ignore=DL3008
@@ -815,10 +816,17 @@ RUN apt-get update \
 RUN groupadd --gid 10001 cups \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin cups \
     && rm -f /etc/cups/printers.conf /etc/cups/ppd/* \
-    && printf 'User cups\nGroup cups\nSystemGroup cups\nErrorLog stderr\nAccessLog stderr\nPageLog stderr\n' > /etc/cups/cups-files.conf \
-    && mkdir -p /run/cups /var/spool/cups/tmp /var/cache/cups /var/log/cups /etc/cups/ppd \
-    && chown -R 10001:10001 /etc/cups /run/cups /var/spool/cups /var/cache/cups /var/log/cups
-COPY --chown=10001:10001 deploy/cups/cupsd.conf /etc/cups/cupsd.conf
+    && mkdir -p /usr/local/share/scadbuddy-cups \
+    && cp -a /etc/cups /usr/local/share/scadbuddy-cups/server-root \
+    && rm -f /usr/local/share/scadbuddy-cups/server-root/cupsd.conf /usr/local/share/scadbuddy-cups/server-root/cups-files.conf \
+    && printf 'User cups\nGroup cups\nSystemGroup cups\nServerRoot /var/lib/cups/etc\nRequestRoot /var/lib/cups/spool\nErrorLog stderr\nAccessLog stderr\nPageLog stderr\n' > /etc/cups/cups-files.conf \
+    && mkdir -p /run/cups /var/cache/cups /var/log/cups /var/lib/cups \
+    && chown -R 10001:10001 /run/cups /var/cache/cups /var/log/cups /var/lib/cups
+# The configuration (cupsd.conf, cups-files.conf) stays in /etc/cups, the image's or
+# mounted over it. The state (queues, PPDs, jobs) lives in subdirectories of
+# /var/lib/cups that start.sh creates, so a volume there (its root owned by root, as a
+# PVC's is) still gives cupsd directories it owns and may chmod.
+COPY deploy/cups/cupsd.conf /etc/cups/cupsd.conf
 COPY deploy/cups/start.sh /usr/local/bin/cups-start
 
 ARG SCADBUDDY_REVISION=unknown

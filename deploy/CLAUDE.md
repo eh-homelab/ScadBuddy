@@ -28,7 +28,8 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
 
 - `deploy/cups/` — the label print server's `cupsd.conf` and `start.sh`, copied into the
   Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). The queue comes from the
-  Deployment's env; remote admin is refused. `README.md` there has the variables and the
+  Deployment's env; its state (queues, jobs) is under `/var/lib/cups`, one volume; remote
+  admin is refused. `README.md` there has the variables and the
   printer's measured facts. Its pin in eh-homelab/clusters is moved by hand, as the camera
   images' are.
 
