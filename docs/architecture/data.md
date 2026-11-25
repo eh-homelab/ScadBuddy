@@ -146,7 +146,11 @@ commit that touched it), `inputs_version`, its `// color` parameters, its media 
 sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
 The row is derived: git stays the record, and any row can be rebuilt from the tree. Once a
 copy run has finished, `Catalogue.slugs`, `list_models` and `record` read the rows
-(phase 2); before that, they read the files.
+(phase 2), and so do the pin index, the library associations (`raw_metas`), the print
+settings, the name check, `duplicates_of`, and the callers that only name or filter
+models (`list_summaries`: the activity facets, the print-import suggestions and the
+outputs' `?tag=`); before that, they read the files. `library_users` and `library_pins`
+always read the files (spec §7.4).
 
 - A write that commits writes its templates' rows in the transaction that records the
   models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,

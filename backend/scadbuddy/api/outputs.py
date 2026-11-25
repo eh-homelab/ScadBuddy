@@ -1072,7 +1072,7 @@ async def list_recent_outputs(
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, "outputs are not indexed here")
     slugs: list[str] | None = list(slug) if slug else None
     if tag is not None:
-        records = await asyncio.to_thread(catalogue.list_models)
+        records = await asyncio.to_thread(catalogue.list_summaries)
         tagged = [record.slug for record in select_models(records, None, [tag], None)]
         slugs = tagged if slugs is None else [s for s in slugs if s in tagged]
     query = OutputQuery(

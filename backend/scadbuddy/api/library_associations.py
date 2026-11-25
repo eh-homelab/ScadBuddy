@@ -25,7 +25,7 @@ from scadbuddy.api.models import require_model_exists
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError
+from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OutputNotFoundError, OutputStore
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.print_library.associations import (
@@ -82,10 +82,9 @@ async def _native(library: PrintLibraryDep) -> NativeLibrary | None:
 
 
 def _raw_meta(catalogue: Catalogue, slug: str) -> dict[str, Any] | None:
-    try:
-        return catalogue.read_raw_meta(slug)
-    except (InvalidModelMetaError, OSError):
-        return None
+    """The model's ``model.json`` dict, None where it does not read: its row once the
+    rows are copied (`Catalogue.raw_metas`, #7317 Task 8)."""
+    return catalogue.raw_metas([slug])[slug]
 
 
 def _name_in(raw: dict[str, Any] | None, slug: str) -> str | None:
@@ -93,10 +92,6 @@ def _name_in(raw: dict[str, Any] | None, slug: str) -> str | None:
         return None
     name = raw.get("name")
     return name if isinstance(name, str) and name else slug
-
-
-def _model_name(catalogue: Catalogue, slug: str) -> str | None:
-    return _name_in(_raw_meta(catalogue, slug), slug)
 
 
 def _mesh_source_in(raw: dict[str, Any] | None) -> int | None:
@@ -109,14 +104,18 @@ def _mesh_source_in(raw: dict[str, Any] | None) -> int | None:
 
 
 def _named(found: list[Association], catalogue: Catalogue) -> list[Association]:
-    names: dict[str, str | None] = {}
+    """``found`` with each model target named, every model's ``model.json`` read once."""
+    wanted = [
+        slug
+        for item in found
+        if item.target_name is None and (slug := PrintSubject.parse(item.target).slug) is not None
+    ]
+    raws = catalogue.raw_metas(list(dict.fromkeys(wanted))) if wanted else {}
     named = []
     for item in found:
-        subject = PrintSubject.parse(item.target)
-        if subject.slug is not None and item.target_name is None:
-            if subject.slug not in names:
-                names[subject.slug] = _model_name(catalogue, subject.slug)
-            item = item.model_copy(update={"target_name": names[subject.slug]})
+        slug = PrintSubject.parse(item.target).slug
+        if slug is not None and item.target_name is None:
+            item = item.model_copy(update={"target_name": _name_in(raws[slug], slug)})
         named.append(item)
     return named
 
@@ -132,8 +131,8 @@ def _implied_for_file(
 ) -> list[Association]:
     """The models made from ``file`` (mine only: a built-in is never made from a library
     file), and the model of the output it is a copy of. Reads every model's
-    ``model.json`` once, as `Catalogue.library_pin_index` does, and names each model
-    found from that read."""
+    ``model.json`` once (`Catalogue.raw_metas`: the rows once they are copied), as
+    `Catalogue.library_pin_index` does, and names each model found from that read."""
     implied: list[Association] = []
     if file.output_id is not None:
         try:
@@ -151,10 +150,9 @@ def _implied_for_file(
                     implied_by="output",
                 )
             )
-    for slug in catalogue.slugs():
+    for slug, raw in catalogue.raw_metas().items():
         if is_builtin(slug):
             continue
-        raw = _raw_meta(catalogue, slug)
         if _mesh_source_in(raw) == file.id:
             implied.append(
                 Association(

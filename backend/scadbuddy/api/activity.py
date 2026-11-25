@@ -348,7 +348,7 @@ def _look_up(
     if models:
         try:
             slugs = [slug for slug in catalogue.slugs() if slug in wanted]
-            names = {record.slug: record.name for record in catalogue.list_models(slugs)}
+            names = {model.slug: model.name for model in catalogue.list_summaries(slugs)}
         except Exception:  # the facets are the activity index's; a name is only a nicety
             logger.warning("activity facets: no model names from the catalogue", exc_info=True)
             # Every model, and every output named by its model's name, is asked again.

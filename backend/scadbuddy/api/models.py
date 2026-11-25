@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 import psycopg
@@ -345,8 +345,24 @@ def fold(text: str) -> str:
     return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
 
 
+class Selectable(Protocol):
+    """What the search and filters read of a model: a `ModelRecord`, or a
+    `ModelSummary` (#7317 Task 8)."""
+
+    @property
+    def slug(self) -> str: ...
+    @property
+    def origin(self) -> str: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def description(self) -> str: ...
+    @property
+    def tags(self) -> list[str]: ...
+
+
 def _selects(
-    record: ModelRecord, words: list[str], tags: list[str], origin: CatalogueOrigin | None
+    record: Selectable, words: list[str], tags: list[str], origin: CatalogueOrigin | None
 ) -> bool:
     if origin is not None and record.origin != origin:
         return False
@@ -357,12 +373,12 @@ def _selects(
     return all(word in text for word in words)
 
 
-def select_models(
-    records: list[ModelRecord],
+def select_models[T: Selectable](
+    records: list[T],
     q: str | None,
     tags: list[str] | None,
     origin: CatalogueOrigin | None,
-) -> list[ModelRecord]:
+) -> list[T]:
     """The records the search and filters select, in the catalogue's order."""
     words = fold(q or "").split()
     wanted = [fold(tag) for tag in tags or []]

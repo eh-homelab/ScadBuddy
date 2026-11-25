@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -98,6 +98,7 @@ from scadbuddy.library.template_rows import (
     BIGINT_MAX,
     BIGINT_MIN,
     META_TEXT_MAX,
+    NOT_STORABLE,
     TemplateRow,
     TemplateRows,
     template_stamp,
@@ -137,10 +138,6 @@ DUPLICATE_STAGING_MAX_AGE = DEFAULT_DUPLICATE_STAGING_MAX_AGE
 #: How many times a merge is worked out again when the template or its upstream
 #: moves between planning and writing it, before it is refused.
 MERGE_ATTEMPTS = 3
-#: How a row's ``meta_error`` starts when its ``model.json`` is JSON that Postgres's
-#: jsonb refuses (NaN, Infinity, a lone surrogate, a NUL in a key): `record` then reads
-#: the file (#7317 Task 7 review M2).
-NOT_STORABLE = "not storable"
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -688,6 +685,18 @@ class ModelRecord(ModelMeta):
     inputs_version: int = Field(default_factory=int)
 
 
+@dataclass(frozen=True)
+class ModelSummary:
+    """What a caller that only names, searches or filters models needs of one: no media,
+    cover, preview or revision work (#7317 Task 8, spec §5.4)."""
+
+    slug: str
+    origin: Literal["builtin", "mine"]
+    name: str
+    description: str
+    tags: list[str]
+
+
 def _file_size(path: Path) -> int | None:
     """The size of a regular file, or None when there is none."""
     try:
@@ -1058,7 +1067,7 @@ class Catalogue:
         if row is None:
             logger.warning("a template has no row; read its files", extra={"slug": slug})
             return self._fresh_record(slug)
-        if row.meta is None and (row.meta_error or "").startswith(NOT_STORABLE):
+        if _not_storable(row):
             logger.warning(
                 "a template's model.json cannot be stored in its row; read its files",
                 extra={"slug": slug},
@@ -1194,8 +1203,26 @@ class Catalogue:
     def print_settings(self, slug: str) -> dict[str, ProcessValue]:
         """The template's ``print_settings`` as its model.json has them now (#770);
         none for a template that is gone. One whose model.json is invalid is
-        :class:`InvalidModelMetaError`, naming the key."""
-        return self._meta(slug, self.read_raw_meta(slug)).print_settings
+        :class:`InvalidModelMetaError`, naming the key. From the row once the rows are
+        copied (#7317 Task 8)."""
+        return self._settings_meta(slug)[0].print_settings
+
+    def _settings_meta(self, slug: str) -> tuple[ModelMeta, TemplateRow | None]:
+        """The metadata the print settings are read from, and the row it came from.
+        Once the rows are copied: the row's ``meta``, or its ``meta_error`` as
+        :class:`InvalidModelMetaError`. The files, as before the copy, for a template
+        with no row but files and for a row whose ``model.json`` Postgres cannot store;
+        none for a template that is gone."""
+        if self._from_rows():
+            assert self.rows is not None
+            row = self.rows.get(slug)
+            if row is not None and row.meta is not None:
+                return self._meta(slug, row.meta), row
+            if row is not None and not _not_storable(row):
+                raise InvalidModelMetaError(slug, row.meta_error or "not JSON")
+            if row is None and not self.exists(slug):
+                return self._meta(slug, {}), None
+        return self._meta(slug, self.read_raw_meta(slug)), None
 
     def part_print_settings(self, slug: str) -> dict[str, PartSettings]:
         """The template's ``part_print_settings`` as its model.json has them now
@@ -1204,26 +1231,29 @@ class Catalogue:
         A key that is not a ``// color`` parameter of the template's ``model.scad`` is
         refused too, naming it, so a typo never sets nothing in silence. A template
         with a pipeline (whose params need not be ``model.scad``'s) or with no
-        ``model.scad`` is only warned about."""
-        meta = self._meta(slug, self.read_raw_meta(slug))
+        ``model.scad`` is only warned about. From the row once the rows are copied: its
+        ``colour_params`` (NULL where ``model.scad`` could not be read)."""
+        meta, row = self._settings_meta(slug)
         declared = meta.part_print_settings
         if declared:
-            try:
-                source = self.paths.model_source(slug).read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                source = None
-            colours = (
-                {n for n, a in find_annotations(source).items() if a.kind == "color"}
-                if source is not None
-                else set()
-            )
+            found: list[str] | None
+            if row is not None:
+                found = row.colour_params
+            else:
+                try:
+                    source = self.paths.model_source(slug).read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    found = None
+                else:
+                    found = [n for n, a in find_annotations(source).items() if a.kind == "color"]
+            colours = set(found or ())
             unknown = [name for name in declared if name not in colours]
             if unknown:
                 problem = (
                     f"part_print_settings names {', '.join(map(repr, unknown))}, which is not a"
                     " // color parameter of model.scad"
                 )
-                if source is None or meta.pipeline is not None:
+                if found is None or meta.pipeline is not None:
                     logger.warning("template %s: %s", slug, problem)
                 else:
                     raise InvalidModelMetaError(slug, problem)
@@ -1490,19 +1520,48 @@ class Catalogue:
         """Every readable pin of every model, by library name, reading each
         ``model.json`` once: what :meth:`library_pins` answers for one name, less the
         entries that cannot be read as a pin. One walk answers any number of names
-        (#253, review of #740)."""
-        # Every model's model.json on the NFS share: one span for the walk (#7245).
+        (#253, review of #740). From the rows' ``meta`` once they are copied (#7317
+        Task 8); a ``model.json`` that is not JSON pins nothing here, and one that does
+        not validate still pins."""
+        # Every model's model.json on the NFS share, or one query: one span (#7245).
         with span("catalogue.library_pin_index") as current:
-            slugs = self.slugs()
-            current.set_attribute("scadbuddy.models", len(slugs))
-            return self._library_pin_index(slugs)
+            raws = self.raw_metas()
+            current.set_attribute("scadbuddy.models", len(raws))
+            return self._library_pin_index(raws)
 
-    def _library_pin_index(self, slugs: list[str]) -> dict[str, list[tuple[str, ModelLibrary]]]:
+    def raw_metas(self, slugs: Sequence[str] | None = None) -> dict[str, dict[str, Any] | None]:
+        """Each template's ``model.json`` as a dict (`read_raw_meta`), None where it does
+        not read as one; every template's, or those of ``slugs``, in their order. From
+        the rows' ``meta`` once they are copied (one query, #7317 Task 8). A row whose
+        ``model.json`` Postgres cannot store, and one of ``slugs`` with no row (a failed
+        refresh; a template that is gone reads as ``{}``, as `read_raw_meta`), read the
+        file."""
+        if not self._from_rows():
+            return {
+                slug: self._file_raw(slug) for slug in (self.slugs() if slugs is None else slugs)
+            }
+        assert self.rows is not None
+        rows = self.rows.all() if slugs is None else self.rows.many(slugs)
+        found = {
+            row.template_id: self._file_raw(row.template_id) if _not_storable(row) else row.meta
+            for row in rows
+        }
+        if slugs is None:
+            return found
+        return {slug: found[slug] if slug in found else self._file_raw(slug) for slug in slugs}
+
+    def _file_raw(self, slug: str) -> dict[str, Any] | None:
+        try:
+            return self.read_raw_meta(slug)
+        except (InvalidModelMetaError, OSError):
+            return None
+
+    def _library_pin_index(
+        self, raws: Mapping[str, dict[str, Any] | None]
+    ) -> dict[str, list[tuple[str, ModelLibrary]]]:
         index: dict[str, list[tuple[str, ModelLibrary]]] = {}
-        for slug in slugs:
-            try:
-                raw = self.read_raw_meta(slug)
-            except InvalidModelMetaError:
+        for slug, raw in raws.items():
+            if raw is None:
                 continue
             entries = raw.get("libraries")
             if not isinstance(entries, list):
@@ -1558,6 +1617,51 @@ class Catalogue:
                     found.append((slug, entry))
                     break
         return found
+
+    def list_summaries(self, slugs: list[str] | None = None) -> list[ModelSummary]:
+        """:meth:`list_models` as summaries: the same templates, in the same order. From
+        the rows once they are copied: one query, and no media, cover, preview or git
+        work (#7317 Task 8). A row whose ``model.json`` does not read is left out, as
+        :meth:`list_models` leaves it out."""
+        with span("catalogue.list_summaries") as current:
+            from_rows = self._from_rows()
+            current.set_attribute("scadbuddy.from_rows", from_rows)
+            if not from_rows:
+                return [
+                    ModelSummary(
+                        slug=record.slug,
+                        origin=record.origin,
+                        name=record.name,
+                        description=record.description,
+                        tags=list(record.tags),
+                    )
+                    for record in self.list_models(slugs)
+                ]
+            assert self.rows is not None
+            if slugs is None:
+                listed = self.rows.all()
+            else:
+                by_id = {row.template_id: row for row in self.rows.many(slugs)}
+                listed = [by_id[slug] for slug in slugs if slug in by_id]
+            summaries: list[ModelSummary] = []
+            for row in listed:
+                if row.meta is None:
+                    continue
+                try:
+                    _, meta = self._parsed(row.template_id, row.meta)
+                except InvalidModelMetaError:
+                    continue
+                summaries.append(
+                    ModelSummary(
+                        slug=row.template_id,
+                        origin=row.origin,
+                        name=meta.name,
+                        description=meta.description,
+                        tags=list(meta.tags),
+                    )
+                )
+            current.set_attribute("scadbuddy.models", len(summaries))
+            return summaries
 
     def list_models(self, slugs: list[str] | None = None) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
@@ -1921,15 +2025,33 @@ class Catalogue:
         wanted = name.casefold()
         if wanted == current.casefold():
             return
-        for other in self.slugs():
-            if other == slug:
-                continue
-            try:
-                taken = self._meta(other, self.read_raw_meta(other)).name
-            except (InvalidModelMetaError, OSError):
-                continue
+        for other, taken in self._other_names(slug):
             if taken.casefold() == wanted:
                 raise ModelNameTakenError(other, taken)
+
+    def _other_names(self, slug: str) -> Iterator[tuple[str, str]]:
+        """Every other template's name, where its ``model.json`` reads: from the rows
+        once they are copied (one query, #7317 Task 8), else from each file."""
+        if self._from_rows():
+            assert self.rows is not None
+            for other, taken, error in self.rows.names():
+                if other == slug:
+                    continue
+                if error is None:
+                    yield other, taken
+                elif error.startswith(NOT_STORABLE):
+                    yield from self._file_name(other)
+            return
+        for other in self.slugs():
+            if other != slug:
+                yield from self._file_name(other)
+
+    def _file_name(self, slug: str) -> Iterator[tuple[str, str]]:
+        """``slug`` and the name its ``model.json`` gives, or nothing where it does not read."""
+        try:
+            yield slug, self._meta(slug, self.read_raw_meta(slug)).name
+        except (InvalidModelMetaError, OSError):
+            return
 
     def pin_library(
         self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
@@ -3159,16 +3281,23 @@ class Catalogue:
         return self._fresh_record(slug)
 
     def duplicates_of(self, model_id: str) -> list[str]:
-        """The templates of mine whose upstream is ``model_id``."""
+        """The templates of mine whose upstream is ``model_id``: from the rows once
+        they are copied (one query, #7317 Task 8), else from each ``model.json``. A row
+        whose ``model.json`` Postgres cannot store is judged by its file."""
         found: list[str] = []
-        for slug in _templates_in(self.paths.models):
+        candidates = _templates_in(self.paths.models)
+        if self._from_rows():
+            assert self.rows is not None
+            found, candidates = self.rows.duplicates_of(model_id)
+        for slug in candidates:
             try:
                 upstream = self.read_raw_meta(slug).get("upstream")
             except (OSError, ValueError):
                 continue
             if isinstance(upstream, dict) and upstream.get("id") == model_id:
                 found.append(slug)
-        return found
+        # The walk's order (`_templates_in` sorts), with the files' answers merged in.
+        return sorted(found)
 
     def delete(self, slug: str) -> None:
         self._require(slug)
@@ -3749,6 +3878,12 @@ def _unstorable(meta: dict[str, Any]) -> str | None:
     if _has_nul(meta):
         return "a NUL character"
     return None
+
+
+def _not_storable(row: TemplateRow) -> bool:
+    """Whether the row's ``model.json`` is JSON that Postgres could not store, so its
+    readers read the file (Task 7 review M2)."""
+    return row.meta is None and (row.meta_error or "").startswith(NOT_STORABLE)
 
 
 def _upstream_id(row: TemplateRow) -> str | None:

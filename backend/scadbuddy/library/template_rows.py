@@ -41,6 +41,11 @@ META_TEXT_MAX = 64 * 1024
 BIGINT_MIN = -(2**63)
 BIGINT_MAX = 2**63 - 1
 
+#: How a row's ``meta_error`` starts when its ``model.json`` is JSON that Postgres's
+#: jsonb refuses (NaN, Infinity, a lone surrogate, a NUL in a key): the catalogue's
+#: readers then read that file, as before the copy (#7317 Task 7 review M2).
+NOT_STORABLE = "not storable"
+
 #: A copy run older than this is deleted when the next run starts (plan decision 8).
 RUN_KEPT = "30 days"
 
@@ -202,6 +207,29 @@ class TemplateRows:
                 (list(template_ids),),
             ).fetchall()
         return [_row_of(row) for row in found]
+
+    def names(self) -> list[tuple[str, str, str | None]]:
+        """Each row's id, ``name`` and ``meta_error``, in the walk's order."""
+        with self._pool.connection() as conn:
+            found = conn.execute(f"SELECT template_id, name, meta_error FROM templates{_ORDER}")
+            return [(row["template_id"], row["name"], row["meta_error"]) for row in found]
+
+    def duplicates_of(self, template_id: str) -> tuple[list[str], list[str]]:
+        """The ids of mine whose ``meta`` names ``template_id`` as their upstream, and
+        the ids of mine whose ``model.json`` Postgres could not store (their file
+        decides), each in the walk's order."""
+        with self._pool.connection() as conn:
+            found = conn.execute(
+                "SELECT template_id, meta IS NULL AS unstored FROM templates"
+                " WHERE origin = 'mine' AND ((meta->'upstream'->>'id' = %s"
+                " AND jsonb_typeof(meta->'upstream'->'id') = 'string')"
+                " OR (meta IS NULL AND starts_with(meta_error, %s)))"
+                f"{_ORDER}",
+                (template_id, NOT_STORABLE),
+            ).fetchall()
+        named = [row["template_id"] for row in found if not row["unstored"]]
+        unstored = [row["template_id"] for row in found if row["unstored"]]
+        return named, unstored
 
     def ids(self) -> list[str]:
         with self._pool.connection() as conn:
