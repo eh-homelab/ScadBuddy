@@ -109,6 +109,12 @@ class DataPaths:
         return self.root / "outputs"
 
     @property
+    def output_blobs(self) -> Path:
+        """The saved outputs' blobs on the `local` store (#7257, plan D7): that store has
+        no content store of its own, so outputs get one here."""
+        return self.root / "output-blobs"
+
+    @property
     def blobs(self) -> Path:
         """Rendered pieces, keyed by `piece_key` (spec §6.2's `local` backend)."""
         return self.root / "blobs"
@@ -204,7 +210,10 @@ class DataPaths:
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id
 
-    def ensure(self) -> None:
+    def ensure(self, *, output_blobs: bool = False) -> None:
+        """Make the data volume's folders. ``output_blobs``: also `output_blobs`, which
+        only the `local` store uses (#7257, plan D7); on `s3` and `bambuddy` the share
+        gets no such folder."""
         for directory in (
             self.models,
             self.outputs,
@@ -215,3 +224,5 @@ class DataPaths:
             self.assets,
         ):
             directory.mkdir(parents=True, exist_ok=True)
+        if output_blobs:
+            self.output_blobs.mkdir(parents=True, exist_ok=True)
