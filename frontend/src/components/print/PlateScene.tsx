@@ -5,7 +5,7 @@ import * as THREE from 'three'
 import { designColorOf, designOpacityOf } from '../../lib/glbColor'
 import { applyPartOpacity, recolourParts } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
-import { PreviewLoader } from '../../lib/previewLoader'
+import { PreviewLoader, stopRetries } from '../../lib/previewLoader'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
 import { WheelGate } from './WheelGate'
@@ -27,6 +27,14 @@ type Props = {
  * is the model, not the slicer's toolpaths: no infill, supports or speeds.
  */
 export function PlateScene({ url, colors, cutAt, onHeight, background }: Props) {
+  // A retry still waiting for this URL stops when the scene leaves it, and its failure is
+  // dropped from the loader's cache, so a later visit loads afresh (#6968).
+  useEffect(
+    () => () => {
+      if (stopRetries(url)) useLoader.clear(PreviewLoader, url)
+    },
+    [url],
+  )
   return (
     <ErrorBoundary
       resetKey={url}

@@ -12,10 +12,27 @@ function passes(error: unknown): boolean {
   return typeof response?.status === 'number' && PASSING.has(response.status)
 }
 
+/** Each URL's retry that waits on its timer, with the failure it ends with if stopped. */
+const waiting = new Map<string, { timer: ReturnType<typeof setTimeout>; fail: () => void }>()
+
+/**
+ * Stops ``url``'s waiting retry, if one waits: its load fails at once, so a viewer that
+ * unmounts or moves to another URL never keeps asking for the old one. True when one was
+ * stopped: the loader's cache then holds that failure, which the caller clears.
+ */
+export function stopRetries(url: string): boolean {
+  const entry = waiting.get(url)
+  if (entry === undefined) return false
+  waiting.delete(url)
+  clearTimeout(entry.timer)
+  entry.fail()
+  return true
+}
+
 /**
  * The viewers' mesh loader: a 502, 503 or 504 is tried again with a backoff, since the first
  * read of a done render can find its files still on their way from the store (#6968). Any
- * other failure, and the last try's, is the caller's error.
+ * other failure, and the last try's, is the caller's error; `stopRetries` ends a wait.
  */
 export class PreviewLoader extends GLTFLoader {
   override load(
@@ -33,7 +50,11 @@ export class PreviewLoader extends GLTFLoader {
           return
         }
         tries += 1
-        setTimeout(attempt, delay)
+        const timer = setTimeout(() => {
+          waiting.delete(url)
+          attempt()
+        }, delay)
+        waiting.set(url, { timer, fail: () => onError?.(error) })
       })
     attempt()
   }

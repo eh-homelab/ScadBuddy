@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator, MutableMapping
@@ -678,6 +679,7 @@ def test_a_preview_not_ready_is_asked_for_again_then_is_a_503(
     edge: TestClient,
     crud_mock: respx.Router,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """#6968: the edge asks again while a replica fetches the files, and a replica that has
     them answers; past `PREVIEW_BUDGET` the page gets a 503, which its viewer tries again."""
@@ -692,7 +694,12 @@ def test_a_preview_not_ready_is_asked_for_again_then_is_a_503(
     assert route.call_count == 2
     monkeypatch.setattr("scadbuddy.crud.storefront.PREVIEW_BUDGET", 0.0)
     crud_mock.get(f"{RENDERS}/{JOB}/preview.glb").mock(return_value=waiting)
-    assert edge.get(f"/api/store/v1/renders/{JOB}/preview.glb").status_code == 503
+    with caplog.at_level(logging.WARNING):
+        r = edge.get(f"/api/store/v1/renders/{JOB}/preview.glb")
+    assert r.status_code == 503
+    assert r.json()["type"] == f"{STOREFRONT_PROBLEMS}preview_not_ready"
+    assert r.headers["retry-after"] == "1"
+    assert "unavailable" not in caplog.text
 
 
 def test_a_dropped_preview_closes_its_stream_at_once(

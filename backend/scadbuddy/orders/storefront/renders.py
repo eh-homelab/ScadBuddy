@@ -172,8 +172,9 @@ _fetches: dict[str, asyncio.Task[None]] = {}
 _ready: OrderedDict[str, None] = OrderedDict()
 READY_KEPT: Final = 4096
 #: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
-#: its files are taken as lost for the status only: it names the preview, whose read then
-#: says so at once (404), rather than the page polling a render that can never show. The
+#: its files are taken as lost for the status and for the preview read (`preview_ready`):
+#: the status names the preview, whose read then goes on and says so at once (404), rather
+#: than the page polling a render that can never show. The
 #: estimate never takes lost files as there (`files_ready`). A count older than
 #: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
 _failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
@@ -267,7 +268,8 @@ async def preview_ready(state: AppState, job: Job) -> bool:
     """Whether the done ``job``'s preview can be read here now (#6968): its files are in
     this process's cache after a wait of at most `READY_WAIT`, or they are taken as lost
     (`files_lost`), so the read says so. False: the read answers 503, and the next one
-    finds the fetch further on."""
+    finds the fetch further on. It fetches even for a job in `_ready`, on purpose: the
+    cache may have evicted the files since, and the read needs them on this replica."""
     return await _fetch(state, job) or files_lost(job.id)
 
 

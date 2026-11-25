@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { PreviewLoader, RETRY_DELAYS_MS } from './previewLoader'
+import { PreviewLoader, RETRY_DELAYS_MS, stopRetries } from './previewLoader'
 
 const URL_ = 'http://shop.test/api/store/v1/renders/a/preview.glb'
 const mesh = () => new Response(JSON.stringify({ asset: { version: '2.0' } }))
@@ -56,5 +56,18 @@ describe('PreviewLoader (#6968)', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(failed).toHaveBeenCalledTimes(1)
     expect(fetched).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops a waiting retry at once', async () => {
+    const fetched = answers(refusal(503))
+    const { loaded, failed } = load()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(fetched).toHaveBeenCalledTimes(1))
+    expect(stopRetries(URL_)).toBe(true)
+    expect(failed).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetched).toHaveBeenCalledTimes(1)
+    expect(loaded).not.toHaveBeenCalled()
+    expect(stopRetries(URL_)).toBe(false)
   })
 })

@@ -27,7 +27,7 @@ import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, type DisplayUnit } from '../lib/units'
 import { ownSlotMaterials, recolourSlots, withPartOpacity } from '../lib/partOpacity'
-import { PreviewLoader } from '../lib/previewLoader'
+import { PreviewLoader, stopRetries } from '../lib/previewLoader'
 import { ErrorBoundary } from './ErrorBoundary'
 import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
@@ -252,6 +252,15 @@ export function Preview({
   const alone =
     chosen && job && chosen.jobId === job.id && plateIndices.includes(chosen.plate) ? chosen.plate : null
   // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
+  // A retry still waiting for the mesh on screen stops when the view moves to another URL
+  // or unmounts, and its failure is dropped from the loader's cache (#6968).
+  const shownUrl = shown?.url
+  useEffect(
+    () => () => {
+      if (shownUrl !== undefined && stopRetries(shownUrl)) useLoader.clear(PreviewLoader, shownUrl)
+    },
+    [shownUrl],
+  )
   const [plateFailed, setPlateFailed] = useState<{ jobId: string; plate: number }>()
   // Another job's is hidden by its id already; dropped too, so none outlives its job.
   if (plateFailed && plateFailed.jobId !== job?.id) setPlateFailed(undefined)
