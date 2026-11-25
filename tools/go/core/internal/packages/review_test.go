@@ -20,3 +20,16 @@ func TestPythonsLengthOfAPinsJSON(t *testing.T) {
 		}
 	}
 }
+
+// CPython 3.12: len(json.dumps("\x7f")) is 8, and str(None) is "None".
+func TestPythonsEscapeOfDELAndItsNameOfNull(t *testing.T) {
+	if got := stringLen("\x7f"); got != 8 {
+		t.Errorf("stringLen: got %d, want 8", got)
+	}
+	if got := pyStr(json.RawMessage("null")); got != "None" {
+		t.Errorf("pyStr: got %q, want None", got)
+	}
+	if _, got := reviewName(json.RawMessage(`{"name": null}`)); got != "None" {
+		t.Errorf("reviewName: got %q, want None", got)
+	}
+}

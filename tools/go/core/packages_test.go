@@ -134,6 +134,16 @@ func TestARepinIsReviewedApprovedAndPrunesWhatItDropped(t *testing.T) {
 	expect(t, a.do("POST", base+"/plugin-packages/nope/discard-pending", "").body["reason"], "package-not-found")
 }
 
+func TestARepinWhoseReviewNamesNullSaysNoneAsPythonDoes(t *testing.T) {
+	a := newAPI(t, packageAreas)
+	a.do("POST", base+"/plugin-packages", install("greeter"))
+	pin := object("ref", "main", "fetch_url", "https://git.test/greeter.git", "fetch_path", "",
+		"commit_sha", c2, "content_hash", h2, "files", map[string]any{}, "review", review("greeter", "name", nil))
+	differs := a.do("POST", base+"/plugin-packages/greeter/pending", pin)
+	expect(t, differs.status, 409)
+	expect(t, differs.body["detail"], `the new commit names the plugin "None", not "greeter"`)
+}
+
 func TestARefusedReviewNeedsAllowAndEnableNeedsApproval(t *testing.T) {
 	a := newAPI(t, packageAreas)
 	a.do("POST", base+"/plugin-packages", install("greeter", "refused", []string{"a command hook"}))

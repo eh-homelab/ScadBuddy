@@ -198,10 +198,10 @@ func pyStr(raw json.RawMessage) string {
 	raw = bytes.TrimSpace(raw)
 	var s string
 	switch {
-	case json.Unmarshal(raw, &s) == nil:
-		return s
 	case string(raw) == "null":
 		return "None"
+	case json.Unmarshal(raw, &s) == nil:
+		return s
 	case string(raw) == "true":
 		return "True"
 	case string(raw) == "false":
@@ -326,7 +326,7 @@ func stringLen(s string) int {
 			n += 2
 		case r < 0x20:
 			n += 6
-		case r < 0x80:
+		case r < 0x7f:
 			n++
 		default:
 			n += 6 * len(utf16.Encode([]rune{r}))

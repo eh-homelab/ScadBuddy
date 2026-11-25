@@ -9,6 +9,7 @@
 package packages
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,6 +37,8 @@ const (
 	reviewJSONMax = 4 * 1024 * 1024
 	feedPackageQ  = 64
 	bodyBytesMax  = 8 * 1024 * 1024 // api/limits.py MAX_TEXT_BODY_BYTES
+	// announceTimeout bounds a write's event once the write has committed.
+	announceTimeout = 10 * time.Second
 
 	packageExists         = "package-exists"
 	packageNotFound       = "package-not-found"
@@ -379,7 +383,7 @@ func reviewName(review json.RawMessage) (string, string) {
 		return "", "None"
 	}
 	var s string
-	if json.Unmarshal(raw, &s) == nil {
+	if string(bytes.TrimSpace(raw)) != "null" && json.Unmarshal(raw, &s) == nil {
 		return s, s
 	}
 	return "\x00", pyStr(raw)
@@ -432,9 +436,12 @@ func written(ctx context.Context, tx pgx.Tx) error {
 	return wire.NotifyWarmEvict(ctx, tx)
 }
 
-// announced tells Settings → Tools & plugins of the committed write (#7460).
+// announced tells Settings → Tools & plugins of the committed write (#7460). As Python's
+// outbox, it does not stop when the request ends.
 func (s *Packages) announced(r *http.Request, name string) {
-	bus.Publish(r.Context(), s.Pool, "plugin_packages.changed", httpx.Field{Key: "name", Value: name})
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), announceTimeout)
+	defer cancel()
+	bus.Publish(ctx, s.Pool, "plugin_packages.changed", httpx.Field{Key: "name", Value: name})
 }
 
 func locked(ctx context.Context, tx pgx.Tx, name string) (*row, error) {

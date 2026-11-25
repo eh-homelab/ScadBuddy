@@ -57,10 +57,12 @@ const (
 )
 
 var (
-	originPattern  = regexp.MustCompile(`^https?://[^/?#@\s]+$`)
-	tabImageName   = regexp.MustCompile(`^[0-9a-f]{64}\.(png|jpg|gif|webp)$`)
-	sha256Hex      = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	activityKey    = regexp.MustCompile(`^agent\.[A-Za-z0-9_.-]+$`)
+	originPattern = regexp.MustCompile(`^https?://[^/?#@\s]+$`)
+	tabImageName  = regexp.MustCompile(`^[0-9a-f]{64}\.(png|jpg|gif|webp)$`)
+	sha256Hex     = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	activityKey   = regexp.MustCompile(`^agent\.[A-Za-z0-9_.-]+$`)
+	// timeSpecial are the words Postgres reads as a time and pydantic refuses.
+	timeSpecial    = regexp.MustCompile(`(?i)infinity|now|today|tomorrow|yesterday|epoch|allballs`)
 	tabImageTypes  = map[string]string{"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
 	scopes         = []string{"once", "session"}
 	principalKinds = []string{"bearer", "oidc", "anonymous", "flow"}
@@ -957,6 +959,10 @@ func (s *Stores) verify(r *http.Request, _ crud.Params) (any, error) {
 	}{token}, nil
 }
 
+// invalidExpiry is the 422 of an expires_at pydantic would not read as a datetime.
+var invalidExpiry = httpx.Invalid(httpx.Issue{Loc: []string{"body", "expires_at"},
+	Msg: "Input should be a valid datetime"})
+
 type tokenRecord struct {
 	ID            string     `json:"id"`
 	Name          string     `json:"name"`
@@ -985,6 +991,9 @@ func (s *Stores) mint(r *http.Request, _ crud.Params) (any, error) {
 	if err := body.Err(); err != nil {
 		return nil, err
 	}
+	if expires != nil && timeSpecial.MatchString(*expires) {
+		return nil, invalidExpiry
+	}
 	if grant && tier != "outward" {
 		return nil, &httpx.Problem{Status: http.StatusUnprocessableEntity, Detail: "an approval grant needs an" +
 			" outward token: deciding an outward action is at least as much as taking one"}
@@ -1004,8 +1013,7 @@ func (s *Stores) mint(r *http.Request, _ crud.Params) (any, error) {
 	case code == "23505":
 		return nil, &httpx.Problem{Status: http.StatusConflict, Detail: "a token with this hash exists"}
 	case strings.HasPrefix(code, "22"):
-		return nil, httpx.Invalid(httpx.Issue{Loc: []string{"body", "expires_at"},
-			Msg: "Input should be a valid datetime"})
+		return nil, invalidExpiry
 	case err != nil:
 		return nil, err
 	}

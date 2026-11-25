@@ -208,6 +208,12 @@ func TestAnMCPTokenIsMintedVerifiedAndRevoked(t *testing.T) {
 	expect(t, mint(object("name", "again", "tier", "read", "token_hash", sha("t"))).status, 409)
 	expect(t, mint(object("name", "x", "tier", "read", "token_hash", sha("u"), "approval_grant", true)).status, 422)
 	expect(t, mint(object("name", "x", "tier", "read", "token_hash", sha("u"), "expires_at", "soon")).status, 422)
+	// Postgres takes these; pydantic does not, and infinity is no time to write back.
+	for _, special := range []string{"infinity", "-Infinity", " now ", "today", "tomorrow", "yesterday", "epoch"} {
+		refused := mint(object("name", "x", "tier", "read", "token_hash", sha("u"), "expires_at", special))
+		expect(t, refused.status, 422)
+		expect(t, refused.body["errors"].([]any)[0].(map[string]any)["loc"], []any{"body", "expires_at"})
+	}
 
 	verified := a.ok("POST", "/mcp-tokens/verify", object("token_hash", sha("t"))).raw
 	expect(t, verified, `{"token":{"id":"`+id+`","tier":"outward"}}`)
