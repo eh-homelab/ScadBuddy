@@ -2675,7 +2675,11 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   the image, with one image line. The browser service's Deployment has no image line of its
   own: clusters copies the worker's with a kustomize replacement, as for the intake sandbox,
   so one pin moves both. A build whose `profile-fetch` job published nothing keeps
-  the pin and warns (plan Decision 74). `ci.yml`'s `profile-fetch-image` job runs the driver
+  the pin and warns (plan Decision 74). The agent's Playwright MCP browser is pinned the same
+  way (#7546): `applications/scadbuddy/playwright-mcp.yaml` (`MANIFEST_PLAYWRIGHT_MCP`,
+  eh-homelab/clusters#4237) gets `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` at the
+  build's digest ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md#adding-it)).
+  `ci.yml`'s `profile-fetch-image` job runs the driver
   tests in the never-published `profile-fetch-test` stage against a local replica of the
   site, with `--network none`, under the pod's own seccomp file and AppArmor profile.
 - **First fetch.** The first real fetch is the owner's, at the next invoice import or with

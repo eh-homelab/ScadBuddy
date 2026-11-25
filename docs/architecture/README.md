@@ -295,9 +295,10 @@ document's claim and the code. These specs and docs were not changed in this PR.
   "all three images" / `build-image.yml` publishes more
   (`.github/workflows/build-image.yml:54`, `:217`, `:329`, `:433`, `:544`, `:657`; after
   `67d7ff6`, also the `playwright-mcp` job, #7027, at `build-image.yml:542`).
-- `README.md:2693-2698` four manifests pinned / up to eleven files and six images
-  (`.github/workflows/deploy.reusable.yml:116-158`); the README never names the
-  `scadbuddy-sandbox` image.
+- `README.md:2693-2698` four manifests pinned / every `MANIFEST*` file and `*_IMAGE`
+  image in `deploy.reusable.yml`'s `env` (`.github/workflows/deploy.reusable.yml:116-158`;
+  `playwright-mcp.yaml` and `scadbuddy-playwright-mcp` since #7546); the README never
+  names the `scadbuddy-sandbox` image.
 - `.github/workflows/build-image.yml:215-216` "drop `continue-on-error` once pinned" / the
   agent pin is required (`.github/workflows/deploy.reusable.yml:925`) but the job keeps it
   (`.github/workflows/build-image.yml:221`).
