@@ -1110,7 +1110,7 @@ export function CustomizePage() {
     return (
       <PageProblem
         title="That version is not here"
-        message={`This model has no revision ${version.slice(0, 7)}. Its current version is available.`}
+        message={`This model has no version ${version.slice(0, 7)}. Its current version is available.`}
       >
         <Button type="button" onClick={backToCurrent}>
           Back to current

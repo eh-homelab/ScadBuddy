@@ -30,7 +30,7 @@ commit of this repository; a library's pin is of the library's own.
 
 A run always builds from nothing, beside the destination, and then takes its place. So a
 second run, with the old repository further on, gives what a first run would. It replaces
-only what it made itself and nothing has committed to since.
+only what it made itself, with nothing committed, changed or left in it since.
 """
 
 from __future__ import annotations
@@ -824,10 +824,14 @@ def _may_replace(target: Path) -> None:
     if not any(target.iterdir()):
         return
     repo = _Repo(target)
-    head = _held(repo).get("head")
+    held = _held(repo)
+    head = held.get("head")
     if not isinstance(head, str) or not repo.available or repo.head() != head:
         raise RefusedError(f"{target} is not empty, and not as this command left it")
-    left = repo._out("status", "--porcelain", "--untracked-files=all").splitlines()
+    copied = set(held.get("copied", []))
+    status = os.fsdecode(repo.bytes_out("status", "--porcelain", "-z", "--untracked-files=all"))
+    # A copied file that only the old repository ignores is untracked here.
+    left = [line for line in status.split("\0") if line and line[3:] not in copied]
     if left:
         raise RefusedError(f"{target} holds changes this command did not make: {left[0]}")
 
@@ -861,6 +865,7 @@ def _make(source: _Repo, repo: _Repo, pins: Sequence[Pin]) -> Report:
     held = {
         "head": head,
         "old_head": plan.head,
+        "copied": report.copied,
         "map": [
             {"slug": slug, "old": old, "new": new}
             for (slug, old), new in sorted(report.ids.items())

@@ -405,6 +405,20 @@ def test_videos_are_copied_and_renders_wrappers_and_locks_are_not(old: Old, dest
     assert problems(old, dest) == []
 
 
+def test_a_second_run_over_a_copy_only_the_old_one_ignores(old: Old, dest: Path) -> None:
+    (old.root / ".git/info").mkdir(exist_ok=True)
+    (old.root / ".git/info/exclude").write_text("*.dat\n")
+    old.save("a", scad="cube();\n")
+    old.write("a", {"über.dat": ONE})
+    made(old, dest)
+    made(old, dest)
+    assert (dest / "a/über.dat").read_bytes() == ONE
+    (dest / "a/über.dat").write_bytes(TWO)
+    (dest / "a/other.dat").write_bytes(TWO)
+    with pytest.raises(RefusedError, match=r"other\.dat"):
+        build(old.root, dest, [], live=old.root)
+
+
 def test_modes_links_and_odd_names(old: Old, dest: Path) -> None:
     odd = 'ui/é "quoted"\n\\name.js'
     old.write("a", {"model.scad": "cube();\n", "run.sh": "#!/bin/sh\n", odd: "x"})
