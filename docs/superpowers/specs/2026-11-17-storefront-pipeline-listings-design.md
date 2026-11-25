@@ -546,8 +546,12 @@ pipeline's variant: the key holds the sha256 of the 3MF that is sliced, each slo
 filament, the choices and the setup, so the same file made by another template, or before
 the template had a pipeline, has the same price (§7.3). The row keeps the variant key and
 the output of the render that made it: a price is never moved to another variant's key,
-and `output_of` shows no preview of another commit. A template's own `print_settings` are
-not in the key, for any listing ([#7633](https://github.com/eh-homelab/ScadBuddy/issues/7633)).
+and `output_of` shows no preview of another commit. Since
+[#7633](https://github.com/eh-homelab/ScadBuddy/issues/7633), the key's setup also holds
+the template's own `print_settings` and `part_print_settings` when they are not empty
+(`key_setup`), so two templates of one 3MF with other settings have two prices. The
+variant carries the settings that made the key (`SliceVariant.template_settings`), and
+its slice takes them, not the template's as they are when the slice runs.
 
 **The instant read (#6921).** `renders.py` `instant_variant`, the
 cart add without a render (`_priced_variant`) and the preview file (`variant_preview`)
@@ -618,7 +622,9 @@ names below are read from `main` after that merge:
 `plan_variant` gives no price when the printer's status cannot be read
 (`STATUS_UNREAD`) or when a slot's type has no preset for the H2C and the chosen nozzle
 (`NO_TYPE_PRESET`). The price key is at `KEY_VERSION` 4 (#6710 moved it from 3: a
-file listing's key has a subject and its setup).
+file listing's key has a subject and its setup). #7633 kept it at 4: a template's
+settings go into the setup only when they are not empty, so the key of a template with
+none did not move.
 
 A pipeline variant goes through `plan_variant` and `slice_request` unchanged, with the
 `PrinterOpening` of the profile's printer. The remembered choices `opening_choices`
@@ -658,7 +664,7 @@ kit, or to its last, so the first output maps to itself. The slice of output `k`
 its `slot_presets`, the kit slot's presets under the output's own slot id
 (`{local + 1: variant.slot_presets[kit + 1]}`), because `resolver.resolve` reads slot ids
 of the file it slices. `SliceVariant` keeps `slot_filaments` and `slot_presets` by kit
-slot. It gains no field: the run reads each output's colours from the outputs it saved.
+slot. A kit gives it no field: the run reads each output's colours from the outputs it saved.
 
 **The kit's digest, and the key.** `price_key` does not change and `KEY_VERSION` stays 4.
 Its `model` is a new `kit_digest(job, file) -> str`, where `file` finds a result's file
