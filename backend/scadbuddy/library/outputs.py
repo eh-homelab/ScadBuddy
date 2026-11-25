@@ -83,7 +83,6 @@ from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobRef
 
 if TYPE_CHECKING:
-    from scadbuddy.library.output_index import OutputIndex
     from scadbuddy.library.output_prints import LastPrint, OutputPrintStore
     from scadbuddy.library.output_rows import OutputRow, OutputRows
     from scadbuddy.store.refs import BlobRefs
@@ -238,9 +237,9 @@ class BackfillState(BaseModel):
 
 
 def tolerate_dropped(action: Callable[[], None], what: str) -> None:
-    """Run ``action``, a write to ``output_index`` or ``output_hold_slugs``. Release B
-    drops both tables (#7257, plan D1), and a release A pod still runs during its roll:
-    a missing table is logged and skipped. Any other error raises."""
+    """Run ``action``, a write to ``output_hold_slugs`` (release A also wrote
+    ``output_index`` through it). Release B's migration drops both tables (#7257, plan
+    D1): a missing table is logged and skipped. Any other error raises."""
     try:
         action()
     except UndefinedTable:
@@ -376,7 +375,8 @@ class OutputMeta(BaseModel):
     #: Empty for a model with none, and on records written before the field existed.
     libraries: list[ModelLibrary] = Field(default_factory=list)
     #: Who saved it (#6371). A record from before the field is the back office's, until
-    #: the API's start marks one the storefront slice run saved (`OutputIndex.sync`).
+    #: the API's start marked one the storefront slice run saved (`OutputIndex.sync`,
+    #: until #7257).
     source: OutputSource = BACK_OFFICE
 
     @model_validator(mode="before")
@@ -564,9 +564,6 @@ class OutputStore:
         self.paths = paths
         #: The last print of each output (#1060), laid over what ``meta.json`` says.
         self.prints = prints
-        #: Every model's outputs as rows (#4777), written as an output is saved, renamed
-        #: or deleted; ``None`` where nothing lists them across models.
-        self.index: OutputIndex | None = None
         #: Every output as a row of ``outputs`` (#7255), the record a lookup by id reads.
         #: ``None`` keeps the files as the only record (tests and tools with no database).
         self.rows: OutputRows | None = None
@@ -1208,13 +1205,6 @@ class OutputStore:
         replaced: list[tuple[str, BlobRef]] = []
         if self.rows is not None:
             replaced = self._insert_row(prepared, blobs)
-        if self.index is not None:
-            # The save stands without its row: a failure is logged, and the next start's
-            # `OutputIndex.sync` adds the row.
-            try:
-                self.index.record(meta, prepared.params)
-            except Exception:
-                logger.exception("could not index a saved output", extra={"id": meta.id})
         # After the record is complete: a lookup racing the writes above may have
         # resolved against a half-written output.
         self.forget_plate_cover(meta.slug)
@@ -1266,7 +1256,7 @@ class OutputStore:
             has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
             copied_at=meta.created_at,
             blobs=blobs or OutputBlobs(),
-            # The list's text on the row (#7257), as `OutputIndex.record` writes it.
+            # The list's text on the row (#7257), which `GET /outputs`'s `q` matches.
             params_text=params_text(prepared.params, cached_defaults(self.paths, meta.slug)),
         )
         try:
@@ -1672,8 +1662,8 @@ class OutputStore:
         by id, and a download is named at download.
 
         A read-modify-write with no lock: nothing else rewrites the meta once the output
-        is saved, except `mark_storefront` once at the API's start, for an output saved
-        before #6371. A second writer of it needs a lock here, or one rename loses."""
+        is saved, except `mark_storefront`, which nothing calls at runtime now (#7257). A
+        second writer of it needs a lock here, or one rename loses."""
         meta, directory = self._stored_meta(output_id)
         renamed = meta.model_copy(update={"name": name or None})
         text = json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
@@ -1685,15 +1675,13 @@ class OutputStore:
         )
         if self.rows is not None:
             self.rows.update_meta(output_id, renamed)
-        if self.index is not None:
-            # After the file: a failure fails the rename, which a retry writes again.
-            self.index.rename(output_id, renamed.name)
         return self.get(output_id)
 
     def mark_storefront(self, output_id: str) -> OutputMeta:
         """Mark an output saved before #6371 as the storefront slice run's: only its meta
-        changes, in ``meta.json`` and its row (#7255). `OutputIndex.sync` calls it before
-        it writes the index row."""
+        changes, in ``meta.json`` and its row (#7255). The start's pass that called it
+        (`OutputIndex.sync`, at every start since #6371) went with ``output_index``
+        (#7257); nothing calls it at runtime now."""
         meta, directory = self._stored_meta(output_id)
         marked = meta.model_copy(update={"source": STOREFRONT})
         text = json.dumps(marked.model_dump(mode="json"), indent=2) + "\n"
@@ -1719,9 +1707,6 @@ class OutputStore:
 
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
-        if self.index is not None:
-            # Before the files: a failure leaves the output whole, for a retry.
-            self.index.forget(output_id)
         if self.rows is not None:
             self.rows.delete(output_id)
         shutil.rmtree(directory, ignore_errors=True)
@@ -1825,7 +1810,7 @@ class OutputStore:
     def restore_rows(self, slug: str) -> None:
         """Write the rows of ``slug``'s outputs again from their files, as the copy does
         (#7255): a model delete that dropped them and then failed keeps its outputs, so
-        they get their rows back. The index rows (#4777) come back at the next start."""
+        they get their rows back."""
         if self.rows is None:
             return
         from scadbuddy.library.output_copy import restore_slug
@@ -1835,16 +1820,9 @@ class OutputStore:
     def forget_indexed(self, slug: str) -> None:
         """Drop the rows of ``slug``'s outputs with their model, before their directory
         goes (spec §6.2). Their output rows are the record (#7255), so a failure to drop
-        them raises, and the caller keeps the directory for a retry. The index rows
-        (#4777) are best effort, as a page drops a row whose files it cannot read."""
+        them raises, and the caller keeps the directory for a retry."""
         if self.rows is not None:
             self.rows.delete_slug(slug)
-        if self.index is None:
-            return
-        try:
-            self.index.forget_slug(slug)
-        except Exception:
-            logger.exception("could not drop a model's indexed outputs", extra={"slug": slug})
 
     def remembers_plate_cover(self, slug: str) -> bool:
         """Whether anything is held for ``slug`` -- for tests of the cache's lifetime."""
@@ -2340,55 +2318,6 @@ def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
     tolerate_dropped(record, "an output's hold slug")
 
 
-def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
-    """Record many outputs' slugs in ONE statement (#2353): the reaper used to upsert
-    every held, live output's slug on every pass, one transaction each, all no-ops once
-    recorded. Rows that already say the same slug are not written."""
-    if not slugs:
-        return
-    ids = sorted(slugs)
-
-    def record() -> None:
-        with refs.pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO output_hold_slugs (output_id, slug)"
-                " SELECT * FROM unnest(%s::text[], %s::text[])"
-                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
-                " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
-                (ids, [slugs[output_id] for output_id in ids]),
-            )
-
-    tolerate_dropped(record, "the held outputs' slugs")
-
-
-def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
-    """Every slug directory under ``root``, with the ids of its outputs that have a
-    meta.json, and every output directory without one. Unlike ``glob``, a slug or output
-    directory that cannot be listed raises instead of being skipped. Symlinks are
-    followed, as ``OutputStore``'s own globs follow them: an output it serves must not
-    look deleted."""
-    live: dict[str, set[str]] = {}
-    bare: list[Path] = []
-    with span("outputs.scan_all") as current:
-        with os.scandir(root) as slugs:
-            for slug in slugs:
-                if not slug.is_dir(follow_symlinks=True):
-                    continue
-                ids = live.setdefault(slug.name, set())
-                with os.scandir(slug.path) as entries:
-                    for entry in entries:
-                        if not entry.is_dir(follow_symlinks=True):
-                            continue
-                        if os.path.isfile(os.path.join(entry.path, META_NAME)):
-                            ids.add(entry.name)
-                        else:
-                            bare.append(Path(entry.path))
-        current.set_attribute("scadbuddy.models", len(live))
-        current.set_attribute("scadbuddy.outputs", sum(len(ids) for ids in live.values()))
-        current.set_attribute("scadbuddy.bare", len(bare))
-    return live, bare
-
-
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
 #: its Parts before it writes meta.json (api/outputs.py `create_output`). It is also the
 #: lease of an id claim: the reaper prunes an `output_claims` row older than this, so a
@@ -2396,82 +2325,27 @@ def _live_outputs(root: Path) -> tuple[dict[str, set[str]], list[Path]]:
 ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 
-def _remove_orphan_directory(directory: Path, grace: timedelta) -> None:
-    """Remove a released orphan's directory (#1815), or one that never held anything
-    (#5448, `_remove_unheld_directories`): no read sees it (they glob for meta.json),
-    but its bytes stay. Only an output's own directory, still without meta.json, and
-    untouched for ``grace``: a save writes its files before meta.json. Best effort: it
-    holds nothing (its holds are gone, or it never had any), so a failure costs only
-    the bytes."""
-    if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name) or directory.is_symlink():
-        return
-    try:
-        if (directory / META_NAME).exists():
-            return
-        age = datetime.now(UTC).timestamp() - directory.stat().st_mtime
-        if age < grace.total_seconds():
-            return
-        shutil.rmtree(directory)
-    except FileNotFoundError:
-        return
-    except OSError:
-        logger.exception(
-            "could not remove an orphaned output's directory", extra={"path": str(directory)}
-        )
-
-
-def _remove_unheld_directories(bare: list[Path], holding: set[str], grace: timedelta) -> None:
-    """Remove each output directory with no meta.json and no hold at all (#5448): a
-    save that claimed its id (`OutputStore.claim`) and stopped before it held its
-    Parts. A held one waits for its holds' release instead."""
-    for directory in bare:
-        if directory.name not in holding:
-            _remove_orphan_directory(directory, grace)
-
-
 def reap_orphan_holds(
     refs: BlobRefs, store: OutputStore, *, grace: timedelta = ORPHAN_HOLD_GRACE
 ) -> int:
     """Release every `output` hold (the Parts and byte blobs) older than ``grace`` whose
-    output has no meta.json (#1007): a save that failed between holding its Parts and
-    writing meta.json, or a hold taken after a delete's release (a byte copy's or a
-    thumbnail's), leaves holds that nothing else ever drops. Returns how many outputs'
-    holds it released. Each released output's directory, if one is left with no
-    meta.json, goes too (`_remove_orphan_directory`, #1815), as does an output directory
-    with no meta.json and no hold at all, past the same grace (#5448: a save that claimed
-    its id and stopped before it held its Parts).
+    output has no ``outputs`` row (#1007, #7257): a save that failed between holding its
+    Parts and writing its row, a hold taken after a delete's release (a byte copy's or a
+    thumbnail's), or the holds of a deleted model's outputs, which nothing else ever
+    drops. Returns how many outputs' holds it released.
 
-    An output that has an ``outputs`` row is live, whatever its folder holds (#7256): the
-    reaper never releases its holds or removes its folder (one query, when the store has
-    rows). With rows, it first deletes the ``output_claims`` rows older than ``grace``
-    (#7257, `OutputRows.prune_claims`): a save that died between its claim and its row.
-
-    It never mistakes a missing directory for deleted outputs. An output's hold is
-    released only when the reaper knows the output's slug (``output_hold_slugs``) and
-    listed that slug's directory. A slug directory that is missing (not yet copied onto
-    a new volume, say) releases nothing for that slug and is logged. With a hold
-    past the grace, a directory it cannot list (permissions, a stale NFS handle)
-    raises and ends the pass, since ``Path.glob`` would skip it; with none, only the
-    unheld-directory pass walks, and a listing that fails is logged and ends it
-    (#5453). An unmounted or empty volume lists no slug at all, so
-    releases nothing. A hold whose slug is unknown (taken before slugs were recorded,
-    and with no live output to learn it from) is never released here. The cost of all
-    this: holds orphaned by a model's whole deletion stay until a person drops them.
-
-    After the cut-over mark (#7257, plan A5) the rows are the record: the reaper lists no
-    folder and reads no ``output_hold_slugs`` (release B drops it while release A pods
-    run). In one statement it releases every `output` hold past ``grace`` whose output
-    has no ``outputs`` row and no claim younger than ``grace`` (`_reap_rows_only`). A
-    model's whole deletion then frees its outputs' holds too."""
+    The rows are the record (#7257, plan A5): the reaper lists no folder and removes
+    none. With rows, it first deletes the ``output_claims`` rows older than ``grace``
+    (`OutputRows.prune_claims`): a save that died between its claim and its row. Then in
+    one statement it releases every `output` hold past ``grace`` whose output has no
+    ``outputs`` row and no claim younger than ``grace`` (`_reap_rows_only`). Release B's
+    migration dropped ``output_hold_slugs``, which the folder pass read, so this pass no
+    longer waits for the cut-over mark."""
     with span("outputs.reap_orphan_holds") as current:
         if store.rows is not None:
-            # First, so a share that cannot be listed does not keep stale claims (#7257).
             current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))
-        if store.rows is not None and store.rows.cut_over():
-            current.set_attribute("scadbuddy.rows_only", True)
-            released = _reap_rows_only(refs, grace)
-        else:
-            released = _reap_orphan_holds(refs, store, grace)
+        current.set_attribute("scadbuddy.rows_only", True)
+        released = _reap_rows_only(refs, grace)
         current.set_attribute("scadbuddy.released", released)
         return released
 
@@ -2492,7 +2366,7 @@ _RELEASE_ORPHANS = (
 
 
 def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
-    """`reap_orphan_holds` after the cut-over mark (#7257): rows only, no folder and no
+    """`reap_orphan_holds`'s release (#7257): rows only, no folder and no
     ``output_hold_slugs``. A save that names its id (a quote's attempt, #5390) claims it
     in ``output_claims`` before its folder, so its holds are kept while the claim is
     younger than ``grace``: a save that runs longer than ``grace`` can lose them. Other
@@ -2506,93 +2380,6 @@ def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
         logger.warning(
             "released the Parts and byte blobs of %d orphaned outputs (rows only, #7257)",
             len(orphans),
-            extra={"ids": orphans[:50]},
-        )
-    return len(orphans)
-
-
-def _with_rows(store: OutputStore, output_ids: Iterable[str]) -> set[str]:
-    """The ids of ``output_ids`` that have an ``outputs`` row, in one query; none when
-    the store has no rows."""
-    if store.rows is None:
-        return set()
-    return store.rows.existing(output_ids)
-
-
-def _reap_orphan_holds(refs: BlobRefs, store: OutputStore, grace: timedelta) -> int:
-    root = store.paths.outputs
-    with refs.pool.connection() as conn:
-        rows = conn.execute(
-            "SELECT holder_id, min(created_at) < now() - %s AS aged FROM blob_refs"
-            " WHERE holder_kind = %s GROUP BY holder_id",
-            (grace, OUTPUT_HOLDER),
-        ).fetchall()
-    held = {row["holder_id"] for row in rows if row["aged"]}
-    holding = {row["holder_id"] for row in rows}
-    if not held:
-        # Only the bare-directory pass is left. A directory it cannot list is logged,
-        # not raised, so a listing that fails does not fail every tick (#5453); with a
-        # hold to release, the walk below raises as before.
-        try:
-            _, bare = _live_outputs(root) if root.is_dir() else ({}, [])
-        except OSError as error:
-            # It repeats on every tick while the directory stays unlistable, so it names
-            # the path to fix (#5462).
-            logger.warning(
-                "could not list the outputs to remove unheld directories",
-                exc_info=True,
-                extra={"root": str(root), "path": error.filename},
-            )
-            return 0
-        with_rows = _with_rows(store, (directory.name for directory in bare))
-        _remove_unheld_directories(bare, holding | with_rows, grace)
-        return 0
-    live, bare = _live_outputs(root) if root.is_dir() else ({}, [])
-    live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
-    # An output that has a row is live, whatever its folder holds (#7256): one query.
-    with_rows = _with_rows(
-        store, [*(held - live_slug.keys()), *(directory.name for directory in bare)]
-    )
-    _remove_unheld_directories(bare, holding | with_rows, grace)
-    # Holds taken before slugs were recorded: a live output tells its own slug.
-    _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
-    candidates = sorted(held - live_slug.keys() - with_rows)
-    with refs.pool.connection() as conn:
-        slug_rows = conn.execute(
-            "SELECT output_id, slug FROM output_hold_slugs WHERE output_id = ANY(%s)",
-            (candidates,),
-        ).fetchall()
-    slug_of = {row["output_id"]: row["slug"] for row in slug_rows}
-    orphans: list[str] = []
-    missing: dict[str, int] = {}
-    unknown = 0
-    for output_id in candidates:
-        slug = slug_of.get(output_id)
-        if slug is None:
-            unknown += 1
-        elif slug not in live:
-            missing[slug] = missing.get(slug, 0) + 1
-        else:
-            orphans.append(output_id)
-    for slug, n in sorted(missing.items()):
-        logger.error(
-            "the outputs directory of %s is missing while %d of its outputs hold Parts;"
-            " not releasing them",
-            slug,
-            n,
-            extra={"root": str(root), "slug": slug},
-        )
-    for output_id in orphans:
-        release_parts(refs, output_id)
-        _remove_orphan_directory(root / slug_of[output_id] / output_id, grace)
-    if orphans or unknown:
-        # One line to spot an unexpected mass release (#1806 review).
-        logger.warning(
-            "released the Parts and byte blobs of %d orphaned outputs (%d held past the"
-            " grace; %d of unknown template kept)",
-            len(orphans),
-            len(held),
-            unknown,
             extra={"ids": orphans[:50]},
         )
     return len(orphans)

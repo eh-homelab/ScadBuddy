@@ -608,19 +608,6 @@ async def _backfill_store_logged(
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
-async def _index_outputs_logged(state: AppState, *, stop: threading.Event) -> None:
-    """The start's pass over the saved outputs (#4777, `OutputIndex.sync`), best effort:
-    a failure is logged, and the next start runs it again."""
-    index = state.outputs.index
-    if index is None:
-        return
-    try:
-        added, dropped = await asyncio.to_thread(index.sync, state.outputs, stop)
-        logger.info("indexed the saved outputs", extra={"added": added, "dropped": dropped})
-    except Exception:
-        logger.exception("could not index the saved outputs; the next start retries")
-
-
 async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
     """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
     logged. It takes the copy's advisory lock, so one replica copies at a time; a run
@@ -2707,7 +2694,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
     adopt_now: asyncio.Task[None] | None = None
-    index_now: asyncio.Task[None] | None = None
     copy_templates_now: asyncio.Task[None] | None = None
     copy_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
@@ -2752,12 +2738,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         attach_now = asyncio.create_task(
             _attach_backfills_logged(state, reraise=False, stop=stop_background),
             name="attach backfills",
-        )
-        # #4777: every saved output with no row in the index gets one, and a row whose
-        # output is gone goes; in the background, as an output with no row is only
-        # missing from the cross-model list meanwhile.
-        index_now = asyncio.create_task(
-            _index_outputs_logged(state, stop=stop_background), name="index outputs"
         )
         # #7317: every template's files copied to its row, and the rows reconciled with
         # the folders, after `_start_render` made the table and synced the built-ins. The
@@ -2830,7 +2810,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             backfill,
             attach_now,
             adopt_now,
-            index_now,
             copy_templates_now,
             copy_now,
         )

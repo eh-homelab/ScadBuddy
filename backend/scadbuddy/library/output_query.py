@@ -1,6 +1,6 @@
-"""The outputs list's query (#4777, order operations spec 2026-11-07 §3.1), shared by
-`OutputIndex` (``output_index``) and `OutputRows` (``outputs``, #7257, spec §4.5): the
-filters, the order, the pages and the parameter text that ``q`` matches.
+"""The outputs list's query (#4777, order operations spec 2026-11-07 §3.1) on
+``outputs`` (`OutputRows.query`, #7257, spec §4.5): the filters, the order, the pages
+and the parameter text that ``q`` matches.
 
 It imports `outputs.py` only inside a function, because `outputs.py` imports
 `output_rows.py`, which imports this module.
@@ -12,16 +12,10 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import DictRow
-
-from scadbuddy.render.inputs import inputs_key
-from scadbuddy.render.job_models import render_key
-
-if TYPE_CHECKING:
-    from scadbuddy.library.outputs import OutputMeta
 
 #: A page's size when the caller names none: the list spans every model.
 DEFAULT_LIMIT = 50
@@ -66,23 +60,6 @@ def params_text(params: Mapping[str, Any], defaults: Mapping[str, Any]) -> str:
     )
 
 
-def saved_by_storefront_run(meta: OutputMeta, inputs: Mapping[str, Any]) -> bool:
-    """Whether the storefront slice run saved this output (#6371), for a record from
-    before ``source``. That run names each output ``Storefront: …`` and saves it under
-    `storefront_output_id` of its render key: the inputs' key for a pipeline template,
-    else the params' key. The name alone is not enough: a person can type it."""
-    from scadbuddy.library.outputs import STOREFRONT_NAME_PREFIX, storefront_output_id
-
-    if not (meta.name or "").startswith(STOREFRONT_NAME_PREFIX):
-        return False
-    params = inputs.get("params", {})
-    keys = (
-        inputs_key(meta.slug, inputs, meta.model_version),
-        render_key(meta.slug, params if isinstance(params, dict) else {}, meta.model_version),
-    )
-    return any(storefront_output_id(key) == meta.id for key in keys)
-
-
 def _like(text: str) -> str:
     escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
@@ -104,9 +81,7 @@ def _filters(query: OutputQuery) -> tuple[str, list[Any]]:
         args.append(list(query.slugs))
     if query.q:
         # An `outputs` row a phase 2 pod saved has no text yet (#7257): it matches no text.
-        where.append(
-            "(x.name ILIKE %s ESCAPE '\\' OR COALESCE(x.params_text, '') ILIKE %s ESCAPE '\\')"
-        )
+        where.append("(x.name ILIKE %s ESCAPE '\\' OR x.params_text ILIKE %s ESCAPE '\\')")
         args += [_like(query.q), _like(query.q)]
     if not query.include_storefront:
         where.append("x.source = %s")
@@ -117,15 +92,11 @@ def _filters(query: OutputQuery) -> tuple[str, list[Any]]:
     return (" WHERE " + " AND ".join(where)) if where else "", args
 
 
-def query_ids(
-    conn: Connection[DictRow], table: Literal["output_index", "outputs"], query: OutputQuery
-) -> tuple[list[str], int]:
-    """The page's output ids from ``table`` (``output_index`` or ``outputs``: both have
-    ``output_id``, ``slug``, ``name``, ``created_at``, ``params_text`` and ``source``),
-    newest first, and how many the filters select. ``after`` must be an id the filters
-    select, else `AfterNotListedError`."""
+def query_ids(conn: Connection[DictRow], query: OutputQuery) -> tuple[list[str], int]:
+    """The page's output ids from ``outputs``, newest first, and how many the filters
+    select. ``after`` must be an id the filters select, else `AfterNotListedError`."""
     where, args = _filters(query)
-    counted = conn.execute(f"SELECT count(*) AS n FROM {table} x{where}", args).fetchone()
+    counted = conn.execute(f"SELECT count(*) AS n FROM outputs x{where}", args).fetchone()
     assert counted is not None
     total: int = counted["n"]
     page = where
@@ -133,7 +104,7 @@ def query_ids(
     if query.after is not None:
         joined = " AND " if where else " WHERE "
         anchor = conn.execute(
-            f"SELECT x.created_at FROM {table} x{where}{joined}x.output_id = %s",
+            f"SELECT x.created_at FROM outputs x{where}{joined}x.output_id = %s",
             [*args, query.after],
         ).fetchone()
         if anchor is None:
@@ -141,7 +112,7 @@ def query_ids(
         page = f"{where}{joined}(x.created_at, x.output_id) < (%s, %s)"
         page_args += [anchor["created_at"], query.after]
     rows = conn.execute(
-        f"SELECT x.output_id FROM {table} x{page}"
+        f"SELECT x.output_id FROM outputs x{page}"
         " ORDER BY x.created_at DESC, x.output_id DESC LIMIT %s",
         [*page_args, query.limit],
     ).fetchall()

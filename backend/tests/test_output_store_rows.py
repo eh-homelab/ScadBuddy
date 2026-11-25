@@ -24,7 +24,6 @@ from scadbuddy.api.outputs import detail
 from scadbuddy.bambuddy.project_file import cached_defaults
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
-from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_query import params_text
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
@@ -67,7 +66,6 @@ def projection(pg_conninfo: str) -> Iterator[JobProjection]:
 
 def _store(paths: DataPaths, projection: JobProjection) -> OutputStore:
     outputs = OutputStore(paths)
-    outputs.index = OutputIndex(projection.pool, paths)
     outputs.rows = OutputRows(projection.pool)
     return outputs
 
@@ -114,12 +112,10 @@ async def test_create_writes_row_with_meta_params_inputs(
 
 
 async def test_save_writes_params_text(tmp_path: Path, projection: JobProjection) -> None:
-    """#7257: the row carries the list's parameter text, as the index row does."""
+    """#7257: the row carries the list's parameter text."""
     paths, job, _ = await finished_job(tmp_path, width=30)
     job = job.model_copy(update={"params": {"width": 30}})
     store = _store(paths, projection)
-    # No index: the save's own row write is what is checked, not `OutputIndex.record`'s.
-    store.index = None
     meta = save_files(store, job)
     row = rows_of(store).get(meta.id)
     assert row is not None

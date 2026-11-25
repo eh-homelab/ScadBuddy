@@ -300,7 +300,7 @@ async def test_reaper_after_cut_over_reads_rows_only(
     tmp_path: Path, projection: JobProjection, content: ContentStore, pool: Pool
 ) -> None:
     """#7257 plan A5: after the mark the reaper scans no folder and reads no
-    ``output_hold_slugs`` (release B drops it while release A pods run). Past the grace, a
+    ``output_hold_slugs`` (release B's migration dropped it). Past the grace, a
     deleted output's holds go; a live output's holds and a claimed id's holds stay."""
     store, job, files = await _with_files(tmp_path)
     _wire(store, projection, content)
@@ -320,8 +320,6 @@ async def test_reaper_after_cut_over_reads_rows_only(
     refs.add("piece-claimed", OUTPUT_HOLDER, claimed)
     for output_id in (live.id, gone.id, claimed):
         _age_holds(pool, output_id)
-    with pool.connection() as conn:
-        conn.execute("DROP TABLE output_hold_slugs")
     # Any scan of the share raises: the outputs folder is a plain file.
     shutil.rmtree(store.paths.outputs)
     store.paths.outputs.write_text("not a folder")

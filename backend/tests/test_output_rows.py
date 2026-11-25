@@ -9,16 +9,13 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from psycopg.rows import dict_row
 
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import output_rows
-from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_query import AfterNotListedError, OutputQuery, params_text
 from scadbuddy.library.output_rows import (
     BYTES_LOCK,
@@ -779,12 +776,9 @@ def _listed(
     )
 
 
-def test_query_on_outputs_matches_index_query(
-    rows: OutputRows, projection: JobProjection, tmp_path: Path
-) -> None:
-    """The rows of `tests/test_output_index.py`'s query tests: `OutputRows.query` lists
-    what `OutputIndex.query` lists, in the same order, with the same totals."""
-    index = OutputIndex(projection.pool, DataPaths(root=tmp_path))
+def test_query_on_outputs(rows: OutputRows) -> None:
+    """`OutputRows.query`: the filters, the order, the pages and the totals (the cases
+    of the old ``output_index`` query tests, #4777, #7257)."""
     listed = [
         _listed("1" * 32, "sign", age=timedelta(days=3), name="Door", params={"w": 30}),
         _listed("2" * 32, "sign", age=timedelta(hours=5), params={"label": "Ada"}),
@@ -796,15 +790,11 @@ def test_query_on_outputs_matches_index_query(
     ]
     for row in listed:
         rows.insert(row)
-        index.record(row.meta, row.params, {})
-    # A row a phase 2 pod saved has no `params_text`: it is listed, and `q` passes it
-    # by, as the index's empty text does.
-    # Its index row was written before its row, so no `record` filled its text.
+    # A row with no text (the copy wrote it): it is listed, and `q` passes it by.
     old = _listed("4" * 32, "sign", age=timedelta(days=4), params={"w": 40})
-    index.record(old.meta, {}, {})
-    rows.insert(dataclasses.replace(old, params_text=None))
+    rows.insert(dataclasses.replace(old, params_text=""))
     got = rows.get("4" * 32)
-    assert got is not None and got.params_text is None
+    assert got is not None and got.params_text == ""
     cases: list[tuple[OutputQuery, tuple[list[str], int]]] = [
         (OutputQuery(since=NOW - timedelta(days=1)), (["3" * 32, "e" * 32, "2" * 32], 3)),
         (OutputQuery(until=NOW - timedelta(days=1)), (["1" * 32, "4" * 32], 2)),
@@ -825,28 +815,11 @@ def test_query_on_outputs_matches_index_query(
     ]
     for query, expected in cases:
         assert rows.query(query) == expected, query
-        assert index.query(query) == expected, query
     # `after` must be an id the filters list: an unknown one, or the storefront's
     # output in the back office's list.
     for missing in ("9" * 32, "f" * 32):
         with pytest.raises(AfterNotListedError):
             rows.query(OutputQuery(after=missing))
-        with pytest.raises(AfterNotListedError):
-            index.query(OutputQuery(after=missing))
-
-
-def test_index_record_fills_params_text(
-    rows: OutputRows, projection: JobProjection, tmp_path: Path
-) -> None:
-    rows.insert(make_row("o1"))
-    index = OutputIndex(projection.pool, DataPaths(root=tmp_path))
-    index.record(make_row("o1").meta, {"width": 20, "depth": 5}, {"depth": 5})
-    got = rows.get("o1")
-    assert got is not None and got.params_text == "width=20"
-    # An output with no row yet (no copy read it): the index row alone.
-    index.record(make_row("o2").meta, {"width": 1}, {})
-    assert rows.get("o2") is None
-    assert index.query(OutputQuery(q="width=1")) == (["o2"], 1)
 
 
 def test_claim_refused_while_claimed_or_saved(rows: OutputRows) -> None:

@@ -9,7 +9,7 @@ byte copy's runs (``output_byte_runs``). Each blob is held in ``blob_refs`` by
 transaction, and every delete of a row releases its byte holds. The files under
 ``data/outputs/<slug>/<id>/`` stay the fallback until #7257.
 
-It is synchronous, like `OutputIndex`: callers on the loop use a thread. It imports
+It is synchronous: callers on the loop use a thread. It imports
 `OutputMeta` only inside a function, because `outputs.py` imports this module.
 """
 
@@ -238,9 +238,9 @@ class OutputRow:
     #: The store sets it, so the value given is ignored.
     bytes_at: datetime | None = None
     #: The parameters that differ from the template's defaults, for the list's ``q``
-    #: (`output_query.params_text`, #7257). ``None``: a row the copy or an older build
-    #: wrote, until `OutputIndex.record` or the next release's migration fills it.
-    params_text: str | None = None
+    #: (`output_query.params_text`, #7257). Empty for a row the copy wrote: the copy
+    #: knows no template defaults.
+    params_text: str = ""
 
 
 def _json(value: Any) -> Jsonb | None:
@@ -1276,11 +1276,11 @@ class OutputRows:
         return at
 
     def query(self, query: OutputQuery) -> tuple[list[str], int]:
-        """`OutputIndex.query` on ``outputs`` (#7257): the page's output ids, newest
-        first, and how many the filters select. ``after`` must be an id the filters
-        select, else `AfterNotListedError`."""
+        """The outputs list's page (#4777, #7257): its output ids, newest first, and how
+        many the filters select. ``after`` must be an id the filters select, else
+        `AfterNotListedError`."""
         with self._pool.connection() as conn:
-            return query_ids(conn, "outputs", query)
+            return query_ids(conn, query)
 
     def claim(self, output_id: str, slug: str) -> bool:
         """Claim ``output_id`` for a save of ``slug`` (#7257, plan D6): True when this

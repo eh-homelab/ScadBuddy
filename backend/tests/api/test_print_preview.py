@@ -345,9 +345,7 @@ def test_a_storefront_output_on_an_order_item_opens_in_the_dialog_and_slices(
     upload(client)
     output_id = saved(client, SLUG, {"width": 12}, "Storefront: Keychain")
     outputs = _state(client).outputs
-    meta = outputs.mark_storefront(output_id)
-    assert outputs.index is not None
-    outputs.index.record(meta, outputs.params(output_id))
+    outputs.mark_storefront(output_id)
     assert client.get("/api/v1/outputs").json() == []
     order = create_order(client, create_customer(client)["id"])
     item = add_item(client, order["id"], output_id=output_id, quantity=1)

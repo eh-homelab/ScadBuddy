@@ -301,14 +301,13 @@ async def test_print_links_name_slug_from_outputs(
     links: PrintLinkStore, jobs: JobProjection
 ) -> None:
     """#7257: a send, a reprint and a link of an output name its slug from its
-    ``outputs`` row, with no ``output_index`` row (release B drops that table)."""
+    ``outputs`` row (release B dropped ``output_index``)."""
     with jobs.pool.connection() as conn:
         conn.execute(
             "INSERT INTO outputs (output_id, slug, meta, created_at)"
             " VALUES (%s, 'sign', '{}', clock_timestamp())",
             (OUTPUT,),
         )
-        conn.execute("DELETE FROM output_index")
     await links.record_sends(OUT, [PrintSend(queue_item_id=95, plate_id=1)])
     await links.record_reprint(OUT, PrintReprint(queue_item_id=96, archive_id=18))
     await links.record(OUT, link(97, queue_item_id=97))
@@ -318,7 +317,7 @@ async def test_print_links_name_slug_from_outputs(
 
 async def test_lan_jobs_name_slug_from_outputs(links: PrintLinkStore, jobs: JobProjection) -> None:
     """#7257 (A3 review M4): a run's LAN start names its output's slug from its
-    ``outputs`` row, with no ``output_index`` row, before the run's own slug."""
+    ``outputs`` row (release B dropped ``output_index``), before the run's own slug."""
     printer = "00000000-0000-4000-8000-000000007257"
     with jobs.pool.connection() as conn:
         conn.execute(
@@ -329,7 +328,6 @@ async def test_lan_jobs_name_slug_from_outputs(links: PrintLinkStore, jobs: JobP
             " VALUES (%s, 'sign', '{}', clock_timestamp())",
             (OUTPUT,),
         )
-        conn.execute("DELETE FROM output_index")
         conn.execute(
             "INSERT INTO print_runs (id, output_id, idempotency_key, status, result, printer,"
             " slug) VALUES ('r7257', %s, 'k7257', 'running', %s, %s, 'old-slug')",
