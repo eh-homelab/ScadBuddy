@@ -331,17 +331,17 @@ async def test_an_answer_is_taken_over_and_withdrawn(
     two = one.model_copy(update={"response": {"answer": "two"}})
     assert await remote.record_decision(one) is True
     assert await remote.call_operations("r1", "c") == []
-    assert await remote.take_over_answer(two, held=two, seen=[]) is False
-    assert await remote.take_over_answer(two, held=one, seen=[]) is True
-    assert await remote.take_over_answer(two, held=one, seen=[]) is True
-    assert await remote.take_over_answer(one, held=two, seen=None) is True
-    assert await remote.take_over_answer(two, held=one, seen=[]) is True
+    assert await remote.take_over_decision(two, held=two, seen=[]) is False
+    assert await remote.take_over_decision(two, held=one, seen=[]) is True
+    assert await remote.take_over_decision(two, held=one, seen=[]) is True
+    assert await remote.take_over_decision(one, held=two, seen=None) is True
+    assert await remote.take_over_decision(two, held=one, seen=[]) is True
     held = await remote.get_decision(one.request_id)
     assert held is not None and held.response == {"answer": "two"}
-    await remote.withdraw_answer(one)
+    await remote.withdraw_decision(one)
     assert await remote.get_decision(one.request_id) is not None
-    await remote.withdraw_answer(two)
-    await remote.withdraw_answer(two)
+    await remote.withdraw_decision(two)
+    await remote.withdraw_decision(two)
     assert await remote.get_decision(one.request_id) is None
 
 

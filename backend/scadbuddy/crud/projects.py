@@ -154,7 +154,7 @@ class RemoteFlowStore:
         )
         return [CallOperation.model_validate(row) for row in response.json()]
 
-    async def take_over_answer(
+    async def take_over_decision(
         self, decision: Decision, *, held: Decision, seen: list[str] | None
     ) -> bool:
         body = {
@@ -165,8 +165,8 @@ class RemoteFlowStore:
         response = await self._send("POST", "/decisions/take-over", json=body)
         return bool(response.json()["recorded"])
 
-    async def withdraw_answer(self, decision: Decision) -> None:
-        # A body, not a query: a URL is logged, and this one would hold the answer.
+    async def withdraw_decision(self, decision: Decision) -> None:
+        # A body, not a query: a URL is logged, and this one may hold an answer.
         await self._send("POST", "/decisions/withdraw", json=decision.model_dump(mode="json"))
 
     async def delete_decision(self, request_id: str) -> None:

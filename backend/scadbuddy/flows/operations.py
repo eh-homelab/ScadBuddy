@@ -2,81 +2,97 @@
 `projects` queue (#1057, plan 2026-10-09-durable-phase-6-flows.md decisions A and B).
 
 Each records the decision in `workflow_run_decisions` first, then tells the harness with
-its own public Update (`provide_callback_result`, `tool_approval`). An approval's Update id
-is the request id. An answer's is the request id and a keyed tag of the answer
-(`answer_update_id`). So a retried run resends the same Update, Temporal answers it once,
-and two answers never share an Update.
+its own public Update (`provide_callback_result`, `tool_approval`). The Update id is the
+request id and a keyed tag of the decision (`decision_update_id`). So a retried run resends
+the same Update, Temporal answers it once, and two decisions never share an Update.
 
 The row lives as long as the Update may have landed (#2247):
 
-- The harness refusing the Update is definite: the row is deleted. The exception is an
-  answer that a worker from before #7575 sent first, under the request id alone: it
-  landed, so the row stays and the operation succeeds. When Temporal cannot say whether
-  it did, the next rule's last sentence holds.
+- The harness refusing the Update is definite: the row is deleted. One exception is a
+  decision that a worker from before #7575 (an approval or a denial: #7588) sent first,
+  under the request id alone: it landed, so the row stays and the operation succeeds. The
+  other is a row that stands for an approval it replaced (below). When Temporal cannot say
+  whether either landed, the next rule's last sentence holds.
 - Any other failure (an RPC error, a deadline, the reply lost) is settled by asking
   Temporal for the Update by its id. Completed means it landed: the row stays and the
   operation succeeds. No such Update means it never landed: the row is deleted, so a
-  failed send never blocks the answer that would resolve the call. When Temporal
+  failed send never blocks the decision that would resolve the call. When Temporal
   cannot say, the row stays and the error is raised; the next attempt resends.
 - Cancelled (the activity's deadline, a worker stopping): the row stays and the
-  cancellation is raised. Nothing is asked while cancelling; the next attempt resends,
-  an answer only if it did not land.
+  cancellation is raised. Nothing is asked while cancelling; the next attempt resends
+  only if it did not land.
 
 A retry, or a new request with the same decision, is let through by `check` on a
 matching row before `waiting_on` is looked at: a call the landed Update resolved is no
 longer waiting, and the resend then gets Temporal's answer for it instead of a 409. Any
-other decision for the call is refused as answered, but for the next rule.
+other decision for the call is refused as answered, but for the next rule. Two approvals
+are the same only with the same input: the call as it was parked, or the same proposal,
+and the same binding shown (`_same`).
 
-An answer takes over the row of another answer that never landed (#7575, `take_over`).
-All of these must hold:
+A person's decision takes over the row of another one of theirs that never landed (#7575,
+#7588, `take_over`). All of these must hold:
 
-- No running operation may still send the row's answer. An operation's record is `running`
-  from before its run until the operation ends, so this reads no clock.
-- After that, Temporal has no Update of the row's answer.
+- No running operation may still send the row's decision. An operation's record is
+  `running` from before its run until the operation ends, so this reads no clock.
+- After that, Temporal has no Update of the row's decision.
 - The execution is still the run's current one.
-- In one transaction, the row still has that answer, and the call has no operation that
-  was not looked at (`FlowStore.take_over_answer`). An answer recorded again locks the row
+- In one transaction, the row still has that decision, the call has no operation that was
+  not looked at, and a call that asks for an approval still waits for it
+  (`FlowStore.take_over_decision`). A decision recorded again locks the row
   (`record_decision`): it is seen there, or it finds the new row.
 
-Anything else refuses the answer, and a later one may take the row over. A send past all
-this (a paused or cancelled attempt, an Update on its way) is another Update: the run takes one
-of the two and refuses the other, which undoes its own row alone (`withdraw`). When the
-attempt that took the row over is refused so, or finds the run ended, it puts the first
-answer back if that one landed.
+Anything else refuses the decision, and a later one may take the row over. The row of a
+grant or of the starter session is never taken over. A send past all this (a paused or
+cancelled attempt, an Update on its way) is another Update: the run takes one of the two and
+refuses the other, which undoes its own row alone (`withdraw`). When the attempt that took
+the row over is refused so, or finds the run ended, it puts the first decision back if that
+one landed. A replaced approval is not put back: the new decision stands (below).
 
-The safety against a late Update is not in the take-over's checks: the harness resolves a
-call once, so the script gets one answer, and an Update id is of one answer, so a late one
-is not taken for another's. The checks only keep the audit row right. An Update from before
-#7575, under the request id alone, names no answer: it is taken for the answer of the row, or
-for the one that the row's answer replaced.
+The harness resolves a call once, and an Update id is of one decision, so a late one is not
+taken for another's. For an answer that is the safety against a late Update: the script gets
+one answer, and the take-over's checks only keep the audit row right. An Update from before
+#7575 or #7588, under the request id alone, names no decision: it is taken for the one of
+the row, or for the one that the row's decision replaced. A denial is put back only for an
+Update of its own.
+
+An approval's Update says only yes or no. What the call may run is what the row says, its
+outcome, its input hash and its narrowed input: a gated body reads it (`flow_decision`; not
+in a run that made an approved call before #2482), and the agent's gate reads it for each of
+its own tools and a plugin's. Both refuse a call with no approval on record. The body first
+takes the call off the run's row (`flow_tools._approved`), which the take-over locks and
+checks. So a take-over never changes a row that a call has read, and after it the replaced
+decision lets nothing run. When a replaced approval lands late, the call runs what the new
+approval says, or does not run when the new decision is a denial. So the row keeps the Update
+ids of the approvals it replaced (`REPLACED`): any of them means that the row stands.
 
 Residual window: a row kept because the Update's fate was unknown (or because the
 operation was cancelled) says `approved`, `denied` or `answered` before the harness has
 it. If no attempt ever resends it and the call is later resolved another way (the
 approval timer, a Reset), the row disagrees with the run. The window is the time until
-the next attempt, or until another answer takes the row over; it stays open only once every
-attempt has been exhausted without Temporal ever answering. An approval's row is never taken
-over: another decision for its call stays refused. A recorded row whose Update is known not
-to have landed, and whose execution was replaced, stays `answered` on the replaced
-execution: the attempt is refused as stale.
+the next attempt, or until another decision takes the row over; it stays open only once
+every attempt has been exhausted without Temporal ever answering. A recorded row whose
+Update is known not to have landed, and whose execution was replaced, stays as it is on the
+replaced execution: the attempt is refused as stale.
 
 The reverse is accepted, not reconciled (#2221): an Update still on its way to the
 history when Temporal answers the probe with no such Update lands after its row was
 deleted, so the call is resolved with no row recording who resolved it. The same holds
 after a take-over when the attempt that took the row over stopped before it could put the
-row back, and its retry is refused. Only that audit row is lost; the run itself is right,
-and a later decision for the call is refused.
+row back, and its retry is refused. Only that audit row is lost: the script has its answer,
+a later decision for the call is refused, and a call that an approval let through does not
+run once the row is gone.
 
 The answer text never reaches the operation's history in the clear (#2221): the route
 seals it under the run's own payload key (`seal_answer`), so the operation's input and
 its `operations` row carry `answer_sealed`, and forgetting the run (`forget.py`) makes
 them unreadable with the rest of the run's payloads.
 
-A Reset undoes the answers after its point (#7364). An attempt that finds its row on
-record asks first whether its Update landed on the execution it checked, and sends nothing
-if it did. Any other attempt sends only after it checked that this execution is the run's
-current one. A Reset between that check and the send is still crossed (milliseconds: the
-harness client cannot pin the Update to an execution).
+A Reset undoes the decisions after its point (#7364). An attempt of an answer or of a
+person's decision that finds its row on record asks first whether its Update landed on the
+execution it checked, and sends nothing if it did. Any other attempt of one sends only after
+it checked that this execution is the run's current one. A Reset between that check and the
+send is still crossed (milliseconds: the harness client cannot pin the Update to an
+execution).
 
 `task_answer` (#7364) is `flow_answer` for a prompt, whose call id is its task's id and
 whose answer is an object the route checked against the task's schema. Once the Update
@@ -90,7 +106,7 @@ import asyncio
 import base64
 import hmac
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
@@ -102,6 +118,7 @@ from temporal_agent_harness.harness.agent_client import (
     CallbackResultError,
     ToolApprovalError,
 )
+from temporal_agent_harness.harness.agent_protocol import ToolApprovalResult
 from temporalio import activity
 from temporalio.api.common.v1 import WorkflowExecution
 from temporalio.api.enums.v1 import ResetReapplyExcludeType
@@ -180,6 +197,11 @@ DRAFT_REFUSED = "https://scadbuddy.dev/problems/flow-draft-refused"
 REFUSED_READS = frozenset({401, 403})
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
+#: In an approval's or a denial's response: the Update ids of the approvals that its row
+#: replaced, any of which may still let the call through, to do what the row says (#7588).
+REPLACED = "replaced"
+#: The harness's refusal of a call that another Update resolved.
+ALREADY = frozenset({"CallbackAlreadyResolved", "ToolApprovalAlreadyResolved"})
 #: How long asking Temporal whether a decision's Update landed may take.
 LANDED_PROBE = timedelta(seconds=10)
 #: The harness tool an outward `tool(...)` call parks as (`flow_tools.approved_tool`):
@@ -256,11 +278,16 @@ def canonical(value: Any) -> Any:
     return value
 
 
-async def answer_update_id(keys: PayloadKeys, row: Decision) -> str:
-    """The Update id of an answer's row (#7575): one for each answer to the call. The tag is
-    made with the run's payload key, so the id in the history tells nothing of the answer."""
+async def decision_update_id(keys: PayloadKeys, row: Decision) -> str:
+    """The Update id of a decision's row (#7575, #7588): one for each decision on the call.
+    The tag is made with the run's payload key, so the id in the history tells nothing of
+    the decision."""
     key = await keys.key_for(f"flow-{row.run_id}", False)
-    text = json.dumps(canonical(row.response), sort_keys=True, separators=(",", ":"))
+    held: Any = row.response
+    if row.kind == "approval":
+        decided = {k: v for k, v in row.response.items() if k != REPLACED}
+        held = [row.outcome, decided, row.responder, row.input_hash]
+    text = json.dumps(canonical(held), sort_keys=True, separators=(",", ":"))
     tag = dedup_iv(key, f"flow-answer-update:{row.request_id}", text.encode())
     return f"{row.request_id}:{tag.hex()}"
 
@@ -411,9 +438,21 @@ def _wanted(kind: str, request: dict[str, Any], answer: Any = None) -> tuple[str
 
 
 def _same(existing: Decision, kind: str, request: dict[str, Any], answer: Any) -> bool:
-    """Whether a recorded row is the decision `request` asks for (a resend), not another."""
+    """Whether a recorded row is the decision `request` asks for (a resend), not another.
+    An approval's is of one input: the very proposal, or the call as it was parked, with the
+    binding that the request was shown, if any."""
     outcome, response = _wanted(kind, request, answer)
-    return existing.kind == kind and existing.outcome == outcome and existing.response == response
+    narrowed = "narrowed_by" in existing.response
+    held = {
+        k: v for k, v in existing.response.items() if k not in ("args", "narrowed_by", REPLACED)
+    }
+    if (existing.kind, existing.outcome, held) != (kind, outcome, response):
+        return False
+    if outcome != "approved":
+        return True
+    if request.get("proposal"):
+        return narrowed and request.get("proposal_hash") == existing.input_hash
+    return not narrowed and request.get("bound_hash") in (None, existing.input_hash)
 
 
 def flow_kinds(
@@ -480,8 +519,8 @@ def flow_kinds(
         # A task's is compared by `record_decision`, so `run_task_answer` sees one that lost.
         if existing is not None and "task_id" not in request:
             answer = await answer_of(request) if kind == "answer" else None
-            # An answer to a call that still waits may take the row over (#7575).
-            may_take = kind == existing.kind == "answer" and entry is not None
+            # A decision on a call that still waits may take a person's row over (#7575).
+            may_take = existing.responder == "browser" and entry is not None
             if not may_take and not _same(existing, kind, request, answer):
                 raise _resolved()
         if existing is None and entry is None:
@@ -495,23 +534,15 @@ def flow_kinds(
             "hops": [h.model_dump(mode="json") for h in entry.hops] if entry is not None else [],
         }
 
-    async def record(request: dict[str, Any], checked: dict[str, Any], decision: Decision) -> None:
-        if not await store.record_decision(decision):
-            raise _resolved()
-
-    async def forget(rid: str) -> None:
-        """Undo a recorded decision whose Update did not land; never masks the failure."""
-        try:
-            await store.delete_decision(rid)
-        except Exception:
-            activity.logger.exception("could not delete the unsent flow decision %s", rid)
-
     async def withdraw(decision: Decision) -> None:
-        """`forget` for an answer: its own row, never one that took it over."""
+        """Undo a recorded decision whose Update did not land: its own row, never one that
+        took it over. Never masks the failure."""
         try:
-            await store.withdraw_answer(decision)
+            await store.withdraw_decision(decision)
         except Exception:
-            activity.logger.exception("could not delete the unsent answer %s", decision.request_id)
+            activity.logger.exception(
+                "could not delete the unsent flow decision %s", decision.request_id
+            )
 
     async def landed(checked: dict[str, Any], update_id: str) -> bool | None:
         """Whether the Update completed on the run: True, False (Temporal has no
@@ -537,10 +568,16 @@ def flow_kinds(
             return None
         return True
 
-    async def answer_landed(checked: dict[str, Any], row: Decision) -> bool | None:
-        """`landed` for the answer a row records."""
-        # Before #7575 every answer's Update id was its request id alone.
-        for update_id in (await answer_update_id(run_keys(), row), row.request_id):
+    async def decision_landed(checked: dict[str, Any], row: Decision) -> bool | None:
+        """`landed` for the decision a row records, or for an approval that it replaced."""
+        # Before #7575 (an approval's: #7588) every Update id was the request id alone.
+        return await any_landed(checked, row, [*row.response.get(REPLACED, []), row.request_id])
+
+    async def any_landed(
+        checked: dict[str, Any], row: Decision, others: Iterable[str]
+    ) -> bool | None:
+        """`landed` for the row's own Update id or one of `others`."""
+        for update_id in (await decision_update_id(run_keys(), row), *others):
             verdict = await landed(checked, update_id)
             if verdict is not False:
                 return verdict
@@ -574,55 +611,72 @@ def flow_kinds(
     async def check_answer(request: dict[str, Any]) -> dict[str, Any]:
         return await check("answer", request)
 
+    async def may_send(request: dict[str, Any], held: Decision) -> bool:
+        """Whether a running operation's request may still send the decision `held`."""
+        if held.kind == "approval":
+            return "approved" in request and _same(held, "approval", request, None)
+        if not {"answer", "answer_sealed"} & request.keys():
+            return False
+        return bool(canonical({"answer": await answer_of(request)}) == canonical(held.response))
+
     async def take_over(checked: dict[str, Any], decision: Decision) -> Decision | None:
-        """Put `decision` in the call's row in place of another answer that never landed and
-        that nothing may still send (the module's rule). The answer it replaced; None when
-        it took nothing."""
+        """Put `decision` in the call's row in place of another one that never landed and
+        that nothing may still send (the module's rule). The one it replaced; None when it
+        took nothing."""
         held = await store.get_decision(decision.request_id)
-        if held is None or (held.kind, held.responder) != ("answer", decision.responder):
+        if held is None or (held.kind, held.responder) != (decision.kind, "browser"):
             return None
         operations = await store.call_operations(decision.run_id, decision.call_id)
         # Before Temporal is asked: an operation that has ended sends nothing after that.
         for operation in operations:
-            request = operation.request
-            if request is None or not {"answer", "answer_sealed"} & request.keys():
-                continue
-            if canonical({"answer": await answer_of(request)}) == canonical(held.response):
+            if operation.request is not None and await may_send(operation.request, held):
                 return None
-        if await answer_landed(checked, held) is not False:
+        if await decision_landed(checked, held) is not False:
             return None
         # Again: asking Temporal may take a while.
         await at_execution(str(checked["workflow_id"]), decision.workflow_run_id)
         seen = [operation.id for operation in operations]
-        if not await store.take_over_answer(decision, held=held, seen=seen):
+        if decision.kind == "approval":
+            before = list(held.response.get(REPLACED, []))
+            if held.outcome == "approved":
+                before.append(await decision_update_id(run_keys(), held))
+            decision.response = {k: v for k, v in decision.response.items() if k != REPLACED}
+            if before:
+                decision.response[REPLACED] = before
+        if not await store.take_over_decision(decision, held=held, seen=seen):
             return None
         return held
 
     async def put_back(checked: dict[str, Any], decision: Decision, held: Decision) -> bool:
-        """Undo a take-over whose replaced answer landed after all; never masks the failure."""
+        """Undo a take-over whose replaced decision landed after all; never masks the
+        failure. Not an approval: the call reads the row, and may have read it."""
+        if held.outcome == "approved":
+            return False
         try:
-            # `seen=None`: no operation matters, as the answer landed. `[]` would let any stop it.
-            return await answer_landed(checked, held) is True and await store.take_over_answer(
-                held, held=decision, seen=None
-            )
+            # An Update under the request id alone may be an approval.
+            bare = [] if held.kind == "approval" else [held.request_id]
+            own = await any_landed(checked, held, bare)
+            # `seen=None`: no operation matters, as `held` landed. `[]` would let any stop it.
+            return own is True and await store.take_over_decision(held, held=decision, seen=None)
         except Exception:
-            activity.logger.exception("could not put back the answer %s", held.request_id)
+            activity.logger.exception("could not put back the decision %s", held.request_id)
             return False
 
-    async def give(
-        request: dict[str, Any], checked: dict[str, Any], taken: Callable[[], ApiError]
-    ) -> Decision:
-        """Record the answer and tell the harness; the decision, once its Update landed.
-        Raises `taken()` when another answer holds the call."""
-        outcome, response = _wanted("answer", request, await answer_of(request))
-        decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
-        update_id = await answer_update_id(run_keys(), decision)
+    async def land(
+        checked: dict[str, Any],
+        decision: Decision,
+        taken: Callable[[], ApiError],
+        send: Callable[[str], Awaitable[Any]],
+    ) -> None:
+        """Record `decision`, then `tell` the harness. Raises `taken()` when another
+        decision holds the call."""
+        update_id = await decision_update_id(run_keys(), decision)
         row = await store.get_decision(decision.request_id)
-        # Another answer's row says nothing of this one.
+        # Another decision's row says nothing of this one.
         sent = (
             row is not None
-            and await answer_update_id(run_keys(), row) == update_id
-            and await answer_landed(checked, row)
+            and await decision_update_id(run_keys(), row) == update_id
+            and await decision_landed(checked, row)
         )
         if not sent:
             await at_execution(str(checked["workflow_id"]), decision.workflow_run_id)
@@ -631,14 +685,25 @@ def flow_kinds(
             replaced = await take_over(checked, decision)
             if replaced is None:
                 raise taken()
-        if sent:
-            return decision
-        client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        if not sent:
+            await tell(checked, decision, taken, send, replaced)
+
+    async def tell(
+        checked: dict[str, Any],
+        decision: Decision,
+        taken: Callable[[], ApiError],
+        send: Callable[[str], Awaitable[Any]],
+        replaced: Decision | None = None,
+    ) -> None:
+        """`send` the recorded `decision` under its Update id: returns once that landed, or
+        the row stands all the same. `replaced` is the one that it took the row over from."""
+        update_id = await decision_update_id(run_keys(), decision)
 
         async def arrived() -> bool | None:
-            # After a take-over, an Update under the request id alone is the replaced answer's.
-            if replaced is None:
-                return await answer_landed(checked, decision)
+            # After a take-over, an Update under the request id alone is the replaced one's:
+            # no matter when that is an approval, as the call does what the row says.
+            if replaced is None or decision.response.get(REPLACED):
+                return await decision_landed(checked, decision)
             return await landed(checked, update_id)
 
         async def undo() -> None:
@@ -646,28 +711,41 @@ def flow_kinds(
                 await withdraw(decision)
 
         try:
-            await client.provide_callback_result(
-                decision.call_id, result=response, update_id=update_id
-            )
-        except CallbackResultError as err:
-            resolved = err.error_type == "CallbackAlreadyResolved"
+            await send(update_id)
+        except (CallbackResultError, ToolApprovalError) as err:
+            resolved = err.error_type in ALREADY
             if resolved:
                 verdict = await arrived()
                 if verdict is None:
                     raise
                 if verdict:
-                    return decision
+                    return
             await undo()
             if err.error_type == "MalformedCallbackResult":
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT, "The run cannot take that answer."
                 ) from None
-            if resolved:
-                raise taken() from None
-            raise _stale() from None
+            raise (taken() if resolved else _stale()) from None
         except BaseException as err:
             if not await settle(arrived, err, undo):
                 raise
+
+    async def give(
+        request: dict[str, Any], checked: dict[str, Any], taken: Callable[[], ApiError]
+    ) -> Decision:
+        """Record the answer and tell the harness; the decision, once its Update landed.
+        Raises `taken()` when another answer holds the call."""
+        outcome, response = _wanted("answer", request, await answer_of(request))
+        decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
+        client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        await land(
+            checked,
+            decision,
+            taken,
+            lambda update_id: client.provide_callback_result(
+                decision.call_id, result=response, update_id=update_id
+            ),
+        )
         return decision
 
     async def run_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -765,41 +843,44 @@ def flow_kinds(
 
     async def run_decide(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         approved = bool(request["approved"])
-        reason = request.get("reason")
-        outcome, response = _wanted("approval", request)
-        decision = _decision(request, checked, kind="approval", outcome=outcome, response=response)
-        decision.hops = hops_of(checked, "approve" if approved else "deny", "browser")
-        if approved and request.get("proposal"):
-            # Bound to the narrowed input, which the gated body runs only when it
-            # hashes to this (`flow_decision`).
-            held = await proposed(checked, request)
-            decision.response = {**response, "args": held.args, "narrowed_by": held.proposed_by}
-            decision.input_hash = held.input_hash
-        elif approved and await store.get_decision(decision.request_id) is None:
-            # Bound to the call as it waits now, which is what the person was shown; a
-            # resend keeps the hash its first attempt recorded.
-            decision.input_hash = await parked_hash(
-                checked, decision.call_id, request.get("bound_hash")
+        row = await store.get_decision(str(checked["request_id"]))
+        if row is not None and row.responder.startswith("grant:"):
+            # Recorded since the check, which refuses it so.
+            raise _stale()
+        if row is not None and _same(row, "approval", request, None):
+            # A resend keeps what its first attempt recorded, the hash with it.
+            decision = row
+        else:
+            outcome, response = _wanted("approval", request)
+            decision = _decision(
+                request, checked, kind="approval", outcome=outcome, response=response
             )
-        await record(request, checked, decision)
-        client = AgentClient(activity.client(), str(checked["workflow_id"]))
-        try:
-            await client.approve_tool(
-                decision.call_id,
-                approved=approved,
-                reason=None if reason is None else str(reason),
-                update_id=decision.request_id,
-            )
-        except ToolApprovalError as err:
-            await forget(decision.request_id)
-            if err.error_type == "ToolApprovalAlreadyResolved":
-                raise _resolved() from None
-            raise _stale() from None
-        except BaseException as err:
-            rid = decision.request_id
-            if not await settle(lambda: landed(checked, rid), err, lambda: forget(rid)):
-                raise
+            decision.hops = hops_of(checked, "approve" if approved else "deny", "browser")
+            if approved and request.get("proposal"):
+                # Bound to the narrowed input, which the gated body runs only when it
+                # hashes to this (`flow_decision`).
+                held = await proposed(checked, request)
+                decision.response = {**response, "args": held.args, "narrowed_by": held.proposed_by}
+                decision.input_hash = held.input_hash
+            elif approved:
+                # Bound to the call as it waits now, which is what the person was shown.
+                decision.input_hash = await parked_hash(
+                    checked, decision.call_id, request.get("bound_hash")
+                )
+        await land(checked, decision, _resolved, approval(checked, decision))
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": decision.outcome}
+
+    def approval(
+        checked: dict[str, Any], decision: Decision
+    ) -> Callable[[str], Awaitable[ToolApprovalResult]]:
+        """How to send an approval or a denial, as its row has it."""
+        client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        return lambda update_id: client.approve_tool(
+            decision.call_id,
+            approved=decision.outcome == "approved",
+            reason=decision.response.get("reason"),
+            update_id=update_id,
+        )
 
     def hops_of(checked: dict[str, Any], action: HopAction, actor: str) -> list[HopRecord]:
         """The entry's way up, with this decision as its last step (spec §4.6)."""
@@ -936,7 +1017,7 @@ def flow_kinds(
             if held is not None and (held.outcome, held.responder) == ("denied", actor):
                 # A retried attempt after this very denial was recorded (and maybe sent):
                 # the entry may have left `parent` since; send it again, idempotently.
-                await send_approval(checked, held, approved=False, reason=reason)
+                await tell(checked, held, _resolved, approval(checked, held))
                 return {**answer, "outcome": "denied"}
             try:
                 recorded = await store.record_decision(decision, at_hop="parent")
@@ -944,7 +1025,7 @@ def flow_kinds(
                 raise _with_person() from None
             if not recorded:
                 raise _resolved()
-            await send_approval(checked, decision, approved=False, reason=reason)
+            await tell(checked, decision, _resolved, approval(checked, decision))
             return {**answer, "outcome": "denied"}
         return await narrow(request, checked, actor, answer)
 
@@ -1002,7 +1083,7 @@ def flow_kinds(
             )
             if await store.record_grant_decision(decision):
                 try:
-                    await send_approval(checked, decision, approved=True, reason=None)
+                    await tell(checked, decision, _resolved, approval(checked, decision))
                 except BaseException:
                     await store.withdraw_grant_decision(decision.request_id)
                     raise
@@ -1017,27 +1098,6 @@ def flow_kinds(
         if await store.move_hop(run_id, call_id, record, proposal=proposal) is None:
             raise _with_person()
         return {**answer, "outcome": "with_person"}
-
-    async def send_approval(
-        checked: dict[str, Any], decision: Decision, *, approved: bool, reason: Any
-    ) -> None:
-        client = AgentClient(activity.client(), str(checked["workflow_id"]))
-        try:
-            await client.approve_tool(
-                decision.call_id,
-                approved=approved,
-                reason=None if reason is None else str(reason),
-                update_id=decision.request_id,
-            )
-        except ToolApprovalError as err:
-            await forget(decision.request_id)
-            if err.error_type == "ToolApprovalAlreadyResolved":
-                raise _resolved() from None
-            raise _stale() from None
-        except BaseException as err:
-            rid = decision.request_id
-            if not await settle(lambda: landed(checked, rid), err, lambda: forget(rid)):
-                raise
 
     async def check_reset(request: dict[str, Any]) -> dict[str, Any]:
         run = await store.get_run(str(request["run_id"]))

@@ -23,11 +23,13 @@ from scadbuddy.api.flows import _pending
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
+from scadbuddy.flows.models import Decision
 from scadbuddy.flows.operations import (
     FLOW_DECIDE,
     PRINTER_CHANGED,
     PRINTER_REFUSED,
     PRINTER_UNBOUND,
+    decision_update_id,
     flow_kinds,
     request_id,
 )
@@ -335,6 +337,69 @@ async def test_a_print_on_a_registry_printer_names_it_and_binds_the_pair_it_link
     assert run.result == "result: 'printing'"
     # The workflow sends the script's arguments: the agent adds the pair and checks it.
     assert served.calls == [("print_output", f"tool-{call_id}", call)]
+
+
+@pytest.mark.parametrize("late", [False, True], ids=["lost", "late"])
+async def test_an_approval_of_another_binding_takes_over_one_that_never_landed(
+    outward: Outward,
+    tools: tuple[Tools, str],
+    monkeypatch: pytest.MonkeyPatch,
+    late: bool,
+) -> None:
+    """#7588: the printer was linked anew since the first approval, which never landed. The
+    call is bound to the pair that the page showed for the second one."""
+    _, queue = tools
+    call = {"output_id": "o1", "printer": PRINTER}
+    run_id = await outward.run(
+        script(f"return await tool('print_output', {call!r})"), tools_queue=queue
+    )
+    call_id = await outward.approval(run_id)
+    parked = await outward.store.get_run(run_id)
+    assert parked is not None
+    old, new = (
+        input_hash(HASH_KEY, "print_output", {**call, "printer_id": linked}) for linked in (2, 5)
+    )
+    first = Decision(
+        request_id=request_id(parked, call_id),
+        run_id=run_id,
+        workflow_run_id=parked.workflow_run_id,
+        call_id=call_id,
+        kind="approval",
+        outcome="approved",
+        responder="browser",
+        input_hash=old,
+    )
+    assert await outward.store.record_decision(first)
+    decide = next(
+        k
+        for k in flow_kinds(outward.remote, Keys(), HASH_KEY, api=_api(5))
+        if k.name == FLOW_DECIDE
+    )
+    if late:
+        original = AgentClient.approve_tool
+        update_id = await decision_update_id(Keys(), first)
+
+        async def beaten(self: AgentClient, tool_id: str, **kwargs: Any) -> Any:
+            await original(self, tool_id, approved=True, update_id=update_id)
+            return await original(self, tool_id, **kwargs)
+
+        monkeypatch.setattr(AgentClient, "approve_tool", beaten)
+    request = {"run_id": run_id, "call_id": call_id, "approved": True, "bound_hash": new}
+    env = ActivityEnvironment(client=outward.client)
+    checked = await env.run(decide.check, request)
+    await env.run(decide.run, request, checked)
+    decision = await outward.store.get_decision(first.request_id)
+    assert decision is not None
+    assert (decision.outcome, decision.input_hash) == ("approved", new)
+    assert (await outward.finished(run_id)).result == "result: 'printing'"
+    # A retry after it landed, the call gone: the same decision.
+    await env.run(decide.run, request, checked)
+    # The first one again is another decision.
+    with pytest.raises(ApiError) as err:
+        await env.run(decide.run, {**request, "bound_hash": old}, checked)
+    assert err.value.status == 409
+    decision = await outward.store.get_decision(first.request_id)
+    assert decision is not None and decision.input_hash == new
 
 
 async def test_an_unknown_tool_is_a_script_error_and_sends_nothing(

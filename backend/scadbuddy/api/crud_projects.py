@@ -272,19 +272,19 @@ async def call_operations(run_id: str, call_id: str, flows: FlowsDep) -> list[Ca
     return await flows.store.call_operations(run_id, call_id)
 
 
-@router.post("/decisions/take-over", name="crud_projects_take_over_answer")
-async def take_over_answer(body: TakeOver, flows: FlowsDep) -> Recorded:
-    taken = await flows.store.take_over_answer(body.decision, held=body.held, seen=body.seen)
+@router.post("/decisions/take-over", name="crud_projects_take_over_decision")
+async def take_over_decision(body: TakeOver, flows: FlowsDep) -> Recorded:
+    taken = await flows.store.take_over_decision(body.decision, held=body.held, seen=body.seen)
     return Recorded(recorded=taken)
 
 
 @router.post(
     "/decisions/withdraw",
-    name="crud_projects_withdraw_answer",
+    name="crud_projects_withdraw_decision",
     status_code=status.HTTP_204_NO_CONTENT,
 )
-async def withdraw_answer(body: Decision, flows: FlowsDep) -> None:
-    await flows.store.withdraw_answer(body)
+async def withdraw_decision(body: Decision, flows: FlowsDep) -> None:
+    await flows.store.withdraw_decision(body)
 
 
 def _same(held: Decision, decision: Decision) -> bool:
