@@ -105,6 +105,7 @@ from scadbuddy.orders.quote import (
     output_matches,
     reference_of,
 )
+from scadbuddy.orders.rendering import kit_output_ids
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.store import BlobStore
@@ -263,7 +264,10 @@ async def print_check(
     ``order_not_accepted`` before it is accepted, ``order_on_hold``, ``item_custom``,
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
     `failed` (one already printing among them), ``print_in_flight`` while a test print of
-    it is open, ``item_made`` when its attempts made its quantity already, and
+    it is open, ``item_kit`` for an item whose render made several outputs (#5701 PR 5,
+    naming them in ``outputs``: one attempt would print one output and count the whole kit
+    made, so the order page prints each output and the shop records the attempt),
+    ``item_made`` when its attempts made its quantity already, and
     ``requote_needed`` when the accepted quote no longer stands
     for what would print: no accepted quote, the item's output gone or no longer its
     reference's, or a slice quote whose sliced file is gone or reads to another digest.
@@ -298,6 +302,17 @@ async def print_check(
             items=[item.id],
         )
     await _none_in_flight(store, item)
+    if reference is not None and item.output_id is not None:
+        kit = await asyncio.to_thread(kit_output_ids, outputs, item.output_id)
+        if len(kit) > 1:
+            # One attempt prints one output and would count the whole kit made.
+            raise _refused(
+                "item_kit",
+                f"item {item.id} is a kit of {len(kit)} outputs: print each output from"
+                " the order page, then record the attempt",
+                items=[item.id],
+                outputs=kit,
+            )
     attempts = await asyncio.to_thread(store.fulfilments, item.id)
     copies = item.quantity - made(attempts)
     if copies < 1:

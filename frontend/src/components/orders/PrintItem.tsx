@@ -4,7 +4,7 @@ import type { Order, OrderItemDetail, PartSettingsMap, PrintRunRequest, Quote, R
 import { orderItemSource } from '../../lib/printSource'
 import { PrintPicker } from '../PrintPicker'
 import { quoteToPrint } from './price'
-import { offersPrint } from './itemActions'
+import { isKit, offersPrint } from './itemActions'
 import { Button } from '@/components/ui/button'
 
 /** #4673 — what a print refused because its setup differs from the quote's
@@ -75,6 +75,7 @@ function offersTestPrint(order: Order, item: OrderItemDetail): boolean {
 export function PrintItem({ order, item, onChanged, testRevision }: { order: Order; item: OrderItemDetail; onChanged: () => void; testRevision?: Revision }) {
   const [open, setOpen] = useState(false)
   if (!(testRevision ? offersTestPrint(order, item) : offersPrint(order, item)) || !orderItemSource(item)) return null
+  if (!testRevision && isKit(item)) return <KitPrints item={item} />
   return (
     <>
       <Button variant="outline" onClick={() => setOpen(true)} data-testid={testRevision ? 'test-print-item' : 'print-item'}>
@@ -86,8 +87,38 @@ export function PrintItem({ order, item, onChanged, testRevision }: { order: Ord
 }
 
 /**
+ * #5701 PR 5 — a kit's outputs, each printed on its own in the plain print dialog. The prints
+ * record no attempt of the item, so the shop records it under Fulfilment once every output
+ * is printed.
+ */
+function KitPrints({ item }: { item: OrderItemDetail }) {
+  const [printing, setPrinting] = useState<string | null>(null)
+  const outputs = item.kit_outputs ?? []
+  const slug = item.reference?.slug
+  if (!slug) return null
+  return (
+    <div className="space-y-2 text-[13px]">
+      <p className="text-muted-foreground">
+        {`This item is a kit of ${outputs.length} outputs. Print each one, then record the attempt under Fulfilment.`}
+      </p>
+      <ul aria-label="Outputs to print" className="divide-y rounded-md border">
+        {outputs.map((id, index) => (
+          <li key={id} className="flex items-center justify-between gap-2 px-2 py-1.5">
+            <span>{`Output ${index + 1}`}</span>
+            <Button type="button" size="sm" variant="outline" aria-label={`Print output ${index + 1} of ${outputs.length}`} onClick={() => setPrinting(id)}>
+              Print…
+            </Button>
+          </li>
+        ))}
+      </ul>
+      {printing && <PrintPicker open source={{ kind: 'output', output: { id: printing, slug } }} onClose={() => setPrinting(null)} onRan={() => undefined} />}
+    </div>
+  )
+}
+
+/**
  * The print dialog of one item, in its item mode: Print's, and the items card's bulk Print
- * (#4955), which opens one per selected item in turn.
+ * (#4955), which opens one per selected item in turn. A kit (`isKit`) is not printed here.
  */
 export function ItemPrintDialog({
   order,

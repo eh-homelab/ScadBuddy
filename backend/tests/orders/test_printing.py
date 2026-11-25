@@ -18,7 +18,7 @@ import pytest
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.events import BusResync, PrintEvent, PrintOutcome, PrintRunEvent
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError
 from scadbuddy.orders.lifecycle import (
     FULFILMENT_HOLDER,
     QUOTE_HOLDER,
@@ -35,6 +35,7 @@ from scadbuddy.orders.printing import (
 )
 from scadbuddy.orders.printing import test_print_check as check_test_print
 from scadbuddy.orders.quote import OutputsRead
+from scadbuddy.orders.rendering import kit_output_id
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
@@ -319,21 +320,28 @@ async def _until(done: Any, timeout: float = 60.0) -> None:
 
 
 class Outputs:
-    """``OutputsRead`` over one output, the reference's render unless told otherwise."""
+    """``OutputsRead`` over the item's output, the reference's render unless told
+    otherwise, and the later outputs of its render (``kit``, #5701)."""
 
-    def __init__(self, item: OrderItem, *, gone: bool = False, plates: int = 0) -> None:
-        assert item.reference is not None
+    def __init__(
+        self, item: OrderItem, *, gone: bool = False, plates: int = 0, kit: int = 1
+    ) -> None:
+        assert item.reference is not None and item.output_id is not None
         self.reference = item.reference
         self.gone = gone
         self.plates = plates
+        self.ids = [item.output_id] + [kit_output_id(item.output_id, k) for k in range(1, kit)]
 
     def get(self, output_id: str) -> OutputMeta:
         if self.gone:
             raise OSError(output_id)
+        if output_id not in self.ids:
+            raise OutputNotFoundError(output_id)
         meta = SimpleNamespace(
             slug=self.reference.slug,
             model_version=self.reference.commit,
             layout_plates=[{}] * self.plates,
+            job_id="job-1",
         )
         return cast(OutputMeta, meta)
 
@@ -414,6 +422,24 @@ def test_an_output_with_other_plates_than_the_quote_is_requoted(
     assert _check(shop, order, item, blobs, Outputs(item, plates=same))["quote_id"] == quote.id
     more = Outputs(item, plates=quoted + 1)
     assert _refusal(lambda: _check(shop, order, item, blobs, more)) == "requote_needed"
+
+
+def test_a_kit_item_is_printed_output_by_output(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
+    """#5701 PR 5: an item whose render made several outputs is a kit. The item's print
+    starts one output, and an attempt of one output would count the whole kit made, so it
+    refuses (``item_kit``, naming the outputs): the order page prints each output."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 1))
+    shop.quoted(order, item)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    kit = Outputs(item, kit=2)
+    with pytest.raises(ApiError) as refused:
+        _check(shop, order, item, blobs, kit)
+    assert str(refused.value.type).rsplit("/", 1)[-1] == "item_kit"
+    assert refused.value.extensions["outputs"] == kit.ids
+    assert refused.value.extensions["items"] == [item.id]
+    assert _check(shop, order, item, blobs, Outputs(item))["output_id"] == item.output_id
 
 
 def test_the_check_prints_what_is_left(shop: Shop, pool: PgPool, tmp_path: Path) -> None:

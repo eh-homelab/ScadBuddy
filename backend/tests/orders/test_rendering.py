@@ -16,6 +16,8 @@ from scadbuddy.orders.lifecycle import ManualQuoteInput
 from scadbuddy.orders.rendering import (
     AttachTo,
     RenderedOutput,
+    kit_output_id,
+    kit_output_ids,
     output_for_reference,
     outputs_for_reference,
 )
@@ -320,3 +322,69 @@ async def test_the_outputs_of_a_pruned_job_are_not_known(shop: Shop) -> None:
     made = await every_output(shop, outputs, renders)
     renders.pruned = True
     assert await every_output(shop, outputs, renders) == made[:1]
+
+
+# -- the order's render of a kit (#5701 PR 5, spec 2026-11-17 §7.4 "The order") ----------
+
+
+async def order_render(shop: Shop, outputs: SavedOutputs, renders: SeveralRenders) -> list[str]:
+    """The item's render as ``order_item_render`` runs it: output 0 set on the item, each
+    later output saved under an id of the first's (`kit_output_id`)."""
+    made = await outputs_for_reference(
+        reference_of(shop),
+        outputs=outputs,
+        renders=renders,
+        create_output=outputs.create,
+        name="ORD 1 Demo",
+        saved_as=lambda index: "op-out",
+        later_as=kit_output_id,
+        follow_every=0.0,
+        item=AttachTo(
+            lifecycle=shop.lifecycle, order=shop.get_order(), item=shop.get_item(), by=BY
+        ),
+    )
+    return [one.output_id for one in made]
+
+
+async def test_an_items_render_attaches_every_output_by_its_job(shop: Shop) -> None:
+    outputs = SavedOutputs()
+    renders = SeveralRenders(3)
+    ids = await order_render(shop, outputs, renders)
+    assert ids == ["op-out", kit_output_id("op-out", 1), kit_output_id("op-out", 2)]
+    assert len(set(ids)) == 3 and outputs.created == ids
+    assert {outputs.get(one).job_id for one in ids} == {"job-1"}
+    # The item holds the first; the rest are found from it, by its job.
+    assert shop.get_item().output_id == "op-out"
+    assert kit_output_ids(outputs, "op-out") == ids
+    # The render again reuses each one: no new render, no new save.
+    assert await order_render(shop, outputs, renders) == ids
+    assert outputs.created == ids and len(renders.submitted) == 1
+
+
+async def test_a_later_output_is_found_from_the_items_own_output(shop: Shop) -> None:
+    """An item that holds an output already (an earlier operation's) keeps it, and the
+    later outputs go under ids of that output, where the reader finds them."""
+    outputs = SavedOutputs()
+    outputs.metas["own"] = OutputMeta.model_construct(
+        id="own", slug="demo", model_version="a" * 40, colors=["#ff0000"], job_id="job-1"
+    )
+    shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, output_id="own")
+    ids = await order_render(shop, outputs, SeveralRenders(2))
+    assert ids == ["own", kit_output_id("own", 1)]
+    assert kit_output_ids(outputs, "own") == ids
+
+
+@pytest.mark.parametrize("count", [0, 1])
+async def test_an_output_of_one_render_is_no_kit(shop: Shop, count: int) -> None:
+    outputs = SavedOutputs()
+    assert await order_render(shop, outputs, SeveralRenders(count)) == ["op-out"]
+    assert kit_output_ids(outputs, "op-out") == ["op-out"]
+
+
+async def test_an_output_of_another_job_is_not_part_of_the_kit(shop: Shop) -> None:
+    outputs = SavedOutputs()
+    ids = await order_render(shop, outputs, SeveralRenders(3))
+    later = outputs.metas[ids[1]]
+    outputs.metas[ids[1]] = later.model_copy(update={"job_id": "job-2"})
+    assert kit_output_ids(outputs, "op-out") == ["op-out"]
+    assert kit_output_ids(outputs, "gone") == ["gone"]

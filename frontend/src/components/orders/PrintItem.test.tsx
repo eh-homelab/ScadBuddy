@@ -5,7 +5,7 @@ import { api, ApiError } from '../../api/client'
 import type { Problem } from '../../api/types'
 import { REQUOTE_HINT } from './PrintItem'
 import { resetMockState } from '../../mocks/handlers'
-import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, state } from '../../mocks/features/orders/state'
+import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
 import { HttpResponse, http } from 'msw'
@@ -238,6 +238,23 @@ describe('PrintItem', () => {
     const error = await within(dialog).findByTestId('quote-error')
     expect(error).toHaveTextContent('not sliced with.')
     expect(error).toHaveTextContent("Quote the item again, or ask the assistant to print it with the quote's setup.")
+  })
+
+  // #5701 PR 5: an item whose render made several outputs prints each one on its own; the
+  // item's own print would print the first alone, so it is not offered.
+  it('prints each output of a kit on its own', async () => {
+    const kit = [OUTPUT_REAGAN, 'b'.repeat(32)]
+    const item = state.items.find((i) => i.id === ITEM_APPROVED)!
+    Object.assign(item, { output_id: OUTPUT_REAGAN, kit_outputs: kit })
+    const printed = vi.spyOn(api, 'printItem')
+    const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    const parts = await screen.findByRole('list', { name: 'Outputs to print' })
+    expect(screen.queryByTestId('print-item')).toBeNull()
+    expect(within(parts).getAllByRole('listitem')).toHaveLength(2)
+    expect(screen.getByTestId('item-section-print')).toHaveTextContent('record the attempt')
+    await user.click(within(parts).getByRole('button', { name: 'Print output 2 of 2' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    expect(printed).not.toHaveBeenCalled()
   })
 
   it('is not offered before the order is accepted', async () => {
