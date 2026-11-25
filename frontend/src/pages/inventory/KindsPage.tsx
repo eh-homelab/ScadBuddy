@@ -1,7 +1,9 @@
-import { ChevronLeftIcon, PlusIcon, Trash2Icon } from 'lucide-react'
+import { ChevronLeftIcon, PlusIcon } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
 import { ApiError } from '../../api/client'
+import { PropertyKeyTable } from '../../components/entities/PropertyKeyTable'
+import { namedTwice, rowsOf, schemaOf, type KeyRow } from '../../components/entities/propertyKeys'
 import { inventoryPaths } from '../../lib/inventoryLinks'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -19,59 +21,6 @@ type LifeBasis = ItemKind['life_basis']
 const LIFE_LABELS: Record<LifeBasis, string> = { none: 'No service life', hours: 'In print hours', months: 'In months' }
 /** Filament items wait for their own phase (#7068), so a new kind is never one. */
 const NEW_TRACKING: Tracking[] = ['lot', 'unit', 'none']
-
-/** A key's JSON Schema type as the key table names it. */
-const KEY_TYPES = { string: 'Text', number: 'Number', integer: 'Whole number', boolean: 'Yes/no', array: 'List' } as const
-type KeyType = keyof typeof KEY_TYPES
-/** One key row; `rid` names the row for React, so a removed row never hands its inputs to the next. */
-type KeyRow = { rid: string; key: string; type: KeyType; description: string; was: string | null }
-
-let rowCount = 0
-const rowId = () => `key-row-${(rowCount += 1)}`
-
-/**
- * The keywords whose value only holds for one type (a bound, a length, a list's items, a
- * value of the type). A key whose type changes drops them; the server would refuse an
- * `enum` of the old type, and a bound of no use on the new one only misleads.
- */
-const TYPED_KEYWORDS = ['enum', 'const', 'default', 'examples', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'minLength', 'maxLength', 'pattern', 'format', 'items', 'prefixItems', 'contains', 'minItems', 'maxItems', 'uniqueItems']
-
-/** The first type of a key's `type` that is not `null`; text when it names none the table knows. */
-function keyTypeOf(sub: Record<string, unknown> | undefined): KeyType {
-  const named = ([] as unknown[]).concat(sub?.type ?? []).find((t) => t !== 'null')
-  return typeof named === 'string' && named in KEY_TYPES ? (named as KeyType) : 'string'
-}
-
-const propertiesOf = (schema: Record<string, unknown>) => (schema.properties && typeof schema.properties === 'object' ? (schema.properties as Record<string, Record<string, unknown>>) : {})
-
-function rowsOf(schema: Record<string, unknown>): KeyRow[] {
-  return Object.entries(propertiesOf(schema)).map(([key, sub]) => ({ rid: rowId(), key, type: keyTypeOf(sub), description: typeof sub.description === 'string' ? sub.description : '', was: key }))
-}
-
-/**
- * The kind's own schema with the table's keys. A key keeps every other keyword it had (an
- * `enum`, a bound) while its type stays; a type left as it was keeps its union with `null`.
- * A changed type drops the keywords of the old one (`TYPED_KEYWORDS`). The server checks the
- * whole schema (`bad_property_schema`), and a schema never refuses a key (spec §6.3a).
- */
-function schemaOf(own: Record<string, unknown>, rows: KeyRow[]): Record<string, unknown> {
-  const before = propertiesOf(own)
-  const properties: Record<string, unknown> = {}
-  for (const row of rows) {
-    const key = row.key.trim()
-    if (!key) continue
-    const old = row.was !== null ? before[row.was] : undefined
-    const sub: Record<string, unknown> = { ...old }
-    if (old && keyTypeOf(old) !== row.type) for (const keyword of TYPED_KEYWORDS) delete sub[keyword]
-    if (!old || keyTypeOf(old) !== row.type) sub.type = row.type
-    if (row.type === 'array') sub.items = (old?.items as unknown) ?? { type: 'string' }
-    else delete sub.items
-    if (row.description.trim()) sub.description = row.description.trim()
-    else delete sub.description
-    properties[key] = sub
-  }
-  return { ...own, type: 'object', properties }
-}
 
 /**
  * #7067 — `/inventory/kinds`: the item kinds as a tree. A kind is a row, never a list in code
@@ -364,15 +313,10 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
   // A built-in kind, or one with items, keeps how it is counted (409 `kind_in_use`).
   const trackingFixed = kind.builtin || kind.item_count > 0 || kind.tracking === 'filament'
 
-  function edit(at: number, patch: Partial<KeyRow>) {
-    setRows((all) => all.map((row, i) => (i === at ? { ...row, ...patch } : row)))
-  }
-
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (!name.trim()) return setError('Give the kind a name.')
-    const keys = rows.map((row) => row.key.trim()).filter(Boolean)
-    if (new Set(keys).size !== keys.length) return setError('Each key is named once.')
+    if (namedTwice(rows)) return setError('Each key is named once.')
     const body: KindPatch = { name: name.trim(), parent_id: parent, uom: uom.trim() || 'each', life_basis: life, saleable, attribute_schema: schemaOf(kind.attribute_schema, rows) }
     if (tracking !== kind.tracking) body.tracking = tracking
     setBusy(true)
@@ -417,56 +361,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
       <fieldset className="flex flex-col gap-2">
         <legend className="mb-1 font-medium">Properties of its items</legend>
         <p className="text-muted-foreground">Each key says what an item's property holds. It types a value; any other key is still kept.</p>
-        {rows.length > 0 && (
-          <table className="w-full max-w-2xl text-left" aria-label={`Keys of ${kind.name}`}>
-            <thead className="text-xs text-muted-foreground">
-              <tr>
-                <th className="py-1 pr-2 font-medium">Key</th>
-                <th className="py-1 pr-2 font-medium">Type</th>
-                <th className="py-1 pr-2 font-medium">Description</th>
-                <th className="py-1">
-                  <span className="sr-only">Remove</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, at) => (
-                <tr key={row.rid}>
-                  <td className="py-1 pr-2">
-                    <Input aria-label={`Key ${at + 1}`} value={row.key} onChange={(e) => edit(at, { key: e.target.value })} className="h-8 w-36 font-mono" />
-                  </td>
-                  <td className="py-1 pr-2">
-                    <Select value={row.type} onValueChange={(next) => edit(at, { type: next as KeyType })}>
-                      <SelectTrigger size="sm" aria-label={`Type of key ${at + 1}`} className="w-36">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent position="popper">
-                        {(Object.keys(KEY_TYPES) as KeyType[]).map((type) => (
-                          <SelectItem key={type} value={type}>
-                            {KEY_TYPES[type]}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </td>
-                  <td className="py-1 pr-2">
-                    <Input aria-label={`Description of key ${at + 1}`} value={row.description} onChange={(e) => edit(at, { description: e.target.value })} className="h-8 w-full min-w-40" />
-                  </td>
-                  <td className="py-1">
-                    <Button type="button" size="icon-sm" variant="ghost" aria-label={`Remove key ${at + 1}`} onClick={() => setRows((all) => all.filter((_, i) => i !== at))}>
-                      <Trash2Icon />
-                    </Button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        <div>
-          <Button type="button" size="xs" variant="outline" onClick={() => setRows((all) => [...all, { rid: rowId(), key: '', type: 'string', description: '', was: null }])}>
-            Add key
-          </Button>
-        </div>
+        <PropertyKeyTable label={`Keys of ${kind.name}`} rows={rows} onChange={setRows} />
       </fieldset>
       <div className="flex flex-wrap gap-2">
         <Button type="submit" size="sm" disabled={busy}>

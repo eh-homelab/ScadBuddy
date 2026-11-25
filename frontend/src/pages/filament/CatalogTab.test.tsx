@@ -202,4 +202,16 @@ describe('the Catalog tab', () => {
     expect(await screen.findByLabelText('Name')).toBeInTheDocument()
     for (const label of ['Attach files', 'Link address', 'New property key']) expect(screen.queryByLabelText(label)).toBeNull()
   })
+
+  it("sets a catalog's property keys before it has a saved row to open", async () => {
+    const { user } = renderPage(<CatalogTab />, { route: '/filament/catalog?kind=insert-types' })
+    await list('Insert types')
+    await user.click(screen.getByRole('button', { name: 'Property keys' }))
+    const form = await screen.findByRole('form', { name: 'Keys of insert_type' })
+    await user.click(within(form).getByRole('button', { name: 'Add key' }))
+    await user.type(within(form).getByLabelText('Key 1'), 'bore_mm')
+    await user.click(within(form).getByRole('button', { name: 'Save keys' }))
+    await waitFor(() => expect(entityMock.schemas.insert_type?.properties).toEqual({ bore_mm: { type: 'string' } }))
+    expect(screen.queryByRole('form', { name: 'Keys of insert_type' })).toBeNull()
+  })
 })

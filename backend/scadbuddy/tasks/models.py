@@ -84,7 +84,11 @@ class TaskOpen(_TaskFields):
     @classmethod
     def _schema_fits_the_subset(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
         defaults = (info.context or {}).get("defaults", True)
-        problems = prompt_schema_problems(value, defaults=defaults)
+        # A default's pattern cut short by the shared budget raises `PatternsTimedOutError`,
+        # which pydantic passes on as it is, not as a refusal: the caller tries again (#7437).
+        # It drops the other fields' errors pydantic collected; the workflow refuses those
+        # before the task reaches the activity (`_prompt_task`).
+        problems = prompt_schema_problems(value, defaults=defaults, retry_timeouts=True)
         if problems:
             raise ValueError("; ".join(problems))
         return value

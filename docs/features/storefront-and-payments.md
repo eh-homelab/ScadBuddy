@@ -90,6 +90,11 @@ sequenceDiagram
   10 s, and the viewer (`frontend/src/lib/previewLoader.ts`) asks again on a 502, 503 or 504
   with a backoff, so a slow store shows as loading, not as an error
   ([#6968](https://github.com/eh-homelab/ScadBuddy/issues/6968)).
+- A published listing with no price (published before #6922, or whose price run ended with
+  none) gets its run from the housekeeping sweep `housekeeping_warm_listings`
+  (`backend/scadbuddy/orders/storefront/prepare.py` `warm_unpriced`, #7665): once per
+  version of the listing, and again only past Temporal's retention. A listing whose run
+  finds no price shows none before that.
 - Venmo's pay page is off (`backend/scadbuddy/payments/venmo.py:48`;
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
 - A pipeline template is listed only when it declares its inputs (`model.json`
