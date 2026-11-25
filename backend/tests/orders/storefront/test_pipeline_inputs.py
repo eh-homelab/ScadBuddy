@@ -337,6 +337,14 @@ def test_a_shape_that_cannot_be_used_is_undeclared(
         settle(listing(), facts)
 
 
+def test_a_pipeline_with_no_module_is_undeclared(tmp_path: Path) -> None:
+    template(tmp_path, DECLARED, json.dumps(SCHEMA).encode())
+    (tmp_path / "pipeline" / "pipeline.py").unlink()
+    facts = pipeline_facts(tmp_path, "kit")
+    assert facts is not None and facts.schema is None
+    assert "pipeline/pipeline.py" in facts.fault
+
+
 def test_a_schema_outside_the_template_is_not_read(tmp_path: Path) -> None:
     outside = tmp_path / "secret.json"
     outside.write_text(json.dumps(SCHEMA))

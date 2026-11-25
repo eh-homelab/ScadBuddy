@@ -306,6 +306,18 @@ def test_a_slug_that_is_no_templates_id_is_refused_before_any_path(
     assert looked == []
 
 
+def test_a_save_at_a_revision_whose_pipeline_cannot_be_read_keeps_no_version(
+    client: TestClient, kit: dict[str, Any], pla_red: str
+) -> None:
+    """The 0 read there is a placeholder: a later commit must not migrate from it."""
+    state = _state(client)
+    (state.paths.model_dir(kit["slug"]) / "pipeline" / "pipeline.py").unlink()
+    commit = state.history.commit("no module", kit["slug"])
+    body = kit_body({**kit, "commit": commit}, pla_red)
+    assert create(client, body)["inputs_v"] is None
+    assert refusal(client, body)["type"] == "listing_inputs_undeclared"
+
+
 def test_every_other_write_of_a_listing_keeps_its_inputs(
     client: TestClient, kit: dict[str, Any], pla_red: str
 ) -> None:

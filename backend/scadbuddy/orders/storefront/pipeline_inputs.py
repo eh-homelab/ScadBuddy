@@ -126,6 +126,10 @@ def pipeline_facts(directory: Path, slug: str) -> PipelineFacts | None:
         return PipelineFacts(0, None, f"the pipeline {slug!r} declares cannot be read")
     version = inputs_version_in(directory, declared)
     sets_params = tuple(declared.sets_params)
+    if not (directory / declared.module).is_file():
+        # Its version is then no version (0), and a render of it would fail.
+        fault = f"{slug!r} has no pipeline module {declared.module}"
+        return PipelineFacts(version, None, fault, sets_params)
     if declared.inputs is None:
         fault = f"{slug!r} declares no shape for its inputs (model.json pipeline.inputs)"
         return PipelineFacts(version, None, fault, sets_params)

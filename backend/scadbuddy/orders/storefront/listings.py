@@ -1099,7 +1099,8 @@ async def with_inputs_version(core: Core, body: ListingInput) -> ListingInput:
         )
         return body
     facts = await asyncio.to_thread(pipeline_facts, directory, slug)
-    if facts is None:
+    if facts is None or facts.schema is None:
+        # Its version may be a placeholder; publish refuses such a revision.
         return body
     return body.model_copy(update={"inputs_v": facts.inputs_version})
 
