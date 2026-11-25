@@ -11,7 +11,6 @@ import {
 } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, Html, OrbitControls } from '@react-three/drei'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
 import { formatBbox, formatElapsed, queuePlace } from '../lib/format'
@@ -28,6 +27,7 @@ import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, type DisplayUnit } from '../lib/units'
 import { ownSlotMaterials, recolourSlots, withPartOpacity } from '../lib/partOpacity'
+import { PreviewLoader, stopRetries } from '../lib/previewLoader'
 import { ErrorBoundary } from './ErrorBoundary'
 import { Spinner } from './ui/spinner'
 import { Badge } from '@/components/ui/badge'
@@ -252,6 +252,15 @@ export function Preview({
   const alone =
     chosen && job && chosen.jobId === job.id && plateIndices.includes(chosen.plate) ? chosen.plate : null
   // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
+  // A retry still waiting for the mesh on screen stops when the view moves to another URL
+  // or unmounts, and its failure is dropped from the loader's cache (#6968).
+  const shownUrl = shown?.url
+  useEffect(
+    () => () => {
+      if (shownUrl !== undefined && stopRetries(shownUrl)) useLoader.clear(PreviewLoader, shownUrl)
+    },
+    [shownUrl],
+  )
   const [plateFailed, setPlateFailed] = useState<{ jobId: string; plate: number }>()
   // Another job's is hidden by its id already; dropped too, so none outlives its job.
   if (plateFailed && plateFailed.jobId !== job?.id) setPlateFailed(undefined)
@@ -346,7 +355,7 @@ export function Preview({
         // drop it as soon as it fails, and the next load of that URL fetches again.
         onError={() => {
           if (!shown) return
-          useLoader.clear(GLTFLoader, shown.url)
+          useLoader.clear(PreviewLoader, shown.url)
           // The mesh on screen is what failed: for one render after a pick it is still
           // every plate together, which is no plate's fault (#3036 review).
           // A plate mesh another job left on screen is not this job's plate either.
@@ -1054,7 +1063,7 @@ function Model({
   onMeasured: (url: string, bbox: BoundingBox) => void
   slotColours?: Readonly<Record<number, string>>
 }) {
-  const gltf = useLoader(GLTFLoader, url)
+  const gltf = useLoader(PreviewLoader, url)
   const recolours = slotColours !== undefined
   // A translucent part gets materials of its own; the rest share the loader's. #6710: with
   // slot colours, each mesh that names a slot gets its own too, to recolour.
