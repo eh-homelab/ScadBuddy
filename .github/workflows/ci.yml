@@ -1162,7 +1162,7 @@ jobs:
     # projection the Temporal path writes (#424) and the other `requires_postgres`
     # tests. The test
     # container reaches it on the runner's loopback (`--network host`), and each
-    # test works in a schema of its own. The container smoke test below uses it
+    # test works in a database of its own. The container smoke test below uses it
     # too, since the app will not start without it.
     services:
       postgres:

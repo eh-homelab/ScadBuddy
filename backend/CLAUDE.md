@@ -127,8 +127,10 @@ headless saves no form data to find: it needs a `DISPLAY` (`xvfb-run -a`, as CI'
 `profile-fetch-image` job runs it) and skips without one unless that variable is set.
 Playwright is pinned exactly in the
 `profile-fetch` dependency group, which `dev` includes.
-Under pytest-xdist each worker makes its schemas in a database of its own
-(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+Under pytest-xdist each worker works in databases of its own: `<test db>_gw<N>`
+(`tests/conftest.py::_pg_database_url`), one migrated template made from it
+(`_pg_template`), and a clone of that template per test (`pg_conninfo`; an empty database
+for a test marked `pg_empty`), all named after `<test db>_gw<N>`. That is
 because advisory locks and NOTIFY channels are per database: workers sharing one would
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
