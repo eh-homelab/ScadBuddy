@@ -101,6 +101,8 @@ func TestABadSessionIsRefusedByField(t *testing.T) {
 		"an extra member":   {newSession("extra", 1), "body.extra"},
 		"a bad parent":      {newSession("parent_id", "X"), "body.parent_id"},
 		"a background true": {newSession("background_tools", true), "body.background_tools"},
+		"a null fork cut": {newSession("fork_of", map[string]any{"parent_id": uuid(), "cut": nil}),
+			"body.fork_of.cut"},
 		"a large scope": {newSession("scope", map[string]any{"x": strings.Repeat("é", 11000)}),
 			"body.scope"},
 	} {
@@ -285,6 +287,8 @@ func TestAPublishNotifiesItsPayload(t *testing.T) {
 	heard := listen(t, a, "scadbuddy_events")
 	event := `{"id":"` + strings.Repeat("a", 32) + `","at":"é","kind":"session.done","session_id":"` +
 		uuid() + `","seq":3.0,"replica":"r🙂"}`
+	nullSeq := strings.Replace(event, `"seq":3.0`, `"seq":null`, 1)
+	expect(t, a.do("POST", base+"/publish/session-event", nullSeq).status, 422)
 	expect(t, a.ok("POST", "/publish/session-event", event).raw, `{"sent":true}`)
 	var want map[string]any
 	_ = json.Unmarshal([]byte(event), &want)

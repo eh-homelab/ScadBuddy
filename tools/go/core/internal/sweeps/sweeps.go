@@ -132,11 +132,12 @@ func (s *Sweeps) forgetRows(r *http.Request, p crud.Params) (any, error) {
 			_, err := tx.Exec(ctx, dropUnnamed, shared)
 			return err
 		})
+		// Any failure, a lost connection too, is left to the sweep, as Python's psycopg.Error.
 		var pg *pgconn.PgError
 		if errors.As(err, &pg) {
 			slog.WarnContext(ctx, "forget: unnamed workspace bytes left for the sweep", "code", pg.Code)
 		} else if err != nil {
-			return nil, err
+			slog.WarnContext(ctx, "forget: unnamed workspace bytes left for the sweep", "error", err.Error())
 		}
 	}
 	// A session's warm process, on whichever replica holds it: sent once the rows' transaction

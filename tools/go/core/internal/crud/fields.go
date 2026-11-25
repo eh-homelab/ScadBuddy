@@ -107,6 +107,10 @@ func (v Value) Int(least, most int64, strict bool) int64 {
 	if !v.present() {
 		return 0
 	}
+	if string(v.raw) == "null" {
+		v.fail("Input should be a valid integer")
+		return 0
+	}
 	var n int64
 	if err := json.Unmarshal(v.raw, &n); err != nil {
 		var f float64
