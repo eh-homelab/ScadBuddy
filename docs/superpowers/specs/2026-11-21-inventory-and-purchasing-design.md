@@ -472,6 +472,7 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
   the back-fill flow proposes an amend (the missing lines, the full header, the lots or
   units received by hand to adopt) and asks the person, as a typed prompt, to accept, edit
   or skip it. An accepted amend runs the amend above. Nothing changes without that yes.
+  The phone intake's "Unlinked" list claims an invoice through the same flow (§11 row 49).
 - **Renamed paths and tools keep working.** `/filament/invoices/:id` (in
   `test-fixtures/filament/ui-paths.json` and the agent's `ui_path`, #6878) redirects to
   `/inventory/invoices/:id`. The fixture and `ui_path` change to the new path. The
@@ -690,8 +691,8 @@ Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
    - Bambuddy still gets only filament (D16).
 
    **3b. The UI, the parity features and the flows** (a new issue under #6949, after 3a).
-   §11 rows 1 to 6, 8, 14, 18, 19, 22 to 25, 29 to 31, 32 (the back-fill), 34, 35, 38
-   (UI), 39, 46 and 47, plus whichever of Q1, Q3 and Q5 the owner says yes to:
+   §11 rows 1 to 6, 8, 14, 16, 17, 18, 19, 22 to 25, 29 to 31, 32 (the back-fill), 34, 35,
+   38 (UI), 39, 46, 47 and 48, plus whichever of Q1, Q3, Q5 and Q8 the owner says yes to:
    - the Filament section moves into Inventory, `/filament/*` redirects (§6.11);
    - Item types (list and type page), the stock list, bulk edit, copy;
    - suppliers, supplier pages and stats, products, the price panel and price sheet,
@@ -699,9 +700,14 @@ Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
    - the invoices list and page for every line, with candidates, confirm, amend, the file
      preview and the links to what a line made;
    - the shopping list for every item;
+   - unit codes, unit labels (#7169) and NTAG tags bound to any unit; quick find and
+     property search over every item and unit;
    - the invoice import flow and the back-fill flow, on #7445's typed prompts (§6.7);
    - the generic agent tools with the filament aliases, and the `purchasing` skill;
    - the exit check: the parity test of §6.11 on a `filament` item and a `hardware` item.
+
+   After 3b: a container's tare for any item, with #7278 (PR #7710 adds the insert's); the
+   phone intake and the "Unlinked" list, built on 3a's model (§11 row 49).
 
    Left as follow-ups unless the owner says otherwise: the forecast for lot items (Q4), a
    generic external catalog beyond the Bambu import of phase 7 (owner, 2026-11-25, on
@@ -759,7 +765,7 @@ closes (§9).
 | 5 | Bulk create, copy | `POST /filament/spools/bulk`, `GET /filament/spools/{id}/copy` | Receive N units or one lot (`POST /inventory/items/{id}/units`, `/lots`) | (a) | "Copy" on an item and a unit | S | 3b |
 | 6 | Bulk edit, archive, restore | `POST /filament/spools/bulk-update`, `bulk-archive`, `bulk-restore`; `components/filament/BulkBar.tsx` | None | (a) | Bulk edit, archive and restore of items and units, one request, all or none | M | 3b |
 | 7 | CSV import | `POST /filament/spools/import` (`filament/csv_import.py`; `SpoolImport.tsx`) | None | (c) | Item and stock CSV import (Q5) | M | 3b or follow-up |
-| 8 | Search by property values | Spools and Types tabs, agent (`lib/filamentSearch.ts`, `agent/src/tools/filamentSearch.ts`) | Items list matches property values (`inventory/items.py` l.113) | (a) | Done for items; the stock list (row 4) takes the same search | S | 3b |
+| 8 | Search by property values | Spools and Types tabs and the agent load property values only for the `spool` and `spool_type` kinds (`lib/filamentSearch.ts` `propertyTexts`, `components/entities/api.ts` `loadKindPropertyTexts`; the copy in `agent/src/tools/filamentSearch.ts`; reported by session scadbuddy-09, 2026-11-25) | The items list's `q` matches property values on the server (`inventory/items.py` l.113), so `inventory_item_list` does too | (a) | One search over item and unit properties for the Item types list, the stock list (row 4) and quick find (row 48) | S | 3b |
 | 9 | Search by tag UID | `filamentSearch.ts` hex match | n/a | (b) | — | — | — |
 | 10 | Catalog: materials, subtypes | Catalog tab (`filament/catalog.py` `CATALOGS`; `pages/filament/CatalogTab.tsx`) | Item kinds tree with attribute schemas (`pages/inventory/KindsPage.tsx`) | (a) | Child kinds of `filament` (owner, 2026-11-25; §6.4): the material's and subtype's values become the kind's defaults, inherited down the tree | L | 3a (data), 3b (UI) |
 | 11 | Catalog: brands | `filament_brands`, with aliases | `items.manufacturer` text | (c) | A shared manufacturers table (Q2) | M | 3a or follow-up |
@@ -767,8 +773,9 @@ closes (§9).
 | 13 | Catalog: location kinds | `filament_location_kinds` | Lots and units take a place (`pages/inventory/PlaceSelect.tsx`) | (a) | Move with the plain `locations` table (§6.4) | S | 3a |
 | 14 | Locations: tree, place page with what is there | Locations tab, `/filament/locations/:id` (`LocationPage.tsx`: spools only) | A lot or a unit names a place; no page lists them | (a) | `/inventory/locations/:id` lists the lots, units and spools at the place | S | 3b |
 | 15 | Sensors, drying, AMS places | `filament/sensors.py`, `dry_hours.py`, `locations.py` `ensure_printer_on` | n/a | (b) | — | — | — |
-| 16 | Codes and QR labels | `L-` and `S-` codes (`codes/resolve.py` `PREFIXES`), `/filament/labels`, label PDF (`filament/label_pdf.py`) | None for items, lots or units | (c) | Codes and labels for units and lots (Q1) | M | 3b or the intake epic |
-| 17 | RFID and NTAG tags, the phone page | `filament/tags.py`, `/filament/scan`, NFC jobs | n/a | (b) | The phone intake (agreed 2026-11-25 with the intake session) resolves a tag to any entity page; the tag formats stay filament | — | — |
+| 16 | Codes and QR labels | `L-` and `S-` codes (`codes/resolve.py` `PREFIXES`), `/filament/labels`, label PDF (`filament/label_pdf.py`, `filament/labels.py`) | None for items, lots or units | (a) | A unit code prefix in `PREFIXES` and a unit drawer in `labels.py`. The label output layer (#7216) does not depend on the subject. A unit label's fields are its item's property keys plus number, place, note, added date and QR. Folds #7169 into 3b (session fix-sync-status-review-findings, 2026-11-25). Lot codes: Q1 | M | 3b |
+| 17 | NTAG tags bound to a unit | `filament_spool_tags`; `filament/tag_formats.py` (OpenSpool, OpenTag3D); `/filament/scan` | n/a | (a) | A generic NDEF URL record of the unit's code (a new format in `pick_format`), and a tag bound to any unit, not only through `filament_spool_tags` (session fix-sync-status-review-findings, 2026-11-25) | M | 3b |
+| 17b | Bambu RFID; K-profiles and AMS slots over the LAN | `filament/rfid_*.py`; #7670 | n/a | (b) | — | — | — |
 | 18 | Suppliers list with stats | Suppliers tab (`SuppliersTab.tsx`; `GET /filament/suppliers/stats`: spools, grams left, grams used, spend) | None; offers pick a supplier from the filament list (`ItemOffers.tsx` l.174) | (a) | `/inventory/suppliers`: products (offers) per supplier, spend, items and units received, stock value; grams stay as the `filament` columns | M | 3b |
 | 19 | Supplier page: details, products, add price | `/filament/suppliers/:id` (`SupplierPage.tsx`, `ProductsTable.tsx`, `AddProductSheet.tsx`) | A section on the filament supplier page lists the other offers (`SupplierPage.tsx` l.295) | (a) | One supplier page: every offer, any kind, with "Add product" for any item | M | 3b |
 | 20 | Supplier products (SKU, URL, pack) | `filament_supplier_products` (`filament/suppliers.py`) | `supplier_offers` (`inventory/offers.py`), non-filament only | (a) | One offer table (§6.5) | M | 3a |
@@ -796,9 +803,14 @@ closes (§9).
 | 42 | Type proposals for untyped spools | `filament/type_proposals.py` | n/a | (b) | — | — | — |
 | 43 | Presets, K values, 3DFP, profile fetch | `filament/sb_presets.py`, `profile_fetch.py`, `tdfp.py` | n/a | (b) | — | — | — |
 | 44 | Bambuddy sync and pull | `filament/bb_sync_*.py`, `bambuddy_pull.py` | Never (D16) | (b) | Only `filament` items, their suppliers, offers and prices reach Bambuddy (D16) | — | — |
-| 45 | Weights, insert weight, consumed counter | `filament/insert_weights.py`; `POST /filament/spools/reset-consumed` | n/a | (b) | Weighing stays on the spool ledger (#7681) | — | — |
+| 45 | Consumed counter, AMS weights | `POST /filament/spools/reset-consumed`, `POST /filament/spools/sync-ams-weights` | n/a | (b) | — | — | — |
+| 45a | Empty weight (tare) of a container | `filament/insert_weights.py`; PR #7710 (open) adds `filament_insert_weight_readings`, an insert's empty weight from a new spool | n/a | (a), later | A tare for any item in a reusable container, with #7278's carrier and parts work (session f8c8ac27, 2026-11-25) | M | after 3b, with #7278 |
+| 45b | Weighing breakdown and drift; end-of-life weighings and the archive reason | #7681 slices A and C (#7682, #7684), on `filament_spool_events` | n/a | (c) | They fit any weighed unit (resin, desiccant). They are built on the spool ledger now; whether and when their event kinds move to the generic unit ledger is Q8 (session scadbuddy-53, 2026-11-25) | M | Q8 |
+| 45c | First weighing under the label; length and density | #7681 slices B and D (#7683, #7685) | n/a | (b) | — | — | — |
 | 46 | Agent tools, purchasing | `filament_supplier_*`, `filament_product_*`, `filament_price_*`, `filament_invoice_*`, `filament_shopping_*`, `filament_supplier_stats`, `filament_purchasing_metrics`, `filament_cost_per_kg` (`agent/src/tools/filamentPurchasing.ts`, `filament.ts`) | `inventory_offer_*`, `inventory_offer_price_add` (`agent/src/tools/inventory.ts`) | (a) | `supplier_*`, `offer_*`, `invoice_*`, `shopping_*`, `purchasing_metrics`, `cost_per_unit`; the filament names stay as aliases for one release | M | 3b |
 | 47 | The skill | `plugins/scadbuddy/skills/filament/SKILL.md` "Import an invoice" | None (the interim rule is #7704) | (a) | A `purchasing` skill for every item; the `filament` skill keeps the spool workflow | S | 3b |
+| 48 | Quick find | `components/filament/FilamentQuickFind.tsx`: spools and types, with their property values (row 8) | None | (a) | Quick find over every item and unit, by name, code, tag and property value | S | 3b |
+| 49 | Phone intake and the "Unlinked" list | Not designed yet (agreed 2026-11-25 between the intake session and this epic) | None | (a) | It takes any item's barcode and any unit's tag. "Unlinked" lists tags, units and invoice lines that nothing claims; claiming an invoice is the back-fill (§6.7) (session scadbuddy-53, 2026-11-25) | L | the intake epic, on 3a's model |
 
 ### 11.3 What phase 2 shipped short of this spec
 
@@ -817,15 +829,15 @@ the code at `4b2438ba0`:
 - **No `inventory_moves` view.** §6.6 unions `stock_moves` with spool events for reports.
   It is not on main; `docs/features/inventory.md` moves it to phase 3.
 - **No codes or labels for items, lots or units.** `codes/resolve.py` `PREFIXES` knows `L`
-  and `S` only (see Q1).
+  and `S` only. Row 16 plans unit codes and labels in 3b (#7169); lot codes are Q1.
 - **Invoices still make no stock for items.** That is phase 3 by design, but meanwhile
   non-filament lines are kept as a note on the invoice and received by hand (#7648, #7704).
 
 ### 11.4 Questions for the owner (class c)
 
-- **Q1. Codes and labels.** Do units and lots get codes (for example `U-<n>` for a unit) and
-  printed QR labels, as spools and places do? The designer's proposal: yes for units and
-  lots, in 3b or in the phone intake epic, so a tap or a scan opens any entity page.
+- **Q1. Lot codes.** Units get codes, labels and NTAG binding in 3b (rows 16 and 17,
+  #7169). Do lots get a code and a label too? The designer's proposal: yes, so a scan of a
+  bin of bearings opens its lot.
 - **Q2. Brands.** Do filament brands become one manufacturers table that every item's
   `manufacturer` names, or stay a filament catalog? The designer's proposal: one table in
   3a, since a brand is not filament-specific (Bambu Lab sells nozzles too).
@@ -841,3 +853,8 @@ the code at `4b2438ba0`:
   point at them. Is that right?
 - **Q7. The other catalogs.** Colours, effects, categories and inserts stay filament
   catalogs (b). Is that right, or must any of them serve every item?
+- **Q8. Weighings on the unit ledger.** #7681 slices A and C (#7682, #7684: the weighing
+  breakdown and drift, end-of-life weighings and the archive reason) fit any weighed unit.
+  Session scadbuddy-53 proposes to build slices A to D on `filament_spool_events` now, and
+  to move the weighing and closing event kinds to the generic unit ledger in phase 3b or a
+  later phase. Which phase, if any?
