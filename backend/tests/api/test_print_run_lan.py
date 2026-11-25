@@ -276,6 +276,23 @@ def test_the_printers_card_names_the_runs_controls(
     assert card["awaiting_plate_clear"] is True
 
 
+def _card_after_sweeps(
+    client: TestClient, workflow_reaper: WorkflowReaper, state: Any, expected: str
+) -> str:
+    """The card's run once the sweep's passes have recorded what they can: a check that
+    does not answer in `SEQUENCE_CHECK_TIMEOUT` (a loaded runner) is skipped and left for
+    the next pass (`end_gone_sequences`), so a few passes stand for the next ones (#7773).
+    The card's run when ``expected`` never heads it."""
+    shown = ""
+    for _ in range(5):
+        workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
+        (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
+        shown = card["lan_run"]["run_id"]
+        if shown == expected:
+            break
+    return shown
+
+
 def test_a_gone_oldest_run_gives_way_once_the_sweep_records_it(
     client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
 ) -> None:
@@ -302,14 +319,10 @@ def test_a_gone_oldest_run_gives_way_once_the_sweep_records_it(
     assert card["lan_run"]["run_id"] == gone
     assert client.get(f"/api/v1/print/runs/{gone}").json()["result"]["lan_stopped"] is None
 
-    workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
-    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
-    assert card["lan_run"]["run_id"] == starting
+    assert _card_after_sweeps(client, workflow_reaper, state, starting) == starting
 
     workflow_reaper.run(parent.terminate())
-    workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
-    (card,) = client.get("/api/v1/print/printers/now").json()["printers"]
-    assert card["lan_run"]["run_id"] == alive
+    assert _card_after_sweeps(client, workflow_reaper, state, alive) == alive
 
 
 def test_the_prune_passes_run_holds_sweep_ends_a_gone_run(
