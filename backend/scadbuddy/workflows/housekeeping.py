@@ -746,10 +746,12 @@ async def _action_changed(
 ) -> bool:
     """Whether ``action`` starts another workflow, or passes it other arguments, than
     the ``previous`` action the Schedule held (described, so its arguments encoded).
-    Deliberately ignores ``execution_timeout`` and ``task_queue``: every caller's
-    timeout is either fixed or a deterministic function of the ``args`` already
-    compared, so it never changes without ``args`` changing too, and a queue rename
-    is not new work for the sweeps to converge."""
+    Deliberately ignores ``execution_timeout``, ``task_timeout`` and ``task_queue``:
+    every caller's execution timeout is either fixed or a deterministic function of the
+    ``args`` already compared, so it never changes without ``args`` changing too. A task
+    timeout (`SensorNotifyPass` sets `SHORT_TASK_TIMEOUT`, #7288) and a queue rename are
+    not new work for the sweeps to converge. The update in `ensure_workflow_schedule`
+    writes all three to the Schedule either way (#7531)."""
     if not isinstance(previous, ScheduleActionStartWorkflow):
         return True
     if previous.workflow != action.workflow:
