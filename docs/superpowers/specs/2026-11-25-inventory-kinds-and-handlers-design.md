@@ -370,10 +370,15 @@ gives us the visibility into the Activities tab in SB".
 - **Idempotency.** The activity id is the idempotency key
   (`order_item:<id>:parts:<n>:<item>`, `entity_merge:<from>:<to>`, a route's
   `Idempotency-Key`). The start uses the conflict policy Use Existing (a repeat attaches
-  to the running one) and the reuse policy Reject Duplicate (a repeat after it finished
-  gets the stored result, within the namespace's retention). An activity runs at least
-  once, so the Go side also records the key with its result in `crud_requests` (§6.1) and
-  answers a repeat from it.
+  to the running one) and the reuse policy Allow Duplicate Failed Only: a repeat after a
+  success is refused and reads the stored result, and a repeat after a failure or a
+  timeout runs again. An activity runs at least once, so the Go side also records the
+  key with its result in `crud_requests` (§6.1) and answers a repeat from it.
+- **A slow write** (owner, 2026-11-25). A public route waits up to 15 s. If the activity
+  is still running, it answers `202 Accepted` with the activity id; the UI shows "still
+  working" and follows it on the Activities tab. A repeat with the same key is never an
+  error: while it runs it attaches and answers `202` again, and once it is done it
+  answers the stored result. So repeated tries cause no extra work.
 - **Orders.** Fulfilling an order item commits the order change, then starts
   `inventory.Take` with the item's key. Temporal retries it until Go answers; there is no
   outbox table and no sweep. If the start itself fails, the fulfil call answers an error
@@ -384,10 +389,17 @@ gives us the visibility into the Activities tab in SB".
   transactions wait on each other; this order avoids it. A stock row that lands on the
   old id between the two steps makes the delete fail on its foreign key, and the merge
   repeats the first step.
-- **Visibility.** An activity interceptor in Go writes each activity's start and end to
-  SB's activity record (`backend/scadbuddy/activity/index.py`, through its CRUD route), so
-  it shows on the Activities tab with its kind, subject and status. Temporal's
-  `ListActivities` lists them too.
+- **Visibility.** It is not automatic; every feature writes its own record row and the
+  activity record follows it. Renders, print runs and the backend's operations write an
+  `activity` row in the same transaction as their own row (`ActivityIndex.upsert_in`, for
+  example `operations/store.py` l.174). The agent, another process, writes its
+  `ai_operations` row and publishes `ai_operation.changed`; the API's activity component
+  ingests it (`activity/component.py` l.61-86, `agent_data/operations.py`). Go does the
+  same: an activity interceptor writes an `inventory_operations` row (id = activity id,
+  kind, subject, status, start, end, the result's problem if any) in Go's transaction and
+  publishes `inventory_operation.changed` on the events channel (Go's `internal/publish`
+  already publishes there); the activity component ingests it into the Activities tab.
+  No new service caller or route is needed. Temporal's `ListActivities` lists them too.
 - **Versions.** Prod runs Temporal server 1.32.1 (eh-homelab/clusters
   `applications/scadbuddy/temporal-cluster-v2.yaml` l.65); Standalone Activities need
   1.32.0. The backend's Python SDK is 1.36.0 (`backend/uv.lock`); they need 1.33.0. The Go
