@@ -157,7 +157,7 @@ code. Stop and report at the end of each phase.
 | 2 | The rest of `/internal/crud/agent/*` (60 files, 20,251 lines today), except routes whose handler uses code of a later phase: `orders`, `activity`, `hosted_plugins`, `store.content`, `library.url_import`, `flow_triggers` | Only those routes are still forwarded. Each moves with the package it uses |
 | 3 | The other internal CRUD: render, print, projects, storefront, camera, intake, profile-fetch | |
 | 4 | The domain packages and their public routes: payments, inventory, entities, filament, printers, store, print_library, storefront, rack, tasks, hosted_plugins, activity, operations, camera. Their few Python-bound files (`filament/label_pdf.py` reportlab, `store/verify_bambuddy.py` PIL, and `print_activities.py` and `native.py`, which import `render/bambu3mf.py`) become activities, or get a Go port of `bambu3mf`'s metadata reads | One package a PR series. This is where CI gains |
-| 5 | The packages that mix both: api, orders, bambuddy, library, flows, analyzers. Their Python-bound files become activities first | |
+| 5 | The packages that mix both: api, orders, bambuddy, library, flows, analyzers. Their Python-bound files become activities first, the calls a person waits on among them (§7) | |
 | 6 | Auth: people, tokens, service-credential minting | |
 | 7 | Migrations, start-up, schedules, and the SQL-holding workflows | No Python process holds the database secret. The projects worker keeps its KEK until #5342, as `ProjectWorkflow` stays in Python (§7) |
 
@@ -166,20 +166,25 @@ the CPU of the Python and Go containers together (never the agent's), per thousa
 on the polled routes, and those routes' p50 and p99. If the CPU per thousand requests falls by
 less than 20% (my number, to adjust), I report it and you choose whether phase 2 starts now.
 
-## 7. Python as activities, and where that does not fit
+## 7. Python as activities
 
 The owner asked for Python as activities. That fits durable work: geometry and mesh
 operations, 3MF builds, analyzers, PIL and lxml work, the customer-file check. The Python
 activity worker holds no database secret and no KEK: its inputs and outputs are blob
 references and JSON, as the render worker's are now.
 
-Three cases do not fit, and I propose:
+A call a person waits on (the editor's geometry, `render_view`, the flow type check) follows
+the same rule (the owner's decision, 2026-11-25): no separate local Python process. It stays
+where it is, in the Python API behind the front, until its package is ported. It then
+becomes a Python activity. Temporal's scheduling delay on it is accepted until the migration is
+complete.
 
-| Case | Why | Proposal |
-|---|---|---|
-| A geometry call a person waits for (`render_view`, the editor) and the flow type check (Monty) | An activity adds Temporal's scheduling to a request. Persistence on prod is slow at times | A Python process on the pod's socket answers these. Same code, no SQL, not an activity |
-| `TemplatePipeline` | The template's `pipeline.py` is compiled and run **inside** the workflow (`workflows/sandbox.py`) | Stays a Python workflow. It is not a part of this migration |
-| `ProjectWorkflow` (flows) | The harness's Monty code runs inside the workflow | The same |
+Two workflows are not activities, and I propose they stay Python workflows:
+
+| Case | Why |
+|---|---|
+| `TemplatePipeline` | The template's `pipeline.py` is compiled and run **inside** the workflow (`workflows/sandbox.py`) |
+| `ProjectWorkflow` (flows) | The harness's Monty code runs inside the workflow |
 
 Python therefore remains in: the render worker and template pipelines, the projects
 worker, `meshmodel` and the numpy part of `render`, the analyzers' geometry, the flow
