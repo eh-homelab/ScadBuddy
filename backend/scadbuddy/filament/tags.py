@@ -672,22 +672,37 @@ def expire_jobs(conn: Conn) -> None:
     whose ``agent_write`` backup exists has begun its write (``write_begun``), so it never
     ends ``expired``: `finish_job` takes its result whenever it comes (#7419 review). Once
     its newest backup is past `BACKUP_TTL`, which no result can be checked against, it ends
-    ``failed`` with the code ``no_read_back`` and that backup's id."""
+    ``failed`` with the code ``no_read_back`` and that backup's id.
+
+    The jobs are locked first, in id order, and their backups read after, in later
+    statements: under READ COMMITTED a statement that waited on `back_up`'s ``FOR SHARE``
+    would otherwise judge the job by a snapshot without the backup it just committed
+    (#7419 round 3)."""
+    due = [
+        row["id"]
+        for row in conn.execute(
+            "SELECT id FROM filament_nfc_jobs WHERE state IN ('pending', 'armed')"
+            " AND expires_at <= now() ORDER BY id FOR UPDATE"
+        ).fetchall()
+    ]
+    if not due:
+        return
     conn.execute(
         "UPDATE filament_nfc_jobs AS j SET state = 'failed', result = jsonb_build_object("
         "'error', %s::text, 'code', 'no_read_back', 'backup_id',"
         " (SELECT b.id::text FROM filament_tag_backups AS b WHERE b.job_id = j.id"
         " AND b.reason = 'agent_write' ORDER BY b.at DESC, b.id DESC LIMIT 1))"
-        " WHERE j.state = 'armed' AND j.expires_at <= now()"
+        " WHERE j.id = ANY(%s) AND j.state = 'armed'"
         " AND (SELECT max(b.at) FROM filament_tag_backups AS b WHERE b.job_id = j.id"
         " AND b.reason = 'agent_write') <= now() - make_interval(secs => %s)",
-        (NO_READ_BACK, BACKUP_TTL.total_seconds()),
+        (NO_READ_BACK, due, BACKUP_TTL.total_seconds()),
     )
     conn.execute(
         "UPDATE filament_nfc_jobs AS j SET state = 'expired'"
-        " WHERE j.state IN ('pending', 'armed') AND j.expires_at <= now()"
+        " WHERE j.id = ANY(%s) AND j.state IN ('pending', 'armed')"
         " AND NOT EXISTS (SELECT 1 FROM filament_tag_backups AS b"
-        " WHERE b.job_id = j.id AND b.reason = 'agent_write')"
+        " WHERE b.job_id = j.id AND b.reason = 'agent_write')",
+        (due,),
     )
 
 
@@ -729,11 +744,20 @@ def get_job(spools: FilamentSpoolStore, job_id: UUID) -> m.NfcJob | None:
 
 
 def _locked_job(conn: Conn, job_id: UUID) -> m.NfcJob:
-    row = conn.execute(
-        f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE id = %s FOR UPDATE", (job_id,)
-    ).fetchone()
-    if row is None:
+    """The job, locked ``FOR UPDATE``. Its row, ``write_begun`` included, is read in a
+    statement after the lock, so a backup `back_up` committed while this waited counts
+    (#7419 round 3)."""
+    if (
+        conn.execute(
+            "SELECT id FROM filament_nfc_jobs WHERE id = %s FOR UPDATE", (job_id,)
+        ).fetchone()
+        is None
+    ):
         raise NfcJobNotFoundError()
+    row = conn.execute(
+        f"SELECT {_JOB_COLUMNS} FROM filament_nfc_jobs WHERE id = %s", (job_id,)
+    ).fetchone()
+    assert row is not None
     return _job_of(row)
 
 
