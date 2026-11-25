@@ -73,15 +73,18 @@ patterns_deadline: ContextVar[float | None] = ContextVar("patterns_deadline", de
 
 class _BudgetSpentError(TimeoutError):
     """A pattern cut short by the check's shared `PATTERNS_BUDGET_S`, not by its own
-    `PATTERN_TIMEOUT_S`: a busy pod, which a later check can pass. A pattern that uses its
-    whole `PATTERN_TIMEOUT_S` (`^(a|aa)+$`) times out on every check, so it is refused."""
+    `PATTERN_TIMEOUT_S`. Most often a busy pod, which a later check passes; but patterns
+    that need more than the budget together time out on every pod, so a caller that tries
+    again bounds its tries (`flow_activities.PATTERN_TIMEOUT_ATTEMPTS`). A pattern that
+    uses its whole `PATTERN_TIMEOUT_S` (`^(a|aa)+$`) times out on every check: refused."""
 
 
 class PatternsTimedOutError(TimeoutError):
     """A default fails only because the check's shared budget ran out, and nothing else in
     the schema is wrong: `schema_problems` with ``retry_timeouts`` raises it, for a caller
-    that tries again later (a prompt's task, #7437). A pattern that uses its whole
-    `PATTERN_TIMEOUT_S` is refused all the same. The message never quotes the value."""
+    that tries again later, a bounded number of times (a prompt's task, #7437). A pattern
+    that uses its whole `PATTERN_TIMEOUT_S` is refused all the same. The message never
+    quotes the value."""
 
     def __init__(self) -> None:
         super().__init__("a default's pattern took too long to check: try again")
