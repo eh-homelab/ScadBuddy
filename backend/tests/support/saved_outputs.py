@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.library.output_rows import output_blob_key
+from scadbuddy.library.output_rows import Role, output_blob_key
 from scadbuddy.library.outputs import MODEL_NAME, OutputStore
 
 
@@ -57,3 +57,12 @@ def lose_model(client: TestClient, output_id: str) -> None:
         await blobs.content.backend.remove(found.ref.backend_id)
 
     portal.call(lose)
+
+
+def stored_bytes(client: TestClient, output_id: str, role: Role = "model") -> bytes:
+    """The saved output's bytes of ``role``, from its blob: a save writes no folder
+    (#7257)."""
+    blobs, portal = _outputs(client).bytes, client.portal
+    assert blobs is not None and portal is not None
+    data: bytes = portal.call(blobs.read, output_blob_key(output_id, role))
+    return data

@@ -8,7 +8,6 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import logging
-import shutil
 import zipfile
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
@@ -26,8 +25,6 @@ from scadbuddy.library.output_rows import (
     plate_cover_key,
 )
 from scadbuddy.library.outputs import (
-    GEOMETRY_NAME,
-    MODEL_NAME,
     OutputBytesLostError,
     OutputMeta,
     OutputStore,
@@ -84,7 +81,7 @@ async def _copied(
 
 
 def _dir(store: OutputStore, meta: OutputMeta) -> Path:
-    """The folder the save still writes (until #7257's task B4), which no reader reads."""
+    """The folder an output saved before #7257 had; a save writes none now."""
     return store.paths.output_dir(meta.slug, meta.id)
 
 
@@ -108,33 +105,20 @@ async def test_geometry_cached_in_output_derived(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, meta = await _copied(tmp_path, projection, content)
-    directory = _dir(store, meta)
-    # Only the blob holds the 3MF: the analysis reads it through a temporary file.
-    (directory / MODEL_NAME).unlink()
+    # The blob holds the 3MF: the analysis reads it through a temporary file on the
+    # spool, and the save wrote no folder (#7257).
+    assert not _dir(store, meta).exists()
     calls = _counting(monkeypatch)
     analysis = await store.geometry(meta.id)
-    assert len(calls) == 1 and calls[0].parent != directory
+    assert len(calls) == 1 and calls[0].parent == content.spool
     assert not calls[0].exists()  # the temporary file is gone
     found = store.rows.derived(meta.id, "geometry", 1)
     assert found is not None
     assert found[0] == str(ANALYSIS_VERSION)
     assert GeometryAnalysis.model_validate(found[1]) == analysis
-    # The row answers, not the file cache.
-    (directory / GEOMETRY_NAME).unlink()
+    # The row answers.
     assert await store.geometry(meta.id) == analysis
     assert len(calls) == 1
-
-
-async def test_geometry_answers_when_its_file_cache_cannot_be_written(
-    tmp_path: Path, projection: JobProjection, content: ContentStore
-) -> None:
-    """#7256 review B-M7: an output whose bytes are only blobs has no folder for the file
-    cache; the analysis is still the answer, and its row is kept."""
-    store, meta = await _copied(tmp_path, projection, content)
-    shutil.rmtree(_dir(store, meta))
-    analysis = await store.geometry(meta.id)
-    found = store.rows.derived(meta.id, "geometry", 1)
-    assert found is not None and GeometryAnalysis.model_validate(found[1]) == analysis
 
 
 async def test_geometry_version_mismatch_recomputes(
@@ -154,7 +138,6 @@ async def test_geometry_version_mismatch_recomputes(
         stale.model_dump(mode="json"),
         model_sha=store.model_sha(meta.id),
     )
-    (_dir(store, meta) / GEOMETRY_NAME).unlink()
     calls = _counting(monkeypatch)
     again = await store.geometry(meta.id)
     assert len(calls) == 1
@@ -196,8 +179,7 @@ async def test_attributed_round_trip_in_rows(
     found = store.rows.derived(meta.id, "attributed", 1)
     assert found is not None and found[0] == str(ANALYSIS_VERSION)
     assert found[1]["model_version"] == "a" * 40
-    # The row answers with the file cache gone.
-    (_dir(store, meta) / "geometry-attributed.json").unlink()
+    # The row answers.
     assert store.attributed(meta.id, 1, "a" * 40) == named
     assert store.attributed(meta.id, 1, "b" * 40) is None
     # A row of another analysis version is a miss.
@@ -229,7 +211,6 @@ async def test_plate_cover_from_model_blob(
     await rewrite_stored_model(store, meta.id, _with_cover)
     with projection.pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
-    shutil.rmtree(_dir(store, meta))
     assert await store.read_plate_cover(meta.slug) == COVER_PNG
     assert await store.read_plate_cover("other") is None
 
@@ -247,13 +228,11 @@ def _without_cover(model: Path) -> None:
 async def _covered(
     tmp_path: Path, projection: JobProjection, content: ContentStore, *, cover: bool = True
 ) -> tuple[OutputStore, OutputMeta]:
-    """A saved output whose model blob holds a plate cover (or none), its NFS 3MF
-    removed."""
+    """A saved output whose model blob holds a plate cover (or none)."""
     store, meta = await _copied(tmp_path, projection, content)
     await rewrite_stored_model(store, meta.id, _with_cover if cover else _without_cover)
     with projection.pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
-    (_dir(store, meta) / MODEL_NAME).unlink()
     return store, meta
 
 

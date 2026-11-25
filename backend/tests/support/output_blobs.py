@@ -15,7 +15,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.library.output_bytes import OutputBytes
+from scadbuddy.library.output_bytes import MODEL_NAME, PREVIEW_NAME, OutputBytes
 from scadbuddy.library.output_rows import OutputBlobs
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.jobs import Job
@@ -49,11 +49,23 @@ class BlobOutput:
     #: The finished render job, for a test that saves another output of it.
     job: Job
 
-    @property
-    def directory(self) -> Path:
-        """The folder the save still writes (until #7257's task B4), which no reader
-        reads: a test removes a file there to show it reads the blob."""
-        return self.store.paths.output_dir(self.meta.slug, self.meta.id)
+    #: A folder of the saved bytes, made from the blobs: a save writes no folder (#7257),
+    #: and no reader reads this one. A test writes a file there and puts the folder again
+    #: (`put_folder_at_keys`).
+    directory: Path
+
+
+async def _folder_of(store: OutputStore, meta: OutputMeta, directory: Path) -> Path:
+    """The saved output's bytes, from its blobs, laid out as its folder."""
+    blobs, row = store.bytes, store.rows.get(meta.id)
+    assert blobs is not None and row is not None
+    (directory / "files").mkdir(parents=True)
+    for name, key in ((MODEL_NAME, row.blobs.model), (PREVIEW_NAME, row.blobs.preview)):
+        if key is not None:
+            (directory / name).write_bytes(await blobs.read(key))
+    for item in store.rows.files(meta.id):
+        (directory / "files" / item.name).write_bytes(await blobs.read(item.blob_key))
+    return directory
 
 
 @contextlib.asynccontextmanager
@@ -66,6 +78,7 @@ async def blob_output(tmp_path: Path, pg_conninfo: str) -> AsyncIterator[BlobOut
         content = store.bytes.content
         try:
             meta = await store.save(job, name="first")
-            yield BlobOutput(store, meta, content, pool, job)
+            directory = await _folder_of(store, meta, tmp_path / "saved" / meta.id)
+            yield BlobOutput(store, meta, content, pool, job, directory)
         finally:
             await content.aclose()

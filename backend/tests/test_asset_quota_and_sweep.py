@@ -13,6 +13,7 @@ import time
 import zipfile
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,7 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter
 from tests.conftest import PgPool, open_pg_pool
 from tests.support.output_blobs import blob_output, put_folder_at_keys
 from tests.support.row_outputs import output_store
+from tests.support.saved_outputs import rewrite_stored_model
 
 DAY = 86400.0
 GRACE = 7 * DAY
@@ -415,19 +417,19 @@ async def test_referenced_asset_ids_read_each_3mf_once(
 
 async def _two_bare_outputs(output: Any, good: bytes, other: bytes) -> tuple[str, str]:
     """Two saved outputs with empty ``params``: the helper's, whose 3MF is ``good``, and a
-    second one, whose 3MF is ``other``. Their NFS 3MFs are removed: only the blobs answer."""
-    store, rows = output.store, output.store.rows
+    second one, whose 3MF is ``other``. Only the blobs hold them."""
+    store = output.store
     second = await store.save(output.job, name="second")
     ids = (output.meta.id, second.id)
     for output_id, data in zip(ids, (good, other), strict=True):
-        directory = store.paths.output_dir(output.meta.slug, output_id)
-        (directory / "model.3mf").write_bytes(data)
-        blobs = await put_folder_at_keys(store.bytes, directory, output_id, output.meta.slug)
-        rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
-        (directory / "model.3mf").unlink()
+        await rewrite_stored_model(store, output_id, partial(_write, data))
     with output.pool.connection() as conn:
         conn.execute("UPDATE outputs SET params = '{}' WHERE output_id = ANY(%s)", (list(ids),))
     return ids
+
+
+def _write(data: bytes, path: Path) -> None:
+    path.write_bytes(data)
 
 
 def _archive_naming(asset_id: str) -> bytes:

@@ -18,8 +18,9 @@ from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import OUTPUT_HOLDER
-from scadbuddy.library.outputs import THUMBNAIL_NAME, OutputStore, hold_parts
+from scadbuddy.library.outputs import hold_parts
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
@@ -176,7 +177,10 @@ def test_save_on_s3_reads_its_files_off_the_loop(
     s3_client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     job_id = _finished_job(s3_client, model)
-    reads = record_reads(monkeypatch, paths.outputs)
+    outputs = _state(s3_client).outputs
+    assert outputs.bytes is not None
+    # The save stages its files on the spool (#7257, plan D8).
+    reads = record_reads(monkeypatch, outputs.bytes.spool)
     saved = s3_client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     )
@@ -187,11 +191,11 @@ def test_save_on_s3_reads_its_files_off_the_loop(
     assert not any(reads)
 
 
-def test_save_files_its_3mf_from_the_folder_it_wrote(
+def test_create_run_files_from_staged_3mf(
     native_s3_client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The save files the 3MF it just wrote and put: from its folder, with no download of
-    the model blob (final review M4)."""
+    """The save files the 3MF it staged and put, with no download of the model blob
+    (final review M4, #7257 task B4): no `OutputBytes.local_blob` while it runs."""
     client = native_s3_client
     created = client.post(
         "/api/v1/models", json={"name": "Widget", "source": "width = 10;\n"}, headers=press()
@@ -199,14 +203,14 @@ def test_save_files_its_3mf_from_the_folder_it_wrote(
     assert created.status_code == 201, created.text
     slug = created.json()["slug"]
     job_id = _finished_job(client, slug)
-    roles: list[tuple[str, str]] = []
-    read_role = OutputStore.read_role
+    downloads: list[str] = []
+    local_blob = OutputBytes.local_blob
 
-    def spy(self: OutputStore, output_id: str, role: Any) -> Any:
-        roles.append((output_id, role))
-        return read_role(self, output_id, role)
+    def spy(self: OutputBytes, key: str, suffix: str) -> Any:
+        downloads.append(key)
+        return local_blob(self, key, suffix)
 
-    monkeypatch.setattr(OutputStore, "read_role", spy)
+    monkeypatch.setattr(OutputBytes, "local_blob", spy)
     saved = client.post(f"/api/v1/models/{slug}/outputs", json={"job_id": job_id}, headers=press())
     monkeypatch.undo()
     assert saved.status_code == 201, saved.text
@@ -214,7 +218,8 @@ def test_save_files_its_3mf_from_the_folder_it_wrote(
     native = _state(client).components.get(PRINT_LIBRARY).native
     assert native is not None
     assert [row.output_id for row in native.rows.filed_rows_for_output(output_id)] == [output_id]
-    assert (output_id, "model") not in roles
+    assert downloads == []
+    assert not (_state(client).paths.root / "outputs" / slug).exists()
 
 
 def test_thumbnail_store_full_is_507_and_changes_nothing(
@@ -241,7 +246,8 @@ def test_thumbnail_store_full_is_507_and_changes_nothing(
     )
     assert response.status_code == 507, response.text
     assert "the blob store has no room for this thumbnail" in response.json()["detail"]
-    assert not (paths.output_dir(model, output_id) / THUMBNAIL_NAME).exists()
+    row = state.outputs.rows.get(output_id)
+    assert row is not None and row.blobs.thumbnail is None
 
 
 def test_save_store_full_is_507_and_cleans_up(
@@ -268,8 +274,10 @@ def test_save_store_full_is_507_and_cleans_up(
     )
     assert response.status_code == 507, response.text
     assert "the blob store has no room for this output" in response.json()["detail"]
-    outputs = paths.outputs / model
-    assert not outputs.is_dir() or list(outputs.iterdir()) == []
+    # Nothing on the share, and nothing left staged on the spool (#7257).
+    assert not (paths.root / "outputs" / model).exists()
+    spool = state.outputs.bytes.spool
+    assert not spool.is_dir() or [p for p in spool.iterdir() if p.is_dir()] == []
     assert state.outputs.rows is not None
     assert state.outputs.rows.for_slug(model) == []
     # The save held its Parts before the puts; neither they nor any byte hold is left.

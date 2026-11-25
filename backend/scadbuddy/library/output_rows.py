@@ -78,12 +78,9 @@ def plate_cover_key(output_id: str, sha256: str) -> str:
 def thumbnail_lock_key(output_id: str) -> str:
     """The text whose ``hashtextextended(…, 0)`` keys the output's thumbnail lock: a
     Postgres advisory transaction lock, so it holds across the API's replicas. Every
-    writer of the thumbnail key or file in a process with a database takes it
-    (`lock_thumbnail`): a thumbnail upload's step (`OutputRows.keep_thumbnail`), a drawn
-    thumbnail's step (`OutputRows.draw_thumbnail`), a write of the file alone
-    (`OutputRows.write_thumbnail_file`) and the byte copy (`OutputRows.write_byte_copy`).
-    With no database (tests and tools) there is no blob and no other replica, and the
-    file is written with no lock."""
+    writer of the thumbnail key takes it (`lock_thumbnail`): a thumbnail upload's step
+    (`OutputRows.keep_thumbnail`), a drawn thumbnail's step (`OutputRows.draw_thumbnail`)
+    and the byte copy (`OutputRows.write_byte_copy`, which no release B pod runs)."""
     return f"output-thumbnail:{output_id}"
 
 
@@ -427,10 +424,6 @@ def _retrying[T](
     raise AssertionError("unreachable")
 
 
-class _FileThereError(Exception):
-    """A drawn thumbnail's file write found a file there: its step rolls back."""
-
-
 def _insert(
     conn: Connection[DictRow], pool: ConnectionPool[Connection[DictRow]], row: OutputRow
 ) -> list[tuple[str, BlobRef]]:
@@ -695,24 +688,13 @@ class OutputRows:
             return _set_blob(conn, output_id, role, key)
 
     def keep_thumbnail(
-        self,
-        output_id: str,
-        key: str,
-        staged: BlobRef,
-        *,
-        slug: str,
-        write: Callable[[], None],
+        self, output_id: str, key: str, staged: BlobRef, *, slug: str
     ) -> tuple[bool, BlobRef | None]:
         """A thumbnail upload's step, in one transaction under the output's thumbnail
         lock (`lock_thumbnail`): ``key`` takes the object of ``staged`` (a put under
-        `staged_thumbnail_key`), then ``write`` writes the file, then the row names
-        ``key`` and holds it. The key moves only when the transaction commits, so a
-        ``write`` that raises leaves the key, the row and the old file as they were; the
-        staged blob is then held by nothing, and the sweep removes it. A commit that
-        fails after ``write`` (a lost connection) leaves the new file with the old key:
-        that is the accepted cost of a file beside a row, until #7257 drops the file.
-        A deadlock or a serialization failure runs the step again (`_retrying`); ``write``
-        then writes the same bytes again.
+        `staged_thumbnail_key`), then the row names ``key`` and holds it. No file is
+        written (#7257). A deadlock or a serialization failure runs the step again
+        (`_retrying`).
 
         Returns whether the row was there (False: nothing written) and the object ``key``
         named before, which the caller releases when it is not ``staged``'s
@@ -730,67 +712,32 @@ class OutputRows:
                 previous = BlobIndex(self._pool).put_in(
                     conn, key, staged, slug=slug, meta={}, reuse=True
                 )
-                write()
                 _set_blob(conn, output_id, "thumbnail", key)
             return True, previous
 
         return _retrying(self._pool, output_id, step)
 
-    def draw_thumbnail(
-        self,
-        output_id: str,
-        key: str,
-        staged: BlobRef,
-        *,
-        slug: str,
-        write: Callable[[], bool],
-    ) -> bool:
+    def draw_thumbnail(self, output_id: str, key: str, staged: BlobRef, *, slug: str) -> bool:
         """A drawn thumbnail's step (#4775), in one transaction under the output's
-        thumbnail lock. With no index row of ``key``, ``key`` takes the object of
-        ``staged``, then ``write`` writes the file only when there is none (False: an
-        upload's file is there, and the key goes back), then the row names ``key`` and
-        holds it. With an index row of ``key`` (an upload's, or a blob the store lost),
-        the key stays and ``write`` writes the file alone, only when there is none.
-        Whether this draw is the thumbnail file now; after the cut-over mark with no
-        folder, ``write`` writes nothing and answers True, so the answer is whether the
-        row decides for this draw (#7257). Blocking."""
+        thumbnail lock: only while ``key`` has no index row, ``key`` takes the object of
+        ``staged`` and the row names ``key`` and holds it. False, and nothing written, when
+        the output has no row or ``key`` has an index row (an upload's, or a blob the
+        store lost: a draw never replaces it, #7257). Blocking."""
 
         def step(conn: Connection[DictRow]) -> bool:
-            try:
-                with conn.transaction():
-                    lock_thumbnail(conn, output_id)
-                    found = conn.execute(
-                        "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
-                    ).fetchone()
-                    if found is None:
-                        return False
-                    there = conn.execute(
-                        "SELECT 1 FROM store_blobs WHERE key = %s", (key,)
-                    ).fetchone()
-                    if there is not None:
-                        # The key is there: the file alone, when there is none. A key
-                        # whose blob the store lost then reads this file.
-                        return write()
-                    BlobIndex(self._pool).put_in(conn, key, staged, slug=slug, meta={}, reuse=True)
-                    if not write():
-                        raise _FileThereError
-                    _set_blob(conn, output_id, "thumbnail", key)
-                    return True
-            except _FileThereError:
-                return False
-
-        return _retrying(self._pool, output_id, step)
-
-    def write_thumbnail_file[T](self, output_id: str, write: Callable[[], T]) -> T:
-        """``write`` of the thumbnail file alone (no blob store, no row yet, or a drawn
-        thumbnail whose put failed), under the output's thumbnail lock, so the byte copy
-        names the key from the file under the same lock (`ThumbnailSwap`), never a file
-        this write replaces. Blocking."""
-
-        def step(conn: Connection[DictRow]) -> T:
             with conn.transaction():
                 lock_thumbnail(conn, output_id)
-                return write()
+                found = conn.execute(
+                    "SELECT 1 FROM outputs WHERE output_id = %s FOR UPDATE", (output_id,)
+                ).fetchone()
+                if found is None:
+                    return False
+                there = conn.execute("SELECT 1 FROM store_blobs WHERE key = %s", (key,)).fetchone()
+                if there is not None:
+                    return False
+                BlobIndex(self._pool).put_in(conn, key, staged, slug=slug, meta={}, reuse=True)
+                _set_blob(conn, output_id, "thumbnail", key)
+                return True
 
         return _retrying(self._pool, output_id, step)
 
@@ -1167,15 +1114,16 @@ class OutputRows:
                 (_json(backfill), output_id),
             )
 
-    def attach_backfill(self, output_id: str, record: dict[str, Any], manifest: list[Any]) -> None:
+    def attach_backfill(self, output_id: str, record: dict[str, Any], manifest: list[Any]) -> bool:
         """A backfill's attach in one statement: the record it has stays, the manifest
-        is the re-render's, and the backfill is cleared."""
+        is the re-render's, and the backfill is cleared. False when the row is gone."""
         with self._pool.connection() as conn:
-            conn.execute(
+            done = conn.execute(
                 "UPDATE outputs SET record = COALESCE(record, %s), manifest = %s,"
                 " backfill = NULL, copied_at = clock_timestamp() WHERE output_id = %s",
                 (_json(record), _json(manifest), output_id),
             )
+            return done.rowcount == 1
 
     def delete(self, output_id: str) -> None:
         """Delete the row and its byte holds; its Parts' holds stay (`release_parts`)."""
@@ -1317,6 +1265,16 @@ class OutputRows:
         """Free a claim whose save failed, so another attempt can claim the id."""
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM output_claims WHERE output_id = %s", (output_id,))
+
+    def refresh_claim(self, output_id: str) -> None:
+        """A live save's claim, made young again (A4 review M1): the prune
+        (`prune_claims`) never takes a claim whose save still runs. Nothing when the save's
+        row has deleted it."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_claims SET claimed_at = clock_timestamp() WHERE output_id = %s",
+                (output_id,),
+            )
 
     def prune_claims(self, grace: timedelta) -> int:
         """Delete the claims older than ``grace``, by the database's clock: a save that

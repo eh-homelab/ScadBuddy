@@ -19,6 +19,7 @@ from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item
 from tests.api.test_versions import SLUG, upload
 from tests.support.operations import press
+from tests.support.row_outputs import mark_storefront
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -155,7 +156,7 @@ def test_storefront_outputs_are_listed_only_when_asked(
     read by id finds either."""
     first, second, third = three
     state = state_of(client)
-    state.outputs.mark_storefront(second)
+    mark_storefront(state.outputs, second)
     response = client.get("/api/v1/outputs")
     assert [row["id"] for row in response.json()] == [third, first]
     assert response.headers["X-Total-Count"] == "2"

@@ -55,6 +55,7 @@ from tests.api.test_versions import SLUG, upload
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.printers import linked_printer
+from tests.support.row_outputs import mark_storefront
 from tests.support.sb_rows import seed_sb_spools
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
@@ -345,7 +346,7 @@ def test_a_storefront_output_on_an_order_item_opens_in_the_dialog_and_slices(
     upload(client)
     output_id = saved(client, SLUG, {"width": 12}, "Storefront: Keychain")
     outputs = _state(client).outputs
-    outputs.mark_storefront(output_id)
+    mark_storefront(outputs, output_id)
     assert client.get("/api/v1/outputs").json() == []
     order = create_order(client, create_customer(client)["id"])
     item = add_item(client, order["id"], output_id=output_id, quantity=1)

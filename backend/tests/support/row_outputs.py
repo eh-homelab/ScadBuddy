@@ -18,7 +18,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.output_rows import OutputRow, OutputRows
-from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.library.outputs import STOREFRONT, OutputMeta, OutputStore
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.index import Pool
@@ -116,3 +116,11 @@ def app_outputs(client: TestClient) -> OutputStore:
     """The app's `OutputStore`."""
     outputs: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
     return outputs
+
+
+def mark_storefront(store: OutputStore, output_id: str) -> None:
+    """Mark the output as the storefront slice run's (#6371) in its row's meta, as a test's
+    stand-in for a storefront save."""
+    row = store.rows.get(output_id)
+    assert row is not None
+    store.rows.update_meta(output_id, row.meta.model_copy(update={"source": STOREFRONT}))

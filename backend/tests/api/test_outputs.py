@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
-import os
-import re
 import shutil
 import tarfile
+import tempfile
 import threading
 import time
 import zipfile
@@ -28,7 +27,7 @@ from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundEr
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.output_rows import ByteWrite, OutputRows
-from scadbuddy.library.outputs import THUMBNAIL_NAME, OutputMeta, OutputStore
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
@@ -43,7 +42,8 @@ from scadbuddy.store.content_models import StoreFullError
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
-from tests.support.saved_outputs import rewrite_model
+from tests.support.row_outputs import app_outputs, update_row
+from tests.support.saved_outputs import rewrite_model, stored_bytes
 from tests.test_geometry import carrot
 
 
@@ -77,21 +77,14 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert "pipeline_run_id" not in body
     assert body["queue_item_id"] is None
 
-    directory = paths.output_dir(model, body["id"])
-    assert sorted(path.name for path in directory.iterdir()) == [
-        "inputs.json",
-        # Its objects (phase 5, spec 2026-09-27 §7): what Arrange lays out again.
-        "manifest.json",
-        "meta.json",
-        "model.3mf",
-        "params.json",
-        "preview.glb",
-        "record.json",
-    ]
-    assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {
-        "width": 12,
-        "label": "hi",
-    }
+    # The row and the blobs are the output; the share gets no folder (#7257).
+    assert not paths.output_dir(model, body["id"]).exists()
+    row = _rows(client).get(body["id"])
+    assert row is not None and row.params == {"width": 12, "label": "hi"}
+    # Its objects (phase 5, spec 2026-09-27 §7): what Arrange lays out again.
+    assert row.record is not None and row.manifest
+    assert row.blobs.model is not None and row.blobs.preview is not None
+    assert stored_bytes(client, body["id"], "preview")
 
 
 @pytest.mark.requires_postgres
@@ -238,9 +231,8 @@ def test_an_output_saved_without_a_thumbnail_gets_one_drawn(
     assert response.status_code == 200
     assert response.headers["content-type"] == "image/png"
     assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
-    # Drawn once, then served as a file.
-    stored = paths.output_dir(model, created["id"]) / "thumbnail.png"
-    assert stored.read_bytes() == response.content
+    # Drawn once, then served from its blob.
+    assert stored_bytes(client, created["id"], "thumbnail") == response.content
 
 
 def test_a_new_output_lists_with_a_thumbnail_when_previews_are_on(
@@ -355,34 +347,14 @@ def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, 
         headers=press(),
     ).json()
     store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    portal = client.portal
+    assert portal is not None
     # The browser's upload landed while the server was drawing.
-    store.write_thumbnail(created["id"], PNG_BYTES)
-    assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is False
-    thumbnail = store.paths.output_dir(model, created["id"]) / THUMBNAIL_NAME
-    assert thumbnail.read_bytes() == PNG_BYTES
-    assert list(thumbnail.parent.glob(".thumbnail.png.*")) == []
-
-
-def test_an_upload_replaces_a_thumbnail_whole(client: TestClient, model: str) -> None:
-    """A reader that opened the old file keeps reading it whole: the upload is put in
-    place by a rename, never written over the file a reader may hold."""
-    created = client.post(
-        f"/api/v1/models/{model}/outputs",
-        json={"job_id": _finished_job(client, model)},
-        headers=press(),
-    ).json()
-    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
-    drawn = b"\x89PNG\r\n\x1a\ndrawn"
-    assert store.write_drawn_thumbnail(created["id"], drawn) is True
-    thumbnail = store.paths.output_dir(model, created["id"]) / THUMBNAIL_NAME
-    held = thumbnail.with_name("held.png")
-    os.link(thumbnail, held)
-
-    store.write_thumbnail(created["id"], PNG_BYTES)
-
-    assert thumbnail.read_bytes() == PNG_BYTES
-    assert held.read_bytes() == drawn
-    assert list(thumbnail.parent.glob(".thumbnail.png.*")) == []
+    portal.call(store.put_thumbnail, created["id"], PNG_BYTES)
+    assert portal.call(store.put_drawn_thumbnail, created["id"], b"\x89PNG\r\n\x1a\ndrawn") is False
+    response = client.get(f"/api/v1/outputs/{created['id']}/thumbnail")
+    assert response.status_code == 200
+    assert response.content == PNG_BYTES
 
 
 def _counting_draws(
@@ -715,7 +687,7 @@ def test_every_output_records_its_model_version_and_stamps_the_3mf(
     expected = source_version(paths.model_dir(model))
     assert body["model_version"] == expected
 
-    stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
+    stamped = _stamp(client, body["id"])
     assert stamped == Provenance(
         model=model,
         version=expected,
@@ -744,7 +716,7 @@ def test_the_version_is_the_source_the_render_saw_not_the_one_on_disk_at_save(
     ).json()
     assert body["model_version"] == rendered
 
-    stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
+    stamped = _stamp(client, body["id"])
     assert stamped is not None
     assert stamped.version == rendered
 
@@ -777,7 +749,7 @@ def test_the_stamp_leaves_out_a_link_when_no_public_url_is_set(
         json={"job_id": _finished_job(client, model)},
         headers=press(),
     ).json()
-    stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
+    stamped = _stamp(client, body["id"])
     assert stamped is not None
     assert stamped.edit_url is None
 
@@ -815,7 +787,6 @@ def test_the_edit_target_of_an_output_with_no_row_is_a_404(
         headers=press(),
     ).json()
     _record_gone(client, created["id"])
-    assert (paths.output_dir(model, created["id"]) / "model.3mf").is_file()
 
     assert client.get(f"/api/v1/outputs/{created['id']}").status_code == 404
     assert client.get(f"/api/v1/outputs/{created['id']}/edit").status_code == 404
@@ -825,34 +796,6 @@ def test_an_edit_link_to_nothing_at_all_is_a_404(client: TestClient, model: str)
     response = client.get(f"/api/v1/outputs/{'0' * 32}/edit")
     assert response.status_code == 404
     assert "0" * 32 in response.json()["detail"]
-
-
-def test_an_unreadable_stamp_404s_rather_than_500s(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    """The record is gone and the 3MF's stamp does not parse as today's shape."""
-    created = client.post(
-        f"/api/v1/models/{model}/outputs",
-        json={"job_id": _finished_job(client, model)},
-        headers=press(),
-    ).json()
-    directory = paths.output_dir(model, created["id"])
-    (directory / "meta.json").unlink()
-    (directory / "params.json").unlink()
-    _record_gone(client, created["id"])
-
-    path = directory / "model.3mf"
-    with zipfile.ZipFile(path) as archive:
-        entries = [(name, archive.read(name)) for name in archive.namelist()]
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, payload in entries:
-            if name == "3D/3dmodel.model":
-                payload = re.sub(rb'(name="ScadBuddy:provenance">)[^<]*', rb"\1{}", payload)
-            archive.writestr(name, payload)
-
-    response = client.get(f"/api/v1/outputs/{created['id']}/edit")
-    assert response.status_code == 404
-    assert created["id"] in response.json()["detail"]
 
 
 def test_the_geometry_of_an_output_is_measured_and_cached(
@@ -875,8 +818,6 @@ def test_the_geometry_of_an_output_is_measured_and_cached(
     assert body["height_to_base_ratio"] == 0.5
     assert body["thinnest_wall"]["thickness_mm"] == 5
 
-    cache = paths.output_dir(model, created["id"]) / "geometry.json"
-    assert json.loads(cache.read_text(encoding="utf-8")) == body
     # Served from the cache from then on: its row in `output_derived` (#7256), so a
     # doctored row comes back as written.
     rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
@@ -966,14 +907,8 @@ def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
 
     assert (first["plate"], first["plates"], first["height_mm"]) == (1, 2, 10)
     assert (second["plate"], second["plates"], second["height_mm"]) == (2, 2, 30)
-    assert (
-        json.loads(
-            (paths.output_dir(model, created["id"]) / "geometry-plate-2.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        == second
-    )
+    found = _rows(client).derived(created["id"], "geometry", 2)
+    assert found is not None and found[1] == second
     missing = client.get(url, params={"plate": 3})
     assert missing.status_code == 404
     assert "no plate 3" in missing.json()["detail"]
@@ -1002,10 +937,8 @@ def test_an_output_records_the_library_commits_it_was_rendered_with(
 
     assert body["libraries"] == [pin]
     assert client.get(f"/api/v1/outputs/{body['id']}").json()["libraries"] == [pin]
-    stored = json.loads(
-        (paths.output_dir(model, body["id"]) / "meta.json").read_text(encoding="utf-8")
-    )
-    assert stored["libraries"] == [pin]
+    row = _rows(client).get(body["id"])
+    assert row is not None and row.meta.model_dump(mode="json")["libraries"] == [pin]
 
 
 def test_an_output_of_a_model_with_no_libraries_records_none(
@@ -1140,7 +1073,7 @@ def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     job = state.render.store.read(job_id)
     with pytest.raises(InputsError):
-        state.outputs.prepare(job, inputs={"params": {"width": "12"}})
+        state.outputs.prepare(job, paths.root / "staged", inputs={"params": {"width": "12"}})
     output_dir = paths.outputs / model
     assert not output_dir.exists() or not any(output_dir.iterdir())
 
@@ -1160,7 +1093,7 @@ def test_an_output_from_before_inputs_reads_as_params_v0(
     output = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     ).json()
-    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    update_row(app_outputs(client), output["id"], inputs=None)
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == {
         "params": {"width": 12, "label": "hi"},
         "v": 0,
@@ -1178,7 +1111,7 @@ def test_an_output_from_before_inputs_reads_its_params_once_per_request(
     output = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     ).json()
-    (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
+    update_row(app_outputs(client), output["id"], inputs=None)
     reads: list[str] = []
     params = OutputStore.params
 
@@ -1306,6 +1239,14 @@ def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: b
 COMMIT = "c" * 40
 
 
+def _stamp(client: TestClient, output_id: str) -> Provenance | None:
+    """The provenance stamped into the saved output's 3MF, read from its blob."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "model.3mf"
+        path.write_bytes(stored_bytes(client, output_id))
+        return read_provenance(path)
+
+
 def _rows(client: TestClient) -> OutputRows:
     """The app's output rows (#7255): the record a read by id answers from."""
     store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
@@ -1321,12 +1262,10 @@ def _record_gone(client: TestClient, output_id: str) -> None:
 def _recorded_at(
     client: TestClient, paths: DataPaths, model: str, output: str, version: str | None
 ) -> None:
-    """The output's record, file and row, as if it had been rendered at ``version``."""
-    path = paths.output_dir(model, output) / "meta.json"
-    meta = json.loads(path.read_text(encoding="utf-8"))
-    meta["model_version"] = version
-    path.write_text(json.dumps(meta), encoding="utf-8")
-    _rows(client).update_meta(output, OutputMeta.model_validate(meta))
+    """The output's row, as if it had been rendered at ``version``."""
+    row = _rows(client).get(output)
+    assert row is not None
+    _rows(client).update_meta(output, row.meta.model_copy(update={"model_version": version}))
 
 
 def _live_directory(monkeypatch: pytest.MonkeyPatch, paths: DataPaths, model: str) -> None:
@@ -1369,7 +1308,6 @@ def test_a_weak_joint_names_no_object_outside_a_mesh_models_render(
     assert _joint_object(client, plain) is None
     arranged = _carrot_output(client, model, paths, scene=True)
     _recorded_at(client, paths, model, arranged, COMMIT)
-    (paths.output_dir(model, arranged) / "arranged_from.json").write_text(json.dumps([plain]))
     row = _rows(client).get(arranged)
     assert row is not None
     _rows(client).delete(arranged)
@@ -1384,9 +1322,8 @@ def test_a_weak_joint_names_no_object_when_the_render_recorded_no_commit(
     the render, so naming its objects could name the wrong one."""
     _live_directory(monkeypatch, paths, model)
     output = _carrot_output(client, model, paths, scene=True)
-    assert json.loads((paths.output_dir(model, output) / "meta.json").read_text())[
-        "model_version"
-    ] == source_version(paths.model_dir(model))
+    row = _rows(client).get(output)
+    assert row is not None and row.meta.model_version == source_version(paths.model_dir(model))
     assert _joint_object(client, output) is None
     _recorded_at(client, paths, model, output, None)
     assert _joint_object(client, output) is None

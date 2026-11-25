@@ -250,13 +250,13 @@ async def test_reaper_keeps_holds_of_output_with_row_and_no_meta(
     pool: Pool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An output whose row stands is live, whatever its folder holds (#7257): the reaper
-    never releases its holds because its folder is gone."""
+    """An output whose row stands is live, with no folder (#7257): the reaper never
+    releases its holds because it has no folder."""
     store, meta = await _saved(tmp_path, projection, content, monkeypatch)
     refs = BlobRefs(pool)
     outputs_module.hold_parts(refs, meta.id, [], meta.slug)
     held = _holds(pool, meta.id)
-    shutil.rmtree(store.paths.output_dir(meta.slug, meta.id))
+    assert not store.paths.output_dir(meta.slug, meta.id).exists()
     _age_holds(pool, meta.id)
     assert reap_orphan_holds(refs, store, grace=timedelta(0)) == 0
     assert _holds(pool, meta.id) == held

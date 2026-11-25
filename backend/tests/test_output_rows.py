@@ -200,7 +200,7 @@ def test_update_meta_changes_name(rows: OutputRows) -> None:
 def test_every_live_writer_moves_copied_at(rows: OutputRows) -> None:
     """A row a live writer touched after the copy's mark is one the copy leaves alone."""
     rows.insert(make_row("o1"))
-    writes: list[Callable[[], None]] = [
+    writes: list[Callable[[], object]] = [
         lambda: rows.update_meta("o1", make_row("o1", name="New").meta),
         lambda: rows.set_backfill("o1", {"job_id": "j"}),
         lambda: rows.attach_backfill("o1", {"plate_key": "p"}, []),

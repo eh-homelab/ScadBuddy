@@ -6,9 +6,9 @@ import dataclasses
 import hashlib
 import json
 import logging
-import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -92,8 +92,6 @@ logger = logging.getLogger(__name__)
 META_NAME = "meta.json"
 PARAMS_NAME = "params.json"
 INPUTS_NAME = "inputs.json"
-#: The cached `render.geometry` analysis of ``model.3mf``, written on first ask.
-GEOMETRY_NAME = "geometry.json"
 #: The ``output_derived`` kinds of `OutputStore.geometry` and `OutputStore.attributed`.
 GEOMETRY_KIND = "geometry"
 ATTRIBUTED_KIND = "attributed"
@@ -165,6 +163,12 @@ async def _to_its_end[T](call: Callable[..., T], *args: Any) -> T:
         if not task.cancelled():
             task.exception()  # retrieved: the cancel, not the thread's error, goes on
         raise
+
+
+def _staging_folder(spool: Path) -> Path:
+    """A new empty folder on the spool for one save's files (#7257, plan D8). Blocking."""
+    spool.mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix="output-", dir=spool))
 
 
 def _object_missing(error: Exception) -> bool:
@@ -295,26 +299,11 @@ def tolerate_dropped(action: Callable[[], None], what: str) -> None:
         logger.warning("%s skipped: its table is gone (#7257)", what)
 
 
-def _replace(path: Path, text: str) -> None:
-    """Write ``path`` whole or not at all: a reader never sees half a file."""
-    _replace_bytes(path, text.encode("utf-8"))
-
-
 def _replace_bytes(path: Path, data: bytes) -> None:
-    """`_replace` for bytes."""
+    """Write ``path`` whole or not at all: a reader never sees half a file."""
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
     temporary.write_bytes(data)
     temporary.replace(path)
-
-
-def _geometry_name(plate: int) -> str:
-    """The file name of a plate's geometry analysis cache."""
-    return GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
-
-
-def _attributed_name(plate: int) -> str:
-    """The file name of a plate's attributed analysis."""
-    return "geometry-attributed.json" if plate == 1 else f"geometry-attributed-plate-{plate}.json"
 
 
 def _holds_plate_cover(model: Path) -> bool:
@@ -554,7 +543,8 @@ def _row_from_folder(directory: Path, slug: str) -> OutputRow | None:
 
 @dataclass
 class PreparedOutput:
-    """An output `OutputStore.prepare` wrote, all but its ``meta.json`` and its row."""
+    """An output `OutputStore.prepare` staged: its files in a folder on the spool, and
+    what its row records."""
 
     directory: Path
     meta: OutputMeta
@@ -563,6 +553,15 @@ class PreparedOutput:
     chosen: PipelineOutput | None
     index: int
     arranged_from: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class SavedOutput:
+    """A saved output and the 3MF it staged (`OutputStore.saving`): the same bytes as its
+    model blob, there while the block runs."""
+
+    meta: OutputMeta
+    model_3mf: Path
 
 
 class OutputStore:
@@ -593,6 +592,9 @@ class OutputStore:
         #: #4775 — whether an output with no thumbnail gets one drawn from its preview
         #: mesh on first read; `preview_renders`, set at boot as the model previews are.
         self.draw_thumbnails = False
+        #: How often a save that names its id makes its claim young again, so the prune
+        #: never takes the claim of a save that still runs (A4 review M1).
+        self.claim_refresh_seconds = ORPHAN_HOLD_GRACE.total_seconds() / 4
         #: Bounds those draws: a History page of new outputs asks for every one at once.
         self.thumbnail_draws = asyncio.Semaphore(2)
         #: How many of those draws' threads are running, a timed-out one's included.
@@ -645,44 +647,6 @@ class OutputStore:
         if row is None:
             raise OutputNotFoundError(output_id)
         return row
-
-    def _cut_over(self) -> bool:
-        """Whether the cut-over mark exists (#7257, plan D2): the rows and the blobs are
-        the record, and an output's folder may be missing (a release B pod saved it)."""
-        return self.rows.cut_over()
-
-    def _folder(self, output_id: str) -> Path:
-        """The output's folder as its row names it, for the file steps the writes still
-        take (`_folder_write`, until #7257's task B4). No read of the share finds it."""
-        return self.paths.output_dir(self._row_of(output_id).slug, output_id)
-
-    def _folder_write[T](
-        self,
-        output_id: str,
-        write: Callable[[Path], T],
-        *,
-        missing: T,
-        directory: Path | None = None,
-    ) -> T:
-        """Run ``write`` on the output's folder (``directory``, else `_folder`): a file
-        step beside the row's. After the cut-over mark a missing folder is no error
-        (#7257, plan D1): the step is logged at debug and skipped, and ``missing`` is the
-        answer; the row step runs as before. Before the mark, a missing folder raises
-        `FileNotFoundError`, as in phase 2. Blocking."""
-        if directory is None:
-            directory = self._folder(output_id)
-        try:
-            return write(directory)
-        except FileNotFoundError:
-            # Only a missing folder is skipped: the stat and the mark are read only here,
-            # so a write that succeeds costs nothing more.
-            if directory.is_dir() or not self._cut_over():
-                raise
-        logger.debug(
-            "an output's folder is gone after the cut-over; its file step is skipped",
-            extra={"output_id": output_id, "path": str(directory)},
-        )
-        return missing
 
     def existing(self, output_ids: Iterable[str]) -> set[str]:
         """Those of ``output_ids`` the store still has: one query (#7255)."""
@@ -750,37 +714,14 @@ class OutputStore:
         return self.rows.ids_for_slug(slug)
 
     def claim(self, slug: str, output_id: str) -> bool:
-        """Make the output's directory, only if it is not there yet (#5390): whether this
-        call made it. A caller that names an id another may also name (a quote's
-        attempts, `orders/quote.py` `operation_output_id`) saves under it only once it
-        holds the claim, so it never writes into, or removes on a failure, a directory
-        another save made.
-
-        The id's ``output_claims`` row comes first (#7257, plan D6), so a pod
-        that claims in the table only (release B) and this pod share one claim. A row
-        claim that fails makes no folder. A folder that is there after the row claim
-        succeeded (a phase 2 pod's claim) releases the row claim. The save's row deletes
-        the row claim (`OutputRows.insert`); a failed save releases it
-        (`output_operations.py`); the hold reaper prunes one past `ORPHAN_HOLD_GRACE`."""
-        if not self.rows.claim(output_id, slug):
-            return False
-        try:
-            self.paths.output_dir(slug, output_id).mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
-            self._release_row_claim(output_id)
-            return False
-        except OSError:
-            self._release_row_claim(output_id)
-            raise
-        return True
-
-    def _release_row_claim(self, output_id: str) -> None:
-        """A release that fails is logged and left to the hold reaper's prune, so the
-        claim's own answer (False, or the folder's error) stands (#7257)."""
-        try:
-            self.rows.release_claim(output_id)
-        except PsycopgError:
-            logger.exception("could not release a claim", extra={"id": output_id})
+        """Claim the id for a save of ``slug`` (#5390, #7257 plan D6): whether this call
+        claimed it. A caller that names an id another may also name (a quote's attempts,
+        `orders/quote.py` `operation_output_id`) saves under it only once it holds the
+        claim. The claim is an ``output_claims`` row (`OutputRows.claim`); no folder is
+        made. The save's row deletes it (`OutputRows.insert`); a failed save releases it
+        (`output_operations.py`); the hold reaper prunes one past `ORPHAN_HOLD_GRACE`,
+        which a running save keeps from happening (`claim_refresh_seconds`)."""
+        return self.rows.claim(output_id, slug)
 
     async def save(
         self,
@@ -797,29 +738,63 @@ class OutputStore:
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
-        """Save the job's output ``index``: `prepare` its folder, upload its bytes to the blob
-        store with no index row (`OutputBytes.put_folder`), then `commit` (#7256, spec §6.6), so
-        the row, its keys' index rows naming those objects, its ``output_files`` rows and the
-        holds of its keys are one transaction: one commit, however many files (#7477). When the
+        """`saving`, for a caller that needs only the record."""
+        async with self.saving(
+            job,
+            name=name,
+            public_url=public_url,
+            inputs=inputs,
+            index=index,
+            files_dir=files_dir,
+            blobs_root=blobs_root,
+            arranged_from=arranged_from,
+            output_id=output_id,
+            print_settings=print_settings,
+            source=source,
+        ) as saved:
+            return saved.meta
+
+    def saving(
+        self,
+        job: Job,
+        *,
+        name: str | None = None,
+        public_url: str | None = None,
+        inputs: Mapping[str, Any] | None = None,
+        index: int = 0,
+        files_dir: Path | None = None,
+        blobs_root: Path | None = None,
+        arranged_from: Sequence[str] = (),
+        output_id: str | None = None,
+        print_settings: Mapping[str, ProcessValue] | None = None,
+        source: OutputSource = BACK_OFFICE,
+    ) -> AbstractAsyncContextManager[SavedOutput]:
+        """Save the job's output ``index``, then hold its staged 3MF while the block runs.
+
+        `prepare` stages its files in a new folder on the spool (`OutputBytes.spool`, the
+        pod's own disk, never the share: #7257, plan D8), the save uploads them to the blob
+        store with no index row (`OutputBytes.put_folder`), then `commit` writes the row,
+        its keys' index rows naming those objects, its ``output_files`` rows and the holds
+        of its keys in one transaction: one commit, however many files (#7477). When the
         sweep freed an object the save reused before that transaction held it
-        (`ReuseLostError`), the transaction rolls back whole, the save uploads its own copy of
-        every object it reused (`OutputBytes.own_copies`) and commits once more. A deadlock runs
-        the transaction again (`OutputRows.insert`). A failed put or commit removes the folder
-        (`discard`) and the objects it uploaded, and raises again, a `StoreFullError`, a last
-        `DeadlockDetected` and a `UniqueViolation` on an id another output holds among them;
-        that output's keys never named this save's objects, so its bytes stay its own (#7478
-        review). A cancel during the puts stops the save at once, with no discard: the folder
-        stays with no ``meta.json``, and no code removes it (#7257, D10). The output has no row,
-        so the hold reaper releases its holds later (#1007); the unrecorded sweep removes the
-        objects. From the first upload until the commit or the failure the save holds each
-        object's stage lock (`OutputBytes.stage_hold`), so another save's failure never removes
-        an object this one uploaded; it waits for a free slot of the stage-lock pool before its
-        first upload (#7477 review I2). A cancel during `prepare` or `commit` cannot stop their
-        thread, which may still finish the output: during `commit` the save keeps its locks
-        until that thread ends, then the cancel stands."""
-        store = self._blobs()
-        prepared = await asyncio.to_thread(
-            self.prepare,
+        (`ReuseLostError`), the transaction rolls back whole, the save uploads its own copy
+        of every object it reused (`OutputBytes.own_copies`) and commits once more. A
+        deadlock runs the transaction again (`OutputRows.insert`). From the first upload
+        until the commit or the failure the save holds each object's stage lock
+        (`OutputBytes.stage_hold`), so another save's failure never removes an object this
+        one uploaded; it waits for a free slot of the stage-lock pool before its first
+        upload (#7477 review I2). A failed put or commit removes the objects it uploaded
+        and raises again, a `StoreFullError`, a last `DeadlockDetected` and a
+        `UniqueViolation` on an id another output holds among them; that output's keys
+        never named this save's objects (#7478 review). A cancel during `commit` cannot
+        stop its thread, which may still finish the output: the save keeps its locks until
+        that thread ends, then the cancel stands. With ``output_id`` the save makes the
+        id's claim young every `claim_refresh_seconds` while it runs (A4 review M1).
+
+        The staged folder goes on exit, error, cancel or not. The block gets the record and
+        the staged ``model.3mf``, the same bytes as its blob, so a caller that files the
+        3MF downloads nothing (`output_operations.py`)."""
+        return self._saving(
             job,
             name=name,
             public_url=public_url,
@@ -832,6 +807,48 @@ class OutputStore:
             print_settings=print_settings,
             source=source,
         )
+
+    @contextlib.asynccontextmanager
+    async def _saving(
+        self,
+        job: Job,
+        *,
+        output_id: str | None,
+        **keywords: Any,
+    ) -> AsyncIterator[SavedOutput]:
+        store = self._blobs()
+        staging = await asyncio.to_thread(_staging_folder, store.spool)
+        keeping = None if output_id is None else asyncio.ensure_future(self._keep_claim(output_id))
+        try:
+            meta = await self._save_staged(job, staging, store, output_id=output_id, **keywords)
+            if keeping is not None:
+                keeping.cancel()
+            yield SavedOutput(meta=meta, model_3mf=staging / MODEL_NAME)
+        finally:
+            if keeping is not None:
+                keeping.cancel()
+            # Shielded: a cancelled save still removes its staged folder.
+            await asyncio.shield(asyncio.to_thread(shutil.rmtree, staging, True))
+
+    async def _keep_claim(self, output_id: str) -> None:
+        """Make the id's claim young again every `claim_refresh_seconds` until cancelled.
+        A failed refresh is logged; the next one tries again."""
+        while True:
+            await asyncio.sleep(self.claim_refresh_seconds)
+            try:
+                await asyncio.to_thread(self.rows.refresh_claim, output_id)
+            except PsycopgError:
+                logger.warning(
+                    "could not refresh a running save's claim",
+                    extra={"id": output_id},
+                    exc_info=True,
+                )
+
+    async def _save_staged(
+        self, job: Job, staging: Path, store: OutputBytes, **keywords: Any
+    ) -> OutputMeta:
+        """The save of `saving`, its files staged in ``staging``."""
+        prepared = await asyncio.to_thread(self.prepare, job, staging, **keywords)
         blobs: OutputBlobs | None = None
         # Entering waits for a slot of the stage-lock pool, before the first upload. The
         # block's end closes the hold: after the commit the rows name the objects; after
@@ -847,7 +864,6 @@ class OutputStore:
                     blobs = await store.own_copies(blobs, prepared.meta.slug, hold)
                     meta, replaced = await _to_its_end(self._commit, prepared, blobs)
             except Exception:
-                await asyncio.to_thread(self.discard, prepared)
                 if blobs is not None:
                     await store.drop_staged(blobs, hold)
                 raise
@@ -862,6 +878,7 @@ class OutputStore:
     def prepare(
         self,
         job: Job,
+        directory: Path,
         *,
         name: str | None = None,
         public_url: str | None = None,
@@ -874,17 +891,18 @@ class OutputStore:
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> PreparedOutput:
-        """Write the folder of the job's output ``index`` (a pipeline job's `ctx.output`,
-        §5.2), or of its one result for a job without outputs, all but ``meta.json``:
-        until `commit`, no reader finds the output. ``files_dir`` holds that output's
-        extra files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a
-        caller that holds the output's Parts first name the output before it exists: a
-        fresh id, or one the caller holds the :meth:`claim` of, since a failed write
-        removes the directory. ``blobs_root`` is the caller's blob store's root, where
-        the job's ``blobs/<key>/<file>`` files are (#7318: a node-local cache); the data
-        volume's ``blobs/`` by default.
+        """Stage the files of the job's output ``index`` (a pipeline job's `ctx.output`,
+        §5.2), or of its one result for a job without outputs, in ``directory``, an empty
+        folder on the spool (`saving`): ``model.3mf`` (stamped), ``preview.glb``, the
+        arrange's ``thumbnail.png`` and ``files/``, what `OutputBytes.put_folder` uploads.
+        The rest of the record goes into the row (`commit`). ``files_dir`` holds that
+        output's extra files (the caller's ``dir_for(files_key) / "files"``). ``output_id``
+        lets a caller that holds the output's Parts first name the output before it
+        exists: a fresh id, or one the caller holds the :meth:`claim` of. ``blobs_root`` is
+        the caller's blob store's root, where the job's ``blobs/<key>/<file>`` files are
+        (#7318: a node-local cache); the data volume's ``blobs/`` by default.
         ``print_settings`` are the template's (#770), written into the saved 3MF.
-        ``source`` says who saved it (#6371). Blocking."""
+        ``source`` says who saved it (#6371). The caller removes ``directory``. Blocking."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
         chosen = job.outputs[index] if job.outputs else None
@@ -899,67 +917,33 @@ class OutputStore:
         ).data
         if output_id is None:
             output_id = uuid.uuid4().hex
-        directory = self.paths.output_dir(job.slug, output_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        # Every copy and write, or none: a failure part-way (a source gone from the
-        # store, a full disk) leaves no half-written output behind to list.
-        try:
-            blobs, root = blobs_root or self.paths.blobs, self.paths.root
-            preview = result_path(result.preview_glb, blobs_root=blobs, data_root=root)
-            shutil.copyfile(preview, directory / PREVIEW_NAME)
-            (directory / PARAMS_NAME).write_text(
-                json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            (directory / INPUTS_NAME).write_text(
-                json.dumps(recorded, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
+        blobs, root = blobs_root or self.paths.blobs, self.paths.root
+        preview = result_path(result.preview_glb, blobs_root=blobs, data_root=root)
+        shutil.copyfile(preview, directory / PREVIEW_NAME)
 
-            # A job from before the hash existed has none to read back; the live tree is
-            # then the closest thing to what it rendered.
-            version = result.source_version or source_version(self.paths.model_dir(job.slug))
-            # Stamped as it is copied (#2755): one read of the job's 3MF and one write,
-            # not a copy and then a rewrite of the copy.
-            stamp(
-                directory / MODEL_NAME,
-                Provenance(
-                    model=job.slug,
-                    version=version,
-                    output=output_id,
-                    params=dict(job.params),
-                    edit_url=edit_url(public_url, output_id),
-                ),
-                print_settings,
-                source=result_path(result.model_3mf, blobs_root=blobs, data_root=root),
-            )
+        # A job from before the hash existed has none to read back; the live tree is
+        # then the closest thing to what it rendered.
+        version = result.source_version or source_version(self.paths.model_dir(job.slug))
+        # Stamped as it is copied (#2755): one read of the job's 3MF and one write,
+        # not a copy and then a rewrite of the copy.
+        stamp(
+            directory / MODEL_NAME,
+            Provenance(
+                model=job.slug,
+                version=version,
+                output=output_id,
+                params=dict(job.params),
+                edit_url=edit_url(public_url, output_id),
+            ),
+            print_settings,
+            source=result_path(result.model_3mf, blobs_root=blobs, data_root=root),
+        )
 
-            if chosen is not None:
-                # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
-                # a bill of materials only when the pipeline wrote one.
-                (directory / RECORD_NAME).write_text(
-                    chosen.record.model_copy(update={"output_index": index}).model_dump_json(),
-                    encoding="utf-8",
-                )
-                if chosen.bom:
-                    (directory / BOM_NAME).write_text(
-                        json.dumps([b.model_dump(mode="json") for b in chosen.bom]),
-                        encoding="utf-8",
-                    )
-                if files_dir is not None and chosen.files:
-                    shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
-                if chosen.manifest:
-                    (directory / MANIFEST_NAME).write_text(
-                        json.dumps([m.model_dump(mode="json") for m in chosen.manifest]),
-                        encoding="utf-8",
-                    )
-            if arranged_from:
-                (directory / ARRANGED_NAME).write_text(
-                    json.dumps(list(arranged_from)), encoding="utf-8"
-                )
-                # No viewer captured an arrange (#2281): its cover is plate 1's own.
-                _cover_from_3mf(directory / MODEL_NAME, directory / THUMBNAIL_NAME)
-        except OSError:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
+        if chosen is not None and files_dir is not None and chosen.files:
+            shutil.copytree(files_dir, directory / FILES_DIR, dirs_exist_ok=True)
+        if arranged_from:
+            # No viewer captured an arrange (#2281): its cover is plate 1's own.
+            _cover_from_3mf(directory / MODEL_NAME, directory / THUMBNAIL_NAME)
 
         meta = OutputMeta(
             id=output_id,
@@ -987,10 +971,10 @@ class OutputStore:
         )
 
     def commit(self, prepared: PreparedOutput, blobs: OutputBlobs | None) -> OutputMeta:
-        """Make the prepared output the record: ``meta.json``, then its row with
-        ``blobs`` (``None``: the files hold the bytes) in one transaction, then its index
-        row, the cover and the listener. ``blobs`` with ``staged`` objects goes through
-        `save`, which releases what the keys named before. Blocking."""
+        """Make the prepared output the record: its row with ``blobs`` in one
+        transaction, then the listener. No ``meta.json`` is written (#7257). ``blobs``
+        with ``staged`` objects goes through `saving`, which releases what the keys named
+        before. Blocking."""
         return self._commit(prepared, blobs)[0]
 
     def _commit(
@@ -998,25 +982,17 @@ class OutputStore:
     ) -> tuple[OutputMeta, list[tuple[str, BlobRef]]]:
         """`commit`, and each key that named another object before the row's transaction,
         with that object (`OutputRows.insert`). Blocking."""
-        directory = prepared.directory
         meta = prepared.meta
-        self._write_meta(directory, meta)
         replaced = self._insert_row(prepared, blobs)
         self._changed(meta.slug)
         return meta, replaced
-
-    def discard(self, prepared: PreparedOutput) -> None:
-        """Remove a prepared output's folder: a save that failed after `prepare`.
-        Blocking."""
-        shutil.rmtree(prepared.directory, ignore_errors=True)
 
     def _insert_row(
         self, prepared: PreparedOutput, blobs: OutputBlobs | None
     ) -> list[tuple[str, BlobRef]]:
         """The saved output's row, with its blob keys, their ``output_files`` rows and
         holds, in one transaction (spec §6.6); what `OutputRows.insert` returns. The row is
-        the record: when the insert fails, the files written for the save go and the save
-        fails."""
+        the record: when the insert fails, the save fails."""
         from scadbuddy.bambuddy.project_file import cached_defaults
         from scadbuddy.library.output_query import params_text
         from scadbuddy.library.output_rows import OutputRow
@@ -1051,35 +1027,8 @@ class OutputStore:
             # The list's text on the row (#7257), which `GET /outputs`'s `q` matches.
             params_text=params_text(prepared.params, cached_defaults(self.paths, meta.slug)),
         )
-        try:
-            return self.rows.insert(row)
-        except ReuseLostError:
-            # Nothing was written: `save` puts its own copies and commits again. Until
-            # then the folder holds no ``meta.json``, as during the puts, so a cancel
-            # meanwhile leaves it to the hold reaper and no copy run records it
-            # (#7477 review M4); a row a copy run wrote from it meanwhile goes too.
-            (directory / META_NAME).unlink(missing_ok=True)
-            try:
-                self.rows.drop_copied(meta.id, meta.slug)
-            except Exception:
-                logger.exception(
-                    "could not drop a copied row after a lost reuse", extra={"id": meta.id}
-                )
-            raise
-        except Exception:
-            shutil.rmtree(directory, ignore_errors=True)
-            # A copy run (the start's or a sweep's) may have read this folder and written
-            # its row before the insert failed: with the folder gone, that row would name
-            # no output. Only a row with the copy's stamp goes (`OutputRows.drop_copied`).
-            # A failure here must not hide the insert's own error; the next copy drops
-            # such a row.
-            try:
-                self.rows.drop_copied(meta.id, meta.slug)
-            except Exception:
-                logger.exception(
-                    "could not delete the copy's row of a failed save", extra={"id": meta.id}
-                )
-            raise
+        # A `ReuseLostError` wrote nothing: `saving` puts its own copies and commits again.
+        return self.rows.insert(row)
 
     def _next_created_at(self, slug: str) -> datetime:
         """Now, or just after the model's newest output when the clock reads earlier.
@@ -1131,18 +1080,13 @@ class OutputStore:
         self._write_backfill(output_id, BackfillState(job_id=job_id, error=error))
 
     def _write_backfill(self, output_id: str, state: BackfillState) -> None:
-        """The file first, then the row (#7255)."""
-        text = state.model_dump_json()
-        self._folder_write(
-            output_id, lambda directory: _replace(directory / BACKFILL_NAME, text), missing=None
-        )
+        """The row only (#7257)."""
         self.rows.set_backfill(output_id, state.model_dump(mode="json"))
 
     def clear_backfill(self, output_id: str) -> None:
-        directory = self._folder(output_id)
-        (directory / BACKFILL_NAME).unlink(missing_ok=True)
+        slug = self._row_of(output_id).slug
         self.rows.set_backfill(output_id, None)
-        self._changed(directory.parent.name)
+        self._changed(slug)
 
     def pending_backfills(self) -> list[tuple[str, BackfillState]]:
         """Every output waiting on a re-render that has not failed: one query (#7255)."""
@@ -1160,20 +1104,15 @@ class OutputStore:
 
     def attach_backfill(self, output_id: str, chosen: PipelineOutput) -> None:
         """Give the output what a new one records (§7, §8.4) from its re-render, keeping
-        its id, name and files. Run again, it writes the same files."""
-        directory = self._folder(output_id)
+        its id, name and files: its row only (#7257). Run again, it writes the same.
+        `OutputNotFoundError` when the row is gone, before or during the write."""
+        slug = self._row_of(output_id).slug
         manifest = [m.model_dump(mode="json") for m in chosen.manifest]
-
-        def write(folder: Path) -> None:
-            if not (folder / RECORD_NAME).is_file():
-                _replace(folder / RECORD_NAME, chosen.record.model_dump_json())
-            _replace(folder / MANIFEST_NAME, json.dumps(manifest))
-            (folder / BACKFILL_NAME).unlink(missing_ok=True)
-
-        self._folder_write(output_id, write, missing=None, directory=directory)
-        # The record it has stays, as the file's does: one statement.
-        self.rows.attach_backfill(output_id, chosen.record.model_dump(mode="json"), manifest)
-        self._changed(directory.parent.name)
+        # The record it has stays: one statement.
+        record = chosen.record.model_dump(mode="json")
+        if not self.rows.attach_backfill(output_id, record, manifest):
+            raise OutputNotFoundError(output_id)
+        self._changed(slug)
 
     def record(self, output_id: str) -> OutputRecord | None:
         row = self._row_of(output_id)
@@ -1355,53 +1294,22 @@ class OutputStore:
         return await self._blobs().held_sha(key)
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
-        """Give the output ``name``, or none (#2288). Only its meta changes, in
-        ``meta.json`` and then in its row (#7255): the 3MF's provenance names the output
-        by id, and a download is named at download.
+        """Give the output ``name``, or none (#2288). Only its meta changes, in its row
+        (#7255, #7257): the 3MF's provenance names the output by id, and a download is
+        named at download.
 
         A read-modify-write with no lock: nothing else rewrites the meta once the output
-        is saved, except `mark_storefront`, which nothing calls at runtime now (#7257). A
-        second writer of it needs a lock here, or one rename loses."""
-        meta, directory = self._stored_meta(output_id)
-        renamed = meta.model_copy(update={"name": name or None})
-        text = json.dumps(renamed.model_dump(mode="json"), indent=2) + "\n"
-        self._folder_write(
-            output_id,
-            lambda folder: _replace(folder / META_NAME, text),
-            missing=None,
-            directory=directory,
-        )
-        self.rows.update_meta(output_id, renamed)
+        is saved. A second writer of it needs a lock here, or one rename loses."""
+        meta = self._row_of(output_id).meta
+        self.rows.update_meta(output_id, meta.model_copy(update={"name": name or None}))
         return self.get(output_id)
 
-    def mark_storefront(self, output_id: str) -> OutputMeta:
-        """Mark an output saved before #6371 as the storefront slice run's: only its meta
-        changes, in ``meta.json`` and its row (#7255). The start's pass that called it
-        (`OutputIndex.sync`, at every start since #6371) went with ``output_index``
-        (#7257); nothing calls it at runtime now."""
-        meta, directory = self._stored_meta(output_id)
-        marked = meta.model_copy(update={"source": STOREFRONT})
-        text = json.dumps(marked.model_dump(mode="json"), indent=2) + "\n"
-        self._folder_write(
-            output_id,
-            lambda folder: _replace(folder / META_NAME, text),
-            missing=None,
-            directory=directory,
-        )
-        self.rows.update_meta(output_id, marked)
-        return marked
-
-    def _stored_meta(self, output_id: str) -> tuple[OutputMeta, Path]:
-        """The output's meta as its row stores it, with no last-print overlay, and its
-        folder (`_folder`)."""
-        row = self._row_of(output_id)
-        return row.meta, self.paths.output_dir(row.slug, output_id)
-
     def delete(self, output_id: str) -> None:
-        directory = self._folder(output_id)
+        """The output's row goes. Its folder on the old share, if any, stays: it is the
+        owner's backup (#7257, plan D10)."""
+        slug = self._row_of(output_id).slug
         self.rows.delete(output_id)
-        shutil.rmtree(directory, ignore_errors=True)
-        self._changed(directory.parent.name)
+        self._changed(slug)
 
     def _oldest_first(self, slug: str) -> list[OutputMeta]:
         """The model's outputs, oldest first: one query of the rows (#7255)."""
@@ -1643,8 +1551,7 @@ class OutputStore:
     def _keep_geometry(
         self, output_id: str, plate: int, analysis: GeometryAnalysis, model_sha: str | None
     ) -> None:
-        """The analysis of the model of ``model_sha`` in its row, and in the file cache
-        until #7257's task B4. Blocking."""
+        """The analysis of the model of ``model_sha`` in its row. Blocking."""
         self.rows.write_derived(
             output_id,
             GEOMETRY_KIND,
@@ -1653,21 +1560,6 @@ class OutputStore:
             analysis.model_dump(mode="json"),
             model_sha=model_sha,
         )
-        # Written aside and renamed, so a concurrent reader never sees half a file. A
-        # failed write (no folder: the bytes are only blobs) loses only that cache; the
-        # analysis is still the answer.
-        name = _geometry_name(plate)
-        text = analysis.model_dump_json(indent=2) + "\n"
-        try:
-            self._folder_write(
-                output_id, lambda folder: _replace(folder / name, text), missing=None
-            )
-        except (OSError, OutputNotFoundError):
-            logger.debug(
-                "could not write an output's geometry file cache",
-                extra={"output_id": output_id},
-                exc_info=True,
-            )
 
     def attributed(self, output_id: str, plate: int, model_version: str) -> GeometryAnalysis | None:
         """The cached analysis whose weak joints name their scene objects at
@@ -1689,8 +1581,7 @@ class OutputStore:
         model_sha: str | None,
     ) -> None:
         """The attributed analysis of the model of ``model_sha`` (`model_sha`, read
-        before the analysis) in its row, and in its file until #7257's task B4.
-        Blocking."""
+        before the analysis) in its row. Blocking."""
         body = {"model_version": model_version, "analysis": analysis.model_dump(mode="json")}
         self.rows.write_derived(
             output_id,
@@ -1700,28 +1591,14 @@ class OutputStore:
             body,
             model_sha=model_sha,
         )
-        name = _attributed_name(plate)
-        text = json.dumps(body, indent=2) + "\n"
-        self._folder_write(output_id, lambda folder: _replace(folder / name, text), missing=None)
-
-    def write_thumbnail(self, output_id: str, png: bytes) -> None:
-        """Whole, by a rename: a reader of the old file never gets half of this one.
-        After the cut-over mark, nothing when the folder is gone (`_folder_write`)."""
-        self._folder_write(
-            output_id, lambda folder: _replace_bytes(folder / THUMBNAIL_NAME, png), missing=None
-        )
 
     async def put_thumbnail(self, output_id: str, png: bytes) -> None:
         """``png`` as the thumbnail (#7256). Its blob is put first, under its own key
         (`staged_thumbnail_key`); then one step, under the output's thumbnail lock across
-        replicas, points the thumbnail key at it, writes the file and names the key in
-        the row (`OutputRows.keep_thumbnail`). The last step to run wins the file and
-        the blob both. A failed put changes nothing and raises (`StoreFullError` among
-        them). A failed file write raises too and leaves the old key and the old file,
-        which still agree; the new blob is held by nothing, and the sweep removes it.
-        After the cut-over mark a missing folder does not raise: the file step is skipped
-        and the key and the row take the blob (#7257). `OutputNotFoundError` when the
-        output has no row."""
+        replicas, points the thumbnail key at it and names the key in the row
+        (`OutputRows.keep_thumbnail`). The last step to run wins. A failed put changes
+        nothing and raises (`StoreFullError` among them). No file is written (#7257).
+        `OutputNotFoundError` when the output has no row."""
         rows = self.rows
         slug = await asyncio.to_thread(rows.slug_of, output_id)
         if slug is None:
@@ -1736,7 +1613,6 @@ class OutputStore:
             key,
             staged,
             slug=slug,
-            write=lambda: self.write_thumbnail(output_id, png),
         )
         if previous is not None and previous.backend_id != staged.backend_id:
             await store.release_replaced(key, previous)
@@ -1765,36 +1641,16 @@ class OutputStore:
             while len(self._undrawable) > UNDRAWABLE_MAX:
                 del self._undrawable[next(iter(self._undrawable))]
 
-    def write_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
-        """``png`` as the thumbnail only when the output still has none: an upload that
-        landed while the server drew stays (#4775). Written whole or not at all. After the
-        cut-over mark, True when the folder is gone: the row decides, as
-        `OutputRows.draw_thumbnail` names the key only while the row names none."""
-
-        def write(folder: Path) -> bool:
-            path = folder / THUMBNAIL_NAME
-            temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-            temporary.write_bytes(png)
-            try:
-                os.link(temporary, path)
-            except FileExistsError:
-                return False
-            finally:
-                temporary.unlink()
-            return True
-
-        return self._folder_write(output_id, write, missing=True)
-
     async def put_drawn_thumbnail(self, output_id: str, png: bytes) -> bool:
         """``png`` as the thumbnail only while the output has none (#4775): an upload that
-        landed first stays, file and blob. The blob is put first, under its own key
+        landed first stays. The blob is put first, under its own key
         (`staged_thumbnail_key`); then one step under the output's thumbnail lock
-        (`OutputRows.draw_thumbnail`) points the thumbnail key at it, writes the file
-        (`write_drawn_thumbnail`) and names the key in the row, only when neither the key
-        nor the file is there; with the key there (a lost blob's), the file alone. A
-        failed put is logged and answers False with nothing written: no reader would read
-        a file (#7257), so the caller remembers the output as undrawable for a while
-        (`api/outputs.py` `_draw_and_keep`). False when the output has no row."""
+        (`OutputRows.draw_thumbnail`) points the thumbnail key at it and names the key in
+        the row, only while the key has no index row. False when the key had one (an
+        upload's, or a lost blob's), or the output has no row. A failed put is logged and
+        answers False with nothing written, so the caller remembers the output as
+        undrawable for a while (`api/outputs.py` `_draw_and_keep`). No file is written
+        (#7257)."""
         rows = self.rows
         slug = await asyncio.to_thread(rows.slug_of, output_id)
         if slug is None:
@@ -1817,12 +1673,6 @@ class OutputStore:
             output_blob_key(output_id, "thumbnail"),
             staged,
             slug=slug,
-            write=lambda: self.write_drawn_thumbnail(output_id, png),
-        )
-
-    def _write_meta(self, directory: Path, meta: OutputMeta) -> None:
-        (directory / META_NAME).write_text(
-            json.dumps(meta.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
         )
 
 

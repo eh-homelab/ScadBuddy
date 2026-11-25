@@ -196,13 +196,8 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     assert request.headers["X-API-Key"] == "s3cret"
     assert b"demo-elan.3mf" in request.content
 
-    # Recorded in Postgres, not in meta.json (#455)...
-    meta = json.loads(
-        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
-    )
-    assert "library_files" not in meta
-
-    # ...and the detail route reports it, so the UI can deep-link without re-sending.
+    # Recorded in Postgres (#455), and the detail route reports it, so the UI can
+    # deep-link without re-sending.
     rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
     assert [(row["id"], row["folder_id"]) for row in rows] == [(41, 2)]
 

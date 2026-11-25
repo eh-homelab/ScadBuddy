@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import threading
 import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
@@ -22,7 +22,6 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy import main
 from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, OutputEvent
 from scadbuddy.library import backfill as backfill_module
-from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import (
     AmbiguousOutputError,
     _announce,
@@ -303,20 +302,18 @@ async def test_an_output_deleted_before_its_hold_keeps_no_holds_and_the_pass_goe
 async def test_an_output_deleted_inside_the_attach_keeps_no_holds_and_the_pass_goes_on(
     tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The delete's rmtree lands while the attach writes: the write's temporary file has
-    no directory to go to (FileNotFoundError)."""
+    """The delete lands while the attach runs: the attach's write finds no row."""
     store, _, job, written = await _legacy_output(tmp_path, pg_pool)
     gone, kept = await _two_legacy(store, job)
     _in_order(store, monkeypatch, gone)
-    directory = store.paths.output_dir("demo", gone)
-    replace = outputs_module._replace
+    attach = store.rows.attach_backfill
 
-    def delete_then_replace(path: Path, text: str) -> None:
-        if path.parent == directory and directory.exists():
-            shutil.rmtree(directory)
-        replace(path, text)
+    def delete_then_attach(output_id: str, *args: Any, **kwargs: Any) -> Any:
+        if output_id == gone and store.rows.get(gone) is not None:
+            store.delete(gone)
+        return attach(output_id, *args, **kwargs)
 
-    monkeypatch.setattr(outputs_module, "_replace", delete_then_replace)
+    monkeypatch.setattr(store.rows, "attach_backfill", delete_then_attach)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
         assert attach_backfills(store, refs, _jobs(job)) == 1

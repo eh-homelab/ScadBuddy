@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -127,10 +126,10 @@ async def test_copy_sweeps_do_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Plan Task B2: both copy activities return, log that the outputs are cut over, and
-    touch no table: no run is added, and no row changes, though a folder is gone."""
+    touch no table: no run is added, and no row changes, though no output has a folder."""
     store, metas = saved
     before = (_runs(pool), _outputs(pool))
-    shutil.rmtree(_folder(store, metas[0]))
+    assert not _folder(store, metas[0]).exists()
     state = SimpleNamespace(
         outputs=store,
         projection=SimpleNamespace(conninfo=projection.conninfo),
@@ -150,12 +149,12 @@ THUMBNAIL_PNG = b"\x89PNG\r\n\x1a\nthumbnail after the mark"
 async def _without_folder(
     saved: tuple[OutputStore, list[OutputMeta]],
 ) -> tuple[OutputStore, OutputMeta, Path]:
-    """Review Focus 2: the mark is written, the store puts blobs, and the first output's
-    folder is gone, as for an output that a release B pod saved."""
+    """Review Focus 2: the mark is written, the store puts blobs, and the first output has
+    no folder: a release B pod saves none (#7257, task B4)."""
     store, metas = saved
     _mark(_rows(store))
     directory = _folder(store, metas[0])
-    shutil.rmtree(directory)
+    assert not directory.exists()
     return store, metas[0], directory
 
 
@@ -167,17 +166,6 @@ async def test_rename_without_folder_after_cut_over(
     assert renamed.name == "renamed"
     row = _rows(store).get(meta.id)
     assert row is not None and row.meta.name == "renamed"
-    assert not directory.exists()
-
-
-async def test_mark_storefront_without_folder_after_cut_over(
-    saved: tuple[OutputStore, list[OutputMeta]],
-) -> None:
-    store, meta, directory = await _without_folder(saved)
-    marked = await asyncio.to_thread(store.mark_storefront, meta.id)
-    assert marked.source == "storefront"
-    row = _rows(store).get(meta.id)
-    assert row is not None and row.meta.source == "storefront"
     assert not directory.exists()
 
 
@@ -241,16 +229,3 @@ async def test_backfill_writes_without_folder_after_cut_over(
     assert store.manifest(meta.id) == chosen.manifest
     assert store.record(meta.id) is not None
     assert not directory.exists()
-
-
-async def test_missing_folder_raises_before_cut_over(
-    saved: tuple[OutputStore, list[OutputMeta]],
-) -> None:
-    """With no mark, a missing folder fails the write, as in phase 2."""
-    store, metas = saved
-    assert _rows(store).cut_over_at() is None
-    shutil.rmtree(_folder(store, metas[0]))
-    with pytest.raises(FileNotFoundError):
-        store.rename(metas[0].id, "renamed")
-    with pytest.raises(FileNotFoundError):
-        store.start_backfill(metas[0].id, "j9")

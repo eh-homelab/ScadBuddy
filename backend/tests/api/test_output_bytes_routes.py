@@ -339,9 +339,7 @@ def test_thumbnail_streams_blob_and_draws_from_preview_blob(
     # One with no thumbnail: drawn from its preview blob.
     outputs.draw_thumbnails = True
     drawn = _copied(client, model, outputs, thumbnail=False)
-    # The folder stays for the drawn file the write still makes (until #7257's task B4,
-    # which needs the cut-over mark); its preview is gone, so only the blob answers.
-    (outputs.paths.output_dir(model, drawn) / PREVIEW_NAME).unlink()
+    _no_share(outputs)
     detail = client.get(f"/api/v1/outputs/{drawn}").json()
     assert detail["has_thumbnail"] is True
     assert detail["thumbnail_version"] is None

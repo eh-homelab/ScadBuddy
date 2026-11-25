@@ -35,9 +35,7 @@ from scadbuddy.library.output_rows import (
     output_file_key,
 )
 from scadbuddy.library.outputs import (
-    BACKFILL_NAME,
     META_NAME,
-    MODEL_NAME,
     BackfillState,
     OutputMeta,
     OutputNotFoundError,
@@ -73,8 +71,22 @@ def rows_of(store: OutputStore) -> OutputRows:
 
 
 def _dir(store: OutputStore, meta: OutputMeta) -> Path:
-    """The folder the save still writes (until #7257's task B4), which no reader reads."""
+    """The output's folder on the old share, which no save writes since #7257 (task B4)
+    and no reader reads."""
     return store.paths.output_dir(meta.slug, meta.id)
+
+
+def _old_folder(store: OutputStore, meta: OutputMeta) -> Path:
+    """The folder a phase 2 pod wrote for the output: its ``meta.json`` and
+    ``params.json``, for the tests of `OutputStore.restore_rows`, which #7257's task B5
+    removes."""
+    row = rows_of(store).get(meta.id)
+    assert row is not None
+    directory = _dir(store, meta)
+    directory.mkdir(parents=True)
+    (directory / META_NAME).write_text(row.meta.model_dump_json(), encoding="utf-8")
+    (directory / "params.json").write_text(json.dumps(row.params), encoding="utf-8")
+    return directory
 
 
 @pytest.fixture
@@ -92,10 +104,8 @@ async def test_create_writes_row_with_meta_params_inputs(
     row = rows_of(store).get(meta.id)
     assert row is not None
     assert row.slug == job.slug
-    on_disk = OutputMeta.model_validate_json(
-        (_dir(store, meta) / META_NAME).read_text(encoding="utf-8")
-    )
-    assert row.meta == on_disk
+    assert row.meta == meta
+    assert not _dir(store, meta).exists()
     assert row.params == job.params
     assert row.inputs == store.inputs(meta.id)
     assert row.inputs is not None
@@ -103,8 +113,10 @@ async def test_create_writes_row_with_meta_params_inputs(
     assert row.record is not None and row.record["output_index"] == 0
     assert row.bom is not None and row.bom[0]["piece"] == "wall"
     assert row.manifest is not None and len(row.manifest) == len(store.manifest(meta.id))
-    with zipfile.ZipFile(_dir(store, meta) / MODEL_NAME) as archive:
-        assert row.has_plate_cover == (PLATE_THUMBNAIL in archive.namelist())
+    async with store.local_role(meta.id, "model") as model:
+        assert model is not None
+        with zipfile.ZipFile(model) as archive:
+            assert row.has_plate_cover == (PLATE_THUMBNAIL in archive.namelist())
 
 
 async def test_save_writes_params_text(tmp_path: Path, projection: JobProjection) -> None:
@@ -117,22 +129,6 @@ async def test_save_writes_params_text(tmp_path: Path, projection: JobProjection
     assert row is not None
     expected = params_text(job.params, cached_defaults(store.paths, job.slug))
     assert "width=30" in expected and row.params_text == expected
-
-
-async def test_get_reads_row_not_meta_file(
-    saved: tuple[OutputStore, OutputMeta, Job],
-) -> None:
-    store, meta, job = saved
-    directory = _dir(store, meta)
-    (directory / META_NAME).unlink()
-    (directory / "params.json").unlink()
-    got = store.get(meta.id)
-    assert got.id == meta.id
-    assert got.name == "first"
-    assert store.name_and_slug(meta.id) == ("first", job.slug)
-    assert store.params(meta.id) == job.params
-    assert store.record(meta.id) is not None
-    assert store.bom(meta.id)[0].piece == "wall"
 
 
 async def test_missing_row_does_not_glob(
@@ -170,28 +166,8 @@ async def test_create_fails_and_cleans_up_when_row_insert_fails(
     with pytest.raises(psycopg.errors.UniqueViolation):
         await store.save(job, output_id=taken)
     assert not store.paths.output_dir(job.slug, taken).exists()
-    # The other save's row stays: the clean-up deletes only a row the copy wrote.
+    # The row that holds the id stays.
     assert rows_of(store).get(taken) is not None
-
-
-async def test_a_failed_save_leaves_no_row_the_copy_wrote(
-    saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The copy read the save's folder and wrote its row, then the save's own insert
-    failed: the save removes its folder, and the copy's row goes with it."""
-    store, _, job = saved
-    rows = rows_of(store)
-
-    def failing(row: OutputRow, conn: object = None) -> None:
-        rows.write_copy([replace(row, files_stamp="stamp")], [], rows.clock())
-        raise psycopg.OperationalError("the connection was lost")
-
-    monkeypatch.setattr(rows, "insert", failing)
-    output_id = "c" * 32
-    with pytest.raises(psycopg.OperationalError):
-        await store.save(job, output_id=output_id)
-    assert not store.paths.output_dir(job.slug, output_id).exists()
-    assert rows.get(output_id) is None
 
 
 class _HeldOpen(list[OutputRow]):
@@ -258,8 +234,12 @@ async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
     with ThreadPoolExecutor(2) as pool:
         copy = pool.submit(rows.write_copy, batch, [], rows.clock())
         assert batch.inserted.wait(30)
+        staging = store.paths.root.parent / "staging"
+        staging.mkdir()
         save = pool.submit(
-            lambda: store.commit(store.prepare(job, name="saved", output_id=output_id), blobs)
+            lambda: store.commit(
+                store.prepare(job, staging, name="saved", output_id=output_id), blobs
+            )
         )
         deadline = time.monotonic() + 30
         while not _waits_on_a_lock(pg_conninfo):
@@ -270,7 +250,6 @@ async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
         assert copy.result(30) == ({output_id}, set())
         saved_meta = save.result(30)
     assert saved_meta.name == "saved"
-    assert (store.paths.output_dir(job.slug, output_id) / META_NAME).is_file()
     row = rows.get(output_id)
     assert row is not None
     assert row.meta.name == "saved" and row.files_stamp is None
@@ -290,11 +269,7 @@ async def test_rename_updates_row(saved: tuple[OutputStore, OutputMeta, Job]) ->
     assert renamed.name == "second"
     row = rows_of(store).get(meta.id)
     assert row is not None and row.meta.name == "second"
-    on_disk = json.loads((_dir(store, meta) / META_NAME).read_text(encoding="utf-8"))
-    assert on_disk["name"] == "second"
-    marked = store.mark_storefront(meta.id)
-    row = rows_of(store).get(meta.id)
-    assert row is not None and row.meta == marked
+    assert not _dir(store, meta).exists()
 
 
 async def test_backfill_round_trip_through_rows(
@@ -304,8 +279,7 @@ async def test_backfill_round_trip_through_rows(
     store.start_backfill(meta.id, "rerender")
     row = rows_of(store).get(meta.id)
     assert row is not None and row.backfill == {"job_id": "rerender", "error": None}
-    # The row answers, not the file.
-    (_dir(store, meta) / BACKFILL_NAME).unlink()
+    assert not _dir(store, meta).exists()
     assert store.backfill(meta.id) == BackfillState(job_id="rerender")
     assert store.pending_backfills() == [(meta.id, BackfillState(job_id="rerender"))]
     store.fail_backfill(meta.id, "rerender", "boom")
@@ -333,7 +307,6 @@ async def test_delete_and_forget_indexed_drop_rows(
     store.delete(meta.id)
     assert rows_of(store).get(meta.id) is None
     assert rows_of(store).get(other.id) is not None
-    shutil.rmtree(store.paths.outputs / job.slug)
     store.forget_indexed(job.slug)
     assert rows_of(store).get(other.id) is None
 
@@ -386,7 +359,7 @@ async def test_model_delete_fails_whole_when_its_output_rows_stay(
         catalogue.delete(job.slug)
     # The model and its outputs stay whole, for a retry.
     assert store.paths.model_source(job.slug).is_file()
-    assert _dir(store, meta).is_dir()
+    assert rows_of(store).get(meta.id) is not None
     assert rows_of(store).get(meta.id) is not None
     monkeypatch.undo()
     catalogue.delete(job.slug)
@@ -402,6 +375,8 @@ async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
     the files, as the copy writes them."""
     store, meta, job = saved
     second = await store.save(job, name="second")
+    for old in (meta, second):
+        _old_folder(store, old)
     catalogue = _catalogue(store)
     model_dir = store.paths.model_dir(job.slug)
     rename = Path.rename
@@ -434,6 +409,8 @@ async def test_restore_rows_skips_a_folder_it_cannot_stat(
     the retired copy's walk did; the other outputs get their rows back."""
     store, meta, job = saved
     second = await store.save(job, name="second")
+    for old in (meta, second):
+        _old_folder(store, old)
     rows_of(store).delete_slug(job.slug)
     stale = _dir(store, meta)
     is_dir = Path.is_dir
@@ -457,9 +434,12 @@ async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
     store, meta, job = saved
     catalogue = _catalogue(store)
     shutil.rmtree(store.paths.model_dir(job.slug))
+    # The sweep still finds a slug by its outputs folder, which a save no longer writes
+    # (#7257 task B4); task B5 finds it by its rows.
+    (store.paths.outputs / job.slug).mkdir(parents=True)
     monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
     catalogue.sweep_orphans()
-    assert _dir(store, meta).is_dir()
+    assert rows_of(store).get(meta.id) is not None
     monkeypatch.undo()
     catalogue.sweep_orphans()
     assert rows_of(store).get(meta.id) is None
@@ -477,7 +457,7 @@ async def test_a_reused_slug_is_refused_while_its_output_rows_stay(
         catalogue.create(job.slug, "cube();\n", ModelMeta(name="Again"))
     # The claim is given back, and the earlier model's outputs stay for a retry.
     assert not store.paths.model_dir(job.slug).exists()
-    assert _dir(store, meta).is_dir()
+    assert rows_of(store).get(meta.id) is not None
 
 
 async def test_rename_fails_when_its_row_write_fails(
@@ -487,8 +467,6 @@ async def test_rename_fails_when_its_row_write_fails(
     monkeypatch.setattr(rows_of(store), "update_meta", _refuse)
     with pytest.raises(psycopg.OperationalError):
         store.rename(meta.id, "second")
-    with pytest.raises(psycopg.OperationalError):
-        store.mark_storefront(meta.id)
 
 
 async def test_start_backfill_fails_when_its_row_write_fails(

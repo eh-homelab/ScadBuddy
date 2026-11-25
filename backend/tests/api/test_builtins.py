@@ -140,7 +140,7 @@ def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
         assert output["model_version"] == _versions(client, model_id)[0]["commit"]
         listed = client.get(f"/api/v1/models/{model_id}/outputs").json()
         assert [row["id"] for row in listed] == [output["id"]]
-        assert (paths.outputs / model_id / output["id"]).is_dir()
+        assert not (paths.outputs / model_id / output["id"]).exists()  # #7257: no folder
     assert outputs[BUILTIN]["model_version"] != outputs[mine]["model_version"]
     assert [entry["message"] for entry in _versions(client, BUILTIN)] == [
         "Sync built-in templates from the image"
