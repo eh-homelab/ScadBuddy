@@ -475,6 +475,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'The same UI files at a pinned revision, for the browser (#425).',
   },
   {
+    operation: 'GET /api/v1/model-records/copy-status',
+    reason:
+      "The last run of the copy of the templates' files to rows (#7317), at an API start or in a " +
+      "housekeeping sweep: an operator's check after a deploy. The copy runs by itself, so an agent has " +
+      'nothing to act on; the templates it copied are in the model tools.',
+  },
+  {
     operation: 'PUT /api/v1/settings',
     reason:
       'The one write path for every stored setting (#322): the Bambuddy URL and API key and the Google Fonts ' +

@@ -42,9 +42,16 @@ and ``maintenance_import`` with ``MAINTENANCE_IMPORT_PATCH`` (#5774), which also
 ``OUTPUT_COPY_PATCH`` (#7255), which also runs ``OUTPUT_COPY_SWEEP``, and
 ``attempt_media`` with ``ATTEMPT_MEDIA_PATCH`` (#7234), which also runs
 ``ATTEMPT_MEDIA_SWEEP``, and ``output_copy_attempt_media`` with both, which runs both
+sweeps, and ``template_copy`` with ``TEMPLATE_COPY_PATCH`` (#7317, recorded without
+``OUTPUT_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``), which also runs
+``TEMPLATE_COPY_SWEEP``, and ``template_copy_attempt_media`` with
+``TEMPLATE_COPY_PATCH`` and ``ATTEMPT_MEDIA_PATCH``, which runs both, and
+``template_output_copy`` with all three, which runs all three
 (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
-them.
+them. ``template_copy``, ``template_copy_attempt_media`` and ``template_output_copy``
+were recorded again before #7317 merged, when ``TEMPLATE_COPY_SWEEP`` moved after
+``ACTIVITY_SWEEP``: no deployed build had run the old order.
 """
 
 from __future__ import annotations
@@ -95,6 +102,9 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "output_copy",
         "attempt_media",
         "output_copy_attempt_media",
+        "template_copy",
+        "template_copy_attempt_media",
+        "template_output_copy",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -112,7 +122,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_output_copy_attempt_media(recording_temporal: str) -> None:
+async def test_record_template_output_copy(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -141,4 +151,4 @@ async def test_record_output_copy_attempt_media(recording_temporal: str) -> None
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "output_copy_attempt_media.json").write_text(history.to_json())
+    (HISTORIES / "template_output_copy.json").write_text(history.to_json())

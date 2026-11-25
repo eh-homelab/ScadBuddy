@@ -31,7 +31,7 @@ same schema, created by a file in `backend/scadbuddy/migrations/` or
 | Domain | Tables (creating migration) | Written by |
 |---|---|---|
 | Render and blobs | `render_jobs` (`20260927T2243Z_render_jobs`), `blob_refs` (`20260928T0900Z_render_jobs_projection`), `store_blobs`, `store_folders` (`20260928T1800Z_blob_store`), `assets` (`20260928T1631Z_assets`), `piece_geometry` (`20261013T0719Z_piece_geometry`), `model_previews`, `template_media`, `saved_presets`, `analyzer_decisions`, `library_leases`, `library_pin_holds`, `library_install_slots`, `transfer_puts` | the API; the render worker through `crud.render` routes (`scadbuddy/api/crud_render.py:89`) |
-| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255; see [Saved outputs](#saved-outputs)) | the API |
+| Core | `events` (`20260928T0630Z_events`), `settings`, `model_print_choices`, `printer_bed_types` (`20260928T0840Z_settings`), `operations`, `activity` (`20261010T0533Z_activity`), `crud_requests`, `models_repo_head`, `templates`, `template_copy_runs` (`20261124T1824Z_templates`, #7317), `flows_repo_head`, `git_remote_pushes`, `output_index`, `outputs`, `output_copy_runs` (`20261124T0053Z_outputs_records`, #7255; see [Saved outputs](#saved-outputs)) | the API |
 | Auth | `auth_sessions`, `auth_login_config`, `auth_break_glass_codes`, `service_credentials`, `personal_access_tokens`, `auth_delegation_codes`, `service_caller_suspensions` (2026-11-02 to 2026-11-06 files) | the API |
 | Printing | `print_runs`, `print_sends`, `print_links`, `output_bambuddy_uploads`, `output_bambuddy_slices`, `output_last_prints`, `print_preview_slices`, `print_slice_starts`, `print_batches`, `print_batch_items`, `print_attachments`, `print_outcomes`, `printers`, `printer_reports` (`20261018T1659Z_printers`), `rack_nozzle_*`, `library_folders`, `library_files` (`20261017T2250Z_print_library`), `native_slices`, `library_copies`, `print_imports`, `print_lan_imports`, `lan_print_archives` and more | the API; the print worker through `crud.print` routes (`scadbuddy/api/crud_print.py:316`) |
 | Spools and filament | `filament_*` (`20261114T1300Z`, `20261114T1301Z` and later), `filament_presets`, `filaments` (the overlay and native spool tables were dropped by `20261118T1235Z_drop_native_spool_tables`, and `held_local_presets` by `20261124T1308Z_drop_held_local_presets`, #7275) | the API; the print worker through CRUD |
@@ -135,6 +135,64 @@ Templates are git repositories on the API's data volume (`SCADBUDDY_DATA_DIR`,
 start (`scadbuddy/library/catalogue.py:2940-2956`, called from `scadbuddy/main.py:1561-1565`).
 Every model edit is a commit, which is what versions and history read
 ([features/versions-and-history.md](../features/versions-and-history.md)).
+
+### Template records
+
+Each template folder that has a `model.scad` also has a row of `templates` (#7317, phase 1
+of the [model records spec](../superpowers/specs/2026-11-25-model-records-in-postgres-design.md),
+migration `20261124T1824Z_templates.sql`): its parsed `model.json` (`meta`, or `meta_error`
+and the raw `meta_text` when it cannot be read or stored), `name`, `version` (the last
+commit that touched it), `inputs_version`, its `// color` parameters, its media files'
+sizes, its cover and a `files_stamp` (`scadbuddy/library/template_rows.py` `TemplateRow`).
+The row is derived: git stays the record, and any row can be rebuilt from the tree. In
+phase 1 nothing reads the rows yet; the readers move to them in phase 2.
+
+- A write that commits writes its templates' rows in the transaction that records the
+  models HEAD and sends its NOTIFY (`scadbuddy/library/history.py` `_also_record`,
+  `scadbuddy/library/repo_lock.py` `_PgHold._also`, in a savepoint), so a save adds no
+  Postgres commit. The rows are read and built before that transaction opens, and a
+  failed read or row write costs the rows only, never the HEAD or its NOTIFY. Content
+  Postgres refuses (a NUL, a `\u0000` escape) is cleaned when the row is built
+  (`scadbuddy/library/catalogue.py` `_unstorable`, `_storable_text`). When git cannot
+  list what a commit touched, the rows written are those of the templates the write
+  named. A write that commits nothing (`ModelHistory.commit` with no change, a
+  built-in's added media, a create whose commit failed) refreshes its rows under the
+  models write lock in a transaction of its own (`scadbuddy/library/template_refresh.py`
+  `TemplateRefresh.refresh_locked`); without git, `Catalogue.notify_change` refreshes them.
+- A failed refresh never fails the write. It is logged with the template ids and counted in
+  `scadbuddy_template_refresh_failures_total` (label `path`: `commit`, `no_commit` or
+  `no_git`; `scadbuddy/core/metrics.py`). The next copy run repairs the row. Two other
+  misses are counted under `no_commit` too: a commit that wrote its
+  files but did not get the write lock, so nothing refreshed its rows
+  (`scadbuddy/library/catalogue.py` `Catalogue._commit`), and a no-commit refresh for which
+  git did not name a version, so the row keeps its stored one.
+- Each API start copies the files to rows once (`scadbuddy/library/template_copy.py`
+  `copy_templates`, one replica at a time under the advisory lock `COPY_LOCK`; a run that
+  does not get it does nothing). The housekeeping sweep `housekeeping_copy_templates`
+  (`workflows/housekeeping.py` `TEMPLATE_COPY_SWEEP`, directly after the activity sweep, behind
+  `TEMPLATE_COPY_PATCH`) copies again on each run of the sweeps' Schedule. Each run is a
+  row of `template_copy_runs`. The copy reconciles: outside the write lock it walks the
+  folders, reads every version with one `git log` walk and stats each template's files; a
+  template with no row, or whose stamp or version differs, is read again `BATCH` at a time,
+  each batch under the write lock. Under the lock it corrects the versions of a commit made
+  since its walk, and when git cannot name a version the row keeps its stored one. Then,
+  under the lock, it drops each row whose folder the walk did not see and that is not there
+  now.
+- A run whose walk may have missed templates (a listing, stat or batch read failed, git
+  failed in a batch, `models/` is missing, or the walk saw no template while rows exist)
+  or whose walk of the history failed (each row then keeps its stored version, so only a
+  template whose stamp changed is read again) drops no row and ends `incomplete`, with no `finished_at`. A stopped run has no
+  `finished_at` either.
+- `GET /api/v1/model-records/copy-status` answers the last run: `started_at`,
+  `finished_at`, `incomplete`, `added`, `refreshed`, `dropped`, and `unreadable`, each
+  walked template whose row has a `meta_error`: its `model.json` is not JSON, cannot be
+  stored, or does not validate (`scadbuddy/api/models.py`
+  `template_copy_status`; 404 before any run).
+- Pods on an older build write the files and commit with no rows, during a roll-out and
+  after a rollback. The next housekeeping sweep repairs their rows. After a roll-out,
+  confirm that every pod runs the new image (`kubectl -n bambuddy get pods -o jsonpath` on
+  the images), then read the copy status: a run with a `finished_at`, not `incomplete`, that
+  started after the last pod on the older build went.
 
 ### Saved outputs
 
