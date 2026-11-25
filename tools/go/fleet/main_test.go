@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -175,5 +176,67 @@ func TestNoCoreImports(t *testing.T) {
 		if mod != "fleet" && mod != "fleetchat" {
 			t.Errorf("fleet depends on %s", pkg)
 		}
+	}
+}
+
+// TestShutdown: on shutdown a request in flight finishes, a stream that never ends by itself
+// is ended after the grace, and serve returns within its timeout.
+func TestShutdown(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 2)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, _ *http.Request) {
+		started <- struct{}{}
+		time.Sleep(300 * time.Millisecond)
+		_, _ = io.WriteString(w, "done")
+	})
+	mux.HandleFunc("/stream", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush()
+		started <- struct{}{}
+		<-r.Context().Done()
+	})
+	ctx, stop := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	const grace, timeout = 500 * time.Millisecond, 2 * time.Second
+	go func() { served <- serve(ctx, listener, mux, grace, timeout) }()
+
+	base := "http://" + listener.Addr().String()
+	stream, err := http.Get(base + "/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	slow := make(chan string, 1)
+	go func() {
+		res, err := http.Get(base + "/slow")
+		if err != nil {
+			slow <- err.Error()
+			return
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		slow <- string(b)
+	}()
+	<-started
+	<-started
+	begun := time.Now()
+	stop()
+	if got := <-slow; got != "done" {
+		t.Errorf("the request in flight got %q, want done", got)
+	}
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	case <-time.After(timeout + time.Second):
+		t.Fatal("serve did not return within its timeout")
+	}
+	if took := time.Since(begun); took < grace || took > timeout {
+		t.Errorf("shutdown took %s, want between the grace %s and the timeout %s", took, grace, timeout)
 	}
 }

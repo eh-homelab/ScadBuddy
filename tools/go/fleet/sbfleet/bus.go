@@ -164,20 +164,26 @@ func (b *bus) follow(ctx context.Context, last *string, f func(fleetchat.Event))
 	return framed, err
 }
 
-// dispatch turns one frame into an Event: a fleet.message change names its recipients;
-// ready with resync, and reconnected, say that events may have been lost. ready without
-// resync follows a replay that lost nothing, so it is no Event.
+// dispatch turns one frame into an Event: a fleet.message change names its recipients.
+// The rest say that events may have been lost, so every watched inbox may have changed:
+// ready with resync (the server could not place Last-Event-ID), ready without reconnect
+// (a stream with no Last-Event-ID starts at the newest event, so what came before it was
+// never seen), reconnected, and a ready or change frame that cannot be read. ready with
+// reconnect and no resync follows a replay that lost nothing (every fleet.* event is
+// logged), so it is no Event.
 func dispatch(ctx context.Context, event, data string, f func(fleetchat.Event)) {
 	switch event {
 	case "ready":
 		var d struct {
-			Resync bool `json:"resync"`
+			Resync    bool `json:"resync"`
+			Reconnect bool `json:"reconnect"`
 		}
 		if err := json.Unmarshal([]byte(data), &d); err != nil {
-			slog.WarnContext(ctx, "sbfleet: skipped a ready frame", "err", err)
+			slog.WarnContext(ctx, "sbfleet: a ready frame that cannot be read; resyncing", "err", err)
+			f(fleetchat.Event{Resync: true})
 			return
 		}
-		if d.Resync {
+		if d.Resync || !d.Reconnect {
 			f(fleetchat.Event{Resync: true})
 		}
 	case "reconnected":
@@ -185,7 +191,8 @@ func dispatch(ctx context.Context, event, data string, f func(fleetchat.Event)) 
 	case "change":
 		recipients, err := recipientsOf(data)
 		if err != nil {
-			slog.WarnContext(ctx, "sbfleet: skipped a change frame", "err", err)
+			slog.WarnContext(ctx, "sbfleet: a change frame that cannot be read; resyncing", "err", err)
+			f(fleetchat.Event{Resync: true})
 			return
 		}
 		if len(recipients) > 0 {

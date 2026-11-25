@@ -137,8 +137,9 @@ func TestBusDeliversRecipients(t *testing.T) {
 		change("e1", "fleet.other", sid),
 		change("e2", "fleet.message", sid, other),
 	)}}
-	got := follow(t, f, 1)
-	want := []fleetchat.Event{{SessionIDs: []string{sid, other}}}
+	got := follow(t, f, 2)
+	// A stream with no Last-Event-ID starts at the newest event: a Resync first.
+	want := []fleetchat.Event{{Resync: true}, {SessionIDs: []string{sid, other}}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("events %+v, want %+v", got, want)
 	}
@@ -169,9 +170,10 @@ func TestBusReconnectsWithLastEventID(t *testing.T) {
 		frames(ready("e1", false, true), change("e2", "fleet.message", other)),
 	}}
 	f.hold = false
-	got := follow(t, f, 2)
-	want := []fleetchat.Event{{SessionIDs: []string{sid}}, {SessionIDs: []string{other}}}
-	if !reflect.DeepEqual(got[:2], want) {
+	got := follow(t, f, 3)
+	// The first stream had no Last-Event-ID (a Resync); the reconnect's replay lost nothing.
+	want := []fleetchat.Event{{Resync: true}, {SessionIDs: []string{sid}}, {SessionIDs: []string{other}}}
+	if !reflect.DeepEqual(got[:3], want) {
 		t.Errorf("events %+v, want %+v", got, want)
 	}
 	s := f.streams()
@@ -258,10 +260,53 @@ func TestBusDropsASilentStream(t *testing.T) {
 	b.minDelay, b.maxDelay, b.silence = time.Millisecond, 2*time.Millisecond, 50*time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := b.Subscribe(ctx, func(fleetchat.Event) { cancel() }); !errors.Is(err, context.Canceled) {
+	var got []fleetchat.Event
+	err := b.Subscribe(ctx, func(ev fleetchat.Event) {
+		got = append(got, ev)
+		if len(ev.SessionIDs) > 0 {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 	if s := f.streams(); len(s) != 2 || s[1].LastEventID != "e0" {
 		t.Errorf("streams %+v", s)
+	}
+	want := []fleetchat.Event{{Resync: true}, {SessionIDs: []string{sid}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("events %+v, want %+v", got, want)
+	}
+}
+
+// A failure before the first stream: that stream still has no Last-Event-ID, starts at the
+// newest event, and so says Resync for whatever was sent in the gap.
+func TestBusResyncsAfterAFailedFirstConnect(t *testing.T) {
+	f := &fakeStream{hold: true, script: []func(http.ResponseWriter) bool{
+		status(503),
+		frames(ready("e0", false, false), change("e1", "fleet.message", sid)),
+	}}
+	got := follow(t, f, 2)
+	want := []fleetchat.Event{{Resync: true}, {SessionIDs: []string{sid}}}
+	if !reflect.DeepEqual(got[:2], want) {
+		t.Errorf("events %+v, want %+v", got, want)
+	}
+	if s := f.streams(); len(s) < 2 || s[1].LastEventID != "" {
+		t.Errorf("streams %+v, want a second with no Last-Event-ID", s)
+	}
+}
+
+// A ready or change frame that cannot be read may have hidden a delivery: a Resync.
+func TestBusResyncsOnUnreadableFrames(t *testing.T) {
+	f := &fakeStream{hold: true, script: []func(http.ResponseWriter) bool{frames(
+		ready("e0", false, true),
+		"event: ready\ndata: {oops\n\n",
+		"id: e1\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"not json\"}\n\n",
+		change("e2", "fleet.message", sid),
+	)}}
+	got := follow(t, f, 3)
+	want := []fleetchat.Event{{Resync: true}, {Resync: true}, {SessionIDs: []string{sid}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("events %+v, want %+v", got, want)
 	}
 }

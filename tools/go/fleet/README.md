@@ -39,12 +39,16 @@ over HTTP (`TestNoCoreImports` checks it).
   - `change`, data `{"c", "p"}`, where `p` is the stored event as a JSON string. A
     `fleet.message` event's `recipients` (session ids) become
     `Event{SessionIDs: recipients}`; other kinds are skipped.
-  - `ready`, data `{"resync", "reconnect"}`. With `resync` true (the server could not
-    place `Last-Event-ID`: pruned, unknown, or too far behind) it becomes
-    `Event{Resync: true}`. Without it the replay before it lost nothing, so it is no
-    event.
+  - `ready`, data `{"resync", "reconnect"}`. It becomes `Event{Resync: true}` when
+    `resync` is true (the server could not place `Last-Event-ID`: pruned, unknown, or
+    too far behind) or `reconnect` is false (a stream sent no `Last-Event-ID`, the first
+    one or any before a frame was seen, starts at the newest event, so what came before
+    was never seen). With `reconnect` true and no `resync`, the replay before it lost
+    nothing (every `fleet.*` event is logged), so it is no event.
   - `reconnected` (the server's own reader fell behind and replayed): `Event{Resync: true}`.
   - `: keepalive` comments, every 15 s.
+  - A `ready` or `change` frame that cannot be read is logged and becomes
+    `Event{Resync: true}`.
 
   Every frame's `id` is kept and sent as `Last-Event-ID` on each reconnect. A stream
   that fails, is refused (a 401 or 403 too: the credential rotates), ends, or sends
@@ -59,7 +63,8 @@ for the stream, that attempt).
 
 `main.go` serves `/mcp` (fleetchat's streamable HTTP handler, server name
 `scadbuddy-fleet`, its version from the build info or `dev`) and `GET /healthz`
-(`ok`). On SIGTERM it ends the open requests and stops within 10 s. The server has
+(`ok`). On SIGTERM it takes no new request and lets the open ones finish for 5 s,
+then ends those still open (the MCP GET streams) and stops within 10 s. The server has
 no auth of its own; a NetworkPolicy admits only ScadBuddy's pods.
 
 | Flag | Environment | Default |

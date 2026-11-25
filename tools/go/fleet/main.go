@@ -26,7 +26,10 @@ import (
 )
 
 const (
-	serverName      = "scadbuddy-fleet"
+	serverName = "scadbuddy-fleet"
+	// On SIGTERM the server drains for shutdownGrace, then ends the requests still open
+	// (the MCP GET streams never end by themselves) and stops by shutdownTimeout.
+	shutdownGrace   = 5 * time.Second
 	shutdownTimeout = 10 * time.Second
 )
 
@@ -207,15 +210,21 @@ func run(ctx context.Context, c config) error {
 	if err != nil {
 		return err
 	}
-	// Requests' contexts end when shutdown starts, so the MCP streams let it finish.
+	slog.Info("fleet listens", "address", listener.Addr().String(), "version", buildVersion())
+	return serve(ctx, listener, newMux(ctx, svc), shutdownGrace, shutdownTimeout)
+}
+
+// serve serves handler on listener until ctx ends. Then it stops taking requests and lets
+// the open ones finish for grace (a tool call in flight completes), ends the contexts of
+// those still open (the MCP GET streams), and stops by timeout, closing what is left.
+func serve(ctx context.Context, listener net.Listener, handler http.Handler, grace, timeout time.Duration) error {
 	requests, endRequests := context.WithCancel(context.Background())
 	defer endRequests()
 	server := &http.Server{
-		Handler:           newMux(ctx, svc),
+		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
 		BaseContext:       func(net.Listener) context.Context { return requests },
 	}
-	slog.Info("fleet listens", "address", listener.Addr().String(), "version", buildVersion())
 	failed := make(chan error, 1)
 	go func() { failed <- server.Serve(listener) }()
 	select {
@@ -223,10 +232,16 @@ func run(ctx context.Context, c config) error {
 		return err
 	case <-ctx.Done():
 	}
-	endRequests()
-	drain, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	stop, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	if err := server.Shutdown(drain); err != nil {
+	drain, cancelDrain := context.WithTimeout(stop, grace)
+	err := server.Shutdown(drain)
+	cancelDrain()
+	if err == nil {
+		return nil
+	}
+	endRequests()
+	if err := server.Shutdown(stop); err != nil {
 		_ = server.Close()
 		return err
 	}
