@@ -9,7 +9,7 @@
 #   image          the app image: build, ruff and mypy, container smoke, real-backend
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
 #                  frontend and Go trees that run against it; and the
-#                  `profile-fetch-image` job (#6625)
+#                  `profile-fetch-image` and `camera-image` jobs (#6625, #7328)
 #   docs_only      every changed path is a Markdown file under docs/: the lint,
 #                  frontend, agent, models, freshness and Go jobs skip, and only the
 #                  `markdown` job checks the change. False with `all` and on an
@@ -27,7 +27,7 @@ if [ "${1:-}" = all ]; then
 fi
 
 wiring='Dockerfile$|\.dockerignore$|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$'
-backend="^(backend/|models/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|workers/playwright-mcp/browser-vectors\.json$|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
+backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test-fixtures/|e2e-stack/|workers/rust/vectors/|workers/playwright-mcp/browser-vectors\.json$|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
 # agent-durable's tests read agent/ (fixtures, vectors) and the agent's migrations in
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"

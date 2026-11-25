@@ -1,0 +1,48 @@
+# MediaMTX in each camera recorder's pod (printer camera recording, phase 1). The recorder
+# process (`backend/scadbuddy/camera/recorder.py`) adds one path per recorded printer through
+# the control API, which listens on localhost only. Each path pulls the printer's stream from
+# the relay over RTSP with the relay read user, and records fMP4 segments under /segments
+# (a volume the two containers share). Keys:
+# https://raw.githubusercontent.com/bluenviron/mediamtx/main/mediamtx.yml
+#
+# MediaMTX calls the recorder's hook server (127.0.0.1:9091) with
+# `runOnRecordSegmentComplete`, which gets MTX_PATH, MTX_SEGMENT_PATH and MTX_SEGMENT_DURATION
+# (seconds, such as "4.8"). Measured 2026-11-24 UTC on bluenviron/mediamtx:1 (v1.21.4): the
+# hook fires once per finished segment, and once more for the last one when the stream stops;
+# MediaMTX logs no deprecation for it. MediaMTX names segment files in the container's local
+# time, so the pod runs with TZ=UTC (`RecorderSettings.check_environment` refuses another TZ).
+#
+# The recorder serves nothing: no RTSP, RTMP, HLS, WebRTC, SRT or MoQ listener.
+
+logLevel: info
+
+# The timeout of read operations, at MediaMTX's default: the v1.21.4 release's mediamtx.yml
+# (https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml). Pinned here, because
+# the recorder's `ADOPT_AGE` (12 s, backend/scadbuddy/camera/recorder.py) assumes that
+# MediaMTX closes a stalled source's file after 10 s.
+readTimeout: 10s
+
+api: yes
+apiAddress: 127.0.0.1:9997
+metrics: yes
+metricsAddress: 127.0.0.1:9998
+
+rtsp: no
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+moq: no
+
+authMethod: internal
+authInternalUsers:
+  # The recorder process, from localhost only: the control API and the metrics.
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+      - action: metrics
+
+# The recorder adds every path through the API, with the relay read password in its source.
+paths: {}

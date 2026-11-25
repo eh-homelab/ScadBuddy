@@ -1125,7 +1125,8 @@ _refuse(RemotePrinterStore, "PrinterStore", PRINTERS_API_ONLY)
 
 
 #: The retry budget of each CRUD call the printer watch makes between two heartbeats (a
-#: report's `put` or `touch`, a start's `settle_lan_ended`), and each try's timeout. A
+#: report's `put` or `touch`, a start's `settle_lan_ended`, the stored report's
+#: `watch_get` before an attempt follows its printer), and each try's timeout. A
 #: call ends within about their sum (a try started just before the budget ends runs its
 #: timeout), so a report's write and its settle take at most about 8 s, well inside the
 #: watch's 30 s heartbeat timeout (`workflows/printer_watch.py` `WATCH_HEARTBEAT`) with
@@ -1150,7 +1151,8 @@ class RemoteReports(PrinterReportStore):
     loop for as long as its connection lasts, so an activity's ordinal would not name
     one write. `touch` is natural: it never moves ``seen_at`` back. Only the watch writes
     (`advance`, `touch`), between two of its heartbeats, so each write is bounded by
-    `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, not the client's own budget."""
+    `WATCH_CALL_BUDGET` and `WATCH_CALL_TIMEOUT`, not the client's own budget. So is the
+    watch's one read (`watch_get`); `get` keeps the client's budget."""
 
     def __init__(self, client: CrudSyncClient) -> None:
         self._client = client
@@ -1210,6 +1212,14 @@ class RemoteReports(PrinterReportStore):
         if printer_uuid(printer_id) is None:
             return None
         body = self._client.request("GET", _report(printer_id)).json()
+        return None if body is None else (body["report"], datetime.fromisoformat(body["seen_at"]))
+
+    def watch_get(self, printer_id: str) -> tuple[dict[str, Any], datetime] | None:
+        if printer_uuid(printer_id) is None:
+            return None
+        body = self._client.request(
+            "GET", _report(printer_id), timeout=WATCH_CALL_TIMEOUT, budget=WATCH_CALL_BUDGET
+        ).json()
         return None if body is None else (body["report"], datetime.fromisoformat(body["seen_at"]))
 
     def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:

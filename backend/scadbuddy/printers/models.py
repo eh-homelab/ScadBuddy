@@ -110,6 +110,8 @@ class PrinterRow(BaseModel):
     #: new one failed: the next sync tries the move again (#4796). Any link made or
     #: removed clears it.
     lan_move_pending: bool = False
+    #: Whether the camera recorder may record this printer's camera (default on).
+    camera_recording: bool = True
     created_at: datetime
     updated_at: datetime
 
@@ -128,6 +130,7 @@ class PrinterPatch(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=80)
     preferred_path: PrintPath | None = None
+    camera_recording: bool | None = None
 
 
 class BambuddyLink(BaseModel):

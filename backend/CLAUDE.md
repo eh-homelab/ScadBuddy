@@ -1063,6 +1063,38 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
   `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
   Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
+- `backend/scadbuddy/camera/` — printer camera recording, phase 1 (#7328, plan
+  `docs/superpowers/plans/2026-11-23-printer-camera-recording.md`, feature page
+  `docs/features/printer-cameras.md`). Two processes, each beside its own MediaMTX in one pod,
+  neither with a database secret (`settings.py` refuses `FORBIDDEN_ENV` and
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`; the recorder also refuses a `TZ` other than `UTC`):
+  `python -m scadbuddy.camera.relay` (`relay.py`, CRUD caller `camera-relay`, the only part that
+  holds access codes; it gives MediaMTX one RTSPS pull per printer through the control API) and
+  `python -m scadbuddy.camera.recorder` (`recorder.py`, CRUD caller `camera`, two pods: leases,
+  upload before index, handover from the standby's buffer, the disk cap, the clock check
+  against the API's `Date` header: uvicorn refreshes it once a second, so a sample is Date + 1 s
+  against the middle of the call, ±1 s plus latency; the smallest of the last three samples more
+  than 2 s off refuses the start with exit 2 (three samples at start), and later fails
+  `/healthz` and puts an `error` on its feed reports). Both register `scadbuddy_camera_*`
+  metrics on prometheus_client's own registry, which `lint-dashboard.sh` reads.
+  `process.py` holds the hook server MediaMTX's `curl` hooks call (127.0.0.1:9091), `/healthz`,
+  `/readyz` and `/metrics` on 9090, and `main_with` (a `CameraRefusal` from `run` exits 2). `/healthz`
+  (`healthy`) answers 503 when MediaMTX's control API does not answer within 3 s, when its
+  runtime list lacks a path the controller put (`wanted()`: a MediaMTX-only restart), when the
+  change follower has stopped, or (recorder) when the clock is off. Before the follower
+  starts it answers 200 when MediaMTX answers and holds the paths and, in the recorder, the
+  clock is within 2 s: the follower does not count yet. `/readyz` answers 503 until the
+  follower runs, a full reconcile has put the paths and `/healthz` would pass; the recorder
+  also waits until every recorded printer has delivered a segment since start, or none for
+  `STALL_SECONDS` (120 s), so a rolling update (with `minReadySeconds: 30`) stops the other
+  recorder only once this one holds video. `follow.py` follows the filtered change stream,
+  `feed.py` sends feed states, `mediamtx.py` is the control API client, `uploads.py` the bucket
+  (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
+  digest). The API side is `store.py` (`CameraStore`: sources, leases, the index, feeds),
+  `models.py`, `api/crud_camera.py` and `api/crud_camera_relay.py`. MediaMTX's configs are
+  `deploy/camera/`; the images are the Dockerfile's `camera-relay` and `camera-recorder`.
+  Tests: `tests/camera/` (the real-MediaMTX e2e `test_e2e_mediamtx.py` needs MediaMTX and
+  ffmpeg, which the `test` stage has; locally it fetches the pinned MediaMTX itself).
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).

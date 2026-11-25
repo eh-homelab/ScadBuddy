@@ -21,7 +21,7 @@ filter that blocks every socket but `AF_UNIX`. Saving is a git commit.
 - Routes: `backend/scadbuddy/api/lsp.py:74` (WebSocket), `backend/scadbuddy/api/model_files.py`,
   `backend/scadbuddy/api/libraries.py:72`.
 - LSP bridge: `backend/scadbuddy/library/lsp.py:211`, `backend/scadbuddy/editor/nonet.py:3-6`.
-- Libraries: the `libraries` Dockerfile stage (`Dockerfile:829`),
+- Libraries: the `libraries` Dockerfile stage (`Dockerfile:955`),
   `backend/scadbuddy/library/library_seed.py`.
 
 ## Data

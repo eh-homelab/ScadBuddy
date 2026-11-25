@@ -8,7 +8,8 @@ are refused even where the ``ipaddress`` module calls them private. A host is an
 literal or an RFC 1123 name; a name is resolved and every address it resolves to must
 pass, and the caller connects to the address checked here, never to the name, so a
 second resolution cannot answer differently (DNS rebinding). `lan_address` is the one
-check, run at every connect: the link's probe, the watch, the upload and the print.
+check, run at every connect: the link's probe, the watch, the upload, the print and the
+camera relay's pull (`camera/relay.py` `_dialable`).
 """
 
 from __future__ import annotations
