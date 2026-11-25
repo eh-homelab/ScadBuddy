@@ -379,6 +379,14 @@ def test_a_report_without_ams_status_says_nothing_of_the_ams(report_h2c: LanRepo
     assert status.ams_status_main is None
     report = _with_print(report_h2c, ams_status="idle")
     assert status_from_report(row(), report, now=report.received_at).ams_status_main is None
+    report = _with_print(report_h2c, ams_status=-1)
+    assert status_from_report(row(), report, now=report.received_at).ams_status_main is None
+
+
+def test_a_numeric_string_ams_status_reads_as_a_number(report_h2c: LanReport) -> None:
+    """Other report numbers (``tray_now``) may come as strings; ``ams_status`` reads alike."""
+    report = _with_print(report_h2c, ams_status="768")
+    assert status_from_report(row(), report, now=report.received_at).ams_status_main == 3
 
 
 def test_each_tray_carries_its_cali_idx_and_k() -> None:
