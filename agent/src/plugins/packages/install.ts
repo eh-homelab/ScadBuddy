@@ -437,8 +437,12 @@ export class PackageInstaller {
       try {
         tree = await this.readMirror({ ...pin, mirrorSha256: pin.mirrorSha256 }, pkg)
       } catch (err) {
-        if (!(err instanceof PluginError || err instanceof UnpackError || err instanceof PackageContentError)) throw err
-        throw notReady(`its mirror failed its check (${err.message})`)
+        // Any failure to read the mirror (a refusal, a bad zip, a transport error) starts the
+        // job, so no load fails without one being started.
+        if (err instanceof PluginError || err instanceof UnpackError || err instanceof PackageContentError) {
+          throw notReady(`its mirror failed its check (${err.message})`)
+        }
+        throw notReady(`its mirror could not be read (${(err as Error).message})`)
       }
       // The pinned files themselves: a refusal here is the one git's copy would get too.
       if (options.vet !== false) await this.vetTree(tree, pkg, pin.name)
@@ -876,7 +880,8 @@ export class PackageInstaller {
 
   /**
    * One file of `pin`, for review (#1029, routes/pluginPackages.ts): read from the
-   * copy that hashes to the pin, fetched again when it does not, but never vetted
+   * copy that hashes to the pin, read again from the pin's mirror when it does not (a
+   * commit pin's from its recorded mirror, never git), but never vetted
    * for loading, since a package the rules refuse is the one that most needs reading.
    * `rel` must be a path in the pin's file list (the route checks). Runs in the
    * package's queue, so a prune cannot remove the copy mid-read.
@@ -900,12 +905,13 @@ export class PackageInstaller {
 
   /**
    * The header values `pin`'s http MCP servers declare (#5485, mcp.ts `declaredHeaderSecrets`),
-   * read from the copy that hashes to the pin, fetched again when there is none. Never vetted and
-   * never checked for address or listing size, so a package that fails to load still gives them:
-   * they stay secrets that every tool redacts and every upload refuses. Throws when no copy can
-   * be had (the fetch fails, or the files do not hash to the pin), so the secrets read fails
-   * closed; for `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without a
-   * fetch (a refusal, never an empty list), unless a copy that hashes to the pin is cached by
+   * read from the copy that hashes to the pin, read again from the pin's mirror when there is
+   * none. Never vetted and never checked for address or listing size, so a package that fails to
+   * load still gives them: they stay secrets that every tool redacts and every upload refuses.
+   * Throws when no copy can be had (no usable mirror, a commit pin's `MirrorNotReadyError`, or
+   * files that do not hash to the pin), so the secrets read fails closed; for
+   * `PACKAGE_SECRETS_FAILURE_MS` after, it throws the same error again without reading the
+   * mirror (a refusal, never an empty list), unless a copy that hashes to the pin is cached by
    * then, which ends the refusal at once. Runs in the package's queue.
    */
   headerSecrets(pin: PackagePin): Promise<string[]> {

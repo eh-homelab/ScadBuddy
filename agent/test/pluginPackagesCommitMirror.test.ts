@@ -153,6 +153,23 @@ describe.skipIf(gitMissing)('commit pin mirrors', () => {
     expect(warnings).toEqual([])
   })
 
+  it('starts the mirror job when the mirror read fails with a transport error', async () => {
+    const prepared = await installer.prepare(validateSource({ kind: 'git', url: URL }))
+    row = pinOf(prepared)
+    const get = mirror.get
+    mirror.get = () => Promise.reject(new TypeError('fetch failed'))
+    try {
+      const load = cold().materialise(row)
+      await expect(load).rejects.toBeInstanceOf(MirrorNotReadyError)
+      await expect(load).rejects.toThrow(/its mirror could not be read \(fetch failed\); a new one is being made in the background/)
+      expect(fetcher.checkouts).toEqual([])
+      expect(started).toEqual([mirrorWorkflowId({ name: 'greeter', commit: repo.commit, contentHash: prepared.contentHash })])
+    } finally {
+      mirror.get = get
+    }
+    await jobs.settled()
+  })
+
   it('leaves a pin with no mirror out, starts its job, and never fetches git on the load', async () => {
     const prepared = await installer.prepare(validateSource({ kind: 'git', url: URL }))
     mirror.kept.clear()

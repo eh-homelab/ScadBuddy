@@ -9,8 +9,9 @@ import type { PackageReview } from './vet.js'
 // 20261122T0323Z_plugin_package_pins.sql): the one authoritative record of an installed
 // plugin package. What is on disk (install.ts) is rebuilt from the pin, and used only when
 // it hashes to `content_hash`: a commit pin (`pin_kind` `commit`) from its recorded mirror
-// (`mirror_sha256`, #7907: a zip of its files in the API's area `package-mirrors`), else
-// from `fetch_url`, `fetch_path` and `commit_sha`; a bytes pin (`bytes`, #6935: an archive or npm package)
+// (`mirror_sha256`, #7907: a zip of its files in the API's area `package-mirrors`), never
+// from git: with no usable mirror the package is not loaded, and the mirror job
+// (mirrorJob.ts) fetches `fetch_url`, `fetch_path` and `commit_sha` and records one; a bytes pin (`bytes`, #6935: an archive or npm package)
 // from the mirrored file `bytes_sha256` (mirror.ts) and `fetch_path` inside it, never
 // from upstream; a version pin (`version`, #6934: a hosted plugin) from that published
 // version's zip, read over the API's CRUD area `hosted-plugins` (hosted.ts).
@@ -297,7 +298,7 @@ export const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 /**
  * A row as the API answers it: every column, its times as ISO text. An API of the build
  * before #6934 answers no `hosted_latest_version` (read as none: nothing shows as not offered),
- * and one before #7907 no mirror columns (read as none: a cold cache fetches the commit).
+ * and one before #7907 no mirror columns (read as none: the package is not loaded until the mirror job records one).
  */
 type WireRow = Omit<
   PackageRow,
