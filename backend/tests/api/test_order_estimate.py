@@ -11,11 +11,11 @@ from fastapi.testclient import TestClient
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import files_only
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import create_order
 from tests.api.test_outputs import _finished_job
 from tests.support.operations import press
+from tests.support.saved_outputs import rewrite_model
 
 ESTIMATE = "/api/v1/orders/estimate"
 BOOK = "/api/v1/orders/price-book"
@@ -23,28 +23,31 @@ BOOK = "/api/v1/orders/price-book"
 
 def output_of(client: TestClient, model: str, paths: DataPaths, *plates: list[Any]) -> str:
     """An output whose 3MF lays ``plates`` out, each a list of meshes."""
-    files_only(client)
     created: dict[str, Any] = client.post(
         f"/api/v1/models/{model}/outputs",
         json={"job_id": _finished_job(client, model)},
         headers=press(),
     ).json()
-    write_plates_3mf(
-        [
-            PlateParts(
-                tuple(
-                    ColourPart(1, f"Color {n}", "#FF0000", mesh)
-                    for n, mesh in enumerate(meshes, start=1)
-                ),
-                (1,),
-            )
-            for meshes in plates
-        ],
-        ["#FF0000"],
-        paths.output_dir(model, created["id"]) / "model.3mf",
-        thumbnails=None,
-    )
     output_id: str = created["id"]
+    rewrite_model(
+        client,
+        output_id,
+        lambda path: write_plates_3mf(
+            [
+                PlateParts(
+                    tuple(
+                        ColourPart(1, f"Color {n}", "#FF0000", mesh)
+                        for n, mesh in enumerate(meshes, start=1)
+                    ),
+                    (1,),
+                )
+                for meshes in plates
+            ],
+            ["#FF0000"],
+            path,
+            thumbnails=None,
+        ),
+    )
     return output_id
 
 

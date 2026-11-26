@@ -1183,27 +1183,6 @@ describe('CustomizePage', () => {
     expect(openSession).toHaveBeenCalledWith('sess-output')
   })
 
-  it('reopens from the 3MF alone when the output record is gone', async () => {
-    const id = 'd'.repeat(32)
-    server.use(
-      http.get('/api/v1/outputs/:id/edit', () =>
-        HttpResponse.json({
-          output_id: id,
-          slug: 'name-keychain',
-          name: null,
-          params: { name: 'Salvaged' },
-          model_version: `sha256:${'ab'.repeat(32)}`,
-          source: '3mf',
-        }),
-      ),
-    )
-    render(`/m/name-keychain?from=${id}`)
-    await waitFor(() =>
-      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Salvaged'),
-    )
-    expect(screen.getByText(`reopened from ${id.slice(0, 8)}`)).toBeInTheDocument()
-  })
-
   it('uses the target EditPage already resolved rather than fetching it again', async () => {
     const id = 'c'.repeat(32)
     let calls = 0

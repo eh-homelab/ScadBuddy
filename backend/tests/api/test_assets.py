@@ -33,6 +33,8 @@ from scadbuddy.worker import worker_deps_from_state
 from tests.api.conftest import wait_for_job
 from tests.conftest import MODEL_SLUG
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs
+from tests.support.saved_outputs import stored_bytes
 
 # The fake openscad exports `width` and `label` (initial "hi"); the annotation is
 # ScadBuddy's own overlay, so it turns `label` into a file parameter.
@@ -143,7 +145,9 @@ def test_uploads_need_a_model_and_ids_need_the_right_shape(client: TestClient) -
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/..%2Fx").status_code in (404, 422)
 
 
-def test_a_render_takes_an_uploaded_id(client: TestClient, paths: DataPaths) -> None:
+def test_a_render_takes_an_uploaded_id(
+    client: TestClient, paths: DataPaths, tmp_path: Path
+) -> None:
     asset = _upload(client, HEART_SVG)
     accepted = client.post(
         f"/api/v1/models/{MODEL_SLUG}/render", json={"params": {"label": asset["id"]}}
@@ -159,9 +163,10 @@ def test_a_render_takes_an_uploaded_id(client: TestClient, paths: DataPaths) -> 
         headers=press(),
     ).json()
     # The value IS the asset's hash, so the output's record and its 3MF name the bytes.
-    directory = paths.output_dir(MODEL_SLUG, output["id"])
-    assert json.loads((directory / "params.json").read_text()) == job["params"]
-    provenance = read_provenance(directory / "model.3mf")
+    assert app_outputs(client).params(output["id"]) == job["params"]
+    model = tmp_path / "model.3mf"
+    model.write_bytes(stored_bytes(client, output["id"]))
+    provenance = read_provenance(model)
     assert provenance is not None and provenance.params == job["params"]
     # And the asset outlives the job, for a re-render or "Customize this version".
     assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset['id']}").status_code == 200

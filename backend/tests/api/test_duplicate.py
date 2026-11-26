@@ -33,6 +33,7 @@ from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 from tests.support.temporal import WorkflowReaper
 
 #: How long `_a_sweep_run_from_now` waits before calling the Schedule broken.
@@ -182,20 +183,20 @@ def test_a_patch_cannot_set_the_upstream(client: TestClient, model: str) -> None
 def test_derived_state_is_not_copied(client: TestClient, paths: DataPaths) -> None:
     assert client.get(f"/api/v1/models/{BUILTIN}/schema").status_code == 200
     assert paths.model_schema_cache(BUILTIN).is_file()
-    (paths.outputs / BUILTIN / "deadbeef").mkdir(parents=True)
+    outputs = app_outputs(client)
+    insert_row(outputs, output_meta("d" * 32, BUILTIN))
     # What an earlier model of the new slug left behind.
-    stale_output = paths.outputs / "my-keychain" / "cafe"
-    stale_output.mkdir(parents=True)
+    insert_row(outputs, output_meta("c" * 32, "my-keychain"))
     paths.model_schema_cache("my-keychain").write_text("{}", encoding="utf-8")
     paths.model_revision_dir("my-keychain", "0" * 40).mkdir(parents=True)
 
     _duplicate(client, BUILTIN, "My keychain")
 
-    assert not (paths.outputs / "my-keychain").exists()
+    assert "my-keychain" not in outputs.rows.slugs()
     assert not paths.model_schema_cache("my-keychain").exists()
     assert not (paths.model_revisions / "my-keychain").exists()
     assert client.get("/api/v1/models/my-keychain/outputs").json() == []
-    assert (paths.outputs / BUILTIN / "deadbeef").is_dir()
+    assert outputs.rows.get("d" * 32) is not None
     assert not any(path.name.startswith(DUPLICATE_STAGING_PREFIX) for path in paths.cache.iterdir())
 
 
