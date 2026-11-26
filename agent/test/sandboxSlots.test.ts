@@ -416,6 +416,16 @@ describe("a slot's files come back to the session", () => {
     expect(await client.base()).toEqual(earlier)
   }, 60_000)
 
+  it("sets the base from a truncated manifest at a slot's start when the pod has none yet", async () => {
+    const client = new SandboxClient(await sandboxes.acquire(SESSION), signal())
+    await runInSandbox(call(), 'bash', `mkdir many && cd many && seq 1 ${MANIFEST_MAX_ENTRIES + 1} | sed 's/^/./' | xargs touch; echo s > seen.txt`, 60_000)
+    expect(await client.base()).toBeNull()
+    const { slot } = await startInSandbox(call(), 'bash', 'true', 10_000)
+    await drain(client, slot.id)
+    // No earlier base to keep: the truncated manifest's is the best there is, and a slot's writes need one.
+    expect(await client.base()).not.toBeNull()
+  }, 60_000)
+
   it('under the same caps as a foreground command', async () => {
     const { slot } = await startInSandbox({ ...call(), limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 } }, 'bash', 'head -c 100 /dev/zero > big.bin', 10_000)
     await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
