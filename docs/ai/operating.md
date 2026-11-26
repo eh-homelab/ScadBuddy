@@ -343,7 +343,13 @@ main on 2026-11-01:
   heartbeat) is placed again with a `restarted` continuation, on another replica when one
   is live. Once its message is in the transcript it resumes with "The agent service
   restarted during this turn…" (`RESTARTED_PROMPT`), naming the calls that had finished
-  as ToolCalls, so the model need not repeat them (spec §5.5).
+  as ToolCalls, so the model need not repeat them (spec §5.5). Before that, each call the
+  lost placement left with no result gets one in the transcript (#7874,
+  [`agent/src/sessions/restartedCalls.ts`](../../agent/src/sessions/restartedCalls.ts)): a
+  ToolCall's own result (the restarted placement waits up to 10 minutes for one that still
+  runs), else a result that says the service restarted while the call ran. A shutdown's cut
+  drops what Claude Code writes after its interrupt, "The user doesn't want to proceed with
+  this tool use…", so no call reads as refused by the user, and its ToolCalls are not cancelled.
 - **Working directory.** A turn's Claude Code runs in the session's directory on its
   worker, `<SCADBUDDY_SESSION_DIR>/<id>/`, a copy of the workspace that each placement
   fills (§13).

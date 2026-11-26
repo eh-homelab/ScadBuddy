@@ -301,7 +301,10 @@ opens every one and seals it again byte for byte).
   closes it and the activity returns `released`; once every held call is decided, the turn is
   placed again with a `parked` continuation that runs each approved call once (§5.4). A turn
   lost with its pod is placed again with a `restarted` continuation, which resumes with
-  `RESTARTED_PROMPT` once its message is in the transcript (§5.5). Every tool call
+  `RESTARTED_PROMPT` once its message is in the transcript (§5.5); before that, each call left
+  with no result gets one in the transcript (`sessions/restartedCalls.ts`, #7874: a ToolCall's own,
+  else "the service restarted while this call ran"), and a shutdown's cut drops what Claude Code
+  writes after its interrupt (`warm.ts` `seal`) and leaves its ToolCalls running. Every tool call
   of a turn on Temporal is a `ToolCall` workflow of its own, `session-<id>-call-<tool_use_id>`
   (`temporal/toolCall.ts`, `tools/activityProjection.ts`, plan Steps 9.2 and 9.3; the
   `tools_as_activities` switch is gone, Step 9.9), started with `requestEagerStart` on the turn's
