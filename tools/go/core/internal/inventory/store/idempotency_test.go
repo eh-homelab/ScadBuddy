@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -198,8 +199,12 @@ func TestARefusalIsRecorded(t *testing.T) {
 	pool := setup(t)
 	ctx := context.Background()
 	runs := 0
-	do := func(pgx.Tx) (int, any, error) {
+	do := func(tx pgx.Tx) (int, any, error) {
 		runs++
+		// What it wrote before it answered 409 does not commit.
+		if _, err := tx.Exec(ctx, `INSERT INTO store_test (v) VALUES ('partial')`); err != nil {
+			return 0, nil, err
+		}
 		return 409, map[string]any{"code": "lot_empty"}, nil
 	}
 	first, err := Write(ctx, pool, req("k", `{}`), do)
@@ -215,6 +220,9 @@ func TestARefusalIsRecorded(t *testing.T) {
 	}
 	if n := count(t, pool, `SELECT count(*) FROM crud_requests WHERE caller = 'inventory'`); n != 1 {
 		t.Fatalf("%d crud_requests rows", n)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM store_test`); n != 0 {
+		t.Fatalf("a 409 left %d rows", n)
 	}
 }
 
@@ -289,13 +297,13 @@ func TestABadActorWritesNothing(t *testing.T) {
 }
 
 // advisory lists the advisory locks that the session pid holds and waits for: the event log, or a key.
-func advisory(t *testing.T, pool *pgxpool.Pool, pid int32) (granted, waiting []string) {
-	t.Helper()
+// It returns an error rather than failing the test, since a write's goroutine calls it.
+func advisory(pool *pgxpool.Pool, pid int32) (granted, waiting []string, err error) {
 	rows, err := pool.Query(context.Background(),
 		`SELECT classid::bigint, objid::bigint, objsubid, granted FROM pg_locks
 		  WHERE locktype = 'advisory' AND pid = $1 ORDER BY 1, 2`, pid)
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -303,7 +311,7 @@ func advisory(t *testing.T, pool *pgxpool.Pool, pid int32) (granted, waiting []s
 		var sub int16
 		var ok bool
 		if err := rows.Scan(&class, &obj, &sub, &ok); err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
 		name := "key"
 		if sub == 1 && class == 0x53434144 && obj == 0x45564E54 {
@@ -315,7 +323,7 @@ func advisory(t *testing.T, pool *pgxpool.Pool, pid int32) (granted, waiting []s
 			waiting = append(waiting, name)
 		}
 	}
-	return granted, waiting
+	return granted, waiting, rows.Err()
 }
 
 // TestTheEventLogLockIsTakenFirst checks the lock order (core/pg_events.py "Lock order"): a
@@ -333,15 +341,18 @@ func TestTheEventLogLockIsTakenFirst(t *testing.T) {
 	}
 	pids := make(chan int32, 1)
 	done := make(chan error, 1)
-	runs := 0
+	var runs atomic.Int32
 	go func() {
 		_, err := Write(ctx, pool, req("k", `{}`), func(tx pgx.Tx) (int, any, error) {
-			runs++
-			granted, _ := advisory(t, pool, func() int32 {
-				var pid int32
-				_ = tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid)
-				return pid
-			}())
+			runs.Add(1)
+			var pid int32
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
+				return 0, nil, err
+			}
+			granted, _, err := advisory(pool, pid)
+			if err != nil {
+				return 0, nil, err
+			}
 			if !slices.Contains(granted, "event_log") || !slices.Contains(granted, "key") {
 				return 0, nil, errors.New("the write runs without both locks: " + strings.Join(granted, ","))
 			}
@@ -353,7 +364,10 @@ func TestTheEventLogLockIsTakenFirst(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var pid int32
-		err := pool.QueryRow(ctx, `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted LIMIT 1`).Scan(&pid)
+		err := pool.QueryRow(ctx, `SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+			AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+			AND classid = x'53434144'::bigint::oid AND objid = x'45564E54'::bigint::oid AND objsubid = 1
+			LIMIT 1`).Scan(&pid)
 		if err == nil {
 			pids <- pid
 			break
@@ -364,11 +378,14 @@ func TestTheEventLogLockIsTakenFirst(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	pid := <-pids
-	granted, waiting := advisory(t, pool, pid)
+	granted, waiting, err := advisory(pool, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(granted) != 0 || !reflect.DeepEqual(waiting, []string{"event_log"}) {
 		t.Fatalf("while it waits for the event log, the write holds %v and waits for %v", granted, waiting)
 	}
-	if runs != 0 {
+	if runs.Load() != 0 {
 		t.Fatal("the write ran before it held the event log")
 	}
 	if err := holder.Rollback(ctx); err != nil {

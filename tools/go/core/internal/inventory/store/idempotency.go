@@ -77,8 +77,14 @@ func (r *Refused) body() map[string]any {
 // row, as crud/idempotency.py idempotent_write does. It takes the key's lock, so a second
 // request with the key waits and then replays the first answer. A key stored with another
 // route or input is 422 idempotency-key-reused, and nothing runs. A *Refused from do is its
-// problem, recorded. Any other error from do records nothing, commits nothing and is
-// returned, so the caller (a Temporal activity) can run it again.
+// problem, recorded. An answer of 400 or more from do is recorded too, but what do wrote
+// does not commit, so a retry never replays a half-done write. Any other error from do
+// records nothing, commits nothing and is returned, so the caller (a Temporal activity) can
+// run it again.
+//
+// Go takes the event log's lock before the key's lock; Python's idempotent_write takes the
+// key's lock first. They never share a caller, so they meet only on a hashtext collision,
+// and then Postgres aborts one of the two as a deadlock (a retry).
 func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) (status int, body any, err error)) (Answer, error) {
 	digest, err := inputDigest(w.Input)
 	if err != nil {
@@ -119,7 +125,8 @@ func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) 
 	return answer, nil
 }
 
-// run is do in a savepoint, so a refusal rolls back what do wrote before it.
+// run is do in a savepoint, so a refusal (a *Refused, or a status of 400 or more) rolls back
+// what do wrote before it.
 func run(ctx context.Context, tx pgx.Tx, do func(pgx.Tx) (int, any, error)) (int, any, error) {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
@@ -135,6 +142,9 @@ func run(ctx context.Context, tx pgx.Tx, do func(pgx.Tx) (int, any, error)) (int
 	}
 	if err != nil {
 		return 0, nil, err
+	}
+	if status >= 400 {
+		return status, body, sp.Rollback(ctx)
 	}
 	return status, body, sp.Commit(ctx)
 }
