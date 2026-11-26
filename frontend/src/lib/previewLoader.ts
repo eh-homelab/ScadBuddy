@@ -12,28 +12,32 @@ function passes(error: unknown): boolean {
   return typeof response?.status === 'number' && PASSING.has(response.status)
 }
 
-/** Each URL's load that may still ask again: the timer of its wait, when one waits, and
- * whether it was stopped, which the try in flight reads when it fails. */
+/** Each URL's loads that may still ask again: each with the timer of its wait, when one
+ * waits, and whether it was stopped, which the try in flight reads when it fails. */
 interface Load {
   timer?: ReturnType<typeof setTimeout>
   stopped: boolean
   fail: () => void
 }
-const loads = new Map<string, Load>()
+const loads = new Map<string, Set<Load>>()
 
 /**
- * Stops ``url``'s load that may still ask again, whether it waits on its timer or its try is
- * in flight: it fails at once, and a try in flight that fails asks no more. So a viewer that
- * unmounts or moves to another URL never keeps asking for the old one. True when one was
- * stopped: the loader's cache then holds that failure, which the caller clears.
+ * Stops every load of ``url`` that may still ask again, whether it waits on its timer or its
+ * try is in flight: each fails at once, and a try in flight that fails asks no more. So a
+ * viewer that unmounts or moves to another URL never keeps asking for the old one. It stops
+ * another viewer's load of the same URL too: `useLoader` shares one load per URL between
+ * viewers, and the cache it fails is shared as well. True when one was stopped: the loader's
+ * cache then holds that failure, which the caller clears.
  */
 export function stopRetries(url: string): boolean {
-  const load = loads.get(url)
-  if (load === undefined) return false
+  const running = loads.get(url)
+  if (running === undefined) return false
   loads.delete(url)
-  load.stopped = true
-  clearTimeout(load.timer)
-  load.fail()
+  for (const load of running) {
+    load.stopped = true
+    clearTimeout(load.timer)
+    load.fail()
+  }
   return true
 }
 
@@ -55,7 +59,9 @@ export class PreviewLoader extends GLTFLoader {
       fail: () => onError?.(new Error(`The preview's load was stopped: ${url}`)),
     }
     const done = () => {
-      if (loads.get(url) === load) loads.delete(url)
+      const running = loads.get(url)
+      running?.delete(load)
+      if (running?.size === 0) loads.delete(url)
     }
     const attempt = () =>
       super.load(
@@ -78,7 +84,7 @@ export class PreviewLoader extends GLTFLoader {
           load.timer = setTimeout(attempt, delay)
         },
       )
-    loads.set(url, load)
+    loads.set(url, (loads.get(url) ?? new Set()).add(load))
     attempt()
   }
 }

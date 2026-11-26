@@ -46,6 +46,9 @@ dependencies = [
     # The labels PDF (#7157, R-7157-3): pages, text and a vector QR code in one library,
     # as Bambuddy's own `/inventory/labels` uses.
     "reportlab>=5.1,<6",
+    # The labels as PNG (#7216, R-7216-5): the PDF rasterised by PDFium, as Bambuddy's
+    # `/inventory/labels` does.
+    "pypdfium2>=5.15,<6",
 ]
 
 [build-system]
@@ -104,6 +107,11 @@ untyped_calls_exclude = ["trimesh"]
 # temporal-agent-harness ships no py.typed marker (0.6.0): its names are Any here.
 [[tool.mypy.overrides]]
 module = ["temporal_agent_harness", "temporal_agent_harness.*"]
+ignore_missing_imports = true
+
+# pypdfium2 ships no py.typed marker (5.15.2): its names are Any here (#7216).
+[[tool.mypy.overrides]]
+module = ["pypdfium2", "pypdfium2.*"]
 ignore_missing_imports = true
 
 # Harness tools and agents are declared with its (untyped) decorators.

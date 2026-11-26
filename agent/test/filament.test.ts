@@ -1027,6 +1027,8 @@ describe('filament location tools', () => {
     ['filament_location_get', 'read'],
     ['filament_printer_labels', 'read'],
     ['filament_label_templates', 'read'],
+    ['filament_label_sheet_upsert', 'write'],
+    ['filament_label_sheet_delete', 'write'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -1075,6 +1077,99 @@ describe('filament location tools', () => {
     await runTool(tool('filament_printer_labels'), {}, ctx())
     await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
     expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
+  })
+
+  it('saves a label sheet: POST without a sheet_id, PUT with one (#7216)', async () => {
+    const SHEETS = `${BACKEND}/api/v1/filament/label-sheets`
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const calls: unknown[] = []
+    server.use(
+      http.post(SHEETS, async ({ request }) => {
+        calls.push(['post', await request.json()])
+        return HttpResponse.json({ id: ROW, name: 'Avery', layout }, { status: 201 })
+      }),
+      http.put(`${SHEETS}/${ROW}`, async ({ request }) => {
+        calls.push(['put', await request.json()])
+        return HttpResponse.json({ id: ROW, name: 'Avery 2', layout })
+      }),
+    )
+    const added = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout }, ctx())
+    expect(firstText(added)).toEqual({ id: ROW, name: 'Avery', layout })
+    const edited = await runTool(tool('filament_label_sheet_upsert'), { sheet_id: ROW, name: 'Avery 2', layout }, ctx())
+    expect(firstText(edited)).toEqual({ id: ROW, name: 'Avery 2', layout })
+    const filled = { ...layout, col_gap_mm: 0, row_gap_mm: 0 }
+    expect(calls).toEqual([['post', { name: 'Avery', layout: filled }], ['put', { name: 'Avery 2', layout: filled }]])
+    expect(tool('filament_label_sheet_upsert').summarize?.({ name: 'Avery', layout } as never)).toBe('Save label sheet Avery')
+  })
+
+  it('surfaces a label sheet 409 and 404 answer, and refuses an out-of-bound input before a request (#7216)', async () => {
+    const SHEETS = `${BACKEND}/api/v1/filament/label-sheets`
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const sent: unknown[] = []
+    server.use(
+      http.post(SHEETS, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'label_sheet_name_taken' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+      http.put(`${SHEETS}/${ROW}`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Not Found', status: 404, detail: 'label_sheet_not_found' },
+          { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const taken = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout }, ctx())
+    expect(taken.isError).toBe(true)
+    expect(JSON.stringify(taken.content)).toContain('label_sheet_name_taken')
+    const missing = await runTool(tool('filament_label_sheet_upsert'), { sheet_id: ROW, name: 'Avery', layout }, ctx())
+    expect(missing.isError).toBe(true)
+    expect(JSON.stringify(missing.content)).toContain('label_sheet_not_found')
+    sent.length = 0
+    const refused = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout: { ...layout, cols: 21 } }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(sent).toEqual([])
+  })
+
+  it('trims a label sheet name before the length check and sends it trimmed (#7216)', async () => {
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const names: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/label-sheets`, async ({ request }) => {
+        names.push(((await request.json()) as { name: string }).name)
+        return HttpResponse.json({ id: ROW, name: 'x', layout }, { status: 201 })
+      }),
+    )
+    const name = 'a'.repeat(100)
+    const ok = await runTool(tool('filament_label_sheet_upsert'), { name: `${name} `, layout }, ctx())
+    expect(ok.isError).toBeFalsy()
+    expect(names).toEqual([name])
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: `${name}a`, layout }, ctx())).isError).toBe(true)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: '   ', layout }, ctx())).isError).toBe(true)
+    // 100 code points outside the BMP are 200 UTF-16 units; zod and the backend both count 100.
+    const wide = '\u{1F9F5}'.repeat(100)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: wide, layout }, ctx())).isError).toBeFalsy()
+    expect(names.at(-1)).toBe(wide)
+  })
+
+  it('says a deleted sheet makes the next print a 409 (#7216)', () => {
+    expect(tool('filament_label_sheet_delete').description).toContain('label_sheet_gone')
+    expect(tool('filament_label_sheet_delete').description).not.toContain('default size')
+  })
+
+  it('deletes a label sheet and reports its id (#7216)', async () => {
+    const calls: string[] = []
+    server.use(
+      http.delete(`${BACKEND}/api/v1/filament/label-sheets/${ROW}`, () => {
+        calls.push('delete')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const res = await runTool(tool('filament_label_sheet_delete'), { sheet_id: ROW }, ctx())
+    expect(firstText(res)).toEqual({ deleted: ROW })
+    expect(calls).toEqual(['delete'])
   })
 
   it('lists the label templates', async () => {

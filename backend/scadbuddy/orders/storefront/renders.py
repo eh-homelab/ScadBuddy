@@ -173,9 +173,9 @@ _ready: OrderedDict[str, None] = OrderedDict()
 READY_KEPT: Final = 4096
 #: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
 #: its files are taken as lost for the status and for the preview read (`preview_ready`):
-#: the status names the preview, whose read then goes on and says so at once (404), rather
-#: than the page polling a render that can never show. The
-#: estimate never takes lost files as there (`files_ready`). A count older than
+#: the status names the preview, whose read then goes on and says so within `READY_WAIT`
+#: (404), rather than the page polling a render that can never show. The estimate never
+#: takes lost files as there (`files_ready`). A count older than
 #: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
 _failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
 FETCH_TRIES: Final = 3
@@ -687,9 +687,10 @@ async def render_estimate(state: AppState, visitor_id: str, job_id: str) -> Stor
     `slice_estimate`). 404 ``render_not_found`` as `owned_job` says; 422
     ``estimate_unavailable`` for a job not done. ``pending`` while its files are fetched
     (#6120) or its slice runs; ``none`` when the listing is gone, its files are lost, a
-    colour of the render has no listing filament, the render made several outputs
-    (`one_output`), or it is of another design than the listing's now (`shows_design`,
-    #6370 review): the price is never of a design the visitor does not see."""
+    colour of the render has no listing filament, or it is of another design than the
+    listing's now (`shows_design`, #6370 review): the price is never of a design the
+    visitor does not see. A render of several outputs has one price over all of them
+    (#5701, spec 2026-11-17 §7.4), since the order renders and prints each one."""
     owned, job = await owned_job(state, visitor_id, job_id)
     if job.state != "done" or job.result is None:
         raise _unavailable("The price is ready once the render is done.")
@@ -716,11 +717,9 @@ async def estimate_of(
     a listing's prices (#6922, `prepare.py` `warm`) asks the same, so it starts its slices
     through the visitor's own path. ``pending`` with no ``price_key`` while its files are
     fetched. ``none``, with no slice started, for a render of another design than the
-    listing's now (`shows_design`), or of several outputs (`one_output`)."""
+    listing's now (`shows_design`)."""
     if not shows_design(listing, job.slug, job.model_version, job.inputs):
         # The shop moved the listing since this render: the page renders again.
-        return NO_PRICE
-    if not one_output(job):
         return NO_PRICE
     if not await _fetch(state, job):
         return NO_PRICE if files_lost(job.id) else pending()
@@ -733,14 +732,6 @@ async def estimate_of(
         variant_key=variant_key,
         listing_id=listing.id,
     )
-
-
-def one_output(job: Job) -> bool:
-    """Whether the first output of ``job`` is the whole render. The price of a pipeline's
-    render of several is built (`kit_digest`, `price_variant`) and no visitor gets it yet:
-    an order makes the first only, so the shop prices it by hand (#5701, spec 2026-11-17
-    §7.4)."""
-    return len(job.outputs) <= 1
 
 
 async def variant_of(

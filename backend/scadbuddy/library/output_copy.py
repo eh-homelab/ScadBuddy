@@ -171,8 +171,9 @@ def copy_outputs(
     The lock is a session lock on a connection of its own (``conninfo``), held for the
     whole run (up to `workflows.housekeeping.OUTPUT_COPY_TIMEOUT`, 15 minutes). It is
     not taken from the API's pool, so the pool's other users keep every connection
-    during a run. Closing the connection ends its session, which releases the lock,
-    also when the run fails.
+    during a run. The run releases the lock (`pg_advisory_unlock`) before it returns,
+    also when it fails, so `OutputRows.try_cut_over` called next finds it free (#7769).
+    Closing the connection releases it too when that unlock could not run.
 
     After the cut-over mark (#7257, plan D4) it does nothing and returns ``None``: the
     files are no longer the record, so a run would drop the row of a folder no write
@@ -194,11 +195,30 @@ def copy_outputs(
         if got is None or not got[0]:
             logger.info("another replica copies the saved outputs; this one does not")
             return None
-        # Again under the lock: the mark may have been written since the first check.
-        if rows.cut_over():
-            logger.info(CUT_OVER_NOTHING_TO_COPY)
-            return None
-        return _copy(store, rows, stop)
+        try:
+            # Again under the lock: the mark may have been written since the first check.
+            if rows.cut_over():
+                logger.info(CUT_OVER_NOTHING_TO_COPY)
+                return None
+            return _copy(store, rows, stop)
+        finally:
+            # Released here, not by the close: the server frees a closed session's locks a
+            # moment later, and the cut-over's check of both locks may come first (#7769).
+            # A dropped connection's unlock fails; the server freed the lock with the
+            # session, and the run's own outcome must come through.
+            try:
+                freed = lock.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (COPY_LOCK,)
+                ).fetchone()
+            except psycopg.Error as e:
+                logger.warning(
+                    "the output copy's lock could not be released; its closed session frees it",
+                    extra={"error": type(e).__name__},
+                )
+            else:
+                # False, not an error, when this session did not hold it (#7823).
+                if freed is None or freed[0] is not True:
+                    logger.warning("the output copy's unlock found its lock not held")
 
 
 def _has_meta(directory: Path) -> bool:

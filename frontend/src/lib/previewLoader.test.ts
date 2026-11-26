@@ -93,4 +93,17 @@ describe('PreviewLoader (#6968)', () => {
     await vi.waitFor(() => expect(loaded).toHaveBeenCalledTimes(1))
     expect(stopRetries(URL_)).toBe(false)
   })
+
+  it('stops every load of the URL', async () => {
+    const fetched = answers(refusal(503))
+    const first = load()
+    const second = load()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => expect(fetched).toHaveBeenCalledTimes(2))
+    expect(stopRetries(URL_)).toBe(true)
+    expect(first.failed).toHaveBeenCalledTimes(1)
+    expect(second.failed).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(fetched).toHaveBeenCalledTimes(2)
+  })
 })

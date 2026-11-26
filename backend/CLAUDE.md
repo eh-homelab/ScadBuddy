@@ -127,8 +127,10 @@ headless saves no form data to find: it needs a `DISPLAY` (`xvfb-run -a`, as CI'
 `profile-fetch-image` job runs it) and skips without one unless that variable is set.
 Playwright is pinned exactly in the
 `profile-fetch` dependency group, which `dev` includes.
-Under pytest-xdist each worker makes its schemas in a database of its own
-(`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
+Under pytest-xdist each worker works in databases of its own: `<test db>_gw<N>`
+(`tests/conftest.py::_pg_database_url`), one migrated template made from it
+(`_pg_template`), and a clone of that template per test (`pg_conninfo`; an empty database
+for a test marked `pg_empty`), all named after `<test db>_gw<N>`. That is
 because advisory locks and NOTIFY channels are per database: workers sharing one would
 serialise every `migrate` and hear each other's events. So the test role needs
 `CREATEDB` (the `postgres` superuser above has it). Each worker also starts its own
@@ -177,7 +179,7 @@ an app whose renders never run uses `tests.conftest.UNUSED_TEMPORAL_ADDRESS`.
 `tests/api` renders on Temporal too, and skips without one: one dev server per session
 (`tests/api/conftest.py::temporal_address`), and each test's app runs its own in-process
 worker on a task queue of its own (the api `settings` fixture), because every test has
-its own data directory and schema. The render is the real pipeline behind the fake
+its own data directory and database (a clone of the migrated template, `pg_conninfo`). The render is the real pipeline behind the fake
 openscad (`FAKE_3MF`, `FAKE_STDERR` in `fake-env.json`; `width=999` fails). Every
 test's queue registers with one worker-deployment version, so the dev server raises
 `matching.maxTaskQueuesInDeploymentVersion` past Temporal's default of 100 (past it,
@@ -1198,9 +1200,58 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   setting `filament_label_template` and the PDF body's `template`), `labels.py` `pdf_labels`
   (the labels from SB's rows; a place label needs `label_base_url`, else 409 `no_label_base`,
   never the request's host) and `label_pdf.py` (ReportLab: the browser label's lines and a vector
-  QR code, Helvetica, Latin-1 only). Routes `GET /filament/label-templates` and `POST
-  /filament/labels` (the PDF as the body, at most 100 labels; in `NOT_NUDGED`). Agent tools: `filament_code_resolve`, `filament_location_get`,
-  `filament_printer_labels` and `filament_label_templates` (all `read`); the PDF route has none
+  QR code; its text in `label_fonts.py`, below). Routes `GET /filament/label-templates` and `POST
+  /filament/labels` (route `render_labels`: the file as the body, at most 100 labels; in
+  `NOT_NUDGED`). The labels as PNG (#7216, plan
+  `docs/superpowers/plans/2026-11-25-label-outputs.md` R-7216-5 to R-7216-8):
+  `label_output.py` `LabelOutput` (`format` `pdf` or `png`, `dpi` 203, 300 or 600, and the
+  spool label's `fields`), the stored-only setting `filament_label_output`, which a body's
+  own `format`, `dpi` and `fields` outrank. The fields (R-7216-9, R-7216-10): `LabelField`,
+  `ALL_FIELDS` (`number`, `material`, `colour`, `hex`, `brand`, `location`, `temps`, `weight`,
+  `note`, `added`, `qr`, the order the lines print; a validator puts any list in it and
+  refuses none or a repeat), `DEFAULT_FIELDS` (`number`, `material`, `colour`, `brand`, `qr`,
+  what labels printed before); `labels.py` `pdf_labels` fills each value (`temps_text`;
+  `added` is the row's `created_at` day in UTC). `label_pdf.py` `fit_lines` drops the last
+  lines while the block is taller than the label less 2 x `PAD_MM`, from line heights only
+  (`NUMBER_MM`, `CODE_MM`, `FIELD_MM`, `LEADING`, `BIG_LEADING`, `GAP_MM`; the big text
+  counted at its full size), never a chosen number or a place's code; the browser label
+  (`frontend/src/components/filament/labelSheet.ts` `fitLines`) must use the same values:
+  `test-fixtures/filament/label-fit-vectors.json` holds them and fit cases, and
+  `tests/filament/test_label_fit_vectors.py` and the frontend's `labelFitVectors.test.ts` check
+  both sides against it (R-7216-19).
+  With no `qr` the text column starts at `QUIET_MM`. Place labels ignore the fields.
+  `label_png.py` rasterises the PDF with pypdfium2, every
+  PDFium call under one process lock (`_PDFIUM_LOCK`: PDFium is not thread-safe), a request's
+  on the one-thread executor `_PDFIUM` (`rasterise`, R-7216-20), so a request that waits for
+  PDFium holds no worker of the shared `to_thread` pool; each page a
+  greyscale PNG that carries its dpi. One page answers `labels.png` (`image/png`), more
+  pages `labels.zip` (`application/zip`, stored, every entry dated 1980-01-01; a roll's
+  entries `spool-<number>.png` and `L-<n>.png`, a sheet's `sheet-<n>.png`). `png_pixels`
+  counts every page before anything is drawn: past `MAX_PNG_PIXELS` (400 megapixels) the
+  route answers 422 `png_too_large`. The text (#7216 R-7216-1 to R-7216-4): `label_fonts.py`
+  draws each line as runs of one font each, DejaVu Sans (`DEJAVU`), else the first font of the
+  Noto chain `FALLBACKS` in `FALLBACK_DIR` that holds the character, else U+FFFD from DejaVu;
+  each font is loaded and registered with ReportLab once per process, when a character needs
+  it, and embedded as a subset; `label_pdf.py` measures every width through
+  `label_fonts.width_mm`. A missing DejaVu file is `LabelFontMissingError`, which the route
+  answers 503 `label_font_missing`, never Helvetica; a missing Noto file is skipped and logged
+  once. No shaping, no right-to-left order and no CJK font: #7707. The tests read the text back
+  with pypdfium2; a test that needs a Noto file skips when it is absent, and fails instead with
+  `SCADBUDDY_TEST_FONTS_REQUIRED=1`, which CI's `backend-pytest` sets (the `test` image has
+  `fonts-noto-core`). Saved sheet grids (#7216 R-7216-11 to R-7216-13): `label_sheets.py`
+  (`LabelSheetStore`, the API's own table `label_sheets`, through `Filament.label_sheets` on the
+  filament pool; `SheetLayout` holds the bounds and the fit on the page; a name is unique by
+  `name_key`, NFC then casefold, a unique index; a create counts and inserts under a
+  transaction advisory lock, at most `MAX_SAVED_SHEETS`). `LabelTemplateChoice` takes
+  `template` `saved` with `sheet_id`, and `resolve` reads the row once per labels request, so
+  the PDF and the PNG use one grid and an edit applies to the next print; a deleted sheet is
+  409 `label_sheet_gone`. Routes `POST /filament/label-sheets`, `PUT` and `DELETE
+  /filament/label-sheets/{sheet_id}` (409 `label_sheet_name_taken`, `too_many_label_sheets`;
+  in `NOT_NUDGED`); `GET /filament/label-templates` lists them as `saved`. Agent tools:
+  `filament_code_resolve`, `filament_location_get`,
+  `filament_printer_labels` and `filament_label_templates` (all `read`), and
+  `filament_label_sheet_upsert` and `filament_label_sheet_delete` (`write`, #7216
+  R-7216-14); the PDF route has none
   (`agent/src/tools/coverage.ts` `NOT_A_TOOL`, R-7157-10).
 - `backend/scadbuddy/codes/` — typed label codes (#6955). `parse.py` `parse_code` and `format_code`
   (`L-12`, `S-142`; any case, dash optional, at most 10 digits, number 1 to 2^31-1), `resolve.py` `PREFIXES`
@@ -1844,7 +1895,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  none matching (`ensure_output` over `rendering.py` `outputs_for_reference`, its first output, #5701 PR 5; #6324: a
   `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
   no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
@@ -1890,7 +1941,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `order_item_render` kind of `operations.py` on the `library` queue (`POST
   /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
   quote's refusals; the output saved under `render_output_id`, one per operation), which
-  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  renders the item's reference and sets the output on it, and saves every later output of a
+  pipeline's render under `kit_output_id` (#5701 PR 5, `outputs_for_reference`). "Slice…" on an item with a design
   and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
   `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
@@ -2537,10 +2589,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,
   one slot across the outputs), `kit_digest` (every output's 3MF), each output saved under
   `storefront_output_id(render_key, index)` and sliced whole with its own slots' presets, and
-  one `price_plates` over every plate (`slice_and_price`'s `place`). No visitor gets that
-  price until #5701's PR 5, whose order makes every output: `renders.py` `one_output` refuses
-  it on every path. A pipeline's cart line needs its row's `every_output`. A file listing has
-  no `inputs`.
+  one `price_plates` over every plate (`slice_and_price`'s `place`). Every path gives that
+  price, since the order makes every output (#5701 PR 5): the item's render
+  (`order_item_render`) and its slice quote (`ensure_output`) save each later output under
+  `orders/rendering.py` `kit_output_id(<the item's output>, index)`, `kit_output_ids` finds
+  them by that id and the job (`ItemDetail.kit_outputs`), and the item's print refuses a kit
+  (409 `item_kit`; also by the output's render job while it lasts, `kit_count`, which the
+  order read gives as `ItemDetail.kit_count`), whose outputs the order page prints one by one. A pipeline's cart line needs its row's
+  `every_output`. A file listing has no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`
@@ -2617,7 +2673,10 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   §7.4): a sha256 of the file the slice reads (the render's 3MF content, or a file
   listing's pinned sha256), the subject's kind (`key_subject`), the price-book filament per
   slot (its slot, id, material, cost, colour, and its type's preset it is sliced with), the
-  profile, the choices, the remembered setup (`key_setup`), and the
+  profile, the choices, the remembered setup (`key_setup`; for a render also the template's
+  own `print_settings` and `part_print_settings`, each only when not empty, read once in
+  `planned_variant` and carried to the run as `SliceVariant.template_settings`, which the
+  slice takes in place of a live read, #7633), and the
   book's policy and the live machine rate that prices it (`for_quote` through `live_rate`,
   read again at most once a minute per process, `RATE_TTL`, and carried to the run,
   `SliceVariant.machine_rate`). Any change is a new

@@ -38,6 +38,7 @@ expect "false true false false false" .github/scripts/uv-git-pin.sh
 expect "false true false false false" .github/scripts/harness-pin.test.sh
 expect "false false true false false" workers/rust/crates/sb-slicer/src/lib.rs
 expect "false false false true false" frontend/src/main.tsx
+expect "false false false true false" deploy/cups/start.sh
 expect "false false false true false" scripts/gen-api-request-defaults.mjs
 expect "false false false false false" scripts/generate-go-client.sh
 expect "false false false true false" tools/go/bambuddy-fs/main.go

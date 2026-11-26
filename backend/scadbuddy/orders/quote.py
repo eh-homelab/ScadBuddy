@@ -84,7 +84,8 @@ from scadbuddy.orders.rendering import (
     AttachTo,
     OutputsRead,
     Renders,
-    output_for_reference,
+    kit_output_id,
+    outputs_for_reference,
     reference_matches,
 )
 from scadbuddy.orders.store import OrderStore
@@ -95,6 +96,7 @@ from scadbuddy.store.content_models import BlobScope
 from scadbuddy.store.refs import BlobRefs
 
 if TYPE_CHECKING:
+    from scadbuddy.bambuddy.output_reader import TemplateSettings
     from scadbuddy.orders.storefront.held_file import HeldFile
 
 __all__ = ["FOLLOW_EVERY", "QUOTE_TIMEOUT", "OutputsRead", "Renders"]
@@ -520,20 +522,25 @@ async def ensure_output(
     saved_as: str | None = None,
     carried: Mapping[int, str] | None = None,
 ) -> str:
-    """The output the item slices (Ruling 7): ``orders/rendering.py``
-    :func:`output_for_reference` of the item's reference, set on the item. ``schema`` is
+    """The output the item slices (Ruling 7): the first of ``orders/rendering.py``
+    :func:`outputs_for_reference` of the item's reference, set on the item. Each later
+    output of a pipeline's render is saved under :func:`kit_output_id` of it (#5701 PR 5),
+    as the item's render saves them, so the order knows the item for a kit
+    (:func:`kit_output_ids`) whichever of the two rendered it. ``schema`` is
     the reference commit's. With ``revision_id`` (the quote's run) the render is of that
     revision: once the item has another, nothing is written and the run is refused
     `revision_not_newest`. ``saved_as`` is the id a new output is saved under
     (:func:`operation_output_id`, #5390). ``carried`` (#4673, a slice's new design) are
     the filaments the item had pinned before that revision."""
-    rendered = await output_for_reference(
+    first_id = saved_as or uuid.uuid4().hex
+    [rendered, *_] = await outputs_for_reference(
         reference_of(item),
         outputs=outputs,
         renders=renders,
         create_output=create_output,
         name=f"{order.label} {item.title}",
-        saved_as=saved_as,
+        saved_as=lambda _index: first_id,
+        later_as=kit_output_id,
         schema=schema,
         follow_every=follow_every,
         item=AttachTo(
@@ -579,9 +586,12 @@ class Slicer(Protocol):
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         """Every plate of an output. A slot in ``slot_presets`` has no spool and is
-        sliced with its filament type's preset (a storefront price, #6574)."""
+        sliced with its filament type's preset (a storefront price, #6574). With
+        ``template_settings`` (a storefront price, #7633), the slice takes those in place
+        of the template's settings as they are now."""
         ...
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:

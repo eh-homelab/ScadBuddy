@@ -251,7 +251,6 @@ export function Preview({
   const platesOfJob = plateIndices.length
   const alone =
     chosen && job && chosen.jobId === job.id && plateIndices.includes(chosen.plate) ? chosen.plate : null
-  // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
   // A retry still waiting for the mesh on screen stops when the view moves to another URL
   // or unmounts, and its failure is dropped from the loader's cache (#6968).
   const shownUrl = shown?.url
@@ -261,6 +260,7 @@ export function Preview({
     },
     [shownUrl],
   )
+  // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
   const [plateFailed, setPlateFailed] = useState<{ jobId: string; plate: number }>()
   // Another job's is hidden by its id already; dropped too, so none outlives its job.
   if (plateFailed && plateFailed.jobId !== job?.id) setPlateFailed(undefined)
