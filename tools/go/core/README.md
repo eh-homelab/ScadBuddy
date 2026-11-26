@@ -131,6 +131,9 @@ Core sends OpenTelemetry traces, metrics and logs over OTLP/HTTP, set up by the 
 | `OTEL_TRACES_SAMPLER`, `…_ARG` | Replace the default sampler, which is the API's: a client span with no parent (a query from a background loop) is dropped |
 | `OTEL_EXPORTER_OTLP_HEADERS`, `…_TIMEOUT`, `…_CERTIFICATE`, `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_BSP_*`, `OTEL_BLRP_*` | As the SDK reads them |
 
+A setting telemetry cannot use (such as a malformed endpoint URL) is logged once as
+"telemetry is off", and core runs with every signal off; it never stops core.
+
 - **Traces.** Each request on both listeners is a server span, a child of the `traceparent` it
   carries. A route Go answers names it as the API's FastAPI spans are (`GET
   /api/v1/internal/crud/agent/sessions/{session_id}/events/last-seq`) and sets `http.route`;

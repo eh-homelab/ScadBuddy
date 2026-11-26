@@ -62,8 +62,10 @@ func realMain(args []string, getenv func(string) string, stderr io.Writer) int {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	tel, err := telemetry.Start(telemetry.Options{ServiceName: serverName})
 	if err != nil {
-		slog.Error("fleet stopped", "err", "telemetry: "+err.Error())
-		return 1
+		// A bad OTEL_* variable turns telemetry off, as a collector outage does, and never
+		// stops the server.
+		slog.Error("telemetry is off", "reason", err.Error())
+		tel = &telemetry.Telemetry{}
 	}
 	// The JSON on stderr stays, for kubectl logs; with logs on, each record also goes over
 	// OTLP, and a record logged inside a request carries its trace_id and span_id.

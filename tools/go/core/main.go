@@ -82,8 +82,10 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	tel, err := telemetry.Start(telemetry.Options{ServiceName: serviceName, DropParentlessClients: true})
 	if err != nil {
-		slog.Error("scadbuddy-core stopped", "error", "telemetry: "+err.Error())
-		os.Exit(1)
+		// Core is the API pod's front: a bad OTEL_* variable turns telemetry off, as a
+		// collector outage does, and never takes the API down.
+		slog.Error("telemetry is off", "reason", err.Error())
+		tel = &telemetry.Telemetry{}
 	}
 	// The JSON on stderr stays, for kubectl logs; with logs on, each record also goes over
 	// OTLP, and a record logged inside a request carries its trace_id and span_id.

@@ -16,6 +16,8 @@ variables; with no endpoint every signal is off. Each request it serves is a SER
 exchange) a CLIENT span whose traceparent core continues, and the Go runtime and process
 are measured. Its JSON log lines stay on stderr; with logs on, each also goes over OTLP
 without its path, error or credential fields.
+A setting telemetry cannot use (such as a malformed endpoint URL) is logged as
+"telemetry is off", and the server runs with every signal off.
 
 ## Package `sbfleet`
 

@@ -12,7 +12,9 @@
 //! for what the SDK and the tracing bridge record on their own. The scrub cannot see a
 //! tracing event's formatted message (it becomes the span event's name), so no call site
 //! may interpolate a value into a log message; values go in fields, which it can drop. A
-//! log record carries the same fields the stdout line does.
+//! log record carries the same fields the stdout line does, but an event with a field the
+//! spans drop (an `error`, a URL, a path) is not exported as a log record at all
+//! ([`exportable`]): it stays on stdout only.
 
 mod process;
 
@@ -494,9 +496,7 @@ mod tests {
         assert_eq!(transport(&traces_grpc, LOGS), Transport::Http);
     }
 
-    /// A span, a process metric and a log record inside the span, through in-memory
-    /// exporters: the record carries the span's trace and span ids, and so does the
-    /// stdout line.
+    /// An event with an `error` or a URL field stays on stdout; only a clean one goes out.
     #[test]
     fn a_log_event_with_an_error_or_a_url_does_not_go_out_over_otlp() {
         use opentelemetry_sdk::logs::InMemoryLogExporter;
@@ -527,6 +527,9 @@ mod tests {
         );
     }
 
+    /// A span, a process metric and a log record inside the span, through in-memory
+    /// exporters: the record carries the span's trace and span ids, and so does the
+    /// stdout line.
     #[test]
     fn a_span_a_process_metric_and_a_log_record_that_carries_the_trace_id() {
         use std::sync::{Arc, Mutex};

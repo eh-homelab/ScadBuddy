@@ -139,6 +139,32 @@ func TestALogRecordCarriesItsTrace(t *testing.T) {
 	}
 }
 
+func TestTheTraceIDsStayAtTheTopUnderAGroup(t *testing.T) {
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	var stderr bytes.Buffer
+	var off *Telemetry
+	logger := slog.New(off.LogHandler(slog.NewJSONHandler(&stderr, nil), "test", nil)).
+		With("a", 1).WithGroup("g").With("b", 2)
+
+	ctx, span := tp.Tracer("t").Start(t.Context(), "s")
+	logger.InfoContext(ctx, "hello", "c", 3)
+	span.End()
+
+	var line map[string]any
+	if err := json.Unmarshal(stderr.Bytes(), &line); err != nil {
+		t.Fatalf("stderr %q: %v", stderr.String(), err)
+	}
+	if line["trace_id"] != span.SpanContext().TraceID().String() ||
+		line["span_id"] != span.SpanContext().SpanID().String() || line["a"] != 1.0 {
+		t.Fatalf("stderr %v", line)
+	}
+	group, _ := line["g"].(map[string]any)
+	if group["b"] != 2.0 || group["c"] != 3.0 || group["trace_id"] != nil {
+		t.Fatalf("group %v", group)
+	}
+}
+
 func TestWithLogsOffOnlyStderrIsWritten(t *testing.T) {
 	var stderr bytes.Buffer
 	var off *Telemetry

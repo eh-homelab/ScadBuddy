@@ -18,7 +18,7 @@ import (
 // function, which may call DefaultKeep. Whatever keep says, a URL with credentials never
 // reaches OTLP, in an attribute or in the message. Base gets everything.
 func (t *Telemetry) LogHandler(base slog.Handler, name string, keep func(slog.Attr) bool) slog.Handler {
-	h := slog.Handler(&traceIDs{base})
+	h := slog.Handler(&traceIDs{Handler: base})
 	if t != nil && t.Logs != nil {
 		if keep == nil {
 			keep = DefaultKeep
@@ -92,22 +92,55 @@ func (k *kept) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (k *kept) WithGroup(name string) slog.Handler { return &kept{k.Handler.WithGroup(name), k.keep} }
 
-// traceIDs adds the context's trace_id and span_id to each record.
-type traceIDs struct{ slog.Handler }
+// traceIDs adds the context's trace_id and span_id to each record, at the top level of the
+// line even under WithGroup: it keeps the handler as it was before its first group, and,
+// for a record inside a span, adds the ids there and replays the attrs and groups since.
+type traceIDs struct {
+	slog.Handler
+	root  slog.Handler                      // the handler before the first group, or nil
+	since []func(slog.Handler) slog.Handler // the WithAttrs and WithGroup calls after it
+}
 
 func (h *traceIDs) Handle(ctx context.Context, r slog.Record) error {
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		r = r.Clone()
-		r.AddAttrs(slog.String("trace_id", sc.TraceID().String()), slog.String("span_id", sc.SpanID().String()))
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return h.Handler.Handle(ctx, r)
 	}
-	return h.Handler.Handle(ctx, r)
+	ids := []slog.Attr{slog.String("trace_id", sc.TraceID().String()), slog.String("span_id", sc.SpanID().String())}
+	if h.root == nil {
+		r = r.Clone()
+		r.AddAttrs(ids...)
+		return h.Handler.Handle(ctx, r)
+	}
+	out := h.root.WithAttrs(ids)
+	for _, step := range h.since {
+		out = step(out)
+	}
+	return out.Handle(ctx, r)
 }
 
 func (h *traceIDs) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &traceIDs{h.Handler.WithAttrs(attrs)}
+	next := &traceIDs{Handler: h.Handler.WithAttrs(attrs), root: h.root}
+	if h.root != nil {
+		next.since = append(h.since[:len(h.since):len(h.since)], func(x slog.Handler) slog.Handler { return x.WithAttrs(attrs) })
+	}
+	return next
 }
 
-func (h *traceIDs) WithGroup(name string) slog.Handler { return &traceIDs{h.Handler.WithGroup(name)} }
+func (h *traceIDs) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	root := h.root
+	if root == nil {
+		root = h.Handler
+	}
+	return &traceIDs{
+		Handler: h.Handler.WithGroup(name),
+		root:    root,
+		since:   append(h.since[:len(h.since):len(h.since)], func(x slog.Handler) slog.Handler { return x.WithGroup(name) }),
+	}
+}
 
 // fanout gives each record to both handlers that want its level.
 type fanout struct{ a, b slog.Handler }

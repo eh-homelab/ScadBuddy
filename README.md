@@ -2244,10 +2244,12 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   protocol is `http/protobuf` unless `OTEL_EXPORTER_OTLP_PROTOCOL` (or the signal's own
   variable) says `grpc`. The metrics are cumulative and include the process's own:
   `process.cpu.time`, `process.memory.usage`, `process.unix.file_descriptor.count` and
-  `process.uptime`. Every `tracing` event is also a log record, and a record or a
-  stdout JSON line logged inside a span carries its `trace_id` and `span_id`. On exit it
-  flushes the three providers within 5 s, after the shutdown grace below. A log record
-  carries the same fields as the stdout line; only spans pass the scrub.
+  `process.uptime`. Every `tracing` event at `info` or above is also a log record, except
+  an event with a field the spans drop (`error`, a URL, a path), which stays on stdout
+  only; a record or a stdout JSON line logged inside a span carries its `trace_id` and
+  `span_id`. On exit it flushes the three providers within 5 s, after the shutdown grace
+  below. A log record that goes out carries the same fields as the stdout line; spans
+  pass the scrub.
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
   details are always one `{"exit_code", "stderr_tail", "errors"}` object, `errors`
