@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -41,9 +41,11 @@ from scadbuddy.filament.suppliers import SuppliersStore
 from scadbuddy.filament.types import SpoolTypeStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.component import Printers
+from scadbuddy.printers.lan_command_models import LanCommandRun
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.spools.activities import filament_rfid_activity
+from scadbuddy.workflows.lan_command import LanCommandAnswer, LanCommandKind
 from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -108,6 +110,31 @@ def _printers(pool: PgPool) -> Printers:
         Printers,
         SimpleNamespace(store=PrinterStore(pool, None), reports=PrinterReportStore(pool)),
     )
+
+
+class _NoLan:
+    """A `LanCommandSender` no test here reaches: no printer here is linked over the LAN,
+    so the slot step sends nothing (`test_rfid_slots.py` covers it)."""
+
+    async def run(
+        self,
+        printer_id: str,
+        run: LanCommandRun,
+        *,
+        kind: LanCommandKind,
+        key: str | None = None,
+    ) -> LanCommandAnswer:
+        raise AssertionError("no LAN command is sent here")
+
+
+def _rfid_activity(
+    printers: Printers,
+    filament: Filament,
+    load: Callable[[], StoredSettings],
+    sync: Callable[[], FilamentSync],
+) -> Callable[[], Any]:
+    """`filament_rfid_activity` with no LAN link and no slicer profiles."""
+    return filament_rfid_activity(printers, filament, load, sync, _NoLan(), lambda: None)
 
 
 def _pending(pool: PgPool) -> list[dict[str, object]]:
@@ -436,7 +463,7 @@ async def test_the_activity_answers_failed_and_never_raises(pg_pool: PgPool) -> 
     f = _filament(pg_pool)
     _bind(f, _spool(f, pg_pool, 11), uid=UID)
     on = lambda: FilamentSync(tags="sb_to_bb")  # noqa: E731
-    run = filament_rfid_activity(_printers(pg_pool), f, _settings, on)
+    run = _rfid_activity(_printers(pg_pool), f, _settings, on)
 
     respx.get(f"{API}/inventory/spools/by-tag").mock(side_effect=httpx.ConnectError("down"))
     assert await run() == "failed"  # a tag failed: the report counts it
@@ -444,7 +471,7 @@ async def test_the_activity_answers_failed_and_never_raises(pg_pool: PgPool) -> 
     def broken() -> FilamentSync:
         raise RuntimeError("settings are gone")
 
-    assert await filament_rfid_activity(_printers(pg_pool), f, _settings, broken)() == "failed"
+    assert await _rfid_activity(_printers(pg_pool), f, _settings, broken)() == "failed"
 
     respx.get(f"{API}/inventory/spools/by-tag").mock(return_value=httpx.Response(404, json={}))
     respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
@@ -466,7 +493,7 @@ async def test_a_failing_slot_step_fails_the_activity_and_stops_no_other_step(
     on = lambda: FilamentSync(tags="sb_to_bb")  # noqa: E731
     broken = cast(Printers, SimpleNamespace())  # no store: the slot step raises
 
-    assert await filament_rfid_activity(broken, f, _settings, on)() == "failed"
+    assert await _rfid_activity(broken, f, _settings, on)() == "failed"
     assert link.call_count == 1  # the tags step ran before it
 
 

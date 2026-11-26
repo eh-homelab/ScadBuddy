@@ -1459,10 +1459,14 @@ def test_the_reconcile_route_runs_the_mode_and_the_tags(client: TestClient) -> N
     assert body["tags"] == {"pushed": 0, "moved": 0, "cleared": 0, "unchanged": 0, "failed": 0}
     assert body["slots"] == {
         "configured": 0,
+        "unconfirmed": 0,
+        "waiting": 0,
         "unchanged": 0,
         "no_preset": 0,
         "no_temps": 0,
+        "invalid_temps": 0,
         "no_nozzle": 0,
+        "unsupported_unit": 0,
         "failed": 0,
     }
 
@@ -1486,10 +1490,14 @@ def test_a_failing_reconcile_step_leaves_the_others_to_run(
     assert body["tags"] == {"pushed": 0, "moved": 0, "cleared": 0, "unchanged": 0, "failed": 0}
     assert body["slots"] == {
         "configured": 0,
+        "unconfirmed": 0,
+        "waiting": 0,
         "unchanged": 0,
         "no_preset": 0,
         "no_temps": 0,
+        "invalid_temps": 0,
         "no_nozzle": 0,
+        "unsupported_unit": 0,
         "failed": 0,
     }
 

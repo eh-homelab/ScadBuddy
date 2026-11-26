@@ -1462,6 +1462,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   pull started during the roll can reach an old build that does not register it; its
   workflow task fails until the new build is current, at most the run's 4.5 minutes, and
   the next tick of the spool refresh pulls again.
+- **Upgrading to the release with #7276** adds one workflow type, `LanCommand` (a printer's
+  K-profile and AMS slot commands over its LAN link, started and awaited by the API,
+  `backend/scadbuddy/workflows/lan_command.py`), to the `bambuddy` queue. Roll
+  `scadbuddy-print` out with `Recreate` (see "A release that needs `Recreate`" below). A
+  K-profile or slot request during the roll can reach an old build that does not register
+  it; that run's workflow task fails until the new build is current, and the route answers
+  202 with the run's id, which `GET /printers/{id}/commands/{command_id}` follows.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
@@ -2544,6 +2551,7 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   of its key (`filament_presets`, a changed file a new version of it, #7176), sets the
   type's presets for the fetched `(printer model, nozzle)` keys to them (`sb-<id>`), reads
   K values from `GET /printers/{id}/kprofiles/`
+  (Bambuddy's route, through `BambuddyClient.k_profiles`: this read stays on Bambuddy until #7604)
   where one matches exactly, and removes an old K value of a fetched key that the new
   preset does not match (the run's notes name each one; a printer whose K table did not
   answer keeps its values). It writes and removes only K values an earlier fetch set

@@ -11,7 +11,6 @@ import typing
 import httpx
 import pytest
 import respx
-from pydantic import ValidationError
 
 from scadbuddy.bambuddy import client as client_module
 from scadbuddy.bambuddy.client import BambuddyClient, Operation
@@ -20,7 +19,6 @@ from scadbuddy.bambuddy.errors import (
     Scope,
     TagAlreadyLinkedError,
 )
-from scadbuddy.bambuddy.models import SlotConfigure
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, RECORDINGS, shaped
 
@@ -30,19 +28,6 @@ RFID = json.loads((RECORDINGS / "openapi" / "rfid-routes.json").read_text(encodi
 
 def _spool(**values: object) -> dict[str, object]:
     return shaped("SpoolResponse", id=3, material="PLA", **values)
-
-
-def _slot(**values: object) -> SlotConfigure:
-    base: dict[str, object] = {
-        "tray_info_idx": "GFA00",
-        "tray_type": "PLA",
-        "tray_sub_brands": "Basic",
-        "tray_color": "FF0000FF",
-        "nozzle_temp_min": 190,
-        "nozzle_temp_max": 230,
-        "nozzle_diameter": "0.4",
-    }
-    return SlotConfigure.model_validate({**base, **values})
 
 
 @respx.mock
@@ -170,59 +155,6 @@ async def test_setting_auto_add_with_auth_on_is_a_scope_409(bambuddy: BambuddyCl
     assert caught.value.extensions["required_scope"] == "Settings (admin only)"
 
 
-@respx.mock
-async def test_slot_configure_puts_the_values_in_the_query(bambuddy: BambuddyClient) -> None:
-    route = respx.post(f"{API}/printers/1/slots/0/2/configure").mock(
-        return_value=httpx.Response(200, json={})
-    )
-
-    await bambuddy.configure_slot(1, 0, 2, _slot(k_value=0.02))
-
-    assert dict(route.calls.last.request.url.params) == {
-        "tray_info_idx": "GFA00",
-        "tray_type": "PLA",
-        "tray_sub_brands": "Basic",
-        "tray_color": "FF0000FF",
-        "nozzle_temp_min": "190",
-        "nozzle_temp_max": "230",
-        "nozzle_diameter": "0.4",
-        "k_value": "0.02",
-    }
-
-
-def test_the_route_s_required_query_parameters_are_required_fields() -> None:
-    required = {
-        p["name"]
-        for r in RFID["routes"]
-        if r["path"].endswith("/configure")
-        for p in r["parameters"]
-        if p["in"] == "query" and p["required"]
-    }
-    base = _slot().model_dump()
-    for name in required & set(SlotConfigure.model_fields):
-        with pytest.raises(ValidationError):
-            SlotConfigure.model_validate({k: v for k, v in base.items() if k != name})
-    assert {"tray_sub_brands", "nozzle_temp_min", "nozzle_temp_max"} <= required
-
-
-def test_a_digest_changes_with_any_field() -> None:
-    base = _slot()
-    assert base.digest() == _slot().digest()
-    for field, value in {
-        "tray_info_idx": "GFB00",
-        "tray_type": "PETG",
-        "tray_sub_brands": "Plus",
-        "tray_color": "00FF00FF",
-        "nozzle_temp_min": 200,
-        "nozzle_temp_max": 250,
-        "cali_idx": 4,
-        "nozzle_diameter": "0.6",
-        "setting_id": "S1",
-        "k_value": 0.5,
-    }.items():
-        assert _slot(**{field: value}).digest() != base.digest(), field
-
-
 @pytest.mark.parametrize(
     "name",
     ["next_tag_scan", "queue_tag_write", "cancel_tag_write", "spoolbuddy_devices", "ws_token"],
@@ -240,7 +172,6 @@ def test_every_operation_the_client_passes_is_a_declared_name() -> None:
         "spools.by_tag",
         "spools.read",
         "settings.update",
-        "printers.slot_configure",
     }
     assert new <= passed
     assert passed <= declared
