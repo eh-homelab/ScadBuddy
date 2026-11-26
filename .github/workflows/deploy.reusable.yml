@@ -1047,12 +1047,23 @@ jobs:
           # one image), equal to each other, and a build with no image keeps the
           # pins and warns. A comment that names the API build the pins came
           # from ("the build of the API's sha-<7>") moves with them, so it stays
-          # true. Sets $camera to `pinned` or `kept`.
+          # true. A file that does not name its image is skipped, as the resolve
+          # step skips it. Sets $camera to `none`, `pinned` or `kept`.
           camera=none
           pin_camera() { # manifest image digest part
             local target=$1 cam_image=$2 cam_digest=$3 part=$4 n
+            camera=none
             local cam_line="^(\s*)image: ${cam_image//./\\.}[:@][^[:space:]]*\$"
+            # The resolve step's own test (#8015): a file that does not name the
+            # image at all was not resolved, so it is skipped here too.
+            local any_line="^\s*(- )?image:.*${cam_image//./\\.}"
+            if ! grep -qE "$any_line" "$target"; then
+              echo "::notice::${target} does not run ${cam_image}; not pinning it"
+              return 0
+            fi
             n=$(grep -cE "$cam_line" "$target" || true)
+            [ "$n" -eq "$(grep -cE "$any_line" "$target")" ] \
+              || { echo "::error file=$target::has an image line for ${cam_image} that is not exactly 'image: ${cam_image}:<tag>@<digest>'"; exit 1; }
             [ "$n" -eq 2 ] \
               || { echo "::error file=$target::expected exactly two camera-${part} image lines (mediamtx and controller), found $n"; exit 1; }
             n=$(grep -E "$cam_line" "$target" | sed -E 's/^\s*image: //' | sort -u | wc -l)

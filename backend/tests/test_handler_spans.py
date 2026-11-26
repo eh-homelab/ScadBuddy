@@ -4,6 +4,7 @@ store's NFS globs and the asset sweep's walk."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import threading
 from pathlib import Path
@@ -12,19 +13,13 @@ import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from scadbuddy.api.outputs import _live
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.tracing import THREAD_WAIT_ATTRIBUTE, span, traced_thread
 from scadbuddy.library.assets import referenced_asset_ids
-from scadbuddy.library.outputs import META_NAME, OutputStore
+from tests.conftest import PgPool
+from tests.support.row_outputs import output_store
+from tests.test_output_rows import make_row
 
 OUTPUT_ID = "a" * 32
-
-
-def _output(paths: DataPaths, slug: str, output_id: str) -> None:
-    directory = paths.outputs / slug / output_id
-    directory.mkdir(parents=True)
-    (directory / META_NAME).write_text("{}", encoding="utf-8")
 
 
 async def test_traced_thread_records_the_wait_and_parents_the_threads_spans(
@@ -70,56 +65,20 @@ async def test_a_cancelled_wait_leaves_no_write_on_an_ended_span(
     assert "ended span" not in caplog.text
 
 
-async def test_the_output_glob_is_a_span_and_a_remembered_hit_is_not(
-    spans: InMemorySpanExporter, tmp_path: Path
+@pytest.mark.requires_postgres
+def test_the_asset_references_scan_is_one_span_with_its_counts(
+    spans: InMemorySpanExporter, tmp_path: Path, pg_pool: PgPool
 ) -> None:
-    paths = DataPaths(tmp_path)
-    _output(paths, "demo", OUTPUT_ID)
-    store = OutputStore(paths)
-    missing = "b" * 32
-
-    assert await _live(store, {OUTPUT_ID, missing}) == {OUTPUT_ID}
-    finished = spans.get_finished_spans()
-    (existing,) = [s for s in finished if s.name == "outputs.existing"]
-    assert existing.attributes is not None
-    assert existing.attributes["scadbuddy.outputs"] == 2
-    assert existing.attributes["scadbuddy.found"] == 1
-    assert THREAD_WAIT_ATTRIBUTE in existing.attributes
-    globs = {
-        s.attributes["scadbuddy.output_id"]: s
-        for s in finished
-        if s.name == "outputs.find_dir" and s.attributes is not None
-    }
-    assert set(globs) == {OUTPUT_ID, missing}
-    assert globs[OUTPUT_ID].attributes == {
-        "scadbuddy.output_id": OUTPUT_ID,
-        "scadbuddy.remembered": False,
-        "scadbuddy.found": True,
-    }
-    missed = globs[missing].attributes
-    assert missed is not None
-    assert missed["scadbuddy.found"] is False
-    for found in globs.values():
-        assert found.parent is not None
-        assert found.parent.span_id == existing.context.span_id
-
-    spans.clear()
-    store.directory(OUTPUT_ID)
-    assert [s.name for s in spans.get_finished_spans()] == []
-
-
-def test_the_asset_references_walk_is_one_span_with_its_counts(
-    spans: InMemorySpanExporter, tmp_path: Path
-) -> None:
-    paths = DataPaths(tmp_path)
-    _output(paths, "demo", OUTPUT_ID)
-    (paths.outputs / "demo" / OUTPUT_ID / "params.json").write_text("{}", encoding="utf-8")
+    """The scan of the output rows (#7257): an output with no params and no model blob
+    has no 3MF to open."""
+    store = output_store(tmp_path, pg_pool)
+    store.rows.insert(dataclasses.replace(make_row(OUTPUT_ID), params={}))
     with span("sweep"):
-        asyncio.run(referenced_asset_ids(paths, [{"file": "not an asset"}]))
+        asyncio.run(referenced_asset_ids(store.paths, [{"file": "not an asset"}], store))
     (walk,) = [s for s in spans.get_finished_spans() if s.name == "assets.referenced"]
     assert walk.attributes is not None
     assert walk.attributes["scadbuddy.outputs"] == 1
-    assert walk.attributes["scadbuddy.files"] == 2
+    assert walk.attributes["scadbuddy.files"] == 0
     assert walk.attributes["scadbuddy.archives"] == 0
     assert walk.attributes["scadbuddy.assets"] == 0
     assert trace.get_current_span() is trace.INVALID_SPAN

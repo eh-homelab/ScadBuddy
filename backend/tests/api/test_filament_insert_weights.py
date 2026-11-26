@@ -91,13 +91,33 @@ def test_no_offer_is_a_reason_and_an_accept_without_one_is_409(
     fresh = _spool(client, insert["id"])
     sliver = client.get(f"{SPOOLS}/{fresh}/insert-weight-offer", params={"reading_g": 1000.3})
     assert sliver.status_code == 200, sliver.text
-    assert (sliver.json()["reason"], sliver.json()["offer"]) == ("not_above_label", None)
+    assert (sliver.json()["reason"], sliver.json()["offer"]) == ("mean_below_1g", None)
     refused = client.post(f"{SPOOLS}/{fresh}/insert-weight", json={"reading_g": 1000.3})
     assert refused.status_code == 409, refused.text
     assert (refused.json()["code"], refused.json()["reason"]) == (
         "no_insert_weight_offer",
-        "not_above_label",
+        "mean_below_1g",
     )
+
+
+def test_an_accept_naming_another_weight_is_409(client: TestClient) -> None:
+    """#7450-2: `new_empty_weight_g` is the weight the offer named."""
+    insert = _insert(client)
+    first, second = _spool(client, insert["id"]), _spool(client, insert["id"])
+    assert client.post(f"{SPOOLS}/{first}/insert-weight", json={"reading_g": 1150}).is_success
+    stale = client.post(
+        f"{SPOOLS}/{second}/insert-weight", json={"reading_g": 1160, "new_empty_weight_g": 160}
+    )
+    assert stale.status_code == 409, stale.text
+    assert (stale.json()["code"], stale.json()["new_empty_weight_g"]) == (
+        "insert_weight_changed",
+        155,
+    )
+    fresh = client.post(
+        f"{SPOOLS}/{second}/insert-weight", json={"reading_g": 1160, "new_empty_weight_g": 155}
+    )
+    assert fresh.status_code == 200, fresh.text
+    assert fresh.json()["empty_weight_g"] == 155
 
 
 def test_an_unknown_spool_is_404_and_a_bad_reading_422(client: TestClient) -> None:

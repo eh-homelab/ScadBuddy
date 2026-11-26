@@ -1134,7 +1134,7 @@ class Catalogue:
         etag = f'"output-{output_id}"'
 
         async def read() -> ThumbnailRead | None:
-            # Blob first, else the file, as `read_plate_cover` (#7256).
+            # The kept cover blob, else the model blob, as `read_plate_cover` (#7256).
             image = await outputs.plate_image(slug, output_id)
             return None if image is None else (image, "image/png", etag)
 
@@ -1843,15 +1843,8 @@ class Catalogue:
         covers = self.media_store.covers_for(builtins) if builtins else {}
         output_covers: dict[str, str] = {}
         if self.outputs is not None:
-            output_rows = self.outputs.rows
-            if output_rows is not None and output_rows.copied():
-                output_covers = output_rows.plate_covers_for(ids)
-            else:
-                # Until the outputs are copied, their folders, as today (plan decision 13).
-                for template_id in ids:
-                    found = self.outputs.plate_cover_output(template_id)
-                    if found is not None:
-                        output_covers[template_id] = found
+            # One query for the listing (#7257: the rows are the outputs' record).
+            output_covers = self.outputs.rows.plate_covers_for(ids)
         previews: dict[str, str] = {}
         if self.previews is not None and self.serve_previews:
             previews = self.previews.preview_ids(ids)
@@ -3439,16 +3432,12 @@ class Catalogue:
 
     def delete(self, slug: str) -> None:
         self._require(slug)
-        # Its output rows first (spec §6.2): they are the outputs' record (#7255), so a
-        # failure fails the delete and leaves the model and its outputs whole for a retry.
-        # The rows go before the rename on purpose: a failed rename leaves the files, and
-        # a retried delete removes them, and the rows come back from the files.
-        self._forget_outputs(slug)
         # Renamed out of `models/` first, so the model leaves the catalogue in one
         # step: an `rmtree` that dies halfway could otherwise leave `model.scad`
         # behind and a half-deleted model listed. The tombstone lives under
         # `cache/` (same volume, so the rename is atomic) rather than beside the
         # model, where it would be picked up by the listing and by `git add -A`.
+        # A failed rename leaves the model and its output rows whole for a retry.
         tombstones = self.paths.tombstones
         try:
             tombstones.mkdir(parents=True, exist_ok=True)
@@ -3456,18 +3445,13 @@ class Catalogue:
         except FileNotFoundError:
             # A concurrent delete of the same slug won the rename.
             raise ModelNotFoundError(slug) from None
-        except OSError:
-            # The model and its outputs stay: their rows come back from the files. A
-            # failure there must not hide the move's own error; the next copy run
-            # writes them too.
-            if self.outputs is not None:
-                try:
-                    self.outputs.restore_rows(slug)
-                except Exception:
-                    logger.exception(
-                        "could not restore a model's output rows", extra={"slug": slug}
-                    )
-            raise
+        # Then its output rows (spec §6.2): the rows and the blobs are the outputs' only
+        # record (#7257). A failure is logged: `sweep_orphans` (below, and at each start)
+        # drops the rows of a deleted model.
+        try:
+            self._forget_outputs(slug)
+        except Exception:
+            logger.exception("could not drop a model's output rows", extra={"slug": slug})
         # The history is the shared `models/` repository, not the model's own:
         # a delete is one more commit, so the model's revisions stay restorable.
         self._commit(f"Delete {slug}", slug)
@@ -3479,12 +3463,9 @@ class Catalogue:
             self.sweep_tombstones()
         except OSError:
             logger.exception("could not sweep tombstones", extra={"path": str(tombstones)})
-        # Its derived files -- the schema cache, exported old revisions and its
-        # outputs (NOT in the repository: a 3MF is a build artefact, not source)
-        # -- and any an earlier delete failed to clear or a race wrote since.
+        # Its derived files -- the schema cache and exported old revisions -- and its
+        # output rows, and any an earlier delete failed to clear or a race wrote since.
         self.sweep_orphans(deleted=(slug,))
-        # Whether or not the sweep got to its outputs: the model is gone either way.
-        self._forget_cover(slug)
         self._drop_preview(slug)
         # Its media rows (#274). Best-effort as the rest: a create or duplicate at
         # this slug clears any left behind (`_clear_media_rows`).
@@ -3544,7 +3525,7 @@ class Catalogue:
         return removed
 
     def sweep_orphans(self, *, deleted: Iterable[str] = ()) -> list[str]:
-        """Remove the slug-keyed derived files of every model that is gone.
+        """Remove the slug-keyed derived files and output rows of every model that is gone.
 
         A delete's own cleanup can fail (a busy PVC, a crash after the commit),
         and a source PUT or a render racing a delete can write the schema cache
@@ -3560,6 +3541,10 @@ class Catalogue:
         is logged and skipped -- a slug whose liveness is unknown is kept -- and
         the rest are still swept.
 
+        The outputs' slugs come from their rows (#7257): a gone model's rows are dropped,
+        each reported as ``outputs/<slug>``. No outputs folder is read or removed: the old
+        share is the owner's backup (plan D10).
+
         A slug whose directory is absent is gone only where something says it was
         deleted (#7649): a commit deleted it, ``deleted`` names it (the delete that
         calls this), or the models directory still holds a template of mine. A
@@ -3572,13 +3557,13 @@ class Catalogue:
             return []
         candidates: list[tuple[str, Path]] = []
         keyed_by_file = (self.paths.schema_cache,)
-        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
+        roots = (self.paths.model_revisions, *keyed_by_file)
         for root in roots:
             try:
                 if not root.is_dir():
                     continue
                 for entry in root.iterdir():
-                    if root in (self.paths.outputs, self.paths.model_revisions):
+                    if root == self.paths.model_revisions:
                         candidates.append((entry.name, entry))
                     elif root in keyed_by_file and entry.suffix == ".json":
                         candidates.append((entry.stem, entry))
@@ -3592,17 +3577,9 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
-            if path.parent == self.paths.outputs:
-                # The rows before the files: a failure keeps both for the next sweep.
-                try:
-                    self._forget_outputs(slug)
-                except Exception:
-                    logger.exception("could not drop a model's output rows", extra={"slug": slug})
-                    continue
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
-                if path.parent == self.paths.outputs:
-                    self._forget_cover(slug)
+        removed.extend(self._sweep_output_rows(gone))
         # The saved presets are not derived, but they are keyed and orphaned the same
         # way: a template that is gone takes its presets with it.
         if self.presets is not None:
@@ -3718,6 +3695,32 @@ class Catalogue:
             return None
         return lambda slug: slug in known and not self.paths.model_dir(slug).exists()
 
+    def _sweep_output_rows(self, gone: Callable[[str], bool]) -> list[str]:
+        """Drop the output rows of every slug that is ``gone`` (#7257), each reported as
+        ``outputs/<slug>``. A read or a drop that fails is logged and skipped."""
+        if self.outputs is None:
+            return []
+        try:
+            slugs = self.outputs.rows.slugs()
+        except Exception:
+            logger.exception("could not list the outputs' slugs for orphans")
+            return []
+        removed: list[str] = []
+        for slug in sorted(slugs):
+            try:
+                if not gone(slug):
+                    continue
+            except OSError:
+                logger.exception("could not check a model for orphans", extra={"slug": slug})
+                continue
+            try:
+                self._forget_outputs(slug)
+            except Exception:
+                logger.exception("could not drop a model's output rows", extra={"slug": slug})
+                continue
+            removed.append(f"outputs/{slug}")
+        return removed
+
     def _drop_preview(self, slug: str) -> None:
         """Best effort, like the rest of a delete's or a reused slug's cleanup: one
         left behind ranks below the model's own thumbnail, and a gone model's is
@@ -3759,20 +3762,19 @@ class Catalogue:
 
         The orphan sweep usually removes these already. When it failed, they are
         still here, and without this the new model would inherit the old one's
-        outputs and cached schema. Its output rows go first and a failure raises
-        (spec §6.2): the new model must not inherit them.
+        output rows and cached schema. Its output rows go first and a failure raises
+        (spec §6.2): the new model must not inherit them. No outputs folder is removed
+        (#7257, plan D10).
         """
         self._forget_outputs(slug)
         for path in (
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
-            self.paths.outputs / slug,
         ):
             _remove_tree(path)
         # Under the model's preview lock: a render of the previous model finishing
         # now is either dropped here or discarded by its own "still wanted?" check.
         self._drop_preview(slug)
-        self._forget_cover(slug)
         # Not derived, but the previous model's: its saved presets.
         if self.presets is not None:
             try:
@@ -3780,15 +3782,9 @@ class Catalogue:
             except psycopg.Error:
                 logger.exception("could not forget saved presets", extra={"slug": slug})
 
-    def _forget_cover(self, slug: str) -> None:
-        """Drop the output store's resolved fallback cover for ``slug``, whose
-        outputs are gone -- so a removed model leaves nothing behind in memory."""
-        if self.outputs is not None:
-            self.outputs.forget_plate_cover(slug)
-
     def _forget_outputs(self, slug: str) -> None:
-        """Drop the rows of ``slug``'s outputs and their rows in the cross-model list
-        (#4777, #7255), before their directory goes. Raises when the output rows stay."""
+        """Drop the rows of ``slug``'s outputs and their byte holds (#7255, #7257).
+        Raises when the output rows stay."""
         if self.outputs is not None:
             self.outputs.forget_indexed(slug)
 

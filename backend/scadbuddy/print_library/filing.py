@@ -85,8 +85,8 @@ async def put_in_folder(
 async def put_saved_in_folder(
     native: NativeLibrary, outputs: OutputStore, meta: OutputMeta, folder_id: int, stem: str
 ) -> tuple[NativeFile, bool]:
-    """`put_in_folder` of the output's 3MF: its model blob through a temporary file, else
-    its NFS file (#7256). 404 when it has neither. A copy already in the folder answers
+    """`put_in_folder` of the output's 3MF: its model blob through a temporary file
+    (#7256, #7257). 404 when it has none. A copy already in the folder answers
     with no download of the 3MF."""
     there = await asyncio.to_thread(native.rows.live_copy_in_folder, meta.id, folder_id)
     if there is not None:

@@ -31,6 +31,13 @@ describe('Projects & files, the blob store (#426)', () => {
     library_folder_id: 2,
     store_backend: 'local' as const,
   }
+  /** The S3 store's saved settings, so the Blob store offers it. */
+  const s3Saved = {
+    store_s3_endpoint: 'https://s3.test',
+    store_s3_bucket: 'outputs',
+    store_s3_access_key_id: 'key',
+    has_store_s3_secret_access_key: true,
+  }
 
   function serve(settings: Settings) {
     const bodies: Record<string, unknown>[] = []
@@ -51,17 +58,27 @@ describe('Projects & files, the blob store (#426)', () => {
   }
 
   it('seeds the Blob store choice and sends a change with Projects & files', async () => {
-    const bodies = serve({ ...stored, has_render_api_key: true, render_key_fallback: false })
+    const bodies = serve({ ...stored, ...s3Saved, has_render_api_key: true, render_key_fallback: false })
     const { user } = renderSettingsSection(<Projects />, { route })
     await loaded()
     const store = screen.getByLabelText('Blob store')
     expect(store).toHaveTextContent('This server’s volume')
-    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(false)
-    await choose(user, store, /Bambuddy library/)
+    expect(await optionDisabled(user, store, /S3-compatible/)).toBe(false)
+    await choose(user, store, /S3-compatible/)
     expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
     await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ store_backend: 'bambuddy' })
+    expect(bodies[0]).toEqual({ store_backend: 's3' })
+  })
+
+  it('offers no Bambuddy library as a blob store, as the server refuses it (#7257)', async () => {
+    serve(stored)
+    const { user } = renderSettingsSection(<Projects />, { route })
+    await loaded()
+    await user.click(screen.getByLabelText('Blob store'))
+    expect(await screen.findByRole('option', { name: /This server/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /Bambuddy library/ })).toBeNull()
+    await user.keyboard('{Escape}')
   })
 
   it('offers ScadBuddy’s own library only over a content store', async () => {
@@ -92,13 +109,14 @@ describe('Projects & files, the blob store (#426)', () => {
   it('saves library_backend and shows it applies on restart', async () => {
     const bodies = serve({
       ...stored,
-      store_backend: 'bambuddy',
+      ...s3Saved,
+      store_backend: 's3',
       has_render_api_key: true,
       render_key_fallback: false,
     })
     const { user } = renderSettingsSection(<Projects />, { route })
     await loaded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('S3-compatible'))
     const library = screen.getByLabelText('Print library')
     expect(await optionDisabled(user, library, /ScadBuddy.s own/)).toBe(false)
     await choose(user, library, /ScadBuddy.s own/)
@@ -115,134 +133,6 @@ describe('Projects & files, the blob store (#426)', () => {
     ).toBeInTheDocument()
   })
 
-  it('does not fall back to local while the library is native', async () => {
-    const bodies: Record<string, unknown>[] = []
-    const stuck = { ...stored, store_backend: 'bambuddy' as const, library_backend: 'native' as const }
-    server.use(
-      http.get('/api/v1/settings', () => HttpResponse.json(stuck)),
-      http.put('/api/v1/settings', async ({ request }) => {
-        bodies.push((await request.json()) as Record<string, unknown>)
-        return HttpResponse.json(
-          {
-            type: 'about:blank',
-            title: 'Unprocessable Content',
-            status: 422,
-            detail:
-              'ScadBuddy\'s own library keeps its files in the blob store: set store_backend to s3 or bambuddy first',
-          },
-          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
-        )
-      }),
-    )
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy’s own'))
-    await user.clear(screen.getByLabelText('Bambuddy URL'))
-    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ bambuddy_url: null })
-    expect(await screen.findByText(/set store_backend to s3 or bambuddy/)).toBeVisible()
-    expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('')
-  })
-
-  it('keeps a stored Bambuddy store backend on an unrelated save', async () => {
-    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
-    const own = screen.getByLabelText(/ScadBuddy.s own URL/)
-    await user.clear(own)
-    await enter(user, own, 'https://scadbuddy.test')
-    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).not.toHaveProperty('store_backend')
-    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
-  })
-
-  it('falls back to the local store when the Bambuddy store loses its inbox', async () => {
-    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
-    const { user } = renderSettingsSection(<Projects />, { route })
-    await loaded()
-    const store = screen.getByLabelText('Blob store')
-    await waitFor(() => expect(store).toHaveTextContent('Bambuddy library'))
-    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
-    expect(await optionDisabled(user, store, /Bambuddy library/)).toBe(true)
-    expect(store).toHaveTextContent('This server’s volume')
-    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ library_folder_id: null, store_backend: 'local' })
-  })
-
-  it('falls back to the local store when a Connection save clears the Bambuddy URL', async () => {
-    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
-    await user.clear(screen.getByLabelText('Bambuddy URL'))
-    // The choice follows the saved URL, so it moves once Connection is saved.
-    expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library')
-    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ bambuddy_url: null, store_backend: 'local' })
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('This server’s volume'))
-  })
-
-  it('falls back to the local store when the Bambuddy URL is reset while on the Bambuddy store', async () => {
-    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
-    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
-  })
-
-  it('does not fall back to local on a reset while the library is native', async () => {
-    const bodies = serve({
-      ...stored,
-      store_backend: 'bambuddy',
-      library_backend: 'native',
-      has_render_api_key: true,
-      render_key_fallback: false,
-    })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Print library')).toHaveTextContent('ScadBuddy’s own'))
-    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
-  })
-
   it('resets only the Bambuddy URL while on the local store', async () => {
     const bodies = serve(stored)
     const { user } = renderSettingsSection(
@@ -256,76 +146,6 @@ describe('Projects & files, the blob store (#426)', () => {
     await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
-  })
-
-  it('keeps the Bambuddy store on a Connection save while an unsaved Projects edit drops the inbox', async () => {
-    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
-    await choose(user, screen.getByLabelText(/Inbox folder/), 'Library root')
-    const own = screen.getByLabelText('ScadBuddy’s own URL')
-    await user.clear(own)
-    await enter(user, own, 'https://mine.test')
-    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ public_url: 'https://mine.test' })
-  })
-
-  it('keeps the Bambuddy store on a Projects save while an unsaved Connection edit clears the URL', async () => {
-    const bodies = serve({ ...stored, store_backend: 'bambuddy', has_render_api_key: true, render_key_fallback: false })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    await seeded()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
-    await user.clear(screen.getByLabelText('Bambuddy URL'))
-    await choose(user, screen.getByLabelText(/Inbox folder/), 'Keychains')
-    await user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
-    await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toEqual({ library_folder_id: 3 })
-  })
-
-  it('offers the Bambuddy store only once its URL is saved, then marks choosing it unsaved', async () => {
-    serve({ ...stored, bambuddy_url: null })
-    const { user } = renderSettingsSection(
-      <>
-        <Connection />
-        <Projects />
-      </>,
-      { route },
-    )
-    // Saved: an inbox folder, no Bambuddy URL.
-    const url = await screen.findByLabelText('Bambuddy URL')
-    await waitFor(() => expect(screen.getByTestId('source-store_backend')).toBeInTheDocument())
-    await enter(user, url, 'https://bambuddy.new.test')
-    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
-    expect(screen.getByTestId('store-backend-hint')).toHaveTextContent('Bambuddy URL is not saved yet')
-    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
-    await waitFor(async () =>
-      expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(false),
-    )
-    expect(screen.queryByTestId('store-backend-hint')).toBeNull()
-    await choose(user, screen.getByLabelText('Blob store'), /Bambuddy library/)
-    expect(within(region('Projects & files')).getByText('Unsaved')).toBeInTheDocument()
-    expect(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' })).toBeEnabled()
-  })
-
-  it('offers the Bambuddy store only once an inbox folder is chosen', async () => {
-    serve({ ...stored, library_folder_id: null })
-    const { user } = renderSettingsSection(<Projects />, { route })
-    await loaded()
-    expect(await optionDisabled(user, screen.getByLabelText('Blob store'), /Bambuddy library/)).toBe(true)
   })
 
   it('shows what the blob store holds, where, against its caps', async () => {

@@ -67,21 +67,12 @@ class ClaimStore:
         finally:
             os.close(fd)
 
-    @staticmethod
-    @contextlib.contextmanager
-    def _held(fd: int) -> Iterator[None]:
-        """The lock on the open lock file ``fd``, held for one change of a claim's name
-        (#7947)."""
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        """The store's lock, held for one change of a claim's name (#7947)."""
-        with self._lock_file() as fd, self._held(fd):
+        """The store's lock, held for one change of a claim's name (#7947); closing the
+        file releases it."""
+        with self._lock_file() as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             yield
 
     def _path(self, name: str) -> Path:
@@ -194,12 +185,14 @@ class ClaimStore:
         # each open is a round trip on NFS.
         with self._lock_file() as fd:
             for path in entries:
-                with self._held(fd):
-                    try:
-                        if os.stat(path).st_mtime >= cutoff:
-                            continue
-                        path.unlink()
-                    except FileNotFoundError:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    if os.stat(path).st_mtime >= cutoff:
                         continue
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 removed += 1
         return removed

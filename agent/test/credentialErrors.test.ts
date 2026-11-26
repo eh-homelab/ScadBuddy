@@ -16,6 +16,7 @@ import {
   rateLimitResetFromText,
   refusesTheKey,
 } from '../src/harness/credentialErrors.js'
+import { IANA_ZONE_NAMES } from '../src/harness/ianaZoneNames.js'
 import { type FakeAnthropic, startFakeAnthropic } from './support/fakeAnthropic.js'
 
 describe('classifyFailure (#1093)', () => {
@@ -89,6 +90,26 @@ describe('describeApiFailure (#1101)', () => {
     ],
   ])('words a refused credential by what the probe said of it: %s', (probe, said) => {
     expect(describeApiFailure({ status: 403, message: 'blocked' }, probe === undefined ? {} : { probe })).toBe(said)
+  })
+})
+
+describe('IANA_ZONE_NAMES (#8023)', () => {
+  // The list is tzdata's, pasted; these fail when the runtime's ICU moves past it.
+  it('holds every zone ICU names with a slash', () => {
+    const missing = Intl.supportedValuesOf('timeZone').filter((z) => z.includes('/') && !IANA_ZONE_NAMES.has(z))
+    expect(missing).toEqual([])
+  })
+
+  it('holds only names ICU reads', () => {
+    const unread = [...IANA_ZONE_NAMES].filter((z) => {
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: z })
+        return false
+      } catch {
+        return true
+      }
+    })
+    expect(unread).toEqual([])
   })
 })
 

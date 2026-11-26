@@ -4,7 +4,6 @@ them, paged as `GET /models/{slug}/outputs`; and the index's repair at start."""
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -19,6 +18,7 @@ from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item
 from tests.api.test_versions import SLUG, upload
 from tests.support.operations import press
+from tests.support.row_outputs import mark_storefront
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -120,7 +120,7 @@ def test_ordered_tells_outputs_an_order_names(
     assert client.get("/api/v1/outputs", params={"ordered": "maybe"}).status_code == 422
 
 
-def test_renames_deletes_and_the_start_keep_the_index_in_step(
+def test_renames_and_deletes_show_in_the_list(
     client: TestClient, three: tuple[str, str, str]
 ) -> None:
     first, second, third = three
@@ -130,18 +130,9 @@ def test_renames_deletes_and_the_start_keep_the_index_in_step(
     deleted = client.delete(f"/api/v1/outputs/{third}", headers=press())
     assert deleted.status_code in (200, 204), deleted.text
     assert listed(client) == [second, first]
-    # An output with no row (saved before the index, or its write failed) is added by
-    # the start's sync; a row whose output went with its model's directory is dropped,
-    # and never listed meanwhile.
-    state = state_of(client)
-    assert state.outputs.index is not None
-    state.outputs.index.forget(first)
-    assert listed(client) == [second]
-    assert state.outputs.index.sync(state.outputs) == (1, 0)
-    assert listed(client) == [second, first]
 
 
-def test_a_deleted_models_outputs_leave_the_index(
+def test_a_deleted_models_outputs_leave_the_list(
     client: TestClient, three: tuple[str, str, str]
 ) -> None:
     """The count never names rows a page cannot show (#5667 review): deleting a model
@@ -151,8 +142,8 @@ def test_a_deleted_models_outputs_leave_the_index(
     deleted = client.delete(f"/api/v1/models/{plate}", headers=press())
     assert deleted.status_code == 204, deleted.text
     state = state_of(client)
-    assert state.outputs.index is not None
-    ids, total = state.outputs.index.query(OutputQuery())
+    assert state.outputs.rows is not None
+    ids, total = state.outputs.rows.query(OutputQuery())
     assert (ids, total) == ([second, first], 2)
 
 
@@ -164,9 +155,7 @@ def test_storefront_outputs_are_listed_only_when_asked(
     read by id finds either."""
     first, second, third = three
     state = state_of(client)
-    assert state.outputs.index is not None
-    meta = state.outputs.mark_storefront(second)
-    state.outputs.index.record(meta, state.outputs.params(second))
+    mark_storefront(state.outputs, second)
     response = client.get("/api/v1/outputs")
     assert [row["id"] for row in response.json()] == [third, first]
     assert response.headers["X-Total-Count"] == "2"
@@ -187,8 +176,8 @@ def test_storefront_outputs_are_listed_only_when_asked(
 
 
 def test_recent_outputs_list_from_rows(client: TestClient, three: tuple[str, str, str]) -> None:
-    """#7257: once a row copy run has finished, the list reads ``outputs``, so it gives
-    the same answers with ``output_index`` gone (release B drops it)."""
+    """#7257: the list reads ``outputs`` alone. Release B's migration dropped
+    ``output_index``."""
     first, second, third = three
     order = create_order(client, create_customer(client)["id"])
     add_item(client, order["id"], output_id=second, quantity=1)
@@ -201,52 +190,43 @@ def test_recent_outputs_list_from_rows(client: TestClient, three: tuple[str, str
         {"ordered": "yes"},
         {"ordered": "no"},
     ]
-    before = [(listed(client, **query), query) for query in queries]
     rows = state_of(client).outputs.rows
     assert rows is not None
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
     with rows._pool.connection() as conn:
-        conn.execute("DROP TABLE output_index")
-    assert [(listed(client, **query), query) for query in queries] == before
-    assert before[0][0] == [third, second, first]
+        gone_table = conn.execute("SELECT to_regclass('output_index') IS NULL AS gone").fetchone()
+    assert gone_table is not None and gone_table["gone"]
+    answers = [listed(client, **query) for query in queries]
+    assert answers[0] == [third, second, first]
+    assert answers[1] == [first] and answers[2] == [second]
+    assert answers[4] == [first]
+    assert answers[5] == [second] and second not in answers[6]
     total = client.get("/api/v1/outputs", params={"slug": SLUG}).headers["X-Total-Count"]
     assert total == "2"
     gone = client.get("/api/v1/outputs", params={"after": "f" * 32})
     assert gone.status_code == 409, gone.text
 
 
-def test_index_writes_tolerate_dropped_table(
-    client: TestClient, three: tuple[str, str, str], caplog: pytest.LogCaptureFixture
-) -> None:
-    """#7257 plan D1: release B drops ``output_index`` and ``output_hold_slugs`` while
-    release A pods still run. A save, a rename, a delete and a model's delete then pass,
-    and each skipped write is logged."""
+def test_writes_pass_with_tables_dropped(client: TestClient, three: tuple[str, str, str]) -> None:
+    """#7257 plan D1: release B's migration dropped ``output_index`` and
+    ``output_hold_slugs``. A save, a rename, a delete and a model's delete pass, and no
+    write reaches either table."""
     first, second, third = three
     rows = state_of(client).outputs.rows
     assert rows is not None
+    fourth = saved(client, SLUG, {"width": 16}, "Gate")
+    renamed = client.patch(f"/api/v1/outputs/{fourth}", json={"name": "Gate tag"}, headers=press())
+    assert renamed.status_code == 200, renamed.text
+    deleted = client.delete(f"/api/v1/outputs/{first}", headers=press())
+    assert deleted.status_code in (200, 204), deleted.text
+    plate = client.get(f"/api/v1/outputs/{third}").json()["slug"]
+    model = client.delete(f"/api/v1/models/{plate}", headers=press())
+    assert model.status_code == 204, model.text
     with rows._pool.connection() as conn:
-        conn.execute("DROP TABLE output_index")
-        conn.execute("DROP TABLE output_hold_slugs")
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library"):
-        fourth = saved(client, SLUG, {"width": 16}, "Gate")
-        renamed = client.patch(
-            f"/api/v1/outputs/{fourth}", json={"name": "Gate tag"}, headers=press()
-        )
-        assert renamed.status_code == 200, renamed.text
-        deleted = client.delete(f"/api/v1/outputs/{first}", headers=press())
-        assert deleted.status_code in (200, 204), deleted.text
-        plate = client.get(f"/api/v1/outputs/{third}").json()["slug"]
-        model = client.delete(f"/api/v1/models/{plate}", headers=press())
-        assert model.status_code == 204, model.text
-    skipped = {r.getMessage() for r in caplog.records if "its table is gone" in r.getMessage()}
-    assert {
-        "output_index record skipped: its table is gone (#7257)",
-        "output_index rename skipped: its table is gone (#7257)",
-        "output_index forget skipped: its table is gone (#7257)",
-        "output_index forget_slug skipped: its table is gone (#7257)",
-        "an output's hold slug skipped: its table is gone (#7257)",
-        "an output's hold slug delete skipped: its table is gone (#7257)",
-    } <= skipped
+        gone = conn.execute(
+            "SELECT to_regclass('output_index') IS NULL AND"
+            " to_regclass('output_hold_slugs') IS NULL AS gone"
+        ).fetchone()
+    assert gone is not None and gone["gone"]
     assert rows.get(fourth) is not None and rows.get(first) is None
     assert rows.get(third) is None and rows.get(second) is not None
     fourth_row = rows.get(fourth)
