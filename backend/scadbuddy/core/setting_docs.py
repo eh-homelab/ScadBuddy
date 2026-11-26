@@ -444,6 +444,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " expected, either way, is a notice on the spool and in the list. 0 notices every"
             " weighing.",
         ),
+        "filament_weighing_finished_left_g": SettingDoc(
+            "Finished spool has at most, grams",
+            "Archiving a spool as finished with more filament than this on it says so first;"
+            " archiving one for any other reason with this much or less asks whether it is"
+            " finished. Nothing is refused.",
+        ),
         "filament_default_cost_per_kg": SettingDoc(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"

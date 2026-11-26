@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -13,11 +13,13 @@ from scadbuddy.filament import ledger
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.spools import (
+    ContinuedFromNotArchivedError,
     FilamentDefaults,
     FilamentSpoolStore,
     NoBelowLabelError,
     NoEmptyWeightError,
     ReadingBelowEmptyError,
+    SpoolCopySourceError,
 )
 from scadbuddy.filament.types import SpoolTypeStore
 from tests.conftest import PgPool
@@ -372,3 +374,310 @@ def test_drift_notice_follows_the_setting(pg_pool: PgPool) -> None:
     assert _get(pg_pool, spool).drift_notice is True
     assert _get(pg_pool, spool, drift_notice_g=20).drift_notice is False
     assert _get(pg_pool, spool, drift_notice_g=12).drift_notice is True
+
+
+# -- the closing preview (#7684) -----------------------------------------------------
+
+
+def _store(pool: PgPool, **defaults: Any) -> FilamentSpoolStore:
+    reader = lambda: FilamentDefaults(low_stock_pct=20, cost_per_kg=None, **defaults)  # noqa: E731
+    return FilamentSpoolStore(pool, reader)
+
+
+@pg
+def test_the_preview_names_filament_left_on_a_finished_spool(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=230, final_grams=None
+    )
+    assert preview is not None
+    assert [n.code for n in preview.notices] == ["filament_left"]
+    assert preview.notices[0].text == "30 g of filament are still on it."
+    assert preview.final_filament_g == 30 and preview.empty_g == 200
+    assert preview.closing.started_g == 1000 and preview.closing.started_from == "reading"
+    assert preview.closing.ledger_consumed_g == 8 and preview.closing.scale_consumed_g == 970
+    assert preview.closing.drift_g == -962
+
+
+@pg
+def test_the_preview_notices_an_empty_spool_not_finished(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "damaged", final_reading_g=203, final_grams=None
+    )
+    assert preview is not None
+    assert [n.code for n in preview.notices] == ["not_finished_but_empty"]
+    assert preview.notices[0].text == "It reads empty; is it finished?"
+    assert preview.final_filament_g == 3
+
+
+@pg
+def test_the_preview_follows_the_setting(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool, finished_left_g=50).closing_preview(
+        spool, "finished", final_reading_g=230, final_grams=None
+    )
+    assert preview is not None
+    assert preview.notices == []
+
+
+@pg
+def test_the_preview_without_a_reading_closes_on_the_ledger(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=None, final_grams=None
+    )
+    assert preview is not None
+    assert preview.final_filament_g == 992 and preview.closing.scale_consumed_g is None
+    assert preview.closing.final_filament_g == 992 and preview.closing.drift_g is None
+    assert [n.code for n in preview.notices] == ["filament_left"]
+
+
+@pg
+def test_the_preview_says_when_the_reading_cannot_be_resolved(pg_pool: PgPool) -> None:
+    """The archive refuses a reading with no empty weight known, or one under it (422);
+    the preview says so as a notice, so the dialog and the agent can tell the person
+    before they press Archive (the review of #7844)."""
+    bare = _spool(pg_pool, None)
+    _weighed_once(pg_pool, bare)
+    preview = _store(pg_pool).closing_preview(
+        bare, "finished", final_reading_g=230, final_grams=None
+    )
+    assert preview is not None and preview.final_filament_g is None
+    assert [n.code for n in preview.notices] == ["no_empty_weight"]
+    assert preview.notices[0].text == (
+        "No empty weight is known for this spool, so the reading cannot be turned into"
+        " filament: enter the filament left instead, or give the spool an insert."
+    )
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    under = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=150, final_grams=None
+    )
+    assert under is not None and under.final_filament_g is None
+    assert [n.code for n in under.notices] == ["reading_below_empty"]
+    assert under.notices[0].text == "The reading is under the empty spool's 200 g."
+    # `final_grams` is the filament itself: no reading, no notice.
+    given = _store(pg_pool).closing_preview(bare, "finished", final_reading_g=None, final_grams=30)
+    assert given is not None and [n.code for n in given.notices] == ["filament_left"]
+
+
+@pg
+def test_the_preview_of_a_reading_under_the_empty_weight_has_no_final(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    preview = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=150, final_grams=None
+    )
+    assert preview is not None
+    assert preview.final_filament_g is None and preview.closing.final_filament_g is None
+    # The reason's notices need a final filament; the reading's own notice stands.
+    assert [n.code for n in preview.notices] == ["reading_below_empty"]
+
+
+@pg
+def test_the_preview_of_no_spool_is_none(pg_pool: PgPool) -> None:
+    assert _store(pg_pool).closing_preview(uuid4(), "finished", None, None) is None
+
+
+# -- the archive (#7684) -------------------------------------------------------------
+
+
+def test_a_restore_takes_no_reason_or_reading() -> None:
+    with pytest.raises(ValueError, match="a restore takes no reason or reading"):
+        m.SpoolArchive(archived=False, reason="finished")
+    with pytest.raises(ValueError, match="a restore takes no reason or reading"):
+        m.SpoolArchive(archived=False, final_reading_g=230)
+    with pytest.raises(ValueError, match="final_reading_g is below final_grams"):
+        m.SpoolArchive(reason="finished", final_reading_g=200, final_grams=230)
+    assert m.SpoolArchive(reason="damaged", final_grams=12).archived is True
+
+
+@pg
+def test_archiving_with_a_final_reading_books_the_weighing_then_the_closing(
+    pg_pool: PgPool,
+) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    store = FilamentSpoolStore(pg_pool)
+    archived_spool = store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
+    assert archived_spool is not None and archived_spool.archived_at is not None
+    events = store.events(spool)
+    assert [e.kind for e in events][-2:] == ["weighed", "archived"]
+    weighed, archived = events[-2], events[-1]
+    assert weighed.grams_after == 30 and weighed.data["reading_g"] == 230
+    assert weighed.data["expected_g"] == 992 and weighed.at < archived.at
+    assert archived.data["reason"] == "finished" and archived.data["final_filament_g"] == 30
+    assert archived.data["started_g"] == 1000 and archived.data["started_from"] == "reading"
+    assert archived.data["ledger_consumed_g"] == 8 and archived.data["scale_consumed_g"] == 970
+    assert archived.data["drift_g"] == pytest.approx(-962)
+    assert archived_spool.grams_left == 30
+
+
+@pg
+def test_the_final_weighing_is_never_the_closings_start(pg_pool: PgPool) -> None:
+    """A spool added full and never weighed before its archive: the archive's own final
+    weighing is the first manual reading on record, and must not become ``started_g``
+    (the closing would then say 0 g consumed). The closing is computed on the events
+    before that weighing, so it starts from the label and matches the preview."""
+    spool = _spool(pg_pool, _insert(pg_pool), added_full=True)
+    _print(pg_pool, spool, 8, T0 + H, "r")
+    store = _store(pg_pool)
+    preview = store.closing_preview(spool, "finished", final_reading_g=230, final_grams=None)
+    assert preview is not None
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
+    archived = store.events(spool)[-1]
+    assert archived.kind == "archived"
+    assert archived.data["started_g"] == 1000 and archived.data["started_from"] == "label"
+    assert archived.data["ledger_consumed_g"] == 8 and archived.data["final_filament_g"] == 30
+    assert archived.data["scale_consumed_g"] == 970 and archived.data["drift_g"] == pytest.approx(
+        -962
+    )
+    assert archived.data == preview.closing.model_dump(mode="json")
+
+
+@pg
+def test_archiving_without_a_reading_closes_on_the_ledger(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(spool, True, actor="t", reason="damaged")
+    events = store.events(spool)
+    assert [e.kind for e in events][-1] == "archived" and "weighed" not in [
+        e.kind for e in events[-2:]
+    ]
+    data = events[-1].data
+    assert data["reason"] == "damaged" and data["final_filament_g"] == 992
+    assert data["ledger_consumed_g"] == 8
+    assert data["scale_consumed_g"] is None and data["drift_g"] is None
+
+
+@pg
+def test_a_final_reading_under_the_empty_weight_archives_nothing(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    store = FilamentSpoolStore(pg_pool)
+    with pytest.raises(ReadingBelowEmptyError):
+        store.archive(spool, True, actor="t", reason="damaged", final_reading_g=150)
+    assert store.get(spool).archived_at is None  # type: ignore[union-attr]
+    assert [e.kind for e in store.events(spool)][-1] not in {"weighed", "archived"}
+
+
+@pg
+def test_a_final_reading_needs_an_empty_weight(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, None)
+    store = FilamentSpoolStore(pg_pool)
+    with pytest.raises(NoEmptyWeightError):
+        store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
+    assert store.get(spool).archived_at is None  # type: ignore[union-attr]
+    assert [e.kind for e in store.events(spool)] == ["created"]
+
+
+@pg
+def test_final_grams_are_the_filament_and_a_reading_with_them_is_the_net(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=240, final_grams=30)
+    weighed = store.events(spool)[-2]
+    assert weighed.grams_after == 30 and weighed.data["empty_g"] == 210
+    assert weighed.data["empty_source"] == "person"
+
+
+@pg
+def test_an_archived_spool_archived_again_books_nothing(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
+    count = len(store.events(spool))
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
+    assert len(store.events(spool)) == count
+
+
+@pg
+def test_a_patch_archive_closes_with_no_reason(pg_pool: PgPool) -> None:
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    store = FilamentSpoolStore(pg_pool)
+    store.update(spool, m.SpoolPatch(archived=True), actor="t")
+    data = store.events(spool)[-1].data
+    assert data["reason"] is None and data["final_filament_g"] == 992
+    assert data["started_g"] == 1000 and data["scale_consumed_g"] is None
+
+
+@pg
+def test_detail_carries_the_closing_of_an_archived_spool(pg_pool: PgPool) -> None:
+    store = FilamentSpoolStore(pg_pool)
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    before = store.detail(spool)
+    assert before is not None and before.closing is None
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=680)
+    detail = store.detail(spool)
+    assert detail is not None and detail.closing is not None
+    assert detail.closing.reason == "finished"
+    # The spool was made with its grams by hand: that reading is the start, not the label.
+    assert detail.closing.started_g == 1000 and detail.closing.started_from == "reading"
+    assert detail.closing.final_filament_g == 480
+    store.archive(spool, False, actor="t")
+    restored = store.detail(spool)
+    assert restored is not None and restored.closing is None
+
+
+# -- a respooled spool continues as a new one (#7684) --------------------------------
+
+
+def _continue(pool: PgPool, source: UUID, grams: float = 480, quantity: int = 1) -> list[UUID]:
+    store = FilamentSpoolStore(pool)
+    body = m.SpoolBulkCreate(
+        spool=m.SpoolCreate(material_id=_material(pool), grams_left=grams, added_full=False),
+        copy_of=source,
+        continued_from=source,
+        quantity=quantity,
+    )
+    with store.transaction() as conn:
+        return store.bulk_on(conn, body, actor="t")
+
+
+@pg
+def test_a_continued_spool_links_both_ledgers(pg_pool: PgPool) -> None:
+    source = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, source)
+    store = FilamentSpoolStore(pg_pool)
+    store.archive(source, True, actor="t", reason="respooled", final_reading_g=680)
+    (made,) = _continue(pg_pool, source)
+    created = store.events(made)[0]
+    assert created.kind == "created" and created.data["continued_from"] == str(source)
+    assert created.grams_after == 480
+    archived = store.events(source)[-1]
+    assert archived.kind == "archived" and archived.data["continued_as"] == str(made)
+    assert archived.data["reason"] == "respooled"
+
+
+@pg
+def test_an_unarchived_source_cannot_be_continued(pg_pool: PgPool) -> None:
+    source = _spool(pg_pool, _insert(pg_pool))
+    with pytest.raises(ContinuedFromNotArchivedError):
+        _continue(pg_pool, source)
+    assert FilamentSpoolStore(pg_pool).list(include_archived=True) == [
+        FilamentSpoolStore(pg_pool).get(source)
+    ]
+
+
+@pg
+def test_a_missing_source_cannot_be_continued(pg_pool: PgPool) -> None:
+    with pytest.raises(SpoolCopySourceError):
+        _continue(pg_pool, uuid4())
+
+
+@pg
+def test_only_one_spool_continues_a_source(pg_pool: PgPool) -> None:
+    source = _spool(pg_pool, _insert(pg_pool))
+    FilamentSpoolStore(pg_pool).archive(source, True, actor="t", reason="respooled")
+    with pytest.raises(ValueError, match="one spool"):
+        _continue(pg_pool, source, quantity=2)
