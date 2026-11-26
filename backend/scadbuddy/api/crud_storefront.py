@@ -542,7 +542,7 @@ async def variant_preview_route(
     _client: StoreClient,
 ) -> Response:
     """The preview mesh of the output a priced slice of the variant saved (#6921),
-    streamed from its blob, else its file (#7256); 404 ``variant_not_found`` for a key
+    streamed from its blob (#7256, #7257); 404 ``variant_not_found`` for a key
     that names none. An ``If-None-Match`` that names the bytes is a 304, from the index
     before any byte is read (`blob_not_modified`), as the outputs' own routes answer."""
     output_id = await variant_output(state, variant_key)

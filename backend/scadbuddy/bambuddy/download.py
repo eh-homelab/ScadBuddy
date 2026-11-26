@@ -9,9 +9,9 @@ Now whatever a file needs to open correctly in Bambu Studio is written when the 
 is **saved**: a file laid out for a printer names that printer and each slot's material
 (#2639), and the template's ``print_settings`` (#770) go into its
 ``project_settings.config`` (``OutputStore.save``, ``render.provenance.stamp``). The
-download streams the saved bytes, the blob first, else the file (#7256,
-`api/output_streams.py`): it has a ``Content-Length`` and an ``ETag`` (strong for a blob,
-weak for a file), answers a matching ``If-None-Match`` with ``304``, and serves no
+download streams the saved bytes from their blob (#7256, #7257,
+`api/output_streams.py`): it has a ``Content-Length`` and a strong ``ETag``,
+answers a matching ``If-None-Match`` with ``304``, and serves no
 ranges.
 """
 

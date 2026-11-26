@@ -6,8 +6,7 @@ type Report = { dirty: boolean; drafts: Drafts }
 
 /**
  * #2171 — what every Settings section reports: whether it holds unsaved edits, and the
- * drafts it publishes for another section to read (Connection's Bambuddy URL, which the
- * store's choice depends on). One registry for every area, so the leave guard and
+ * drafts it publishes for another section to read. One registry for every area, so the leave guard and
  * "changed elsewhere" see every section, mounted together or not.
  */
 class DirtyRegistry {

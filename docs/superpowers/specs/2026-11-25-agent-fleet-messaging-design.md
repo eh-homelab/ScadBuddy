@@ -79,11 +79,11 @@ job and print progress. The owner chose no data loss; the operator can set per-k
 
 A new migration in `backend/scadbuddy/migrations/` (API ledger):
 
-- `fleet_agents (session_id uuid pk, handle text unique, label text, cursor bigint default 0, last_seen timestamptz)`
+- `fleet_agents (session_id uuid pk, handle text unique, label text, cursor bigint default 0, last_seen timestamptz, created_at timestamptz, updated_at timestamptz)` (`created_at` and `updated_at` from #7968; core sets `updated_at` with the cursor)
 - `fleet_channels (name text pk, created_at timestamptz)`
 - `fleet_members (channel, session_id, joined_at, pk (channel, session_id))`
 - `fleet_messages (seq bigint identity pk, from_session uuid, channel text null, to_session uuid null, text text, sent_at timestamptz, check exactly one target)`
-- `fleet_deliveries (session_id, seq, pk (session_id, seq))`
+- `fleet_deliveries (session_id, seq, created_at, pk (session_id, seq))` (`created_at` from #7968)
 
 ### 4.2 Routes in core (Go)
 

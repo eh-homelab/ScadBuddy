@@ -16,9 +16,9 @@ from fastapi.testclient import TestClient
 import scadbuddy.api.outputs as outputs_api
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import MAX_TAG_CHARS, MAX_TAGS
-from scadbuddy.library.outputs import META_NAME, OutputMeta
-from scadbuddy.render.glb import BoundingBox
+from scadbuddy.library.outputs import OutputMeta
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 from tests.support.template_rows import sync_template_rows
 
 SOURCE = b"width = 10;\ncube(width);\n"
@@ -37,22 +37,14 @@ def _create(
     assert response.status_code == 201, response.text
 
 
-def _seed_outputs(paths: DataPaths, slug: str, count: int) -> list[str]:
-    """``count`` output records, newest first, as the listing orders them."""
+def _seed_outputs(client: TestClient, slug: str, count: int) -> list[str]:
+    """``count`` output rows, newest first, as the listing orders them."""
     start = datetime(2026, 10, 1, tzinfo=UTC)
     ids: list[str] = []
     for n in range(count):
         output_id = f"{n:032x}"
-        meta = OutputMeta(
-            id=output_id,
-            slug=slug,
-            job_id="j",
-            created_at=start + timedelta(minutes=n),
-            bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
-        )
-        directory = paths.outputs / slug / output_id
-        directory.mkdir(parents=True)
-        (directory / META_NAME).write_text(meta.model_dump_json(), encoding="utf-8")
+        meta = output_meta(output_id, slug, created_at=start + timedelta(minutes=n))
+        insert_row(app_outputs(client), meta)
         ids.append(output_id)
     return ids[::-1]
 
@@ -282,7 +274,7 @@ def test_outputs_page_with_limit_and_after(
     client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _create(client, "widget")
-    newest_first = _seed_outputs(paths, "widget", 5)
+    newest_first = _seed_outputs(client, "widget", 5)
 
     whole = client.get("/api/v1/models/widget/outputs")
     assert [row["id"] for row in whole.json()] == newest_first
@@ -308,7 +300,7 @@ def test_outputs_page_with_limit_and_after(
 
 def test_outputs_after_an_unknown_id_is_a_conflict(client: TestClient, paths: DataPaths) -> None:
     _create(client, "widget")
-    _seed_outputs(paths, "widget", 1)
+    _seed_outputs(client, "widget", 1)
     response = client.get("/api/v1/models/widget/outputs", params={"after": "f" * 32})
     assert response.status_code == 409
 

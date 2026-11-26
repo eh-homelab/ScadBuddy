@@ -62,7 +62,6 @@ from scadbuddy.library.libraries import (
     LibraryStore,
 )
 from scadbuddy.library.media_store import PostgresMediaStore
-from scadbuddy.library.output_index import OutputIndex
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
@@ -364,9 +363,9 @@ def _build_core(settings: Settings) -> AppState:
     # Job events commit with the job change that they describe.
     projection.events = events
     preview_store = PreviewStore(pool.connection)
-    outputs = OutputStore(paths, prints=OutputPrintStore(pool))
-    outputs.index = OutputIndex(pool, paths)
-    outputs.rows = OutputRows(pool)
+    # The outputs' blob store is the store's, which the lifespan builds: it sets
+    # `outputs.bytes` there, or refuses to start (`OutputStoreUnusableError`, #7257).
+    outputs = OutputStore(paths, rows=OutputRows(pool), bytes=None, prints=OutputPrintStore(pool))
     uploads = BambuddyUploadStore(pool)
     # Render leases in Postgres, so a removal here sees the render worker's (#872).
     checkouts = CheckoutGate(CheckoutLeases(pool, paths.libraries))

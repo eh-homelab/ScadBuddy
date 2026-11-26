@@ -12,12 +12,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.print_library.associations import RELATIONS
 from scadbuddy.print_library.store import NativeFile
-from scadbuddy.render.glb import BoundingBox
 from tests.api.test_library_native import _native, _three_mf, _upload, native_client
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
@@ -280,18 +279,7 @@ def test_an_outputs_copy_is_an_output_of_its_model(
     native_client: TestClient, model: str, paths: DataPaths, tmp_path: Path
 ) -> None:
     output_id = "0123456789abcdef0123456789abcdef"
-    directory = paths.outputs / model / output_id
-    directory.mkdir(parents=True)
-    (directory / "meta.json").write_text(
-        OutputMeta(
-            id=output_id,
-            slug=model,
-            job_id="j",
-            created_at=datetime.now(UTC),
-            bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 4), size=(10, 10, 4)),
-        ).model_dump_json(),
-        encoding="utf-8",
-    )
+    insert_row(app_outputs(native_client), output_meta(output_id, model))
     copy = _upload(native_client, _three_mf(tmp_path / "bracket.3mf"), output_id=output_id)
     [on_model] = _listed(native_client, f"/api/v1/models/{model}/associations")
     [on_file] = _listed(native_client, f"/api/v1/print/library/{copy.id}/associations")

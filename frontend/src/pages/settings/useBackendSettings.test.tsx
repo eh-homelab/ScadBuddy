@@ -44,6 +44,14 @@ function Timing() {
   )
 }
 
+/** The S3 store's saved settings, so `storeChoice` finds it ready. */
+const S3_SAVED = {
+  store_s3_endpoint: 'https://s3.test',
+  store_s3_bucket: 'outputs',
+  store_s3_access_key_id: 'key',
+  has_store_s3_secret_access_key: true,
+}
+
 function Store() {
   const form = useBackendSettings('projects', ['store_backend'], {
     effective: (name, raw, f) => (name === 'store_backend' ? storeChoice(f.settings, f.value).backend : raw),
@@ -58,20 +66,20 @@ function Store() {
           onValueChange={(next) => form.setField('store_backend', next)}
           choices={[
             { value: 'local', label: 'This server’s volume' },
-            { value: 'bambuddy', label: 'Bambuddy library' },
-            { value: 's3', label: 'S3' },
+            { value: 's3', label: 'S3 store' },
           ]}
         />
       </FieldRow>
-      {/* What the select cannot do while Bambuddy's option is not ready: choose it anyway. */}
-      <Button onClick={() => form.setField('store_backend', 'bambuddy')}>Choose Bambuddy</Button>
+      {/* What the select cannot do while the S3 option is not ready: choose it anyway. */}
+      <Button onClick={() => form.setField('store_backend', 's3')}>Choose S3</Button>
     </SavedSection>
   )
 }
 
 function Url() {
   const form = useBackendSettings('connection', ['bambuddy_url'], {
-    alsoReset: (name, s) => (name === 'bambuddy_url' && s.store_backend === 'bambuddy' ? { store_backend: 'local' } : {}),
+    // A made-up rule, for the hook's mechanism only: resetting the URL takes the store back to local.
+    alsoReset: (name, s) => (name === 'bambuddy_url' && s.store_backend === 's3' ? { store_backend: 'local' } : {}),
   })
   return (
     <SavedSection form={form} id="connection" title="Connection">
@@ -354,10 +362,10 @@ describe('useBackendSettings', () => {
   })
 
   it('resets with alsoReset and reseeds those fields in every section', async () => {
-    setMockSettings({ ...mockSettings(), store_backend: 'bambuddy' })
+    setMockSettings({ ...mockSettings(), ...S3_SAVED, store_backend: 's3' })
     const put = vi.spyOn(api, 'putSettings')
     const { user } = await renderHarness()
-    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('Bambuddy library'))
+    await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveTextContent('S3 store'))
     await user.click(screen.getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
     expect(put).toHaveBeenCalledWith({ reset: ['bambuddy_url'], store_backend: 'local' })
@@ -394,23 +402,22 @@ describe('useBackendSettings', () => {
   })
 
   it('compares and sends the effective value', async () => {
-    // No inbox folder: the Bambuddy store is not ready, so choosing it is still local.
-    setMockSettings({ ...mockSettings(), library_folder_id: null })
+    // No S3 settings saved: the S3 store is not ready, so choosing it is still local.
     const { user, unmount } = await renderHarness()
-    await user.click(screen.getByRole('button', { name: 'Choose Bambuddy' }))
+    await user.click(screen.getByRole('button', { name: 'Choose S3' }))
     expect(screen.getByLabelText('Blob store')).toHaveTextContent('This server’s volume')
     expect(dirtySections()).toEqual([])
     expect(within(region('Projects & files')).queryByText('Unsaved')).toBeNull()
     unmount()
 
-    // With the inbox saved, the choice is what is sent.
-    setMockSettings({ ...mockSettings(), library_folder_id: 2 })
+    // With the S3 store saved, the choice is what is sent.
+    setMockSettings({ ...mockSettings(), ...S3_SAVED })
     const put = vi.spyOn(api, 'putSettings')
     const next = await renderHarness()
-    await next.user.click(screen.getByRole('button', { name: 'Choose Bambuddy' }))
+    await next.user.click(screen.getByRole('button', { name: 'Choose S3' }))
     await waitFor(() => expect(dirtySections()).toEqual(['projects']))
     await next.user.click(within(region('Projects & files')).getByRole('button', { name: 'Save Projects & files' }))
-    await waitFor(() => expect(put).toHaveBeenCalledWith({ store_backend: 'bambuddy' }))
+    await waitFor(() => expect(put).toHaveBeenCalledWith({ store_backend: 's3' }))
     await waitFor(() => expect(dirtySections()).toEqual([]))
     put.mockRestore()
   })

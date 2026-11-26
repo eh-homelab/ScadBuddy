@@ -157,9 +157,14 @@ old_ref="$(printf '1%.0s' {1..40})"
 # `camera_file <part>` prints clusters' camera-<part>.yaml as in
 # eh-homelab/clusters applications/scadbuddy-camera/: a comment that names the
 # API build, then one Deployment whose two containers (mediamtx, controller)
-# run one image. $cam_edge_line, when set, replaces the edge's second image line.
+# run one image. $cam_edge_line, when set, replaces the edge's second image line;
+# $cam_edge_content, when set, replaces the edge's whole file.
 camera_file() {
   local part=$1 image second
+  if [ "$part" = edge ] && [ -n "${cam_edge_content:-}" ]; then
+    printf '%s\n' "$cam_edge_content"
+    return
+  fi
   case "$part" in
     relay) image=$CAMERA_RELAY_IMAGE ;;
     recorder) image=$CAMERA_RECORDER_IMAGE ;;
@@ -652,6 +657,34 @@ else
     || fail "two different camera-edge lines: wrong error: $(grep '::error' "$work/log")"
 fi
 cam_edge_line=
+# #8015: a camera file that does not name its image is skipped, as the resolve
+# step skips it; one that names it in another form fails and says why.
+cam_edge_content=$(printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: scadbuddy-camera-edge')
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^camera_edge=none$' "$work/out" || fail "edge file without its image: output is not none"
+  grep -q "does not run $CAMERA_EDGE_IMAGE; not pinning it" "$work/log" \
+    || fail "edge file without its image: no notice: $(cat "$work/log")"
+  grep -q '^camera_recorder=pinned$' "$work/out" || fail "edge file without its image: recorder not pinned"
+else
+  fail "edge file without its image: step failed: $(grep '::error' "$work/log")"
+fi
+cam_edge_content=$(printf '%s\n' 'containers:' "- image: $CAMERA_EDGE_IMAGE:$cam_old" "- image: $CAMERA_EDGE_IMAGE:$cam_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "edge '- image:' form: step passed, expected an error"
+else
+  grep -q "has an image line for $CAMERA_EDGE_IMAGE that is not exactly 'image: $CAMERA_EDGE_IMAGE:<tag>@<digest>'" "$work/log" \
+    || fail "edge '- image:' form: wrong error: $(grep '::error' "$work/log")"
+fi
+cam_edge_content=
+# A release version (X.Y.Z) ends before the full stop that follows it in the comment.
+if VERSION=1.2.3 run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  for part in recorder edge; do
+    grep -qF "the build of the API's 1.2.3. Both containers" "$work/repo/$CAMERA_DIR/camera-$part.yaml" \
+      || fail "release version: $part comment is wrong: $(grep 'build of' "$work/repo/$CAMERA_DIR/camera-$part.yaml")"
+  done
+else
+  fail "release version: step failed: $(grep '::error' "$work/log")"
+fi
 # A relay pin is allowed in the relay's file only: in another file of the
 # camera directory it fails.
 extra_path=$CAMERA_DIR/camera-other.yaml

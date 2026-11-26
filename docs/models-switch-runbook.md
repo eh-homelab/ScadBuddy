@@ -26,13 +26,18 @@ about the cluster are read from eh-homelab/clusters on 2026-11-25, and not check
 
 | Step | What |
 |---|---|
-| dump | Each row and `meta.json` that the next steps change, in a directory of its own |
+| dump | Each row that the next steps change, in a directory of its own |
 | renames | `models` to `models-old`, then `models-next` to `models` |
-| files | `model_version` in the `meta.json` of each output whose id is in the map |
 | rows | `commit` and `render_key` of `order_items` and `order_item_revisions`; `commit` of `storefront_listings`, and not `updated_at`; `model_version` in `outputs.meta`; `scope_key` and `body` of the `template_version` rows of `analyzer_decisions`; `models_repo_head`; no row in `templates` and `template_copy_runs`; no `models` row in `git_remote_pushes` |
 
 The rows change in one transaction. A second `run` with the same dump finishes one that
 stopped, at any point. `rollback` with that dump undoes it.
+
+An output's record is its `outputs` row alone since release B of #7257. The switch reads
+and writes no file under `data/outputs/` (`models_switch.py`, module docstring). The dump
+is of format 2 (`FORMAT`), with no `meta.json` files. The command refuses a dump of
+format 1, made by an older build: finish or roll back such a switch with that build's
+image (`_refuse_older_format`).
 
 An order item whose `render_key` is not the key of its inputs at the old id keeps that key.
 Its commit changes. `preflight` names each one.
@@ -232,10 +237,9 @@ kubectl -n bambuddy exec scadbuddy-models-switch -- \
 It must say these lines, in this order (`note:` lines come first):
 
 ```text
-dumped <rows> rows and <files> files to /data/models-switch-1
+dumped <rows> rows to /data/models-switch-1
 renamed models to models-old
 renamed models-next to models
-meta.json: <files> of <files> are written now
 <rows> rows are changed
 done: /data/models is the new repository, at <new HEAD>; the old one is /data/models-old, and it stays
 ```
@@ -263,7 +267,7 @@ and the next start continues the copy (each batch keeps its rows); raise the sta
 | Check | Expected |
 |---|---|
 | `GET /api/v1/model-records/copy-status` | `finished_at` is set and after the start; `incomplete` is false; `added` is the number of templates; `unreadable` is empty |
-| `GET /api/v1/outputs/copy-status` | `finished_at` is set; `incomplete` is false; `copied` and `dropped` are 0; `refreshed` is the number of `meta.json` files that were written (`run` prints it; the copy sees them by their new time) |
+| `GET /api/v1/outputs/copy-status` | The same as in step 2: `cut_over_at` is set. No copy runs since release B of #7257, so nothing in it moves |
 | The model list and one mesh model | Each template is there. The mesh model opens, and it renders |
 | The approved item | Its saved output is still its output. Its quote stands: the item page asks for no new one |
 | The listing | The page shows it with the prices that it had |
@@ -304,7 +308,7 @@ It is for the first minutes only. What was saved after the switch names new ids:
   not have it.
 - An order, a listing or an output that was made after the switch names an id that the old
   repository does not have. The command names each one, and leaves it.
-- A row or a `meta.json` that the switch changed, and that something else changed after it,
+- A row that the switch changed, and that something else changed after it,
   stops the rollback before it changes anything: it holds neither the old value nor the new
   one. That is how the limit shows.
 
@@ -320,7 +324,7 @@ kubectl -n bambuddy exec scadbuddy-models-switch -- \
 ```
 
 Its last line starts with `done: /data/models is the old repository`. It renames back, puts
-back the dumped `meta.json` files (with their times) and the dumped columns, sets
+back the dumped columns, sets
 `models_repo_head`, and empties `templates` and `template_copy_runs`. It deletes no repository,
 no output and no dump. A `run` after it needs a dump directory of its own when a row changed
 in between. Then start one replica and do the checks of step 6: the HEAD is the old one, and
