@@ -242,6 +242,25 @@ def test_every_plate_of_a_multi_plate_output_is_listed_with_its_cover(
     assert client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail").status_code == 404
 
 
+@respx.mock
+def test_a_plate_with_no_cover_shows_the_outputs_thumbnail_when_asked(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#7939: a queue item's picture asks with ``cover_if_missing``; a plate with no cover
+    then answers as the output's thumbnail does. A plate with one keeps its own."""
+    configure(client)
+    output_id = _output_without_cover(client, model)
+    add_plate(_output_3mf(paths, output_id), 2, thumbnail=b"\x89PNG plate two")
+    asked = {"cover_if_missing": "true"}
+
+    own = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
+    fallback = client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail", params=asked)
+    kept = client.get(f"/api/v1/outputs/{output_id}/plates/2/thumbnail", params=asked)
+
+    assert (fallback.status_code, fallback.content) == (own.status_code, own.content)
+    assert kept.content == b"\x89PNG plate two"
+
+
 @pytest.mark.requires_postgres
 @respx.mock
 def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
