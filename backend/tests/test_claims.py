@@ -198,6 +198,31 @@ def test_release_never_moves_a_claim_another_request_put_since(
     assert claims.get(a.name) == b"a"
 
 
+def test_a_claim_renewed_between_the_release_check_and_its_move_is_put_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7897: a put between `release`'s check (still the file its hold wrote) and its move
+    aside is moved with it; `release` sees the other file and puts it back."""
+    claims = ClaimStore(tmp_path)
+    held = claims.hold(b"a")
+    stat = Path.stat
+    renewed = False
+
+    def stat_then_renew(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        nonlocal renewed
+        result = stat(self, *args, **kwargs)
+        if self.name == held.name and not renewed:
+            renewed = True
+            claims.hold(b"a")
+        return result
+
+    monkeypatch.setattr(Path, "stat", stat_then_renew)
+    claims.release(held)
+    assert renewed
+    assert claims.get(held.name) == b"a"
+    assert [path.name for path in tmp_path.iterdir()] == [held.name]
+
+
 def test_hold_file_moves_a_streamed_file_in_and_a_second_renews_it(tmp_path: Path) -> None:
     """A media upload is streamed to disk, never read into memory (#1054): its file
     is moved in under the digest computed while streaming."""
