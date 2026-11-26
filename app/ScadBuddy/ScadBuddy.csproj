@@ -66,6 +66,9 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Maui.Controls" Version="$(MauiVersion)" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+		<!-- Traces, metrics and logs over OTLP/HTTP (Telemetry.cs). -->
+		<PackageReference Include="OpenTelemetry" Version="1.21.0" />
+		<PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.21.0" />
 		<PackageReference Include="Xamarin.AndroidX.WebKit" Version="1.18.0" Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'" />
 		<!-- WebKit 1.18 brings androidx.core 1.19.1; core-ktx must match it, or both define the same classes. -->
 		<PackageReference Include="Xamarin.AndroidX.Core.Core.Ktx" Version="1.19.1" Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'" />

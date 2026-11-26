@@ -20,7 +20,8 @@ public static class MauiProgram
 #if ANDROID
 				events.AddAndroid(android => android
 					.OnResume(activity => NfcBridge.Instance.Resume(activity))
-					.OnPause(activity => NfcBridge.Instance.Pause(activity)));
+					.OnPause(activity => NfcBridge.Instance.Pause(activity))
+					.OnStop(_ => Telemetry.Flush()));
 #endif
 			});
 
@@ -38,6 +39,9 @@ public static class MauiProgram
 		builder.Logging.AddDebug();
 #endif
 
-		return builder.Build();
+		Telemetry.Start(builder.Logging);
+		var app = builder.Build();
+		Telemetry.Attach(app.Services);
+		return app;
 	}
 }

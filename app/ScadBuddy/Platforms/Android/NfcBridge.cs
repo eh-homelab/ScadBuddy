@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -6,6 +7,7 @@ using Android.App;
 using Android.Nfc;
 using Android.Nfc.Tech;
 using AndroidX.WebKit;
+using Microsoft.Extensions.Logging;
 using AWebView = Android.Webkit.WebView;
 
 namespace ScadBuddy;
@@ -175,8 +177,19 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		}
 	}
 
+	// Reads by kind (mifare_classic or ndef) and outcome: complete, partial (a sector refused,
+	// or the read stopped and the next tap resumes it) or error.
+	static readonly Counter<long> Reads = Telemetry.Meter.CreateCounter<long>("scadbuddy_app.nfc.reads");
+	static readonly Histogram<double> ReadDuration = Telemetry.Meter.CreateHistogram<double>("scadbuddy_app.nfc.read.duration", "s");
+	// MIFARE reads that started from the sectors an earlier, partial read of the same tag kept.
+	static readonly Counter<long> ResumedReads = Telemetry.Meter.CreateCounter<long>("scadbuddy_app.nfc.resumed_reads");
+
 	static JsonObject Read(Tag tag)
 	{
+		using var span = Telemetry.Source.StartActivity("nfc.read");
+		var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		var ndefFailed = false;
+		var resumed = false;
 		var uid = tag.GetId() ?? [];
 		var techs = tag.GetTechList() ?? [];
 		var isClassic = techs.Contains("android.nfc.tech.MifareClassic");
@@ -194,11 +207,12 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 				foreach (var record in message?.GetRecords() ?? []) records.Add(NdefWire.Parse(record));
 			}
 		}
-		catch (Exception) { }
-		if (isClassic) mifare = ReadClassic(tag, uid);
+		catch (Exception) { ndefFailed = true; }
+		if (isClassic) mifare = ReadClassic(tag, uid, out resumed);
 		Android.Util.Log.Info("ScadBuddyNfc",
 			$"read {Convert.ToHexString(uid)} techs={string.Join(',', techs.Select(t => t.Split('.').Last()))} records={records.Count} " +
 			(mifare is null ? "mifare=none" : $"blocks={mifare["blocks"]!.AsArray().Count} refused={mifare["refusedSectors"]!.ToJsonString()} error={mifare["error"]?.ToString() ?? "none"}"));
+		Record(span, started, techs, records.Count, isClassic, ndefFailed, resumed, mifare);
 		if (mifare is not null)
 		{
 			var count = mifare["blocks"]!.AsArray().Count;
@@ -212,8 +226,42 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		return reading;
 	}
 
-	static JsonObject? ReadClassic(Tag tag, byte[] uid)
+	/// <summary>The read's span attributes, metrics and OTLP log: counts and names only, never the UID or block data.</summary>
+	static void Record(System.Diagnostics.Activity? span, long started, IList<string> techs, int records, bool isClassic, bool ndefFailed, bool resumed, JsonObject? mifare)
 	{
+		var kind = isClassic ? "mifare_classic" : "ndef";
+		var blocks = mifare?["blocks"]!.AsArray().Count ?? 0;
+		var refused = mifare?["refusedSectors"]!.AsArray().Count ?? 0;
+		// The error's kind (its sector and exception type), never Android's message.
+		var error = mifare?["error"]?.ToString() is { } failure ? string.Join(": ", failure.Split(": ").Take(2)) : null;
+		var outcome = isClassic
+			? mifare is null ? "error" : error is not null || refused > 0 ? "partial" : "complete"
+			: ndefFailed ? "error" : "complete";
+		var shortTechs = string.Join(',', techs.Select(t => t.Split('.').Last()));
+		span?.SetTag("nfc.techs", shortTechs);
+		span?.SetTag("nfc.kind", kind);
+		span?.SetTag("nfc.ndef.records", records);
+		span?.SetTag("nfc.outcome", outcome);
+		if (isClassic)
+		{
+			span?.SetTag("nfc.mifare.blocks", blocks);
+			span?.SetTag("nfc.mifare.refused_sectors", refused);
+			span?.SetTag("nfc.mifare.resumed", resumed);
+		}
+		if (outcome == "error" || error is not null)
+			span?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, error ?? "read failed");
+		var tags = new System.Diagnostics.TagList { { "kind", kind }, { "outcome", outcome } };
+		Reads.Add(1, tags);
+		ReadDuration.Record(System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds, tags);
+		if (resumed) ResumedReads.Add(1);
+		Telemetry.Nfc.LogInformation(
+			"nfc read {Kind} {Outcome} techs={Techs} records={Records} blocks={Blocks} refused={Refused} resumed={Resumed} error={Error}",
+			kind, outcome, shortTechs, records, blocks, refused, resumed, error ?? "none");
+	}
+
+	static JsonObject? ReadClassic(Tag tag, byte[] uid, out bool resumed)
+	{
+		resumed = false;
 		MifareClassic? classic;
 		try { classic = MifareClassic.Get(tag); } catch (Exception) { return null; }
 		if (classic is null) return null;
@@ -224,6 +272,7 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		Dictionary<int, JsonArray> sectors;
 		lock (PartialGate)
 			sectors = partial is { } p && p.Uid == hex && DateTime.UtcNow - p.At < PartialFor ? p.Sectors : [];
+		resumed = sectors.Count > 0;
 		var refused = new JsonArray();
 		var at = -1;
 		string? failure = null;

@@ -194,6 +194,38 @@ The owner's decisions (2026-11-26):
   A workflow `app.yml` builds and tests on `ubuntu-latest` for changes under `app/`, and
   attaches the APK to a release on an `app-v*` tag.
 
+### The app's telemetry
+
+The app sends traces, metrics and logs as `tools/go/bambuddy-fs` sends its own (its README,
+"Telemetry"). The code is `app/ScadBuddy/Telemetry.cs`.
+
+- The packages are `OpenTelemetry` and `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.21.0
+  ([NuGet](https://www.nuget.org/packages/OpenTelemetry/1.21.0)), pinned in `ScadBuddy.csproj`.
+- The export is OTLP/HTTP protobuf to `<base>/v1/traces`, `/v1/metrics` and `/v1/logs`. The
+  default base is bambuddy-fs's: `https://otlp.internal.nullreference.io`
+  (eh-homelab/clusters#2221). That collector takes no credentials, so the APK holds no secret.
+- The base URL is the Preferences key `scadbuddy.otel.endpoint`. The menu item "Telemetry" sets
+  it. An empty value turns telemetry off. Off, the app builds no provider and makes no network
+  call. A change takes effect after a restart. Android gives an app no environment, so the
+  `OTEL_*` variables do not apply.
+- The resource is `service.name=scadbuddy-app`, `service.version` (the app's version), and
+  `service.instance.id`, a random id that the app keeps for each install. No device name is sent.
+- The sampler is parent-based always-on. Metrics are cumulative and export each 60 s, because
+  Prometheus refuses delta.
+- The app flushes all three signals, within 5 s and off the main thread, each time it leaves
+  the screen (Android `OnStop`). Android gives an app no clean exit.
+- Spans: `nfc.read` for each tag read, with `nfc.kind`, `nfc.techs`, `nfc.ndef.records`,
+  `nfc.outcome`, and for MIFARE Classic `nfc.mifare.blocks`, `nfc.mifare.refused_sectors` and
+  `nfc.mifare.resumed`. A failed read has the error status, with the failing sector and the
+  exception type. The span never holds the UID, block data or Android's error message.
+- Metrics: `scadbuddy_app.nfc.reads` and `scadbuddy_app.nfc.read.duration` (by `kind` and
+  `outcome`: `complete`, `partial` or `error`), and `scadbuddy_app.nfc.resumed_reads`.
+- Logs: `Microsoft.Extensions.Logging` goes to OTLP. The bridge logs each read on the category
+  `ScadBuddy.Nfc`. Logcat keeps its `ScadBuddyNfc` lines, with the UID and the blocks.
+- The app makes no HTTP call of its own, so it propagates no `traceparent`. The page in the
+  WebView keeps its own browser tracing (`frontend/src/lib/tracing.ts`). The app does not
+  instrument the page.
+
 ### Scan a tag (G6)
 
 - The composer's attach menu gets "Scan a tag". It posts `POST /api/v1/filament/nfc-jobs`

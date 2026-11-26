@@ -65,6 +65,24 @@ public partial class MainPage : ContentPage
 		await DisplayAlertAsync("Saved", "Close the app and open it again to use the new address.", "OK");
 	}
 
+	async void OnTelemetryClicked(object? sender, EventArgs e)
+	{
+		var entered = await DisplayPromptAsync(
+			"Telemetry",
+			"The OpenTelemetry collector this app sends traces, metrics and logs to (OTLP/HTTP base URL). Leave it empty to send nothing. The app uses the change after a restart.",
+			initialValue: Telemetry.Endpoint,
+			keyboard: Keyboard.Url);
+		if (entered is null) return;
+		entered = entered.Trim();
+		if (entered.Length > 0 && (!Uri.TryCreate(entered, UriKind.Absolute, out var parsed) || parsed.Scheme is not ("http" or "https")))
+		{
+			await DisplayAlertAsync("Not changed", "Give a full http:// or https:// address, or leave it empty.", "OK");
+			return;
+		}
+		Preferences.Set(Telemetry.EndpointKey, entered);
+		await DisplayAlertAsync("Saved", entered.Length == 0 ? "Close the app and open it again to stop telemetry." : "Close the app and open it again to use the new collector.", "OK");
+	}
+
 	void OnReloadClicked(object? sender, EventArgs e) => Web.Reload();
 
 	protected override bool OnBackButtonPressed()
