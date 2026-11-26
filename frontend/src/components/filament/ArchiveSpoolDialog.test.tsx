@@ -126,6 +126,32 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     expect(within(dialog).queryByText(/after all/)).toBeNull()
   })
 
+  it('drops the note when the number replaced starts like the old one (#7945)', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', slowFirstPreview()))
+    const { dialog } = await show(3, 180)
+    const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
+    await userEvent.type(field, '210')
+    await within(dialog).findByText(/after all/, undefined, { timeout: 3000 })
+    // The first keystroke of the replacement, "210" to "2", looks like a shortening by the text alone:
+    // what was selected decides, not the text.
+    await userEvent.tripleClick(field)
+    await userEvent.keyboard('250')
+    expect(field).toHaveValue('250')
+    expect(within(dialog).queryByText(/after all/)).toBeNull()
+  })
+
+  it('drops the note when a shorter number is pasted over the old one (#7945)', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', slowFirstPreview()))
+    const { dialog } = await show(3, 180)
+    const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
+    await userEvent.type(field, '210')
+    await within(dialog).findByText(/after all/, undefined, { timeout: 3000 })
+    await userEvent.tripleClick(field)
+    await userEvent.paste('21')
+    expect(field).toHaveValue('21')
+    expect(within(dialog).queryByText(/after all/)).toBeNull()
+  })
+
   it('says nothing about a number typed once the label had already changed (#7909)', async () => {
     server.use(http.get('*/api/v1/filament/spools/:id/closing', () => noEmptyWeightPreview()))
     const { dialog } = await show(3, 180)
