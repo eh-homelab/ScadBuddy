@@ -7,6 +7,7 @@ a denial (#7588, `test_decision_take_over.py`)."""
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -386,6 +387,30 @@ async def test_a_send_that_meets_the_run_closing_with_an_unknown_fate_keeps_its_
         await operate(flows, answer, request)
     assert err.value is closed
     assert await flows.store.get_decision(request_id(run, call_id)) is not None
+
+
+async def test_an_approval_that_meets_the_run_closing_with_an_unknown_fate_keeps_its_row(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7900: approvals share `tell`. An unknown fate keeps the row and raises the send's
+    own error, and a warning says why, so the 5xx is told apart from the stale case."""
+    run, call_id = await _gated(flows)
+    decide = kinds(flows)[FLOW_DECIDE]
+    request = {"run_id": run.id, "call_id": call_id, "approved": True}
+    closed = RPCError(
+        "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+    )
+
+    async def closing(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        raise closed
+
+    monkeypatch.setattr(AgentClient, "approve_tool", closing)
+    monkeypatch.setattr(WorkflowUpdateHandle, "result", _no_answer)
+    with caplog.at_level(logging.WARNING), pytest.raises(RPCError) as err:
+        await operate(flows, decide, request)
+    assert err.value is closed
+    assert await flows.store.get_decision(request_id(run, call_id)) is not None
+    assert any("whether it landed is unknown" in r.getMessage() for r in caplog.records)
 
 
 async def test_an_answer_cancelled_after_it_landed_keeps_its_row_and_resends(
