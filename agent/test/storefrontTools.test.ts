@@ -287,6 +287,16 @@ describe('storefront tools (#6131)', () => {
       }
     })
 
+    it('takes empty inputs at version 0 from an output that holds no inputs at all, and says so', async () => {
+      let posted: Record<string, unknown> | undefined
+      serveDollhouse({ params: { course: 200 } }, (body) => (posted = body as Record<string, unknown>))
+      const result = firstText(await tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE }, ctx())) as Record<string, unknown>
+      expect(posted).toMatchObject({ inputs: {}, inputs_v: 0, fixed: { course: 200 } })
+      expect(result['notes']).toEqual([
+        `The output holds none of Dollhouse's own design inputs (its pipeline's), so the listing starts with none: open the listing at /storefront/listings/${LISTING} and press "Set up the design" before you publish it.`,
+      ])
+    })
+
     it('sets no inputs from a model, and says the design needs setting up in the editor', async () => {
       let posted: Record<string, unknown> | undefined
       serveDollhouse(house.source, (body) => (posted = body as Record<string, unknown>))
