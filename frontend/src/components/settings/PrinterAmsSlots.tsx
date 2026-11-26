@@ -149,15 +149,20 @@ function AmsBody({ row }: { row: PrinterRow }) {
           ? { text: `${title}: sent to ${slot.label}; the printer did not confirm it. Read the AMS before you send it again.`, warn: true }
           : { text: `${title}: sent to ${slot.label}.`, warn: false }
         // A reset clears the saved preset only when the printer confirmed it in the route's own answer
-        // (P43): one it answered late, or a resend, keeps it, so read the slot to say which.
+        // (P43): one it answered late, or a resend, keeps it, so read the slot to say which. That read is
+        // the panel's refresh too.
         if (action === 'reset' && slot.saved_preset) {
-          const kept = await api.printerAms(row.id).then(
-            (fresh) => fresh.units.find((u) => u.ams_id === unit.ams_id)?.slots.find((s) => s.tray_id === slot.tray_id)?.saved_preset,
-            () => undefined,
-          )
+          const fresh = await api.printerAms(row.id).catch(() => null)
+          const kept = fresh?.units.find((u) => u.ams_id === unit.ams_id)?.slots.find((s) => s.tray_id === slot.tray_id)?.saved_preset
           if (kept) said.text += ` Its saved preset ${kept.preset_name} was kept; use “Clear saved preset” to clear it.`
+          setMessage(said)
+          if (fresh) {
+            ams.setData(fresh, { supersede: true })
+            return
+          }
+        } else {
+          setMessage(said)
         }
-        setMessage(said)
       }
       ams.refresh()
     } catch (cause) {

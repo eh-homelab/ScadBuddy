@@ -134,12 +134,12 @@ export function keyRequired(request: Request): Response | undefined {
   )
 }
 
-/** The command's answer: `body` at once, or a 202 while `setPrinterCommandSlow` is on. */
 /** Whether the next command answers in its route's own reply (no 202 to follow). */
 export function answersAtOnce(): boolean {
   return state.slow <= 0 && !state.latched
 }
 
+/** The command's answer: `body` at once, or a 202 while `setPrinterCommandSlow` is on. */
 export function commandAnswer(printer: string, request: Request, body: JsonBodyType): Response {
   const key = request.headers.get('Idempotency-Key')
   state.keys.push(key)
