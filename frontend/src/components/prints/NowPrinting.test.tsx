@@ -660,6 +660,65 @@ describe('the live camera (#7330)', () => {
     await waitFor(() => expect(cameraReconnects()).toEqual([SPARE]))
   })
 
+  /** A 202 with no mocked relay restart, so the test drives the relay's reports itself. */
+  const plainReconnect = () => {
+    const sent: string[] = []
+    server.use(
+      http.post('/api/v1/printers/:id/camera/reconnect', ({ params }) => {
+        sent.push(String(params.id))
+        return HttpResponse.json({ printer_id: String(params.id) }, { status: 202 })
+      }),
+    )
+    return sent
+  }
+
+  it('starts the player over only when the relay next reports pulling', async () => {
+    const sent = plainReconnect()
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await within(dialog).findByRole('list', { name: 'Camera feeds' })
+    // A player that starts over is a new element (LivePlayer is keyed by the attempt).
+    const first = within(dialog).getByTestId('live-player')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Reconnect' }))
+    await waitFor(() => expect(sent).toEqual([SPARE]))
+    expect(await within(dialog).findByText('Reconnecting the camera.')).toBeInTheDocument()
+    // The event itself, and the teardown's reports, are no reason to start over.
+    act(() => emitRealtime('camera.reconnect', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    setCameraFeeds(SPARE, [{ part: 'relay', state: 'stopped', detail: null, updated_at: '2026-11-25T12:00:05Z' }])
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('camera-feed-relay')).toHaveTextContent('Stopped'))
+    expect(within(dialog).getByTestId('live-player')).toBe(first)
+
+    setCameraFeeds(SPARE, [{ part: 'relay', state: 'pulling', detail: null, updated_at: '2026-11-25T12:00:08Z' }])
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('live-player')).not.toBe(first))
+    // Later reports do not start it over again.
+    const second = within(dialog).getByTestId('live-player')
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('camera-feed-relay')).toHaveTextContent('Receiving'))
+    expect(within(dialog).getByTestId('live-player')).toBe(second)
+  })
+
+  it('starts the player over 20 s after a reconnect when the relay never reports pulling', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const sent = plainReconnect()
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await within(dialog).findByRole('list', { name: 'Camera feeds' })
+    // A player that starts over is a new element (LivePlayer is keyed by the attempt).
+    const first = within(dialog).getByTestId('live-player')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Reconnect' }))
+    await waitFor(() => expect(sent).toEqual([SPARE]))
+    await act(() => vi.advanceTimersByTimeAsync(19_000))
+    expect(within(dialog).getByTestId('live-player')).toBe(first)
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await waitFor(() => expect(within(dialog).getByTestId('live-player')).not.toBe(first))
+  })
+
   it("shows the refusal's text when the reconnect is refused", async () => {
     server.use(
       http.post('/api/v1/printers/:id/camera/reconnect', () =>

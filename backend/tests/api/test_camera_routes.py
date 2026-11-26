@@ -124,6 +124,16 @@ def test_reconnect_emits_the_event(client: TestClient, printer: str, events: lis
     assert event.printer_id == printer
 
 
+def test_reconnect_names_the_printer_in_its_canonical_spelling(
+    client: TestClient, printer: str, events: list[Event]
+) -> None:
+    response = client.post(f"/api/v1/printers/{printer.upper()}/camera/reconnect")
+    assert response.status_code == 202
+    assert [event.printer_id for event in events if isinstance(event, CameraReconnectEvent)] == [
+        printer
+    ]
+
+
 def test_reconnect_refuses_a_printer_not_recorded(client: TestClient, events: list[Event]) -> None:
     printer = _make_printer(client, recorded=False)
     response = client.post(f"/api/v1/printers/{printer}/camera/reconnect")

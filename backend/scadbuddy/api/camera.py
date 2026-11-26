@@ -97,7 +97,8 @@ async def reconnect_printer_camera(state: StateDep, printer_id: str) -> Reconnec
             f"printer {printer_id} is not recorded",
             type_=f"{PROBLEMS}camera-not-recorded",
         )
-    emit(state.events, CameraReconnectEvent(printer_id=printer_id))
+    # The canonical spelling, so the relay never puts a second path for one printer.
+    emit(state.events, CameraReconnectEvent(printer_id=str(printer_uuid(printer_id))))
     return Reconnecting(printer_id=printer_id)
 
 

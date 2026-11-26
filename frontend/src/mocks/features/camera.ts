@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { CameraFeed, PrinterCamera } from '../../api/types'
+import { emitRealtime } from '../realtime'
 import { printersNowState } from './printersNow'
 
 /**
@@ -12,7 +13,8 @@ import { printersNowState } from './printersNow'
  * with the session in the `session` query key. The media playlist is live and has no
  * segment yet: hls.js
  * gives up on it, the player asks again each second, and says "Camera unavailable" when
- * its 10 s wait ends.
+ * its 10 s wait ends. A reconnect plays the relay's restart: the relay feed reports
+ * `stopped`, then `pulling` again, each with a `camera.feed` event, as `Relay.restart` does.
  */
 const PROBLEMS = 'https://scadbuddy.dev/problems/'
 
@@ -21,11 +23,28 @@ const RECEIVING: CameraFeed[] = [
   { part: 'recorder', state: 'pulling', detail: null, updated_at: '2026-11-25T12:00:00Z' },
 ]
 
-const state: { feeds: Map<string, CameraFeed[]>; reconnects: string[] } = { feeds: new Map(), reconnects: [] }
+const state: { feeds: Map<string, CameraFeed[]>; reconnects: string[]; generation: number } = {
+  feeds: new Map(),
+  reconnects: [],
+  generation: 0,
+}
 
 export function reset(): void {
   state.feeds = new Map()
   state.reconnects = []
+  // A restart still under way from the last test does not report into the next one.
+  state.generation += 1
+}
+
+/** When the mocked relay reports `stopped`, then `pulling`, after a reconnect. */
+const MOCK_RESTART_MS = { stopped: 200, pulling: 1500 }
+
+function reportRelay(printerId: string, feedState: CameraFeed['state'], generation: number): void {
+  if (generation !== state.generation) return
+  const others = (state.feeds.get(printerId) ?? RECEIVING).filter((feed) => feed.part !== 'relay')
+  const relay: CameraFeed = { part: 'relay', state: feedState, detail: null, updated_at: new Date().toISOString() }
+  state.feeds.set(printerId, [relay, ...others])
+  emitRealtime('camera.feed', ['printers', `printer:${printerId}`], { printer_id: printerId })
 }
 
 /** Replace a printer's feed states, for a test. */
@@ -93,6 +112,10 @@ export const handlers = [
     const id = String(params.id)
     if (!recorded(id)) return notRecorded(id)
     state.reconnects.push(id)
+    const generation = state.generation
+    emitRealtime('camera.reconnect', ['printers', `printer:${id}`], { printer_id: id })
+    setTimeout(() => reportRelay(id, 'stopped', generation), MOCK_RESTART_MS.stopped)
+    setTimeout(() => reportRelay(id, 'pulling', generation), MOCK_RESTART_MS.pulling)
     return HttpResponse.json({ printer_id: id }, { status: 202 })
   }),
   http.post('/api/v1/camera/live/:id/whep', () =>

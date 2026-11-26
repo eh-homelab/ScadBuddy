@@ -512,8 +512,9 @@ function CameraView({ printer, bambuddyId }: { printer: PrinterNow; bambuddyId: 
 
 /** #7330 — the live view, with the job and the camera's feed states beside it. */
 function LiveCameraView({ printer }: { printer: PrinterNow }) {
-  // A reconnect restarts the relay's pull, so the player starts over too.
+  // A reconnect restarts the relay's pull, so the player starts over too, once the pull is back.
   const [attempt, setAttempt] = useState(0)
+  const restart = useCallback(() => setAttempt((count) => count + 1), [])
   return (
     <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
       <div className="min-w-0">
@@ -524,10 +525,14 @@ function LiveCameraView({ printer }: { printer: PrinterNow }) {
           {ACTIVITY[printer.activity].label}
         </Badge>
         <JobStatus printer={printer} />
-        <CameraFeeds printerId={printer.id} onReconnect={() => setAttempt((count) => count + 1)} />
+        <CameraFeeds printerId={printer.id} onReconnect={restart} />
       </div>
     </div>
   )
+}
+
+function relayFeed(camera: PrinterCamera): CameraFeed | undefined {
+  return camera.feeds.find((feed) => feed.part === 'relay')
 }
 
 const FEED_PART: Record<CameraFeed['part'], string> = { relay: 'Live feed', recorder: 'Recording' }
@@ -539,8 +544,17 @@ const FEED_STATE: Record<CameraFeed['state'], { label: string; dot: string }> = 
 }
 
 /**
+ * How long the player waits for the relay to report `pulling` again after a reconnect
+ * before it starts over anyway.
+ */
+const RECONNECT_WAIT_MS = 20_000
+
+/**
  * #7330 — each part's feed state (`GET /printers/{id}/camera`), read again on the
  * printer's camera events, and Reconnect, which asks the relay to restart its pull.
+ * `onReconnect` runs when the relay next reports `pulling` after the reconnect (a report
+ * newer than the one read when it was sent), or after `RECONNECT_WAIT_MS`. A player that
+ * started at once would attach to the old pull while the relay tears it down.
  */
 function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnect: () => void }) {
   const [camera, setCamera] = useState<PrinterCamera | null>(null)
@@ -548,6 +562,12 @@ function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnec
   const [sending, setSending] = useState(false)
   const [reconnect, setReconnect] = useState<{ sent: true } | { refused: string } | null>(null)
   const read = useRef<() => void>(() => undefined)
+  const last = useRef<PrinterCamera | null>(null)
+  const waiting = useRef<{ since: string | null; timer: ReturnType<typeof setTimeout> } | null>(null)
+  const restart = useRef(onReconnect)
+  useEffect(() => {
+    restart.current = onReconnect
+  }, [onReconnect])
   // `camera.feed` and `camera.reconnect` publish on `printer:<id>`; its reports do too,
   // about once a second while it prints, and are no news here.
   useSubscription(`printer:${printerId}`, (signal) => {
@@ -556,6 +576,10 @@ function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnec
   useEffect(() => {
     let live = true
     let sent = 0
+    const done = () => {
+      if (waiting.current) clearTimeout(waiting.current.timer)
+      waiting.current = null
+    }
     read.current = () => {
       const mine = ++sent
       const current = () => live && mine === sent
@@ -563,8 +587,14 @@ function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnec
         .printerCamera(printerId)
         .then((answer) => {
           if (!current()) return
+          last.current = answer
           setCamera(answer)
           setReadError(null)
+          const relay = relayFeed(answer)
+          if (waiting.current && relay?.state === 'pulling' && relay.updated_at !== waiting.current.since) {
+            done()
+            restart.current()
+          }
         })
         .catch((cause: unknown) => {
           if (current()) setReadError(cause instanceof ApiError ? cause.detail : 'The camera state could not be read.')
@@ -574,6 +604,8 @@ function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnec
     return () => {
       live = false
       read.current = () => undefined
+      last.current = null
+      done()
     }
   }, [printerId])
 
@@ -584,7 +616,13 @@ function CameraFeeds({ printerId, onReconnect }: { printerId: string; onReconnec
       .reconnectPrinterCamera(printerId)
       .then(() => {
         setReconnect({ sent: true })
-        onReconnect()
+        if (waiting.current) clearTimeout(waiting.current.timer)
+        const since = last.current ? (relayFeed(last.current)?.updated_at ?? null) : null
+        const timer = setTimeout(() => {
+          waiting.current = null
+          restart.current()
+        }, RECONNECT_WAIT_MS)
+        waiting.current = { since, timer }
       })
       .catch((cause: unknown) =>
         setReconnect({

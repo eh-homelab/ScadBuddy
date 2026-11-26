@@ -46,7 +46,11 @@ test.describe('the live camera (#7330)', () => {
     await dialog.getByRole('button', { name: 'Reconnect' }).click()
     await expect(dialog.getByText('Reconnecting the camera.')).toBeVisible()
     expect(reconnects).toEqual(['/api/v1/printers/00000000-0000-4000-8000-000000000003/camera/reconnect'])
-    // The reconnect starts the player over: WebRTC first again, then HLS.
+    // The player starts over (WebRTC first again, then HLS) only once the relay reports
+    // `pulling` again: the mocked relay reports `stopped` at 200 ms and `pulling` at 1.5 s.
+    await expect(feeds.getByTestId('camera-feed-relay')).toContainText('Stopped')
+    expect(offers).toHaveLength(1)
+    await expect(feeds.getByTestId('camera-feed-relay')).toContainText('Receiving')
     await expect.poll(() => offers.length).toBe(2)
 
     await expect(player.getByText('Camera unavailable')).toBeVisible({ timeout: 15_000 })

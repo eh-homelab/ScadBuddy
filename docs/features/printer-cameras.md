@@ -151,7 +151,10 @@ Otherwise the dialog keeps the MJPEG view.
     the proxy; any other redirect is a 502.
   - `GET /api/v1/printers/{id}/camera` (the feed states and `live`) and
     `POST …/camera/reconnect` (202; the relay replaces that printer's path, `camera.reconnect`
-    event, `Relay.restart`).
+    event, `Relay.restart`). After the 202 the dialog starts its player again only when the
+    relay next reports `pulling` (a report newer than the one it read before), or after 20 s
+    (`NowPrinting.tsx` `CameraFeeds`). A player that started at once would attach to the old
+    pull while the relay removes it.
 - **Problem types.** `camera-edge-unset` (503: the route's own URL, or the user or password, is unset; `camera_live` is then false), `camera-edge-unreachable`
   (502), `camera-edge-refused` (502: the edge refused the read user, or sent a redirect that
   the proxy does not pass), `camera-live-session-ended` (404: MediaMTX dropped the HLS session;
@@ -167,8 +170,10 @@ Otherwise the dialog keeps the MJPEG view.
   forwards no cookie, so the next answer names the session in the query key `session`
   (`video1_stream.m3u8?session=<uuid>`, each segment and part too). A request without the
   session gets 401 "session not found". Once made, the session id works without credentials at
-  MediaMTX, so it acts as a bearer key: only the API's proxy ever sees it, and the edge read
-  password and a NetworkPolicy keep the HLS and WHEP ports from every other pod.
+  MediaMTX, so it acts as a bearer key. The browser gets it in the playlists, through the
+  proxy, and sends it back in the query. The edge admits a request that names it without the
+  read password, so only the NetworkPolicy (the API's pods only on 8888) keeps it from being
+  used outside the proxy.
 - **Lifetime of a pull** (same date and method). With `hlsMuxerCloseAfter: 10s` the muxer is
   gone 10 s after the last HLS request, the session stays a reader until about 40 s, and the
   relay lost the edge's reader 48.5 s after the last request (69.2 s with the default 60 s).
