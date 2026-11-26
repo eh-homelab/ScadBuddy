@@ -334,7 +334,8 @@ the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code 
 row is a new tag. A phone reads a Bambu tag's UID as 4 bytes (`7E7482BB`), and the AMS reports
 the same tag as `7E7482BB00000100`, so ScadBuddy stores every 4-byte UID in the AMS's form
 (`spools/models.py` `clean_tag_uid`, #8042; all 38 Bambu tags on prod end `00000100`, read
-2026-11-26), and a phone's scan of a Bambu spool opens it. The switch "Open what I scan at once" (remembered on the phone, localStorage
+2026-11-26), and a phone's scan of a Bambu spool opens it. A 4-byte tag that is not a Bambu
+tag (typed in, or another maker's) is stored and shown in that longer form too. The switch "Open what I scan at once" (remembered on the phone, localStorage
 `scadbuddy.scan.openAtOnce`) opens the thing's page on each such read, and the page then starts
 scanning by itself when it opens. "Write tag" on a spool backs the tag up first, writes the spool's
 records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
