@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from math import ceil, isfinite
+from math import ceil, isfinite, pi
 
 from scadbuddy.bambuddy.stages import stage_of
 from scadbuddy.filament import ledger
@@ -33,6 +33,11 @@ _STAGE_OUTCOMES: dict[str, Outcome] = {
     "failed": "failed",
     "cancelled": "cancelled",
 }
+#: #7685 (spec §5.6): the prints' implied density and the type's are a mismatch when
+#: apart by more than this fraction of the type's. A sentence on the page, never a booking.
+DENSITY_TOLERANCE = 0.05
+#: The diameter a spool with none known is read at (the catalog's own default).
+DEFAULT_DIAMETER_MM = 1.75
 _PLATE_KINDS = frozenset({ledger.PRINT_STARTED, ledger.PRINT_ENDED})
 _CENT = Decimal("0.01")
 _DAY = 86400.0
@@ -55,6 +60,7 @@ def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
             continue
         job = ledger.job_of(event)
         grams = _grams(event)
+        length: float | None = None
         if event.ref_kind == ledger.BB_USAGE:
             status = event.data.get("bb_status")
             outcome = _STAGE_OUTCOMES.get(
@@ -66,6 +72,9 @@ def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
                 continue
             outcome = "failed" if basis == "not_applied" else "completed"
             grams = 0.0 if basis == "not_applied" else grams
+            metres = event.data.get("length_m")
+            if isinstance(metres, (int, float)) and not isinstance(metres, bool):
+                length = float(metres)
         else:
             continue
         found.append(
@@ -76,9 +85,20 @@ def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
                 outcome=outcome,
                 printer_id=event.printer_id,
                 event_id=event.id,
+                length_m=length,
             )
         )
     return found
+
+
+def implied_density(grams: float, metres: float, diameter_mm: float) -> float | None:
+    """The density ``grams`` over ``metres`` of filament of ``diameter_mm`` implies, in
+    g/cm³ (spec §5.6: ``grams / (metres * 100 * pi * (diameter_mm / 20) ** 2)``; 1 m of
+    1.75 mm at 1.24 g/cm³ is 2.98 g). ``None`` when either is 0 or less."""
+    if grams <= 0 or metres <= 0 or diameter_mm <= 0:
+        return None
+    volume_cm3 = metres * 100 * pi * (diameter_mm / 20) ** 2
+    return grams / volume_cm3
 
 
 def burn(
@@ -219,12 +239,29 @@ def spool_metrics(
     label_weight_g: int | None,
     window_days: int,
     now: datetime,
+    diameter_mm: float = 1.75,
+    density_g_cm3: float | None = None,
 ) -> SpoolMetrics:
     """One spool's metrics. "Opened" is its first ``loaded`` event, else its first plate
     (Decision 15). Money is quantized to the cent. The consumed counter counts the plates
-    after the newest ``consumed_reset`` (#7149 R-7149-4); the other figures are lifetime."""
+    after the newest ``consumed_reset`` (#7149 R-7149-4); the other figures are lifetime.
+    The metres and the implied density (#7685) are over the plates that carry a length,
+    at ``diameter_mm``, against ``density_g_cm3``, the spool's effective type density."""
     found = plates(events)
     used = sum(p.grams for p in found)
+    lengthed = [p for p in found if p.length_m is not None]
+    metres = sum(p.length_m or 0.0 for p in lengthed) if lengthed else None
+    implied = (
+        None
+        if metres is None
+        else implied_density(sum(p.grams for p in lengthed), metres, diameter_mm)
+    )
+    mismatch = (
+        implied is not None
+        and density_g_cm3 is not None
+        and density_g_cm3 > 0
+        and abs(implied / density_g_cm3 - 1) > DENSITY_TOLERANCE
+    )
     resets = [e for e in _ordered(events) if e.kind == ledger.CONSUMED_RESET]
     since = resets[-1].at if resets else None
     consumed = sum(p.grams for p in found if since is None or p.at > since)
@@ -249,4 +286,8 @@ def spool_metrics(
         days_since_last_use=_days(last_used_at, now),
         hours_outside_dry=hours_outside_dry,
         ams_error=ams_error(ams_pairs(events, label_weight_g)),
+        used_m=metres,
+        implied_density_g_cm3=implied,
+        density_g_cm3=density_g_cm3,
+        density_mismatch=mismatch,
     )

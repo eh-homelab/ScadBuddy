@@ -29,6 +29,9 @@ class Plate(BaseModel):
     printer_id: UUID | None
     #: The event the plate's grams come from.
     event_id: UUID
+    #: The metres the plate extruded (#7685, the end's ``data.length_m``); ``None`` for a
+    #: plate booked without one (a BB usage row, or a print from before the length).
+    length_m: float | None = None
 
 
 class AmsError(BaseModel):
@@ -71,6 +74,16 @@ class SpoolMetrics(BaseModel):
     days_since_last_use: float | None
     hours_outside_dry: float
     ams_error: AmsError | None
+    #: #7685 (spec §5.6): the metres of the plates that carry a length; ``None`` when
+    #: none does.
+    used_m: float | None = None
+    #: The density those plates' grams and metres imply over the spool's diameter;
+    #: ``None`` without metres.
+    implied_density_g_cm3: float | None = None
+    #: The spool's effective type density, for the comparison.
+    density_g_cm3: float | None = None
+    #: Both known and apart by more than `metrics.DENSITY_TOLERANCE`.
+    density_mismatch: bool = False
 
 
 class TimelineRow(BaseModel):
