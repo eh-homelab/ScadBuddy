@@ -835,10 +835,13 @@ and "Not this order" hides it for good, after an unlink and a new link too. If t
 later changes or removes a deposit already recorded, the order page warns until the shop
 records the difference as a `bank_transfer` payment with the transaction id as reference
 (payments are never edited). A cancelled order takes no payment and shows no such warning.
-With `SCADBUDDY_PUBLIC_URL` set, Link registers
-`https://<public host>/api/v1/payments/bank/webhook` for the account's webhooks
-([webhooks](https://plaid.com/docs/api/webhooks/)); an account linked before the public URL
-was set gets none until it is linked again. Each webhook is checked by its
+With `SCADBUDDY_STOREFRONT_PUBLIC_URL` (else `SCADBUDDY_PUBLIC_URL`) set, Link registers
+`https://<that host>/api/v1/payments/bank/webhook` for the account's webhooks
+([webhooks](https://plaid.com/docs/api/webhooks/)). The storefront's host comes first because
+Plaid must reach it from the internet, and the back office may be LAN-only; the deployment
+then routes that one path to the API (eh-homelab/clusters `httproute-storefront.yaml`). An
+account linked before that URL was set, or while it named another host, keeps the old one
+until it is linked again. Each webhook is checked by its
 `Plaid-Verification` JWT
 ([webhook verification](https://plaid.com/docs/api/webhooks/webhook-verification/)).
 `SYNC_UPDATES_AVAILABLE` reads the new deposits at once. When the bank needs the shop to

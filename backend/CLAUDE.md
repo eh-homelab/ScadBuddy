@@ -3356,7 +3356,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   topic `order:<id>`) per order it suggested a deposit for, and per order of a recorded
   deposit whose amount it changed or that it removed, so an open order page reloads.
   Plaid's webhook (`POST /payments/bank/webhook`, in `PUBLIC_ENDPOINTS`; the link token
-  names it from `public_url`, `PaymentsComponent._webhook_url`) is checked by its
+  names it from `storefront_public_url`, else `public_url`, `PaymentsComponent._webhook_url`, #7976) is checked by its
   `Plaid-Verification` JWT before it is read (`plaid.webhook_key_id`, `verification_key`,
   `verify_webhook`: ES256 only, a `kid` shaped as a UUID (`KID_SHAPE`) before Plaid is
   asked, `iat` at most 5 minutes old and at most `WEBHOOK_MAX_SKEW_SECONDS` (60) ahead,
