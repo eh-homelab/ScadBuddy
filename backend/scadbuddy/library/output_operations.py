@@ -223,6 +223,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
                     blobs_root=blobs.root,
                     arranged_from=sources,
                     output_id=output_id,
+                    claimed=claimed,
                     print_settings=print_settings,
                     # #6371: only the storefront slice run names one; `POST /outputs`'s
                     # body cannot, so its outputs are the back office's.

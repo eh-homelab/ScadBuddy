@@ -1310,3 +1310,48 @@ async def test_a_save_cancelled_after_a_lost_reuse_leaves_nothing_staged(
     assert store.rows.get(output_id) is None
     assert not paths.output_dir(job.slug, output_id).exists()
     assert [p for p in store.bytes.spool.iterdir() if p.is_dir()] == []
+
+
+async def test_put_thumbnail_lock_holds_across_replicas(
+    copied: tuple[OutputStore, OutputMeta],
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B4 review: two API replicas, each its own store, pools and content store over one
+    database. Replica A's put lands first; its step stops after it took the thumbnail
+    lock, before the key takes its object (`BlobIndex.put_in`). Replica B's put lands
+    later, and its step must wait for A's, so the row names B's image, the later one."""
+    store, meta = copied
+    key = output_blob_key(meta.id, "thumbnail")
+    with store_pool(pg_conninfo) as rows_pool, store_pool(pg_conninfo) as index_pool:
+        other_content = local_content(tmp_path / "remote", index_pool)
+        other_content.spool = tmp_path / "spool-b"
+        other = OutputStore(
+            store.paths, rows=OutputRows(rows_pool), bytes=OutputBytes(other_content)
+        )
+        loop = asyncio.get_running_loop()
+        a_in_step = asyncio.Event()
+        b_done = threading.Event()
+        waited = threading.Event()
+        put_in = index_module.BlobIndex.put_in
+
+        def a_waits(self: Any, conn: Any, at: str, *args: Any, **kwargs: Any) -> Any:
+            if at == key and not waited.is_set():
+                waited.set()
+                loop.call_soon_threadsafe(a_in_step.set)
+                # Without a lock across replicas, B's whole step runs here.
+                b_done.wait(timeout=1.5)
+            return put_in(self, conn, at, *args, **kwargs)
+
+        monkeypatch.setattr(index_module.BlobIndex, "put_in", a_waits)
+        try:
+            first = asyncio.create_task(store.put_thumbnail(meta.id, b"from a"))
+            await a_in_step.wait()
+            await other.put_thumbnail(meta.id, b"from b")
+            b_done.set()
+            await first
+        finally:
+            b_done.set()
+            await other_content.aclose()
+        assert await _read(store, meta.id, "thumbnail") == b"from b"

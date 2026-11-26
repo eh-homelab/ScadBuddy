@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import threading
 from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
@@ -202,7 +203,7 @@ async def test_live_save_keeps_its_claim(
         return found is not None and bool(found["young"])
 
     monkeypatch.setattr(store.bytes, "put_folder", slow)
-    task = asyncio.create_task(store.save(job, files_dir=files, output_id=output_id))
+    task = asyncio.create_task(store.save(job, files_dir=files, output_id=output_id, claimed=True))
     try:
         await asyncio.wait_for(entered.wait(), 30)
         age()
@@ -217,3 +218,76 @@ async def test_live_save_keeps_its_claim(
         go_on.set()
     meta = await task
     assert meta.id == output_id
+
+
+async def test_save_cancelled_during_puts_leaves_the_spool_empty(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4 review: a save cancelled while it uploads leaves nothing staged on the spool."""
+    store, job, files = await _store_and_job(tmp_path, pool)
+    assert store.bytes is not None
+    entered = asyncio.Event()
+
+    async def stalled(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(store.bytes, "put_folder", stalled)
+    task = asyncio.create_task(store.save(job, name="cancelled", files_dir=files))
+    await asyncio.wait_for(entered.wait(), 30)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert _spooled(store) == []
+
+
+async def test_save_cancelled_during_prepare_leaves_the_spool_empty(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4 review: a cancel cannot stop `prepare`'s thread, so the save waits for it to end
+    before it removes the staged folder; nothing it wrote stays on the spool. The thread
+    stops halfway, before it copies the extra files."""
+    store, job, files = await _store_and_job(tmp_path, pool)
+    entered = threading.Event()
+    go_on = threading.Event()
+    ended = threading.Event()
+    copytree = shutil.copytree
+
+    def slow(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        go_on.wait(10)
+        try:
+            return copytree(*args, **kwargs)
+        finally:
+            ended.set()
+
+    monkeypatch.setattr(shutil, "copytree", slow)
+    task = asyncio.create_task(store.save(job, name="cancelled", files_dir=files))
+    assert await asyncio.to_thread(entered.wait, 30)
+    task.cancel()
+    await asyncio.sleep(0.2)
+    go_on.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(ended.wait, 30)
+    assert _spooled(store) == []
+
+
+async def test_unclaimed_save_refreshes_no_claim(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B4 review: a save under an id it did not claim (a fresh id) keeps no claim young."""
+    store, job, files = await _store_and_job(tmp_path, pool)
+    store.claim_refresh_seconds = 0.01
+    refreshed: list[str] = []
+    monkeypatch.setattr(store.rows, "refresh_claim", refreshed.append)
+    assert store.bytes is not None
+    put_folder = store.bytes.put_folder
+
+    async def slow(*args: Any, **kwargs: Any) -> Any:
+        await asyncio.sleep(0.2)
+        return await put_folder(*args, **kwargs)
+
+    monkeypatch.setattr(store.bytes, "put_folder", slow)
+    await store.save(job, files_dir=files, output_id="c" * 32)
+    assert refreshed == []

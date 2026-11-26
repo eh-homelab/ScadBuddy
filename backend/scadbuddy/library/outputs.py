@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -735,6 +736,7 @@ class OutputStore:
         blobs_root: Path | None = None,
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
+        claimed: bool = False,
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> OutputMeta:
@@ -749,6 +751,7 @@ class OutputStore:
             blobs_root=blobs_root,
             arranged_from=arranged_from,
             output_id=output_id,
+            claimed=claimed,
             print_settings=print_settings,
             source=source,
         ) as saved:
@@ -766,6 +769,7 @@ class OutputStore:
         blobs_root: Path | None = None,
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
+        claimed: bool = False,
         print_settings: Mapping[str, ProcessValue] | None = None,
         source: OutputSource = BACK_OFFICE,
     ) -> AbstractAsyncContextManager[SavedOutput]:
@@ -788,8 +792,10 @@ class OutputStore:
         `UniqueViolation` on an id another output holds among them; that output's keys
         never named this save's objects (#7478 review). A cancel during `commit` cannot
         stop its thread, which may still finish the output: the save keeps its locks until
-        that thread ends, then the cancel stands. With ``output_id`` the save makes the
-        id's claim young every `claim_refresh_seconds` while it runs (A4 review M1).
+        that thread ends, then the cancel stands; a cancel during `prepare` waits for its
+        thread too, so nothing it writes stays on the spool. With ``claimed`` (the caller
+        holds the claim of ``output_id``, `claim`) the save makes the claim young every
+        `claim_refresh_seconds` while it runs (A4 review M1).
 
         The staged folder goes on exit, error, cancel or not. The block gets the record and
         the staged ``model.3mf``, the same bytes as its blob, so a caller that files the
@@ -804,6 +810,7 @@ class OutputStore:
             blobs_root=blobs_root,
             arranged_from=arranged_from,
             output_id=output_id,
+            claimed=claimed,
             print_settings=print_settings,
             source=source,
         )
@@ -814,11 +821,16 @@ class OutputStore:
         job: Job,
         *,
         output_id: str | None,
+        claimed: bool,
         **keywords: Any,
     ) -> AsyncIterator[SavedOutput]:
         store = self._blobs()
         staging = await asyncio.to_thread(_staging_folder, store.spool)
-        keeping = None if output_id is None else asyncio.ensure_future(self._keep_claim(output_id))
+        keeping = (
+            asyncio.ensure_future(self._keep_claim(output_id))
+            if claimed and output_id is not None
+            else None
+        )
         try:
             meta = await self._save_staged(job, staging, store, output_id=output_id, **keywords)
             if keeping is not None:
@@ -848,7 +860,9 @@ class OutputStore:
         self, job: Job, staging: Path, store: OutputBytes, **keywords: Any
     ) -> OutputMeta:
         """The save of `saving`, its files staged in ``staging``."""
-        prepared = await asyncio.to_thread(self.prepare, job, staging, **keywords)
+        # To its end: a cancel cannot stop the thread, which would then write into the
+        # staged folder after `_saving` removed it.
+        prepared = await _to_its_end(functools.partial(self.prepare, job, staging, **keywords))
         blobs: OutputBlobs | None = None
         # Entering waits for a slot of the stage-lock pool, before the first upload. The
         # block's end closes the hold: after the commit the rows name the objects; after
@@ -1728,9 +1742,10 @@ def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
 
 
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
-#: its Parts before it writes meta.json (api/outputs.py `create_output`). It is also the
-#: lease of an id claim: the reaper prunes an `output_claims` row older than this, so a
-#: save that runs longer than this can lose its claim (#7257).
+#: its Parts before its row is committed (`output_operations.py` `create_run`). It is also
+#: the lease of an id claim: the reaper prunes an `output_claims` row older than this. A
+#: running save that holds a claim makes it young again (`claim_refresh_seconds`), so only
+#: an unclaimed save that runs longer than this can lose its holds (#7257).
 ORPHAN_HOLD_GRACE = timedelta(hours=1)
 
 
@@ -1775,12 +1790,11 @@ _RELEASE_ORPHANS = (
 
 
 def _reap_rows_only(refs: BlobRefs, grace: timedelta) -> int:
-    """`reap_orphan_holds`'s release (#7257): rows only, no folder and no
-    ``output_hold_slugs``. A save that names its id (a quote's attempt, #5390) claims it
-    in ``output_claims`` before its folder, so its holds are kept while the claim is
-    younger than ``grace``: a save that runs longer than ``grace`` can lose them. Other
-    saves take a new id and no claim. As with a phase 2 pod's save, their holds are kept
-    only while they are younger than ``grace``."""
+    """`reap_orphan_holds`'s release (#7257), from rows only. A save that names its id (a
+    quote's attempt, #5390) claims it in ``output_claims`` before its row, and makes the
+    claim young again while it runs, so its holds are kept while it runs. Other saves take
+    a new id and no claim: their holds are kept only while they are younger than
+    ``grace``."""
     with refs.pool.connection() as conn:
         found = conn.execute(_RELEASE_ORPHANS, {"kind": OUTPUT_HOLDER, "grace": grace}).fetchall()
     orphans = [str(row["holder_id"]) for row in found]

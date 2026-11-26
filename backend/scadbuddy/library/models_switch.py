@@ -251,8 +251,8 @@ def _sha256(data: bytes) -> str:
 
 
 def _with_version(data: bytes, version: str) -> bytes:
-    """A ``meta.json`` with another ``model_version``, in the form `OutputStore.rename`
-    writes. A key that this build does not know stays."""
+    """A ``meta.json`` with another ``model_version``: JSON with an indent of 2 and a
+    newline at its end. A key that this build does not know stays."""
     body = {**json.loads(data), "model_version": version}
     return (json.dumps(body, indent=2) + "\n").encode()
 
