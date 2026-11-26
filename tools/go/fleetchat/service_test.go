@@ -76,6 +76,12 @@ func TestValidation(t *testing.T) {
 	if _, err := svc.Send(ctx, sidA, Target{Agent: "ffffffff"}, "hi"); !errors.Is(err, ErrUnknownAgent) {
 		t.Errorf("Send to an unknown agent: %v; want ErrUnknownAgent", err)
 	}
+	if _, err := svc.Send(ctx, sidA, Target{Channel: "nobody-joined"}, "hi"); !errors.Is(err, ErrUnknownChannel) {
+		t.Errorf("Send to an unknown channel: %v; want ErrUnknownChannel", err)
+	}
+	if err := svc.Leave(ctx, sidA, "nobody-joined"); !errors.Is(err, ErrUnknownChannel) {
+		t.Errorf("Leave an unknown channel: %v; want ErrUnknownChannel", err)
+	}
 }
 
 func TestSendPublishes(t *testing.T) {
