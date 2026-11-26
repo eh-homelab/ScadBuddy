@@ -7,6 +7,7 @@ from __future__ import annotations
 import threading
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
@@ -2156,7 +2157,7 @@ def test_a_moved_kind_keeps_its_old_chains_schema(pg_conninfo: str) -> None:
             " VALUES ('foam', 'Foam', 'spool_part', 'lot')"
         )
         migrate(conn)
-        props = dict(
+        props: dict[str, dict[str, Any]] = dict(
             conn.execute(
                 "SELECT id, attribute_schema -> 'properties' FROM item_kinds"
                 " WHERE id IN ('foam', 'hardware', 'ams_part')"
