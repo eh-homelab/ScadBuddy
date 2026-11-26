@@ -31,8 +31,11 @@ import {
   type SpoolType,
   type SpoolTypeDetail,
 } from '../../api/filament'
+import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
+import { ClosingSummary } from '../../components/filament/ClosingSummary'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
+import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
 import { InsertWeightOffer } from '../../components/filament/InsertWeightOffer'
 import { useInsertWeightCheck } from '../../components/filament/useInsertWeightCheck'
 import { FirstTypePresets } from '../../components/filament/FirstTypePresets'
@@ -425,7 +428,13 @@ export function SpoolPage() {
   const asked = id === 'new' ? search.get('copy') : null
   /** The source was deleted after the form loaded its copy: the next save sends no `copy_of`. */
   const [sourceGone, setSourceGone] = useState(false)
+  /** #7684 — the continued spool's number, for the banner. */
+  const [sourceNumber, setSourceNumber] = useState<number | null>(null)
   const copyOf = sourceGone ? null : asked
+  /** #7684 — the copy continues a respooled spool (`&continue=1&grams=<g>`): its filament, not added full. */
+  const continues = asked !== null && search.get('continue') === '1'
+  const continuedGrams = continues ? search.get('grams') : null
+  const continuedFrom = continues ? copyOf : null
   /** How many identical spools a save makes (#7150). */
   const [quantity, setQuantity] = useState('1')
   /** One `Idempotency-Key` per opened form: a retry or a second click makes no more spools. */
@@ -470,9 +479,11 @@ export function SpoolPage() {
     setQuantity('1')
     setCreateKey(crypto.randomUUID())
     setSourceGone(false)
+    setSourceNumber(null)
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
       asked ? copySpool(asked) : Promise.resolve(null),
+      continues && asked ? getSpool(asked).then((source) => source.number) : Promise.resolve(null),
       listCatalog('materials'),
       listCatalog('subtypes'),
       listCatalog('brands'),
@@ -483,14 +494,15 @@ export function SpoolPage() {
       listLocations(),
       api.listPrinters(),
     ])
-      .then(([spool, copy, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
+      .then(([spool, copy, source, materials, subtypes, brands, categories, effects, insertTypes, types, places, printers]) => {
         if (!live) return
+        setSourceNumber(source)
         setLists({ materials, subtypes, brands, categories, effects, insertTypes, types, places: flatten(places), placeNames: named(places), placeHrefs: placeLinks(places), printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })) })
         if (spool) {
           setSaved(spool)
           setDraft(draftOf(spool))
         }
-        if (copy) setDraft(draftOfCopy(copy))
+        if (copy) setDraft(continues ? { ...draftOfCopy(copy), grams_left: continuedGrams ?? '', added_full: 'no' } : draftOfCopy(copy))
       })
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That spool is gone. Pick another from the Spools tab.' : `The spool could not be loaded: ${message(cause)}`)
@@ -499,7 +511,7 @@ export function SpoolPage() {
     return () => {
       live = false
     }
-  }, [id, asked])
+  }, [id, asked, continues, continuedGrams])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
   /** The catalogs and places by id and name: the names the timeline shows for an event's ids. */
@@ -545,6 +557,10 @@ export function SpoolPage() {
   // #7280: a scale reading of a spool with an insert is checked for an offer of its empty weight.
   const scaleReading = DECIMAL.test(reading.trim()) && Number(reading) > 0 ? Number(reading) : null
   const { check: insertCheck, pending: checkPending, unanswered: checkUnanswered, recheck: recheckInsertWeight } = useInsertWeightCheck(saved && !saved.archived_at && saved.effective.insert_type_id ? saved.id : undefined, scaleReading)
+  // #7683: a new spool read under its label weight: the person says what is up before it is recorded.
+  const [resolutionChoice, setResolutionChoice] = useState<{ reading: number; resolution: Resolution } | null>(null)
+  // #7684: the archive asks for a reason and an optional final weighing.
+  const [archiveOpen, setArchiveOpen] = useState(false)
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setNotice(null)
     setDraft((was) => ({ ...was, [key]: value }))
@@ -609,7 +625,7 @@ export function SpoolPage() {
     try {
       if (creating) {
         // One request makes every spool with its place, presets and K values (#7150).
-        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf }, createKey)
+        const made = await bulkCreateSpools({ spool: created(body, draft.grams_left), quantity: count, location_id: draft.location_id || null, presets: draft.presets, k_values: draft.k_values, copy_of: copyOf, continued_from: continuedFrom }, createKey)
         const first = made[0]!
         setMadeId(first.id)
         setNotice(made.length > 1 ? `Saved ${made.length} spools, #${first.number} to #${made[made.length - 1]!.number}` : 'Saved')
@@ -720,13 +736,25 @@ export function SpoolPage() {
 
   const leftNow = saved?.grams_left ?? null
   const scale = Number(reading)
-  const filament = empty && reading.trim() !== '' && Number.isFinite(scale) ? scale - empty.empty_weight_g : scale
+  /** Only a `below_label` answer for the insert the form shows, as `offer` below. */
+  const belowLabel = empty && insertCheck?.reason === 'below_label' && insertCheck.insert_type_id === empty.id ? insertCheck : null
+  const resolution: Resolution | null = belowLabel ? (resolutionChoice?.reading === scale ? resolutionChoice.resolution : (belowLabel.default ?? 'tared')) : null
+  const chosen = belowLabel?.resolutions.find((one) => one.kind === resolution) ?? null
+  const filament = chosen ? chosen.filament_g : empty && reading.trim() !== '' && Number.isFinite(scale) ? scale - empty.empty_weight_g : scale
   const readingOk = reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament >= 0
   /** Only an offer for the insert the form shows: an unsaved change of insert has none. */
   const offer = empty && insertCheck?.offer?.insert_type_id === empty.id ? insertCheck.offer : null
   const offerChecked = offer ? (offerChoice?.reading === offer.reading_g ? offerChoice.checked : offer.checked_by_default) : false
   /** Accepts a checked offer first, so the weighing's filament is the reading less the new empty weight (D3). */
   async function weigh() {
+    if (belowLabel && resolution) {
+      // #7683: the reading alone, with the choice; the store computes the filament and the side effect.
+      await addSpoolEvent(spoolKey, { kind: 'weighed', source: 'scale', reading_g: scale, resolution })
+      setReading('')
+      setResolutionChoice(null)
+      await reload(true)
+      return
+    }
     let grams = filament
     if (offer && offerChecked) {
       let accepted
@@ -775,7 +803,7 @@ export function SpoolPage() {
           {!creating && saved && <NeedsDrying spool={saved} />}
         </div>
         {!creating && saved?.archived_at && (
-          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, false); await reload(true) })}>
+          <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, { archived: false }); await reload(true) })}>
             <ArchiveRestoreIcon /> Restore
           </Button>
         )}
@@ -803,7 +831,12 @@ export function SpoolPage() {
       <p role="status" className="mb-2 min-h-5 text-[13px] text-muted-foreground">
         {notice}
       </p>
-      {creating && copyOf && (
+      {creating && copyOf && continues && (
+        <p className="mb-4 text-[13px] text-muted-foreground">
+          Continues <Link to={filamentLinks.spool(copyOf)} className="underline">spool #{sourceNumber ?? '…'}</Link>: its filament, respooled.
+        </p>
+      )}
+      {creating && copyOf && !continues && (
         <p className="mb-4 text-[13px] text-muted-foreground">
           A copy of <Link to={filamentLinks.spool(copyOf)} className="underline">the first spool</Link>. Its number, tag, tray, weight history, weight lock and whether it was added full stay with it.
         </p>
@@ -910,9 +943,24 @@ export function SpoolPage() {
             {!creating && saved && (
               <div className="flex flex-wrap items-center gap-2 border-t pt-3">
                 {!saved.archived_at && (
-                  <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void act(async () => { await archiveSpool(spoolKey, true); await reload(true) })}>
-                    <ArchiveIcon /> Archive
-                  </Button>
+                  <>
+                    <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => setArchiveOpen(true)}>
+                      <ArchiveIcon /> Archive
+                    </Button>
+                    <ArchiveSpoolDialog
+                      key={saved.id}
+                      spool={saved}
+                      emptyWeightG={empty?.empty_weight_g ?? null}
+                      open={archiveOpen}
+                      onOpenChange={setArchiveOpen}
+                      onArchived={(archived, continueWithGrams) => {
+                        setArchiveOpen(false)
+                        // #7684: a respooled spool goes on as a new one, its final filament as the new spool's grams.
+                        if (continueWithGrams != null) guard.leaveTo(filamentLinks.continueSpool(archived.id, continueWithGrams))
+                        else void reload(true)
+                      }}
+                    />
+                  </>
                 )}
                 {saved.in_use ? (
                   <p className="text-[13px] text-muted-foreground">It has prints, so job costs keep their source.</p>
@@ -967,6 +1015,7 @@ export function SpoolPage() {
               <div className="grid gap-4 rounded-md border p-3 md:grid-cols-2">
                 <div className="flex flex-col gap-2">
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
+                  {saved?.archived_at && saved.closing && <ClosingSummary closing={saved.closing} at={saved.archived_at} />}
                   {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
                     <WeighingBreakdown event={saved.last_weighing} />
                   ) : (
@@ -993,6 +1042,7 @@ export function SpoolPage() {
                     {empty && readingOk && <p className="text-[12px] text-muted-foreground tabular-nums">{grams(filament)} of filament.</p>}
                     {empty && reading.trim() !== '' && DECIMAL.test(reading.trim()) && filament < 0 && <p className="text-[12px] text-warn">That is less than the empty spool.</p>}
                     {checkUnanswered && readingOk && <p className="text-[12px] text-muted-foreground">The empty weight check did not answer. You can record the weighing without it.</p>}
+                    {belowLabel && resolution && readingOk && <BelowLabelChoice check={belowLabel} value={resolution} disabled={busy} onChange={(next) => setResolutionChoice({ reading: scale, resolution: next })} />}
                     {offer && readingOk && <InsertWeightOffer offer={offer} checked={offerChecked} disabled={busy} onCheckedChange={(checked) => setOfferChoice({ reading: offer.reading_g, checked })} />}
                     <div>
                       <Button type="submit" size="sm" variant="outline" disabled={busy || !readingOk || checkPending}>

@@ -645,10 +645,11 @@ func TestAnUpstreamThatIsDownIsABadGateway(t *testing.T) {
 
 func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
 	env := map[string]string{
-		"SCADBUDDY_CORE_UPSTREAM":    "http://127.0.0.1:1",
-		"SCADBUDDY_DATABASE_URL":     "postgres://postgres@127.0.0.1:1/postgres",
-		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
-		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:0",
+		"SCADBUDDY_CORE_UPSTREAM":      "http://127.0.0.1:1",
+		"SCADBUDDY_DATABASE_URL":       "postgres://postgres@127.0.0.1:1/postgres",
+		"SCADBUDDY_CORE_LISTEN":        "127.0.0.1:0",
+		"SCADBUDDY_CORE_CRUD_LISTEN":   "127.0.0.1:0",
+		"SCADBUDDY_CORE_CRUD_UPSTREAM": "http://127.0.0.1:2",
 	}
 	err := run(context.Background(), func(k string) string { return env[k] })
 	if err == nil || !strings.Contains(err.Error(), "needs its own") {
@@ -679,4 +680,17 @@ func TestAFailedBindLeavesNothingListening(t *testing.T) {
 		t.Fatalf("the free address is still held: %v", err)
 	}
 	again.Close()
+}
+
+func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
+	env := map[string]string{
+		"SCADBUDDY_CORE_UPSTREAM":    "http://127.0.0.1:1",
+		"SCADBUDDY_DATABASE_URL":     "postgres://postgres@127.0.0.1:1/postgres",
+		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
+		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:1",
+	}
+	err := run(context.Background(), func(k string) string { return env[k] })
+	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
+		t.Fatalf("got %v", err)
+	}
 }

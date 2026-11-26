@@ -26,6 +26,15 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   MediaMTX's docs and the measurements they rest on; a MediaMTX bump re-measures them (the
   camera spec §2).
 
+- `deploy/cups/` — the label print server's `cupsd.conf`, `start.sh` and `zebra` backend,
+  copied into the Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). One
+  queue per label size comes from the Deployment's `CUPS_QUEUES`; the backend holds a job
+  until the printer's calibrated label length matches its queue. State (queues, jobs) is
+  under `/var/lib/cups`, one volume; admin needs the user `admin` and the password mounted
+  at `CUPS_ADMIN_PASSWORD_FILE`. `README.md` there has the variables and the
+  printer's measured facts. Its pin in eh-homelab/clusters is moved by hand, as the camera
+  images' are.
+
 - `deploy/security/` — the browser and parser pods' Localhost profiles (#6779):
   `seccomp/intake-sandbox.json`, `seccomp/profile-fetch.json` (containerd v2.2.7's default
   for a pod with no capabilities, plus only what each pod's sandbox needs) and the AppArmor

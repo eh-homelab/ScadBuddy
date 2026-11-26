@@ -101,6 +101,35 @@ def offer_reason(reading: float, label: int) -> m.NoOfferReason | None:
     return None
 
 
+#: A shortfall within this share of the label weight reads as a tared scale by default.
+TARED_SHARE = 0.10
+
+
+def below_label(
+    reading_g: float, label: int, empty_g: int
+) -> tuple[float, list[m.BelowLabelResolution], m.BelowLabelResolutionKind]:
+    """A new spool's reading under its label weight (#7683, spec §5.3): the shortfall,
+    the resolutions in order (``tared`` always; ``short`` and ``label_wrong`` only when the
+    reading is at least the empty weight) and the default (``tared`` for a shortfall within
+    `TARED_SHARE` of the label, else ``short``, else ``tared``)."""
+    shortfall = label - reading_g
+    found = [m.BelowLabelResolution(kind="tared", filament_g=reading_g)]
+    filament = reading_g - empty_g
+    if filament >= 0:
+        found.append(m.BelowLabelResolution(kind="short", filament_g=filament))
+        found.append(
+            m.BelowLabelResolution(
+                kind="label_wrong",
+                filament_g=filament,
+                new_label_weight_g=max(1, math.floor(filament + 0.5)),
+            )
+        )
+    default: m.BelowLabelResolutionKind = "tared"
+    if shortfall > TARED_SHARE * label and len(found) > 1:
+        default = "short"
+    return shortfall, found, default
+
+
 def mean_weight(derived: Sequence[float]) -> int:
     """The mean of the readings, rounded half up (D4)."""
     return math.floor(sum(derived) / len(derived) + 0.5)
@@ -139,13 +168,19 @@ def check_on(
         reason: m.NoOfferReason | None, offer: m.InsertWeightOffer | None = None
     ) -> m.InsertWeightCheck:
         weight = None if insert is None else insert["empty_weight_g"]
-        return m.InsertWeightCheck(
+        check = m.InsertWeightCheck(
             offer=offer,
             reason=reason,
             insert_type_id=None if insert is None else insert["id"],
             empty_weight_g=weight,
             filament_g=None if weight is None else reading_g - weight,
         )
+        if reason == "below_label":
+            assert label is not None and weight is not None
+            check.shortfall_g, check.resolutions, check.default = below_label(
+                reading_g, label, weight
+            )
+        return check
 
     label: int | None = spool["label_weight_g"]
     if spool["archived"]:
@@ -159,6 +194,8 @@ def check_on(
         return answer("used")
     if not full(spool["grams_left"], label):
         return answer("not_full")
+    if reading_g < label - FULL_TOLERANCE_G:
+        return answer("below_label")
     reason = offer_reason(reading_g, label)
     if reason is not None:
         return answer(reason)

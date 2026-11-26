@@ -338,18 +338,28 @@ def expected_before(
 
 
 def breakdown(
-    *, reading_g: float, grams: float, empty: EmptyWeight | None, expected: float | None
+    *,
+    reading_g: float,
+    grams: float,
+    empty: EmptyWeight | None,
+    expected: float | None,
+    tared: bool = False,
+    resolved: bool = False,
 ) -> dict[str, Any]:
     """A weighing's ``data`` keys (#7682): the reading, what was taken off it for the empty
     spool and where that came from (``insert`` when it is the effective empty weight,
+    ``tared`` when the scale was tared on the empty spool so nothing was taken off (#7683),
     else ``person``: the client took something else off, or nothing was known), the grams
     the ledger expected and the drift, ``grams - expected``, to 0.1 g; both null with no
-    ``expected``."""
+    ``expected``. A ``resolved`` weighing (#7683: the person explained the shortfall)
+    keeps ``expected_g`` and records no drift."""
     empty_g = reading_g - grams
     source: str
     basis: str | None
     name: str | None
-    if empty is not None and abs(empty_g - empty.grams) < 0.05:
+    if tared:
+        source, basis, name = "tared", None, None
+    elif empty is not None and abs(empty_g - empty.grams) < 0.05:
         source, basis, name = empty.source, empty.basis, empty.name
     else:
         source, basis, name = "person", None, None
@@ -360,8 +370,64 @@ def breakdown(
         "empty_basis": basis,
         "empty_name": name,
         "expected_g": expected,
-        "drift_g": None if expected is None else round(grams - expected, 1),
+        "drift_g": None if expected is None or resolved else round(grams - expected, 1),
     }
+
+
+def closing(
+    events: Sequence[m.SpoolEvent],
+    *,
+    label_weight_g: int | None,
+    added_full: bool | None,
+    final_filament_g: float | None,
+    reason: m.ArchiveReason | None,
+    grams_left: float | None = None,
+) -> dict[str, Any]:
+    """An ``archived`` event's ``data`` (#7684, spec §5.4): the reason and the lifetime
+    reconciliation. ``started_g`` is the first ``scale`` or ``person`` reading
+    (``started_from`` ``reading``; a ``created`` event's counts), else the label weight of a
+    spool added full (``label``), else null. ``ledger_consumed_g`` is the grams of the
+    plates (`metrics.plates`) at or after that reading, every plate for the label, never
+    affected by a ``consumed_reset``; null without a start. ``final_filament_g`` is the
+    final weighing's filament, else ``grams_left`` (the spool's at the archive).
+    ``scale_consumed_g`` is ``started_g`` less the final weighing's filament and ``drift_g``
+    is ``ledger_consumed_g - scale_consumed_g`` (negative: the scale found less filament
+    than the ledger expected), both null without a weighing or a start. Grams to 0.1 g."""
+    from scadbuddy.filament.metrics import plates  # metrics imports this module
+
+    ordered = sorted(events, key=lambda e: (e.at, e.seq))
+    first = next((e for e in ordered if e.source in _MANUAL and e.grams_after is not None), None)
+    started: float | None
+    started_from: str | None
+    since: datetime | None
+    if first is not None:
+        started, started_from, since = first.grams_after, "reading", first.at
+    elif added_full and label_weight_g is not None:
+        started, started_from, since = float(label_weight_g), "label", None
+    else:
+        started, started_from, since = None, None, None
+    consumed: float | None = None
+    if started is not None:
+        consumed = sum(p.grams for p in plates(ordered) if since is None or p.at >= since)
+    final = grams_left if final_filament_g is None else final_filament_g
+    scale: float | None = None
+    drift: float | None = None
+    if started is not None and final_filament_g is not None:
+        scale = started - final_filament_g
+        drift = None if consumed is None else consumed - scale
+    return {
+        "reason": reason,
+        "started_g": _tenth(started),
+        "started_from": started_from,
+        "ledger_consumed_g": _tenth(consumed),
+        "final_filament_g": _tenth(final),
+        "scale_consumed_g": _tenth(scale),
+        "drift_g": _tenth(drift),
+    }
+
+
+def _tenth(value: float | None) -> float | None:
+    return None if value is None else round(value, 1)
 
 
 def events(conn: Conn, spool_id: UUID) -> list[m.SpoolEvent]:

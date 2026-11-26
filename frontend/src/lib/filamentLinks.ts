@@ -33,10 +33,12 @@ const anchored = (path: string, anchor: string) => `${path}#${encodeURIComponent
 export const filamentLinks = {
   spools,
   newSpool: `${spools}/new`,
-  /** #7273 — the phone page that reads and writes tags through Web NFC. */
-  scan: `${BASE}/scan`,
+  /** #7273 — the hand-held Scan mode: the phone page that reads and writes tags through Web NFC. Top-level, as it opens any thing a tag names. */
+  scan: '/scan',
   /** #7150 — a new spool filled from an existing one. */
   copySpool: (id: string) => query(`${spools}/new`, { copy: id }),
+  /** #7684 — a respooled spool continued as a new one, with its final filament as the new spool's grams. */
+  continueSpool: (id: string, grams: number) => query(`${spools}/new`, { copy: id, continue: '1', grams: String(grams) }),
   spool: (id: string) => at(spools, id),
   types,
   newType: `${types}/new`,

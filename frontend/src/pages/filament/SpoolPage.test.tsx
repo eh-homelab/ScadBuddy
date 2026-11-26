@@ -195,6 +195,33 @@ describe('the spool page', () => {
     expect(screen.getByRole('combobox', { name: 'Material' })).not.toHaveAttribute('aria-invalid', 'true')
   })
 
+  it('archives through the dialog with a reason, then shows the spool archived (#7684)', async () => {
+    const { user } = open(3)
+    await heading(3)
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #3' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Other' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect((await getSpool(spoolId(3))).archived_at).not.toBeNull()
+    // The Weight section now says the closing: no final weighing, so the ledger's side only.
+    expect(within(screen.getByRole('region', { name: 'Weight' })).getByTestId('closing-summary')).toHaveTextContent(/^Other on .*: started with .*; not weighed at the end\.$/)
+  })
+
+  it('continues a respooled spool as a new one from the archive dialog (#7684)', async () => {
+    const { user } = open(10)
+    await heading(10)
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #10' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Respooled' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Archive and continue as a new spool' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByText((_, node) => node?.tagName === 'P' && /^Continues spool #10: its filament, respooled\.$/.test(node.textContent ?? ''))).toBeInTheDocument()
+    expect(screen.getByLabelText('Grams left')).toHaveValue('250')
+    expect((await getSpool(spoolId(10))).archived_at).not.toBeNull()
+  })
+
   it('offers no Delete for a spool that printed, only Archive and why', async () => {
     open(4)
     await heading(4)
@@ -561,6 +588,27 @@ describe('the spool page', () => {
     expect(await heading(20)).toBeInTheDocument()
     const twin = (await listSpools()).find((one) => one.number === 20)!
     expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
+  })
+
+  it('continues a respooled spool as a new one with its filament (#7684)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(19)}&continue=1&grams=480`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    // The banner's text is split around the spool link, so the matcher reads the whole paragraph.
+    expect(await screen.findByText((_, node) => node?.tagName === 'P' && /^Continues spool #19: its filament, respooled\.$/.test(node.textContent ?? ''))).toBeInTheDocument()
+    expect(screen.getByLabelText('Grams left')).toHaveValue('480')
+    expect(screen.getByRole('combobox', { name: 'Added full' })).toHaveTextContent('No')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    const sent = posts[0] as { continued_from: string; copy_of: string; spool: { grams_left: number; added_full: boolean } }
+    expect(sent.continued_from).toBe(spoolId(19))
+    expect(sent.copy_of).toBe(spoolId(19))
+    expect(sent.spool).toMatchObject({ grams_left: 480, added_full: false })
+    expect(await heading(20)).toBeInTheDocument()
+    const created = (await listSpoolEvents((await listSpools()).find((one) => one.number === 20)!.id))[0]
+    expect(created?.data).toMatchObject({ continued_from: spoolId(19) })
+    expect((await listSpoolEvents(spoolId(19))).findLast((one) => one.kind === 'archived')?.data).toMatchObject({ continued_as: created?.spool_id })
   })
 
   it('names the source as copy_of and never marks a preset row migrated (R-7150-11, R-7150-13)', async () => {

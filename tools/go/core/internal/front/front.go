@@ -36,6 +36,8 @@ func ParseNetworks(raw string) (Networks, error) {
 func network(entry string) (netip.Prefix, bool) {
 	address, bits, slash := strings.Cut(entry, "/")
 	ip, err := netip.ParseAddr(address)
+	// A zoned entry (fe80::1%eth0) is refused, though Python's ipaddress takes it: a zone
+	// names a link of this host, and no proxy of the cluster is named by one.
 	if err != nil || ip.Zone() != "" {
 		return netip.Prefix{}, false
 	}
@@ -72,7 +74,10 @@ func (ns Networks) contains(address string) bool {
 }
 
 // Client is the request's client: the last X-Forwarded-For value when the peer is a trusted
-// proxy and the value is an IP address, else the peer (proxies.py client_address).
+// proxy and the value is an IP address, else the peer (proxies.py client_address). With
+// several X-Forwarded-For lines it takes the last value of the last line, as
+// telemetry/admission.py and the agent do; api/auth.py and the storefront read the first
+// line. Envoy, the trusted proxy, sends one line, so they agree there.
 func (ns Networks) Client(r *http.Request) string {
 	peer, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

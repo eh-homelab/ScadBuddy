@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATIONS, MIGRATIONS_DIR, migrate
 
-pytestmark = pytest.mark.requires_postgres
+pytestmark = [pytest.mark.requires_postgres, pytest.mark.pg_empty]
 
 MIGRATION = MIGRATIONS_DIR / "20261117T1557Z_storefront_slice_profile_presets.sql"
 P1 = "00000000-0000-4000-8000-000000000001"

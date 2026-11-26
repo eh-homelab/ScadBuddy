@@ -73,6 +73,9 @@ EDGE_AREAS: Final[frozenset[str]] = frozenset(
 #: The site key's read: the page's CSP waits on it, so it gives up fast and the edge
 #: keeps its last value (`storefront/turnstile.py` `SiteKey`).
 SITE_KEY_BUDGET: Final = 2.0
+#: How long the edge asks again for a preview the CRUD side cannot read yet (#6968): well
+#: inside a proxy's 30 s, after which the page's viewer asks again itself.
+PREVIEW_BUDGET: Final = 10.0
 BASE: Final = f"/api/v1{PREFIX}/storefront"
 #: A design request's one call: the CRUD side answers only once every file is checked
 #: and stored.
@@ -487,10 +490,12 @@ class StorefrontCrud:
         self, job_id: str, *, plate: int | None, visitor_id: str, client: str
     ) -> CrudStream:
         """``GET …/storefront/renders/{id}/preview.glb``, its body unread: the caller
-        reads it as a stream, then closes it."""
+        reads it as a stream, then closes it. A replica that still fetches the files
+        answers 503 (#6968), which is asked again for `PREVIEW_BUDGET` at most."""
         return await self._crud.stream(
             "GET",
             f"{BASE}/renders/{job_id}/preview.glb",
             params=None if plate is None else {"plate": str(plate)},
             headers={VISITOR_HEADER: visitor_id, CLIENT_HEADER: client},
+            budget=PREVIEW_BUDGET,
         )

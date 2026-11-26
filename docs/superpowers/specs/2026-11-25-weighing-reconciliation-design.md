@@ -108,6 +108,9 @@ The change:
   resolution that `check_on` in `insert_weights.py` already does.
 - `person` and `scale` weighings are treated alike here; `bb` weighings (pulled from
   Bambuddy) record no breakdown, since Bambuddy gives no reading.
+- As built in #7683: `empty_source` has a third value, `tared`, for a weighing resolved as
+  §5.3's `tared`: nothing was taken off the reading, so `empty_g` is 0 and `empty_basis`
+  and `empty_name` are null.
 
 ### 5.2 What the person sees (slice A)
 
@@ -141,7 +144,7 @@ The change:
 spool reads at or under its label weight, and the page then books the reading less the
 placeholder empty weight. The change:
 
-- For a spool that is new by #7280's rule (added full, nothing consumed, grams left at
+- For a spool that is new by #7280's rule (nothing consumed, grams left at
   the label), a reading under the label weight makes the check answer `below_label`
   with `shortfall_g = label - reading` and three resolutions, each with its filament
   grams:
@@ -159,6 +162,26 @@ placeholder empty weight. The change:
 - With no empty weight known, only `tared` is offered.
 - #7280's offer needs a reading above the label weight, so `below_label` and the offer
   never meet on one reading.
+- As built in #7683: the check needs an insert with a weight, as #7280's does (it answers
+  `no_insert` first); with no empty weight known the client records the reading as the
+  filament, which is `tared` by nature, with no choice. `below_label` fires for a reading
+  under `label - 0.5 g` (#7280's full tolerance), after `used` and `not_full` and before
+  `not_above_label`. The resolutions come in the order `tared`, `short`, `label_wrong`;
+  the last two only when the reading is at least the empty weight, so a reading under it
+  offers `tared` alone. `label_wrong`'s new label is the filament rounded half up, at
+  least 1 g. The store checks the choice again under the row locks: a `resolution` the
+  check does not offer now is 422 `no_below_label` with the check's `reason`, and
+  nothing is booked. `short` and `label_wrong` book their side effect as an `edited`
+  event (`data.changes` `{"added_full": [before, false]}` or
+  `{"label_weight_g": [before, new]}`, `before` the spool's own value, null when it came
+  from the type) at the weighing's `at`, before the weighing, in the same transaction.
+- As built in #7683: a weighing with a `resolution` keeps `expected_g` (what the ledger
+  believed) and records `drift_g` null, so `last_drift_g` stays null and no Drift mark
+  appears: the person just explained the gap (the owner's call of 2026-11-25).
+- As built in #7683: "new" is what `check_on` reads, the ledger's consumption and the grams
+  left at the label (`insert_weights.consumed` and `full`), never `added_full`; a spool
+  added with `added_full` false or unknown and its label's grams is new too, and `short`
+  on one already not added full books no `edited` event.
 
 ### 5.4 End of life (slice C, #7684)
 
@@ -192,6 +215,19 @@ The change:
   type's.
 - An archived spool's page shows the closing summary in the Weight section; the history
   timeline shows the reason on the archive.
+- As built in #7684: the reason and the final weighing go on the archive route's body
+  (`SpoolArchive.reason`, `final_reading_g`, `final_grams`; a patch's `archived` records no
+  reason), not on `SpoolPatch`; the closing also keeps `started_from` (`reading` or
+  `label`) and `final_filament_g`; the preview is `GET /filament/spools/{id}/closing` with
+  its `notices`, against the setting `filament_weighing_finished_left_g` (5 g), which also
+  name a reading the archive would refuse (`no_empty_weight`, `reading_below_empty`, and
+  since #7909 `reading_below_grams`, a reading under the `final_grams` sent with it); the
+  dialog takes the spool's effective empty weight from the preview's `empty_g`, and says so
+  when that changes the meaning of a number already typed (#7909); the sync's
+  archives record `other`; and `continued_from` is a field of `SpoolDraft`, sent with
+  `copy_of`, for one spool, and refused (`continued_from_taken`, #7909) while a spool that
+  continues the source still exists. `SpoolDetail.closing` carries the archived spool's
+  closing, `null` for an archive from before #7684 (#7909).
 
 ### 5.5 Tolerances
 

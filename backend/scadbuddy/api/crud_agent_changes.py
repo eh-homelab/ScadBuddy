@@ -5,7 +5,8 @@ Area ``changes``: ``GET …/agent/changes``, a server-sent event stream of what 
 ``LISTEN`` connection used to hear (the agent opens none now), on the six channels
 (``scadbuddy_events``, ``_input``, ``_pending``, ``_mcp``, ``_warm_evict``, ``_settings``),
 with ``Last-Event-ID`` replay of the backend's ``events`` log (`agent_changes/hub.py` has
-the design). Frames:
+the design). The event log's ``fleet.*`` kinds are left out (`keep_agent`): they name the
+fleet's session ids, so only the ``fleet`` caller's stream carries them (`crud_fleet.py`). Frames:
 
 - ``change``: ``{"c": <channel>, "p": <the NOTIFY payload>}``, with ``id`` when it is a logged
   event;
@@ -23,6 +24,7 @@ one more is 429.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Callable
 from typing import Annotated
 
@@ -36,6 +38,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import AppState, StateDep
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Service
+from scadbuddy.core.events import PG_CHANNEL
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.crud.guard import crud_router
@@ -62,6 +65,22 @@ def stream_key(request: Request) -> str:
     return f"{credential}@{peer}"
 
 
+#: The fleet's event kinds (#7818). They name the recipients' session ids, which are the
+#: fleet's only identity, so they go only to the ``fleet`` caller's stream.
+FLEET_KIND_PREFIX = "fleet."
+
+
+def keep_agent(change: Change) -> bool:
+    """Every change but the event log's ``fleet.`` kinds."""
+    if change.channel != PG_CHANNEL:
+        return True
+    try:
+        kind = json.loads(change.payload).get("kind")
+    except (ValueError, AttributeError):
+        return True
+    return not (isinstance(kind, str) and kind.startswith(FLEET_KIND_PREFIX))
+
+
 @router.get("/changes", name="crud_agent_changes")
 async def changes(
     request: Request,
@@ -69,7 +88,7 @@ async def changes(
     hub: HubDep,
     last_event_id: Annotated[str | None, Header()] = None,
 ) -> StreamingResponse:
-    return await change_stream(request, state, hub, last_event_id, keep=None)
+    return await change_stream(request, state, hub, last_event_id, keep=keep_agent)
 
 
 async def change_stream(

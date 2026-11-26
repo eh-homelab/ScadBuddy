@@ -1,5 +1,6 @@
 import { api, ApiError } from '../../api/client'
-import type { Filament, Job, ModelSummary, ParamValue } from '../../api/types'
+import type { Filament, Job, ModelSummary } from '../../api/types'
+import { soldDesign } from './designInputs'
 import { defaultsFor, emptyDraft, sellMedia, titleColours, withoutWords, type ListingDraft } from './listingDraft'
 
 /**
@@ -32,7 +33,8 @@ interface Source {
   slug: string
   version: string | null
   name: string | null
-  values: Record<string, ParamValue>
+  /** The render's whole inputs: its values (`params`), their version and a template UI's own state. */
+  inputs: Record<string, unknown>
   job: Job | null
 }
 
@@ -42,7 +44,7 @@ async function source(sell: string): Promise<Source> {
   const id = sell.slice(at + 1)
   if (at > 0 && id && kind === 'job') {
     const job = await api.getJob(id)
-    return { slug: job.slug, version: job.model_version ?? null, name: null, values: job.params ?? {}, job }
+    return { slug: job.slug, version: job.model_version ?? null, name: null, inputs: { ...job.inputs, params: job.params ?? {} }, job }
   }
   if (at > 0 && id && kind === 'output') {
     const output = await api.getOutput(id)
@@ -51,14 +53,14 @@ async function source(sell: string): Promise<Source> {
       if (error instanceof ApiError && error.status === 404) return null
       throw error
     })
-    return { slug: output.slug, version: output.model_version ?? null, name: output.name ?? null, values: output.params ?? {}, job }
+    return { slug: output.slug, version: output.model_version ?? null, name: output.name ?? null, inputs: { ...output.inputs, params: output.params ?? {} }, job }
   }
   throw new Error(`Nothing to sell: ${JSON.stringify(sell)} names no render or saved output.`)
 }
 
 /** The listing `sell` names, filled in with the price book's `filaments` and the `models`' names and pictures. */
 export async function sellListing(sell: string, filaments: readonly Filament[], models: readonly ModelSummary[]): Promise<SellListing> {
-  const { slug, version, name, values, job } = await source(sell)
+  const { slug, version, name, inputs, job } = await source(sell)
   const model = models.find((m) => m.slug === slug)
   const notes: string[] = []
   const versions = await api.listVersions(slug)
@@ -68,6 +70,8 @@ export async function sellListing(sell: string, filaments: readonly Filament[], 
   if (!commit) throw new Error(`${model?.name ?? slug} has no version in its history to sell.`)
   if (!pinned) notes.push(`That was made from a version that is not in the design's history, so the listing uses the current version (${current?.short ?? commit.slice(0, 7)}).`)
   const schema = await api.getSchema(slug, commit)
+  // #5701: a pipeline template's own inputs go with the values, at the version they were made.
+  const { values, design } = soldDesign(schema, inputs)
   const took = seconds(job)
   if (took !== null && took > SLOW_RENDER_SECONDS) {
     notes.push(`This design took ${Math.round(took)} s to render. The store's preview and price give up after about ${SLOW_RENDER_SECONDS} s, so customers may not get one.`)
@@ -77,6 +81,7 @@ export async function sellListing(sell: string, filaments: readonly Filament[], 
     ...emptyDraft(slug, commit),
     title: (name ?? fallback).slice(0, 200),
     ...defaultsFor(schema, filaments, values),
+    ...design,
     media_ids: sellMedia(model?.media ?? []),
   }
   // A colour the customer chooses never goes in the title (the owner's rule).

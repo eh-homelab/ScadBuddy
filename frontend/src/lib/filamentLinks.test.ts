@@ -36,7 +36,7 @@ describe('filamentLinks (#6869)', () => {
     expect(filamentLinks.printerLabels('p/1')).toBe('/filament/labels?printers=p%2F1')
     expect(filamentLinks.spools).toBe('/filament/spools')
     expect(filamentLinks.newSpool).toBe('/filament/spools/new')
-    expect(filamentLinks.scan).toBe('/filament/scan')
+    expect(filamentLinks.scan).toBe('/scan')
     expect(filamentLinks.copySpool('a b')).toBe('/filament/spools/new?copy=a+b')
     expect(filamentLinks.newType).toBe('/filament/types/new')
     expect(filamentLinks.printers).toBe('/settings/printing#printers')

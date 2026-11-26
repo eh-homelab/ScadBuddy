@@ -1,16 +1,19 @@
-import { ChevronLeftIcon, CopyIcon, NfcIcon } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Link } from 'react-router'
+import { CopyIcon, NfcIcon } from 'lucide-react'
+import { useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
 import { postTagRead, type TagReadResult } from '../../api/filament'
+import { CodeCard } from '../../components/filament/scan/CodeCard'
 import { KnownTag } from '../../components/filament/scan/KnownTag'
 import { NfcJobBanner } from '../../components/filament/scan/NfcJobBanner'
 import { DecodedFields, NewTag } from '../../components/filament/scan/NewTag'
 import type { HeldPhotos } from '../../components/filament/scan/PhotoButtons'
 import { filamentLinks } from '../../lib/filamentLinks'
+import { codeLabel, codeTarget } from '../../lib/resolvedCode'
 import { NfcSession, nfcSupport, type Reading, type WireRecord } from '../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 
 /** One read of this session: the tap and what the server answered. */
@@ -25,11 +28,32 @@ interface Entry {
 
 const timeOf = (at: Date) => at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 const outcomeOf = (result: TagReadResult) =>
-  result.spool ? `Spool #${result.spool.number}` : result.next === 'none' ? 'No serial number' : 'New tag'
+  result.spool ? `Spool #${result.spool.number}` : result.resolved ? codeLabel(result.resolved) : result.next === 'none' ? 'No serial number' : 'New tag'
+/** Where a read opens, when it opens something: the spool's page, or the thing a code named. */
+const targetOf = (result: TagReadResult): string | null =>
+  result.next === 'open_spool' && result.spool ? filamentLinks.spool(result.spool.id) : result.next === 'open_code' && result.resolved ? codeTarget(result.resolved) : null
 /** What the live region says of a read, for a person who cannot see the list change. */
 const announcementOf = (uid: string, result: TagReadResult) =>
   uid ? `Read ${uid}: ${outcomeOf(result).replace(/^\w/, (first) => first.toLowerCase())}` : 'Read a tag with no serial number'
 const UNREADABLE = 'This tag could not be read. Hold it to the phone again.'
+
+/** "Open what I scan at once", remembered on this phone: `"1"` when on; off when unset or storage is blocked. */
+export const OPEN_AT_ONCE_KEY = 'scadbuddy.scan.openAtOnce'
+function readOpenAtOnce(): boolean {
+  try {
+    return localStorage.getItem(OPEN_AT_ONCE_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+function writeOpenAtOnce(on: boolean) {
+  try {
+    if (on) localStorage.setItem(OPEN_AT_ONCE_KEY, '1')
+    else localStorage.removeItem(OPEN_AT_ONCE_KEY)
+  } catch {
+    // A blocked storage keeps the switch for this page only.
+  }
+}
 
 function scanRefusal(cause: unknown): string {
   if (cause instanceof DOMException && cause.name === 'NotAllowedError') return "Allow NFC for this site in Chrome's settings, then tap Scan again."
@@ -41,17 +65,20 @@ function scanRefusal(cause: unknown): string {
  * #7273 — the phone page (spec 2026-11-23-web-nfc-tags-design.md, screens 1 to 4). One Web NFC
  * scan runs from the first "Scan" until the page goes; each tap is posted to `POST /tags/reads`
  * and listed newest first, and the newest opens: its spool (screen 2), a new tag (screen 3), or a
- * tag with no serial number. An agent's NFC job shows on top until the person arms or declines it
- * (`NfcJobBanner`). A browser without Web NFC gets the page's address to open elsewhere.
+ * tag with no serial number, or the thing a code on a tag or label names (`CodeCard`, #6955). An
+ * agent's NFC job shows on top until the person arms or declines it (`NfcJobBanner`). With "Open
+ * what I scan at once" on, a read that opens something navigates there, and the page starts
+ * the scan by itself when it opens. A browser without Web NFC gets the page's address to open
+ * elsewhere.
  */
 export function ScanPage() {
   const [support] = useState(nfcSupport)
   return (
     <div className="mx-auto flex min-h-full w-full max-w-md min-w-0 flex-col gap-5 px-4 pt-4 text-[13px]">
-      <Link to={filamentLinks.spools} className="inline-flex items-center gap-1 text-muted-foreground hover:underline">
-        <ChevronLeftIcon className="size-3.5" /> Spools
-      </Link>
-      <h1 className="text-lg font-semibold tracking-tight">Scan a tag</h1>
+      <div className="flex flex-col gap-1">
+        <h1 className="text-lg font-semibold tracking-tight">Scan</h1>
+        <p className="text-muted-foreground">Hold a tag or a label to the phone: a spool's tag, a place's tag, or a label with a code such as L-12 or S-142.</p>
+      </div>
       {support === 'ok' ? <Scanner /> : <Unsupported embedded={support === 'embedded'} />}
     </div>
   )
@@ -117,25 +144,49 @@ function Scanner() {
   const [openKey, setOpenKey] = useState<number | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const nextKey = useRef(0)
+  const [openAtOnce, setOpenAtOnce] = useState(readOpenAtOnce)
+  const openAtOnceId = useId()
+  const navigate = useNavigate()
+  // The reading handler is bound once (below); these refs give it the current switch and navigate.
+  const openAtOnceRef = useRef(openAtOnce)
+  const navigateRef = useRef(navigate)
+  useEffect(() => {
+    openAtOnceRef.current = openAtOnce
+    navigateRef.current = navigate
+  }, [openAtOnce, navigate])
 
   useEffect(() => {
     const nfc = session
     // The session never changes (`useState`'s initialiser), so this runs once.
+    // A read's answer that lands after the page is gone (a tap while an earlier tap's answer
+    // navigated away) is dropped, and the page navigates at most once: two taps in flight
+    // would otherwise each navigate, the second over the first's page.
+    let alive = true
+    let navigated = false
     const off = nfc.onReading((reading: Reading) => {
       postTagRead({ uid: reading.uid || null, tag_type: null, records: reading.records }).then(
         (result) => {
+          if (!alive || navigated) return
           const key = (nextKey.current += 1)
           setEntries((now) => [{ key, at: new Date(), uid: reading.uid, records: reading.records, result, held: {} }, ...now])
           setOpenKey(key)
           setError(null)
           // The read's number makes each announcement new: a live region says nothing when its text stays the same.
           setAnnouncement(`${announcementOf(reading.uid, result)} (read ${key})`)
+          const target = openAtOnceRef.current ? targetOf(result) : null
+          if (target) {
+            navigated = true
+            void navigateRef.current(target)
+          }
         },
-        (cause: unknown) => setError(`ScadBuddy could not look up the tag: ${cause instanceof ApiError ? cause.detail : 'try the tag again'}.`),
+        (cause: unknown) => {
+          if (alive) setError(`ScadBuddy could not look up the tag: ${cause instanceof ApiError ? cause.detail : 'try the tag again'}.`)
+        },
       )
     })
     const offError = nfc.onReadingError(() => setError(UNREADABLE))
     return () => {
+      alive = false
       off()
       offError()
       nfc.stop()
@@ -153,6 +204,22 @@ function Scanner() {
     } finally {
       setStarting(false)
     }
+  }
+
+  // With the switch on, the page scans as soon as it opens (coming back from a thing it opened
+  // included); a refusal is worded as the button's would be, and the button stays to try again.
+  const autoStarted = useRef(false)
+  useEffect(() => {
+    if (autoStarted.current || !readOpenAtOnce()) return
+    autoStarted.current = true
+    void start()
+    // Once, on mount: `start` reads the session, which never changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const setOpenAtOnceAndRemember = (on: boolean) => {
+    setOpenAtOnce(on)
+    writeOpenAtOnce(on)
   }
 
   const update = (key: number, change: Partial<Entry>) => setEntries((now) => now.map((one) => (one.key === key ? { ...one, ...change } : one)))
@@ -215,6 +282,12 @@ function Scanner() {
           onAnnounce={setAnnouncement}
         />
       )}
+      <div className="flex items-center gap-3">
+        <Switch id={openAtOnceId} checked={openAtOnce} onCheckedChange={setOpenAtOnceAndRemember} />
+        <label htmlFor={openAtOnceId} className="font-medium">
+          Open what I scan at once
+        </label>
+      </div>
       <section aria-labelledby="scan-reads" className="flex flex-col gap-2">
         <h2 id="scan-reads" className="font-medium">
           This session's reads
@@ -291,6 +364,9 @@ function ReadView({
         onAnnounce={onAnnounce}
       />
     )
+  }
+  if (result.next === 'open_code' && result.resolved) {
+    return <CodeCard resolved={result.resolved} />
   }
   if (result.next === 'bind_or_create') {
     return (

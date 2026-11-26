@@ -546,6 +546,7 @@ describe('filament spool tools', () => {
     ['filament_spool_set_presets', 'write'],
     ['filament_spool_set_k_values', 'write'],
     ['filament_spool_archive', 'write'],
+    ['filament_spool_closing', 'read'],
     ['filament_spool_delete', 'write'],
     ['filament_spool_bind_tag', 'write'],
     ['filament_tag_unbind', 'write'],
@@ -705,6 +706,39 @@ describe('filament spool tools', () => {
     const deleted = await runTool(tool('filament_spool_delete'), { spool_id: ROW }, ctx())
     expect(firstText(deleted)).toEqual({ deleted: ROW })
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
+  })
+
+  it('archives a spool with a reason and a final weighing (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/archive`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, archived_at: '2026-11-25T12:00:00Z' })
+      }),
+    )
+    const call = { spool_id: ROW, reason: 'finished', final_reading_g: 230 }
+    expect((await runTool(tool('filament_spool_archive'), call, ctx())).isError).toBeFalsy()
+    await runTool(tool('filament_spool_archive'), { spool_id: ROW, reason: 'damaged', final_grams: 12 }, ctx())
+    expect(bodies).toEqual([
+      { archived: true, reason: 'finished', final_reading_g: 230 },
+      { archived: true, reason: 'damaged', final_grams: 12 },
+    ])
+    expect(() => tool('filament_spool_archive').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
+  })
+
+  it("previews a spool's closing with the query it was given (#7684)", async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${SPOOL}/closing`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+      }),
+    )
+    const out = await runTool(tool('filament_spool_closing'), { spool_id: ROW, reason: 'finished', final_reading_g: 230 }, ctx())
+    expect(firstText(out)).toEqual({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+    await runTool(tool('filament_spool_closing'), { spool_id: ROW }, ctx())
+    expect(seen).toEqual(['?reason=finished&final_reading_g=230', ''])
+    expect(() => tool('filament_spool_closing').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
   })
 
   it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {
@@ -888,6 +922,51 @@ describe('filament_spool_add_event with a new spool reading (#7280)', () => {
     expect((firstText(res) as Record<string, unknown>).filament_g).toBe(950)
   })
 
+  const BELOW = {
+    offer: null,
+    reason: 'below_label',
+    insert_type_id: ROW,
+    empty_weight_g: 200,
+    filament_g: 700,
+    shortfall_g: 100,
+    resolutions: [
+      { kind: 'tared', filament_g: 900, new_label_weight_g: null },
+      { kind: 'short', filament_g: 700, new_label_weight_g: null },
+      { kind: 'label_wrong', filament_g: 700, new_label_weight_g: 700 },
+    ],
+    default: 'tared',
+  }
+
+  it('with a reading under the label and no resolution, names the choices and books nothing (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(tool('filament_spool_add_event'), { spool_id: ROW, kind: 'weighed', reading_g: 900 }, ctx())
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['offer 900'])
+    expect(bodies).toEqual([])
+    const out = firstText(res) as Record<string, unknown>
+    expect(out.event).toBeNull()
+    expect(out.below_label).toMatchObject({ shortfall_g: 100, default: 'tared' })
+    expect(String(out.next)).toContain('resolution')
+  })
+
+  it('with a resolution, posts it with the reading alone (#7683)', async () => {
+    const order: string[] = []
+    const bodies: unknown[] = []
+    mock(BELOW, order, bodies)
+    const res = await runTool(
+      tool('filament_spool_add_event'),
+      { spool_id: ROW, kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' },
+      ctx(),
+    )
+    expect(res.isError).toBeFalsy()
+    expect(order).toEqual(['event'])
+    expect(bodies).toEqual([{ kind: 'weighed', source: 'scale', reading_g: 900, resolution: 'short' }])
+    expect((firstText(res) as Record<string, unknown>).event).toEqual({ kind: 'weighed' })
+    expect(tool('filament_spool_add_event').description).toContain('below_label')
+  })
+
   it('sends the reading beside the grams, so the event keeps its breakdown (#7682)', async () => {
     const order: string[] = []
     const bodies: unknown[] = []
@@ -991,6 +1070,8 @@ describe('filament location tools', () => {
     ['filament_location_get', 'read'],
     ['filament_printer_labels', 'read'],
     ['filament_label_templates', 'read'],
+    ['filament_label_sheet_upsert', 'write'],
+    ['filament_label_sheet_delete', 'write'],
     ['filament_location_upsert', 'write'],
     ['filament_spool_move', 'write'],
   ])('%s is %s tier, never gated', (name, risk) => {
@@ -1039,6 +1120,99 @@ describe('filament location tools', () => {
     await runTool(tool('filament_printer_labels'), {}, ctx())
     await runTool(tool('filament_printer_labels'), { printer_ids: [ROW] }, ctx())
     expect(bodies).toEqual([{ printer_ids: null }, { printer_ids: [ROW] }])
+  })
+
+  it('saves a label sheet: POST without a sheet_id, PUT with one (#7216)', async () => {
+    const SHEETS = `${BACKEND}/api/v1/filament/label-sheets`
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const calls: unknown[] = []
+    server.use(
+      http.post(SHEETS, async ({ request }) => {
+        calls.push(['post', await request.json()])
+        return HttpResponse.json({ id: ROW, name: 'Avery', layout }, { status: 201 })
+      }),
+      http.put(`${SHEETS}/${ROW}`, async ({ request }) => {
+        calls.push(['put', await request.json()])
+        return HttpResponse.json({ id: ROW, name: 'Avery 2', layout })
+      }),
+    )
+    const added = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout }, ctx())
+    expect(firstText(added)).toEqual({ id: ROW, name: 'Avery', layout })
+    const edited = await runTool(tool('filament_label_sheet_upsert'), { sheet_id: ROW, name: 'Avery 2', layout }, ctx())
+    expect(firstText(edited)).toEqual({ id: ROW, name: 'Avery 2', layout })
+    const filled = { ...layout, col_gap_mm: 0, row_gap_mm: 0 }
+    expect(calls).toEqual([['post', { name: 'Avery', layout: filled }], ['put', { name: 'Avery 2', layout: filled }]])
+    expect(tool('filament_label_sheet_upsert').summarize?.({ name: 'Avery', layout } as never)).toBe('Save label sheet Avery')
+  })
+
+  it('surfaces a label sheet 409 and 404 answer, and refuses an out-of-bound input before a request (#7216)', async () => {
+    const SHEETS = `${BACKEND}/api/v1/filament/label-sheets`
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const sent: unknown[] = []
+    server.use(
+      http.post(SHEETS, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json(
+          { type: 'about:blank', title: 'Conflict', status: 409, detail: 'label_sheet_name_taken' },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        )
+      }),
+      http.put(`${SHEETS}/${ROW}`, () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Not Found', status: 404, detail: 'label_sheet_not_found' },
+          { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const taken = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout }, ctx())
+    expect(taken.isError).toBe(true)
+    expect(JSON.stringify(taken.content)).toContain('label_sheet_name_taken')
+    const missing = await runTool(tool('filament_label_sheet_upsert'), { sheet_id: ROW, name: 'Avery', layout }, ctx())
+    expect(missing.isError).toBe(true)
+    expect(JSON.stringify(missing.content)).toContain('label_sheet_not_found')
+    sent.length = 0
+    const refused = await runTool(tool('filament_label_sheet_upsert'), { name: 'Avery', layout: { ...layout, cols: 21 } }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(sent).toEqual([])
+  })
+
+  it('trims a label sheet name before the length check and sends it trimmed (#7216)', async () => {
+    const layout = { page: 'a4', width_mm: 70, height_mm: 37, cols: 3, rows: 8, top_mm: 0, left_mm: 0 }
+    const names: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/filament/label-sheets`, async ({ request }) => {
+        names.push(((await request.json()) as { name: string }).name)
+        return HttpResponse.json({ id: ROW, name: 'x', layout }, { status: 201 })
+      }),
+    )
+    const name = 'a'.repeat(100)
+    const ok = await runTool(tool('filament_label_sheet_upsert'), { name: `${name} `, layout }, ctx())
+    expect(ok.isError).toBeFalsy()
+    expect(names).toEqual([name])
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: `${name}a`, layout }, ctx())).isError).toBe(true)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: '   ', layout }, ctx())).isError).toBe(true)
+    // 100 code points outside the BMP are 200 UTF-16 units; zod and the backend both count 100.
+    const wide = '\u{1F9F5}'.repeat(100)
+    expect((await runTool(tool('filament_label_sheet_upsert'), { name: wide, layout }, ctx())).isError).toBeFalsy()
+    expect(names.at(-1)).toBe(wide)
+  })
+
+  it('says a deleted sheet makes the next print a 409 (#7216)', () => {
+    expect(tool('filament_label_sheet_delete').description).toContain('label_sheet_gone')
+    expect(tool('filament_label_sheet_delete').description).not.toContain('default size')
+  })
+
+  it('deletes a label sheet and reports its id (#7216)', async () => {
+    const calls: string[] = []
+    server.use(
+      http.delete(`${BACKEND}/api/v1/filament/label-sheets/${ROW}`, () => {
+        calls.push('delete')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const res = await runTool(tool('filament_label_sheet_delete'), { sheet_id: ROW }, ctx())
+    expect(firstText(res)).toEqual({ deleted: ROW })
+    expect(calls).toEqual(['delete'])
   })
 
   it('lists the label templates', async () => {
@@ -1846,6 +2020,26 @@ describe('filament_spool_upsert quantity and copy_of', () => {
       // R-7150-13: the draft names its source (the route answers `copy_of`), so the backend keeps a copied migrated row so.
       { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID },
     ])
+  })
+
+  it('passes continued_from through for a respooled spool (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
+        HttpResponse.json({ spool: { type_id: ROW, weight_locked: false }, location_id: null, presets: [], k_values: [], copy_of: SOURCE_ID }),
+      ),
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    const call = { copy_of: SOURCE_ID, continued_from: SOURCE_ID, fields: { grams_left: 480, added_full: false } }
+    expect((await runTool(tool('filament_spool_upsert'), call, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { spool: { type_id: ROW, weight_locked: false, grams_left: 480, added_full: false }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID, continued_from: SOURCE_ID },
+    ])
+    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, continued_from: SOURCE_ID }, ctx())
+    expect(refused.isError).toBe(true)
   })
 
   // R-7150-8: a resend reads the copy again, so its key names the draft it read too.

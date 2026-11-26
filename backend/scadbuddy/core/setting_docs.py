@@ -444,6 +444,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " expected, either way, is a notice on the spool and in the list. 0 notices every"
             " weighing.",
         ),
+        "filament_weighing_finished_left_g": SettingDoc(
+            "Finished spool has at most, grams",
+            "Archiving a spool as finished with more filament than this on it says so first;"
+            " archiving one for any other reason with this much or less asks whether it is"
+            " finished. Nothing is refused.",
+        ),
         "filament_default_cost_per_kg": SettingDoc(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"
@@ -477,8 +483,24 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         "filament_label_template": SettingDoc(
             "Label template",
             "The size of a printed label, for spools and for printer, AMS and slot places:"
-            " a roll or box label, an AMS holder, an Avery sheet, or a custom size of 40 to"
-            " 190 mm wide and 25 to 190 mm tall. The Labels page saves the last one chosen.",
+            " a roll or box label, an AMS holder, an Avery sheet, a sheet grid you saved, or a"
+            " custom size of 40 to 190 mm wide and 25 to 190 mm tall. The Labels page saves the"
+            " last one chosen. A saved sheet is read at each print, so an edit applies to the"
+            " next print; when it is deleted, the labels download is refused, and the page draws"
+            " at 50 x 25 mm, until you choose another template.",
+        ),
+        "filament_label_output": SettingDoc(
+            "Label output",
+            "The file that the labels download gives: a PDF, or PNG images at 203, 300 or"
+            " 600 dpi for label printer software. One page is one PNG; more pages come as a"
+            " ZIP of PNGs. Also the fields a spool label prints, top to bottom: number,"
+            " material, colour name, colour hex, brand, location, nozzle temperatures, label"
+            " weight, the note's first line and the date it was added, and the QR code. The"
+            " default is the number, material, colour name, brand and QR code. Lines that do"
+            " not fit on the label are left off from the bottom; the number, when chosen,"
+            " stays. Without the QR code, the text uses its space. Place labels always print"
+            " their code, name and QR code. The Labels page saves the last format, dpi and"
+            " fields.",
         ),
         "filament_shopping_auto_add_empty": SettingDoc(
             "Add empty spools to the shopping list",
@@ -527,11 +549,20 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "event_log_retention_seconds": SettingDoc(
             "Keep live-update events for",
-            "For replay after a short disconnect. 0 is no limit.",
+            "How long to keep events for replay after a disconnect. 0 is no limit, the"
+            " default: no event is lost.",
         ),
         "event_log_retention_rows": SettingDoc(
             "Keep at most this many live-update events",
-            "Older events are pruned past this count. 0 is no limit.",
+            "Older events are pruned past this count. 0 is no limit, the default. The count"
+            " covers only events that no other rule keeps or ages out.",
+        ),
+        "event_log_retention_kinds": SettingDoc(
+            "Keep events of a kind for",
+            "Seconds to keep each kind of event, by kind prefix, such as job: 3600. A"
+            " prefix covers its sub-kinds, and the longest matching prefix wins. 0 keeps"
+            " that kind forever. An event's own retention beats this, and the first two"
+            " settings apply to the kinds left over.",
         ),
         "realtime_sockets": SettingDoc(
             "Live-update connections",

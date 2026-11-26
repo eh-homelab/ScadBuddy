@@ -100,7 +100,7 @@ func (l *Log) append(r *http.Request, p crud.Params) (any, error) {
 				return err
 			}
 		}
-		out, err = appendIn(r.Context(), tx, session, texts)
+		out, err = AppendIn(r.Context(), tx, session, texts)
 		return err
 	})
 	var pg *pgconn.PgError
@@ -142,8 +142,8 @@ func member(text, name string) (value *string, ok bool) {
 	return value, true
 }
 
-// appendIn appends texts in the caller's transaction; their seqs, oldest first.
-func appendIn(ctx context.Context, tx pgx.Tx, session string, texts []string) ([]int64, error) {
+// AppendIn appends texts in the caller's transaction; their seqs, oldest first.
+func AppendIn(ctx context.Context, tx pgx.Tx, session string, texts []string) ([]int64, error) {
 	if len(texts) == 0 {
 		return []int64{}, nil
 	}
@@ -374,7 +374,7 @@ func (l *Log) forkLog(r *http.Request, p crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		first, err := appendIn(ctx, tx, child, started)
+		first, err := AppendIn(ctx, tx, child, started)
 		if err != nil {
 			return err
 		}
@@ -382,7 +382,7 @@ func (l *Log) forkLog(r *http.Request, p crud.Params) (any, error) {
 			event_seq = GREATEST(event_seq, $1) WHERE id = $2::text::uuid`, cut, child); err != nil {
 			return err
 		}
-		last, err := appendIn(ctx, tx, child, then)
+		last, err := AppendIn(ctx, tx, child, then)
 		out = append(first, last...)
 		return err
 	})

@@ -217,6 +217,37 @@ uncosted one has an empty own cost too; a costed one has its own cost:
    Read it again with `filament_invoice_get` first. The person may have changed
    it on the page.
 
+### A line that is not filament (#7648)
+
+An invoice can hold goods that are not filament, for example NFC tags, nozzles,
+desiccant or tools. A filament invoice line always makes or costs spools. So
+never put such goods on a line. This rule holds until inventory phase 3 (#7068)
+gives invoices a line for any item.
+
+- **Record the goods as inventory, at the same time as the confirm.** Treat them
+  as spools are treated: nothing is created before the person says yes. First
+  propose them in the confirm summary (rule 6): the item (an existing one from
+  `inventory_item_list` with `q`, or a new one), its kind (`inventory_kind_list`:
+  `consumable`, `hardware`, `nozzle` and so on), the quantity and the cost. Only
+  after the person says yes, call `inventory_item_upsert` for a new item, then:
+  - For a kind that tracks lots, call `inventory_lot_receive` with `qty` and
+    `total_cost_minor`. The cost is the line subtotal + its tax + its share of
+    shipping (rule 2). Set `received_at` to the delivery date. Put the supplier
+    and the order number in `note`.
+  - For a kind that tracks units (a nozzle, a tool), call
+    `inventory_unit_receive` with `cost_minor` per unit.
+- **No filament on the invoice:** propose the inventory records, and ask the
+  person what to do with the draft: leave it, or delete it
+  (`filament_invoice_delete`) once the records are made after their yes. Never confirm a draft with no lines. It cannot reconcile.
+- **Filament and other goods on one invoice:** the filament lines go on the
+  invoice. Share the tax and the shipping over every line by value, so that the
+  other goods take their share. Set the header's `subtotal`, `tax`, `shipping`
+  and `total` to the filament lines' share only, so that the invoice reconciles.
+  Then start the invoice `note` with `Not filament:`, the printed totals, and
+  each other line (its description, quantity, subtotal and the inventory item it
+  went to). Phase 3 finds that note and puts those lines back on the invoice.
+  Tell the person, and ask before you confirm.
+
 ### Check at the end
 
 - The invoice's lines add up to its total, within the confirm tolerance. Confirm

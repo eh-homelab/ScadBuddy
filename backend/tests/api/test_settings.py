@@ -218,6 +218,16 @@ def test_a_retention_is_stored_and_a_clear_keeps_every_row(
     assert cleared.json()[field] is None
 
 
+def test_event_log_retention_kinds_round_trip(client: TestClient, settings: Settings) -> None:
+    kinds = {"job": 3600.0, "fleet.message": 0.0}
+    saved = client.put("/api/v1/settings", json={"event_log_retention_kinds": kinds})
+    assert saved.json()["event_log_retention_kinds"] == kinds
+    assert client.get("/api/v1/settings").json()["event_log_retention_kinds"] == kinds
+    assert read_stored(settings.database_url)["event_log_retention_kinds"] == kinds
+    refused = client.put("/api/v1/settings", json={"event_log_retention_kinds": {"Bad": 1}})
+    assert refused.status_code == 422
+
+
 @pytest.mark.parametrize("field", ["print_run_retention_seconds", "operation_retention_seconds"])
 @pytest.mark.parametrize("value", [0, -1, 86, 86399])
 def test_a_retention_under_a_day_is_refused(client: TestClient, field: str, value: int) -> None:
