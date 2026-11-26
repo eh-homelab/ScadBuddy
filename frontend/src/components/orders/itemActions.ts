@@ -24,10 +24,10 @@ export function offersPrint(order: Order, item: OrderItemDetail): boolean {
   )
 }
 
-/** #5701 PR 5 — whether the item's render made several outputs (`kit_outputs`): the item's
- * own print would print the first alone (the backend refuses it, `item_kit`). */
-export function isKit(item: Pick<OrderItemDetail, 'kit_outputs'>): boolean {
-  return (item.kit_outputs?.length ?? 0) > 1
+/** #5701 PR 5 — whether the item's render made several outputs (`kit_count`, the count the
+ * backend refuses the item's own print by, `item_kit`): that print would print the first alone. */
+export function isKit(item: Pick<OrderItemDetail, 'kit_count'>): boolean {
+  return (item.kit_count ?? 0) > 1
 }
 
 /** Why an accepted item's quantity and price are read-only (`item_locked`); `lockedText` adds
