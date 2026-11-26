@@ -1659,13 +1659,26 @@ async def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> lis
     summary="A plate's cover image",
 )
 async def get_output_plate_thumbnail(
-    output_id: OutputIdPath, index: int, outputs: OutputsDep
+    output_id: OutputIdPath,
+    index: int,
+    outputs: OutputsDep,
+    config: ConfigDep,
+    events: EventsDep,
+    request: Request,
+    cover_if_missing: Annotated[
+        bool,
+        Query(description="The output's thumbnail when the plate has no cover (#7939)"),
+    ] = False,
 ) -> Response:
-    """The plate's own cover from inside the 3MF, the one Bambu Studio would show."""
+    """The plate's own cover from inside the 3MF, the one Bambu Studio would show. A
+    queue item's picture asks with ``cover_if_missing``: a plate with no cover then shows
+    the output's thumbnail, never nothing."""
     await asyncio.to_thread(require_output, outputs, output_id)
     async with _model_3mf(outputs, output_id) as path:
         image = await asyncio.to_thread(_plate_cover, path, index)
     if image is None:
+        if cover_if_missing:
+            return await get_output_thumbnail(output_id, outputs, config, events, request, None)
         raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
     return Response(image, media_type="image/png")
 
