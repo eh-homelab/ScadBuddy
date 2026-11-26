@@ -779,6 +779,17 @@ def flow_kinds(
                 # aborted by closing workflow"), and the Update never existed: the call is
                 # no longer waiting (#7822). An unknown fate keeps its row and error (#7883).
                 raise _stale() from None
+            if (
+                verdict is None
+                and isinstance(err, RPCError)
+                and err.status == RPCStatusCode.NOT_FOUND
+            ):
+                # Not the stale case: whether it landed is unknown, so the row stays (#7900).
+                activity.logger.warning(
+                    "flow decision %s: the run closed under its send, and whether it landed"
+                    " is unknown; its row stays",
+                    decision.request_id,
+                )
             raise
 
     async def give(
