@@ -74,8 +74,10 @@ func TestAZoneNameInAnotherCaseIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	saved := zoneDirs
-	zoneDirs = []string{dir}
+	zoneDirs = nil
 	t.Cleanup(func() { zoneDirs = saved })
+	// $ZONEINFO is read first, so the stand-in directory is checked there too.
+	t.Setenv("ZONEINFO", dir)
 
 	for name, want := range map[string]bool{
 		"America/New_York": true,

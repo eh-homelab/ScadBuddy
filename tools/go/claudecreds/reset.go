@@ -113,7 +113,8 @@ func location(name string) (*time.Location, bool) {
 }
 
 // zoneDirs are the directories time.LoadLocation reads before its embedded data
-// (zoneinfo_unix.go's platformZoneSources, and zoneinfo_ios.go's for darwin).
+// (zoneinfo_unix.go's platformZoneSources, which darwin uses too; iOS has none). It
+// reads $ZONEINFO before them; writtenAsFiled checks that too.
 var zoneDirs = []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/lib/locale/TZ", "/etc/zoneinfo"}
 
 // writtenAsFiled reports whether no zone directory holds name in another case. On a
@@ -122,7 +123,12 @@ var zoneDirs = []string{"/usr/share/zoneinfo", "/usr/share/lib/zoneinfo", "/usr/
 // (#8023). It reads each directory's entries, so the answer is the same on any
 // filesystem.
 func writtenAsFiled(name string) bool {
-	for _, dir := range zoneDirs {
+	dirs := zoneDirs
+	if env := os.Getenv("ZONEINFO"); env != "" {
+		// A zip file there is read by exact name; os.ReadDir fails on it and skips it.
+		dirs = append([]string{env}, dirs...)
+	}
+	for _, dir := range dirs {
 		for _, part := range strings.Split(name, "/") {
 			entries, err := os.ReadDir(dir)
 			if err != nil {
