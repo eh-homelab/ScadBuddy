@@ -56,7 +56,7 @@ func Publish(ctx context.Context, pool *pgxpool.Pool, kind string, fields ...htt
 	}
 	if err == nil {
 		err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, logLock); err != nil {
+			if err := HoldLog(ctx, tx); err != nil {
 				return err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO events (event_id, kind, at, payload)

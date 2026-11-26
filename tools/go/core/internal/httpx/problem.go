@@ -61,6 +61,14 @@ var titles = map[int]string{
 	503: "Service Unavailable",
 }
 
+// Title is the title problems.py gives status: its name, or "Error".
+func Title(status int) string {
+	if title := titles[status]; title != "" {
+		return title
+	}
+	return "Error"
+}
+
 // Marshal is v as compact JSON: no HTML escapes, no trailing newline.
 func Marshal(v any) ([]byte, error) {
 	var b bytes.Buffer
@@ -102,10 +110,7 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 	if kind == "" {
 		kind = "about:blank"
 	}
-	title := titles[p.Status]
-	if title == "" {
-		title = "Error"
-	}
+	title := Title(p.Status)
 	fields := append([]Field{
 		{"type", kind},
 		{"title", title},

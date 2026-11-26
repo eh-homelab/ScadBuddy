@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -20,6 +21,10 @@ from scadbuddy.entities.refs import EntityRef
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
+
+#: `EntityStore.ensure`'s statement, which Go's inventory store runs too (#7667 §5.1;
+#: `tools/go/core/internal/inventory/store` `EnsureEntity`).
+ENSURE_ENTITY_SQL = (Path(__file__).parent / "shared" / "ensure_entity.sql").read_text()
 
 
 @dataclass(frozen=True)
@@ -174,11 +179,7 @@ class EntityStore:
         """The registry row of `ref`, made on first use."""
         if not self.exists(conn, ref):
             raise EntityNotFound(str(ref))
-        row = conn.execute(
-            "INSERT INTO entities (kind, ref) VALUES (%s, %s)"
-            " ON CONFLICT (kind, ref) DO UPDATE SET kind = EXCLUDED.kind RETURNING id",
-            (ref.kind, ref.ref),
-        ).fetchone()
+        row = conn.execute(ENSURE_ENTITY_SQL, (ref.kind, ref.ref)).fetchone()
         assert row is not None
         return UUID(str(row["id"]))
 
