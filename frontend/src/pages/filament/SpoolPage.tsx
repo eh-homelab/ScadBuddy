@@ -1001,7 +1001,7 @@ export function SpoolPage() {
             </div>
             <p className="text-[13px] text-muted-foreground">
               {empty
-                ? `Empty spool ${empty.empty_weight_g} g (${empty.name})${empty.empty_weight_basis === 'derived' && empty.derived_count > 0 ? `, from ${empty.derived_count} new ${empty.derived_count === 1 ? 'spool' : 'spools'}` : ''}.`
+                ? `Empty spool ${empty.empty_weight_g} g (${empty.name})${empty.empty_weight_basis !== 'derived' ? '' : empty.derived_count > 0 ? `, from ${empty.derived_count} new ${empty.derived_count === 1 ? 'spool' : 'spools'}` : ', from new spools since deleted'}.`
                 : 'Empty spool weight not known. Choose its spool.'}
             </p>
             {creating ? (

@@ -25,6 +25,16 @@ describe('useInsertWeightCheck (#7452)', () => {
     expect(result.current).toMatchObject({ check: null, pending: false, unanswered: true })
   })
 
+  it('shows a later answer in place of unanswered', async () => {
+    let answer: (check: InsertWeightCheck) => void = () => {}
+    vi.mocked(insertWeightOffer).mockReturnValue(new Promise((resolve) => (answer = resolve)))
+    const { result } = renderHook(() => useInsertWeightCheck('spool', 1200))
+    await act(async () => vi.advanceTimersByTimeAsync(300 + CHECK_WAIT_MS))
+    expect(result.current).toMatchObject({ check: null, pending: false, unanswered: true })
+    await act(async () => answer(NO_OFFER))
+    expect(result.current).toMatchObject({ check: NO_OFFER, pending: false, unanswered: false })
+  })
+
   it('keeps an answer that comes in time', async () => {
     vi.mocked(insertWeightOffer).mockResolvedValue(NO_OFFER)
     const { result } = renderHook(() => useInsertWeightCheck('spool', 1200))

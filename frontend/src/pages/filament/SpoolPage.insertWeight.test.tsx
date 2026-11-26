@@ -91,6 +91,13 @@ describe('the weigh form offers an insert weight from a new spool (#7280)', () =
     expect(await screen.findByText('Empty spool 200 g (Cardboard spool), from 1 new spool.')).toBeInTheDocument()
   })
 
+  it('names a derived weight whose readings are all gone (#7450)', async () => {
+    await upsertCatalog('insert-types', { empty_weight_basis: 'derived' }, IT.CARDBOARD)
+    open(9)
+    await heading(9)
+    expect(await screen.findByText('Empty spool 180 g (Cardboard spool), from new spools since deleted.')).toBeInTheDocument()
+  })
+
   it('accepts when a person checks the offer', async () => {
     const accepts = recorded('POST', /\/insert-weight$/)
     const events = recorded('POST', /\/events$/)

@@ -82,13 +82,17 @@ and R-7280-6 where they differ):
   `not_above_label` (backend `NoOfferReason`, the frontend mocks, the agent tool text, the skill).
 - **R-7449-3** The full tolerance holds at its edge: `abs(grams_left - label) <= 0.5`.
 - **R-7449-4** An archived insert type answers `no_insert`, in `check_on` and in the re-check
-  under lock in `accept_on`. The check still gives `filament_g` from its weight.
+  under lock in `accept_on`. The check still gives `filament_g` from its weight. A reading
+  under the label still answers `below_label` with its resolutions (#7683), because none of them
+  writes the insert: the review of cac9b3da1 found that an archived insert had hidden them, and a
+  tared reading was then booked one insert weight light.
 - **R-7450-1** A spool's delete takes its reading row out in the delete's transaction
   (`insert_weights.forget_spool_on`, called by `FilamentSpoolStore.delete`), with the insert's row
   locked first. When the insert's basis is `derived`, its `empty_weight_g` becomes the mean of the
   rows left; `derived_count` is a count of the rows, so it follows. Neither the issue nor this plan
   says what an insert with no readings left weighs, so: the last weight stays, the basis stays
-  `derived`, and nothing new is set (`derived_count` reads 0). Another basis is never changed.
+  `derived`, and nothing new is set (`derived_count` reads 0). The spool page then says the
+  weight is "from new spools since deleted". Another basis is never changed.
 - **R-7450-2** `InsertWeightAccept` takes an optional `new_empty_weight_g`. When it is given and
   the mean under the locks differs, the accept writes nothing and answers 409
   `insert_weight_changed` with the `new_empty_weight_g` now. The UI sends the offer's value, and on

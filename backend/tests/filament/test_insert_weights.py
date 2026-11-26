@@ -409,6 +409,11 @@ def test_an_archived_insert_gets_no_offer(pg_pool: PgPool) -> None:
         store.accept(spool, 1150)
     assert refused.value.reason == "no_insert"
     assert _insert_row(pg_pool, insert).empty_weight_g == 200
+    # A reading under the label still asks what is up (#7683): a resolution writes nothing
+    # to the insert, so an archived one does not hide it.
+    under = store.check(spool, 950)
+    assert under is not None and (under.reason, under.default) == ("below_label", "tared")
+    assert [r.kind for r in under.resolutions] == ["tared", "short", "label_wrong"]
 
 
 @pg

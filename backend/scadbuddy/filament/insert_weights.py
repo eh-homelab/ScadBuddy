@@ -185,8 +185,7 @@ def check_on(
     label: int | None = spool["label_weight_g"]
     if spool["archived"]:
         return answer("archived")
-    # An archived insert keeps its weight for the filament, but takes no new one (#7449-4).
-    if insert is None or insert["archived"]:
+    if insert is None:
         return answer("no_insert")
     if label is None:
         return answer("no_label_weight")
@@ -196,6 +195,10 @@ def check_on(
         return answer("not_full")
     if reading_g < label - FULL_TOLERANCE_G:
         return answer("below_label")
+    # An archived insert keeps its weight for the filament, but takes no new one (#7449-4).
+    # A reading under the label still gets its resolutions: none of them writes the insert.
+    if insert["archived"]:
+        return answer("no_insert")
     reason = offer_reason(reading_g, label)
     if reason is not None:
         return answer(reason)

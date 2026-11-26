@@ -195,7 +195,7 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
     default: null,
   })
   if (row.archived_at) return answer('archived')
-  if (!insert || insert.archived_at) return answer('no_insert')
+  if (!insert) return answer('no_insert')
   if (label == null) return answer('no_label_weight')
   const used = state.events
     .filter((event) => event.spool_id === row.id)
@@ -219,6 +219,8 @@ function insertWeightCheck(row: SpoolRow, reading: number): S['InsertWeightCheck
     const shortfall = label - reading
     return { ...answer('below_label'), shortfall_g: shortfall, resolutions, default: shortfall > 0.1 * label && resolutions.length > 1 ? 'short' : 'tared' }
   }
+  // #7449-4: an archived insert takes no new weight, but keeps the resolutions above.
+  if (insert.archived_at) return answer('no_insert')
   const derived = reading - label
   if (derived <= 0) return answer('not_above_label')
   if (derived > label) return answer('derived_too_heavy')
