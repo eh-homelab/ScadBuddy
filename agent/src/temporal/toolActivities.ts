@@ -201,7 +201,7 @@ export const BACKEND_UNAVAILABLE = 'BackendUnavailable'
  * away (#4442 gate re-review): a gated call's activity runs once, so these are its only retries.
  */
 export const RESOLVE_BACKOFF_MS: readonly number[] = [500, 2000]
-/** The failure type of a call from a workflow that is no known session. */
+/** The failure type of a call from a workflow that is no known session, and of a bare tool activity from any workflow but a flow run's (#7323). */
 export const UNKNOWN_SESSION = 'UnknownSession'
 /** The failure type of a gated call with no approval recorded for it. */
 export const NOT_APPROVED = 'NotApproved'
