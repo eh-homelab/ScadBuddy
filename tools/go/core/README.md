@@ -126,6 +126,11 @@ codec's subjects and payloads, and the canonical JSON of the input and response 
 open every vector in `backend/tests/fixtures/`. `internal/gate` is the gate's validator, pinned by
 `pending-input-vectors.json` and `response-hash-vectors.json`, and the `gate` area's routes.
 
+`internal/bambutag` decodes a Bambu Lab MIFARE Classic 1K filament tag and derives its sector
+keys from the UID, after the [RFID Tag Guide](https://github.com/Bambu-Research-Group/RFID-Tag-Guide/blob/a26cf83d7b296b71c558f8c332d464f4e5b9c314/BambuLabRfid.md)
+(#8058). It is pure: no I/O and no SQL, and it never writes a tag. Its `Tag` JSON is what a scan
+record stores; `testdata/*.json` pins it, and a change bumps `DecoderVersion`.
+
 A request that reaches Python carries one `X-Forwarded-For` value: its client, as the trusted
 proxies name it (`core/proxies.py`). So Python runs with `SCADBUDDY_TRUSTED_PROXIES=127.0.0.1`
 (and `SCADBUDDY_CORE_UPSTREAM` names the literal `127.0.0.1`, not `localhost`, which may connect over
