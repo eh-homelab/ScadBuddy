@@ -208,6 +208,7 @@ func TestStoreErrors(t *testing.T) {
 	}{
 		{"unknown agent", 404, "unknown-agent", fleetchat.ErrUnknownAgent},
 		{"not member", 403, "not-member", fleetchat.ErrNotMember},
+		{"unknown channel", 404, "unknown-channel", fleetchat.ErrUnknownChannel},
 		{"handle taken", 409, "handle-taken", ErrHandleTaken},
 	}
 	t.Run("text too long", func(t *testing.T) {
