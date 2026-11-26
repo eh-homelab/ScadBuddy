@@ -13,6 +13,7 @@ import type {
   ToolImage,
   VersionLink,
 } from './protocol'
+import { WORKER_RESTARTED, WORKER_RESTARTED_TEXT } from './toolGroups'
 
 /** One entry in a session's transcript and action feed, in arrival order. */
 export type FeedItem =
@@ -654,6 +655,8 @@ function errorMessage(code: string | undefined, message: string): string {
       return 'The assistant is still working through the messages already sent, so this one was not taken. Wait a moment, then send it again.'
     case 'rate_limited':
       return 'Too many new chats started in a short time, so this one was not started. Wait a minute, then send it again.'
+    case WORKER_RESTARTED:
+      return WORKER_RESTARTED_TEXT
     default:
       return message
   }

@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { FeedItem } from './state'
-import { feedBlocks, groupStatus, isLiveStatus, toolStatus, type ToolStatus } from './toolGroups'
+import {
+  feedBlocks,
+  groupStatus,
+  isLiveStatus,
+  stopReasonText,
+  stoppedBy,
+  toolStatus,
+  type ToolStatus,
+  WORKER_RESTARTED,
+  WORKER_RESTARTED_TEXT,
+} from './toolGroups'
 
 type Tool = Extract<FeedItem, { kind: 'tool' }>
 
@@ -88,6 +98,23 @@ describe('toolStatus (#782)', () => {
     // Another error is not a Stop.
     expect(statusOf([done('t1', false), { kind: 'error', id: 'e2', message: 'down' }], 't1')).toBe('failed')
     expect(statusOf([done('t1'), interrupted], 't1')).toBe('done')
+  })
+
+  // #7874: a worker shutdown cut the turn while a call ran, and the workflow placed the turn again.
+  it('stopped, with the restart as its reason, when a worker restart cut the turn while it was the last step', () => {
+    const restarted: FeedItem = { kind: 'error', id: 'e1', message: WORKER_RESTARTED_TEXT, code: WORKER_RESTARTED }
+    const refused = done('t1', false)
+    // The turn goes on on another worker: its next reply follows the restart, not the call.
+    const items = [refused, restarted, text('m1')]
+    expect(statusOf(items, 't1')).toBe('stopped')
+    expect(stopReasonText(stoppedBy(refused, items))).toBe(WORKER_RESTARTED_TEXT)
+    // A call with no result stopped too, even while the next placement runs.
+    expect(statusOf([tool('t1'), restarted, text('m1')], 't1')).toBe('stopped')
+    // A Stop keeps "Stopped" alone; a call that failed before the restart failed.
+    const stop: FeedItem = { kind: 'error', id: 'e2', message: 'the turn was interrupted', code: 'interrupted' }
+    expect(stopReasonText(stoppedBy(refused, [refused, stop]))).toBeUndefined()
+    expect(statusOf([done('t1', false), text('m0'), restarted], 't1')).toBe('failed')
+    expect(stoppedBy(done('t2'), [done('t2')])).toBeUndefined()
   })
 
   it('waits for the user while its question is open', () => {

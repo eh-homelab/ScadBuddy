@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { blobUrl, type ServerEvent, ServerEventSchema } from '../../agent/chat/protocol'
 import { chatReducer, initialChatState } from '../../agent/chat/state'
-import type { ToolCall, ToolStatus } from '../../agent/chat/toolGroups'
+import { type ToolCall, type ToolStatus, WORKER_RESTARTED_TEXT } from '../../agent/chat/toolGroups'
 import { highlightJson, prettyJson } from '../../agent/chat/json'
 import { ToolGroup } from './ToolGroup'
 
@@ -76,6 +76,29 @@ describe('a single call', () => {
     const note = "The user doesn't want to proceed with this tool use. The tool use was rejected."
     group([call('t1', { result: { ok: false, summary: note, sources: [] } })], [status])
     expect(screen.getByTestId('agent-tool')).not.toHaveTextContent('want to proceed')
+  })
+
+  // #7874: a call a worker restart stopped says why, and keeps Claude Code's note under Details only.
+  it('shows a stopped call’s reason, and keeps Claude Code’s note under Details', async () => {
+    const note = "The user doesn't want to proceed with this tool use. The tool use was rejected."
+    const user = userEvent.setup()
+    render(
+      <MemoryRouter>
+        <ToolGroup
+          calls={[call('t1', { title: 'Find tools', result: { ok: false, summary: note, sources: [] } })]}
+          statuses={['stopped']}
+          reasons={[WORKER_RESTARTED_TEXT]}
+          sessionId="sess-1"
+          advanced={false}
+        />
+      </MemoryRouter>,
+    )
+    const tool = screen.getByTestId('agent-tool')
+    expect(within(tool).getByTestId('agent-tool-status')).toHaveTextContent('Stopped')
+    expect(within(tool).getByTestId('agent-tool-stop-reason')).toHaveTextContent(WORKER_RESTARTED_TEXT)
+    expect(tool).not.toHaveTextContent('want to proceed')
+    await user.click(within(tool).getByRole('button', { name: 'Details: Find tools' }))
+    expect(screen.getByTestId('agent-tool-result')).toHaveTextContent('want to proceed')
   })
 
   // #2149: the first call stays mounted, Details open, when a second joins its group.
