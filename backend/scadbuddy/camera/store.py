@@ -1,8 +1,9 @@
 """The camera store: which printers record, the segment index, the feed leases and the
 feed state (plan 2026-11-23 camera recording, phase 1).
 
-A printer qualifies when its LAN link has a sealed code, its last report names an
-``rtsps://`` camera (`models.rtsp_url`) and ``printers.camera_recording`` is on. One
+A printer qualifies when it is a physical printer (``printers.kind`` ``physical``), its LAN
+link has a sealed code, its last report names an ``rtsps://`` camera (`models.rtsp_url`) and
+``printers.camera_recording`` is on. One
 recorder at a time holds a printer's lease. The lease is one statement, so two recorders
 that ask at once cannot both get it."""
 
