@@ -29,6 +29,7 @@ A field that is not the type it should be reads as absent, never as a failed sta
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -303,6 +304,74 @@ def _active_extruder(report: dict[str, Any]) -> int:
     return 0 if state is None else (state >> 4) & 0xF
 
 
+#: ``snow`` when an extruder holds nothing (Bambuddy ``tray_ids.py`` ``WIRE_SLOT_NONE``).
+SNOW_NONE = 0xFFFF
+
+
+def decode_snow(value: Any) -> tuple[int, int] | None:
+    """The ``(ams_id, slot)`` an extruder's ``snow`` names: ``ams_id << 8 | slot``, an AMS
+    0-3 by its slot's low two bits and an AMS-HT 128-135 as slot 0, as Bambuddy's
+    ``decode_wire_slot`` reads it:
+    https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/utils/tray_ids.py#L349-L374
+    ``None`` for ``SNOW_NONE`` and for what it cannot decode. An external holder (high
+    byte 254 or 255) is ``None`` too: ``decode_wire_slot`` reads 0xFEFF as Ext-R, but the
+    recorded idle H2C (``tests/printers/fixtures/lan-report-h2c-idle.json``, nothing
+    loaded, ``tray_now`` 255) reports 0xFEFF on extruder 1, and Bambuddy's own unload
+    leaves 254/255 out of its ``snow`` check (``bambu_mqtt.py`` L8491-L8493 at that
+    commit). The external holders keep the ``tray_now`` rule (`ams_slots.is_loaded`)."""
+    if isinstance(value, bool):
+        return None
+    snow = _int(value) if isinstance(value, int | str) else None
+    if snow is None or not 0 <= snow < SNOW_NONE:
+        return None
+    ams_id, slot = snow >> 8, snow & 0xFF
+    if 0 <= ams_id <= 3:
+        return ams_id, slot & 0x03
+    if 128 <= ams_id <= 135:
+        return ams_id, 0
+    return None
+
+
+def extruder_entries(report: Mapping[str, Any]) -> dict[int, dict[str, Any]]:
+    """The entries of ``device.extruder.info`` by their ``id`` (0 the right extruder, 1
+    the left). An entry that is not an object, or whose ``id`` is not 0 or 1, is left out.
+    The list order is not used: a report can list the extruders in either order."""
+    device = report.get("device")
+    block = device.get("extruder") if isinstance(device, dict) else None
+    info = block.get("info") if isinstance(block, dict) else None
+    if not isinstance(info, list):
+        return {}
+    by_id: dict[int, dict[str, Any]] = {}
+    for entry in info:
+        if not isinstance(entry, dict):
+            continue
+        ext_id = entry.get("id")
+        if isinstance(ext_id, bool) or not isinstance(ext_id, int | str):
+            continue
+        key = _int(ext_id)
+        if key is None or not 0 <= key <= 1:
+            continue
+        by_id[key] = entry
+    return by_id
+
+
+def extruder_loaded(report: dict[str, Any]) -> list[tuple[int, int] | None]:
+    """Each extruder's loaded slot (`decode_snow`) from ``device.extruder.info``, by
+    extruder id (`extruder_entries`); ``[]`` unless two or more entries carry an ``id``
+    and a ``snow``. Bambuddy
+    reads ``snow`` only from two extruders' entries (``bambu_mqtt.py`` L3551-L3575 and
+    the unload's dual-nozzle gate at L8473-L8493, d3be761f): nobody has read a
+    single-nozzle printer's ``snow``, so one with one entry keeps ``tray_now``."""
+    by_id = {
+        key: decode_snow(entry["snow"])
+        for key, entry in extruder_entries(report).items()
+        if "snow" in entry
+    }
+    if len(by_id) < 2:
+        return []
+    return [by_id[key] for key in sorted(by_id)]
+
+
 def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> PrinterStatus:
     """``row``'s status from its latest merged report. ``id`` is the Bambuddy printer's
     when the row links one, else 0 (a LAN-only printer has no Bambuddy id); the card
@@ -312,8 +381,17 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
     ams = ams_units(data)
     switch = _fila_switch(data)
     extruders, inlets = _routing(data, switch is not None)
+    block = data.get("ams")
+    raw_ams_status = data.get("ams_status")
+    ams_status = None if isinstance(raw_ams_status, bool) else _int(raw_ams_status)
     status = PrinterStatus.model_validate(
         {
+            # Bambuddy ``bambu_mqtt.py`` L2819-L2831 (``tray_now``) and L3644-L3655 (the
+            # AMS state is the second byte of ``ams_status``).
+            "tray_now": block.get("tray_now") if isinstance(block, dict) else None,
+            "ams_status_main": (
+                (ams_status >> 8) & 0xFF if ams_status is not None and ams_status >= 0 else None
+            ),
             "id": row.bambuddy_printer_id or 0,
             "name": row.name,
             "connected": is_fresh(report.received_at, now),
@@ -337,6 +415,7 @@ def status_from_report(row: PrinterRow, report: LanReport, *, now: datetime) -> 
             "fila_switch": switch,
             "ams_extruder_map": extruders,
             "ams_switch_inlet": inlets,
+            "extruder_loaded": extruder_loaded(data),
             "hms_errors": hms_errors(data.get("hms")),
         }
     )

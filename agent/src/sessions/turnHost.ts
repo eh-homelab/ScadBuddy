@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { SDKResultMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
 import type { GateTrace } from '../approvals/service.js'
@@ -24,11 +24,13 @@ import type { SessionImages } from './blobs.js'
 import type { TurnFence, TurnRoutes } from '../gate/crudPending.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, waitForTab } from './manager.js'
+import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
 import { type Placement, type SessionDirectory, watchCaps } from '../workspace/directory.js'
 import type { TurnRows } from './turnRows.js'
+import { type CallEnd, type DanglingCall, danglingCalls, resultsEntry, toolResultBlock } from './restartedCalls.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). It is a
@@ -103,20 +105,24 @@ import type { TurnRows } from './turnRows.js'
 //
 // A shutdown (`stop`) gives the running turns their grace, then cuts the rest: only those fail
 // with the retryable ShuttingDown, which places the turn on another replica; a turn that ended
-// on its own in the grace (a reply, a refusal) keeps its end.
+// on its own in the grace (a reply, a refusal) keeps its end. A cut turn's process is sealed
+// (warm.ts `seal`) and its error results are not shown, so Claude Code's answer to the interrupt
+// ("The user doesn't want to proceed…") never reads as the user's refusal, and its ToolCalls run
+// on (`keepsCalls`). The restarted placement gives each call left with no result its own (`#supply`, #7874).
 
 /**
  * What a restart may have lost of the working directory: a new file reaches the workspace only at a
  * park or at the turn's end (the minute's write-back syncs only files it holds, #5140).
  */
 const RESTARTED_FILES = 'New files in the working directory since the last wait for an answer may be missing; check before relying on them.'
-export const RESTARTED_PROMPT =
-  `The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. ${RESTARTED_FILES} Continue the task.`
+/** What the restart message says of the calls in flight: each has its result (`#supply`, restartedCalls.ts), which says how it ended (#7874). */
+const RESTARTED_CALLS = 'Each call that was in flight has a result that says how it ended; one that did not finish may have run in part, so check before you call it again.'
+export const RESTARTED_PROMPT = `The agent service restarted during this turn. ${RESTARTED_CALLS} ${RESTARTED_FILES} Continue the task.`
 /**
  * The restart message when calls in flight had finished as ToolCall workflows (plan 2026-10-13 Step
- * 9.2): which ones, and whether each succeeded, so the model need not repeat them; the rest are still
- * to be checked. Never what a call returned: that is tool output, which reaches the model only as a
- * tool result (#258), here `tool_call_result`'s.
+ * 9.2) and their results are not in the transcript: which ones, and whether each succeeded, so the
+ * model need not repeat them. Never what a call returned: that is tool output, which reaches the
+ * model only as a tool result (#258), here `tool_call_result`'s.
  */
 export function restartedPrompt(finished: readonly FinishedCall[]): string {
   if (finished.length === 0) return RESTARTED_PROMPT
@@ -125,9 +131,14 @@ export function restartedPrompt(finished: readonly FinishedCall[]): string {
     'The agent service restarted during this turn. These calls finished before the restart; do not repeat them:\n' +
     `${lines.join('\n')}\n` +
     `Read what one returned with the ${TOOL_CALL_RESULT_TOOL} tool, giving its call id. ` +
-    `Any other call that was in flight is marked as interrupted; check before repeating it. ${RESTARTED_FILES} Continue the task.`
+    `${RESTARTED_CALLS} ${RESTARTED_FILES} Continue the task.`
   )
 }
+
+/** The longest a restarted placement waits for a ToolCall its lost placement left running (#7874); past it, the model is told the call still runs. */
+export const CUT_CALL_WAIT_MS = 10 * 60_000
+/** How often a restarted placement heartbeats while it waits for those calls. */
+const CUT_CALL_BEAT_MS = 5_000
 
 /** What a call that cannot park here reads: an attention request or a tab wait, or a turn with no way to its workflow. */
 export const NO_PARKS = 'this session cannot wait for an approval or an answer yet, so the call was not run'
@@ -179,6 +190,14 @@ const CUT_TEXT: Record<Cut, string> = {
   shutdown: 'the agent service is shutting down',
 }
 
+/**
+ * The `error` event's code that a placement cut by a shutdown logs before it fails ShuttingDown
+ * (#7874). The turn is placed again, so the panel shows a call that was running then as stopped,
+ * with this reason, not as failed with Claude Code's refusal text.
+ */
+export const WORKER_RESTARTED = 'worker_restarted'
+export const WORKER_RESTARTED_TEXT = 'the agent worker restarted; the turn continues on another worker'
+
 export type TurnHostDeps = {
   /** The replica's turn machinery (SessionManager.turnCore): its warm processes, events, audit. */
   core: TurnCoreDeps
@@ -203,6 +222,14 @@ export type TurnHostDeps = {
   pendingRoutes: TurnRoutes
   /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
   finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
+  /**
+   * How a call the lost placement left in flight ended, when it is a ToolCall (activityProjection.ts
+   * `cutToolCall`), waited for up to `waitMs`. Absent (no Temporal), every such call reads
+   * restartedCalls.ts `restartedCallText`.
+   */
+  cutCall?: (sessionId: string, call: DanglingCall, wait: { waitMs: number; signal: AbortSignal; beat: () => void }) => Promise<CallEnd>
+  /** Tests only: how long a restarted placement waits for a running ToolCall (CUT_CALL_WAIT_MS). */
+  cutCallWaitMs?: number
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
   runCall?: (call: DecidedCall) => Promise<DecidedRun>
   /** Where a `done` summary is posted, as a classic turn posts it (#815 §4); absent, it reads NO_PARKS. */
@@ -302,6 +329,8 @@ export class TurnHost {
   readonly #reported = new WeakMap<Placement, Set<string>>()
   /** Held calls by request id: each is woken by its entry's NOTIFY. */
   readonly #waiters = new Map<string, Set<() => void>>()
+  /** The sessions whose turn a shutdown cut here: their ToolCalls run on (`keepsCalls`). */
+  readonly #shutdownCut = new Set<string>()
 
   constructor(deps: TurnHostDeps) {
     this.#deps = deps
@@ -319,6 +348,15 @@ export class TurnHost {
 
   get stopping(): boolean {
     return this.#stopping
+  }
+
+  /**
+   * Whether a call of the session is left to run when its turn stops (activityProjection.ts
+   * `ToolCallStarterDeps.keeps`): a shutdown cut its turn here, and the restarted placement reads
+   * the call's result (#7874), so it is never cancelled and never run twice.
+   */
+  keepsCalls(sessionId: string): boolean {
+    return this.#shutdownCut.has(sessionId)
   }
 
   /** How many placements run here now. */
@@ -374,6 +412,11 @@ export class TurnHost {
     const cutOff = (why: Cut) => {
       if (cut !== undefined) return
       cut = why
+      // A shutdown: what Claude Code writes after its interrupt is dropped (warm.ts `seal`, #7874), and the calls run on.
+      if (why === 'shutdown') {
+        this.#shutdownCut.add(id)
+        for (const entry of entries) this.#deps.core.warm.seal(entry)
+      }
       controller.abort(new Error(CUT_TEXT[why]))
       // A shutdown leaves the process to end as a stopped turn's does; any other cut is a placement nobody waits on any more.
       if (why !== 'shutdown') for (const entry of entries) void this.#deps.core.warm.cut(entry, CUT_TEXT[why])
@@ -439,12 +482,17 @@ export class TurnHost {
       const said = `the turn ended: ${decided.stop}`
       return this.#result(tallyTurn(session, { stopped: said, interrupted: said, result: undefined, refused: undefined, failure: undefined, secrets: [], turnUsd: 0, cutUsd: 0 }), [])
     }
+    // Each call the lost placement left in flight gets its result first, in the transcript (#7874).
+    const supplied = restarted
+      ? await this.#supply(id, turnId, { attempt, turnId }, AbortSignal.any([controller.signal, control.cancelled]), () => control.heartbeat({ pushed: false }))
+      : undefined
+    const given = new Set(supplied?.ids ?? [])
     // Unread (Temporal away), the message says only what it always said: the model checks them.
     const finished = restarted
       ? ((await this.#deps.finishedCalls?.(id, turnId).catch((err: unknown) => {
           this.#deps.core.stderr?.(`restarted turn ${turnId}: its finished calls could not be read: ${describe(err)}\n`)
           return []
-        })) ?? [])
+        })) ?? []).filter((c) => !given.has(c.id))
       : []
     const text = restarted ? restartedPrompt(finished) : decided ? decided.text : (input.message?.text ?? '')
     if (!text) throw ApplicationFailure.nonRetryable(`turn ${turnId} of session ${id} has no message`, SESSION_GONE)
@@ -495,6 +543,10 @@ export class TurnHost {
       principal,
       userText: input.message?.words ?? input.message?.text ?? text,
       ...(input.continuation ? { continuation: input.continuation.kind } : {}),
+      ...(supplied ? { shownFirst: [supplied.message] } : {}),
+      // Once a shutdown cut the turn, the error results Claude Code gives the calls it stopped are not
+      // shown: they say the user refused them. The restarted placement shows each call's own (#7874).
+      drops: (e) => e.type === 'tool.result' && !e.ok && cutBy() === 'shutdown',
       signal: controller.signal,
       interrupt: () => controller.abort(new Error('the turn was interrupted')),
       gates: (ctx) =>
@@ -518,6 +570,7 @@ export class TurnHost {
       // The prompt goes in right after the acquire.
       onAcquired: ({ entry }) => {
         entries.push(entry)
+        if (cutBy() === 'shutdown') this.#deps.core.warm.seal(entry)
         // Its transcript appends only while this placement holds the turn, or is the session's
         // last placement and no turn runs: what Claude Code writes as it exits between turns
         // (`last-prompt`, `cost-state`, warm.ts DRAIN_MS) lands as a classic process's does,
@@ -639,7 +692,13 @@ export class TurnHost {
         core.traced.released(parks.taken.length)
         return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
       }
-      if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
+      if (why === 'shutdown') {
+        // #7874: the log says why the calls in flight stopped. Fenced as the turn's own events are.
+        await events
+          .appendFenced(id, [event({ type: 'error', sessionId: id, code: WORKER_RESTARTED, message: WORKER_RESTARTED_TEXT })], { attempt, turnId })
+          .catch((err: unknown) => this.#deps.core.stderr?.(`session ${id}: could not log the restart of turn ${turnId}: ${describe(err)}\n`))
+        throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
+      }
       // Another placement took the row (#6387): the workflow owns placement, and places the turn
       // again, whose claim fences that one out. Only an ended turn is over.
       if (why === 'moved' || why === 'replaced') {
@@ -1029,6 +1088,53 @@ export class TurnHost {
     return run.ok
       ? `${paused} It was approved and ScadBuddy ran it once. Result:\n${run.text}`
       : `${paused} It was approved and ScadBuddy ran it once, and it failed:\n${run.text}`
+  }
+
+  /**
+   * A restarted placement's results for the calls its lost placement left in flight (§5.5, #7874):
+   * each tool_use of the transcript's last reply with no result (restartedCalls.ts `danglingCalls`)
+   * gets one, all in one user entry appended under the turn's fence before the process resumes, so
+   * the model reads how each call ended. A ToolCall's own result once it completes (`cutCall`,
+   * waited for up to CUT_CALL_WAIT_MS, heartbeating), or what is true of it; never a second run.
+   * The message whose events show the results, and the calls it answers; undefined when no call
+   * was in flight, the transcript could not be read, or the append was refused. Then Claude Code
+   * marks those calls itself as it resumes, as before.
+   */
+  async #supply(id: string, turnId: string, fence: AppendFence, signal: AbortSignal, heartbeat: () => void): Promise<{ message: SDKUserMessage; ids: string[] } | undefined> {
+    const transcripts = this.#deps.core.transcripts
+    const key = { projectKey: '', sessionId: id }
+    let found: ReturnType<typeof danglingCalls>
+    try {
+      found = danglingCalls((await transcripts.load(key)) ?? [])
+    } catch (err) {
+      if (backendDropped(err)) throw err
+      this.#deps.core.stderr?.(`restarted turn ${turnId}: its transcript could not be read for the calls in flight: ${describe(err)}\n`)
+      return undefined
+    }
+    if (found.calls.length === 0) return undefined
+    const beat = setInterval(heartbeat, CUT_CALL_BEAT_MS)
+    beat.unref()
+    const blocks: Record<string, unknown>[] = []
+    try {
+      for (const call of found.calls) {
+        const end: CallEnd = this.#deps.cutCall
+          ? await this.#deps.cutCall(id, call, { waitMs: this.#deps.cutCallWaitMs ?? CUT_CALL_WAIT_MS, signal, beat: heartbeat }).catch((err: unknown): CallEnd => {
+              if (backendDropped(err)) throw err
+              // Unread (Temporal away): what is true of any call the restart ended.
+              this.#deps.core.stderr?.(`restarted turn ${turnId}: call ${call.id} could not be read: ${describe(err)}\n`)
+              return { kind: 'none' }
+            })
+          : { kind: 'none' }
+        blocks.push(toolResultBlock(call, end))
+      }
+    } finally {
+      clearInterval(beat)
+    }
+    const entry = resultsEntry(id, found.leaf, blocks, randomUUID(), new Date())
+    // Only while this placement holds the turn: a refused append is a placement the fence cuts off next.
+    if (!(await transcripts.appendIf(key, [entry], fence))) return undefined
+    const message = { type: 'user', message: entry.message, parent_tool_use_id: null, session_id: id } as SDKUserMessage
+    return { message, ids: found.calls.map((c) => c.id) }
   }
 
   /** Whether a user entry (the turn's prompt, or a tool result after it) landed in the main transcript after the mark. */

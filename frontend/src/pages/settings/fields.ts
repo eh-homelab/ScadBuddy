@@ -8,6 +8,7 @@ export type SectionId =
   | 'connection'
   | 'printing'
   | 'print-watcher'
+  | 'flow-answerers'
   | 'orders'
   | 'filament'
   | 'projects'
@@ -189,6 +190,12 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
   // #7682 — a weighing whose drift is at or over this many grams is a notice.
   {
     name: 'filament_weighing_drift_notice_g',
+    section: 'filament',
+    kind: 'count',
+  },
+  // #7684 — a spool archived as finished with more than this on it gets a notice first.
+  {
+    name: 'filament_weighing_finished_left_g',
     section: 'filament',
     kind: 'count',
   },

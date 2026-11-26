@@ -1,4 +1,5 @@
 import { pendingInput } from './routes/pendingInput.js'
+import { SETTING_TOOL_IMAGE_INLINE_MAX, toolImageInlineMax } from './tools/imageLimits.js'
 import { pendingNotices, NotificationDispatcher, WAITING_POLL_MS } from './notify/dispatcher.js'
 import { crudGrantRequests, crudPollLease, pairingRequests, waitingNotices } from './notify/waiting.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
@@ -101,7 +102,8 @@ import { CrudFlowBlobs } from './temporal/flowBlobs.js'
 import { CrudFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { decidedCalls, gateActivities, RecordedApprovals, RowSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
-import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
+import { cutToolCall, finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
+import type { DanglingCall } from './sessions/restartedCalls.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { CrudTurnRows } from './sessions/turnRows.js'
@@ -151,12 +153,14 @@ const PORT = 8081
 const APPROVAL_SWEEP_MS = 30_000
 /** How often sessions left `running` with nothing behind them are ended (DurableRunningSweep). */
 const SESSION_REAP_MS = 30_000
-// The shutdown's budget for running turns, inside the pod's 60 s
-// terminationGracePeriodSeconds (clusters applications/scadbuddy/scadbuddy.yaml and
-// scadbuddy-agent-worker.yaml, a RollingUpdate with maxSurge 1, maxUnavailable 0):
-// TURN_DRAIN_MS for them to finish, TURN_ABORT_WAIT_MS for the rest to record that
-// they were stopped, then shutdown()'s own 10 s.
-const TURN_DRAIN_MS = 12_000
+// The shutdown's budget for running turns, inside the agent worker pod's 330 s
+// terminationGracePeriodSeconds (clusters applications/scadbuddy/scadbuddy-agent-worker.yaml,
+// a RollingUpdate with maxSurge 1, maxUnavailable 0): TURN_DRAIN_MS for them to finish,
+// TURN_ABORT_WAIT_MS for the rest to record that they were stopped, then shutdown()'s own
+// 10 s. A draining replica takes no new placement, so new turns go to the new pods; a turn
+// still running at the end is cut and placed again elsewhere (#7874: a rollout once cut every
+// turn longer than 12 s). The API pod (scadbuddy.yaml, 60 s) runs no turn.
+const TURN_DRAIN_MS = 300_000
 const TURN_ABORT_WAIT_MS = 5_000
 /** How often audit rows past their retention are deleted (audit/log.ts). */
 const AUDIT_RETENTION_SWEEP_MS = 60 * 60_000
@@ -352,6 +356,8 @@ const toolServices: ToolServices = {
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
+  // The inline limit for a tool's image (#7745), read at each call (Settings → Assistant → Images).
+  toolImageInlineMaxBytes: async () => toolImageInlineMax(await settings.get<unknown>(SETTING_TOOL_IMAGE_INLINE_MAX)),
   // The render limits in Settings, read live (tools/renderLimits.ts).
   renderLimiter: new RenderLimiter(settingsRenderLimits(settings)),
   // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
@@ -767,6 +773,9 @@ const turnHost =
         // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
         finishedCalls: (sessionId: string, turnId: string) =>
           temporalClient ? finishedToolCalls({ reads: sessionReads, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
+        // How each call a lost placement left in flight ended, when it is a ToolCall: its own result (#7874).
+        cutCall: (sessionId: string, call: DanglingCall, wait: { waitMs: number; signal: AbortSignal; beat: () => void }) =>
+          temporalClient ? cutToolCall({ client: temporalClient, blobs: sessionImages }, sessionId, call, wait) : Promise.resolve({ kind: 'none' as const }),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
         // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
@@ -886,7 +895,8 @@ const eagerClient = (): Client | undefined => {
 }
 if (temporalClient) {
   const results = { client: temporalClient, blobs: sessionImages }
-  toolCallStart = toolCallStarter({ ...results, eager: eagerClient })
+  // A call whose turn a shutdown cut here runs on: the restarted placement reads its result (#7874).
+  toolCallStart = toolCallStarter({ ...results, eager: eagerClient, keeps: (sessionId) => turnHost?.keepsCalls(sessionId) ?? false })
   // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
   toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
 }
@@ -918,6 +928,8 @@ const background = backgroundTasks
       secrets: toolServices.secrets,
       agents: managerAgents(sessions, { access: accessResolver }),
       workspace,
+      // A background command where a sandbox is set up runs in the session's pod; this replica follows it (#5916, #7310).
+      ...(sandboxes ? { sandbox: { sandboxes, limits: () => workspace.limits() } } : {}),
     })
   : undefined
 // The gate's writes go through the API (area `gate`), its events through this replica's event log,
@@ -1318,8 +1330,9 @@ async function stop(): Promise<void> {
   // turns' pending approvals stay pending (approvals/service.ts).
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
-  // and at 15 s it stops regardless: inside the turns' 17 s budget. The session host worker stops
-  // with it, with the turns' 17 s as its grace; the pinned host worker only once they end (below).
+  // and at 15 s it stops regardless; the turns' ToolCalls go to the other replicas' pollers after that.
+  // The session host worker stops with it, with the turns' drain and abort wait as its grace; the
+  // pinned host worker only once they end (below).
   // AgentSession turns get
   // TURN_DRAIN_MS as their grace (TurnHost.stop); one still running then is cut and fails
   // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace

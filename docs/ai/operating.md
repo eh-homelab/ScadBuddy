@@ -67,7 +67,8 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   process exits. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
-  A worker's running turns get 12 s to finish (`TURN_DRAIN_MS`), and any still running is
+  A worker's running turns get 5 minutes to finish (`TURN_DRAIN_MS`, inside the agent worker
+  pod's 330 s `terminationGracePeriodSeconds`; #7874), and any still running is
   then cut and goes on on another replica (§1.2, "Restarts"). A parked call is released, not
   lost: its entry stays open, and the turn goes on once it is decided, wherever a worker
   runs then.
@@ -343,7 +344,13 @@ main on 2026-11-01:
   heartbeat) is placed again with a `restarted` continuation, on another replica when one
   is live. Once its message is in the transcript it resumes with "The agent service
   restarted during this turn…" (`RESTARTED_PROMPT`), naming the calls that had finished
-  as ToolCalls, so the model need not repeat them (spec §5.5).
+  as ToolCalls, so the model need not repeat them (spec §5.5). Before that, each call the
+  lost placement left with no result gets one in the transcript (#7874,
+  [`agent/src/sessions/restartedCalls.ts`](../../agent/src/sessions/restartedCalls.ts)): a
+  ToolCall's own result (the restarted placement waits up to 10 minutes for one that still
+  runs), else a result that says the service restarted while the call ran. A shutdown's cut
+  drops what Claude Code writes after its interrupt, "The user doesn't want to proceed with
+  this tool use…", so no call reads as refused by the user, and its ToolCalls are not cancelled.
 - **Working directory.** A turn's Claude Code runs in the session's directory on its
   worker, `<SCADBUDDY_SESSION_DIR>/<id>/`, a copy of the workspace that each placement
   fills (§13).
@@ -902,6 +909,10 @@ classes named below are the agent's `Crud…` clients:
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `tool_image_inline_max_bytes`, the largest image a tool shows the model at once (default
+  512 KiB, 16 KiB to the largest image block, 3.75 MiB; larger ones go to the session's
+  workspace, #7745), which the same route writes
+  ([`agent/src/tools/imageLimits.ts`](../../agent/src/tools/imageLimits.ts));
   `memory_recall_max_query_chars`, the longest automatic Hindsight recall query in
   characters (default 800, 0 for no cut, at most 100000), which Settings → Assistant →
   Hindsight memory writes through `PUT /api/v1/ai/settings/memory`
@@ -1390,10 +1401,13 @@ the session's data key; archiving the chat or marking it done ends its tasks, an
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
 
 A `Monitor` is a task of the same kind whose source runs as one heartbeating activity: a
-command (only while Claude Code's own `Bash` is on, above) in the session's directory on the
-replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), never where a
-sandbox is set up (#5864: there the session's Bash runs in its pod, and Monitor's description
-offers only `ws`), a
+command (only while `Bash` is on, above) in the session's directory on the
+replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), or, where a
+sandbox is set up, in the session's sandbox pod (#5916): there the command runs in a
+background slot of the pod's exec server, and the activity on the replica that ran the turn
+only follows its output and brings its files back at its end
+(`background/sandboxSource.ts`; [security.md](security.md), "Bash and PowerShell in a
+sandbox pod"), with the same caps as below; a
 WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
 check passed, with no redirect). A line is cut at 8000 characters and the rest of it
 dropped, and so is a batch, so a command that never writes a newline holds no more. The

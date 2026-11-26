@@ -24,12 +24,13 @@ backend is listed by `python -m scadbuddy.tools.settings_reference`. Paths under
 | [Storefront edge](#storefront-edge) | `scadbuddy` (`runtime`) | `python -m scadbuddy.storefront` | 8083 | no |
 | [Intake worker and sandbox](#intake-worker-and-sandbox) | `scadbuddy` (`runtime`) | `python -m scadbuddy.intake_worker`, `python -m scadbuddy.intake_worker.sandbox` | 9090, 8090 | no |
 | [Profile-fetch worker and browser](#profile-fetch-worker-and-browser) | `scadbuddy-profile-fetch` (`profile-fetch`) | `python -m scadbuddy.profile_fetch`, `python -m scadbuddy.profile_fetch.browser` | 9090, 8091 | no |
-| [Camera relay and recorders](#camera-relay-and-recorders) | `scadbuddy-camera-relay` (`camera-relay`), `scadbuddy-camera-recorder` (`camera-recorder`) | `python -m scadbuddy.camera.relay`, `python -m scadbuddy.camera.recorder`, each beside `mediamtx` | 9090 (health); relay RTSP 8554 | no |
+| [Camera relay and recorders](#camera-relay-and-recorders) | `scadbuddy-camera-relay` (`camera-relay`), `scadbuddy-camera-recorder` (`camera-recorder`), `scadbuddy-camera-edge` (`camera-edge`, #7330) | `python -m scadbuddy.camera.relay`, `.recorder`, `.edge`, each beside `mediamtx` | 9090 (health); relay RTSP 8554; edge HLS 8888, WHEP 8889, UDP 8189 | no |
 | [Agent sidecar](#agent-sidecar-and-agent-worker) | `scadbuddy-agent` (`agent`) | `node dist/main.js`, role `api` | 8081 | yes (today's code) |
 | [Agent worker](#agent-sidecar-and-agent-worker) | `scadbuddy-agent` (`agent`) | `node dist/main.js`, role `worker` | 8081 (health) | yes (today's code) |
 | [Session sandbox and egress proxy](#session-sandbox-and-egress-proxy) | `scadbuddy-sandbox` (`sandbox`) | `node dist/sandbox/main.js` | 8090, 3128 | no |
 | [agent-durable](#agent-durable) | `scadbuddy-agent-durable` (`agent-durable`) | `python -m scadbuddy_durable` | 8082 (health) | yes, mounted (today's manifests) |
 | [Slicer worker](#slicer-worker) | `scadbuddy-slicer` (`slicer`) | `scadbuddy-slicer` | 9090 | no |
+| [Fleet chat server](#fleet-chat-server) | `ghcr.io/eh-homelab/scadbuddy-fleet` (`tools/go/fleet/Dockerfile`) | `scadbuddy-fleet` | 8080 | no |
 | [bambuddy-fs](#bambuddy-fs) | `scadbuddy-bambuddy-fs` (`tools/go/bambuddy-fs/Dockerfile`) | `bambuddy-fs mount` | none | no |
 | [Frontend](#frontend) | built into `scadbuddy` (`frontend` stage) | served by the API and the edge | | |
 
@@ -59,6 +60,8 @@ flowchart LR
     AS -->|crud.agent, api| API
     AW --> SBX[session sandbox pods] --> EG[egress proxy]
     SL[slicer] -->|transfer URLs| API
+    FL[fleet chat server :8080] -->|crud.fleet| API
+    CC[Claude Code sessions] -->|/mcp| FL
     API --> PG[(Postgres)]
     AS --> PG
     AW --> PG
@@ -110,7 +113,8 @@ flowchart LR
   `bambuddy-follow`: print runs, LAN upload and start, follow, printer watches
   ([workflows.md](workflows.md#print-to-the-h2c)), and the filament sync with Bambuddy,
   the Bambuddy pull and the location-sensor alerts (`FilamentBbSync`, `FilamentBbPull`,
-  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-217`).
+  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-223`), and a printer's K-profile and
+  AMS slot commands over its LAN link (`LanCommand`, #7276, started and awaited by the API).
 - **Reads.** The API URL and a service proof as above. Its Bambuddy key comes from the
   CRUD settings route; a printer's access code is opened by the API and handed over a
   CRUD route (`scadbuddy/api/crud_print.py:2242`).
@@ -174,18 +178,24 @@ its image: MediaMTX and the controller. They share the pod's network (the contro
 - **Relay.** `python -m scadbuddy.camera.relay` (`scadbuddy/camera/relay.py`), one pod. It
   reads the qualifying printers, access codes included, as CRUD caller `camera-relay`
   (`scadbuddy/api/crud_camera_relay.py`), and gives MediaMTX one RTSPS pull per printer
-  through the control API. MediaMTX serves the streams to the recorders on 8554 with one
-  read user.
+  through the control API. MediaMTX serves the streams to the recorders and the edge on 8554
+  with one read user.
+- **Edge.** `python -m scadbuddy.camera.edge` (`scadbuddy/camera/edge.py`), one pod, CRUD
+  caller `camera` (ServiceAccount `scadbuddy-camera-edge`). Its MediaMTX pulls each recorded
+  printer from the relay on demand and serves WebRTC (8889) and LL-HLS (8888) to the API's
+  proxy (`scadbuddy/api/camera.py`) behind its own read user. The controller sets
+  `scadbuddy_camera_viewers`. It holds no bucket key and no access code.
 - **Recorders.** `python -m scadbuddy.camera.recorder` (`scadbuddy/camera/recorder.py`), two
   pods. Each MediaMTX reads every stream from the relay and writes fMP4 segments to a shared
   `/segments` volume. Per printer, the recorder that holds the lease puts the segments in the
   bucket and indexes them as CRUD caller `camera` (`scadbuddy/api/crud_camera.py`). Only these
   pods hold the bucket's camera keys.
-- **Reads.** The API URL and a service proof; the recorders also the bucket keys and the
-  relay read user. Both refuse a database secret and the KEK (`scadbuddy/camera/settings.py`).
-  Neither reaches Temporal in phase 1.
-- **Images.** `scadbuddy-camera-relay` and `scadbuddy-camera-recorder`, Dockerfile stages
-  `camera-relay` and `camera-recorder`, both off `camera`, with MediaMTX from the `mediamtx`
+- **Reads.** The API URL and a service proof; the recorders and the edge also the relay read
+  user, and the recorders the bucket keys. The edge's MediaMTX also reads the edge read user
+  (`MTX_AUTHINTERNALUSERS_0_*`). All three refuse a database secret and the KEK (`scadbuddy/camera/settings.py`).
+  None reaches Temporal.
+- **Images.** `scadbuddy-camera-relay`, `scadbuddy-camera-recorder` and `scadbuddy-camera-edge`,
+  Dockerfile stages `camera-relay`, `camera-recorder` and `camera-edge`, all off `camera`, with MediaMTX from the `mediamtx`
   stage.
 
 ## Agent sidecar and agent worker
@@ -205,7 +215,9 @@ One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar ser
 ## Session sandbox and egress proxy
 
 `SCADBUDDY_SANDBOX_ROLE=exec` is one pod per assistant session that runs sandboxed `Bash`
-and `PowerShell`; `egress` is those pods' CONNECT proxy (`agent/src/sandbox/main.ts:13-19`).
+and `PowerShell`, and their background commands and a `Monitor`'s command in background
+slots (`agent/src/sandbox/slots.ts`, #5916, #7310); `egress` is those pods' CONNECT proxy
+(`agent/src/sandbox/main.ts:13-19`).
 The agent worker creates the pods through the Kubernetes API (`agent/src/sandbox/pods.ts:192`).
 
 ## agent-durable
@@ -221,9 +233,34 @@ and mounts no database secret and no KEK; see
 The Rust `scadbuddy-slicer` serves the `slice_plate` activity on `slicer` and runs the
 Bambu Studio CLI (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`,
 `workers/rust/crates/sb-slicer/src/runner.rs:103-135`). It reads only the Temporal and
-concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`) and
+concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`; traces, metrics and logs over OTLP, `workers/rust/crates/sb-temporal/src/telemetry.rs`) and
 holds no credential: its inputs carry transfer URLs. See
 [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md).
+
+## Fleet chat server
+
+The agent fleet chat (spec
+[`2026-11-25-agent-fleet-messaging-design.md`](../superpowers/specs/2026-11-25-agent-fleet-messaging-design.md),
+feature page [agent-fleet-chat.md](../features/agent-fleet-chat.md)): an MCP server that
+lets Claude Code sessions send direct messages and channel posts to each other. The Go
+binary `scadbuddy-fleet` (`tools/go/fleet/main.go`, uid 10003) serves `/mcp` and
+`GET /healthz` on 8080. It holds no database secret and no KEK. It reaches the fleet's
+tables only through core's CRUD routes under `/api/v1/internal/crud/fleet/`
+(`tools/go/core/internal/fleet`; core serves them when `SCADBUDDY_CORE_AREAS` names
+`fleet`) with the `crud.fleet` credential of caller `fleet`. It exchanges its proof for that
+credential at `POST /api/v1/auth/service-token` (a projected token of the ServiceAccount
+`scadbuddy-fleet`, `FLEETCHAT_SERVICE_TOKEN_FILE`, or a bootstrap secret,
+`FLEETCHAT_SERVICE_BOOTSTRAP_FILE`) and renews it in process at half-life and after a 401
+(`tools/go/fleet/sbfleet/credential.go`). It follows the change stream
+`GET /api/v1/internal/crud/fleet/changes` (the Python API's `api/crud_fleet.py`, which core
+forwards: the `fleet.*` events of the event log, with `Last-Event-ID` replay) to tell
+subscribed inboxes of new messages. Its other settings are `FLEETCHAT_LISTEN`,
+`FLEETCHAT_CORE_URL`, `FLEETCHAT_MAX_TEXT`, `FLEETCHAT_PAGE_SIZE`,
+`FLEETCHAT_MAX_PAGE_SIZE` and `FLEETCHAT_SESSION_TIMEOUT`
+([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). The server has no auth of
+its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+(the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
+Gateway. Neither the server nor that policy is deployed yet.
 
 ## bambuddy-fs
 

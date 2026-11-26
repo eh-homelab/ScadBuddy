@@ -241,7 +241,8 @@ async def history_payloads(client: Client, workflow_id: str) -> bytes:
 _AGENT_OWNERS = """
 CREATE TABLE IF NOT EXISTS ai_sessions (
     id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL,
-    archived_at timestamptz
+    archived_at timestamptz, background_tools boolean NOT NULL DEFAULT true,
+    turn_flow boolean NOT NULL DEFAULT false
 );
 CREATE TABLE IF NOT EXISTS ai_mcp_tokens (
     id uuid PRIMARY KEY, tier text NOT NULL, expires_at timestamptz, revoked_at timestamptz

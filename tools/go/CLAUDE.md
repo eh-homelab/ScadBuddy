@@ -18,8 +18,8 @@ runs `go work sync`, which would move a lagging client's `go.mod` past its own
 `vendor/modules.txt` and edit bambuddy-fs's `go.mod` on a client-only change (#2686).
 bambuddy-fs's mount tests need `/dev/fuse` and `fusermount3` (they skip without the
 device). core's tests need `SCADBUDDY_TEST_DATABASE_URL` (they skip without it;
-CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in seven places, moved together: `go.work`'s
-`toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile` and `tools/go/core/Dockerfile`, and `GOTOOLCHAIN` in
+CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these places, moved together: `go.work`'s
+`toolchain`, the golang tag in `tools/go/bambuddy-fs/Dockerfile`, `tools/go/core/Dockerfile` and `tools/go/fleet/Dockerfile`, and `GOTOOLCHAIN` in
 `go-module-ci.yml`, in `ci.yml`'s two freshness steps and in its `go-client` job.
 
 
@@ -29,10 +29,21 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in seven
   Kiota-generated client (`client/`, committed, plus its own `vendor/` for module-mode
   consumers); `bambuddy-fs/` is the FUSE mount of Bambuddy's library over it
   (`internal/api` the client wrapper, `internal/fsys` the tree, cache, writes and the
-  unsent queue, `internal/telemetry` OTel; README there). Its unsent writes are the
-  only copy of a save, under the state directory, never the cache. `core/` is the
-  API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to Python
-  (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  unsent queue, `internal/telemetry` its spans and metrics; README there). Its unsent
+  writes are the only copy of a save, under the state directory, never the cache. `core/`
+  is the API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to
+  Python (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  `fleetchat/` is the agent fleet chat library (MCP tools over a host's `Store` and `Bus`,
+  imports nothing else from this repo; README there). `fleet/` is ScadBuddy's host of it,
+  the image `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` over core's
+  `…/crud/fleet/` routes and a `Bus` over the API's fleet change stream, with the `fleet`
+  credential; it imports nothing from `core/`) and the server binary (`/mcp`, `/healthz`,
+  `FLEETCHAT_*` settings; README there).
+  `telemetry/` is the OpenTelemetry setup every module uses (#7667): traces, metrics and
+  logs over OTLP from the `OTEL_*` variables (off, at no cost, with no endpoint), the
+  server and client HTTP wrappers, the slog bridge, the runtime and process metrics, and
+  `pgxtrace` for pgx. A new Go service starts it with `telemetry.Start` and flushes it
+  with `Shutdown`.
 
 ## See also
 

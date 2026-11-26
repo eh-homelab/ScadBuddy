@@ -37,6 +37,7 @@ function pending(task: TaskQuestion | null): FlowPending {
     summary: null,
     bound_hash: null,
     task,
+    people_only: false,
   }
 }
 

@@ -130,6 +130,7 @@ import type {
   Activity,
   PrintProgress,
   PrintersNow,
+  PrinterCamera,
   PrinterRow,
   PrinterCreate,
   PrinterPatch,
@@ -315,6 +316,7 @@ import type {
   KProfileSet,
   KProfileTable,
   KProfileWriteResult,
+  LanCommandPending,
   ProfileOptions,
 } from './types'
 import type {
@@ -640,6 +642,7 @@ export function mayHaveRun(error: unknown): boolean {
   // Temporal may hold a start of it: only the same key follows it (review #1316 (13) 1a).
   if (error.problem.may_have_started === true) return true
   if (error.problem.type === OPERATION_UNFINISHED) return true
+  if (error.problem.type === PRINTER_COMMAND_RUNNING) return true
   if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
   if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
   if (error.problem.type !== UNANSWERED) return false
@@ -695,6 +698,11 @@ export const printRunPoll = {
   acceptingMs: 240_000,
   followMs: 3_600_000,
   operationFollowMs: 1_260_000,
+  /**
+   * #7276 — how long the page follows a printer command's 202 (`printerCommand`): past a
+   * K-profile read's three tries and a write's wait, with room for a slow printer.
+   */
+  printerCommandFollowMs: 120_000,
 }
 
 /**
@@ -944,6 +952,72 @@ export async function command<T>(
   )
   if (first.status === 202) onAccepted?.(first.body as OperationAccepted)
   return followOperation<T>(first as { status: number; body: T | OperationAccepted }, signal, operations)
+}
+
+/** #7276 P51 — the `type` of the problem `printerCommand` writes when it stops following a command that still runs. */
+export const PRINTER_COMMAND_RUNNING = 'urn:scadbuddy:printer-command-running'
+
+export interface PrinterCommandOptions {
+  /**
+   * The write's key: a new one per press, unless the press repeats a command that may still run
+   * (P55: the panel passes that command's key, so the backend joins its run). A read sends none.
+   */
+  key?: string
+  /** Told once, with the command's id, when the route answered 202: the command was sent and runs. */
+  onWaiting?: (commandId: string) => void
+  /** Stops the request and its follow (the panel closed, or its nozzle changed); the command itself is not stopped. */
+  signal?: AbortSignal
+}
+
+/**
+ * #7276 P44, P51 — a printer command over ScadBuddy's LAN link (backend `printers/native.py`
+ * `command_response`). Its route answers 200 with its own model, or 202 `LanCommandPending`
+ * while the printer is slow: that 202 is no operation and no result, so it is followed here at
+ * `GET /printers/{id}/commands/{command_id}`, which answers the route's own model, or 202 while
+ * the command runs. A write sends one `Idempotency-Key`, sent again unchanged after an answer
+ * that never arrived, so the printer gets the command once. Past `printerCommandFollowMs` it
+ * throws `PRINTER_COMMAND_RUNNING` with the `command_id`: the command may still reach the
+ * printer, so a caller never sends it again under a new key.
+ */
+export async function printerCommand<T>(
+  printerId: string,
+  path: string,
+  init: RequestInit = {},
+  { key = newRequestId(), onWaiting, signal: stop }: PrinterCommandOptions = {},
+): Promise<T> {
+  const signal = stop ?? init.signal ?? undefined
+  const write = (init.method ?? 'GET').toUpperCase() !== 'GET'
+  const headers: Record<string, string> = {
+    ...(init.headers as Record<string, string> | undefined),
+    ...(write ? { 'Idempotency-Key': key } : {}),
+  }
+  let answer = await reattach(() => requestWithStatus<T | LanCommandPending>(path, { ...init, headers, signal }), signal)
+  const began = performance.now()
+  let told = false
+  while (answer.status === 202) {
+    const commandId = (answer.body as LanCommandPending).workflow_id
+    if (!told) {
+      told = true
+      onWaiting?.(commandId)
+    }
+    if (performance.now() - began >= printRunPoll.printerCommandFollowMs) {
+      throw new ApiError({
+        type: PRINTER_COMMAND_RUNNING,
+        title: 'Still running',
+        status: 202,
+        detail: write
+          ? 'The printer has not answered yet, and it may still take the command. Do not send it again: read the printer again in a minute to see whether it took.'
+          : 'The printer has not answered yet. Read it again in a minute.',
+        command_id: commandId,
+      })
+    }
+    await wait(printRunPoll.intervalMs, signal)
+    answer = await reattach(
+      () => requestWithStatus<T | LanCommandPending>(`/printers/${seg(printerId)}/commands/${seg(commandId)}`, { signal }),
+      signal,
+    )
+  }
+  return answer.body as T
 }
 
 /**
@@ -2446,6 +2520,13 @@ export const api = {
 
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+  /** #7330 — a recorded printer's camera: its feed states, and whether the live view is on offer. */
+  printerCamera: (id: string) => request<PrinterCamera>(`/printers/${seg(id)}/camera`),
+  /** #7330 — asks the relay to restart the printer's camera pull; 409 `camera-not-recorded`. */
+  reconnectPrinterCamera: (id: string) =>
+    request<unknown>(`/printers/${seg(id)}/camera/reconnect`, { method: 'POST' }),
+  /** #7330 — the live view's base: `…/whep` (WebRTC) and `…/hls/index.m3u8` (LL-HLS) under it. */
+  cameraLiveUrl: (id: string) => `${API_BASE}/camera/live/${seg(id)}`,
 
   // #3823 — the printer registry: one row per physical printer, keyed by serial, with
   // its Bambuddy link and its LAN link. The LAN access code is sent once (`PUT /lan`,
@@ -2469,38 +2550,61 @@ export const api = {
     command<BambuddyVirtualPrinter>(`/printers/virtual/${vpId}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteVirtualPrinter: (vpId: number) =>
     command<{ deleted: number }>(`/printers/virtual/${vpId}`, { method: 'DELETE' }),
-  /** #7154: a printer's K table for one nozzle, read from the printer through Bambuddy. */
-  listKProfiles: (id: string, nozzle: string) =>
-    request<KProfileTable>(`/printers/${seg(id)}/kprofiles?nozzle_diameter=${encodeURIComponent(nozzle)}`),
+  /**
+   * #7154, #7276: a printer's K table for one nozzle, read from the printer over ScadBuddy's LAN
+   * link. Every K-profile and slot command goes through `printerCommand`, which follows a 202.
+   */
+  listKProfiles: (id: string, nozzle: string, options?: PrinterCommandOptions) =>
+    printerCommand<KProfileTable>(
+      id,
+      `/printers/${seg(id)}/kprofiles?nozzle_diameter=${encodeURIComponent(nozzle)}`,
+      {},
+      options,
+    ),
   kProfileNotes: (id: string) => request<KProfileNotes>(`/printers/${seg(id)}/kprofiles/notes`),
-  /** The writes are commands, each sent once: Bambuddy dedupes none of them (R-7154-5). */
-  setKProfile: (id: string, body: KProfileSet) =>
-    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles`, { method: 'POST', body: JSON.stringify(body) }),
-  setKProfilesBatch: (id: string, profiles: KProfileSet[]) =>
-    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/batch`, {
-      method: 'POST',
-      body: JSON.stringify({ profiles }),
-    }),
-  deleteKProfile: (id: string, body: KProfileRemove) =>
-    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/delete`, { method: 'POST', body: JSON.stringify(body) }),
+  /** The writes are commands, each sent once under one key (R-7154-5). */
+  setKProfile: (id: string, body: KProfileSet, options?: PrinterCommandOptions) =>
+    printerCommand<KProfileWriteResult>(
+      id,
+      `/printers/${seg(id)}/kprofiles`,
+      { method: 'POST', body: JSON.stringify(body) },
+      options,
+    ),
+  setKProfilesBatch: (id: string, profiles: KProfileSet[], options?: PrinterCommandOptions) =>
+    printerCommand<KProfileWriteResult>(
+      id,
+      `/printers/${seg(id)}/kprofiles/batch`,
+      { method: 'POST', body: JSON.stringify({ profiles }) },
+      options,
+    ),
+  deleteKProfile: (id: string, body: KProfileRemove, options?: PrinterCommandOptions) =>
+    printerCommand<KProfileWriteResult>(
+      id,
+      `/printers/${seg(id)}/kprofiles/delete`,
+      { method: 'POST', body: JSON.stringify(body) },
+      options,
+    ),
+  /** A note is ScadBuddy's own, never sent to the printer: the route takes a key and ignores it. */
   setKProfileNote: (id: string, key: string, note: string) =>
-    command<KProfileWriteResult>(`/printers/${seg(id)}/kprofiles/notes`, {
+    printerCommand<KProfileWriteResult>(id, `/printers/${seg(id)}/kprofiles/notes`, {
       method: 'PUT',
       body: JSON.stringify({ setting_id: key, note }),
     }),
-  /** #7153: a printer's AMS slots and labels, read from Bambuddy's live status. */
+  /** #7153, #7276: a printer's AMS slots and labels, from its latest LAN report. */
   printerAms: (id: string) => request<AmsView>(`/printers/${seg(id)}/ams`),
   /**
-   * The slot writes call Bambuddy in the request (R-7153-5); each that reaches the printer reads
-   * its state first and answers a 409 with a `code` when it is unsafe now (R-7153-3).
+   * The slot writes go to the printer over ScadBuddy's LAN link; each reads the printer's latest
+   * report first and answers a 409 with a `code` when it is unsafe now (R-7153-3).
    */
-  configureSlot: (id: string, ams: number, tray: number, body: SlotConfigureBody) =>
-    request<SlotConfigured>(`/printers/${seg(id)}/trays/${ams}/${tray}/configure`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-  slotCommand: (id: string, ams: number, tray: number, action: SlotCommandSent['action']) =>
-    request<SlotCommandSent>(`/printers/${seg(id)}/trays/${ams}/${tray}/${action}`, { method: 'POST' }),
+  configureSlot: (id: string, ams: number, tray: number, body: SlotConfigureBody, options?: PrinterCommandOptions) =>
+    printerCommand<SlotConfigured>(
+      id,
+      `/printers/${seg(id)}/trays/${ams}/${tray}/configure`,
+      { method: 'POST', body: JSON.stringify(body) },
+      options,
+    ),
+  slotCommand: (id: string, ams: number, tray: number, action: SlotCommandSent['action'], options?: PrinterCommandOptions) =>
+    printerCommand<SlotCommandSent>(id, `/printers/${seg(id)}/trays/${ams}/${tray}/${action}`, { method: 'POST' }, options),
   setSlotPreset: (id: string, ams: number, tray: number, body: SlotPresetBody) =>
     request<SavedSlotPreset>(`/printers/${seg(id)}/trays/${ams}/${tray}/preset`, {
       method: 'PUT',
@@ -3534,10 +3638,10 @@ export const api = {
   /** The long edge the assistant panel scales attached images to, served by the agent service. */
   getImageSettings: () => request<ImageSettings>('/ai/settings/images'),
 
-  putImageSettings: (longEdge: number) =>
+  putImageSettings: (changes: { long_edge?: number; tool_inline_max_bytes?: number }) =>
     request<ImageSettings>('/ai/settings/images', {
       method: 'PUT',
-      body: JSON.stringify({ long_edge: longEdge }),
+      body: JSON.stringify(changes),
     }),
 
   /** The automatic Hindsight recall query's cap, in characters, served by the agent service. */

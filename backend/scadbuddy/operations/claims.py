@@ -10,17 +10,24 @@ its answer is final (``api/operations.py``): only one its own put created, and o
 while it is still the file that put wrote, so bytes another request put before or
 since stay for that request's run. The housekeeping sweep removes the rest once
 nothing has put them for ``CLAIM_MAX_AGE``.
+
+A claim's name changes (a put links or replaces it, a release or the sweep removes it)
+only under the store's lock, a file beside the root (`ClaimStore._locked`, #7947). So a
+release or the sweep checks a claim and removes it with no put between the two, and
+never moves a claim aside: a run reading the claim another put renewed never finds it
+missing.
 """
 
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import hashlib
 import os
 import re
 import tempfile
 import time
-import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -48,6 +55,19 @@ class ClaimStore:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """The store's lock, held for one change of a claim's name (#7947). It is a file
+        beside the root, not in it, so a listing of the claims is only claims; opened for
+        writing, as an exclusive ``flock`` on NFS needs (the API's ``/data``)."""
+        self.root.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.root.with_name(f"{self.root.name}.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
     def _path(self, name: str) -> Path:
         if not _NAME.fullmatch(name):
             raise ValueError(f"{name!r} is not a claim")
@@ -71,11 +91,12 @@ class ClaimStore:
                 handle.write(data)
                 handle.flush()
                 written = os.fstat(handle.fileno())
-            try:
-                os.link(tmp, path)
-            except FileExistsError:
-                os.replace(tmp, path)
-                return Held(name, written.st_ino, written.st_mtime_ns, created=False)
+            with self._locked():
+                try:
+                    os.link(tmp, path)
+                except FileExistsError:
+                    os.replace(tmp, path)
+                    return Held(name, written.st_ino, written.st_mtime_ns, created=False)
             os.unlink(tmp)
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
@@ -91,11 +112,12 @@ class ClaimStore:
         self.root.mkdir(parents=True, exist_ok=True)
         try:
             written = path.stat()
-            try:
-                os.link(path, target)
-            except FileExistsError:
-                os.replace(path, target)
-                return Held(digest, written.st_ino, written.st_mtime_ns, created=False)
+            with self._locked():
+                try:
+                    os.link(path, target)
+                except FileExistsError:
+                    os.replace(path, target)
+                    return Held(digest, written.st_ino, written.st_mtime_ns, created=False)
             path.unlink()
         except BaseException:
             path.unlink(missing_ok=True)
@@ -126,27 +148,26 @@ class ClaimStore:
 
     def release(self, held: Held) -> None:
         """Remove the claim ``held`` created, unless a put has written it since; a claim
-        already gone is no error. It is moved aside first, and put back when what was
-        moved is not the file ``held`` wrote."""
+        already gone is no error. The check and the removal are one step under the lock
+        (#7947): a claim another put renewed is left where it is, never moved, as a run of
+        that put may be reading it (#7853)."""
         if not held.created:
             return
         path = self._path(held.name)
-        aside = self.root / f".released-{uuid.uuid4().hex}"
-        try:
-            os.rename(path, aside)
-        except FileNotFoundError:
-            return
-        moved = aside.stat()
-        if (moved.st_ino, moved.st_mtime_ns) != (held.inode, held.mtime_ns):
-            with contextlib.suppress(FileExistsError):
-                os.link(aside, path)
-        aside.unlink()
+        with self._locked():
+            try:
+                found = os.stat(path)
+            except FileNotFoundError:
+                return
+            if (found.st_ino, found.st_mtime_ns) == (held.inode, held.mtime_ns):
+                path.unlink()
 
     def sweep(self, max_age: timedelta = CLAIM_MAX_AGE) -> int:
         """Remove the claims (and a crashed put's temporary files) older than ``max_age``.
 
-        Each is moved aside before it is removed, and kept when what was moved is not
-        what was found old: a put between the two renewed it (review 3c 1.4)."""
+        Each is checked and removed under the lock (#7947), so a put that renews it is
+        either before the check, and the claim is kept, or after the removal, and writes
+        it anew (review 3c 1.4)."""
         cutoff = time.time() - max_age.total_seconds()
         removed = 0
         try:
@@ -154,20 +175,12 @@ class ClaimStore:
         except FileNotFoundError:
             return 0
         for path in entries:
-            aside = self.root / f".swept-{uuid.uuid4().hex}"
-            try:
-                found = path.stat()
-                if found.st_mtime >= cutoff:
+            with self._locked():
+                try:
+                    if os.stat(path).st_mtime >= cutoff:
+                        continue
+                    path.unlink()
+                except FileNotFoundError:
                     continue
-                os.rename(path, aside)
-            except FileNotFoundError:
-                continue
-            moved = aside.stat()
-            if moved.st_ino == found.st_ino and moved.st_mtime < cutoff:
-                removed += 1
-            else:
-                # Renewed: back where it was, unless a later put already put it there.
-                with contextlib.suppress(FileExistsError):
-                    os.link(aside, path)
-            aside.unlink()
+            removed += 1
         return removed

@@ -9,9 +9,11 @@
 #   image          the app image: build, ruff and mypy, container smoke, real-backend
 #                  e2e and the bambuddy-fs live mount; every backend change, plus the
 #                  frontend and Go trees that run against it; and the
-#                  `profile-fetch-image` and `camera-image` jobs (#6625, #7328)
+#                  `profile-fetch-image`, `camera-image` and `cups-image` jobs (#6625,
+#                  #7328, deploy/cups/)
 #   docs_only      every changed path is a Markdown file under docs/, or a CLAUDE.md
-#                  or AGENTS.md in any directory but a vendor/ tree: the lint, frontend, agent, models,
+#                  or AGENTS.md in any directory but a vendor/ tree, and none is a doc a
+#                  test reads (`read_by_tests`): the lint, frontend, agent, models,
 #                  freshness and Go jobs skip, and only the `markdown` job checks the
 #                  change. False with `all` and on an empty diff.
 #
@@ -36,11 +38,14 @@ backend="^(backend/|models/|deploy/camera/|deploy/grafana/|deploy/security/|test
 # backend/scadbuddy/migrations_agent/ (#5299). The job also checks the backend's harness pin.
 agent_durable="^(agent-durable/|agent/|backend/scadbuddy/migrations_agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
-image_extra='^(frontend/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
+image_extra='^(frontend/|deploy/cups/|scripts/gen-api-request-defaults\.mjs$|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 
 docs='^(docs/.+\.md|(.+/)?(CLAUDE|AGENTS)\.md)$'
+# A doc a test reads is code, not docs-only: `agent/test/evalScoring.test.ts` resolves
+# the design spec's §6.2 from disk (#7792). A new test that reads a doc adds its path here.
+read_by_tests='^docs/superpowers/specs/2026-09-22-scadbuddy-design\.md$'
 paths=$(cat)
-code=$(grep -vE "$docs" <<<"$paths" || true; grep -E '(^|/)vendor/' <<<"$paths" || true)
+code=$(grep -vE "$docs" <<<"$paths" || true; grep -E "(^|/)vendor/|$read_by_tests" <<<"$paths" || true)
 pick() { if grep -qE "$1" <<<"$code"; then echo true; else echo false; fi; }
 
 b=$(pick "$backend")

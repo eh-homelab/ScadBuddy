@@ -9,6 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import BinaryIO
 
@@ -20,6 +21,7 @@ from scadbuddy.bambuddy.filaments3mf import (
     UnreadableFilamentsError,
     read_filaments,
 )
+from scadbuddy.bambuddy.models import FilamentRequirement
 from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 
@@ -278,6 +280,25 @@ def _on_printed(grams: dict[int, float], printed: PrintedFilaments) -> dict[int,
     return dict(sorted(moved.items()))
 
 
+def _lengths_on_printed(
+    sliced: Sequence[FilamentRequirement], printed: PrintedFilaments
+) -> dict[int, float]:
+    """The metres on the filaments the plate prints (#7685), moved as `_on_printed` moves
+    the grams. A slot whose sources include one with grams but no length is left out
+    (#7932): its metres would cover only part of its grams and skew the implied density.
+    Each value is rounded to 2 places as `_on_printed` rounds a merged one; Bambu Studio
+    writes ``used_m`` with 2 decimals, so an unmerged slot's metres are unchanged."""
+    moved: dict[int, float] = {}
+    partial: set[int] = set()
+    for slot in sliced:
+        key = printed.slot(slot.slot_id)
+        if slot.used_meters > 0:
+            moved[key] = round(moved.get(key, 0.0) + slot.used_meters, 2)
+        elif slot.used_grams > 0:
+            partial.add(key)
+    return dict(sorted((key, used) for key, used in moved.items() if key not in partial))
+
+
 class NativeSliceRead(BaseModel):
     """What the native slicer's 3MF says about one plate. Not ``SlicedPlate``:
     ``filaments3mf.py`` has one."""
@@ -285,33 +306,60 @@ class NativeSliceRead(BaseModel):
     plate_id: int
     print_time_seconds: int | None = None
     grams_by_slot: dict[int, float] = {}
+    #: The metres each slot extrudes (#7685, ``slice_info.config``'s ``used_m``); a slot
+    #: the file gives no length is absent, as is a merged slot one of whose sources with
+    #: grams had none (#7932, `_lengths_on_printed`).
+    length_by_slot: dict[int, float] = {}
     filament_used_g: float | None = None
     filament_changes: int | None = None
     #: The side each slot was sliced for (#4232), as the Bambuddy path's ``side``.
     side_by_slot: dict[int, Side] = {}
 
 
-def plate_grams(payload: bytes | BinaryIO, plate_id: int) -> dict[int, float]:
-    """``plate_id``'s grams per slot as :func:`read_sliced` reads them, without reading
-    the G-code's body: what a LAN start's spool use is (#4643). Empty for a file or a
-    plate that cannot be read."""
+class PlateUses(BaseModel):
+    """What one plate uses per slot (#7685): its grams, and its metres where the file
+    says (``used_m``, written beside ``used_g`` by Bambu Studio; measured on
+    ``tests/printers/fixtures/rack-slice-info-h2c.config``)."""
+
+    grams_by_slot: dict[int, float] = {}
+    length_by_slot: dict[int, float] = {}
+
+
+def _uses(
+    payload: bytes | BinaryIO, plate_index: int, sliced: Sequence[FilamentRequirement]
+) -> PlateUses:
+    grams = {slot.slot_id: slot.used_grams for slot in sliced}
+    try:
+        with zipfile.ZipFile(_file(payload)) as archive:
+            printed = printed_filaments(archive, plate_index)
+    except (*_MEMBER_ERRORS, KeyError):
+        printed = PrintedFilaments()
+    return PlateUses(
+        grams_by_slot=_on_printed(grams, printed),
+        length_by_slot=_lengths_on_printed(sliced, printed),
+    )
+
+
+def plate_uses(payload: bytes | BinaryIO, plate_id: int) -> PlateUses:
+    """``plate_id``'s grams and metres per slot as :func:`read_sliced` reads them, without
+    reading the G-code's body: what a LAN start's spool use is (#4643, #7685). Empty for
+    a file or a plate that cannot be read."""
     try:
         read = read_filaments(_file(payload), sliced=True)
     except UnreadableFilamentsError:
-        return {}
+        return PlateUses()
     profile = read.profile
     if profile is None or not profile.plates:
-        return {}
+        return PlateUses()
     plate = profile.plates[0] if len(profile.plates) == 1 else profile.plate(plate_id)
     if plate is None:
-        return {}
-    grams = {slot.slot_id: slot.used_grams for slot in read.sliced.get(plate.index, [])}
-    try:
-        with zipfile.ZipFile(_file(payload)) as archive:
-            printed = printed_filaments(archive, plate.index)
-    except (*_MEMBER_ERRORS, KeyError):
-        printed = PrintedFilaments()
-    return _on_printed(grams, printed)
+        return PlateUses()
+    return _uses(payload, plate.index, read.sliced.get(plate.index, []))
+
+
+def plate_grams(payload: bytes | BinaryIO, plate_id: int) -> dict[int, float]:
+    """:func:`plate_uses`' grams."""
+    return plate_uses(payload, plate_id).grams_by_slot
 
 
 def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
@@ -335,13 +383,15 @@ def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
             raise ApiError(404, f"the sliced file has no plate {plate_id}")
         plate = found
     index = plate.index
-    grams_by_slot = {slot.slot_id: slot.used_grams for slot in read.sliced.get(index, [])}
+    sliced = read.sliced.get(index, [])
+    grams = {slot.slot_id: slot.used_grams for slot in sliced}
     gcode, printed, sides = _plate_files(payload, index)
-    grams_by_slot = _on_printed(grams_by_slot, printed)
+    grams_by_slot = _on_printed(grams, printed)
     return NativeSliceRead(
         plate_id=plate_id,
         print_time_seconds=plate.print_seconds,
         grams_by_slot=grams_by_slot,
+        length_by_slot=_lengths_on_printed(sliced, printed),
         filament_used_g=round(sum(grams_by_slot.values()), 2) if grams_by_slot else None,
         filament_changes=None if gcode is None else filament_changes(gcode),
         side_by_slot=_sides_on_printed(sides, printed),

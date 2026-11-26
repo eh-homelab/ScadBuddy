@@ -232,6 +232,12 @@ class RemoteFlowStore:
         tiers: list[str] | None = response.json()["tiers"]
         return tiers
 
+    async def answer_allowed(self, responder: str, principal: str | None) -> bool:
+        response = await self._send(
+            "POST", "/decisions/answerer", json={"responder": responder, "principal": principal}
+        )
+        return bool(response.json()["allowed"])
+
     async def approval_expiry_s(self) -> int:
         response = await self._send("GET", "/approval-expiry")
         return int(response.json()["seconds"])

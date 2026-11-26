@@ -31,4 +31,5 @@ the [user guide](../user-guide.md).
 | Activity | [activity.md](activity.md) | `backend/scadbuddy/api/activity.py:46` |
 | The AI assistant | [ai-assistant.md](ai-assistant.md) | `agent/src/routes/chat.ts:76`, `frontend/src/components/assistant/AssistantChat.tsx:155` |
 | Claude plugin and MCP | [claude-plugin-and-mcp.md](claude-plugin-and-mcp.md) | `agent/src/mcp/http.ts:451`, `plugins/scadbuddy/` |
+| Agent fleet chat (MCP messages between Claude Code sessions) | [agent-fleet-chat.md](agent-fleet-chat.md) | `tools/go/fleet/main.go`, `tools/go/core/internal/fleet/fleet.go` |
 | Settings, sign-in and access tokens | [settings-and-sign-in.md](settings-and-sign-in.md) | `frontend/src/pages/SettingsPage.tsx`, `backend/scadbuddy/api/auth.py:50` |

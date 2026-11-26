@@ -2,13 +2,14 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
-import { createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
+import { addSpoolEvent, createTagBackup, getSpool, getType, listSpoolEvents, listSpools, patchSpool, setSpoolKValues, setSpoolPresets, spoolTagRecords, spoolTagWritten } from '../../api/filament'
 import { SPOOL_ADVANCED_KEY } from '../../components/filament/SpoolSections'
 import { H2C, L, spoolId, T, TAG } from '../../mocks/features/filament/seed'
 import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasingSeed'
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -85,6 +86,16 @@ describe('the spool page', () => {
     expect(await within(weight).findByText('Started at the label weight 1000 g. Bambuddy reported 268 g; 732 g unexplained.')).toBeInTheDocument()
   })
 
+  it("names the starting amount as the drift's likely cause when the scale finds the label weight (#7685)", async () => {
+    // #4 started at Bambuddy's 268 g of a 1000 g label and printed 148 g: the ledger expects 120 g.
+    // A reading of 852 g of filament is the label weight less the print: the starting amount was wrong.
+    await addSpoolEvent(spoolId(4), { kind: 'weighed', source: 'scale', reading_g: 1102 })
+    open(4)
+    await heading(4)
+    const weight = screen.getByRole('region', { name: 'Weight' })
+    expect(await within(weight).findByText(/The scale found 732 g more than the prints accounted for\. Likely cause: the starting amount; it was 732 g under the label weight, and the scale found the label weight\./)).toBeInTheDocument()
+  })
+
   it('says how the tag came in and when it was written (#7149)', async () => {
     open(4)
     await heading(4)
@@ -123,22 +134,22 @@ describe('the spool page', () => {
     expect((await getSpool(spoolId(4))).added_full).toBe(false)
   })
 
-  it('resets an overridden colour with one PATCH of null, and the mark stays until the answer', async () => {
+  it('resets an overridden colour with one unchecked bulk-update of null, and the mark stays until the answer (#7703)', async () => {
     await patchSpool(spoolId(3), { rgba: '#112233FF' })
     const edited = (await listSpoolEvents(spoolId(3))).filter((event) => event.kind === 'edited').length
-    const patches = recorded('PATCH', /\/spools\//)
+    const patches = recorded('POST', /\/spools\/bulk-update$/)
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
     // Holds the answer; a resolver that returns nothing falls through to the mock.
-    server.use(http.patch('*/api/v1/filament/spools/:id', async () => { await gate }))
+    server.use(http.post('*/api/v1/filament/spools/bulk-update', async () => { await gate }))
     const { user } = open(3)
     await heading(3)
     const field = () => document.querySelector('[data-field="rgba"]') as HTMLElement
     expect(within(field()).getByText('Set on this spool')).toBeInTheDocument()
     await user.click(within(field()).getByRole('button', { name: 'Reset Colour to type' }))
-    await waitFor(() => expect(patches).toEqual([{ rgba: null }]))
+    await waitFor(() => expect(patches).toEqual([{ spool_ids: [spoolId(3)], patch: { rgba: null } }]))
     expect(within(field()).getByText('Set on this spool')).toBeInTheDocument()
     release()
     await waitFor(() => expect(within(field()).queryByText('Set on this spool')).toBeNull())
@@ -150,7 +161,7 @@ describe('the spool page', () => {
   it('keeps the mark and shows the refusal when the reset is refused', async () => {
     await patchSpool(spoolId(3), { rgba: '#112233FF' })
     server.use(
-      http.patch('*/api/v1/filament/spools/:id', () =>
+      http.post('*/api/v1/filament/spools/bulk-update', () =>
         HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'the spool changed under you' }, { status: 409, headers: { 'Content-Type': 'application/problem+json' } }),
       ),
     )
@@ -193,6 +204,33 @@ describe('the spool page', () => {
     await heading(1)
     expect(screen.queryByText('Choose a material')).toBeNull()
     expect(screen.getByRole('combobox', { name: 'Material' })).not.toHaveAttribute('aria-invalid', 'true')
+  })
+
+  it('archives through the dialog with a reason, then shows the spool archived (#7684)', async () => {
+    const { user } = open(3)
+    await heading(3)
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #3' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Other' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    expect(await screen.findByRole('button', { name: 'Restore' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect((await getSpool(spoolId(3))).archived_at).not.toBeNull()
+    // The Weight section now says the closing: no final weighing, so the ledger's side only.
+    expect(within(screen.getByRole('region', { name: 'Weight' })).getByTestId('closing-summary')).toHaveTextContent(/^Other on .*: started with .*; not weighed at the end\.$/)
+  })
+
+  it('continues a respooled spool as a new one from the archive dialog (#7684)', async () => {
+    const { user } = open(10)
+    await heading(10)
+    await user.click(screen.getByRole('button', { name: 'Archive' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #10' })
+    await user.click(within(dialog).getByRole('radio', { name: 'Respooled' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Archive and continue as a new spool' }))
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    expect(await screen.findByText((_, node) => node?.tagName === 'P' && /^Continues spool #10: its filament, respooled\.$/.test(node.textContent ?? ''))).toBeInTheDocument()
+    expect(screen.getByLabelText('Grams left')).toHaveValue('250')
+    expect((await getSpool(spoolId(10))).archived_at).not.toBeNull()
   })
 
   it('offers no Delete for a spool that printed, only Archive and why', async () => {
@@ -563,6 +601,27 @@ describe('the spool page', () => {
     expect(twin).toMatchObject({ colour_name: 'Teal', label_weight_g: 1000, grams_left: null })
   })
 
+  it('continues a respooled spool as a new one with its filament (#7684)', async () => {
+    const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+    rememberAdvanced(SPOOL_ADVANCED_KEY)
+    const { user } = render(`/filament/spools/new?copy=${spoolId(19)}&continue=1&grams=480`)
+    expect(await screen.findByRole('heading', { level: 1, name: 'New spool' })).toBeInTheDocument()
+    // The banner's text is split around the spool link, so the matcher reads the whole paragraph.
+    expect(await screen.findByText((_, node) => node?.tagName === 'P' && /^Continues spool #19: its filament, respooled\.$/.test(node.textContent ?? ''))).toBeInTheDocument()
+    expect(screen.getByLabelText('Grams left')).toHaveValue('480')
+    expect(screen.getByRole('combobox', { name: 'Added full' })).toHaveTextContent('No')
+    await user.click(screen.getByRole('button', { name: 'Save spool' }))
+    await waitFor(() => expect(posts).toHaveLength(1))
+    const sent = posts[0] as { continued_from: string; copy_of: string; spool: { grams_left: number; added_full: boolean } }
+    expect(sent.continued_from).toBe(spoolId(19))
+    expect(sent.copy_of).toBe(spoolId(19))
+    expect(sent.spool).toMatchObject({ grams_left: 480, added_full: false })
+    expect(await heading(20)).toBeInTheDocument()
+    const created = (await listSpoolEvents((await listSpools()).find((one) => one.number === 20)!.id))[0]
+    expect(created?.data).toMatchObject({ continued_from: spoolId(19) })
+    expect((await listSpoolEvents(spoolId(19))).findLast((one) => one.kind === 'archived')?.data).toMatchObject({ continued_as: created?.spool_id })
+  })
+
   it('names the source as copy_of and never marks a preset row migrated (R-7150-11, R-7150-13)', async () => {
     const posts = recorded('POST', /\/filament\/spools\/bulk$/)
     const { user } = render(`/filament/spools/new?copy=${spoolId(6)}`)
@@ -673,6 +732,12 @@ describe('the spool page\'s history (#6269)', () => {
     expect(within(metrics).getByText('Empty around').parentElement).toHaveTextContent(new Date('2027-03-15T00:00:00Z').toLocaleDateString(undefined, { dateStyle: 'medium', timeZone: 'UTC' }))
     expect(within(metrics).getByText('30 g')).toBeInTheDocument()
     expect(within(metrics).getByText('±20 g')).toBeInTheDocument()
+    // #7685: job-d's 35 g over 11.7 m of 1.75 mm filament is 1.24 g/cm³ (`impliedDensity`),
+    // 2% under the material's 1.27: inside the tolerance, so no mismatch sentence.
+    expect(within(metrics).getByText('Used').parentElement).toHaveTextContent('3 prints, 40 g each, 11.7 m')
+    const density = within(metrics).getByText('Density').parentElement!
+    expect(density).toHaveTextContent('1.24 g/cm³')
+    expect(density).not.toHaveTextContent('check the type')
     const timeline = within(history).getByRole('list', { name: 'History of this spool' })
     expect(within(timeline).getByRole('link', { name: 'Print 41' })).toHaveAttribute('href', '/prints/41')
     expect(within(timeline).getByRole('link', { name: 'Its order' })).toHaveAttribute('href', `/orders/${ORDER_CLOSED}`)
@@ -695,7 +760,8 @@ describe('the spool page\'s history (#6269)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Reset counter' }))
     await waitFor(() => expect(posts).toEqual([{ kind: 'consumed_reset' }]))
     await waitFor(() => expect(used()).toHaveTextContent(/^Used0 g/))
-    expect(used()).toHaveTextContent('120 g in all')
+    // #7685: the seed's one lengthed plate (job-d, 11.7 m) shows beside the lifetime grams.
+    expect(used()).toHaveTextContent('120 g, 11.7 m in all')
     expect((await getSpool(spoolId(2))).grams_left).toBe(820)
   })
 
@@ -791,5 +857,91 @@ describe("the spool page's Advanced toggle", () => {
     await user.click(screen.getByRole('button', { name: 'Discard changes' }))
     expect(screen.queryByLabelText('Diameter (mm)')).toBeNull()
     expect(screen.queryByRole('checkbox', { name: /Lock the weight/ })).toBeNull()
+  })
+
+  describe('defined and required properties (#7703)', () => {
+    it('saves the row and its defined properties with one request', async () => {
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+      const { user } = render('/filament/spools/new')
+      await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      expect(await screen.findByText('Fill the required properties first: lot_number.')).toBeVisible()
+      expect(screen.getByLabelText('lot_number')).toHaveAttribute('aria-invalid', 'true')
+      await user.type(screen.getByLabelText('lot_number'), 'L-7')
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(async () => expect((await listSpools()).length).toBe(12))
+      expect(posts.at(-1)).toMatchObject({ quantity: 1, spool: { properties: { lot_number: 'L-7' } } })
+      const made = (await listSpools()).find((one) => one.number === 20)!
+      expect(entityMock.properties.get(`spool:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['lot_number', 'L-7']])
+    })
+
+    it('an edit sends a changed defined property with its PATCH', async () => {
+      const patches = recorded('PATCH', new RegExp(`/filament/spools/${spoolId(1)}$`))
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('lot_number'), 'L-9')
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'lot_number')?.value).toBe('L-9'))
+      expect(patches).toEqual([{ properties: { lot_number: 'L-9' } }])
+    })
+
+    // #7951: a late read of the spool's properties keeps what the user typed meanwhile.
+    it('keeps a value typed before the properties read answers (#7951)', async () => {
+      seedEntityProperties(`spool:${spoolId(1)}`, { lot_number: 'OLD' })
+      let answer: () => void = () => {}
+      const held = new Promise<void>((resolve) => (answer = resolve))
+      // Holds the read; a resolver that returns nothing falls through to the mock.
+      server.use(http.get(`*/api/v1/entities/${encodeURIComponent(`spool:${spoolId(1)}`)}/properties`, async () => { await held }))
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('lot_number'), 'L-9')
+      answer()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save spool' })).toBeEnabled())
+      expect(screen.getByLabelText('lot_number')).toHaveValue('L-9')
+    })
+
+    // #7951: a failed read says so, instead of showing every defined field empty.
+    it('says when the spool properties could not be read (#7951)', async () => {
+      server.use(http.get(`*/api/v1/entities/${encodeURIComponent(`spool:${spoolId(1)}`)}/properties`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+      open(1)
+      await heading(1)
+      expect(await screen.findByText(/The spool's properties could not be loaded/)).toBeVisible()
+    })
+
+    // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.
+    it('is clean after saving a list with a blank trailing item', async () => {
+      entityMock.schemas.spool = { type: 'object', properties: { barcodes: { type: 'array', items: { type: 'string' } } } }
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('barcodes item 1'), ' x')
+      await user.click(screen.getByRole('button', { name: 'Add barcodes item' }))
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'barcodes')?.value).toEqual(['x']))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save spool' })).toBeDisabled())
+    })
+
+    it('resets a field to its type on a spool its required keys leave incomplete', async () => {
+      await patchSpool(spoolId(3), { rgba: '#112233FF' })
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const { user } = open(3)
+      await heading(3)
+      const field = () => document.querySelector('[data-field="rgba"]') as HTMLElement
+      await user.click(within(field()).getByRole('button', { name: 'Reset Colour to type' }))
+      await waitFor(async () => expect((await getSpool(spoolId(3))).overridden).not.toContain('rgba'))
+    })
+
+    it('create type from spool asks for the required keys and sends them', async () => {
+      entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const { user } = open(6)
+      await heading(6)
+      await user.click(screen.getByRole('button', { name: 'Create type from this spool' }))
+      const dialog = await screen.findByRole('dialog', { name: 'The new type needs these properties' })
+      await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+      expect(await within(dialog).findByText('Fill the required properties first: mpn.')).toBeVisible()
+      await user.type(within(dialog).getByLabelText('mpn'), 'A00-T1')
+      await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+      await waitFor(async () => expect((await getSpool(spoolId(6))).type_id).not.toBeNull())
+      const typeId = (await getSpool(spoolId(6))).type_id!
+      expect(entityMock.properties.get(`spool_type:${typeId}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'A00-T1']])
+    })
   })
 })

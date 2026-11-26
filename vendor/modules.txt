@@ -5,7 +5,11 @@ github.com/cenkalti/backoff/v5
 # github.com/cespare/xxhash/v2 v2.3.0
 ## explicit; go 1.11
 github.com/cespare/xxhash/v2
+# github.com/eh-homelab/ScadBuddy/tools/go/fleetchat v0.0.0-00010101000000-000000000000 => ./tools/go/fleetchat
+## explicit; go 1.25.0
 # github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client v0.0.0-00010101000000-000000000000 => ./tools/go/scadbuddy-client
+## explicit; go 1.26.0
+# github.com/eh-homelab/ScadBuddy/tools/go/telemetry v0.0.0-00010101000000-000000000000 => ./tools/go/telemetry
 ## explicit; go 1.26.0
 # github.com/go-logr/logr v1.4.4
 ## explicit; go 1.18
@@ -14,6 +18,9 @@ github.com/go-logr/logr/funcr
 # github.com/go-logr/stdr v1.2.2
 ## explicit; go 1.16
 github.com/go-logr/stdr
+# github.com/google/jsonschema-go v0.4.3
+## explicit; go 1.23.0
+github.com/google/jsonschema-go/jsonschema
 # github.com/google/uuid v1.6.0
 ## explicit
 github.com/google/uuid
@@ -89,15 +96,54 @@ github.com/microsoft/kiota-serialization-multipart-go
 # github.com/microsoft/kiota-serialization-text-go v1.1.8
 ## explicit; go 1.26.0
 github.com/microsoft/kiota-serialization-text-go
+# github.com/modelcontextprotocol/go-sdk v1.8.0
+## explicit; go 1.25.0
+github.com/modelcontextprotocol/go-sdk/auth
+github.com/modelcontextprotocol/go-sdk/internal/authutil
+github.com/modelcontextprotocol/go-sdk/internal/json
+github.com/modelcontextprotocol/go-sdk/internal/jsonrpc2
+github.com/modelcontextprotocol/go-sdk/internal/mcpgodebug
+github.com/modelcontextprotocol/go-sdk/internal/util
+github.com/modelcontextprotocol/go-sdk/internal/xcontext
+github.com/modelcontextprotocol/go-sdk/jsonrpc
+github.com/modelcontextprotocol/go-sdk/mcp
+github.com/modelcontextprotocol/go-sdk/oauthex
+# github.com/segmentio/asm v1.1.3
+## explicit; go 1.17
+github.com/segmentio/asm/ascii
+github.com/segmentio/asm/base64
+github.com/segmentio/asm/cpu
+github.com/segmentio/asm/cpu/arm
+github.com/segmentio/asm/cpu/arm64
+github.com/segmentio/asm/cpu/cpuid
+github.com/segmentio/asm/cpu/x86
+github.com/segmentio/asm/internal/unsafebytes
+github.com/segmentio/asm/keyset
+# github.com/segmentio/encoding v0.5.4
+## explicit; go 1.23
+github.com/segmentio/encoding/ascii
+github.com/segmentio/encoding/iso8601
+github.com/segmentio/encoding/json
 # github.com/std-uritemplate/std-uritemplate/go/v2 v2.0.12
 ## explicit; go 1.20
 # github.com/std-uritemplate/std-uritemplate/go/v2 v2.0.13
 ## explicit; go 1.20
 github.com/std-uritemplate/std-uritemplate/go/v2
+# github.com/yosida95/uritemplate/v3 v3.0.2
+## explicit; go 1.14
+github.com/yosida95/uritemplate/v3
 # go.opentelemetry.io/auto/sdk v1.2.1
 ## explicit; go 1.24.0
 go.opentelemetry.io/auto/sdk
 go.opentelemetry.io/auto/sdk/internal/telemetry
+# go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
+## explicit; go 1.26.0
+go.opentelemetry.io/contrib/bridges/otelslog
+# go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0
+## explicit; go 1.26.0
+go.opentelemetry.io/contrib/instrumentation/runtime
+go.opentelemetry.io/contrib/instrumentation/runtime/internal/deprecatedruntime
+go.opentelemetry.io/contrib/instrumentation/runtime/internal/x
 # go.opentelemetry.io/otel v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel
@@ -114,7 +160,16 @@ go.opentelemetry.io/otel/propagation/internal/hextable
 go.opentelemetry.io/otel/semconv/internal/metricpool
 go.opentelemetry.io/otel/semconv/v1.37.0
 go.opentelemetry.io/otel/semconv/v1.43.0
+go.opentelemetry.io/otel/semconv/v1.43.0/goconv
 go.opentelemetry.io/otel/semconv/v1.43.0/otelconv
+# go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
+## explicit; go 1.26.0
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/observ
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/retry
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/transform
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/x
 # go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp
@@ -145,6 +200,7 @@ go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/x
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/log
 go.opentelemetry.io/otel/log/embedded
+go.opentelemetry.io/otel/log/noop
 # go.opentelemetry.io/otel/metric v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/metric
@@ -161,6 +217,13 @@ go.opentelemetry.io/otel/sdk/trace
 go.opentelemetry.io/otel/sdk/trace/internal/env
 go.opentelemetry.io/otel/sdk/trace/internal/observ
 go.opentelemetry.io/otel/sdk/trace/tracetest
+# go.opentelemetry.io/otel/sdk/log v1.47.0
+## explicit; go 1.26.0
+go.opentelemetry.io/otel/sdk/log
+go.opentelemetry.io/otel/sdk/log/internal/attrnorm
+go.opentelemetry.io/otel/sdk/log/internal/counter
+go.opentelemetry.io/otel/sdk/log/internal/observ
+go.opentelemetry.io/otel/sdk/log/internal/x
 # go.opentelemetry.io/otel/sdk/metric v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/sdk/metric
@@ -180,9 +243,11 @@ go.opentelemetry.io/otel/trace/internal/telemetry
 go.opentelemetry.io/otel/trace/noop
 # go.opentelemetry.io/proto/otlp v1.11.0
 ## explicit; go 1.25.0
+go.opentelemetry.io/proto/otlp/collector/logs/v1
 go.opentelemetry.io/proto/otlp/collector/metrics/v1
 go.opentelemetry.io/proto/otlp/collector/trace/v1
 go.opentelemetry.io/proto/otlp/common/v1
+go.opentelemetry.io/proto/otlp/logs/v1
 go.opentelemetry.io/proto/otlp/metrics/v1
 go.opentelemetry.io/proto/otlp/resource/v1
 go.opentelemetry.io/proto/otlp/trace/v1
@@ -196,18 +261,26 @@ golang.org/x/net/internal/httpcommon
 golang.org/x/net/internal/httpsfv
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sync v0.22.0
+# golang.org/x/oauth2 v0.35.0
+## explicit; go 1.25.0
+# golang.org/x/oauth2 v0.36.0
+## explicit; go 1.25.0
+golang.org/x/oauth2
+golang.org/x/oauth2/internal
+# golang.org/x/sync v0.20.0
 ## explicit; go 1.26.0
 # golang.org/x/sync v0.23.0
-## go 1.26.0
+## explicit; go 1.26.0
+golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
+# golang.org/x/sys v0.41.0
+## explicit; go 1.26.0
 # golang.org/x/sys v0.48.0
 ## explicit; go 1.26.0
+golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/text v0.41.0
-## explicit; go 1.26.0
 # golang.org/x/text v0.42.0
 ## explicit; go 1.26.0
 golang.org/x/text/cases
@@ -223,6 +296,9 @@ golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
 golang.org/x/text/width
+# golang.org/x/time v0.15.0
+## explicit; go 1.25.0
+golang.org/x/time/rate
 # google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc
 ## explicit; go 1.26.0
 google.golang.org/genproto/googleapis/api/httpbody

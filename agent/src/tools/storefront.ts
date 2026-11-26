@@ -121,7 +121,8 @@ export const storefrontTools: Tool[] = [
       'in: from a saved output (`output_id`: its design version, values and name) or from a model (`slug`, with ' +
       '`values` for the parameters to set; the template defaults otherwise, at its current version). For a template ' +
       "with a pipeline (#5701), an output also brings the design's own inputs and their version, which the listing " +
-      'keeps fixed; a model brings none, and `notes` then says to set up the design in the editor before publish. ' +
+      'keeps fixed; a model brings none, and `notes` then says to set up the design in the editor before publish ' +
+      '(as it does for an output that holds none). ' +
       'A parameter the pipeline sets itself is neither offered nor locked. Free text is ' +
       "the customer's to type and every colour is the customer's to choose, from the price book's filaments of the " +
       "design's material (any material when no colour matches one); everything else is locked at its value. `lock` " +
@@ -250,9 +251,19 @@ export const storefrontTools: Tool[] = [
         `draft a storefront listing of ${name}`,
       )
       const page = `/storefront/listings/${encodeURIComponent(made.id)}`
-      if (schema.pipeline && !output) {
+      // #7879: a version whose pipeline declares no inputs has no "Set up the design" in the
+      // editor (`DesignBlock`), and publish refuses it, so the note says so instead.
+      if (schema.pipeline && schema.pipeline.inputs == null) {
+        notes.push(
+          `This version of ${record.name} cannot be listed: its pipeline declares no inputs (${schema.pipeline.fault || 'no reason given'}), so the editor offers no "Set up the design" and publish refuses it (listing_inputs_undeclared). Choose another version in the editor, or fix the template and draft it again.`,
+        )
+      } else if (schema.pipeline && !output) {
         notes.push(
           `${record.name} has a design of its own to set up (its pipeline's inputs), which a model brings none of: open the listing at ${page} and press "Set up the design" before you publish it, or draft it from a saved output of that design.`,
+        )
+      } else if (schema.pipeline && Object.keys(sold.design.inputs ?? {}).length === 0) {
+        notes.push(
+          `The output holds none of ${record.name}'s own design inputs (its pipeline's), so the listing starts with none: open the listing at ${page} and press "Set up the design" before you publish it.`,
         )
       }
       return json({

@@ -10,6 +10,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { cn } from '@/lib/utils'
 import { filamentLinks } from '../../lib/filamentLinks'
 import { RgbaSwatch } from './RgbaSwatch'
+import { IncompleteMark } from '../entities/IncompleteMark'
 import { COLUMN_TITLES, grams, hasUnknownMaterial, needsType, type ColumnId, type SpoolGroup } from './spoolsQuery'
 
 const NUMERIC = new Set<ColumnId>(['grams_left', 'label_weight'])
@@ -59,6 +60,7 @@ function cell(spool: Spool, column: ColumnId, typeCodes: ReadonlyMap<string, str
           </SpoolLink>
           <NeedsType spool={spool} />
           <DriftNotice spool={spool} />
+          <IncompleteMark row={spool} />
           <NeedsDrying spool={spool} />
           <CheckTray check={check} />
         </span>

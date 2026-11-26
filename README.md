@@ -496,10 +496,13 @@ on shutdown.
     `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
     hear it once over the process's one `LISTEN` connection. After
     that connection drops and comes back, subscribers get a `bus.resync` event.
-    The table keeps events for `Last-Event-ID` replay:
-    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
-    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
-    replica every 5 minutes.
+    The table keeps every event by default, for `Last-Event-ID` replay:
+    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (0) and
+    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (0), 0 for no limit.
+    `SCADBUDDY_EVENT_LOG_RETENTION_KINDS` is a JSON object of seconds by kind prefix
+    (`{"job": 3600}`; the longest matching prefix wins, 0 keeps that kind forever), and
+    an event's own `retention_seconds` beats it. The rows cap counts only the events that
+    no other rule covers. Every replica prunes every 5 minutes.
     `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
     `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
     `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
@@ -642,7 +645,12 @@ socket would give it root on the node.
 
 ### Payment webhooks (#4957)
 
-The front door (Pomerium and the LAN gateway) stays in front of every route but one. A
+The front door (Pomerium and the LAN gateway) stays in front of every route except
+this one and the agent's bearer-token paths, which check their own credential: `/mcp`,
+`/mcp/workspace/` and the plugin feed's three reads (`…/plugin-feeds/{feed}/marketplace.json`,
+`…/plugins/{name}/versions/…` and `…/plugins/{name}/archives/…`; eh-homelab/clusters#4017
+and #4368). The feed's Settings routes under the same prefix take no token and stay
+behind the front door. A
 payment provider must reach `POST /api/v1/payments/webhooks/<provider>` from the
 internet, so route only the path prefix `/api/v1/payments/webhooks/` from the public
 host to the API Service, and no other path. That route takes no session: the
@@ -985,7 +993,7 @@ A deploy that rolls the pod also migrates the database at startup
 log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'
 `analyzer_decisions`, and `20260928T0840Z_settings.sql` the settings tables). The
 event log's retention is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` /
-`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (see the render queue settings above); the
+`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` / `_KINDS` (see the render queue settings above); the
 defaults need no manifest change.
 
 ```mermaid
@@ -1454,6 +1462,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   pull started during the roll can reach an old build that does not register it; its
   workflow task fails until the new build is current, at most the run's 4.5 minutes, and
   the next tick of the spool refresh pulls again.
+- **Upgrading to the release with #7276** adds one workflow type, `LanCommand` (a printer's
+  K-profile and AMS slot commands over its LAN link, started and awaited by the API,
+  `backend/scadbuddy/workflows/lan_command.py`), to the `bambuddy` queue. Roll
+  `scadbuddy-print` out with `Recreate` (see "A release that needs `Recreate`" below). A
+  K-profile or slot request during the roll can reach an old build that does not register
+  it; that run's workflow task fails until the new build is current, and the route answers
+  202 with the run's id, which `GET /printers/{id}/commands/{command_id}` follows.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
@@ -2233,6 +2248,20 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   URL (`SCADBUDDY_API_INTERNAL_URL`, the API's Service) and, when `store_backend` is
   `s3`, the bucket's endpoint.
 - It serves `/healthz` and `/metrics` on `9090`.
+- It exports OpenTelemetry traces, metrics and logs over OTLP
+  (`workers/rust/crates/sb-temporal/src/telemetry.rs`, #7667). Each signal is on when
+  its endpoint is set (`OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT`, or else
+  `OTEL_EXPORTER_OTLP_ENDPOINT` plus `/v1/traces`, `/v1/metrics` or `/v1/logs`), and off
+  with `OTEL_SDK_DISABLED=true` or when its `OTEL_<SIGNAL>_EXPORTER` names no `otlp`. The
+  protocol is `http/protobuf` unless `OTEL_EXPORTER_OTLP_PROTOCOL` (or the signal's own
+  variable) says `grpc`. The metrics are cumulative and include the process's own:
+  `process.cpu.time`, `process.memory.usage`, `process.unix.file_descriptor.count` and
+  `process.uptime`. Every `tracing` event at `info` or above is also a log record, except
+  an event with a field the spans drop (`error`, a URL, a path), which stays on stdout
+  only; a record or a stdout JSON line logged inside a span carries its `trace_id` and
+  `span_id`. On exit it flushes the three providers within 5 s, after the shutdown grace
+  below. A log record that goes out carries the same fields as the stdout line; spans
+  pass the scrub.
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
   details are always one `{"exit_code", "stderr_tail", "errors"}` object, `errors`
@@ -2522,6 +2551,7 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   of its key (`filament_presets`, a changed file a new version of it, #7176), sets the
   type's presets for the fetched `(printer model, nozzle)` keys to them (`sb-<id>`), reads
   K values from `GET /printers/{id}/kprofiles/`
+  (Bambuddy's route, through `BambuddyClient.k_profiles`: this read stays on Bambuddy until #7604)
   where one matches exactly, and removes an old K value of a fetched key that the new
   preset does not match (the run's notes name each one; a printer whose K table did not
   answer keeps its values). It writes and removes only K values an earlier fetch set
@@ -2713,23 +2743,24 @@ ScadBuddy records each qualifying printer's camera all the time, as fMP4 segment
 4 s in a bucket with an index in Postgres (phase 1 of #7334). What it does, and the code, are
 in [docs/features/printer-cameras.md](docs/features/printer-cameras.md); the design is
 `docs/superpowers/specs/2026-11-23-printer-camera-recording-design.md`. eh-homelab/clusters
-holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 3.
+holds the manifests. Phase 1 added two Deployments, the relay and the recorders. Phase 3
+(live view, #7330) adds a third, the live edge.
 
-- **Two images.** `ghcr.io/eh-homelab/scadbuddy-camera-relay` and
-  `ghcr.io/eh-homelab/scadbuddy-camera-recorder` are the Dockerfile targets `camera-relay` and
-  `camera-recorder` (python:3.12-slim-bookworm, uid 10001, `tini`, `curl`, the controller's
+- **Three images.** `ghcr.io/eh-homelab/scadbuddy-camera-relay`,
+  `ghcr.io/eh-homelab/scadbuddy-camera-recorder` and `ghcr.io/eh-homelab/scadbuddy-camera-edge`
+  are the Dockerfile targets `camera-relay`, `camera-recorder` and `camera-edge` (python:3.12-slim-bookworm, uid 10001, `tini`, `curl`, the controller's
   venv with no database client library, and MediaMTX v1.21.4 from the `mediamtx` stage, pinned
   by sha256). Each holds its MediaMTX config at `/etc/mediamtx/mediamtx.yml`, from
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
-  `build-image.yml` job `camera` publishes both (amd64); `ci.yml` job `camera-image` builds and
-  checks both. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
+  `build-image.yml` job `camera` publishes all three (amd64); `ci.yml` job `camera-image` builds and
+  checks all three. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
   relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
   (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
   (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
-  `python -m scadbuddy.camera.relay` or `python -m scadbuddy.camera.recorder`). The controller
+  `python -m scadbuddy.camera.relay`, `.recorder` or `.edge`). The controller
   drives MediaMTX's control API on `127.0.0.1:9997`, and MediaMTX's hooks run `curl` against
   the controller on `127.0.0.1:9091`, so the two must share the pod. The control API and the
   metrics (`127.0.0.1:9998`) listen on localhost only (`deploy/camera/*.yml`).
@@ -2773,11 +2804,51 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
     same variables replaced it, so the control API answered 401 (same date and image). The
     recorders' MediaMTX gets the read user inside each path's source URL, which the
     controller puts through the control API.
-- **The relay read secret.** One user and password, in two pods: the relay's MediaMTX
-  (`MTX_AUTHINTERNALUSERS_0_*`) and the recorder controllers
+- **The relay read secret.** One user and password, in three pods: the relay's MediaMTX
+  (`MTX_AUTHINTERNALUSERS_0_*`), the recorder controllers and the edge controller
   (`SCADBUDDY_CAMERA_RELAY_READ_USER`/`_PASS`). It allows reading the relay's paths over
   RTSP and nothing else.
-- **No database and no key.** Both controllers refuse to start when
+- **`scadbuddy-camera-edge` (live view, #7330).** One replica, strategy `Recreate`. It pulls
+  from the relay only while someone watches, and serves WebRTC (WHEP) on 8889 and LL-HLS on
+  8888 to the API's proxy. Browsers never reach its HTTP ports: `GET`/`POST`/`PATCH`/`DELETE`
+  `/api/v1/camera/live/{printer_id}/…` on the API's origin forwards each call
+  (`api/camera.py`). ServiceAccount `scadbuddy-camera-edge` (CRUD caller `camera`,
+  `auth/exchange.py` `SERVICE_ACCOUNTS`). Its controller (`python -m scadbuddy.camera.edge`)
+  puts one on-demand path per recorded printer in its MediaMTX
+  (`source: rtsp://<read user>@<relay>/<printer id>`, `sourceOnDemand: true`,
+  `sourceOnDemandCloseAfter: 10s`), and sets `scadbuddy_camera_viewers`. It holds no
+  access code, no bucket key and no database secret, and refuses to start with one
+  (`EdgeSettings.check_environment`, exit 2). The image's config is
+  `deploy/camera/mediamtx-edge.yml`. Ports: 8888 (LL-HLS) and 8889 (WHEP) for the API
+  only, 8189/udp (WebRTC media) for browsers, 9090 (controller probes and metrics).
+  MediaMTX's control API (9997) and metrics (9998) listen on localhost only.
+  - Edge controller environment: `SCADBUDDY_API_INTERNAL_URL`, `SCADBUDDY_SERVICE_TOKEN_FILE`,
+    `SCADBUDDY_LOG_LEVEL`, `SCADBUDDY_CAMERA_MEDIAMTX_API_URL` (default
+    `http://127.0.0.1:9997`), `SCADBUDDY_CAMERA_RELAY_RTSP_URL` and the relay read secret
+    (`SCADBUDDY_CAMERA_RELAY_READ_USER`/`_PASS`) (`EdgeSettings`).
+  - Edge MediaMTX container: `MTX_AUTHINTERNALUSERS_0_USER` and `MTX_AUTHINTERNALUSERS_0_PASS`
+    from **the edge read secret**, a second 1Password item. Entry 0 of
+    `mediamtx-edge.yml` is the read user, so HLS and WHEP fail closed: without the two
+    variables it keeps a placeholder no client can use. Measured 2026-11-25 (MediaMTX
+    v1.21.4, arm64, the pinned binary and the `camera-edge` image in Docker): HLS and
+    WHEP answer 401 with no credentials and with a wrong password; with the right
+    password HLS answers 200 and WHEP gets past auth (400 for an empty offer). Only the
+    API holds this secret and adds HTTP Basic auth to every call.
+  - `MTX_WEBRTCADDITIONALHOSTS`: the host name or address a browser can reach on UDP 8189
+    (a comma list). WebRTC media does not pass the API. Without a reachable address the
+    player falls back to LL-HLS after 6 s ([MediaMTX WebRTC](https://mediamtx.org/docs/features/webrtc-specific-features)).
+  - The API's four variables (all needed for `camera_live`; with one unset, the live
+    routes whose own URL, or the user or password, is unset answer 503 `camera-edge-unset`, and
+    `camera_live` is false, so the dialog keeps the MJPEG view):
+    `SCADBUDDY_CAMERA_EDGE_WHEP_URL` (the edge Service on 8889),
+    `SCADBUDDY_CAMERA_EDGE_HLS_URL` (on 8888), `SCADBUDDY_CAMERA_EDGE_READ_USER` and
+    `SCADBUDDY_CAMERA_EDGE_READ_PASS` (the edge read secret). They are bootstrap fields;
+    the Settings view shows the password as `set`, never its value.
+  - Lifetime of a pull (measured 2026-11-25, v1.21.4, by the real-MediaMTX e2e): the edge
+    config sets `hlsMuxerCloseAfter: 10s`. The relay's reader of the edge is gone about
+    50 s after the last HLS request (48.5 s measured; 69.2 s with the default 60 s). All
+    viewers of a printer share one pull from the relay, and the printer sees no extra client.
+- **No database and no key.** All three controllers refuse to start when
   `SCADBUDDY_DATABASE_URL`, `PGPASSWORD`, `PGPASSFILE`, `SCADBUDDY_SECRET_KEY_FILE` or
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` is set (exit 2, #5295; `camera/settings.py`).
 - **Probes.** Each controller answers `/healthz` on 9090 (`camera/process.py` `healthy`). It
@@ -2821,19 +2892,28 @@ holds the manifests. Phase 1 adds two Deployments; the live edge comes in phase 
 - **Metrics.** `/metrics` on each controller's 9090: the relay's
   `scadbuddy_camera_relay_pulling` and `scadbuddy_camera_relay_reconnects_total`, the
   recorders' `scadbuddy_camera_segments_indexed_total`, `_upload_lag_seconds`,
-  `_backlog_bytes`, `_leader` and `_last_segment_age_seconds` (the "Cameras" row of the
+  `_backlog_bytes`, `_leader` and `_last_segment_age_seconds`, and the edge's
+  `scadbuddy_camera_viewers` (MediaMTX readers of each printer's live path: one per WebRTC
+  session, one for the whole HLS muxer, so not a count of people) (the "Cameras" row of the
   printing dashboard). Scrape them as the workers are: a Service per Deployment
-  (`scadbuddy-camera-relay`, `scadbuddy-camera-recorder`) with a ServiceMonitor, as the
+  (`scadbuddy-camera-relay`, `scadbuddy-camera-recorder`, `scadbuddy-camera-edge`) with a ServiceMonitor, as the
   render worker's `servicemonitor-render.yaml` in eh-homelab/clusters. The dashboard's
   queries need the scrape's `namespace` and `pod` labels.
 - **Pod security.** uid 10001, `runAsNonRoot`, `allowPrivilegeEscalation: false`, every
   capability dropped, read-only root file system. Measured 2026-11-24 in Docker
-  (`--read-only --cap-drop ALL`): both MediaMTX configs start and the control API answers 200.
+  (`--read-only --cap-drop ALL`): the relay's and the recorders' MediaMTX configs start and the
+  control API answers 200. Measured 2026-11-25 in Docker with the same flags, for the edge image:
+  uid 10001, the HLS, WebRTC and UDP listeners come up, and the control API answers 200.
 - **Network policies.** The relay: ingress on 8554 from the recorder pods only, and the
   metrics scrape on 9090; egress to
   the printers' LAN (RTSPS, port 322 on the H2C, spec §2), the API's CRUD port 8082, and DNS.
   The recorders: egress to the relay's 8554, the API's 8082, the bucket and DNS; no ingress
-  but the metrics scrape on 9090. Temporal egress is phase 4's.
+  but the metrics scrape on 9090. Temporal egress is phase 4's. The relay's 8554 also
+  admits the edge's pods. The edge: ingress on 8888 and 8889 from the API's pods only, beside
+  the edge read password. An HLS session id acts as a bearer key once made: the browser gets
+  it in the proxied playlists, and the edge admits a request that names it without the read
+  password, so this policy alone keeps it from being used from other pods. Also 8189/udp from the browsers' networks, and
+  the scrape on 9090; egress to the relay's 8554, the API's 8082 and DNS.
 
 ### Switching continuous deploy off
 
@@ -2886,6 +2966,16 @@ worker's exists), and copying `deploy/grafana/` at that revision over
 `kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
+
+The Go services (scadbuddy-core, scadbuddy-fleet and bambuddy-fs, through the shared `tools/go/telemetry`)
+and the Rust slicer worker export traces, metrics and logs natively over OTLP/HTTP, with
+`OTEL_EXPORTER_OTLP_ENDPOINT` as the base of `/v1/traces`, `/v1/metrics` and `/v1/logs`. They
+share these rules with the services below: the endpoint and per-signal endpoint variables,
+`OTEL_<SIGNAL>_EXPORTER` and `OTEL_SDK_DISABLED`. Two differ: bambuddy-fs, with no endpoint, sends
+to eh-homelab's collector (`--no-telemetry` turns that off; `tools/go/bambuddy-fs/README.md`
+"Telemetry"), and only core samples with the rule that drops parentless client spans. See
+`tools/go/core/README.md` ("Telemetry"). A request that
+core forwards is one trace: core's span is the parent of the API's.
 
 The API, the render worker and the agent sidecar export OpenTelemetry traces over
 OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the

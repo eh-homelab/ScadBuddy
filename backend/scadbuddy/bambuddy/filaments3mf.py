@@ -289,12 +289,18 @@ def _sliced(root: ET.Element | None) -> dict[int, list[FilamentRequirement]]:
                 continue
             if slot is None or grams <= 0:
                 continue
+            try:
+                # #7685: the metres beside the grams; a missing or odd value is 0.
+                metres = float(node.get("used_m", "0"))
+            except ValueError:
+                metres = 0.0
             plates.setdefault(index, []).append(
                 FilamentRequirement(
                     slot_id=slot,
                     type=node.get("type", ""),
                     color=node.get("color", ""),
                     used_grams=round(grams, 1),
+                    used_meters=round(metres, 2) if metres > 0 else 0.0,
                 )
             )
     return {index: sorted(found, key=lambda f: f.slot_id) for index, found in plates.items()}

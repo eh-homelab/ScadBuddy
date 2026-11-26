@@ -108,14 +108,14 @@ describe('get_render_colours', () => {
     expect(Buffer.from(picture.data, 'base64')).toEqual(Buffer.from(PNG))
   })
 
-  it('keeps the legend when the image is too large to inline and comes back as a link', async () => {
+  it('keeps the legend when the image is too large to inline and goes to the workspace (#7745)', async () => {
     const { client } = backend(
       () => new Response(PNG, { headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000,#00FF00', 'x-scadbuddy-colour-columns': '2' } }),
     )
     const result = await runTool(
       tool('get_render_colours'),
       { job_id: 'c'.repeat(32) },
-      { ...ctx(client), maxInlineBytes: PNG.length - 1 },
+      { ...ctx(client), toolImageInlineMaxBytes: async () => PNG.length - 1 },
     )
     expect(firstText(result)).toMatchObject({
       tiles: [
@@ -123,7 +123,7 @@ describe('get_render_colours', () => {
         { colour: '#00FF00', row: 1, column: 2 },
       ],
     })
-    expect(result.content.some((c) => c.type === 'resource_link')).toBe(true)
+    expect(result.content.some((c) => c.type === 'text' && /"inline":\s*false/.test(c.text))).toBe(true)
     expect(result.content.some((c) => c.type === 'image')).toBe(false)
   })
 
@@ -194,18 +194,25 @@ describe('an explicit camera (#830)', () => {
   it.each([
     ['get_render_view', { job_id: job, view: 'front' }, `/api/v1/jobs/${job}/views/front.png`],
     ['get_output_view', { output_id: job, view: 'front' }, `/api/v1/outputs/${job}/views/front.png`],
-  ])('%s sends the camera, and links the same picture when it is over the cap', async (name, args, path) => {
+  ])('%s sends the camera, and keeps the same picture in the workspace when it is over the cap', async (name, args, path) => {
     const { client, seen } = backend(png)
     const inline = await runTool(tool(name), { ...args, size: 128, ...camera }, ctx(client))
     expect(inline.isError, JSON.stringify(inline)).toBeFalsy()
     expect(seen[0]!.path).toBe(path)
     expect(query(seen[0]!.search)).toEqual({ size: '128', ...sent })
 
-    const linked = await runTool(tool(name), { ...args, ...camera }, { ...ctx(client), maxInlineBytes: PNG.length - 1 })
-    const link = linked.content.find((c) => c.type === 'resource_link') as { uri: string }
-    const [linkPath, linkSearch] = link.uri.split('?')
-    expect(linkPath).toBe(path)
-    expect(query(linkSearch ?? '')).toEqual(sent)
+    const sources: string[] = []
+    const workspace = {
+      async write(_ws: unknown, file: string, bytes: Uint8Array, o: { mediaType: string; source: { route: string } }) {
+        sources.push(o.source.route)
+        return { path: file, mediaType: o.mediaType, size: bytes.byteLength, sha256: '0'.repeat(64) }
+      },
+    } as unknown as NonNullable<ToolContext['workspace']>
+    const kept = await runTool(tool(name), { ...args, ...camera }, { ...ctx(client), workspace, toolImageInlineMaxBytes: async () => PNG.length - 1 })
+    expect(kept.content.some((c) => c.type === 'image')).toBe(false)
+    const [keptPath, keptSearch] = sources[0]!.split('?')
+    expect(keptPath).toBe(path)
+    expect(query(keptSearch ?? '')).toEqual(sent)
   })
 
   it('leaves the query alone without one, so a named view is drawn as before', async () => {

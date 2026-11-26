@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { L } from '../../mocks/features/filament/seed'
+import { L, spoolId } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { renderPage } from '../../test/utils'
 import { SpoolsTab } from './SpoolsTab'
 
@@ -196,5 +197,19 @@ describe('the Spools tab', () => {
       expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true')
       expect(screen.getByRole('switch', { name: 'Remember my view' })).not.toBeChecked()
     })
+  })
+
+  it('marks a spool its required keys leave incomplete, and filters to those (#7703)', async () => {
+    entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+    seedEntityProperties(`spool:${spoolId(1)}`, { lot_number: 'L-1' })
+    const { user } = render()
+    const rows = spoolRows(await table())
+    const one = rows.find((row) => row.dataset.spool === '1')!
+    const two = rows.find((row) => row.dataset.spool === '2')!
+    expect(within(two).getByText('Missing required: lot_number')).toBeVisible()
+    expect(within(one).queryByText(/Missing required/)).toBeNull()
+    await user.click(screen.getByRole('checkbox', { name: 'Only incomplete' }))
+    await waitFor(async () => expect(spoolRows(await table()).map((row) => row.dataset.spool)).not.toContain('1'))
+    expect(spoolRows(await table()).length).toBe(rows.length - 1)
   })
 })

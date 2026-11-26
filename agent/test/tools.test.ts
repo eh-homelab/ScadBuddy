@@ -569,6 +569,24 @@ describe('render_model', () => {
     expect(firstText(done)).toMatchObject({ status: 'done' })
     expect(saved).toEqual({ job_id: 'j', name: null, inputs })
   })
+
+  // Review of #7869: an order item's kit names save_output for the outputs it has not saved,
+  // so the tool takes which of a pipeline job's outputs to keep.
+  it("keeps the pipeline job's output that `index` names", async () => {
+    const saved: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/outputs`, async ({ request }) => {
+        saved.push(await request.json())
+        return HttpResponse.json({ id: '0123456789abcdef0123456789abcdef' }, { status: 201 })
+      }),
+    )
+    await runTool(tool('save_output'), { slug: 'box', job_id: 'j', index: 2 }, ctx())
+    await runTool(tool('save_output'), { slug: 'box', job_id: 'j' }, ctx())
+    expect(saved).toEqual([
+      { job_id: 'j', name: null, index: 2 },
+      { job_id: 'j', name: null },
+    ])
+  })
 })
 
 describe('uploads', () => {
@@ -1976,6 +1994,56 @@ describe('get_printer_camera (#796)', () => {
   })
 })
 
+describe('camera feed state and reconnect (#7330)', () => {
+  const printer = '0f0e0d0c-0b0a-4908-8706-050403020100'
+  const state = {
+    recorded: true,
+    live: false,
+    feeds: [{ part: 'relay', state: 'retrying', detail: 'connection refused', updated_at: '2026-11-25T10:00:00Z' }],
+  }
+
+  it("reads a printer's feed state, marked untrusted, at read", async () => {
+    server.use(http.get(`${BACKEND}/api/v1/printers/${printer}/camera`, () => HttpResponse.json(state)))
+    const t = tool('get_printer_camera_state')
+    expect(t.risk).toBe('read')
+    const result = await runTool(t, { printer_id: printer }, ctx({ principal: { id: 'r', kind: 'bearer', tiers: ['read'] } }))
+    expect(result.isError).toBeFalsy()
+    const text = (result.content[0] as { text: string }).text
+    expect(JSON.parse(text)).toMatchObject({ untrusted_data: { tool: 'get_printer_camera_state' } })
+    expect(text).toContain('connection refused')
+  })
+
+  it('refuses a printer id that is not a registry uuid, before any request', async () => {
+    const result = await runTool(tool('get_printer_camera_state'), { printer_id: '7' }, ctx())
+    expect(result.isError).toBe(true)
+  })
+
+  it('reconnects at write, with no approval, and passes the 409 of a printer not recorded', async () => {
+    let posted = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/printers/${printer}/camera/reconnect`, () => {
+        posted += 1
+        return posted === 1
+          ? HttpResponse.json({ printer_id: printer }, { status: 202 })
+          : HttpResponse.json(
+              { type: 'https://scadbuddy.dev/problems/camera-not-recorded', title: 'Conflict', status: 409, detail: `printer ${printer} is not recorded` },
+              { status: 409, headers: { 'content-type': 'application/problem+json' } },
+            )
+      }),
+    )
+    const t = tool('reconnect_printer_camera')
+    expect(t.risk).toBe('write')
+    const writer = ctx({ principal: { id: 'w', kind: 'bearer', tiers: ['read', 'write'] } })
+    const done = await runTool(t, { printer_id: printer }, writer)
+    expect(done.isError).toBeFalsy()
+    expect((done.content[0] as { text: string }).text).toContain(printer)
+    const refused = await runTool(t, { printer_id: printer }, writer)
+    expect(refused.isError).toBe(true)
+    expect((refused.content[0] as { text: string }).text).toContain('not recorded')
+    expect(posted).toBe(2)
+  })
+})
+
 describe('analyze_geometry', () => {
   it('tells the model about weak joints and the split each suggests', () => {
     const t = tool('analyze_geometry')
@@ -2327,22 +2395,25 @@ describe('binary results: inline under the cap, a link over it', () => {
     expect((result.content[1] as { text: string }).text).toContain('SCADBUDDY_PUBLIC_URL')
   })
 
-  it('get_asset with content: small image inline, large one linked', async () => {
+  it('get_asset with content: small image inline, one over the image limit never inline and never a path (#7745)', async () => {
     const asset = 'b'.repeat(64)
-    let size = 4
+    let size = 16
     server.use(
       http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset })),
       http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () =>
-        new HttpResponse(new Uint8Array(size), { headers: { 'content-type': 'image/png' } }),
+        new HttpResponse(PNG_BYTES(size), { headers: { 'content-type': 'image/png' } }),
       ),
     )
     const args = { slug: 'box', asset_id: asset, include_content: true }
-    const small = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
+    const limit = { toolImageInlineMaxBytes: async () => 16 }
+    const small = await runTool(tool('get_asset'), args, ctx(limit))
     expect(small.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
     size = 64
-    const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
+    const large = await runTool(tool('get_asset'), args, ctx(limit))
     expect(large.isError).toBeFalsy()
-    expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
+    expect(large.content.map((c) => c.type)).toEqual(['text', 'text'])
+    expect(JSON.stringify(large.content)).toMatch(/inline.{0,6}false/)
+    expect(JSON.stringify(large.content)).not.toContain('/api/v1/models/box/assets')
   })
 
   it("get_asset with content: a mesh's picture is its preview, never its bytes (#959)", async () => {
@@ -2351,13 +2422,17 @@ describe('binary results: inline under the cap, a link over it', () => {
       http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset, kind: 'stl', triangles: 12 })),
       http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () => HttpResponse.json({}, { status: 500 })),
       http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/preview`, () =>
-        new HttpResponse(new Uint8Array(4), { headers: { 'content-type': 'image/png' } }),
+        new HttpResponse(PNG_BYTES(16), { headers: { 'content-type': 'image/png' } }),
       ),
     )
     const answer = await runTool(tool('get_asset'), { slug: 'box', asset_id: asset, include_content: true }, ctx({ maxInlineBytes: 16 }))
     expect(answer.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
   })
 })
+
+/** Bytes that start as a PNG or a JPEG, so a tool image is typed by its signature (#7745). */
+const PNG_BYTES = (size: number) => { const b = new Uint8Array(size); b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]); return b }
+const JPEG_BYTES = (size: number) => { const b = new Uint8Array(size); b.set([0xff, 0xd8, 0xff]); return b }
 
 describe("tools for #324's routes", () => {
   const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
@@ -2374,13 +2449,13 @@ describe("tools for #324's routes", () => {
     expect(firstText(await runTool(tool('get_asset_usage'), {}, ctx()))).toMatchObject({ count: 1 })
   })
 
-  it('draws a view inline, and links it when it is over the cap', async () => {
+  it('draws a view inline, and answers a note, not a path, over the image limit', async () => {
     const job = 'd'.repeat(32)
     let requested = ''
     server.use(
       http.get(`${BACKEND}/api/v1/jobs/${job}/views/top.png`, ({ request }) => {
         requested = new URL(request.url).search
-        return new HttpResponse(new Uint8Array(32), { headers: { 'content-type': 'image/png' } })
+        return new HttpResponse(PNG_BYTES(32), { headers: { 'content-type': 'image/png' } })
       }),
     )
     const inline = await runTool(tool('get_render_view'), { job_id: job, view: 'top', size: 256 }, ctx())
@@ -2393,8 +2468,9 @@ describe("tools for #324's routes", () => {
     })
     expect(inline.content[1]).toMatchObject({ type: 'image', mimeType: 'image/png' })
     expect(requested).toBe('?size=256')
-    const linked = await runTool(tool('get_render_view'), { job_id: job, view: 'top' }, ctx({ maxInlineBytes: 8 }))
-    expect(linked.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/jobs/${job}/views/top.png` })
+    const over = await runTool(tool('get_render_view'), { job_id: job, view: 'top' }, ctx({ toolImageInlineMaxBytes: async () => 8 }))
+    expect(over.content.some((c) => c.type === 'image' || c.type === 'resource_link')).toBe(false)
+    expect(JSON.stringify(over.content)).not.toContain(`/api/v1/jobs/${job}`)
   })
 
   it('removing a library checkout is outward (irreversible) and only prepares', async () => {
@@ -2621,7 +2697,7 @@ describe('print media (#307)', () => {
   it('fetches a print photo by its Bambuddy file name, as an image', async () => {
     server.use(
       http.get(`${BACKEND}/api/v1/prints/35/photos/finish_1790488620_ab12.jpg`, () =>
-        new HttpResponse(new Uint8Array(8), { headers: { 'content-type': 'image/jpeg' } }),
+        new HttpResponse(JPEG_BYTES(8), { headers: { 'content-type': 'image/jpeg' } }),
       ),
     )
     const result = await runTool(tool('get_print_image'), { archive_id: 35, photo: 'finish_1790488620_ab12.jpg' }, ctx())

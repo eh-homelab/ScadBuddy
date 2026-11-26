@@ -221,6 +221,9 @@ importers:
       embla-carousel-react:
         specifier: ^8.6.0
         version: 8.6.0(react@19.3.1)
+      hls.js:
+        specifier: 1.7.4
+        version: 1.7.4
       lucide-react:
         specifier: 1.77.0
         version: 1.77.0(@types/react@19.3.0)(react@19.3.1)
@@ -2430,8 +2433,8 @@ packages:
   hermes-parser@0.25.1:
     resolution: {integrity: sha512-6pEjquH3rqaI6cYAXYPcz9MS4rY6R4ngRgrgfDshRptUZIc3lw0MCIJIGDj9++mfySOuPTHB4nrSW99BCvOPIA==}
 
-  hls.js@1.7.3:
-    resolution: {integrity: sha512-MsPlx6yVW4Qv4C7mEVou4/gk/5cN2dVxOTnrNjPSmyH2f0Ln+/UkG10Ax1PE6OvrmTVPKgQYozTtBaPOuCzq7A==}
+  hls.js@1.7.4:
+    resolution: {integrity: sha512-3GlxGdPvT2YHvQYOt+yOzT/DEior/qJVNIylHA77kgeoBTdQQqi70GwefNEUmHQeNGyjC8U62+bruqW/Tpm+tg==}
 
   hookified@1.15.1:
     resolution: {integrity: sha512-MvG/clsADq1GPM2KGo2nyfaWVyn9naPiXrqIe4jYjXNZQt238kWyOGrsyc/DmRAQ+Re6yeo6yX/yoNCG5KAEVg==}
@@ -4741,7 +4744,7 @@ snapshots:
       cross-env: 7.0.3
       detect-gpu: 5.0.70
       glsl-noise: 0.0.0
-      hls.js: 1.7.3
+      hls.js: 1.7.4
       maath: 0.10.8(@types/three@0.187.0)(three@0.187.0)
       meshline: 3.3.1(three@0.187.0)
       react: 19.3.1
@@ -5570,7 +5573,7 @@ snapshots:
     dependencies:
       hermes-estree: 0.25.1
 
-  hls.js@1.7.3: {}
+  hls.js@1.7.4: {}
 
   hookified@1.15.1: {}
 

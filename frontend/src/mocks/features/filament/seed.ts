@@ -512,7 +512,7 @@ function events(): S['SpoolEvent'][] {
     event(2, '2026-11-02T08:00:00Z', 'weighed', { source: 'scale', grams_before: 1000, grams_after: 995, delta_g: -5 }),
     event(2, '2026-11-03T20:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 995, delta_g: -55, ref_kind: 'bb_usage', ref_id: 'usage-c', actor: 'bambuddy', data: { job: 'job-c', basis: 'bb_usage', bb_archive_id: 41, bb_status: 'completed' } }),
     event(2, '2026-11-05T09:30:00Z', 'moved', { grams_before: 940, data: { from: L.SHELF_A, to: L.DRY_BOX } }),
-    event(2, '2026-11-06T16:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 940, delta_g: -35, ref_kind: 'print_run', ref_id: 'run3/job-d/0', actor: 'system:printer-watch', data: { job: 'job-d' } }),
+    event(2, '2026-11-06T16:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 940, delta_g: -35, ref_kind: 'print_run', ref_id: 'run3/job-d/0', actor: 'system:printer-watch', data: { job: 'job-d', basis: 'sliced', length_m: 11.7 } }),
     event(2, '2026-11-09T11:00:00Z', 'print_ended', { ...printer, source: 'print_actual', grams_before: 905, delta_g: -30, ref_kind: 'bb_usage', ref_id: 'usage-e', actor: 'bambuddy', data: { job: 'job-e', basis: 'bb_usage', bb_archive_id: 42, bb_status: 'failed' } }),
     event(2, '2026-11-10T14:00:00Z', 'edited', { grams_before: 875, actor: 'service:agent', data: { changes: { cost_per_kg: [null, '25.0000'] }, author: { principal: 'person@example.com', session: 'mock-session', tool: 'filament_update_spool' } } }),
     event(2, '2026-11-11T09:00:00Z', 'edited', { grams_before: 875, data: { changes: { cost_per_kg: ['25.0000', null] } } }),

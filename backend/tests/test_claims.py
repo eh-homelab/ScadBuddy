@@ -1,5 +1,6 @@
 import hashlib
 import os
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -111,28 +112,50 @@ def test_a_put_survives_the_sweep_removing_the_claim_under_it(
     assert claims.get(name) == b"a"
 
 
-def test_a_claim_renewed_while_the_sweep_looks_at_it_survives(
+#: The puts `_put_waits_on_the_lock` started, joined by each test once its call returns.
+_PUTS: list[threading.Thread] = []
+
+
+def _put_waits_on_the_lock(
+    claims: ClaimStore, name: str, monkeypatch: pytest.MonkeyPatch
+) -> list[bool]:
+    """Patch ``os.stat`` so that the first stat of the claim ``name`` (the check of a
+    release or the sweep) starts a put of its bytes in a thread, and records whether that
+    put was still waiting on the store's lock when the check went on (#7947)."""
+    stat = os.stat
+    waited: list[bool] = []
+
+    def stat_with_a_put(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if Path(path).name == name and not waited:
+            put = threading.Thread(target=claims.put, args=(b"a",))
+            put.start()
+            _PUTS.append(put)
+            put.join(timeout=0.3)
+            waited.append(put.is_alive())
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_with_a_put)
+    return waited
+
+
+def _join_puts() -> None:
+    while _PUTS:
+        _PUTS.pop().join(timeout=5)
+
+
+def test_a_put_waits_while_the_sweep_checks_and_removes_a_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Review 3c 1.4: a put between the sweep's stat and its removal keeps the claim."""
-    claims = ClaimStore(tmp_path)
+    """#7947 (review 3c 1.4): a put of an old claim's bytes cannot come between the
+    sweep's check and its removal; it waits on the lock, then writes the claim anew."""
+    claims = ClaimStore(tmp_path / "claims")
     name = claims.put(b"a")
     past = time.time() - timedelta(days=2).total_seconds()
-    os.utime(tmp_path / name, (past, past))
-    stat = Path.stat
-    renewed = False
-
-    def stat_then_renew(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
-        nonlocal renewed
-        result = stat(self, *args, **kwargs)
-        if self.name == name and not renewed:
-            renewed = True
-            claims.put(b"a")
-        return result
-
-    monkeypatch.setattr(Path, "stat", stat_then_renew)
-    assert claims.sweep(timedelta(days=1)) == 0
-    assert renewed
+    os.utime(tmp_path / "claims" / name, (past, past))
+    waited = _put_waits_on_the_lock(claims, name, monkeypatch)
+    assert claims.sweep(timedelta(days=1)) == 1
+    _join_puts()
+    assert waited == [True]
     assert claims.get(name) == b"a"
 
 
@@ -174,6 +197,45 @@ def test_release_keeps_a_claim_another_request_put_since(tmp_path: Path) -> None
     claims.release(b)
     assert claims.get(a.name) == b"a"
     assert [path.name for path in tmp_path.iterdir()] == [a.name]
+
+
+def test_release_never_moves_a_claim_another_request_put_since(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7853: B renewed the claim A created, and B's run may be reading it. A's release
+    leaves it in place: a move aside and back would leave no file for a moment, and a
+    read of B's in that gap is a LookupError (two copies of one archive photo, #7232)."""
+    claims = ClaimStore(tmp_path)
+    a = claims.hold(b"a")
+    claims.hold(b"a")
+    moved: list[tuple[Any, Any]] = []
+    rename = os.rename
+
+    def recording_rename(src: Any, dst: Any) -> None:
+        moved.append((src, dst))
+        rename(src, dst)
+
+    monkeypatch.setattr(os, "rename", recording_rename)
+    claims.release(a)
+    assert moved == []
+    assert claims.get(a.name) == b"a"
+
+
+def test_a_put_waits_while_a_release_checks_and_removes_its_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7947: a put of the same bytes cannot come between `release`'s check (still the
+    file its hold wrote) and its removal, so the claim's name is never missing while
+    another put's file is there (two copies of one archive photo, #7232). The put waits
+    on the lock, then writes the claim anew."""
+    claims = ClaimStore(tmp_path / "claims")
+    held = claims.hold(b"a")
+    waited = _put_waits_on_the_lock(claims, held.name, monkeypatch)
+    claims.release(held)
+    _join_puts()
+    assert waited == [True]
+    assert claims.get(held.name) == b"a"
+    assert [path.name for path in (tmp_path / "claims").iterdir()] == [held.name]
 
 
 def test_hold_file_moves_a_streamed_file_in_and_a_second_renews_it(tmp_path: Path) -> None:

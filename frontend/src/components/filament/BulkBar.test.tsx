@@ -150,4 +150,27 @@ describe('the bulk bar', () => {
     await user.click(screen.getByRole('button', { name: 'Labels' }))
     expect(screen.getByText('/filament/labels?ids=id1,id2')).toBeInTheDocument()
   })
+
+  it('sets a type with the unchecked bulk-update, so an incomplete spool takes it (#7703)', async () => {
+    const bodies: unknown[] = []
+    let patched = 0
+    server.use(
+      http.post('/api/v1/filament/spools/bulk-update', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ changed: ['s1'], unchanged: [], not_found: [] })
+      }),
+      http.patch('/api/v1/filament/spools/:id', () => {
+        patched += 1
+        return HttpResponse.json({}, { status: 500 })
+      }),
+    )
+    const onDone = vi.fn()
+    const types = [{ id: 't1', code: 'PLA-RED', colour_name: null }] as unknown as Parameters<typeof BulkBar>[0]['types']
+    const { user } = renderPage(<BulkBar selected={[two[1]!]} places={[]} types={types} onDone={onDone} onClear={() => {}} />)
+    await user.click(screen.getByRole('button', { name: /Set type/ }))
+    await user.click(await screen.findByRole('menuitem', { name: /PLA-RED/ }))
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('Set PLA-RED on 1 spool.'))
+    expect(bodies).toEqual([{ spool_ids: ['s1'], patch: { type_id: 't1' } }])
+    expect(patched).toBe(0)
+  })
 })

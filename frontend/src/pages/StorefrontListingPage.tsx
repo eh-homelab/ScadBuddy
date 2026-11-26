@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftIcon } from 'lucide-react'
 import { api, ApiError } from '../api/client'
-import type { CustomizerSchema, ModelSummary, StorefrontFileSnapshot, StorefrontListing, StorefrontListingInput } from '../api/types'
+import type { ModelSummary, StorefrontFileSnapshot, StorefrontListing, StorefrontListingInput } from '../api/types'
 import { ListingEditor } from '../components/storefront/ListingEditor'
 import { PrepareColours } from '../components/storefront/PrepareColours'
 import type { LivePictures } from '../components/storefront/ListingPictures'
@@ -24,6 +24,7 @@ import {
   switchSource,
   unsaveable,
   withoutUnknown,
+  type DesignSchema,
   type ListingDraft,
   type ListingRefusal,
 } from '../components/storefront/listingDraft'
@@ -164,7 +165,7 @@ function message(error: unknown): string {
 }
 
 /** The alert for a refusal said beside its control (#6258, #6144): it points there. */
-function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefined): string {
+function refusalAlert(refusal: ListingRefusal, schema: DesignSchema | undefined): string {
   if (refusal.kind === 'material_not_allowed') return 'Not published: a colour on offer is of a material this listing does not allow. See “Materials allowed” below.'
   if (refusal.kind === 'locked_colours_unprintable') return 'Not published: no allowed material can print these colours. See “Colours on offer” below.'
   if (refusal.kind === 'filament_unknown') return 'Not published: a colour on offer is no longer in the price book. Untick it under “Colours on offer”, then publish again.'
@@ -175,7 +176,12 @@ function refusalAlert(refusal: ListingRefusal, schema: CustomizerSchema | undefi
   const param = schema?.parameters?.find((p) => p.name === refusal.name)
   // #5701: a parameter the design sets itself has no row of its own. Until the schema is
   // read, the Design block shows no note, so the alert names the parameter instead.
-  if (refusal.kind === 'param' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
+  if (refusal.kind === 'param' && refusal.code === 'pipeline_set' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return 'Not published: the design needs a change. See the note under “Design” below.'
+  // #7862: another refusal of a parameter the design sets has no row and no note either.
+  if (refusal.kind === 'param' && schema?.pipeline_params?.includes(refusal.name)) return `Not published: “${param?.caption || refusal.name}” needs a change, but the design sets it itself, so this editor shows no row for it.`
+  // #7778: any other refusal of a parameter with no row (a hidden one, or one this version
+  // does not have) has no note under it to point to.
+  if (refusal.kind === 'param' && schema && !shownParams(schema).some((p) => p.name === refusal.name)) return `Not published: “${param?.caption || refusal.name}” needs a change, but this editor shows no row for it: it is a hidden parameter of this design, or one this version does not have.`
   return `Not published: “${param?.caption || refusal.name}” needs a change. See the note under it below.`
 }
 

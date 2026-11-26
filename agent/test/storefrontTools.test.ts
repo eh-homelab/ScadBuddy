@@ -275,8 +275,26 @@ describe('storefront tools (#6131)', () => {
           expect(posted, vector.name).not.toHaveProperty('inputs_v')
         }
         expect(Object.keys((posted?.['params'] as object | undefined) ?? {}), vector.name).not.toContain('piece')
-        expect(result['notes'], vector.name).toEqual([])
+        // An output with none of the design's own inputs says so (the vectors' empty case).
+        const empty = inputs !== undefined && Object.keys(inputs as object).length === 0
+        expect(result['notes'], vector.name).toEqual(
+          empty
+            ? [
+                `The output holds none of Dollhouse's own design inputs (its pipeline's), so the listing starts with none: open the listing at /storefront/listings/${LISTING} and press "Set up the design" before you publish it.`,
+              ]
+            : [],
+        )
       }
+    })
+
+    it('takes empty inputs at version 0 from an output that holds no inputs at all, and says so', async () => {
+      let posted: Record<string, unknown> | undefined
+      serveDollhouse({ params: { course: 200 } }, (body) => (posted = body as Record<string, unknown>))
+      const result = firstText(await tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE }, ctx())) as Record<string, unknown>
+      expect(posted).toMatchObject({ inputs: {}, inputs_v: 0, fixed: { course: 200 } })
+      expect(result['notes']).toEqual([
+        `The output holds none of Dollhouse's own design inputs (its pipeline's), so the listing starts with none: open the listing at /storefront/listings/${LISTING} and press "Set up the design" before you publish it.`,
+      ])
     })
 
     it('sets no inputs from a model, and says the design needs setting up in the editor', async () => {
@@ -288,6 +306,17 @@ describe('storefront tools (#6131)', () => {
       expect(result['notes']).toEqual([
         `Dollhouse has a design of its own to set up (its pipeline's inputs), which a model brings none of: open the listing at /storefront/listings/${LISTING} and press "Set up the design" before you publish it, or draft it from a saved output of that design.`,
       ])
+    })
+
+    it('says a version whose pipeline declares no inputs cannot be listed, not to set it up (#7879)', async () => {
+      const faulted = { ...house.schema, pipeline: { inputs_version: null, inputs: null, fault: 'pipeline/__init__.py: no module named inputs' } } as Schema
+      const said = `This version of Dollhouse cannot be listed: its pipeline declares no inputs (pipeline/__init__.py: no module named inputs), so the editor offers no "Set up the design" and publish refuses it (listing_inputs_undeclared). Choose another version in the editor, or fix the template and draft it again.`
+      serveDollhouse(house.source, () => {}, faulted)
+      const fromModel = firstText(await tool('storefront_listing_draft').execute({ slug: 'dollhouse' }, ctx())) as Record<string, unknown>
+      expect(fromModel['notes']).toEqual([said])
+      serveDollhouse({ params: { course: 200 } }, () => {}, faulted)
+      const fromOutput = firstText(await tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE }, ctx())) as Record<string, unknown>
+      expect(fromOutput['notes']).toEqual([said])
     })
 
     it('refuses to lock or set a parameter the pipeline sets itself', async () => {

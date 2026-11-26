@@ -9,9 +9,10 @@ The **Filament** section is ScadBuddy's own filament inventory. It covers:
 - suppliers, price sheets, invoices and a shopping list;
 - locations with humidity and temperature sensors;
 - RFID tags, NTAG labels, and printed QR labels for spools, places, printers, AMS units and slots;
-- a printer's K-profiles (pressure advance) through Bambuddy: list, set, batch set, delete and notes;
-- a printer's AMS slots through Bambuddy: configure a slot by hand, its saved slicer preset, refresh
-  and reset, load and unload, and the AMS units' labels;
+- a printer's K-profiles (pressure advance) over ScadBuddy's own LAN link: list, set, batch set,
+  delete, and ScadBuddy's notes on them;
+- a printer's AMS slots over ScadBuddy's own LAN link: configure a slot by hand, refresh and reset,
+  load and unload; and ScadBuddy's own saved slicer preset per slot and label per AMS unit;
 - a ledger of spool events, with history, metrics and a forecast;
 - key-value properties on spools and spool types (#7026).
 
@@ -105,8 +106,11 @@ Filament presets are ScadBuddy's own (#7176, plan
 `filament_presets`, each document a blob with every version kept. A type or spool names one
 by the ref `sb-<id>` in `slicer_filament`. The native slicer reads them from ScadBuddy's
 store; Bambuddy knows each one only by its mirror's local preset id
-(`EffectivePreset.bambuddy_id`), which its slice path, the spool push and the AMS slot
-configure send. ScadBuddy owns the presets, and Bambuddy is at most a mirror target or
+(`EffectivePreset.bambuddy_id`), which its slice path and the spool push send. The print
+dialog's tray-question answer sends no preset: it names the tray and the spool, and Bambuddy
+configures the tray from the spool it already holds (below). The AMS slot configure sends none:
+it goes over the LAN and names the preset through the native catalogue (`printers/ams_slots.py`
+`slot_ids`). ScadBuddy owns the presets, and Bambuddy is at most a mirror target or
 the source of an import (#7244, the owner's decision of 2026-11-23): ScadBuddy keeps no
 copy of Bambuddy's local presets, and the native slicer, the print dialog and the profile
 fill read none. Bambuddy's presets come in three ways only, each reading `GET
@@ -147,25 +151,46 @@ wins over 3DFP's (#7142). Fetching presets is the `ProfileFetch` workflow on the
 profile-fetch worker, and a 3DFP search or add is its `TdfpSearch` or `TdfpCreate` workflow (#7025, `filament/tdfp.py`)
 ([processes.md](../architecture/processes.md#profile-fetch-worker-and-browser)).
 
-A printer's K-profiles (#7154, plan
-`docs/superpowers/plans/2026-11-23-printer-kprofiles.md`) are read from the printer through
-the Bambuddy printer its registry row links, and shown on its card in Settings → Printers
-(closed until opened: each read asks the printer over MQTT). Each write (set, batch set,
-delete, a note's set and delete) is an operation on the `bambuddy` queue, so the print
-worker makes the call. Set, batch and delete run once: Bambuddy dedupes none of them, and a
-write the printer did not acknowledge answers `confirmed: false`. ScadBuddy keeps no copy;
-the notes live in Bambuddy, under the keys its own K-Profiles page uses.
+A printer's K-profiles (#7154, moved off Bambuddy by #7276, plan
+`docs/superpowers/plans/2026-11-25-filament-hardware-off-bambuddy.md` Task 7) are read from
+and written to the printer over ScadBuddy's own LAN link: MQTT `extrusion_cali_*` commands
+(`backend/scadbuddy/printers/lan_commands.py`) run by the `LanCommand` workflow
+(`backend/scadbuddy/workflows/lan_command.py`), routes
+`backend/scadbuddy/api/printer_kprofiles.py`. They are shown on the printer's card in
+Settings → Printers (closed until opened: each read asks the printer). The printer must be
+linked over the LAN (409 `not_lan_linked`) and heard from lately (409 `printer_offline`).
+Set, batch set and delete take an `Idempotency-Key`: a key sent again joins the run it
+started or reads its outcome, so the command reaches the printer once; a write the printer
+did not acknowledge answers `confirmed: false`. A printer slow to answer gets a 202 with the
+run's id, followed at `GET /printers/{id}/commands/{command_id}`. The notes are ScadBuddy's
+own (`backend/scadbuddy/printers/command_data.py`), under the keys Bambuddy's K-Profiles page
+uses; nothing about them is sent to the printer or to Bambuddy.
 
-A printer's AMS slots (#7153, plan `docs/superpowers/plans/2026-11-23-ams-slot-control.md`)
-are read from Bambuddy's live status of the printer its registry row links, and shown on its
-card in Settings → Printers ("AMS slots", closed until opened). The routes call Bambuddy in
-the request. Each write that reaches the printer (configure, reset, refresh, load, unload)
-reads Bambuddy's status first and refuses with a 409 and a `code` while the printer prints,
-while the AMS is busy, or where the slot is not there; load also refuses an empty slot or the
-one already feeding, and refresh refuses while filament is loaded. Configure takes any SB
-spool (its values and its type's preset and K value for the slot's nozzle) or the values by
-hand. A slot's saved preset and an AMS unit's label live in Bambuddy; a label write also
-names ScadBuddy's place of the unit. The page asks before every printer write.
+A printer's AMS slots (#7153, moved off Bambuddy by #7276, same plan, Task 8) are read from
+the printer's latest LAN report, and shown on its card in Settings → Printers ("AMS slots",
+closed until opened). Each command (configure, reset, refresh, load, unload) is MQTT over the
+same LAN link (`backend/scadbuddy/api/printer_slots.py`), sent under an `Idempotency-Key` as
+above. Before it sends, ScadBuddy's own guard (`backend/scadbuddy/printers/ams_slots.py`
+`guard`) reads that report and refuses with a 409 and a `code`: `printer_offline` (no fresh
+report), `printer_busy` (a print is active), `ams_busy`, `no_slot`; load also refuses an empty
+slot (`tray_empty`) or the one already feeding (`already_loaded`), and refresh refuses while
+filament is loaded (`filament_loaded`). Configure takes any SB spool (its values and its type's
+preset and K value for the slot's nozzle) or the values by hand. A slot's saved preset is
+ScadBuddy's own (`printers/command_data.py`), and an AMS unit's label is the name of
+ScadBuddy's place of the unit; neither is sent to the printer or to Bambuddy. A reset clears
+the saved preset only when the printer confirms it in the route's own answer (P43); otherwise
+the page says the preset was kept. The page asks before every printer write.
+
+An override tag's slot is configured the same way: the RFID reconcile
+(`backend/scadbuddy/filament/rfid_slots.py`) runs the configure's commands over the LAN link
+and does not call Bambuddy.
+
+One write to a printer still goes through Bambuddy. The print dialog's tray-question
+answer (`BambuddyClient.assign_spool`, `POST /inventory/assignments`) places the spool at the
+tray in ScadBuddy and writes Bambuddy's assignment for a linked spool, after which Bambuddy
+configures the tray over MQTT. #7641 moves it. The K-profile read for the profile fill
+(`BambuddyClient.k_profiles`, `filament/profile_fetch.py`) also stays on Bambuddy until
+[#7604](https://github.com/eh-homelab/ScadBuddy/issues/7604).
 
 ### Weighing breakdown (#7682)
 
@@ -218,14 +243,97 @@ so it raises no Drift mark: the person just explained the gap. The timeline says
 100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
 scale was tared on the spool)". Design: the same spec, §5.3.
 
-### The phone page (#7273)
+### End of life: finished, respooled, damaged out (#7684)
 
-`/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
-(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`). It works only in Chrome on
+Archive asks why the spool goes and offers one last weighing. The spool page's Archive
+button opens a dialog: a reason (`finished`, `respooled`, `damaged`, `other`; the dialog
+needs one, the API keeps it optional, and the sync's archives record `other`), and the
+scale reading with the spool when its empty weight is known, else the filament left.
+`GET /filament/spools/{id}/closing` previews, as the inputs settle, what the archive would
+record, and says when the numbers disagree with the reason: a finished spool with more
+than the setting `filament_weighing_finished_left_g` (5 g by default) still on it ("30 g of
+filament are still on it."), or any other reason at or under it ("It reads empty; is it
+finished?"), and what the archive would refuse: a reading with no empty weight known
+(`no_empty_weight`), under it (`reading_below_empty`) or under the `final_grams` sent with
+it (`reading_below_grams`, #7909); such a reading closes on nothing. The person can go on;
+nothing refuses. `POST /filament/spools/{id}/archive`
+takes `reason`, `final_reading_g` and `final_grams`: a final weighing is booked as a
+`weighed` event just before the `archived` event, by the same rules as any weighing
+(422 `no_empty_weight`, `reading_below_empty`; a restore takes neither).
+
+The `archived` event's `data` keeps the lifetime reconciliation: `reason`, `started_g` and
+`started_from` (`reading`, the spool's first scale or by-hand filament reading, or `label`,
+the label weight of an added-full spool), `ledger_consumed_g` (the plates since that start,
+never reset by a used-counter reset), `final_filament_g`, `scale_consumed_g` (start less
+final filament, null without a final weighing) and `drift_g` (ledger less scale: negative
+means the scale found less filament than the ledger expected). An archived spool's Weight
+section says it in one sentence ("Finished on 25 Nov 2026: started with 1000 g (from the
+label), the ledger used 508 g, the scale says 520 g were used; 12 g less than the ledger
+expected." or "…the ledger used 508 g; not weighed at the end."), and the timeline shows
+the reason on the archive.
+
+Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
+filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
+with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and not
+yet continued by a spool that still exists (422 `continued_from_taken`, #7909), and the
+request makes one spool. The new spool's `created` event keeps `continued_from`, the source's
+newest `archived` event gets `continued_as`, and the timeline links the two ends. A spool
+archived before #7684 has no closing: its page shows none (#7909). The agent's
+`filament_spool_archive` takes the reason and the final reading, `filament_spool_closing` (a
+read) previews the closing and its notices, and `filament_spool_upsert` takes `continued_from`. Design: the same spec, §5.4 and §5.5.
+
+### Length and the density check (#7685)
+
+A LAN print books its filament length beside its grams: the sliced plate's `used_m` per
+filament (Bambu Studio writes it beside `used_g` in `Metadata/slice_info.config`; measured on
+`backend/tests/printers/fixtures/rack-slice-info-h2c.config`) is read by
+`slicing/slice_info.py` `plate_uses` with the grams, rides in `LanUploaded.length_by_slot`
+and `SlotUse.length_m`, and is kept as `data.length_m` on the `print_started` event (absent
+when the plate gave the slot no length, or when a slot merged onto the plate's first filament
+has a source with grams but no length, #7932) and copied onto its `print_ended` (`0.0` on a
+failed plate, as its grams are 0). Bambuddy's usage rows have no length and keep none, so a plate
+Bambuddy also booked (the paired plate counts once, as the BB row) takes the length of
+ScadBuddy's own end of the job. The spool's
+history (`GET /filament/spools/{id}/history`) sums the metres of the plates that carry a
+length over 0 m (`metrics.used_m`, null when none does: a spool whose lengthed plates all
+failed has no metres, not 0 m), derives the density those plates' grams and metres
+imply over the spool's effective diameter (`implied_density_g_cm3`; 1 m of 1.75 mm filament
+at 1.24 g/cm³ is 2.98 g) and compares it with the type's (`density_g_cm3`): apart by more
+than 5 % is `density_mismatch`. For a plate ScadBuddy alone booked, both numbers are the
+slicer's, so the implied density is the slicer preset's density read back, not a
+measurement: a mismatch means the preset and the type disagree about the filament. For a
+plate Bambuddy also booked, the grams are Bambuddy's usage row's over the slicer's metres,
+summed over the job's ends on the spool (one spool can feed several slots of a job). The spool page's Used tile adds the metres ("3 prints, 40 g
+each, 11.7 m"), a Density tile shows the implied value with "The type says 1.24 g/cm³" or
+the mismatch sentence ("The prints imply 1.31 g/cm³, 6% over the type's 1.24 g/cm³: check
+the type's density or the label."), and the timeline shows a print's metres beside its grams
+("−35 g, 11.7 m, measured"). A mismatch is a sentence, never a booking. The Weight section's
+drift sentence then names a likely cause when one fits, read against the anchor the weighing
+was compared with (the newest anchor before it), the first of: the starting amount (an
+added-full spool anchored on a pull's figure whose drift is that figure's gap to the label:
+the scale found the label weight), the type's density (the drift is what the slicer's grams
+since that anchor over-counted at its preset's density, with a mismatch), or a placeholder
+empty weight, for any drift, since the real empty weight is unknown ("Likely cause: the
+spool's empty weight is a placeholder."). Nothing under a gram of drift, and nothing with
+no fit; every cause waits for the history to load. Design: the same spec, §5.6.
+
+### The phone page, the hand-held Scan mode (#7273)
+
+`/scan` ("Scan" in the nav; `/filament/scan` redirects there) reads and writes tags with the
+phone's own NFC reader, through Web NFC
+(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`; the Scan mode's plan
+`docs/superpowers/plans/2026-11-25-scan-mode.md`). It works only in Chrome on
 Android, in its own tab: Web NFC refuses a frame, so inside Bambuddy the page shows its address
-to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens the
-spool that holds the tag, or offers to bind it or make a spool from what the tag says
-(OpenSpool or OpenTag3D). "Write tag" on a spool backs the tag up first, writes the spool's
+to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens
+what the tag names, in this order: the spool that holds the tag (`next` `open_spool`; the
+binding wins over anything the records say); else the thing a typed code in the records names,
+a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record such as `L-12`
+or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
+`GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
+the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
+row is a new tag. The switch "Open what I scan at once" (remembered on the phone, localStorage
+`scadbuddy.scan.openAtOnce`) opens the thing's page on each such read, and the page then starts
+scanning by itself when it opens. "Write tag" on a spool backs the tag up first, writes the spool's
 records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
 and binds it only when the read-back equals what was sent. Every write keeps a backup, which
 the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,
@@ -268,7 +376,16 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `missing_properties` and `invalid_properties` (keys only); an archived row is never
   marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
   that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
-  once the base-kind design settles; the UI follows in its own change.
+  once the base-kind design settles.
+- In the UI, a kind's key table has a Required column for those kinds. Ticking it shows how
+  many live rows lack the key. The spool, type and catalog forms show the defined keys as
+  fields, required ones first and marked. A refused save marks each missing or ill-fitting
+  field and says "Fill the required properties first". The Spools, Types and catalog lists
+  mark an incomplete row and filter to them ("Incomplete"). "Create type from this spool",
+  the price book's "Make a type" and a new tag's "Create a spool from this tag" ask for the
+  required keys before they make the row. "Reset to type", the bulk bar's type and linking
+  a type to a price book row use the unchecked routes, so they work on an incomplete row
+  (`frontend/src/components/entities/DefinedFields.tsx`, `RequiredKeysDialog.tsx`).
 - `item` is the exception (#7067). An item's properties follow its item kind's
   `attribute_schema`, merged down the kind tree (a child kind's key wins;
   `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the
@@ -320,15 +437,18 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
 - Core: `backend/scadbuddy/filament/`:
   - the SB spools a print reads: `inventory.py` (`read_sb_spools` at `:957`, `reconcile_trays` at `:453`);
   - `capture.py`, `ledger.py`, `catalog.py`, `types.py`, `locations.py`, `sensors.py`, `invoices.py`, `labels.py`;
+  - a LAN print's grams and metres: `print_uses.py`, `prints.py`, read from the sliced plate by `backend/scadbuddy/slicing/slice_info.py` `plate_uses`;
+  - the history and its metrics: `metrics.py` (`implied_density`), `metrics_store.py`; the drift's likely cause: `frontend/src/components/filament/driftCause.ts`;
   - `backend/scadbuddy/codes/` (code parsing and resolving);
   - `bb_sync_*.py` and `bambuddy_pull.py`;
   - `profile_fetch.py`, `sb_presets.py` (ScadBuddy's presets) and
     `backend/scadbuddy/slicing/own_presets.py` (their refs, as the native slicer reads them);
-  - a printer's K-profiles: `backend/scadbuddy/bambuddy/kprofiles.py` (the bodies and the operation kinds, `kprofile_kinds` at `:168`) and `BambuddyClient.set_k_profile` and its siblings in `backend/scadbuddy/bambuddy/client.py`.
+  - a printer's K-profiles: `backend/scadbuddy/printers/kprofiles.py` (the bodies and the LAN steps) and `backend/scadbuddy/api/printer_kprofiles.py` (over ScadBuddy's own LAN link, #7276); `BambuddyClient` has no printer K-profile write, slot command, slot preset or AMS label call any more (removed in #7276; it keeps the K-table read `k_profiles` that `profile_fetch.py` uses, until #7604, `put_spool_k_profiles` for the sync's spool K values, and `assign_spool` for the tray question, until #7641).
 - Workflows:
   - `backend/scadbuddy/workflows/spool_refresh.py:104`;
   - `filament_sync.py:68`, `filament_pull.py:43`, `sensor_notify.py:58`.
-- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`.
+- Agent tools: `agent/src/tools/filament.ts`, `filamentPurchasing.ts`, `traySpools.ts`, `printerSlots.ts`,
+  `printerKProfiles.ts`, `printerCommand.ts` (a printer command's 202, followed or read with `printer_command_get`).
 
 ## Data
 
@@ -494,32 +614,31 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   - bulk edit, archive and restore (#7151): `test_filament_spool_bulk_ops.py`;
   - `backend/tests/test_spool_refresh_replay.py`;
   - `backend/tests/profile_fetch/`;
-  - `backend/tests/api/test_printer_kprofiles.py`, `backend/tests/bambuddy/test_client_kprofiles.py`;
-  - `backend/tests/api/test_printer_slots.py`, `backend/tests/bambuddy/test_client_slots.py`.
+  - `backend/tests/api/test_printer_kprofiles.py`;
+  - `backend/tests/api/test_printer_slots.py`.
 - Frontend: `frontend/src/components/settings/PrinterKProfiles.test.tsx` (mocks `frontend/src/mocks/features/printerKProfiles.ts`),
   `frontend/src/components/settings/PrinterAmsSlots.test.tsx` (mocks `frontend/src/mocks/features/printerAmsSlots.ts`),
   and the AMS unit place's rename in `frontend/src/pages/filament/LocationsTab.test.tsx`;
   the #7151 operations in `components/filament/BulkBar.test.tsx`, `pages/filament/LocationPage.test.tsx`,
   `pages/filament/SpoolsTab.search.test.tsx` and `pages/filament/TagsTab.test.tsx`.
-- Agent: `agent/test/printerSlots.test.ts`.
+- Agent: `agent/test/printerSlots.test.ts`, `agent/test/printerKProfiles.test.ts`.
 
 ## Limits and known issues
 
 - The filament epic is [#6260](https://github.com/eh-homelab/ScadBuddy/issues/6260).
-- K-profile writes need Bambuddy's `KPROFILES_CREATE`, `_UPDATE` and `_DELETE`, which no
-  Bambuddy API key can hold
-  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
-  lines 305-307): while Bambuddy's auth is on, every write is the scope problem naming
-  `K-profiles (admin only)`. The assistant has no K-profile tool yet
-  ([#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
-- A slot preset's and an AMS label's writes need Bambuddy's `PRINTERS_UPDATE`, which no
-  Bambuddy API key can hold
-  ([`core/auth.py`](https://github.com/maziggy/bambuddy/blob/v1.3.1/backend/app/core/auth.py)
-  line 280): while Bambuddy's auth is on, they are the scope problem naming
-  `Printers (admin only)`. Renaming an AMS unit's place on Filament → Locations does not write
-  Bambuddy's label.
-- A slot write reads the printer's state, then writes: a print started between the two calls
-  is not caught by ScadBuddy (Bambuddy's own reset refuses it).
+- K-profiles and slot commands need a printer linked over ScadBuddy's LAN link: a printer
+  linked only through Bambuddy is refused 409 `not_lan_linked`
+  (`backend/scadbuddy/printers/native.py` `lan_row`), and no Bambuddy scope applies. The
+  assistant's K-profile tools are `printer_kprofile*` and `printer_command_get`
+  (`agent/src/tools/printerKProfiles.ts`, `agent/src/tools/printerCommand.ts`,
+  [#7162](https://github.com/eh-homelab/ScadBuddy/issues/7162)).
+- A slot preset and an AMS label are ScadBuddy's own and reach neither the printer nor
+  Bambuddy. The label is the unit's place name, so renaming that place on Filament →
+  Locations renames the label.
+- A slot command checks the printer's latest LAN report, then sends: a print started after
+  that report is not caught by ScadBuddy's guard (`backend/scadbuddy/printers/ams_slots.py`
+  `guard`), whose refusals are its own 409 codes (`printer_busy`, `ams_busy`, `no_slot`,
+  `printer_offline` and the rest above).
 - Parity with Bambuddy 1.2.6b1 (#6270) is not complete yet: [filament-parity.md](filament-parity.md)
   lists every §11 item, its evidence, and the gap issue for each miss.
 - Filament profiles in Postgres, and their follow-ups, are still open:

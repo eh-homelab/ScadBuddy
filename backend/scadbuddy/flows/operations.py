@@ -1,4 +1,5 @@
-"""A person's answer and approval for a flow run's parked calls, as operations on the
+"""Answers and approvals for a flow run's parked calls (a person's, or an agent's answer
+that `flow_answerers` admits, #7471), as operations on the
 `projects` queue (#1057, plan 2026-10-09-durable-phase-6-flows.md decisions A and B).
 
 Each records the decision in `workflow_run_decisions` first, then tells the harness with
@@ -30,7 +31,8 @@ are the same only with the same input: the call as it was parked, or the same pr
 and the same binding shown (`_same`).
 
 A person's decision takes over the row of another one of theirs that never landed (#7575,
-#7588, `take_over`). All of these must hold:
+#7588, `take_over`). For an answer, a person also takes over an agent's row, and an agent
+only one of its own (#7471, `may_take_over`). All of these must hold:
 
 - No running operation may still send the row's decision. An operation's record is
   `running` from before its run until the operation ends, so this reads no clock.
@@ -140,10 +142,11 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
 from scadbuddy.crud.client import CrudRefusedError
 from scadbuddy.crud.projects import RESET_REFUSED
+from scadbuddy.flows.answerers import ANSWER_NOT_ALLOWED
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.models import TERMINAL, Decision, Proposal, Run
+from scadbuddy.flows.models import TERMINAL, CallOperation, Decision, Proposal, Run
 from scadbuddy.flows.narrowing import narrowing_problem
 from scadbuddy.flows.print_binding import (
     api_drafts,
@@ -157,6 +160,7 @@ from scadbuddy.flows.store import (
     HopMovedError,
     ResetBeforeFloorError,
     ResetSupersededError,
+    may_take_over,
 )
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
 from scadbuddy.tasks.models import Task, TaskState
@@ -169,6 +173,9 @@ if TYPE_CHECKING:
     from scadbuddy.crud.projects import RemoteFlowStore
 
 FLOW_ANSWER = "flow_answer"
+#: An agent's answer, text or a task's (`task_id`), which the setting `flow_answerers` let
+#: through (#7471). The only kind whose request says who answers: a person's never does.
+AGENT_ANSWER = "flow_agent_answer"
 FLOW_DECIDE = "flow_decide"
 #: A person's typed answer to a prompt's task (#7364).
 TASK_ANSWER = "task_answer"
@@ -292,6 +299,9 @@ async def decision_update_id(keys: PayloadKeys, row: Decision) -> str:
     the decision."""
     key = await keys.key_for(f"flow-{row.run_id}", False)
     held: Any = row.response
+    if row.kind == "answer" and row.responder != "browser":
+        # Not a person's (#7471): theirs keeps the id it had before.
+        held = [row.response, row.responder]
     if row.kind == "approval":
         decided = {k: v for k, v in row.response.items() if k != REPLACED}
         held = [row.outcome, decided, row.responder, row.input_hash]
@@ -310,6 +320,27 @@ def _stale() -> ApiError:
 
 def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
+
+
+def not_allowed() -> ApiError:
+    """An answer by an agent that the setting does not let answer (#7471)."""
+    return ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "Only a person answers this flow's questions. The setting flow_answerers says who"
+        " else may.",
+        type_=ANSWER_NOT_ALLOWED,
+        setting="flow_answerers",
+    )
+
+
+def people_only() -> ApiError:
+    """An agent's answer to a question that the script asked people only (#7471)."""
+    return ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "Only a person answers this question: the flow asked it of people only.",
+        type_=ANSWER_NOT_ALLOWED,
+        people_only=True,
+    )
 
 
 def task_not_open(state: TaskState) -> ApiError:
@@ -453,11 +484,20 @@ def _wanted(kind: str, request: dict[str, Any], answer: Any = None) -> tuple[str
     )
 
 
-def _same(existing: Decision, kind: str, request: dict[str, Any], answer: Any) -> bool:
+def _same(
+    existing: Decision,
+    kind: str,
+    request: dict[str, Any],
+    answer: Any,
+    responder: str = "browser",
+) -> bool:
     """Whether a recorded row is the decision `request` asks for (a resend), not another.
     An approval's is of one input: the very proposal, or the call as it was parked, with the
-    binding that the request was shown, if any."""
+    binding that the request was shown, if any. An answer's is of one answerer, `responder`
+    (#7471)."""
     outcome, response = _wanted(kind, request, answer)
+    if kind == "answer" and existing.responder != responder:
+        return False
     narrowed = "narrowed_by" in existing.response
     held = {
         k: v for k, v in existing.response.items() if k not in ("args", "narrowed_by", REPLACED)
@@ -516,7 +556,10 @@ def flow_kinds(
         if described.run_id != run_id:
             raise _stale()
 
-    async def check(kind: str, request: dict[str, Any]) -> dict[str, Any]:
+    async def check(
+        kind: str, request: dict[str, Any], responder: str = "browser"
+    ) -> dict[str, Any]:
+        """`responder` is who answers: a person, or the agent of an `AGENT_ANSWER`."""
         run = await store.get_run(str(request["run_id"]))
         if run is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
@@ -535,12 +578,18 @@ def flow_kinds(
         # A task's is compared by `record_decision`, so `run_task_answer` sees one that lost.
         if existing is not None and "task_id" not in request:
             answer = await answer_of(request) if kind == "answer" else None
-            # A decision on a call that still waits may take a person's row over (#7575).
-            may_take = existing.responder == "browser" and entry is not None
-            if not may_take and not _same(existing, kind, request, answer):
+            # A decision on a call that still waits may take a row over (#7575): a person's
+            # any answerer's, an agent's its own (#7471).
+            may_take = entry is not None and (
+                existing.responder == responder or (kind == "answer" and responder == "browser")
+            )
+            if not may_take and not _same(existing, kind, request, answer, responder):
                 raise _resolved()
         if existing is None and entry is None:
             raise _stale()
+        if responder != "browser" and entry is not None and entry.people_only is not False:
+            # Asked again here: a Reset since the route may have parked another question.
+            raise people_only()
         return {
             "request_id": rid,
             "workflow_id": run.workflow_id,
@@ -605,16 +654,17 @@ def flow_kinds(
         ask: Callable[[], Awaitable[bool | None]],
         err: BaseException,
         undo: Callable[[], Awaitable[None]],
-    ) -> bool:
+    ) -> bool | None:
         """After a send that failed other than by a refusal: True when the Update landed
-        anyway (the decision stands); otherwise False, having deleted the row (`undo`) only
-        when Temporal says the Update never existed."""
+        anyway (the decision stands); False when Temporal says it never existed, having
+        deleted the row (`undo`); None when it could not say, or the send was cancelled
+        (nothing is asked then), and the row stays."""
         if isinstance(err, asyncio.CancelledError):
-            return False
+            return None
         verdict = await ask()
         if verdict is False:
             await undo()
-        return verdict is True
+        return verdict
 
     def _decision(request: dict[str, Any], checked: dict[str, Any], **fields: Any) -> Decision:
         return Decision(
@@ -622,21 +672,46 @@ def flow_kinds(
             run_id=str(request["run_id"]),
             workflow_run_id=str(checked["workflow_run_id"]),
             call_id=_call_id(request),
-            responder="browser",
-            **fields,
+            **{"responder": "browser", **fields},
         )
 
     async def check_answer(request: dict[str, Any]) -> dict[str, Any]:
         return await check("answer", request)
 
-    async def may_send(request: dict[str, Any], held: Decision) -> bool:
-        """Whether a running operation's request may still send the decision `held`."""
+    async def check_agent_answer(request: dict[str, Any]) -> dict[str, Any]:
+        """The checks of a person's answer, the question not for people only, and the
+        answerer's session or token still allowed (spec §4.4). The setting itself is read
+        at the route only."""
+        responder, _ = agent_of(request)
+        checked = await check("answer", request, responder)
+        principal = request.get("principal")
+        if not await store.answer_allowed(responder, None if principal is None else str(principal)):
+            raise not_allowed()
+        return checked
+
+    def agent_of(request: dict[str, Any]) -> tuple[str, str | None]:
+        """An `AGENT_ANSWER`'s answerer and the rule that admitted it."""
+        responder = str(request["responder"])
+        if responder == "browser" or responder.startswith("grant:"):
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "Not an agent's answer.")
+        admitted = request.get("admitted_by")
+        return responder, None if admitted is None else str(admitted)
+
+    async def may_send(operation: CallOperation, held: Decision) -> bool:
+        """Whether a running operation may still send the decision `held`."""
+        request = operation.request
+        if request is None:
+            return False
         if held.kind == "approval":
             # Whatever binding it was shown: an old worker's resend ignores it, and the
             # row's hash is the one that is sent in any case.
             shown = {k: v for k, v in request.items() if k != "bound_hash"}
             return "approved" in request and _same(held, "approval", shown, None)
         if not {"answer", "answer_sealed"} & request.keys():
+            return False
+        # Only an agent's kind says who answers (#7471); an API from before it names no kind.
+        agent = operation.kind in (AGENT_ANSWER, None)
+        if (request.get("responder", "browser") if agent else "browser") != held.responder:
             return False
         return bool(canonical({"answer": await answer_of(request)}) == canonical(held.response))
 
@@ -645,16 +720,16 @@ def flow_kinds(
         that nothing may still send (the module's rule). The one it replaced; None when it
         took nothing."""
         held = await store.get_decision(decision.request_id)
-        if held is None or (held.kind, held.responder) != (decision.kind, "browser"):
+        if held is None or not may_take_over(decision, held, []):
             return None
         operations = await store.call_operations(decision.run_id, decision.call_id)
         own = activity.info().workflow_id
         # Before Temporal is asked: an operation that has ended sends nothing after that.
         # This one sends its own decision, never `held`.
         for operation in operations:
-            if operation.workflow_id == own or operation.request is None:
+            if operation.workflow_id == own:
                 continue
-            if await may_send(operation.request, held):
+            if await may_send(operation, held):
                 return None
         if await decision_landed(checked, held) is not False:
             return None
@@ -766,16 +841,43 @@ def flow_kinds(
                 ) from None
             raise (taken() if resolved else _stale()) from None
         except BaseException as err:
-            if not await settle(arrived, err, undo):
-                raise
+            verdict = await settle(arrived, err, undo)
+            if verdict is True:
+                return
+            if isinstance(err, RPCError) and err.status == RPCStatusCode.NOT_FOUND:
+                # The run closed, or was closing, under the send ("workflow update was
+                # aborted by closing workflow").
+                if verdict is False:
+                    # The Update never existed: the call is no longer waiting (#7822).
+                    raise _stale() from None
+                # Whether it landed is unknown, so the row and the error stay (#7883, #7900).
+                activity.logger.warning(
+                    "flow decision %s: the run closed under its send, and whether it landed"
+                    " is unknown; its row stays",
+                    decision.request_id,
+                )
+            raise
 
     async def give(
-        request: dict[str, Any], checked: dict[str, Any], taken: Callable[[], ApiError]
+        request: dict[str, Any],
+        checked: dict[str, Any],
+        taken: Callable[[], ApiError],
+        responder: str = "browser",
+        admitted_by: str | None = None,
     ) -> Decision:
-        """Record the answer and tell the harness; the decision, once its Update landed.
-        Raises `taken()` when another answer holds the call."""
+        """Record the answer of `responder` (a person, or an admitted agent) and tell the
+        harness; the decision, once its Update landed. Raises `taken()` when another
+        answer holds the call."""
         outcome, response = _wanted("answer", request, await answer_of(request))
-        decision = _decision(request, checked, kind="answer", outcome=outcome, response=response)
+        decision = _decision(
+            request,
+            checked,
+            kind="answer",
+            outcome=outcome,
+            response=response,
+            responder=responder,
+            admitted_by=admitted_by,
+        )
         client = AgentClient(activity.client(), str(checked["workflow_id"]))
         await land(
             checked,
@@ -794,20 +896,32 @@ def flow_kinds(
     async def run_task_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The result is in the operation's record and its history, so it holds no answer:
         the route reads the task. An answer that lost (`_task_taken`) marks nothing."""
-        assert tasks is not None
         decision = await give(request, checked, _task_taken)
+        return await task_answered(decision, request.get("by"))
+
+    async def task_answered(decision: Decision, by: Any) -> dict[str, Any]:
+        """Mark the task that `decision` answered, by `by`."""
+        assert tasks is not None
         task_id = decision.call_id
         try:
             await tasks.mark_answered(
-                task_id,
-                decision.response["answer"],
-                request.get("by"),
-                decision.workflow_run_id,
+                task_id, decision.response["answer"], by, decision.workflow_run_id
             )
         except Exception as err:
             # By its type alone: its text may quote the answer.
             activity.logger.warning("could not mark the task %s: %s", task_id, type(err).__name__)
         return {"run_id": decision.run_id, "task_id": task_id, "outcome": "answered"}
+
+    async def run_agent_answer(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """An agent's answer (#7471): to a task, which it marks as answered by the agent,
+        or a text."""
+        responder, admitted_by = agent_of(request)
+        is_task = "task_id" in request
+        taken = _task_taken if is_task else _resolved
+        decision = await give(request, checked, taken, responder, admitted_by)
+        if is_task:
+            return await task_answered(decision, responder)
+        return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": "answered"}
 
     async def parked_hash(checked: dict[str, Any], call_id: str, shown: Any) -> str | None:
         """The input hash of the call as it is parked (#2318): an outward agent tool's
@@ -1262,6 +1376,13 @@ def flow_kinds(
             queue="projects",
             # A resend is the same request, signed in as before or not.
             unkeyed=frozenset({"by"}),
+        ),
+        OperationKind(
+            name=AGENT_ANSWER,
+            check=check_agent_answer,
+            run=run_agent_answer,
+            run_attempts=3,
+            queue="projects",
         ),
         OperationKind(
             name=FLOW_DECIDE, check=check_decide, run=run_decide, run_attempts=3, queue="projects"

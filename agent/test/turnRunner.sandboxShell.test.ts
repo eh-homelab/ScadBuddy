@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type AccessRow, BUILTIN_SOURCES } from '../src/access/model.js'
-import { MONITOR_SANDBOXED } from '../src/access/live.js'
+import { MONITOR_SHELL_OFF } from '../src/access/live.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { PackagesForRun } from '../src/plugins/packages/install.js'
 import { turnRunnerForTest } from './support/turnRunner.js'
@@ -56,10 +56,16 @@ describe("a turn's Bash and PowerShell in the session's sandbox (#5864)", () => 
     expect(turn.fingerprintParts.servedBuiltins).toEqual(expect.arrayContaining(['Bash', 'PowerShell']))
   })
 
-  it("tells the model Monitor's command is not available, and refuses one, with a sandbox", async () => {
+  it("offers Monitor's command with a sandbox, at the sandboxed Bash's tier (#5916)", async () => {
     const turn = await build({ background: true })
-    expect(turn.run.systemPromptAppend).toContain("its `command` source would not run in this session's sandbox")
-    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'x', command: 'tail -f x' })).toEqual({ off: MONITOR_SANDBOXED })
+    expect(turn.run.systemPromptAppend).toContain('A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).')
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'x', command: 'tail -f x' })).toBe('outward')
+  })
+
+  it("refuses Monitor's command with a sandbox while the sandboxed Bash is off", async () => {
+    const turn = await build({ background: true, access: [row('Bash', 'off')] })
+    expect(turn.run.systemPromptAppend).toContain("its `command` source needs Bash, which is off here")
+    expect(await turn.run.live!.access('mcp__builtin__Monitor', { description: 'x', command: 'tail -f x' })).toEqual({ off: MONITOR_SHELL_OFF })
   })
 
   it('without a sandbox nothing changes', async () => {

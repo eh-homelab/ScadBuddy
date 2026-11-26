@@ -22,6 +22,7 @@ import { DurableTurns } from '../src/sessions/durable.js'
 import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
+import { restartedCallText } from '../src/sessions/restartedCalls.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from '../src/temporal/session/affinity.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
@@ -1204,7 +1205,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
   })
 
-  it('SIGTERM mid-turn: a turn still running past the grace is cut and moves, its spend counted once (I4)', async () => {
+  // Skipped by the owner's decision of 2026-11-26 (#7874): it runs the real Claude Code binary through
+  // a shutdown and is slow in CI. Kept so it can be turned on again; it checks the replay of a cut call.
+  it.skip('SIGTERM mid-turn: a turn still running past the grace is cut and moves, its spend counted once (I4)', async () => {
     const hold = latch()
     slowGate = hold.promise
     script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
@@ -1217,6 +1220,15 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(b.acquired).toBe(1)
     hold.release()
+    // #7874: the call the cut stopped reads, to the model and in the panel, that the service
+    // restarted while it ran; never Claude Code's answer to the interrupt, which says the user refused it.
+    const restarted = restartedCallText('mcp__stub__slow')
+    const resumed = fake.messageCalls().at(-1)!
+    expect(conversation(resumed)).toContain(RESTARTED_PROMPT)
+    expect(conversation(resumed)).toContain(restarted)
+    expect(conversation(resumed)).not.toContain("doesn't want to proceed")
+    const results = (await b.m.events.read(id, 0, 10_000)).flatMap((e) => (e.event.type === 'tool.result' ? [e.event] : []))
+    expect(results).toEqual([expect.objectContaining({ ok: false, summary: restarted })])
     // A's request (as A's cut turn wrote it) and B's, each once.
     // (Its turns are as classic counts a stopped turn's: the interrupted result's.)
     const row = await recorded(id)

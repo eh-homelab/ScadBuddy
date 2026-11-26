@@ -271,6 +271,34 @@ PRINT_LAN_UPDATE_ACTIVITY = "print_lan_update"
 #: The printer read before a LAN run's first upload (#6871): busy, the run waits.
 LAN_CHECK_ACTIVITY = "lan_check"
 
+#: One command to a printer over its LAN link and the reply that matches it (#7276,
+#: plan 2026-11-25 Task 2): ``lan_command``, run once per command by ``LanCommand``.
+LAN_COMMAND_ACTIVITY = "lan_command"
+LAN_COMMAND_WORKFLOW = "LanCommand"
+#: A read's reply that never came after its tries (`LAN_READ_TRIES`): the route's 502.
+LAN_NO_ANSWER = "lan_no_answer"
+#: The printer presented another certificate than the pinned one: nothing was sent, and
+#: the route answers 409 ``printer_cert_changed`` (P30).
+LAN_CERT_CHANGED = "lan_cert_changed"
+#: How long a command route waits for its ``LanCommand`` run before it answers 202 with
+#: the run's workflow id, under Envoy's 15 s route timeout (P27).
+LAN_ROUTE_WAIT_S = 10.0
+#: How long a K-profile write waits for its reply, in seconds: Bambuddy's
+#: ``await_cali_ack`` default (``bambu_mqtt.py`` L7636 at the pinned commit,
+#: https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7636-L7664).
+LAN_REPLY_WAIT_WRITE = 6.0
+#: How long an AMS command waits for its reply (R-7276-10): Bambuddy measured its RFID
+#: replies at 11 ms.
+LAN_REPLY_WAIT_AMS = 2.0
+#: A read's tries, the wait of each and the pause between them, as Bambuddy's
+#: ``get_kprofiles`` (``timeout=5.0``, ``max_retries=3``, a 0.5 s sleep between tries; P20):
+#: https://github.com/maziggy/bambuddy/blob/d3be761f3bd0b6bac78045dc53599331d64c3672/backend/app/services/bambu_mqtt.py#L7542-L7619
+LAN_REPLY_WAIT_READ = 5.0
+LAN_READ_TRIES = 3
+LAN_READ_PAUSE = 0.5
+#: What ``lan_command``'s start-to-close adds to the connect timeout and its waits (P20).
+LAN_COMMAND_MARGIN = 2.0
+
 
 class LanCheckInput(BaseModel):
     """``lan_check``: the registry row, the run it reads for (its place in the queue),
@@ -332,6 +360,10 @@ class LanUploaded(BaseModel):
     #: ``…/filament/print-uses``). Empty
     #: in a history from before it, or for a file that does not say.
     grams_by_slot: dict[int, float] = Field(default_factory=dict)
+    #: The plate's metres per slot (#7685, `slice_info.plate_uses`), booked beside the
+    #: grams as ``data.length_m``. Empty in a history from before it, or for a file that
+    #: does not say.
+    length_by_slot: dict[int, float] = Field(default_factory=dict)
 
 
 class LanPrintInput(BaseModel):
