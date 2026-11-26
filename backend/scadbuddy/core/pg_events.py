@@ -79,9 +79,15 @@ The replay log
 ``events`` (migrations/20260928T0630Z_events.sql) keeps each published event under a
 monotonically increasing ``seq``. :meth:`replay` reads the events after a ``seq``,
 oldest first, with a limit, and says whether rows the caller has not seen were
-already pruned. It is pruned by age and by row count
-(``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``)
-every `PRUNE_INTERVAL`, by every replica; the deletes are idempotent.
+already pruned. A row of a kind this process has no model for comes back as an
+:class:`~.events.OpaqueEvent`. Nothing is pruned by default. Rows age out by the
+event's own ``retention_seconds``, by kind prefix
+(``SCADBUDDY_EVENT_LOG_RETENTION_KINDS``) or by the global age and row count
+(``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``; see
+`EventLogRetention` for the precedence), every `PRUNE_INTERVAL`, by every replica; the
+deletes are idempotent. The own-retention delete reads the partial index
+``events_own_retention``; the per-kind and global deletes run only when an operator
+configures them, and they range-scan ``events_logged_at``.
 
 Consuming it (a backend WebSocket gateway, #406)
 ------------------------------------------------
@@ -123,8 +129,8 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable, Collection
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from psycopg import AsyncConnection, Connection
@@ -134,6 +140,7 @@ from psycopg_pool import AsyncConnectionPool
 from scadbuddy.core.events import (
     DEFAULT_QUEUE_SIZE,
     PG_CHANNEL,
+    AnyEvent,
     BusResync,
     Event,
     InProcessEventBus,
@@ -246,19 +253,35 @@ class EventLogMissingError(RuntimeError):
     """The bus was started on a database the job store has not migrated."""
 
 
+# A kind equals a prefix or sits under it (`job` covers `job.progress`, not `jobs.x`);
+# `left()` and `||` rather than LIKE, as `_` in a kind is a LIKE wildcard. The first form
+# takes the prefix as a parameter, the second reads it from `unnest(...) AS p`.
+_MATCHES = "(kind = %s::text OR left(kind, length(%s::text) + 1) = %s::text || '.')"
+_MATCHES_P = "(kind = p OR left(kind, length(p) + 1) = p || '.')"
+
+
 @dataclass(frozen=True)
 class EventLogRetention:
-    """How much of the log to keep. 0 is no limit on that dimension."""
+    """How much of the log to keep. 0 is no limit on that dimension, and the default:
+    every event is kept.
+
+    Precedence, per row: the event's own ``retention_seconds`` (in its payload), then the
+    longest ``kinds`` prefix that matches its kind (a prefix matches the kind itself and
+    its dotted sub-kinds), then ``seconds``. ``rows`` caps only the rows that neither of
+    the first two covers. A 0 anywhere on the first two keeps the row forever and still
+    covers it.
+    """
 
     seconds: float = 0.0
     rows: int = 0
+    kinds: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class LoggedEvent:
     #: The event's place in the log: what a client sends back as ``Last-Event-ID``.
     seq: int
-    event: Event
+    event: AnyEvent
 
 
 @dataclass(frozen=True)
@@ -385,7 +408,7 @@ class PgNotifyEventBus:
         #: Told of every payload heard on the channel, as it was heard, with its event when
         #: it decodes and None when not: the agent's change stream (`agent_changes/hub.py`,
         #: #5299 D4). Each runs on the event loop and must not block.
-        self.taps: list[Callable[[str, Event | None], None]] = []
+        self.taps: list[Callable[[str, AnyEvent | None], None]] = []
         listener.listen(PG_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
     # -- lifecycle ------------------------------------------------------------------
@@ -596,20 +619,62 @@ class PgNotifyEventBus:
         return {str(event_id): int(seq) for event_id, seq in rows}
 
     async def prune_log(self) -> int:
-        """Apply the retention settings; returns the rows removed."""
+        """Apply the retention settings; returns the rows removed.
+
+        One ``DELETE`` per rule class (see `EventLogRetention` for the precedence): an
+        event's own retention, each kind prefix (longest first, so a row goes to the
+        longest prefix that matches), then the global seconds and rows over the rest.
+        The first reads the partial index ``events_own_retention``. The per-kind and
+        global deletes run only when an operator configures them, and they range-scan
+        ``events_logged_at``.
+        """
+        retention = self.retention
+        prefixes = sorted(retention.kinds, key=len, reverse=True)
+        # Only a JSON number counts: any other stored value reads as absent, so one
+        # foreign row cannot make the cast raise and stop every prune.
+        own = (
+            "(CASE WHEN jsonb_typeof(payload->'retention_seconds') = 'number'"
+            " THEN payload->>'retention_seconds' END)"
+        )
         removed = 0
         async with self._pool.connection() as conn:
-            if self.retention.seconds > 0:
+            # The predicate of the partial index events_own_retention, word for word, so
+            # this DELETE reads that index and not the whole log.
+            cursor = await conn.execute(
+                "DELETE FROM events WHERE jsonb_typeof(payload->'retention_seconds') = 'number'"
+                f" AND ({own})::float8 > 0"
+                f" AND logged_at < now() - make_interval(secs => ({own})::float8)"
+            )
+            removed += max(0, cursor.rowcount)
+            for index, prefix in enumerate(prefixes):
+                seconds = retention.kinds[prefix]
+                if seconds <= 0:
+                    continue
                 cursor = await conn.execute(
-                    "DELETE FROM events WHERE logged_at < now() - make_interval(secs => %s)",
-                    (self.retention.seconds,),
+                    f"DELETE FROM events WHERE {own} IS NULL AND {_MATCHES}"
+                    f" AND NOT EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p"
+                    f" WHERE {_MATCHES_P})"
+                    " AND logged_at < now() - make_interval(secs => %s)",
+                    (prefix, prefix, prefix, prefixes[:index], seconds),
                 )
                 removed += max(0, cursor.rowcount)
-            if self.retention.rows > 0:
+            uncovered = (
+                f"{own} IS NULL AND NOT EXISTS (SELECT 1 FROM unnest(%s::text[]) AS p"
+                f" WHERE {_MATCHES_P})"
+            )
+            if retention.seconds > 0:
                 cursor = await conn.execute(
-                    "DELETE FROM events WHERE seq <= ("
-                    " SELECT seq FROM events ORDER BY seq DESC OFFSET %s LIMIT 1)",
-                    (self.retention.rows,),
+                    f"DELETE FROM events WHERE {uncovered}"
+                    " AND logged_at < now() - make_interval(secs => %s)",
+                    (prefixes, retention.seconds),
+                )
+                removed += max(0, cursor.rowcount)
+            if retention.rows > 0:
+                cursor = await conn.execute(
+                    f"DELETE FROM events WHERE {uncovered} AND seq <= ("
+                    f" SELECT seq FROM events WHERE {uncovered}"
+                    " ORDER BY seq DESC OFFSET %s LIMIT 1)",
+                    (prefixes, prefixes, retention.rows),
                 )
                 removed += max(0, cursor.rowcount)
         if removed:
@@ -659,18 +724,19 @@ class PgNotifyEventBus:
             event = decode_event(payload)
         except ValueError:
             self._tap(payload, None)
-            # Another version's kind, or something else NOTIFYing on the channel.
+            # Not an event: a payload with a broken envelope, or something else NOTIFYing
+            # on the channel. A kind this process has no model for is an `OpaqueEvent`.
             logger.warning("ignored an undecodable event payload", extra={"bytes": len(payload)})
             return
         self._tap(payload, event)
         self.metrics.events_received.inc()
         # Listeners first: one that applies the event later takes `settle` here, before
         # any read can be stamped with it (#1039).
-        self.local.publish(event)
+        self.local.deliver(event)
         self.last_event_id = event.id
         self.live_event_id = event.id
 
-    def _tap(self, payload: str, event: Event | None) -> None:
+    def _tap(self, payload: str, event: AnyEvent | None) -> None:
         for tap in self.taps:
             try:
                 tap(payload, event)

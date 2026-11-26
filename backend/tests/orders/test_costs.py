@@ -788,6 +788,58 @@ async def test_a_storefront_quote_takes_the_basis_of_the_rate_its_variant_was_pr
     assert (at.machine_rate_basis, at.machine_rate_confidence) == ("quote_actuals", 66)
 
 
+async def test_a_kits_attempt_is_costed_over_every_output(shop: Shop, pool: PgPool) -> None:
+    """#5701 PR 5: a storefront kit's quote holds every output's plates, renumbered, each
+    filament by kit slot (spec 2026-11-17 §7.4). An attempt recorded by hand for the kit,
+    after the order page printed each output, is costed over all of them, at every kit
+    slot's filament."""
+    order = shop.order()
+    item = shop.item(order)
+    red = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#ff0000", cost_per_kg="20")
+    )
+    blue = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#0000ff", cost_per_kg="40")
+    )
+    slots = [
+        ColourSlot(slot=0, colour="#ff0000", filament_id=red.id),
+        ColourSlot(slot=1, colour="#0000ff", filament_id=blue.id),
+    ]
+    # Output 0's plate uses kit slot 0; output 1's, numbered after it, kit slot 1 alone.
+    plates = [
+        Plate(index=1, print_seconds=600, filaments=[PlateFilament(slot=0, used_g=Decimal("10"))]),
+        Plate(index=2, print_seconds=900, filaments=[PlateFilament(slot=1, used_g=Decimal("30"))]),
+    ]
+    priced = price(plates, {0: red, 1: blue}, PricingPolicy(), currency="USD", quantity=1)
+    line = FirmLine(
+        lines=tuple(priced.lines),
+        unit_cost_minor=priced.unit_cost_minor,
+        unit_price_minor=priced.unit_price_minor,
+        currency="USD",
+        printer="p-1",
+        plates=tuple(plate.model_dump(mode="json") for plate in plates),
+    )
+    with shop.rows.transaction() as conn:
+        _, [(_, quote)] = shop.lifecycle._firm_quotes(conn, order, BY, {item.id: line})  # type: ignore[misc]
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    # The kit's slots, as the submit pins them on the item.
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            (Jsonb([s.model_dump() for s in slots]), item.id),
+        )
+    by_hand(shop, order, shop.get_item(item), "succeeded", 1)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # 10 g at 20 a kilogram and 30 g at 40: 140 cents, the quote's own filament line.
+    assert (at.grams, at.seconds, at.filament_minor) == (40.0, 1500, 140)
+    assert sum(ln.amount_minor for ln in quote.lines if ln.kind == "filament") == 140
+
+
 async def test_an_attempt_at_todays_rate_takes_its_printers_basis(shop: Shop, pool: PgPool) -> None:
     order = shop.order()
     item = shop.lifecycle.add_custom_item(

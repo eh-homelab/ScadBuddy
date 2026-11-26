@@ -308,7 +308,9 @@ sent with no `inputs_v` are of the commit's `INPUTS_VERSION`, which the row then
 null kept, the later commit's own version would be read as theirs and `migrate` skipped. A
 commit that cannot be read, or whose pipeline declaration or module cannot, keeps the null,
 and publish refuses it. A `PUT` replaces the row, so the editor sends back the `inputs` and `inputs_v`
-the listing has (PR 2, `listingDraft.ts` `draftOf`). PR 6 sets them.
+the listing has (PR 2, `listingDraft.ts` `draftOf`). PR 6 sets them, and always sends the `inputs_v`
+they are of. Empty inputs with an `inputs_v` (Sell of a render with none of its own) count too:
+`draftOf` keeps both, so publish migrates them.
 
 ## 5. The back-office editor (question 2)
 
@@ -319,8 +321,10 @@ Two ways in, one for each starting point:
 1. **Sell on storefront** (easy listing spec §3). The shop designs the house on the
    dollhouse's own page, presses Generate, then Generate's menu "Sell on storefront…".
    `sellSource.ts` reads the job or the output, and for a pipeline template it now takes
-   `inputs` less `params` and `v` as the draft's `inputs`, and `inputs.v` as `inputs_v`.
-   The smart defaults (`defaultsFor`) run over `inputs.params`, as they run over
+   `inputs` less `params` and `v` as the draft's `inputs`, and `inputs.v` as `inputs_v`
+   (a missing `v` is 0, as the backend reads it). Whether it is a pipeline template is
+   `RevisionSchema.pipeline` at the listing's commit (§6.1): a template with a UI and no
+   pipeline keeps UI state in its inputs too, and publish refuses that. The smart defaults (`defaultsFor`) run over `inputs.params`, as they run over
    `params` today. This is the main path, and it reuses the template's UI with no new UI
    at all.
 2. **"Set up the design" in the editor.** For a new listing, a version change, or a
@@ -344,14 +348,18 @@ template. It stays at the top, because the inputs decide everything below them:
 │ ...                  │  │                                         │
 ```
 
-- The summary line is the template UI's own `describe()` text (host API §4.3), read
-  while the dialog is open and kept on the draft. When there is none, the editor writes
-  the schema's titles and values: "House: Modules wide 3, Modules deep 1, Storeys 2,
-  Windows per storey 1".
+- The summary line is the template UI's own `describe()` text (host API §4.3), read at
+  "Use this design" and kept in the block while those are the listing's inputs at that
+  version (as built: not on the draft, whose fields are the saved body's). When there is
+  none, the editor writes the schema's titles and values: "House: Modules wide 3, Modules
+  deep 1, Storeys 2, Windows per storey 1". With no inputs it says "Not set up yet", or
+  "The design the template starts with" for empty inputs of a known version.
 - "Set by you. Customers cannot change it." says the rule of this version once, in plain
   words. No JSON is shown.
 - A refusal whose `name` starts with `inputs` shows here, in the block, with the schema's
-  title for the path ("Storeys: at most 3."), never the raw path.
+  title for the path ("Storeys: at most 3."), never the raw path. An input the version does
+  not have (reason `additional`) has a "Remove it" button.
+- A version whose pipeline declares no shape says so in the block, before a publish does.
 - A template with no pipeline shows the Design line as today.
 
 ### 5.3 The "Set up the design" dialog
@@ -362,7 +370,7 @@ host (`template-ui/host.ts`) is built over the draft, not over the Customize pag
 
 | Host call | In the dialog |
 | --- | --- |
-| `inputs.get` | `{...draft.inputs, params: the listing's locked values and defaults, v}` |
+| `inputs.get` | `{...draft.inputs, params: the listing's locked values and defaults, v}`, at the commit's `INPUTS_VERSION` |
 | `inputs.set` | changes the dialog's working copy only |
 | `schema` | the schema at the listing's commit |
 | `files.url` | the template's files at the listing's commit |
@@ -371,17 +379,27 @@ host (`template-ui/host.ts`) is built over the draft, not over the Customize pag
 | `presets.list`, `presets.load` | the template's presets, to start from one |
 | `presets.save` | refused: a listing is not a preset |
 
+As built, the working copy starts at the commit's `INPUTS_VERSION` (`designInputs.ts`
+`designStart`): older inputs go through `POST /models/{slug}/inputs/migrate` at the commit,
+as on the Customize page. A listing with none starts from what `migrate` makes of `{params,
+v: 0}`, which is the template's own design for the dollhouse, and empty where the template
+refuses that. A migration's `params` are left out, as at publish (§4.3). Inputs that cannot
+be brought up start again, and the dialog says so. A change of the listing's template or
+version while the dialog is open closes it. Escape with changes asks before it drops them.
+
 The dialog ends with two buttons: "Use this design" and "Cancel". "Use this design"
 writes the working copy back:
 
 - every key but `params` and `v` becomes `draft.inputs`, and `v` becomes `inputs_v`;
 - each value in `params` becomes the locked value of a locked parameter, or the starting
   value of an offered one (`fittedDefault`, as the editor's "Starts at" does). The
-  bounds and the colours on offer do not change.
+  bounds and the colours on offer do not change. Hidden parameters and `pipeline_params`
+  are left out, and a value the listing already has is no edit.
 
 If the module fails to mount (the host falls back to a form for any template, §4.2 of
 the pipelines spec), the dialog draws a form from the input schema instead, with the
-flows' `StartRun` controls (fact 5). A pipeline template with no UI gets the same form.
+flows' `StartRun` controls (fact 5), one group per object. A pipeline template with no UI
+gets the same form.
 
 Visual rules, from the frontend-design pass: the dialog is the app's own (its tokens,
 its type, its buttons), and the template's UI inside it keeps the look its shadow root
@@ -394,8 +412,11 @@ dialog full screen, as the dollhouse's own one-column layout expects.
 - `listingDraft.ts` gains `inputs` and `inputs_v` on the draft; `listingInput` sends
   them; `savedKey` includes them, so a change to the inputs is an unsaved change.
 - `listingRefusal` gains kind `inputs` for the five new `listing_inputs_*` codes, with
-  `name` and `reason`. `listing_param_pipeline_set` shows under the parameter it names,
-  as the other `params.<name>` refusals do.
+  `name` and `reason`. `listing_param_pipeline_set` (the only one whose `name` is
+  `params.<name>`; the other refusals of a parameter give its bare name) shows under the
+  parameter it names, or in the Design block when that parameter has no row (§6.1). The
+  editor takes such a bound or lock off the listing when it reads the version's schema
+  (`withoutUnknown`), so it meets this refusal only in a race.
 - Editing the inputs of a published listing unpublishes it on save, as any edit does.
   The page's note ("Saving a draft takes this listing off the store…") covers it.
 - The live preview (`previewListing`) shows a pipeline listing's settings as today. The
@@ -440,6 +461,11 @@ A template names the parameters its pipeline sets itself, in its `model.json`:
   `GET /models/{slug}/versions/{version}/schema`, which the editor reads through
   `api.getSchema(slug, commit)`) gains `pipeline_params: list[str] = []`. It is read from
   `model.json` at that revision, as `_revision_ui` reads `ui` there.
+- PR 6 adds `pipeline: RevisionPipeline | None` (`inputs_version`, `inputs`, `fault`) beside
+  it, read by the same `pipeline_facts` that publish uses; null for a template with no
+  pipeline. No other route gave a commit's `INPUTS_VERSION`, and the editor needs it with
+  the declared shape: for the block's words, for the form, and to never send a null
+  `inputs_v`.
 - The editor hides them: `listingDraft.ts` `shownParams(schema)` leaves out each name in
   `schema.pipeline_params`, as it leaves out the `Hidden` group. A hidden parameter is
   never offered and never locked by the shop, so it renders at the schema's default,
@@ -505,11 +531,11 @@ at publish and after Prepare colours) both ask it, so the rule goes there and no
 for the add and for `reprice` at submit, so a cart line never keeps a firm price for a
 design the listing no longer sells. `variant_at_add` applies it to the visitor's own job.
 
-**Several outputs.** Until PR 5, `renders.py` `one_output` (at most one entry in
-`job.outputs`) is asked by `estimate_of`, so by the estimate and the warming, and by
-`variant_at_add`. A variant key is recorded only through `estimate_of`, so the instant
-read and an add from it find no row of such a render. A line of one keeps no variant, so
-the submit prices nothing. The submit has no job to ask: the render is pruned after a day.
+**Several outputs.** From PR 3 to PR 4, `renders.py` `one_output` (at most one entry in
+`job.outputs`) was asked by `estimate_of`, so by the estimate and the warming, and by
+`variant_at_add`, and a line of such a render kept no variant. PR 5 removed it: since then
+`variant_of` gives one variant over every output (§7.4) on each path. The submit has no job
+to ask: the render is pruned after a day.
 So a line's row says whether its 3MF is the whole render (`storefront_item_prices`
 `every_output`, true on each row written since PR 3), and `price_of` gives a pipeline's
 line no price without it. A line that PR 2 added has the first output's 3MF, whatever else
@@ -520,8 +546,12 @@ pipeline's variant: the key holds the sha256 of the 3MF that is sliced, each slo
 filament, the choices and the setup, so the same file made by another template, or before
 the template had a pipeline, has the same price (§7.3). The row keeps the variant key and
 the output of the render that made it: a price is never moved to another variant's key,
-and `output_of` shows no preview of another commit. A template's own `print_settings` are
-not in the key, for any listing ([#7633](https://github.com/eh-homelab/ScadBuddy/issues/7633)).
+and `output_of` shows no preview of another commit. Since
+[#7633](https://github.com/eh-homelab/ScadBuddy/issues/7633), the key's setup also holds
+the template's own `print_settings` and `part_print_settings` when they are not empty
+(`key_setup`), so two templates of one 3MF with other settings have two prices. The
+variant carries the settings that made the key (`SliceVariant.template_settings`), and
+its slice takes them, not the template's as they are when the slice runs.
 
 **The instant read (#6921).** `renders.py` `instant_variant`, the
 cart add without a render (`_priced_variant`) and the preview file (`variant_preview`)
@@ -592,7 +622,9 @@ names below are read from `main` after that merge:
 `plan_variant` gives no price when the printer's status cannot be read
 (`STATUS_UNREAD`) or when a slot's type has no preset for the H2C and the chosen nozzle
 (`NO_TYPE_PRESET`). The price key is at `KEY_VERSION` 4 (#6710 moved it from 3: a
-file listing's key has a subject and its setup).
+file listing's key has a subject and its setup). #7633 kept it at 4: a template's
+settings go into the setup only when they are not empty, so the key of a template with
+none did not move.
 
 A pipeline variant goes through `plan_variant` and `slice_request` unchanged, with the
 `PrinterOpening` of the profile's printer. The remembered choices `opening_choices`
@@ -632,7 +664,7 @@ kit, or to its last, so the first output maps to itself. The slice of output `k`
 its `slot_presets`, the kit slot's presets under the output's own slot id
 (`{local + 1: variant.slot_presets[kit + 1]}`), because `resolver.resolve` reads slot ids
 of the file it slices. `SliceVariant` keeps `slot_filaments` and `slot_presets` by kit
-slot. It gains no field: the run reads each output's colours from the outputs it saved.
+slot. A kit gives it no field: the run reads each output's colours from the outputs it saved.
 
 **The kit's digest, and the key.** `price_key` does not change and `KEY_VERSION` stays 4.
 Its `model` is a new `kit_digest(job, file) -> str`, where `file` finds a result's file
@@ -658,9 +690,15 @@ for the first. `materialize_result` does not raise for a key the store no longer
 -> list[RenderedOutput]` gets the first output through `output_for_reference` (one submit
 and wait, or the output saved before). It then reads the job that output was saved from,
 saves each later entry of `job.outputs` with `"index": k` under `saved_as(k)`, in index
-order, and reuses an output already saved there while it `reference_matches`. A job that
-was pruned since gives the first output alone, which the check below refuses.
-`output_for_reference` stays as it is for the order's render and the quote.
+order, and reuses an output already saved there while it `reference_matches` and is of
+the same job. The first output is reused only while its job can still be read
+(`output_for_reference`'s `needs_job`, #7655): once the prune took that job, the
+reference renders again, and each output of the new job is saved under
+`rerendered_output_id(saved_as(k), job_id)`, one id per output and job, so no attempt
+saves it twice. A job gone between that check and the read gives the first output alone,
+which the check below refuses. Since PR 5 the order's render and its slice quote call
+`outputs_for_reference` too, so they also reuse an output only while its job can be read;
+a caller of `output_for_reference` alone reuses a matching output as before.
 `storefront_output_id(render_key, index=0)` keeps today's id for index 0. For a
 later output it appends `:{index}` to the uuid5 name string, not to the id: the id is
 `uuid5(NAMESPACE_URL, f"scadbuddy:storefront_output:{render_key}:{index}").hex`
@@ -718,18 +756,45 @@ today, so a kit adds no new counting. The whole kit's slice runs under the one
 operation's `QUOTE_TIMEOUT` (`LOST_AFTER` is built on it). §10.4 measures a whole
 dollhouse slice against it.
 
-**The order.** The order's render still saves and attaches output 0 to the item
-(`output_for_reference`), because `OrderItem` holds one `output_id`. The customer's firm
-price covers the whole kit, and the price row's plates go to the item's job cost. The
-other outputs of an ordered kit are found by the job: each saved output records its
-`job_id`, and the job lists every output. The cart line has every slot of the kit, so
-until PR 5 a back-office slice quote of it, which slices output 0 alone, is refused for a
-slot that only another output uses (`quote.py` `unsliced_slots`): the shop types the
-price. An order page that renders and prints every output of an item is part of this build (PR 5, §11). **No customer pays for an output the
-order cannot make:** until PR 5 lands, a render with more than one output still answers
-`none`, so such a kit is priced by hand. PR 4 builds the kit price, and PR 5 turns it on
-together with the order's every-output render and print. The dollhouse makes one output
-(fact 2), so no listed template meets this today.
+**The order (PR 5).** The order's render (`order_item_render`) and the item's slice quote
+(`quote.py` `ensure_output`) call `outputs_for_reference` with the item: it sets output 0
+on the item, because `OrderItem` holds one `output_id`, and saves each later output `k` of
+the same job under `orders/rendering.py` `kit_output_id(<the item's output>, k)`, a uuid5
+of that id and `k` (`later_as`). The item's own output is reused while it matches and its
+job can be read, and its later outputs go under ids of it; once the prune took the job,
+the reference renders again and the item takes the new job's outputs. `kit_output_ids`
+finds every output of the item from its `output_id`: each later id while it holds an output
+that records the same `job_id`. The order read carries them as `ItemDetail.kit_outputs`,
+and how many outputs the render made as `ItemDetail.kit_count` (both empty or 0 for an
+item of one output). `kit_count` is the count the item's print refuses by (below), so the
+page and the print agree.
+
+The customer's firm price covers the whole kit, and the price row's plates (renumbered,
+each filament by kit slot) go to the item's quote, so job cost reads every plate and every
+kit slot of the kit (`tests/orders/test_costs.py`).
+
+The order page prints each output on its own, in the plain print dialog of that output,
+and the shop records the item's attempt by hand under Fulfilment. The item's own print
+(`order_item_print`) refuses a kit, 409 `item_kit`, naming the saved outputs in `outputs`:
+an attempt records one print run and counts the item's quantity made, so an attempt of one
+output would count the whole kit made. It knows a kit by its saved outputs, or, for an
+output another path set on the item (a person's pick, an add with an `output_id`), by its
+render job while the job can be read (`kit_count`, extension `count`); such an output whose
+job the prune took is not known as part of a kit (#7780). When the order holds fewer
+outputs than the job made, the refusal and the order page say to save the others from the
+model's recent renders first. A store that fails while the order read looks for a kit
+leaves the item without one, logged; the order still reads. The order page names each
+output by its name and shows its colours when the output store answers. The items card's
+bulk Print leaves a kit out. A test
+print of a kit's revision prints output 0 alone, as before: it counts for nothing. An
+attempt per output, and a back-office slice quote of every output, are #7780: until then a
+back-office slice quote of a kit slices output 0 alone and is refused for a slot that only
+another output uses (`quote.py` `unsliced_slots`), and the shop types the price.
+
+**No customer pays for an output the order cannot make:** until PR 5, a render with more
+than one output answered `none`, so such a kit was priced by hand. PR 4 built the kit
+price, and PR 5 turned it on together with the order's every-output render and print. The
+dollhouse makes one output (fact 2), so no listed template meets this today.
 
 ## 8. Template changes (question 5)
 
@@ -748,7 +813,8 @@ A listing pins a commit (fact 11). Here that means:
   schema. A key the new schema dropped is refused (`listing_inputs_invalid`, reason
   `additional`, under the Design block) unless the template's `migrate` drops it. A
   pipeline removed at the new commit, with inputs set, is `listing_inputs_unexpected`;
-  the shop clears them with "Set up the design". A pipeline added at the new commit with
+  the block then has a "Clear the design" button (as built: there is no design to set up at
+  that commit). A pipeline added at the new commit with
   no inputs set yet is checked like any other: an empty `inputs` fails a schema with a
   `required` key.
 - **A deleted template.** Publish refuses it (`listing_reference`, as today). A listing
@@ -762,13 +828,15 @@ A listing pins a commit (fact 11). Here that means:
   pipeline template, it takes the output's `inputs` less `params` and `v` as `inputs`,
   and `inputs.v` as `inputs_v`, and runs the smart defaults over `inputs.params`. With
   `{slug, values}` it sets no inputs; the answer then says that the design needs setting
-  up in the editor, with the editor link. `storefront_listing_publish` is unchanged: its
+  up in the editor, with the editor link. It says the same for an output whose own inputs
+  are empty. `storefront_listing_publish` is unchanged: its
   refusals carry the new codes.
 - `storefrontDraft.ts` (the agent's copy of `defaultsFor`) and `listingDraft.ts` both
   gain the split of a source's inputs into `inputs`, `inputs_v` and the values. The rule
-  goes into `test-fixtures/storefront/sell-draft-vectors.json` as new cases (`source`
-  with whole inputs; expected `input.inputs` and `input.inputs_v`), so the two copies
-  stay equal.
+  goes into `test-fixtures/storefront/sell-draft-vectors.json` as new cases (`source`, the
+  whole inputs, and a schema with `pipeline` and `pipeline_params`; `expected` holds the
+  smart defaults with `inputs` and `inputs_v`), so the two copies stay equal. PR 6 added
+  them; the agent's test leaves the `source` cases out until PR 7 reads them.
 - The authoring skill (`plugins/scadbuddy/skills/authoring`) gains the `pipeline.inputs`
   declaration and its subset, with its sources cited as `lint-plugin.sh` requires.
 
@@ -833,16 +901,21 @@ A listing pins a commit (fact 11). Here that means:
   - A plate of the second output that fails, and a kit slot at 0 g, each give a
     `failed` row and no price; no row is ever `done` with part of the kit.
   - Outputs saved from two jobs give `GEOMETRY_DIFFERS`.
-  - Until PR 5: the estimate route still answers `none` for a job of two outputs
-    (`tests/api/test_storefront_pipeline_listings.py`, also while the kit's `done` row
-    stands; the same file prices a real render of two outputs).
+  - Until PR 5 the estimate route answered `none` for a job of two outputs; since PR 5 it
+    answers the kit's price (`tests/api/test_storefront_pipeline_listings.py`, which
+    prices a real render of two outputs).
   - `slice_and_price` with no `place` gives the plates as today (a back-office quote
     test, unchanged).
   - One claim: a two-output variant takes one place of `storefront_slices_concurrent`;
     with `limit=1`, a second variant's read answers `pending`.
-- PR 5, the order of a kit item (`tests/orders/`): an item from a two-output render
-  attaches both outputs by `job_id`; its job cost meets every kit slot; the order page
-  offers a print of each output; the estimate route now answers the kit price.
+- PR 5, the order of a kit item: an item from a two-output render attaches both outputs
+  by `job_id` (`tests/orders/test_rendering.py`, and the order's read of a real render,
+  `tests/api/test_storefront_pipeline_listings.py`); its job cost meets every kit slot
+  (`tests/orders/test_costs.py`); the item's print refuses a kit, `item_kit`
+  (`tests/orders/test_printing.py`); the order page offers a print of each output
+  (`PrintItem.test.tsx`), and bulk Print leaves a kit out (`ItemsBulk.test.tsx`); the
+  estimate route, the instant read, the add and the submit answer the kit's price, and a
+  line PR 2 added stays by hand.
 - `outputs_for_reference` (`tests/orders/test_rendering.py`): saves every output under
   `storefront_output_id(key, k)`, index 0 under today's id, and reuses saved outputs that match on a second call with
   no new render.
@@ -860,11 +933,11 @@ A listing pins a commit (fact 11). Here that means:
 - `listingDraft.test.ts` and the agent's tool test read the new vector cases.
 - `sellSource` takes a job's and an output's inputs.
 - `shownParams` leaves out the `pipeline_params` of a revision schema.
-- `ListingEditor.test.tsx`: the Design block's summary; a refusal with `name`
+- `DesignBlock.test.tsx` and `designInputs.test.ts`: the Design block's summary; a refusal with `name`
   `inputs.house.storeys` shows under the block with the title "Storeys"; "Set up the
   design" mounts a fake template module, and "Use this design" writes `inputs`,
   `inputs_v` and the locked values; a module that throws shows the schema form.
-- A Playwright run on the msw mocks: Sell on storefront from the dollhouse's page, the
+- A Playwright run on the msw mocks (`e2e/storefront-design.spec.ts`): Sell on storefront from the dollhouse's page, the
   editor with the Design block, publish.
 
 ### 10.4 Before go-live (on prod, by hand)
@@ -929,7 +1002,11 @@ until the step that makes it safe.
    cost meets every kit slot, and the order page prints each output. This PR removes PR
    3's `none` for several outputs (`one_output`), so the kit price goes live only with it.
    `every_output` stays: a line added before PR 3 holds one output's digest for good. After 4.
-6. **`feat(storefront): set a listing's design inputs`** (frontend). The Design block,
+   As built: the order page prints each output in its plain print dialog, the item's own
+   print refuses a kit (`item_kit`), and the shop records the attempt by hand; an attempt
+   per output is #7780 (§7.4, "The order").
+6. **`feat(storefront): set a listing's design inputs`** (frontend, and
+   `RevisionSchema.pipeline`, §6.1). The Design block,
    the "Set up the design" dialog (owner, decision 1), the schema form fallback, Sell's
    inputs, the refusal mapping, `shownParams` over `pipeline_params`, the mocks and the
    Playwright run. It can go up in parallel with 3 to 5, after 2.
@@ -1017,7 +1094,8 @@ stored value changes its meaning.
   `ui` (the dollhouse has one), so no back-office edit today changes a pipeline item's
   `house`.
 - **The dialog is reusable.** The host of §5.3 is built over a source of inputs, not
-  over the listing draft. The follow-up mounts the same dialog over the item's
+  over the listing draft (`DesignDialog.tsx` `Design` takes a start, a slug, a commit and a
+  schema). The follow-up mounts the same dialog over the item's
   revision: `inputs.get` reads the revision's inputs, and "Use this design" sends
   `{...inputs, params}` as a new revision through the route `DesignInputs` uses now.
   The item's `v` stays the commit's `INPUTS_VERSION`, because publish migrated it.

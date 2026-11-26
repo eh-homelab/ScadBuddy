@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 from collections.abc import AsyncIterator
@@ -18,7 +19,7 @@ from scadbuddy.library.output_rows import ByteWrite, OutputBlobs, OutputRows
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.jobs import Job
 from scadbuddy.render.projection import JobProjection
-from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.store.content import ContentStore
 from tests.support.arrange import finished_job
 from tests.support.saved_outputs import save_files
 from tests.support.store import local_content, store_pool
@@ -33,8 +34,9 @@ async def put_folder_at_keys(
     transaction instead (`OutputRows.insert`)."""
     got = await blobs.put_folder(directory, output_id, slug)
     for item in got.staged:
-        await blobs.content.link(item.key, item.ref, scope=BlobScope(slug=slug))
-    await blobs.drop_staged(got)
+        await asyncio.to_thread(
+            blobs.content.index.put, item.key, item.ref, slug=slug, meta={}, reuse=item.reused
+        )
     return dataclasses.replace(got, staged=())
 
 

@@ -47,6 +47,7 @@ from scadbuddy.library.history import (
     RevisionRange,
 )
 from scadbuddy.operations.component import OperationsDep
+from scadbuddy.orders.storefront.pipeline_inputs import pipeline_facts
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
@@ -200,6 +201,18 @@ def get_version_source(
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
+class RevisionPipeline(BaseModel):
+    """What a revision declares of its pipeline (#5701, spec 2026-11-17 §4.1), read as a
+    listing's publish reads it, without running it."""
+
+    #: The revision's ``INPUTS_VERSION``; None when its module cannot be read.
+    inputs_version: int | None = None
+    #: The declared shape of the pipeline's own inputs (``pipeline.inputs``), or None.
+    inputs: dict[str, Any] | None = None
+    #: Why ``inputs`` is None; empty otherwise.
+    fault: str = ""
+
+
 class RevisionSchema(CustomizerSchema):
     """A revision's schema, with that revision's own ``ui`` (spec 2026-09-27 §4.1): the
     record carries only the current one, and an old revision may declare another or none."""
@@ -209,6 +222,9 @@ class RevisionSchema(CustomizerSchema):
     #: The parameters that revision's pipeline sets itself (``pipeline.sets_params``, spec
     #: 2026-11-17 §6.1), which the listing editor hides; empty with no readable pipeline.
     pipeline_params: list[str] = Field(default_factory=list)
+    #: The revision's pipeline, whose design inputs the listing editor sets (§5); None for
+    #: a template with none.
+    pipeline: RevisionPipeline | None = None
 
 
 def _revision_meta(directory: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -230,16 +246,6 @@ def _revision_ui(directory: Path, slug: str) -> tuple[UiDeclaration | None, str 
         return None, error
     meta = ModelMeta.model_validate({"name": slug, "ui": raw["ui"]})
     return meta.ui, meta.ui_error
-
-
-def _revision_pipeline_params(directory: Path, slug: str) -> list[str]:
-    """The ``pipeline.sets_params`` of the model.json in ``directory``, read as the
-    catalogue reads the pipeline: only that key."""
-    raw, _ = _revision_meta(directory)
-    if raw is None or raw.get("pipeline") is None:
-        return []
-    meta = ModelMeta.model_validate({"name": slug, "pipeline": raw["pipeline"]})
-    return list(meta.pipeline.sets_params) if meta.pipeline is not None else []
 
 
 @router.get(
@@ -277,9 +283,17 @@ async def get_version_schema(
     directory = source.scad.parent
     sampled = await asyncio.to_thread(with_samples, schema, directory)
     ui, ui_error = await asyncio.to_thread(_revision_ui, directory, slug)
-    pipeline_params = await asyncio.to_thread(_revision_pipeline_params, directory, slug)
+    facts = await asyncio.to_thread(pipeline_facts, directory, slug)
     return RevisionSchema(
-        **sampled.model_dump(), ui=ui, ui_error=ui_error, pipeline_params=pipeline_params
+        **sampled.model_dump(),
+        ui=ui,
+        ui_error=ui_error,
+        pipeline_params=[] if facts is None else list(facts.sets_params),
+        pipeline=None
+        if facts is None
+        else RevisionPipeline(
+            inputs_version=facts.inputs_version, inputs=facts.schema, fault=facts.fault
+        ),
     )
 
 

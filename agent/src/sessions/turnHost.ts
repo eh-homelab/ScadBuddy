@@ -24,6 +24,7 @@ import type { SessionImages } from './blobs.js'
 import type { TurnFence, TurnRoutes } from '../gate/crudPending.js'
 import { userPrompt } from './images.js'
 import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, waitForTab } from './manager.js'
+import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
@@ -178,6 +179,14 @@ const CUT_TEXT: Record<Cut, string> = {
   replaced: 'a newer placement of the session took over',
   shutdown: 'the agent service is shutting down',
 }
+
+/**
+ * The `error` event's code that a placement cut by a shutdown logs before it fails ShuttingDown
+ * (#7874). The turn is placed again, so the panel shows a call that was running then as stopped,
+ * with this reason, not as failed with Claude Code's refusal text.
+ */
+export const WORKER_RESTARTED = 'worker_restarted'
+export const WORKER_RESTARTED_TEXT = 'the agent worker restarted; the turn continues on another worker'
 
 export type TurnHostDeps = {
   /** The replica's turn machinery (SessionManager.turnCore): its warm processes, events, audit. */
@@ -639,7 +648,13 @@ export class TurnHost {
         core.traced.released(parks.taken.length)
         return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
       }
-      if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
+      if (why === 'shutdown') {
+        // #7874: the log says why the calls in flight stopped. Fenced as the turn's own events are.
+        await events
+          .appendFenced(id, [event({ type: 'error', sessionId: id, code: WORKER_RESTARTED, message: WORKER_RESTARTED_TEXT })], { attempt, turnId })
+          .catch((err: unknown) => this.#deps.core.stderr?.(`session ${id}: could not log the restart of turn ${turnId}: ${describe(err)}\n`))
+        throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
+      }
       // Another placement took the row (#6387): the workflow owns placement, and places the turn
       // again, whose claim fences that one out. Only an ended turn is over.
       if (why === 'moved' || why === 'replaced') {

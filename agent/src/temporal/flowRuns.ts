@@ -42,7 +42,8 @@ export interface FlowRuns {
   approved(requestId: string, inputHash?: string): Promise<boolean>
   /**
    * Whether the call's approval for this `inputHash` came from the run's grant (#2481),
-   * now revoked or expired: `approved` is false for it, and it is refused GrantRevoked.
+   * now revoked or expired, or a grant it inherits from or the standing grant it was seeded
+   * from no longer in force (#5685): `approved` is false for it, and it is refused GrantRevoked.
    */
   lapsed?(requestId: string, inputHash?: string): Promise<boolean>
   /**

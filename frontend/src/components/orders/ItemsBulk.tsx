@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Spinner } from '@/components/ui/spinner'
-import { itemActions, type ItemActionKey } from './itemActions'
+import { isKit, itemActions, type ItemActionKey } from './itemActions'
 import { ItemPrintDialog } from './PrintItem'
 import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalItems, refusalText } from './refusal'
@@ -65,7 +65,8 @@ export function ItemsBulk({
 }) {
   const rules = { shipments, unfulfilAllowed }
   const fulfil = allowed(order, selected, rules, ['fulfil']).filter((item) => FULFILLABLE.has(item.status))
-  const print = allowed(order, selected, rules, ['print'])
+  // A kit prints output by output from its own details (#5701), never in the item's dialog.
+  const print = allowed(order, selected, rules, ['print']).filter((item) => !isKit(item))
   const remove = allowed(order, selected, rules, ['delete', 'cancel'])
   const tooMany = fulfil.length > MAX_BULK_FULFIL
   const [fulfilling, setFulfilling] = useState(false)

@@ -8,8 +8,9 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { colourProblems, defaultFits, effectiveMaterials, emptyDraft, fittedDefault, fixColour, isFileDraft, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, pickableColours, refusalText, sameColour, schemaBound, shownParams, switchSource, titleColours, withoutWords, type ListingDraft, type ListingRefusal } from './listingDraft'
+import { colourProblems, defaultFits, effectiveMaterials, emptyDraft, fittedDefault, fixColour, isFileDraft, isSupport, isSupportOnly, lockedValue, materialKey, MAX_TEXT_LENGTH, nearestFilaments, offerable, priceBookMaterials, pickableColours, refusalText, sameColour, schemaBound, shownParams, switchSource, titleColours, withoutWords, type DesignSchema, type ListingDraft, type ListingRefusal } from './listingDraft'
 import { customerFilaments } from '../../storefront/params'
+import { DesignBlock } from './DesignBlock'
 import { MaterialOrder } from './MaterialOrder'
 import { ListingPictures, type LivePictures, type MediaState } from './ListingPictures'
 import { FileChoice, FileParts, FilePictures, FileStateNotes } from './FileSource'
@@ -34,7 +35,7 @@ export interface ListingEditorProps {
   onChange: (draft: ListingDraft) => void
   models: readonly ModelSummary[]
   versions: readonly ModelVersion[] | undefined
-  schema: CustomizerSchema | undefined
+  schema: DesignSchema | undefined
   filaments: readonly Filament[]
   media: readonly MediaView[]
   /** #6213 — the pictures the public site shows now (`LivePictures`). */
@@ -515,7 +516,7 @@ function ColourProblems({ draft, schema, filaments, onChange }: { draft: Listing
  * and keeps the chosen one's pickers open; a saved one folds to one line, with "Change"
  * opening both. Switching the source clears what the other source set (`switchSource`).
  * What the library says of a published file's version, and what publish refused about the
- * file, show here whether folded or not.
+ * file, show here whether folded or not, as do a pipeline design's own inputs (#5701).
  */
 function SourceBlock({
   isNew = false,
@@ -523,12 +524,15 @@ function SourceBlock({
   onChange,
   models,
   versions,
+  schema,
+  filaments,
+  settled,
   file,
   library,
   listingId,
   refusal,
   onKeepPublished,
-}: Pick<ListingEditorProps, 'isNew' | 'draft' | 'onChange' | 'models' | 'versions' | 'file' | 'library' | 'listingId' | 'refusal' | 'onKeepPublished'>) {
+}: Pick<ListingEditorProps, 'isNew' | 'draft' | 'onChange' | 'models' | 'versions' | 'schema' | 'filaments' | 'file' | 'library' | 'listingId' | 'refusal' | 'onKeepPublished'> & { settled: boolean }) {
   const id = useId()
   const [changing, setChanging] = useState(false)
   const fileSource = isFileDraft(draft)
@@ -539,6 +543,9 @@ function SourceBlock({
   const after = (
     <>
       {fileSource && <FileStateNotes draft={draft} file={file} onChange={onChange} onKeepPublished={onKeepPublished} />}
+      {!fileSource && (
+        <DesignBlock draft={draft} onChange={onChange} schema={schema} name={model?.name ?? draft.slug} filaments={filaments} settled={settled} refusal={refusal ?? null} />
+      )}
       {refused && (
         <p role="alert" className="text-xs text-destructive">
           Not published: {refused.detail}.
@@ -954,6 +961,9 @@ export function ListingEditor({
         onChange={onChange}
         models={models}
         versions={versions}
+        schema={schema}
+        filaments={filaments}
+        settled={coloursSettled}
         file={file}
         library={library}
         listingId={listingId}

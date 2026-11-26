@@ -797,6 +797,55 @@ COPY backend/tests ./tests
 ENV PYTEST_ADDOPTS="-p no:cacheprovider"
 CMD ["xvfb-run", "-a", "python", "-m", "pytest", "tests/profile_fetch/test_site.py"]
 
+# ── cups: the label print server ──────────────────────────────────────────────
+# CUPS with the Zebra ZPL driver, for the network label printer (deploy/cups/README.md).
+# Debian's own packages: `cups` holds the `rastertolabel` filter, `cups-common` the
+# `sample.drv` that makes the "Zebra ZPL Label Printer" PPD, and `cups-filters` (with its
+# core drivers) the PDF and image to raster filters (`dpkg -S` in debian 13.7, 2026-11-25).
+# start.sh declares one queue per label size from CUPS_QUEUES and runs cupsd in the
+# foreground, without root.
+# /var/lib/cups may be a volume (deploy/cups/README.md, "State").
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0 AS cups
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cups cups-filters ghostscript libpam-pwdfile openssl tini \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/lib/cups/filter/rastertolabel \
+    && test -f /usr/share/cups/drv/sample.drv \
+    && test -f /usr/lib/x86_64-linux-gnu/security/pam_pwdfile.so
+
+RUN groupadd --gid 10001 cups \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin cups \
+    && rm -f /etc/cups/printers.conf /etc/cups/ppd/* \
+    && mkdir -p /usr/local/share/scadbuddy-cups \
+    && cp -a /etc/cups /usr/local/share/scadbuddy-cups/server-root \
+    && rm -f /usr/local/share/scadbuddy-cups/server-root/cupsd.conf /usr/local/share/scadbuddy-cups/server-root/cups-files.conf \
+    && printf 'User cups\nGroup cups\nSystemGroup cups\nServerRoot /var/lib/cups/etc\nRequestRoot /var/lib/cups/spool\nCacheDir /var/lib/cups/cache\nErrorLog stderr\nAccessLog stderr\nPageLog stderr\n' > /etc/cups/cups-files.conf \
+    && mkdir -p /run/cups /var/log/cups /var/lib/cups \
+    && chown -R 10001:10001 /run/cups /var/log/cups /var/lib/cups \
+    && printf 'auth required pam_pwdfile.so pwdfile=/var/lib/cups/etc/admin.passwd\naccount required pam_permit.so\n' > /etc/pam.d/cups
+# The admin login (cupsd.conf): cupsd runs without root, so PAM checks the password
+# against a file start.sh writes from CUPS_ADMIN_PASSWORD_FILE, not against /etc/shadow.
+# The configuration (cupsd.conf, cups-files.conf) stays in /etc/cups, the image's or
+# mounted over it. The state (queues, PPDs, jobs) lives in subdirectories of
+# /var/lib/cups that start.sh creates, so a volume there (its root owned by root, as a
+# PVC's is) still gives cupsd directories it owns and may chmod.
+COPY deploy/cups/cupsd.conf /etc/cups/cupsd.conf
+COPY deploy/cups/start.sh /usr/local/bin/cups-start
+COPY --chmod=0755 deploy/cups/zebra /usr/lib/cups/backend/zebra
+
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
+WORKDIR /tmp
+USER 10001:10001
+EXPOSE 8631
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/usr/local/bin/cups-start"]
+
 # ── mediamtx: the pinned MediaMTX release binary ──────────────────────────────
 # Printer camera recording (#7328, docs/features/printer-cameras.md). One place for the
 # version and the per-arch digests: the camera images and the `test` stage copy the
@@ -832,13 +881,13 @@ RUN case "$TARGETARCH" in \
     && rm -f /tmp/mediamtx.tar.gz /tmp/mediamtx.sha256 \
     && test "$(mediamtx --version)" = "$MEDIAMTX_VERSION"
 
-# ── camera-relay, camera-recorder: printer camera recording (#7328) ───────────
-# Two images, one per process (README.md, "Printer cameras (#7328)"). Each pod
+# ── camera-relay, camera-recorder, camera-edge: printer camera recording and live view (#7328, #7330) ──
+# Three images, one per process (README.md, "Printer cameras (#7328)"). Each pod
 # runs two containers of its image: MediaMTX (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`)
 # and the controller (the default command). The controller drives MediaMTX's control API
 # on 127.0.0.1:9997, and MediaMTX's hooks run curl against the controller's hook server on
 # 127.0.0.1:9091, so both share the pod's network. The recorder's two containers also
-# share /segments. Neither process holds a database secret or client (#5295).
+# share /segments. No process holds a database secret or client (#5295).
 #
 # `camera-deps` builds the venv as `profile-fetch-deps` does: no dev group, no editable
 # install, and no psycopg package. It needs git for the git-pinned
@@ -880,16 +929,16 @@ ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Fails the build when a psycopg package is installed, or when either process's start
-# imports Postgres code (#5295: neither has a database). `-B`, so it writes no bytecode.
+# Fails the build when a psycopg package is installed, or when any camera process's start
+# imports Postgres code (#5295: none has a database). `-B`, so it writes no bytecode.
 RUN python -B - <<'CHECK'
 import importlib.util, sys
 for name in ("psycopg", "psycopg_binary", "psycopg_pool", "psycopg_c"):
     if importlib.util.find_spec(name) is not None:
         sys.exit(f"ERROR: {name} is installed in the camera image")
-import scadbuddy.camera.relay, scadbuddy.camera.recorder
+import scadbuddy.camera.relay, scadbuddy.camera.recorder, scadbuddy.camera.edge
 if any(m == "psycopg" or m.startswith("psycopg.") for m in sys.modules):
-    sys.exit("ERROR: importing scadbuddy.camera.relay or .recorder imported psycopg")
+    sys.exit("ERROR: importing scadbuddy.camera.relay, .recorder or .edge imported psycopg")
 CHECK
 
 RUN groupadd --gid 10001 camera \
@@ -922,6 +971,13 @@ ENV TZ=UTC
 # The controller's /healthz and /metrics (`camera.process.HEALTH_PORT`).
 EXPOSE 9090
 CMD ["python", "-m", "scadbuddy.camera.recorder"]
+
+FROM camera AS camera-edge
+COPY deploy/camera/mediamtx-edge.yml /etc/mediamtx/mediamtx.yml
+# MediaMTX's LL-HLS and WebRTC (WHEP) for the API, WebRTC's ICE over UDP; the
+# controller's /healthz and /metrics (`camera.process.HEALTH_PORT`).
+EXPOSE 8888 8889 8189/udp 9090
+CMD ["python", "-m", "scadbuddy.camera.edge"]
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to

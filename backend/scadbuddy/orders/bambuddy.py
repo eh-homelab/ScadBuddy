@@ -28,6 +28,7 @@ from scadbuddy.bambuddy.models import (
     PrinterMaintenanceOverview,
     SliceJob,
     SpoolAssignment,
+    as_utc,
 )
 from scadbuddy.bambuddy.preview import preview_job
 from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
@@ -63,8 +64,9 @@ def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
     return ArchiveFacts(
         archive_id=archive.id,
         status=archive.status,
-        started_at=archive.started_at,
-        completed_at=archive.completed_at,
+        # Bambuddy's times are naive UTC; orders compares them with aware ones (#7826).
+        started_at=as_utc(archive.started_at),
+        completed_at=as_utc(archive.completed_at),
         actual_seconds=archive.actual_time_seconds,
         grams=grams,
         finish_photos=[p for p in archive.photos if p.startswith(FINISH_PHOTO_PREFIX)],

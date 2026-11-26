@@ -1,11 +1,11 @@
 import { Suspense, useEffect, useMemo, useState } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { OrbitControls } from '@react-three/drei'
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import { designColorOf, designOpacityOf } from '../../lib/glbColor'
 import { applyPartOpacity, recolourParts } from '../../lib/partOpacity'
 import { cameraFraming } from '../../lib/previewFrame'
+import { PreviewLoader, stopRetries } from '../../lib/previewLoader'
 import { ErrorBoundary } from '../ErrorBoundary'
 import { Button } from '@/components/ui/button'
 import { WheelGate } from './WheelGate'
@@ -27,10 +27,18 @@ type Props = {
  * is the model, not the slicer's toolpaths: no infill, supports or speeds.
  */
 export function PlateScene({ url, colors, cutAt, onHeight, background }: Props) {
+  // A retry still waiting for this URL stops when the scene leaves it, and its failure is
+  // dropped from the loader's cache, so a later visit loads afresh (#6968).
+  useEffect(
+    () => () => {
+      if (stopRetries(url)) useLoader.clear(PreviewLoader, url)
+    },
+    [url],
+  )
   return (
     <ErrorBoundary
       resetKey={url}
-      onError={() => useLoader.clear(GLTFLoader, url)}
+      onError={() => useLoader.clear(PreviewLoader, url)}
       fallback={(error, retry) => <PreviewFailure url={url} error={error} retry={retry} />}
     >
       <WheelGate>
@@ -104,7 +112,7 @@ export function PreviewFailure({ url, error, retry }: { url: string; error: Erro
 }
 
 function PlateModel({ url, colors, cutAt, onHeight }: Omit<Props, 'background'>) {
-  const gltf = useLoader(GLTFLoader, url)
+  const gltf = useLoader(PreviewLoader, url)
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as { target: THREE.Vector3; update: () => void } | null
   const invalidate = useThree((state) => state.invalidate)

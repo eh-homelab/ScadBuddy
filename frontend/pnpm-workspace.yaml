@@ -9,3 +9,6 @@ overrides:
   cmdk>@radix-ui/react-dialog: 1.1.23
   cmdk>@radix-ui/react-id: 1.1.4
   cmdk>@radix-ui/react-primitive: 2.1.10
+  # monaco-editor 0.57.0 pins dompurify 3.4.15, which has open advisories fixed in
+  # 3.4.17 (#7789). monaco-editor 0.58.0 pins 3.4.17; drop this once it is adopted.
+  monaco-editor>dompurify: 3.4.17

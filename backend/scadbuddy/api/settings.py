@@ -57,6 +57,7 @@ from scadbuddy.core.settings import (
 )
 from scadbuddy.filament.bb_sync_models import pushes_anything
 from scadbuddy.filament.component import FilamentDep
+from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.filament.rfid_mode import (
     AUTO_ADD_SETTING,
@@ -271,6 +272,8 @@ class SettingsView(BaseModel):
     filament_sync_pass_ttl_days: int | None = None
     #: #7157: the label template the Labels page and `POST /filament/labels` use.
     filament_label_template: LabelTemplateChoice = Field(default_factory=LabelTemplateChoice)
+    #: #7216: the format, PNG dpi and fields of `POST /filament/labels`.
+    filament_label_output: LabelOutput = Field(default_factory=LabelOutput)
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
@@ -311,12 +314,14 @@ class SettingsView(BaseModel):
     has_git_remote_token: bool = False
     event_log_retention_seconds: float
     event_log_retention_rows: int
+    event_log_retention_kinds: dict[str, float] = Field(default_factory=dict)
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = 20
     filament_default_cost_per_kg: Decimal | None = None
     filament_weighing_drift_notice_g: int = 10
+    filament_weighing_finished_left_g: int = 5
     filament_drying_temp_c: int | None = None
     filament_drying_hours: Decimal | None = None
     filament_label_base_url: str | None = None
@@ -494,6 +499,8 @@ def _bootstrap(settings: Settings) -> list[BootstrapValue]:
         value = resolved[name] if name in resolved else getattr(settings, name)
         if name == "database_url":
             value = _redacted_database_url(settings.database_url)
+        elif name == "camera_edge_read_pass" and value is not None:
+            value = "set"
         values.append(
             BootstrapValue(
                 name=name,
@@ -554,6 +561,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         filament_auto_add_unknown_rfid=stored.filament_auto_add_unknown_rfid,
         filament_sync_pass_ttl_days=stored.filament_sync_pass_ttl_days,
         filament_label_template=stored.filament_label_template or LabelTemplateChoice(),
+        filament_label_output=stored.filament_label_output or LabelOutput(),
         orders_deposit_policy=stored.orders_deposit_policy or [],
         storefront_shipping_options=stored.storefront_shipping_options or [],
         storefront_payment_instructions=stored.storefront_payment_instructions,

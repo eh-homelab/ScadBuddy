@@ -74,6 +74,7 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
  │  scadbuddy-core (Go)  :8080 and :8082                         │
  │    ported areas ──────────────► Postgres                      │
  │    the rest ─► 127.0.0.1:8090 ─► uvicorn (Python) ─► Postgres │
+ │    8082's rest ─► 127.0.0.1:8092 (Python's CRUD listener)     │
  │  agent sidecar ─► 127.0.0.1:8080                              │
  └──────────────────────────────────────────────────────────────┘
 ```
@@ -81,7 +82,9 @@ compute (`workers/rust`). This is my proposal; the owner said either language.
 - **Ports** (#7702). Go listens on 8080 and, for CRUD callers, on 8082 (`SCADBUDDY_CORE_CRUD_LISTEN`),
   with 8082's path filter (`crud/listener.py` `serves`: a path `posixpath.normpath` changes is
   refused, not only a wrong prefix). Python listens on `127.0.0.1:8090`; its own CRUD listener
-  moves to a free port (`SCADBUDDY_CRUD_PORT=0`) that no Service or policy names.
+  is on the fixed port 8092 (`SCADBUDDY_CRUD_PORT=8092`), which no Service or policy names. What
+  8082 does not answer goes there (`SCADBUDDY_CORE_CRUD_UPSTREAM`, #7774), never to 8090, so
+  Python's own path filter still stands behind Go's.
 - **The client address** (#7702). Go applies the trusted proxies (`SCADBUDDY_CORE_TRUSTED_PROXIES`, as
   `core/proxies.py`) and sends Python the client it finds as the one `X-Forwarded-For` value.
   Python trusts only `127.0.0.1`.

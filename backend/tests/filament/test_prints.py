@@ -51,12 +51,13 @@ def _printer(pool: PgPool) -> tuple[PrinterReportStore, str]:
     return PrinterReportStore(pool), row.id
 
 
-def _start(pool: PgPool, grams: float = 40.0) -> UUID:
+def _start(pool: PgPool, grams: float = 40.0, length_m: float | None = None) -> UUID:
     spool = _spool(pool)
     started = datetime.now(UTC)
-    record_uses(
-        pool, RUN, JOB, [SlotUse(slot_id=0, spool_id=spool, grams=grams, plate_started_at=started)]
+    use = SlotUse(
+        slot_id=0, spool_id=spool, grams=grams, plate_started_at=started, length_m=length_m
     )
+    record_uses(pool, RUN, JOB, [use])
     return spool
 
 
@@ -92,12 +93,24 @@ def test_a_plate_ends_at_the_report_that_shows_it(pg_pool: PgPool) -> None:
 
 
 def test_a_failed_plate_books_no_grams(pg_pool: PgPool) -> None:
-    spool = _start(pg_pool)
+    spool = _start(pg_pool, length_m=13.4)
     reports, pid = _printer(pg_pool)
     t = _running(pg_pool, reports, pid)
     _advance(pg_pool, reports, pid, "FAILED", t)
     (end,) = _ends(pg_pool, spool)
     assert end.delta_g == 0 and end.data["basis"] == "not_applied"
+    # #7685: a failed plate's length is 0 m, as its grams are 0 g.
+    assert end.data["length_m"] == 0.0
+
+
+def test_a_report_ended_plate_keeps_its_length(pg_pool: PgPool) -> None:
+    """#7685: the report's ``print_ended`` copies the start's ``data.length_m``."""
+    spool = _start(pg_pool, length_m=13.4)
+    reports, pid = _printer(pg_pool)
+    t = _running(pg_pool, reports, pid)
+    _advance(pg_pool, reports, pid, "FINISH", t)
+    (end,) = _ends(pg_pool, spool)
+    assert end.delta_g == -40 and end.data["length_m"] == 13.4
 
 
 def test_a_moved_on_end_is_left_to_the_settle(pg_pool: PgPool) -> None:

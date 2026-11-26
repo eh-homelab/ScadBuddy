@@ -368,6 +368,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attachment_update: () => [],
   order_attachment_delete: () => [],
   // An entity's files and links (#6950) are records of their own, shown on the entity's page.
+  entity_attachment_add: () => [],
   entity_attachment_update: () => [],
   entity_attachment_delete: () => [],
   entity_link_add: () => [],
@@ -759,6 +760,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'printer_slot_preset_clear',
   'printer_ams_label_set',
   'printer_ams_label_clear',
+  // #7330: a camera reconnect restarts ScadBuddy's pull; a camera is no recorded resource kind.
+  'reconnect_printer_camera',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',
@@ -804,6 +807,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'filament_sensor_save',
   'filament_sensor_archive',
   'filament_spool_import',
+  // #7216: a saved label sheet is no recorded resource kind.
+  'filament_label_sheet_upsert',
+  'filament_label_sheet_delete',
   // #6264: the RFID override mode and its reconcile touch the filament inventory, and
   // neither is a recorded resource kind.
   'filament_rfid_override_mode',
