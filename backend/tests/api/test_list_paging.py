@@ -19,6 +19,7 @@ from scadbuddy.library.catalogue import MAX_TAG_CHARS, MAX_TAGS
 from scadbuddy.library.outputs import OutputMeta
 from tests.support.operations import press
 from tests.support.row_outputs import app_outputs, insert_row, output_meta
+from tests.support.template_rows import sync_template_rows
 
 SOURCE = b"width = 10;\ncube(width);\n"
 
@@ -72,17 +73,18 @@ def test_models_page_builds_only_its_own_records(
     for slug in ("alpha", "bravo", "charlie"):
         _create(client, slug)
     catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
-    built: list[str] = []
-    record = catalogue._record
+    built: list[list[str]] = []
+    many = catalogue.rows.many
 
-    def counting(slug: str, *args: object) -> object:
-        built.append(slug)
-        return record(slug, *args)
+    # #7317 phase 3: a page's records are built from its own rows only.
+    def counting(template_ids: list[str]) -> object:
+        built.append(list(template_ids))
+        return many(template_ids)
 
-    monkeypatch.setattr(catalogue, "_record", counting)
+    monkeypatch.setattr(catalogue.rows, "many", counting)
     page = client.get("/api/v1/models", params={"limit": 1, "after": "alpha"})
     assert [row["slug"] for row in page.json()] == ["bravo"]
-    assert built == ["bravo"]
+    assert built == [["bravo"]]
 
 
 def test_a_model_left_out_does_not_shorten_its_page(client: TestClient, paths: DataPaths) -> None:
@@ -93,6 +95,7 @@ def test_a_model_left_out_does_not_shorten_its_page(client: TestClient, paths: D
     every = [row["slug"] for row in client.get("/api/v1/models").json()]
     broken = every[1]
     paths.model_source(broken).with_name("model.json").write_text("{", encoding="utf-8")
+    sync_template_rows(client)
     listed = [slug for slug in every if slug != broken]
 
     first = client.get("/api/v1/models", params={"limit": 2})

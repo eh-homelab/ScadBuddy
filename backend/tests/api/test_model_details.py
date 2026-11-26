@@ -23,6 +23,7 @@ from scadbuddy.core.paths import DataPaths
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
 from tests.support.row_outputs import update_row
+from tests.support.template_rows import sync_template_rows
 
 SLUG = "widget"
 SOURCE = "width = 10;\ncube(width);\n"
@@ -952,6 +953,7 @@ def test_a_metadata_edit_moves_updated_at(client: TestClient, paths: DataPaths) 
     hour_ago = time.time() - 3600
     for path in (paths.model_source(SLUG), paths.model_meta(SLUG)):
         os.utime(path, (hour_ago, hour_ago))
+    sync_template_rows(client)
     before = datetime.fromisoformat(client.get(f"/api/v1/models/{SLUG}").json()["updated_at"])
 
     patched = client.patch(
@@ -1100,6 +1102,7 @@ def test_nulls_in_a_model_json_on_disk_are_the_defaults(
         "placed",
         json.dumps({"name": None, "description": None, "tags": None, "libraries": None}),
     )
+    sync_template_rows(client)
 
     listed = _listed(client)["placed"]
     assert (listed["name"], listed["description"], listed["tags"], listed["libraries"]) == (

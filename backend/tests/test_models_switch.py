@@ -596,6 +596,13 @@ def answers(world: World) -> dict[str, Any]:
                 "pipeline": reference.render_key
                 == inputs_key(reference.slug, reference.inputs, reference.commit),
             }
+        # A key that is neither kind stays: it is read as a plain item's, as before.
+        neither = OrderStore(pool).item("neither")
+        assert neither is not None and neither.reference is not None
+        found["neither"] = (neither.reference.commit, neither.reference.render_key) == (
+            neither.reference.commit,
+            inputs_key(neither.reference.slug, neither.reference.inputs, neither.reference.commit),
+        )
         shown = ListingStore(pool).get("shown")
         assert shown is not None and shown.template_snapshot is not None
         found["variant"] = variant_key(shown, ResolvedChoice("PLA", {"w": 3}, []), {0: "f"})
@@ -607,6 +614,7 @@ def test_the_order_checks_answer_as_before(world: World) -> None:
     before = answers(world)
     assert before["plain"]["matches"] and before["pipeline"]["matches"]
     assert (before["plain"]["pipeline"], before["pipeline"]["pipeline"]) == (False, True)
+    assert before["neither"] is False
     world.run()
     assert answers(world) == before
     start_copies(world)
@@ -1162,6 +1170,30 @@ def test_a_number_keeps_its_digits_and_an_unknown_key_stays(world: World) -> Non
 # ── the dump directory ────────────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize(
+    "path", ["outputs/../../escape/meta.json", "/tmp/escape/meta.json", "models/a/model.json"]
+)
+def test_a_dump_that_names_a_file_outside_the_outputs_is_refused(world: World, path: str) -> None:
+    world.run()
+    files = world.dump / "files.jsonl"
+    lines = files.read_bytes().splitlines(keepends=True)
+    first = json.loads(lines[0])
+    first["path"] = path
+    files.write_bytes(json.dumps(first).encode() + b"\n" + b"".join(lines[1:]))
+    manifest = world.dump / "manifest.json"
+    body = json.loads(b"".join(manifest.read_bytes().splitlines(keepends=True)[:-1]))
+    body["files"]["files.jsonl"] = hashlib.sha256(files.read_bytes()).hexdigest()
+    signed = (json.dumps(body, indent=1) + "\n").encode()
+    manifest.write_bytes(signed + f"{hashlib.sha256(signed).hexdigest()}\n".encode())
+    before = snapshot(world)
+    with pytest.raises(SwitchRefusedError, match="not an output's"):
+        world.rollback()
+    with pytest.raises(SwitchRefusedError, match="not an output's"):
+        world.run()
+    assert snapshot(world) == before
+    assert not (world.paths.root.parent / "escape").exists()
+
+
 def test_a_dump_directory_that_holds_something_else_is_refused(world: World) -> None:
     world.dump.mkdir()
     (world.dump / "x").write_text("x")
@@ -1268,6 +1300,22 @@ def test_another_new_one_after_the_renames_stops_it(
         world.run()
     assert database(world) == world.before["database"]
     assert tree(world.paths.outputs) == world.before["outputs"]
+
+
+def test_an_output_whose_folder_went_is_not_made_again(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = models_switch._put_files
+    folder = world.meta_path("a", 1).parent
+
+    def then_put(*args: Any) -> Any:
+        shutil.rmtree(folder)
+        return real(*args)
+
+    monkeypatch.setattr(models_switch, "_put_files", then_put)
+    with pytest.raises(SwitchFailedError, match=output_id(1)):
+        world.run()
+    assert not folder.exists()
 
 
 def test_a_row_made_in_the_middle_stops_it(world: World, monkeypatch: pytest.MonkeyPatch) -> None:

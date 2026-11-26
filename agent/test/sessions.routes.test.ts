@@ -101,7 +101,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
   it("takes, logs and ignores an earlier client's mode, whatever its value (#7323)", async () => {
     const start = (body: unknown) =>
       app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
-    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       for (const mode of [undefined, 'classic', 'durable', 'fast', null]) {
         const res = await start({ title: 'a', ...(mode === undefined ? {} : { mode }) })

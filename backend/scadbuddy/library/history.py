@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import posixpath
 import re
 import shutil
@@ -266,6 +267,29 @@ class ModelHistory(GitRepo):
             timeout=LFS_PUSH_TIMEOUT,
             config=[*config, *pinned],
         )
+
+    def deleted_templates(self) -> set[str]:
+        """Each template and built-in that a commit up to HEAD deleted and HEAD no longer
+        holds (#7649). One that only lost a file, or came back, is not. Empty in a
+        repository with no commit."""
+        if self.head() is None:
+            return set()
+        tree = self._run("ls-tree", "-r", "--name-only", "-z", "HEAD", text=False)
+        assert isinstance(tree.stdout, bytes)
+        held = {_model_id(name) for name in os.fsdecode(tree.stdout).split("\0")}
+        log = self._run(
+            "log",
+            "--no-renames",
+            "--diff-filter=D",
+            "--format=",
+            "--name-only",
+            "-z",
+            "HEAD",
+            text=False,
+        )
+        assert isinstance(log.stdout, bytes)
+        names = os.fsdecode(log.stdout).split("\0")
+        return {slug for slug in map(_model_id, names) if slug is not None} - held
 
     def show(self, commit: str, path: str) -> bytes:
         """As :meth:`GitRepo.show`; a mesh's bytes where git holds its pointer."""

@@ -38,8 +38,18 @@ from tests.api.test_print_history import NATIVE_HASH, link, mock_archive, native
 from tests.api.test_send import API, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
+
+
+@pytest.fixture
+def model(client: TestClient, model: str) -> str:
+    """The template written on the volume by hand, copied to its row: the suggestions
+    read the rows only (#7317 phase 3)."""
+    sync_template_rows(client)
+    return model
+
 
 ARCHIVE = 193
 HASH = "c0ffee" * 10 + "abcd"

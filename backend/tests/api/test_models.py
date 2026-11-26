@@ -38,6 +38,7 @@ from tests.conftest import PgPool
 from tests.support.arrange import saved_output
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 SOURCE = "width = 10;\ncube(width);\n"
 
@@ -222,6 +223,7 @@ def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -
         assert list(paths.tombstones.iterdir()) == []
 
 
+@pytest.mark.usefixtures("model")
 def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
     orphan = paths.outputs / "gone" / "deadbeef"
     orphan.mkdir(parents=True)
@@ -231,6 +233,7 @@ def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) 
         assert list(paths.outputs.iterdir()) == []
 
 
+@pytest.mark.usefixtures("model")
 def test_an_orphaned_schema_cache_and_revision_are_swept_at_startup(
     app: FastAPI, paths: DataPaths
 ) -> None:
@@ -251,6 +254,9 @@ def test_a_delete_sweeps_other_models_orphans(
     orphan.mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
     paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    # A live template besides: a models directory with none sweeps nothing (#7649).
+    paths.model_dir("kept").mkdir()
+    paths.model_source("kept").write_text("cube(1);\n", encoding="utf-8")
 
     assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
 
@@ -258,6 +264,7 @@ def test_a_delete_sweeps_other_models_orphans(
     assert not paths.model_schema_cache("gone").exists()
 
 
+@pytest.mark.usefixtures("model")
 def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
     client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -279,6 +286,7 @@ def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
     assert "could not list for orphans" in caplog.text
 
 
+@pytest.mark.usefixtures("model")
 def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
     client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -322,10 +330,12 @@ def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
     ],
     ids=["roots", "listings", "liveness", "removals", "everything"],
 )
+@pytest.mark.usefixtures("model")
 def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...]) -> None:
     """#176: `main.lifespan` and `Catalogue.delete` call `sweep_orphans` unguarded, so
     it must swallow every filesystem error itself: a root it cannot check, a listing,
-    a slug's liveness and a removal, and the saved presets' pass."""
+    a slug's liveness and a removal, and the saved presets' pass. Where the models
+    directory itself cannot be listed, nothing is swept, presets included (#7649)."""
     (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
     paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
     paths.schema_cache.mkdir(parents=True)
@@ -357,7 +367,8 @@ def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...
         removed = catalogue.sweep_orphans()
 
     assert removed == []
-    presets.sweep_orphans.assert_called_once()
+    listed = not {"is_dir", "iterdir"} & set(failing)
+    assert presets.sweep_orphans.call_count == (1 if listed else 0)
 
 
 def test_a_new_model_does_not_inherit_a_gone_models_leftovers(
@@ -400,6 +411,72 @@ def test_the_orphan_sweep_never_touches_a_live_model(
 
     assert catalogue.sweep_orphans() == []
     assert all(path.exists() for path in derived)
+
+
+@pytest.mark.parametrize("state", ["missing", "empty", "only built-ins"])
+def test_no_sweep_while_the_models_directory_has_no_template(
+    client: TestClient, model: str, paths: DataPaths, state: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#7649: a wrong mount, a rename in progress or a restore that is not whole. Every
+    template would read as gone, and its outputs and presets with it."""
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    output = paths.output_dir(model, "deadbeef")
+    output.mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True, exist_ok=True)
+    paths.model_schema_cache(model).write_text("{}\n", encoding="utf-8")
+    body = {"name": "Lid", "inputs": {"params": {"width": 12}}}
+    preset = client.post(f"/api/v1/models/{model}/presets", json=body, headers=press())
+    assert preset.status_code == 201
+    catalogue.previews.record_failure(model, "key", "no preview")
+    kept = paths.models.with_name("models-kept")
+    paths.models.rename(kept)
+    if state != "missing":
+        paths.models.mkdir()
+    if state == "only built-ins":
+        (kept / "_builtin").rename(paths.models / "_builtin")
+    with caplog.at_level("WARNING"):
+        assert catalogue.sweep_orphans() == []
+        assert catalogue.sweep_orphan_previews() == []
+    assert output.is_dir() and paths.model_schema_cache(model).is_file()
+    assert [saved.name for saved in catalogue.presets.saved_presets(model)] == ["Lid"]
+    assert model in catalogue.previews.slugs()
+    assert "no template" in caplog.text
+
+
+def test_a_template_a_commit_deleted_is_swept_with_no_template_left(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#7649: with no template in the models directory, the history still says which
+    slugs were deleted; one it never held is kept."""
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    slug = _upload(client).json()["slug"]
+    assert client.delete(f"/api/v1/models/{slug}", headers=press()).status_code == 204
+    # What a render racing the delete writes after its sweep.
+    paths.output_dir(slug, "deadbeef").mkdir(parents=True)
+    paths.output_dir("never", "deadbeef").mkdir(parents=True)
+
+    assert catalogue.sweep_orphans() == [f"outputs/{slug}"]
+    assert (paths.outputs / "never").is_dir()
+
+
+def test_a_template_still_in_head_is_kept_though_a_commit_deleted_a_file_of_it(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#7649: a restore that brought back `.git` but not the folders. A template HEAD
+    still holds is not gone because one of its files once was."""
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    slug = _upload(client).json()["slug"]
+    extra = paths.model_dir(slug) / "extra.scad"
+    extra.write_text("cube(1);\n", encoding="utf-8")
+    assert catalogue.history.commit("Add a file", slug) is not None
+    extra.unlink()
+    assert catalogue.history.commit("Drop the file", slug) is not None
+    paths.model_dir(slug).rename(paths.root / "away")
+    output = paths.output_dir(slug, "deadbeef")
+    output.mkdir(parents=True)
+
+    assert catalogue.sweep_orphans() == []
+    assert output.is_dir()
 
 
 def test_a_failed_startup_sweep_does_not_stop_the_boot(
@@ -1380,6 +1457,7 @@ def test_a_malformed_pipeline_declaration_shows_its_error(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     _declare_pipeline(paths, model, {"module": "../p.py", "api": 1}, None)
+    sync_template_rows(client)
     detail = client.get(f"/api/v1/models/{model}").json()
     assert detail["pipeline"] is None and "module" in detail["pipeline_error"]
     [listed] = [row for row in client.get("/api/v1/models").json() if row["slug"] == model]
@@ -1395,6 +1473,7 @@ def test_a_pipeline_the_parser_chokes_on_never_breaks_the_listing(
     paths.model_source("other").write_text("cube();\n", encoding="utf-8")
     paths.model_meta("other").write_text(json.dumps({"name": "Other"}), encoding="utf-8")
     _declare_pipeline(paths, model, {"module": "pipeline/p.py", "api": 1}, "-" * 200_000 + "1")
+    sync_template_rows(client)
     listing = client.get("/api/v1/models")
     assert listing.status_code == 200
     assert {row["slug"] for row in listing.json()} >= {model, "other"}

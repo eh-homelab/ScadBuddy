@@ -20,15 +20,36 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/access"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/approvals"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/audit"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/blobs"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/packages"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/pending"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/plugins"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/publish"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/questions"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/secrets"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sessions"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/stores"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/sweeps"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/tasks"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/transcripts"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/turns"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/workspace"
 )
 
 const (
@@ -53,7 +74,11 @@ func main() {
 }
 
 func run(ctx context.Context, env func(string) string) error {
-	upstream, err := newUpstream(env("SCADBUDDY_CORE_UPSTREAM"))
+	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
+	if err != nil {
+		return fmt.Errorf("SCADBUDDY_CORE_TRUSTED_PROXIES: %w", err)
+	}
+	upstream, err := newUpstream(env("SCADBUDDY_CORE_UPSTREAM"), trusted)
 	if err != nil {
 		return err
 	}
@@ -84,30 +109,75 @@ func run(ctx context.Context, env func(string) string) error {
 	if err != nil {
 		return err
 	}
-	address := env("SCADBUDDY_CORE_LISTEN")
-	if address == "" {
-		address = ":8080"
+	address := or(env("SCADBUDDY_CORE_LISTEN"), ":8080")
+	servers := map[string]http.Handler{address: router}
+	// The CRUD port, which pods that may reach nothing else are admitted to (crud/listener.py).
+	if crudAddress := env("SCADBUDDY_CORE_CRUD_LISTEN"); crudAddress != "" {
+		if crudAddress == address {
+			return errors.New("SCADBUDDY_CORE_CRUD_LISTEN is the main address; the CRUD port needs its own")
+		}
+		// What Go does not answer goes to Python's own CRUD listener, never to the full API, so
+		// Python's path filter still stands behind Go's.
+		crudUpstream, err := newUpstream(env("SCADBUDDY_CORE_CRUD_UPSTREAM"), trusted)
+		if err != nil {
+			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
+		}
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+		if err != nil {
+			return err
+		}
+		servers[crudAddress] = front.CRUDOnly(crudRouter)
 	}
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return err
-	}
-	server := &http.Server{Handler: router, ReadHeaderTimeout: 30 * time.Second}
-	slog.Info("scadbuddy-core listens", "address", listener.Addr().String())
-	return serve(ctx, server, listener)
+	return serve(ctx, servers)
 }
 
-func serve(ctx context.Context, server *http.Server, listener net.Listener) error {
-	failed := make(chan error, 1)
-	go func() { failed <- server.Serve(listener) }()
+func or(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+// serve serves each address's handler until ctx ends or one server fails.
+func serve(ctx context.Context, handlers map[string]http.Handler) error {
+	// Every address is bound before any is served, so a failed bind leaves nothing running.
+	listeners := map[net.Listener]http.Handler{}
+	for address, handler := range handlers {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			for l := range listeners {
+				l.Close()
+			}
+			return err
+		}
+		listeners[listener] = handler
+	}
+	failed := make(chan error, len(listeners))
+	var servers []*http.Server
+	for listener, handler := range listeners {
+		server := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second}
+		servers = append(servers, server)
+		slog.Info("scadbuddy-core listens", "address", listener.Addr().String())
+		go func() { failed <- server.Serve(listener) }()
+	}
+	var err error
 	select {
-	case err := <-failed:
-		return err
+	case err = <-failed:
 	case <-ctx.Done():
 	}
 	drain, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	return server.Shutdown(drain)
+	for _, server := range servers {
+		err = errors.Join(err, ignoreClosed(server.Shutdown(drain)))
+	}
+	return ignoreClosed(err)
+}
+
+func ignoreClosed(err error) error {
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
 }
 
 // areaRoutes is a package's routes by area name, over the pool, with the KEKs (nil without
@@ -116,7 +186,11 @@ type areaRoutes func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]crud.Rout
 
 // areaPackages are the packages whose areas the switch below does not name.
 var areaPackages = []areaRoutes{
-	access.Areas, mcprelay.Areas, notify.Areas, secrets.Areas, transcripts.Areas,
+	access.Areas, agentreads.Areas, agentstart.Areas, approvals.Areas, audit.Areas, blobs.Areas,
+	edits.Areas, escalations.Areas, forget.Areas, gate.Areas, mcprelay.Areas, notify.Areas,
+	ordercosts.Areas, packages.Areas, pending.Areas, plugins.Areas, publish.Areas,
+	questions.Areas, secrets.Areas, sessions.Areas, stores.Areas, sweeps.Areas, tasks.Areas,
+	transcripts.Areas, workspace.Areas,
 }
 
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
@@ -147,7 +221,10 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add("agent", log.Reads()...)
 			router.Add("agent", log.Writes()...)
 		case "session-turns:read":
-			router.Add("agent", turn.Polled()...)
+			router.Add("agent", turn.Reads()...)
+		case "session-turns":
+			router.Add("agent", turn.Reads()...)
+			router.Add("agent", turn.Writes()...)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
@@ -162,11 +239,10 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	return router, nil
 }
 
-// peerHeader names the request's TCP peer to Python. It is always overwritten here.
-const peerHeader = "X-ScadBuddy-Peer"
-
-// newUpstream forwards to the Python API at an http:// URL or a unix:///path socket.
-func newUpstream(raw string) (http.Handler, error) {
+// newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The
+// request's client, as the trusted proxies name it, is the one X-Forwarded-For value Python
+// reads; Python trusts the front alone.
+func newUpstream(raw string, trusted front.Networks) (http.Handler, error) {
 	target, err := url.Parse(raw)
 	if err != nil || raw == "" {
 		return nil, errors.New("SCADBUDDY_CORE_UPSTREAM is an http:// URL or a unix:// path")
@@ -192,17 +268,13 @@ func newUpstream(raw string) (http.Handler, error) {
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.Out.URL.Scheme, p.Out.URL.Host = target.Scheme, target.Host
 			p.Out.Host = p.In.Host
-			// Rewrite drops these; Python decides what to believe (core/proxies.py).
-			for _, h := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"} {
+			// Rewrite drops these; Python reads them from its trusted peer, the front.
+			for _, h := range []string{"Forwarded", "X-Forwarded-Host", "X-Forwarded-Proto"} {
 				if v, ok := p.In.Header[h]; ok {
 					p.Out.Header[h] = v
 				}
 			}
-			host, _, err := net.SplitHostPort(p.In.RemoteAddr)
-			if err != nil {
-				host = p.In.RemoteAddr
-			}
-			p.Out.Header.Set(peerHeader, host)
+			p.Out.Header.Set("X-Forwarded-For", trusted.Client(p.In))
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if !errors.Is(err, context.Canceled) {

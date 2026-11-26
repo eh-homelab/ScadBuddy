@@ -1653,7 +1653,15 @@ const tools: Tool[] = [
       'slightly heavy, then call again with the same `reading_g` and `accept_insert_weight` true or false. ' +
       '`checked_by_default` is advice only: pass `true` only when the user says to take it. `true` changes the insert in ' +
       'ScadBuddy only and runs before the weighing, so the weighing uses the new empty weight; `false` books with the ' +
-      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked.',
+      'current empty weight. With no offer, the weighing is booked at once, and `true` is refused with nothing booked. ' +
+      'A new spool read under its label weight (#7683): the check answers `reason: below_label` with `shortfall_g`, ' +
+      '`resolutions` (`tared`: the scale was tared on the empty spool, the filament is the reading; `short`: the spool ' +
+      'holds less than its label, the filament is the reading less the empty weight and the spool stops being added ' +
+      "full; `label_wrong`: the same filament, and the spool's own label weight becomes it, `new_label_weight_g`), " +
+      'each with its `filament_g`, and `default`. With no `resolution` the tool books nothing (`event: null`, ' +
+      '`below_label`): tell the person the shortfall and the readings offered with their numbers, then call again with ' +
+      'the same `reading_g` and the `resolution` the person chose. Pass `resolution` only when the user chose it; a ' +
+      'resolution the check does not offer is refused (422 `no_below_label`) with nothing booked.',
     input: z.object({
       spool_id: z.string().uuid(),
       kind: z.enum(['weighed', 'dried', 'consumed_reset']),
@@ -1661,6 +1669,10 @@ const tools: Tool[] = [
       grams: z.number().min(0).optional(),
       reading_g: z.number().positive().max(100000).optional().describe('Scale reading with the spool, in grams (weighed only)'),
       accept_insert_weight: z.boolean().optional().describe("After an offer: true takes its empty weight for the insert, false declines it (needs reading_g)"),
+      resolution: z
+        .enum(['tared', 'short', 'label_wrong'])
+        .optional()
+        .describe("After a `below_label` answer: how the reading under the label is read, the person's choice (needs reading_g, no grams)"),
       temp_c: z.number().int().min(0).nullable().optional().describe("Left out: the spool's drying default"),
       hours: z.string().nullable().optional().describe("A decimal, e.g. `8`; left out: the spool's drying default"),
       note: z.string().optional(),
@@ -1672,18 +1684,19 @@ const tools: Tool[] = [
       'GET /api/v1/filament/spools/{spool_id}/insert-weight-offer',
       'POST /api/v1/filament/spools/{spool_id}/insert-weight',
     ],
-    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight }) =>
+    summarize: ({ spool_id, kind, grams, reading_g, accept_insert_weight, resolution }) =>
       kind === 'weighed'
         ? reading_g !== undefined
-          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}`
+          ? `Record a reading of ${reading_g} g on spool ${spool_id}${accept_insert_weight ? ' and take its insert weight' : ''}${resolution ? ` (${resolution})` : ''}`
           : `Record ${grams ?? '?'} g on spool ${spool_id}`
         : kind === 'consumed_reset'
           ? `Reset the used counter of spool ${spool_id}`
           : `Record a drying of spool ${spool_id}`,
-    handler: async ({ spool_id, reading_g, accept_insert_weight, ...body }, { backend }) => {
+    handler: async ({ spool_id, reading_g, accept_insert_weight, resolution, ...body }, { backend }) => {
       const path = { spool_id }
       if (reading_g === undefined) {
         if (accept_insert_weight) throw new ToolError('accept_insert_weight needs reading_g')
+        if (resolution) throw new ToolError('resolution needs reading_g')
         return json(
           await ok(
             backend.POST('/api/v1/filament/spools/{spool_id}/events', { params: { path }, body }),
@@ -1693,12 +1706,33 @@ const tools: Tool[] = [
       }
       if (body.kind !== 'weighed') throw new ToolError('reading_g is for a weighing (kind: weighed)')
       if (body.grams !== undefined) throw new ToolError('give reading_g or grams, not both')
+      if (resolution) {
+        if (accept_insert_weight) throw new ToolError('a resolution and accept_insert_weight never meet on one reading')
+        const event = await ok(
+          backend.POST('/api/v1/filament/spools/{spool_id}/events', {
+            params: { path },
+            body: { ...body, reading_g, resolution },
+          }),
+          `record on spool ${spool_id}`,
+        )
+        return json({ event, filament_g: event.grams_after, insert_weight: null, insert_weight_accepted: null })
+      }
       const check = await ok(
         backend.GET('/api/v1/filament/spools/{spool_id}/insert-weight-offer', {
           params: { path, query: { reading_g } },
         }),
         `check the insert weight of spool ${spool_id}`,
       )
+      if (check.reason === 'below_label') {
+        return json({
+          event: null,
+          filament_g: null,
+          below_label: check,
+          next:
+            'Nothing was booked. Tell the person the shortfall and the readings offered with their numbers, then ' +
+            'call again with the same reading_g and the resolution the person chose.',
+        })
+      }
       if (check.offer && accept_insert_weight === undefined) {
         return json({
           event: null,

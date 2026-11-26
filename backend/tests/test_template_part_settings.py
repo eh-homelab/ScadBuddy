@@ -18,17 +18,20 @@ from tests.conftest import PgPool
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
 from tests.support.row_outputs import output_store, update_row
+from tests.support.template_rows import open_template_rows
 
 #: A template with one colour parameter, ``base_color``.
 SOURCE = 'base_color = "#FFFFFF"; // color\ncolor(base_color) cube(1);\n'
 
 
-def _catalogue(tmp_path: Path, meta: dict[str, object]) -> Catalogue:
+def _catalogue(tmp_path: Path, meta: dict[str, object], pool: PgPool) -> Catalogue:
     paths = DataPaths(tmp_path)
     paths.model_dir("demo").mkdir(parents=True)
     paths.model_source("demo").write_text(SOURCE, encoding="utf-8")
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
-    return Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pool)
+    return catalogue
 
 
 def test_settings_are_read_by_colour_parameter() -> None:
@@ -80,9 +83,11 @@ def test_a_part_is_named_by_an_identifier_not_a_slot(name: str) -> None:
         meta_from_raw({"part_print_settings": {name: {"wall_loops": 3}}}, "demo")
 
 
-def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path) -> None:
+def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path, pg_pool: PgPool) -> None:
     catalogue = _catalogue(
-        tmp_path, {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": [[2]]}}}
+        tmp_path,
+        {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": [[2]]}}},
+        pg_pool,
     )
 
     with pytest.raises(InvalidModelMetaError, match=r"part_print_settings.*base_color\.wall_loops"):
@@ -92,10 +97,12 @@ def test_loading_a_template_with_a_bad_value_says_which(tmp_path: Path) -> None:
 
 
 def test_the_catalogue_answers_them_and_the_record_states_only_what_is_set(
-    tmp_path: Path,
+    tmp_path: Path, pg_pool: PgPool
 ) -> None:
     catalogue = _catalogue(
-        tmp_path, {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": 3}}}
+        tmp_path,
+        {"name": "Demo", "part_print_settings": {"base_color": {"wall_loops": 3}}},
+        pg_pool,
     )
 
     assert catalogue.part_print_settings("demo") == {"base_color": PartSettings(wall_loops=3)}
@@ -103,10 +110,12 @@ def test_the_catalogue_answers_them_and_the_record_states_only_what_is_set(
     assert record["part_print_settings"] == {"base_color": {"wall_loops": 3}}
 
 
-def test_a_name_that_is_not_a_colour_parameter_is_refused(tmp_path: Path) -> None:
+def test_a_name_that_is_not_a_colour_parameter_is_refused(tmp_path: Path, pg_pool: PgPool) -> None:
     """#5638 review: a typo must not set nothing in silence."""
     catalogue = _catalogue(
-        tmp_path, {"name": "Demo", "part_print_settings": {"base_colour": {"wall_loops": 3}}}
+        tmp_path,
+        {"name": "Demo", "part_print_settings": {"base_colour": {"wall_loops": 3}}},
+        pg_pool,
     )
 
     with pytest.raises(InvalidModelMetaError, match="'base_colour', which is not a // color"):
@@ -114,7 +123,7 @@ def test_a_name_that_is_not_a_colour_parameter_is_refused(tmp_path: Path) -> Non
 
 
 def test_a_pipeline_template_is_only_warned_about(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, pg_pool: PgPool
 ) -> None:
     """Its params need not be model.scad's, so an unknown name cannot be judged there."""
     catalogue = _catalogue(
@@ -124,14 +133,15 @@ def test_a_pipeline_template_is_only_warned_about(
             "pipeline": {"module": "pipeline/pipeline.py", "api": 1},
             "part_print_settings": {"shell_color": {"wall_loops": 3}},
         },
+        pg_pool,
     )
 
     assert catalogue.part_print_settings("demo") == {"shell_color": PartSettings(wall_loops=3)}
     assert "'shell_color', which is not a // color parameter" in caplog.text
 
 
-def test_a_template_that_is_gone_has_none(tmp_path: Path) -> None:
-    assert _catalogue(tmp_path, {"name": "Demo"}).part_print_settings("gone") == {}
+def test_a_template_that_is_gone_has_none(tmp_path: Path, pg_pool: PgPool) -> None:
+    assert _catalogue(tmp_path, {"name": "Demo"}, pg_pool).part_print_settings("gone") == {}
 
 
 def test_each_parameter_is_the_slot_of_its_colour_in_the_output() -> None:
@@ -200,6 +210,7 @@ async def test_an_arranged_output_takes_no_template_part_settings(
     for output in (plain, arranged):
         update_row(store, output.id, params={"label_color": output.colors[0]})
     catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
+    open_template_rows(catalogue, pg_pool)
     reader = LocalOutputs(store, catalogue)
 
     assert (await reader.naming(plain)).part_settings == {1: PartSettings(top_shell_layers=8)}

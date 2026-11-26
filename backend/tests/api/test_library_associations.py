@@ -17,6 +17,7 @@ from scadbuddy.print_library.store import NativeFile
 from tests.api.test_library_native import _native, _three_mf, _upload, native_client
 from tests.support.operations import press
 from tests.support.row_outputs import app_outputs, insert_row, output_meta
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -252,6 +253,8 @@ def test_a_model_made_from_a_file_lists_it_as_its_source(
         "file_id": fixed.id,
     }
     meta.write_text(json.dumps(raw), encoding="utf-8")
+    # A hand edit: the next copy run repairs its row (#7317 phase 3).
+    sync_template_rows(native_client)
     implied = {
         "id": None,
         "library_file_id": fixed.id,

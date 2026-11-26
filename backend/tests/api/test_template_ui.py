@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from tests.support.operations import press
+from tests.support.template_rows import sync_template_rows
 
 UI = {"module": "ui/index.js", "slot": "panel", "api": 1}
 
@@ -94,6 +95,7 @@ def test_a_model_without_ui_has_no_module(client: TestClient, model: str) -> Non
 
 def test_a_malformed_ui_costs_only_the_ui(client: TestClient, model: str, paths: DataPaths) -> None:
     _with_ui(paths, model, {}, ui={"module": "../model.scad", "slot": "sidebar", "api": "one"})
+    sync_template_rows(client)
     record = client.get(f"/api/v1/models/{model}").json()
     assert record["ui"] is None
     assert "ui" in record["ui_error"] and "slot" in record["ui_error"]
@@ -285,6 +287,36 @@ def test_a_revisions_schema_carries_the_params_its_pipeline_sets(
         client.get(f"/api/v1/models/{model}/versions/{broken}/schema").json()["pipeline_params"]
         == []
     )
+
+
+@pytest.mark.requires_git
+def test_a_revisions_schema_carries_what_its_pipeline_declares(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#5701 (spec 2026-11-17 §5): the listing editor sets a pipeline's inputs by the shape
+    and the version the revision declares, as publish reads them."""
+    before = _commit(paths, "no pipeline yet")
+    pipeline = paths.model_dir(model) / "pipeline"
+    pipeline.mkdir()
+    (pipeline / "pipeline.py").write_text("INPUTS_VERSION = 2\n", encoding="utf-8")
+    declared = {"module": "pipeline/pipeline.py", "api": 1}
+    _with_pipeline(paths, model, declared)
+    undeclared = _commit(paths, "no shape")
+    shape = {"type": "object", "properties": {"rows": {"type": "integer", "title": "Rows"}}}
+    (pipeline / "inputs.json").write_text(json.dumps(shape), encoding="utf-8")
+    _with_pipeline(paths, model, {**declared, "inputs": "pipeline/inputs.json"})
+    head = _commit(paths, "shape")
+
+    def pipeline_at(commit: str) -> object:
+        return client.get(f"/api/v1/models/{model}/versions/{commit}/schema").json()["pipeline"]
+
+    assert pipeline_at(before) is None
+    assert pipeline_at(undeclared) == {
+        "inputs_version": 2,
+        "inputs": None,
+        "fault": f"{model!r} declares no shape for its inputs (model.json pipeline.inputs)",
+    }
+    assert pipeline_at(head) == {"inputs_version": 2, "inputs": shape, "fault": ""}
 
 
 @pytest.mark.requires_git

@@ -38,7 +38,7 @@ export type SessionRow = {
   /** Its browser options, or null for the browser's defaults (#7027). */
   browser: SessionBrowser | null
   parent_id: string | null
-  runtime: SessionRuntime | null
+  runtime: SessionRuntime
   max_turns: number
   budget_usd: number
   cost_usd: number
@@ -107,7 +107,7 @@ export type NewSessionRow = {
   tags: string[]
   scope: Record<string, unknown>
   parentId: string | null
-  runtime: SessionRuntime | null
+  runtime: SessionRuntime
   maxTurns: number
   budgetUsd: number
   /** The session whose lineage's budget this one spends from (#823). */

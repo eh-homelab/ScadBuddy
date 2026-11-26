@@ -177,6 +177,7 @@ from scadbuddy.orders.storefront.renders import (
     StoreVariant,
     instant_variant,
     owned_job,
+    preview_ready,
     render_estimate,
     shown_render,
     start_render,
@@ -414,11 +415,19 @@ async def render_preview(
 ) -> Response:
     """The visitor's render's preview mesh, streamed from its cached piece; with
     ``plate``, that plate alone. 404 ``render_not_found`` unless the visitor asked for
-    the render and its preview is there."""
+    the render and its preview is there. 503 ``preview_not_ready`` while this replica
+    still fetches the render's files (`preview_ready`, #6968): the edge and the page ask
+    again, so a slow store never holds the request to a proxy's timeout."""
     _, job = await owned_job(state, visitor, job_id)
     if job.state != "done" or job.result is None:
         raise problem(
             status.HTTP_404_NOT_FOUND, "render_not_found", "This render has no preview yet."
+        )
+    if not await preview_ready(state, job):
+        raise problem(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "preview_not_ready",
+            "The preview is still loading. Try again in a moment.",
         )
     try:
         return await get_job_preview(job_id, state.render, paths, state, budget, plate)

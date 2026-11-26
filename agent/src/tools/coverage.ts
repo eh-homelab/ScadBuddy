@@ -17,6 +17,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "A multipart upload and a binary download. The assistant gets an invoice's file in the import session's first message, as an image or a PDF document block (#6267), not through a tool.",
   })),
   {
+    operation: 'PUT /api/v1/filament/types/{type_id}/cost-per-kg',
+    reason:
+      "The UI's one-field cost action (#7703, spec 6.3b): it sets only the cost and skips the required-properties check, so linking a type to the price book still works on an incomplete type. The assistant sets a type's cost with filament_type_upsert, whose required-property handling is #7703's agent-tools step.",
+  },
+  {
     operation: 'GET /api/v1/print-imports/library-files/{file_id}',
     reason:
       "The Import print dialog's check, on focus, that its chosen library file still stands (#7335). The assistant imports with import_print, which gets the same refusals and the replacement from the import itself.",
@@ -641,17 +646,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "An order's files (#4251) as the order page shows them: order_get lists them under `attachments` and " +
       "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
       'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
-  })),
-  ...(
-    [
-      'POST /api/v1/entities/{ref}/attachments',
-      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
-      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "An entity's files (#6950): a multipart upload, and the bytes and thumbnails the page draws. The agent lists, edits and removes them with entity_attachment_list, entity_attachment_update and entity_attachment_delete; an upload by the agent is out of scope in phase 1.",
   })),
   {
     operation: 'GET /api/v1/orders/{order_id}/sources/{source_id}/preview',

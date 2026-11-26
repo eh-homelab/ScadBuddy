@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import importlib
 import logging
 import pkgutil
+import signal
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+import time
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from types import FrameType
 from typing import Any, Final
 
 from fastapi import APIRouter, Depends, FastAPI
@@ -141,7 +153,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
     load_render_store_settings,
 )
-from scadbuddy.library.template_copy import copy_templates
+from scadbuddy.library.template_copy import TemplateCopyResult, copy_templates
 from scadbuddy.operations.blob_claims import sweep_upload_blobs
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS, OperationCommands
@@ -628,16 +640,25 @@ async def _backfill_store_logged(
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
-async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
+async def _copy_templates_once(
+    state: AppState, stop: threading.Event, *, quiet: bool = False
+) -> TemplateCopyResult | None:
     """One run of the copy of the templates' files to rows (#7317, `copy_templates`),
-    logged. It takes the copy's advisory lock, so one replica copies at a time; a run
-    that does not get it does nothing. A failure is logged, then raised."""
+    logged, and its result. It takes the copy's advisory lock, so one replica copies at a
+    time; a run that does not get it does nothing and answers None, as it does when the
+    catalogue has no rows (``quiet``: with no log line for that). A failure is logged,
+    then raised."""
     refresh = state.catalogue.refresh
     if refresh is None:
-        return
+        return None
     try:
         result = await asyncio.to_thread(
-            copy_templates, state.catalogue, refresh.rows, refresh, state.projection.pool, stop
+            functools.partial(copy_templates, quiet=quiet),
+            state.catalogue,
+            refresh.rows,
+            refresh,
+            state.projection.pool,
+            stop,
         )
     except Exception:
         logger.exception("could not copy the templates to rows; the next sweep or start retries")
@@ -654,6 +675,133 @@ async def _copy_templates_once(state: AppState, stop: threading.Event) -> None:
                 "stopped": stop.is_set(),
             },
         )
+    return result
+
+
+#: How long the start waits for another replica's first copy of the templates (#7317
+#: phase 3, plan D4), and how often it asks whether that copy has finished, in seconds.
+#: The API's startupProbe allows about 300 s for the whole start (10 s x 30, eh-homelab/
+#: clusters `applications/scadbuddy/scadbuddy.yaml`), and the steps before the first copy
+#: (migrations, the built-in sync, the openscad probe) use part of it. A wait of 300 s let
+#: the kubelet kill a waiting replica before it served; 120 s leaves it room to serve.
+FIRST_COPY_WAIT = 120.0
+FIRST_COPY_POLL = 1.0
+
+#: The signals that stop the first copy (`_stop_on_signal`): those uvicorn handles.
+STOP_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+
+
+@contextmanager
+def _stop_on_signal(stop: threading.Event) -> Iterator[None]:
+    """``stop`` set by a SIGTERM or SIGINT while the block runs, then the handler that
+    was there runs as before. uvicorn installs its handler (`Server.handle_exit`) before
+    the lifespan starts, and that handler only marks the server to exit once the start
+    ends: without this, a pod told to stop during the first copy waits for the copy.
+    Python runs signal handlers in the main thread only, so elsewhere (a test's portal
+    thread) it does nothing. The same chain as `agent_changes/component.py`
+    `chain_signals`."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    replaced: dict[int, Any] = {}
+    for sig in STOP_SIGNALS:
+        # None: a handler set from C, which Python cannot call or put back. It is treated
+        # as SIG_DFL, for the pass-on and for the restore.
+        previous = signal.getsignal(sig)
+        if previous is None:
+            previous = signal.SIG_DFL
+
+        def handler(signum: int, frame: FrameType | None, previous: Any = previous) -> None:
+            if previous == signal.SIG_IGN:
+                return
+            stop.set()
+            if callable(previous):
+                previous(signum, frame)
+            elif previous == signal.SIG_DFL:
+                # What the signal would have done with no handler of ours.
+                signal.signal(signum, signal.SIG_DFL)
+                signal.raise_signal(signum)
+
+        signal.signal(sig, handler)
+        replaced[sig] = previous
+    ours = {sig: signal.getsignal(sig) for sig in replaced}
+    try:
+        yield
+    finally:
+        for signum, previous in replaced.items():
+            # Only our own is put back: a handler set over ours since is not ours to remove.
+            if signal.getsignal(signum) is ours[signum]:
+                signal.signal(signum, previous)
+
+
+def _first_copy_finished(result: TemplateCopyResult, stop: threading.Event) -> bool:
+    """Whether this replica's first copy finished. An incomplete one is logged at error
+    level, unless a signal stopped it."""
+    if not result.incomplete:
+        return True
+    if stop.is_set():
+        logger.info("the first copy of the templates to rows was stopped")
+    else:
+        logger.error(
+            "the first copy of the templates to rows was incomplete; the lists lack"
+            " what it missed until the next copy run"
+        )
+    return False
+
+
+async def _first_template_copy(state: AppState, stop: threading.Event) -> bool:
+    """The first copy of the templates to rows, before the app serves (#7317 phase 3,
+    plan D4): the catalogue's lists read only rows. When a copy run has finished (every
+    start after the first), it does nothing. Otherwise it runs one copy and waits for it.
+    When another replica holds the copy lock (replicas of a fresh install that start
+    together), it waits up to `FIRST_COPY_WAIT` for that replica's run to finish, and it
+    takes the lock itself when that run ends unfinished. A copy that fails or ends
+    incomplete, or a wait that ends, is logged at error level and the app serves anyway:
+    the housekeeping sweep `TEMPLATE_COPY_SWEEP` copies again. A SIGTERM or SIGINT sets
+    ``stop``, which ends the copy and the wait (`_stop_on_signal`).
+
+    It answers whether this replica finished a copy here, so that the start's background
+    copy does not read every template again at once."""
+    refresh = state.catalogue.refresh
+    if refresh is None:
+        return False
+    rows = refresh.rows
+    with _stop_on_signal(stop):
+        try:
+            if await asyncio.to_thread(rows.copied):
+                return False
+            result = await _copy_templates_once(state, stop, quiet=True)
+            if result is not None:
+                return _first_copy_finished(result, stop)
+            # Logged once here and once at the end, not at each poll.
+            logger.info(
+                "another replica copies the templates to rows; this one waits for its run",
+                extra={"wait_s": FIRST_COPY_WAIT},
+            )
+            deadline = time.monotonic() + FIRST_COPY_WAIT
+            while time.monotonic() < deadline and not stop.is_set():
+                await asyncio.sleep(FIRST_COPY_POLL)
+                if await asyncio.to_thread(rows.copied):
+                    logger.info("another replica's first copy of the templates finished")
+                    return False
+                # The other replica's run ended unfinished and released the lock.
+                result = await _copy_templates_once(state, stop, quiet=True)
+                if result is not None:
+                    return _first_copy_finished(result, stop)
+            if stop.is_set():
+                logger.info("the wait for the first copy of the templates to rows was stopped")
+                return False
+            logger.error(
+                "another replica's first copy of the templates to rows did not finish in"
+                " time; this one serves, and the lists lack what is not copied yet",
+                extra={"waited_s": FIRST_COPY_WAIT},
+            )
+        except Exception:
+            logger.exception(
+                "the first copy of the templates to rows failed; the app serves, and the"
+                " next copy run copies them"
+            )
+    return False
 
 
 async def _copy_templates_logged(state: AppState, *, stop: threading.Event) -> None:
@@ -1870,7 +2018,8 @@ async def _start_render(state: AppState) -> None:
     # Only now is the `templates` table there (#7317, plan decision 2): the boot
     # commit `ensure_repo` made before it writes no rows; the start copy fills them.
     state.history.template_rows = state.catalogue.refresh
-    # The readers too (#7317 phase 2): they read the rows once a copy run has finished.
+    # The readers too (#7317 phase 3): they read only the rows, and a database where no
+    # copy run has finished gets its first copy before the app serves.
     if state.catalogue.refresh is not None:
         state.catalogue.rows = state.catalogue.refresh.rows
     await _prepare_catalogue(state)
@@ -2558,6 +2707,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.fonts.prepare()
         state.openscad_version = await probe_openscad_version(state.config)
         await _start_render(state)
+        # #7317 phase 3: the catalogue's lists read only rows, so a database where no copy
+        # run has finished (a fresh install, a test's) gets its first copy before the app
+        # serves. A SIGTERM or SIGINT meanwhile stops it.
+        first_copied = await _first_template_copy(state, threading.Event())
         # After the projection, which migrated the database: the bus writes the event
         # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
         # was published before now (the built-in sync's commits) waited.
@@ -2625,10 +2778,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         # #7317: every template's files copied to its row, and the rows reconciled with
         # the folders, after `_start_render` made the table and synced the built-ins. The
-        # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again.
-        copy_templates_now = asyncio.create_task(
-            _copy_templates_logged(state, stop=stop_background), name="copy templates"
-        )
+        # housekeeping sweep `TEMPLATE_COPY_SWEEP` runs it again. Not when this start's
+        # first copy just finished: it would read every template again at once.
+        if not first_copied:
+            copy_templates_now = asyncio.create_task(
+                _copy_templates_logged(state, stop=stop_background), name="copy templates"
+            )
         # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
         # VP's, with the sweeps off too.
         adopt_now = asyncio.create_task(

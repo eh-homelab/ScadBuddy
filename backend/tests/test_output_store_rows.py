@@ -437,6 +437,9 @@ async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
     # The sweep still finds a slug by its outputs folder, which a save no longer writes
     # (#7257 task B4); task B5 finds it by its rows.
     (store.paths.outputs / job.slug).mkdir(parents=True)
+    # A live template besides: a models directory with none sweeps nothing (#7649).
+    store.paths.model_dir("kept").mkdir()
+    store.paths.model_source("kept").write_text("cube(1);\n", encoding="utf-8")
     monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
     catalogue.sweep_orphans()
     assert rows_of(store).get(meta.id) is not None
