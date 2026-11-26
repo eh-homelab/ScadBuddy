@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,7 +67,49 @@ func (a *Activities) write(ctx context.Context, name string, in Input, do func(t
 		return store.Answer{}, err
 	}
 	return store.Write(ctx, a.Flow.Pool, store.WriteReq{Caller: store.Caller, Key: in.Key, Route: name, Input: digest, Actor: by},
-		func(tx pgx.Tx) (int, any, error) { return do(tx, by) })
+		func(tx pgx.Tx) (int, any, error) {
+			if hasNUL(in) {
+				// Postgres takes no NUL in text: it would fail the write, and Temporal would
+				// retry it for ever. pydantic's Text refuses it before the start.
+				return 0, nil, &store.Refused{Status: http.StatusUnprocessableEntity, Code: "bad_input",
+					Detail: "a text of the input holds a NUL character"}
+			}
+			return do(tx, by)
+		})
+}
+
+// hasNUL says whether a path parameter or a string of the body (a key too) holds a NUL.
+func hasNUL(in Input) bool {
+	for k, v := range in.Params {
+		if strings.ContainsRune(k+v, 0) {
+			return true
+		}
+	}
+	var v any
+	if json.Unmarshal(in.Body, &v) != nil {
+		return false
+	}
+	var walk func(any) bool
+	walk = func(v any) bool {
+		switch x := v.(type) {
+		case string:
+			return strings.ContainsRune(x, 0)
+		case []any:
+			for _, e := range x {
+				if walk(e) {
+					return true
+				}
+			}
+		case map[string]any:
+			for k, e := range x {
+				if strings.ContainsRune(k, 0) || walk(e) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(v)
 }
 
 // body is raw, or null when it is empty.

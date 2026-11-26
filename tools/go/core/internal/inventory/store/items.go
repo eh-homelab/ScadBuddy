@@ -385,11 +385,67 @@ func lifeMonths(n *int64) any {
 	return *n
 }
 
+// The bounds of models.py ItemInput and InventoryItemPatch: an input past one is 422
+// bad_input, as pydantic refuses it before the start.
+const (
+	itemNameMax     = 200
+	manufacturerMax = 200
+	itemNoteMax     = 4000
+	sourceMax       = 100
+	sourceRefMax    = 200
+	modelCodeMax    = 100
+	compatibleMax   = 100
+	lifeMonthsMax   = 1200
+)
+
+// checkItemTexts checks the fields an item's input and patch share; a nil one is absent.
+func checkItemTexts(name, manufacturer, note *string, compatible *[]string, lifeMonths *int64) error {
+	if name != nil && *name == "" {
+		return badInput("name is at least 1 character")
+	}
+	errs := []error{checkText("name", deref(name), itemNameMax), checkText("manufacturer", deref(manufacturer), manufacturerMax),
+		checkText("note", deref(note), itemNoteMax)}
+	if compatible != nil {
+		if len(*compatible) > compatibleMax {
+			return badInput("compatible_with has at most %d codes", compatibleMax)
+		}
+		for _, code := range *compatible {
+			if code == "" {
+				return badInput("a compatible_with code is at least 1 character")
+			}
+			errs = append(errs, checkText("a compatible_with code", code, modelCodeMax))
+		}
+	}
+	if lifeMonths != nil && (*lifeMonths <= 0 || *lifeMonths > lifeMonthsMax) {
+		return badInput("life_months is 1 to %d", lifeMonthsMax)
+	}
+	return firstErr(errs...)
+}
+
+func firstErr(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Create makes an item: kind_not_found, kind_archived, class_open, steps_invalid,
 // filament_item_refused (Ruling 9) or item_exists. A blank source_ref is stored as null.
 // Each compatible_with code becomes a relation to its model kind. It publishes one
 // handler_config.changed per step it resolves.
 func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Actor) (wire.Item, error) {
+	source := in.Source
+	if source == "" {
+		source = "manual"
+	}
+	if err := checkItemTexts(&in.Name, &in.Manufacturer, &in.Note, &in.CompatibleWith, in.LifeMonths); err != nil {
+		return wire.Item{}, err
+	}
+	if err := firstErr(checkText("source", source, sourceMax), checkText("source_ref", deref(in.SourceRef), sourceRefMax)); err != nil {
+		return wire.Item{}, err
+	}
 	var archived *time.Time
 	err := tx.QueryRow(ctx, `SELECT archived_at FROM item_kinds WHERE id = $1 FOR SHARE`, in.KindID).Scan(&archived)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -425,10 +481,6 @@ func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Act
 	if in.LowStock != nil {
 		low = string(*in.LowStock)
 	}
-	source := in.Source
-	if source == "" {
-		source = "manual"
-	}
 	var ref *string
 	if in.SourceRef != nil && strings.TrimSpace(*in.SourceRef) != "" {
 		ref = in.SourceRef
@@ -459,6 +511,13 @@ func (s *Items) Create(ctx context.Context, tx pgx.Tx, in wire.ItemInput, by Act
 func (s *Items) Update(ctx context.Context, tx pgx.Tx, id string, p wire.InventoryItemPatch, by Actor) (wire.Item, error) {
 	if !uuidText.MatchString(id) {
 		return wire.Item{}, itemNotFound(id)
+	}
+	var compatible []string
+	if p.CompatibleWith != nil {
+		compatible = *p.CompatibleWith
+	}
+	if err := checkItemTexts(p.Name, p.Manufacturer, p.Note, &compatible, p.LifeMonths.Value); err != nil {
+		return wire.Item{}, err
 	}
 	var lock string
 	err := tx.QueryRow(ctx, `SELECT id::text FROM items WHERE id = $1::uuid FOR UPDATE`, id).Scan(&lock)

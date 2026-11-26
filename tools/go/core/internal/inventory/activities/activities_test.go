@@ -116,7 +116,9 @@ func (f *fixture) refused(name string, status int, code string, params map[strin
 	if answer.Status != status || out["code"] != code {
 		f.t.Fatalf("%s: %d %s, want %d %s", name, answer.Status, answer.Body, status, code)
 	}
-	if out["type"] != "https://scadbuddy.dev/problems/inventory/"+code && code != "bad_property_schema" {
+	// bad_property_schema and the entity reference codes keep the entities' type.
+	entities := map[string]bool{"bad_property_schema": true, "bad_entity_ref": true, "unknown_entity_kind": true, "entity_not_found": true}
+	if out["type"] != "https://scadbuddy.dev/problems/inventory/"+code && !entities[code] {
 		f.t.Fatalf("%s: type %v", name, out["type"])
 	}
 	return out
