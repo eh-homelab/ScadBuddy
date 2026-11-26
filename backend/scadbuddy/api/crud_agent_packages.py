@@ -20,21 +20,28 @@ hashes a package; the API stores the pin it was given.
   (409 ``pin-mismatch``); a review that lists refusals needs ``allow_refused`` (409
   ``refused-needs-allow``); a pending pin fetched from another place is approved disabled;
 - ``POST …/{name}/enabled`` the switch (409 ``package-unapproved`` before an approval);
-- ``POST …/{name}/delete`` the uninstall, with every access row and listing of the package.
+- ``POST …/{name}/delete`` the uninstall, with every access row and listing of the package;
+- ``POST …/{name}/mirror`` the record of a commit pin's mirror (#7907): the sha256 of a zip of
+  its files that the package holds (409 ``mirror-missing`` otherwise), set as
+  ``mirror_sha256`` when the commit and content hash sent are the pin's, and as
+  ``pending_mirror_sha256`` when they are the re-pin's (both when both match); 409
+  ``pin-mismatch`` when neither is. It changes no pin, approval or switch.
 
 A pin is a commit (``pin_kind`` ``commit``, a repository source) or bytes (``bytes``, #6935:
 an archive or npm package, or a marketplace entry of either, pinned to the sha256 of the
 file the agent fetched). A bytes pin is stored only while the package holds its mirror (409
-``mirror-missing``); the agent sends the file first to area ``package-mirrors``:
+``mirror-missing``); the agent sends the file first to area ``package-mirrors``. A commit
+pin's files are sent there too, as a zip, once a fetch hashes to the pin (#7907):
 
 - ``POST …/package-mirrors/{name}`` the raw bytes of a file for the package ``name``, at
   most `MAX_MIRROR_BYTES`, kept as a blob under their sha256 and held for ``name``
   (`agent_data/package_mirrors.py`); answers ``{bytes_sha256}``;
-- ``GET …/package-mirrors/{name}/{sha256}`` the bytes, only while a row of ``name`` has that
-  sha256 as its ``bytes_sha256`` or ``pending_bytes_sha256``; else 404
-  ``mirror-not-found``, even while the blob is still in the store.
+- ``GET …/package-mirrors/{name}/{sha256}`` the bytes, only while a row of ``name`` names that
+  sha256 (``bytes_sha256``, ``pending_bytes_sha256``, ``mirror_sha256`` or
+  ``pending_mirror_sha256``); else 404 ``mirror-not-found``, even while the blob is still in
+  the store.
 
-Every package write also releases the holds of mirrors no pin names, past their grace.
+Every package write also releases the holds of mirrors no row names, past their grace.
 
 Area ``hosted-plugins`` (#6932): ``GET …/hosted-plugins/{name}`` a hosted plugin with its
 latest version's row (``plugin`` null when there is none), and
@@ -195,6 +202,9 @@ class PackageRow(BaseModel):
     pending_content_hash: str | None
     pending_files: dict[str, Any] | None
     pending_review: dict[str, Any] | None
+    #: A commit pin's mirror (#7907): the sha256 of a zip of its files, and of its re-pin's.
+    mirror_sha256: str | None = None
+    pending_mirror_sha256: str | None = None
     created_at: datetime
     updated_at: datetime
     #: For a ``hosted`` package, its hosted plugin's ``latest_version`` (null otherwise, or
@@ -304,7 +314,7 @@ def _mirror_held(conn: psycopg.Connection[Any], name: str, body: Pin) -> None:
 
 def _written(conn: psycopg.Connection[Any]) -> None:
     """What every package write ends with: the warm-evict NOTIFY, and the release of the
-    mirrors no pin names any more."""
+    mirrors no row names any more."""
     package_mirrors.release_unnamed(conn)
     notify_warm_evict(conn)
 
@@ -503,7 +513,8 @@ async def plugin_package_pending(name: Name, body: Pending, state: StateDep) -> 
             "UPDATE ai_plugin_packages SET pending_ref = %s, pending_fetch_url = %s,"
             " pending_fetch_path = %s, pending_pin_kind = %s, pending_commit_sha = %s,"
             " pending_bytes_sha256 = %s, pending_version = %s, pending_content_hash = %s,"
-            " pending_files = %s, pending_review = %s, updated_at = now()"
+            " pending_files = %s, pending_review = %s, pending_mirror_sha256 = NULL,"
+            " updated_at = now()"
             " WHERE name = %s RETURNING *",
             (
                 body.ref,
@@ -534,7 +545,8 @@ async def plugin_package_discard(name: Name, state: StateDep) -> PackageRow:
             "UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL,"
             " pending_fetch_path = NULL, pending_pin_kind = NULL, pending_commit_sha = NULL,"
             " pending_bytes_sha256 = NULL, pending_version = NULL, pending_content_hash = NULL,"
-            " pending_files = NULL, pending_review = NULL, updated_at = now()"
+            " pending_files = NULL, pending_review = NULL, pending_mirror_sha256 = NULL,"
+            " updated_at = now()"
             " WHERE name = %s RETURNING *",
             (name,),
         ).fetchone()
@@ -618,11 +630,16 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
                 " commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,"
                 " version = pending_version,"
                 " content_hash = pending_content_hash, files = pending_files,"
-                " review = pending_review, approved_at = now(), allow_refused = %s,"
+                " review = pending_review,"
+                # A same-commit re-pin whose zip was not sent keeps the pin's mirror.
+                " mirror_sha256 = COALESCE(pending_mirror_sha256, CASE WHEN"
+                " pending_commit_sha = commit_sha AND pending_content_hash = content_hash"
+                " THEN mirror_sha256 END),"
+                " approved_at = now(), allow_refused = %s,"
                 " pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,"
                 " pending_pin_kind = NULL, pending_commit_sha = NULL,"
                 " pending_bytes_sha256 = NULL, pending_version = NULL,"
-                " pending_content_hash = NULL,"
+                " pending_content_hash = NULL, pending_mirror_sha256 = NULL,"
                 " pending_files = NULL, pending_review = NULL, updated_at = now()"
                 " WHERE name = %s RETURNING *",
                 (moved, current["pending_pin_kind"], allow, name),
@@ -691,6 +708,61 @@ async def plugin_package_delete(name: Name, state: StateDep) -> Done:
     return Done(done=done)
 
 
+class MirrorRecord(_Body):
+    """A commit pin's mirror (#7907): the pin it is of, and the sha256 of the zip of its
+    files that the agent sent to ``POST …/package-mirrors/{name}``."""
+
+    commit_sha: str = Field(pattern=COMMIT_PATTERN)
+    content_hash: str = Field(pattern=HASH_PATTERN)
+    bytes_sha256: str = Field(pattern=SHA256_PATTERN)
+
+
+@router.post("/plugin-packages/{name}/mirror", name="crud_agent_plugin_package_mirror")
+async def plugin_package_mirror(name: Name, body: MirrorRecord, state: StateDep) -> PackageRow:
+    """Records ``body.bytes_sha256`` as the mirror of the commit pin it names: the pin's
+    (``mirror_sha256``) and the re-pin's (``pending_mirror_sha256``) when each is that commit
+    and content hash. Only a mirror the package holds is recorded. No pin, approval or switch
+    changes, so nothing is announced and no warm Claude Code is evicted."""
+
+    def run(conn: psycopg.Connection[Any]) -> PackageRow:
+        current = _locked(conn, name)
+        if not package_mirrors.held(conn, name, body.bytes_sha256):
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"no mirror of the bytes {body.bytes_sha256} is kept; send them first",
+                reason=MIRROR_MISSING,
+            )
+        is_current = (
+            current["pin_kind"] == "commit"
+            and current["commit_sha"] == body.commit_sha
+            and current["content_hash"] == body.content_hash
+        )
+        is_pending = (
+            current["pending_pin_kind"] == "commit"
+            and current["pending_commit_sha"] == body.commit_sha
+            and current["pending_content_hash"] == body.content_hash
+        )
+        if not is_current and not is_pending:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f'"{name}" is not pinned to {body.commit_sha} with that content hash,'
+                " and its re-pin is not either",
+                reason=PIN_MISMATCH,
+            )
+        row = conn.execute(
+            "UPDATE ai_plugin_packages SET"
+            " mirror_sha256 = CASE WHEN %s THEN %s ELSE mirror_sha256 END,"
+            " pending_mirror_sha256 = CASE WHEN %s THEN %s ELSE pending_mirror_sha256 END"
+            " WHERE name = %s RETURNING *",
+            (is_current, body.bytes_sha256, is_pending, body.bytes_sha256, name),
+        ).fetchone()
+        assert row is not None
+        package_mirrors.release_unnamed(conn)
+        return _row(conn, row)
+
+    return await _in_tx(state, run)
+
+
 @router.post("/package-mirrors/{name}", name="crud_agent_package_mirror_post")
 async def package_mirror_post(name: Name, request: Request, state: StateDep) -> Mirrored:
     """The raw bytes of a file the agent fetched for the package ``name``, kept under
@@ -734,7 +806,8 @@ async def package_mirror_post(name: Name, request: Request, state: StateDep) -> 
 )
 async def package_mirror(name: Name, sha256: Sha256, state: StateDep) -> FileResponse:
     """The kept bytes of ``sha256``, only while the package ``name``'s pin or pending re-pin
-    names them: a hold released, or another package's file, is not served."""
+    names them (its bytes, or a commit pin's recorded mirror): a hold released, or another
+    package's file, is not served."""
     not_found = ApiError(
         status.HTTP_404_NOT_FOUND,
         f"no mirror of the bytes {sha256} is kept for {name}",
@@ -745,8 +818,9 @@ async def package_mirror(name: Name, sha256: Sha256, state: StateDep) -> FileRes
         return (
             conn.execute(
                 "SELECT 1 FROM ai_plugin_packages WHERE name = %s"
-                " AND (bytes_sha256 = %s OR pending_bytes_sha256 = %s)",
-                (name, sha256, sha256),
+                " AND %s IN (bytes_sha256, pending_bytes_sha256, mirror_sha256,"
+                " pending_mirror_sha256)",
+                (name, sha256),
             ).fetchone()
             is not None
         )
