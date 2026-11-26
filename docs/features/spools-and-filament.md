@@ -264,8 +264,9 @@ filament (Bambu Studio writes it beside `used_g` in `Metadata/slice_info.config`
 `backend/tests/printers/fixtures/rack-slice-info-h2c.config`) is read by
 `slicing/slice_info.py` `plate_uses` with the grams, rides in `LanUploaded.length_by_slot`
 and `SlotUse.length_m`, and is kept as `data.length_m` on the `print_started` event (absent
-when the plate gave the slot no length) and copied onto its `print_ended` (`0.0` on a failed
-plate, as its grams are 0). Bambuddy's usage rows have no length and keep none, so a plate
+when the plate gave the slot no length, or when a slot merged onto the plate's first filament
+has a source with grams but no length, #7932) and copied onto its `print_ended` (`0.0` on a
+failed plate, as its grams are 0). Bambuddy's usage rows have no length and keep none, so a plate
 Bambuddy also booked (the paired plate counts once, as the BB row) takes the length of
 ScadBuddy's own end of the job. The spool's
 history (`GET /filament/spools/{id}/history`) sums the metres of the plates that carry a
