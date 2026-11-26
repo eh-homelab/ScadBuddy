@@ -308,6 +308,17 @@ describe('storefront tools (#6131)', () => {
       ])
     })
 
+    it('says a version whose pipeline declares no inputs cannot be listed, not to set it up (#7879)', async () => {
+      const faulted = { ...house.schema, pipeline: { inputs_version: null, inputs: null, fault: 'pipeline/__init__.py: no module named inputs' } } as Schema
+      const said = `This version of Dollhouse cannot be listed: its pipeline declares no inputs (pipeline/__init__.py: no module named inputs), so the editor offers no "Set up the design" and publish refuses it (listing_inputs_undeclared). Choose another version in the editor, or fix the template and draft it again.`
+      serveDollhouse(house.source, () => {}, faulted)
+      const fromModel = firstText(await tool('storefront_listing_draft').execute({ slug: 'dollhouse' }, ctx())) as Record<string, unknown>
+      expect(fromModel['notes']).toEqual([said])
+      serveDollhouse({ params: { course: 200 } }, () => {}, faulted)
+      const fromOutput = firstText(await tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE }, ctx())) as Record<string, unknown>
+      expect(fromOutput['notes']).toEqual([said])
+    })
+
     it('refuses to lock or set a parameter the pipeline sets itself', async () => {
       serveDollhouse(house.source, () => {})
       await expect(tool('storefront_listing_draft').execute({ output_id: DOLLHOUSE, lock: ['piece'] }, ctx())).rejects.toThrow(
