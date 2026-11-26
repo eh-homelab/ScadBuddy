@@ -69,7 +69,11 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		var adapter = NfcAdapter.GetDefaultAdapter(a);
 		if (adapter is null) return;
 		var flags = NfcReaderFlags.NfcA | NfcReaderFlags.NfcB | NfcReaderFlags.NfcF | NfcReaderFlags.NfcV;
-		adapter.EnableReaderMode(a, this, flags, null);
+		// Android's presence check re-selects the tag every 125 ms by default, which drops a
+		// MIFARE Classic sector's authentication in the middle of a read: wait 5 s instead.
+		var extras = new Android.OS.Bundle();
+		extras.PutInt(NfcAdapter.ExtraReaderPresenceCheckDelay, 5000);
+		adapter.EnableReaderMode(a, this, flags, extras);
 	}
 
 	public void OnPostMessage(AWebView view, WebMessageCompat message, Android.Net.Uri sourceOrigin, bool isMainFrame, JavaScriptReplyProxy replyProxy)
@@ -192,6 +196,9 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		}
 		catch (Exception) { }
 		if (isClassic) mifare = ReadClassic(tag, uid);
+		Android.Util.Log.Info("ScadBuddyNfc",
+			$"read {Convert.ToHexString(uid)} techs={string.Join(',', techs.Select(t => t.Split('.').Last()))} records={records.Count} " +
+			(mifare is null ? "mifare=none" : $"blocks={mifare["blocks"]!.AsArray().Count} refused={mifare["refusedSectors"]!.ToJsonString()} error={mifare["error"]?.ToString() ?? "none"}"));
 		var reading = new JsonObject { ["type"] = "reading", ["serialNumber"] = serial, ["records"] = records };
 		if (mifare is not null) reading["mifare"] = mifare;
 		return reading;
@@ -205,31 +212,57 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		var keys = HKDF.DeriveKey(HashAlgorithmName.SHA256, uid, 16 * 6, Salt, Info);
 		var blocks = new JsonArray();
 		var refused = new JsonArray();
+		var at = -1;
 		using (classic)
 		{
 			try
 			{
+				classic.Timeout = 1000;
 				classic.Connect();
 				for (var sector = 0; sector < classic.SectorCount; sector++)
 				{
+					at = sector;
 					var key = sector < 16 ? keys.AsSpan(sector * 6, 6).ToArray() : null;
-					if (key is null || !classic.AuthenticateSectorWithKeyA(sector, key)) { refused.Add(sector); continue; }
-					var first = classic.SectorToBlock(sector);
-					var count = classic.GetBlockCountInSector(sector);
-					// The last block of a sector is its key trailer: never sent.
-					for (var at = 0; at < count - 1; at++)
+					if (key is null) { refused.Add(sector); continue; }
+					// A failed transfer halts the card: reconnect and try the sector once more.
+					JsonArray? read = null;
+					for (var attempt = 0; attempt < 2 && read is null; attempt++)
 					{
-						var data = classic.ReadBlock(first + at);
-						blocks.Add(new JsonObject { ["index"] = first + at, ["dataHex"] = Convert.ToHexString(data).ToLowerInvariant() });
+						try
+						{
+							if (attempt > 0) { classic.Close(); classic.Connect(); }
+							read = ReadSector(classic, sector, key);
+						}
+						catch (Java.IO.IOException error) when (attempt == 0)
+						{
+							Android.Util.Log.Info("ScadBuddyNfc", $"sector {sector} failed, retrying: {error.Message}");
+						}
 					}
+					if (read is null) { refused.Add(sector); continue; }
+					foreach (var block in read) blocks.Add(block!.DeepClone());
 				}
 			}
 			catch (Exception error)
 			{
-				return new JsonObject { ["uid"] = Convert.ToHexString(uid), ["blocks"] = blocks, ["refusedSectors"] = refused, ["error"] = error.Message };
+				return new JsonObject { ["uid"] = Convert.ToHexString(uid), ["blocks"] = blocks, ["refusedSectors"] = refused, ["error"] = $"sector {at}: {error.GetType().Name}: {error.Message}" };
 			}
 		}
 		return new JsonObject { ["uid"] = Convert.ToHexString(uid), ["blocks"] = blocks, ["refusedSectors"] = refused };
+	}
+
+	/// <summary>A sector's data blocks, or null when the key is refused. The last block of a sector is its key trailer: never read.</summary>
+	static JsonArray? ReadSector(MifareClassic classic, int sector, byte[] key)
+	{
+		if (!classic.AuthenticateSectorWithKeyA(sector, key)) return null;
+		var first = classic.SectorToBlock(sector);
+		var count = classic.GetBlockCountInSector(sector);
+		var read = new JsonArray();
+		for (var at = 0; at < count - 1; at++)
+		{
+			var data = classic.ReadBlock(first + at);
+			read.Add(new JsonObject { ["index"] = first + at, ["dataHex"] = Convert.ToHexString(data).ToLowerInvariant() });
+		}
+		return read;
 	}
 
 	void Emit(JsonObject message) => Send(message.ToJsonString());

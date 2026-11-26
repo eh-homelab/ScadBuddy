@@ -99,8 +99,10 @@ git commit -m "fix(filament): a 4-byte tag UID is the AMS's <uid>00000100 (#7905
 
 - [ ] **Step 1: Write the failing tests** (pattern: `tests/orders/storefront/test_slice_profile_migration.py`: `migrate(conn, MIGRATIONS[:before])`, insert rows, apply the file, assert)
 
-- `test_a_short_row_with_a_long_twin_is_merged`: long `7E7482BB00000100` (kind `bambu_mifare`, tray set, unbound, `last_seen_at` null); short `7E7482BB` (kind `other`, `last_seen_at` set, source `phone`, one `filament_tag_backups` row, one `filament_bb_tag_pending` row). After: one row, the long one's id, kind `bambu_mifare`; its `last_seen_at`/`last_seen_source`/`last_seen_records` are the short row's (the newer); the backup's `tag_id` is the long row's; no pending row names the gone id.
+- `test_a_short_row_with_a_long_twin_is_merged`: long `7E7482BB00000100` (kind `bambu_mifare`, tray set, unbound, `last_seen_at` null); short `7E7482BB` (kind `other`, `last_seen_at` set, source `phone`, one `filament_bb_tag_pending` row). After: one row, the long one's id, kind `bambu_mifare`; its `last_seen_at`/`last_seen_source`/`last_seen_records` are the short row's (the newer); no pending row names the gone id.
+- `test_a_short_row_with_backups_is_left_alone`: short row with one `filament_tag_backups` row and a long twin. After: both rows unchanged.
 - `test_a_bound_short_row_moves_its_binding_to_the_long_row`: short bound (open binding) to spool S, long unbound. After: the open binding is on the long row, spool S; the short row is gone.
+- `test_the_ledger_follows_the_merged_tag`: short row with a closed binding to spool S and its `tag_bound` and `tag_unbound` events on S. After: both events' `data->>'tag_id'` is the twin's id; the closed binding is on the twin; S's event count is unchanged.
 - `test_two_open_bindings_are_left_alone`: both bound (to two spools). After: both rows unchanged, both bindings open.
 - `test_a_short_row_with_no_twin_is_rekeyed`: short `DC999BE3` alone. After: same id, `tag_uid` `DC999BE300000100`.
 - `test_running_it_again_changes_nothing`: apply the file twice over the first case's rows; the second run changes no row (compare a full `SELECT … ORDER BY id` before and after).
@@ -115,12 +117,14 @@ Expected: FAIL: the migration file does not exist.
 One `DO $$ … $$` block over `SELECT id, tag_uid FROM filament_tags WHERE tag_uid ~ '^[0-9A-F]{8}$' ORDER BY id FOR UPDATE`. For each short row, its twin is the row with `tag_uid = short || '00000100'`.
 
 - Twin and both hold an open binding: `RAISE NOTICE` naming both ids; skip.
+- Short row has a `filament_tag_backups` row: `RAISE NOTICE`; skip. Backups refuse UPDATE and DELETE by trigger (`20261124T0258Z_filament_tag_backups.sql`), so they cannot move; such a row stays as it is (prod has none, measured 2026-11-26).
 - Twin found, otherwise:
   1. Move the short row's bindings to the twin (open and closed: `UPDATE filament_tag_bindings SET tag_id = twin`).
-  2. Move its backups to the twin.
+  2b. Rewrite the spool ledger's copies of its id: `UPDATE filament_spool_events SET data = jsonb_set(data, '{tag_id}', to_jsonb(twin::text)) WHERE kind IN ('tag_bound', 'tag_unbound') AND data->>'tag_id' = short::text` (`filament/spools.py` writes `data.tag_id` on both kinds; no FK guards it).
   3. Delete its `filament_bb_tag_pending` row, and queue the twin when the short row had one (`INSERT … ON CONFLICT DO NOTHING`).
   4. Copy `last_seen_at`, `last_seen_source` and `last_seen_records` to the twin when the short row's `last_seen_at` is newer or the twin's is null; copy `raw_blob` and `note` when the twin's are null.
-  5. Delete the short row. The twin keeps its kind and tray UUID.
+  5. `RAISE NOTICE` the merge (short id and UID, twin id, how many bindings and events moved), so the API's start log keeps the record.
+  6. Delete the short row. The twin keeps its kind and tray UUID. Bindings and backups reference `filament_tags` with no `ON DELETE`, so a reference the steps above missed makes the delete fail and rolls the whole migration back; the API then stops at start with the error, and nothing is lost.
 - No twin: `UPDATE filament_tags SET tag_uid = tag_uid || '00000100'`.
 
 Header comment: why (the measured facts, one line each), and that it is a no-op where no short UID is stored.
