@@ -39,7 +39,8 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   `…/crud/fleet/` routes and a `Bus` over the API's fleet change stream, with the `fleet`
   credential; it imports nothing from `core/`) and the server binary (`/mcp`, `/healthz`,
   `FLEETCHAT_*` settings; README there).
-  `claudecreds/` is a library for Claude Code logins (#7981): `ResetFromText`, the reset a
+  `claudecreds/` is a library for Claude Code logins (#7981): `ParseEntry` and `Tail`, the
+  rate-limit and credential events in transcripts (#7988), and `ResetFromText`, the reset a
   usage-limit text names, in UTC or an IANA zone, held to the agent's
   `rate-limit-reset-vectors.json` with the TypeScript and Python ports (#7986; README there).
   `telemetry/` is the OpenTelemetry setup every module uses (#7667): traces, metrics and
