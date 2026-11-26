@@ -340,8 +340,8 @@ func (g *Gate) grant(r *http.Request, _ crud.Params) (any, error) {
 			return err
 		}
 		// Inherited, or seeded from a standing grant: only while its whole chain is in
-		// force, as the API's check of the call requires (#5685).
-		if held, err := flowgrants.ChainInForce(ctx, tx, grant); err != nil || !held {
+		// force, as the API's check of the call requires (#5685), each link share-locked.
+		if held, err := flowgrants.LockChainInForce(ctx, tx, grant); err != nil || !held {
 			return err
 		}
 		tag, err := tx.Exec(ctx, `INSERT INTO ai_input_responses (request_id, session_id, kind,

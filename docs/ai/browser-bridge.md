@@ -431,7 +431,7 @@ sequenceDiagram
   key that a cancelled call
   left is deleted by the hourly sweep (older than an hour). The API deletes both
   (`POST …/crud/agent/payload-keys/{subject}/drop` and `…/payload-key-sweeps`,
-  `backend/scadbuddy/api/crud_agent_forget.py`, area `forget`, #5299 step 6). Without the
+  `tools/go/core/internal/forget`, area `forget`, #5299 step 6). Without the
   payload codec no call goes through Temporal: it is refused (`no_browser`, asking the
   operator to check the agent's service credential), and is never sent another way.
 - **Inline, capped:** a bridge payload is never kept in the payload store (only a

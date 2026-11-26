@@ -103,6 +103,11 @@ function stopBackend(child: ChildProcess | undefined): Promise<void> {
   })
 }
 
+// CI sets it, so a missing piece there fails instead of skipping unnoticed.
+if (skip !== undefined && process.env.SCADBUDDY_TEST_WORKSPACE_BACKEND_REQUIRED === '1') {
+  throw new Error(`SCADBUDDY_TEST_WORKSPACE_BACKEND_REQUIRED is set, but ${skip}`)
+}
+
 describe.skipIf(skip !== undefined)(`workspace files through the real backend${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let db: Database
   let drop: () => Promise<void>

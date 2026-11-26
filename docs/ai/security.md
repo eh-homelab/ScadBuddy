@@ -420,7 +420,7 @@ The agent reads no KEK (#5299 step 12).
   `ai_forgotten_subjects`. The agent keeps a released key 30 s at most.
   The Web Push keys and the notification channels' tokens are sealed and opened by the
   API too (area `notify`, #5299 step 5,
-  [`backend/scadbuddy/api/crud_agent_notify.py`](../../backend/scadbuddy/api/crud_agent_notify.py)):
+  [`tools/go/core/internal/notify`](../../tools/go/core/internal/notify)):
   the agent gets the VAPID private key, a subscription's keys and a channel's token only
   from the routes that send with them. The API re-wraps them at a rotation. So it is for
   the remote plugins' header secrets and their OAuth sign-ins (area `plugins`, #5299 step 5,

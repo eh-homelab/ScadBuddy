@@ -869,10 +869,20 @@ jobs:
           tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
           "$RUNNER_TEMP/temporal" --version
 
+      # test/workspaceBlobs.backend.e2e.test.ts builds tools/go/core and runs it in
+      # front of the backend. go.work's toolchain, as go-module-ci's; with
+      # SCADBUDDY_TEST_WORKSPACE_BACKEND_REQUIRED a missing piece fails the test
+      # rather than skipping it.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
       - name: Unit tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
           SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
+          SCADBUDDY_TEST_WORKSPACE_BACKEND_REQUIRED: "1"
         run: pnpm test
 
       - name: Build

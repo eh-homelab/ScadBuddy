@@ -1524,8 +1524,9 @@ def _seq(step: Any) -> int:
 def chain_in_force(conn: Connection[DictRow], grant_id: str) -> bool:
     """Whether grant ``grant_id`` and every grant it inherits from (`parent_grant_id`) is in
     force, and the standing grant any of them was seeded from is still in force under
-    the approval that seeded it (#4252). The one chain check: `FlowStore` and the agent's
-    reads (`flows/agent_reads.py`, #5685) both call it."""
+    the approval that seeded it (#4252). `FlowStore` calls it. Its Go copy,
+    `tools/go/core/internal/flowgrants` `ChainInForce`, is the check the agent's reads
+    (`internal/agentreads`) and `/gate/grant` use (#5685): change the two together."""
     rows = conn.execute(
         "WITH RECURSIVE chain AS ("
         " SELECT id, parent_grant_id, status, revoked_at, expires_at, standing_grant_id,"

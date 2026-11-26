@@ -103,7 +103,7 @@ from scadbuddy.crud.guard import CrudCaller, crud_router
 #: route under it; its ``mcp-tokens`` area is ``…/agent/mcp-tokens`` and every route under it, the
 #: MCP bearer tokens by their hashes; its ``notify`` area is ``…/agent/push/*`` and
 #: ``…/agent/notify-channels`` and every route under it, the Web Push records and the notification
-#: channels, sealed and opened with the API's KEK (`tools/go/core/internal/stores`, and
+#: channels, sealed and opened with the API's KEK (`tools/go/core/internal/notify`, and
 #: `api/crud_agent_notify.py` for the waiting pushes). Its plugin stores (#5299 step 5): its
 #: ``access`` area is ``…/agent/access/*`` and ``…/agent/tool-listings/*``, the tool access and the
 #: listings a connection test stores, and ``…/agent/leases/{key}``, the leases the agent holds

@@ -6,12 +6,23 @@ import (
 	"context"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Querier is a pool, a connection or a transaction.
 type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
+
+// links is the ids of grant $1, every grant it inherits from, and the standing grants they
+// were seeded from.
+const links = `WITH RECURSIVE chain AS (
+	SELECT id, parent_grant_id, standing_grant_id, 0 AS depth FROM flow_grants WHERE id = $1
+	UNION ALL SELECT g.id, g.parent_grant_id, g.standing_grant_id, c.depth + 1
+	FROM flow_grants g JOIN chain c ON g.id = c.parent_grant_id WHERE c.depth < 64)
+SELECT coalesce(array_agg(id), '{}'),
+	coalesce(array_agg(standing_grant_id) FILTER (WHERE standing_grant_id IS NOT NULL), '{}')
+FROM chain`
 
 // chain is grant $1 and every grant it inherits from (parent_grant_id, at most 64 deep),
 // each with whether it is in force and whether it reached its root. Both expiries are
@@ -36,4 +47,28 @@ func ChainInForce(ctx context.Context, q Querier, id string) (bool, error) {
 	var held bool
 	err := q.QueryRow(ctx, chain, id).Scan(&held)
 	return held, err
+}
+
+// Locker is a transaction.
+type Locker interface {
+	Querier
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// LockChainInForce is ChainInForce inside a transaction, with a share lock on every row the
+// answer reads: the grant, the grants it inherits from and the standing grants they were
+// seeded from. A revocation of any of them lands wholly before or after the caller's
+// transaction (#5685).
+func LockChainInForce(ctx context.Context, tx Locker, id string) (bool, error) {
+	var grants, standing []string
+	if err := tx.QueryRow(ctx, links, id).Scan(&grants, &standing); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM flow_grants WHERE id = ANY($1) FOR SHARE`, grants); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM flow_trigger_grants WHERE id = ANY($1) FOR SHARE`, standing); err != nil {
+		return false, err
+	}
+	return ChainInForce(ctx, tx, id)
 }
