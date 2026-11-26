@@ -10,6 +10,7 @@ expect true  tools/go/bambuddy-fs/main.go
 expect true  backend/scadbuddy/migrations/20261102T0645Z_service_credentials.sql
 expect true  backend/scadbuddy/migrations_agent/20260928T0107Z_sessions.sql
 expect false backend/scadbuddy/migrationsx/a.sql
+expect true  docs/inventory-model/kinds.yaml
 expect true  go.work
 expect true  go.work.sum
 expect true  vendor/modules.txt

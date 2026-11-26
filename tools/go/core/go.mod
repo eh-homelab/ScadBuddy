@@ -2,7 +2,10 @@ module github.com/eh-homelab/ScadBuddy/tools/go/core
 
 go 1.26.0
 
-require github.com/jackc/pgx/v5 v5.13.0
+require (
+	github.com/jackc/pgx/v5 v5.13.0
+	go.yaml.in/yaml/v3 v3.0.6
+)
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
