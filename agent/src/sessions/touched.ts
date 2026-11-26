@@ -751,8 +751,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'unlink_tray_spool',
   // #7150: a spool made from a tray is an SB spool, which is no recorded kind either.
   'create_tray_spool',
-  // #7153: an AMS slot's control and an AMS unit's label reach the printer and Bambuddy; the
-  // label also names the unit's place, no recorded resource kind.
+  // #7153, #7276: an AMS slot's commands reach the printer over the LAN link; a slot's saved
+  // preset is ScadBuddy's own row, and a unit's label names the unit's place: no recorded
+  // resource kind.
   'printer_slot_configure',
   'printer_slot_reset',
   'printer_slot_refresh',
@@ -762,6 +763,14 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'printer_slot_preset_clear',
   'printer_ams_label_set',
   'printer_ams_label_clear',
+  // #7162: a printer's K-profiles live on the printer, and their notes are ScadBuddy's own
+  // rows: no recorded resource kind. The reads (printer_kprofiles_get,
+  // printer_kprofile_notes_get, printer_command_get) touch nothing by their tier.
+  'printer_kprofile_set',
+  'printer_kprofile_batch_set',
+  'printer_kprofile_delete',
+  'printer_kprofile_note_set',
+  'printer_kprofile_note_delete',
   // #7330: a camera reconnect restarts ScadBuddy's pull; a camera is no recorded resource kind.
   'reconnect_printer_camera',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)

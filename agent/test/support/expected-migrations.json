@@ -432,6 +432,10 @@
     "sha256": "69cfdad9690606b0dfb38977feed6395bf8339e7b9c395b19bbc932b0b3401e7"
   },
   {
+    "id": "20261126T1109Z_plugin_package_commit_mirrors",
+    "sha256": "9389d71b7b68b03286adcc6a16e7bddf33717e9b63d07726f5e743bb674f8506"
+  },
+  {
     "id": "20261126T1613Z_credential_claude_login_scope_lease",
     "sha256": "4e836673e38907624c7646df0b8cdfd8b87b59d221c12dad027ca6427e85f406"
   }

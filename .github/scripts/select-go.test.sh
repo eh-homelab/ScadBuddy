@@ -22,6 +22,9 @@ expect true  .github/workflows/ci.yml
 expect true  .github/scripts/select-go.sh
 expect true  .github/scripts/select-go.test.sh
 expect true  .github/scripts/changed-paths.sh
+expect true  agent/test/fixtures/rate-limit-reset-vectors.json
+expect false agent/test/fixtures/secret-vectors.json
+expect false agent/src/harness/credentialErrors.ts
 expect false Dockerfile
 expect false backend/scadbuddy/api/library_print.py
 expect false README.md

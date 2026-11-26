@@ -211,9 +211,10 @@ RESET_VECTORS = json.loads(
 
 @pytest.mark.parametrize("case", RESET_VECTORS, ids=lambda c: f"{c['text']!r}@{c['now']}")
 def test_a_rate_limit_reset_is_read_from_the_result_text(case: dict[str, Any]) -> None:
-    """#4088: the reset Claude Code's result names, the next such time in UTC; `at`
-    null keeps the default cooldown. credentialErrors.ts `rateLimitResetFromText` is
-    held to the same vectors (#4121 review)."""
+    """#4088: the reset Claude Code's result names, the next such time in the zone it
+    names (#7986); `at` null keeps the default cooldown. credentialErrors.ts
+    `rateLimitResetFromText` and claudecreds `ResetFromText` are held to the same
+    vectors (#4121 review)."""
     now = datetime.fromisoformat(case["now"])
     reset = rate_limit_reset(case["text"], now)
     if case["at"] is None:

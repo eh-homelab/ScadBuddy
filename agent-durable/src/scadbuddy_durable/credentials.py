@@ -15,8 +15,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, tzinfo
 from typing import Any, Literal, cast, get_args
+from zoneinfo import ZoneInfo
 
 import psycopg
 
@@ -168,10 +169,13 @@ def cooldown_until(now: datetime, until: datetime | None = None) -> datetime:
 
 
 #: Claude Code's subscription-limit result names its reset, "resets 10:30pm (UTC)" or
-#: "resets Oct 21, 4am (UTC)" (#4088, measured in prod `ai_credentials.last_error`).
+#: "resets Oct 21, 4am (UTC)" (#4088, measured in prod `ai_credentials.last_error`). A
+#: machine that is not pinned to UTC names its own IANA zone, "resets 1:30am
+#: (America/New_York)" (#7986, measured in local Claude Code transcripts).
 _RESET = re.compile(
     r"\bresets\s+(?:(?P<month>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+)?"
-    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<half>am|pm)\s*\(UTC\)",
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<half>am|pm)\s*"
+    r"\((?P<zone>UTC|[a-z][a-z0-9_+-]*(?:/[a-z0-9_+-]+)+)\)",
     re.IGNORECASE,
 )
 #: How long after a named minute it still counts as passing now (see rate_limit_reset).
@@ -181,13 +185,32 @@ RESET_HORIZON = timedelta(days=31)
 _MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 
+def _zone(name: str) -> tzinfo | None:
+    """The zone the text names, or None when this machine's zone data does not know it."""
+    if name.upper() == "UTC":
+        return UTC
+    try:
+        return ZoneInfo(name)
+    except KeyError, ValueError, OSError:
+        # ZoneInfoNotFoundError is a KeyError; a directory ("America/Indiana") is an OSError.
+        return None
+
+
+def _zoned(zone: tzinfo, day: date, hour: int, minute: int) -> datetime:
+    """That wall clock time in the zone, in UTC. With fold=0, a time that occurs twice
+    (DST ends) is the earlier, and a time that does not occur (DST starts) is read with
+    the offset before the gap, as credentialErrors.ts and claudecreds do."""
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone).astimezone(UTC)
+
+
 def rate_limit_reset(text: str, now: datetime) -> datetime | None:
     """The reset a rate-limited result's text names, as the next such time after
     ``now``: a time alone is today's or tomorrow's, a date this year's or, across the
-    new year, next year's. None when the text names none, or one that is not a time;
-    the caller then keeps the default cooldown. A segment never sees the 429's
-    ``anthropic-ratelimit-*-reset`` headers a classic probe reads (credentialErrors.ts
-    ``rateLimitResetFromHeaders``).
+    new year, next year's. Today, tomorrow and the year are those of the zone the text
+    names, with its DST rules (#7986). None when the text names none, one that is not a
+    time, or a zone this machine does not know; the caller then keeps the default
+    cooldown. A segment never sees the 429's ``anthropic-ratelimit-*-reset`` headers a
+    classic probe reads (credentialErrors.ts ``rateLimitResetFromHeaders``).
 
     The text names the minute, never the second, so a reset within RESET_GRACE before
     ``now`` is one that is passing now, not tomorrow's (or next year's): None, the
@@ -199,20 +222,27 @@ def rate_limit_reset(text: str, now: datetime) -> datetime | None:
     if not 1 <= hour <= 12 or minute > 59:
         return None
     hour = hour % 12 + (12 if m["half"].lower() == "pm" else 0)
+    zone = _zone(m["zone"])
+    if zone is None:
+        return None
     now = now.astimezone(UTC)
+    today = now.astimezone(zone).date()
     try:
         if m["month"] is None:
-            at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            at = _zoned(zone, today, hour, minute)
             if at > now:
                 return at
-            return None if at > now - RESET_GRACE else at + timedelta(days=1)
+            if at > now - RESET_GRACE:
+                return None
+            # Tomorrow is the zone's next date, which is not always 24 hours later (DST).
+            return _zoned(zone, today + timedelta(days=1), hour, minute)
         month = _MONTHS.index(m["month"].lower()) + 1
-        at = datetime(now.year, month, int(m["day"]), hour, minute, tzinfo=UTC)
+        at = _zoned(zone, date(today.year, month, int(m["day"])), hour, minute)
         if at > now:
             return at
         # Only a date just across the new year is next year's ("Jan 2" on Dec 31); one
         # earlier this year has passed, however recently.
-        later = at.replace(year=now.year + 1)
+        later = _zoned(zone, date(today.year + 1, month, int(m["day"])), hour, minute)
         return later if later - now <= RESET_HORIZON else None
     except ValueError:
         # Not a month, or not a day of it (Feb 30; Feb 29 of next year).

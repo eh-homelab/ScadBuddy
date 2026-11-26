@@ -88,8 +88,9 @@ func main() {
 		tel = &telemetry.Telemetry{}
 	}
 	// The JSON on stderr stays, for kubectl logs; with logs on, each record also goes over
-	// OTLP, and a record logged inside a request carries its trace_id and span_id.
-	slog.SetDefault(slog.New(tel.LogHandler(slog.NewJSONHandler(os.Stderr, nil), serviceName, nil)))
+	// OTLP, and a record logged inside a request carries its trace_id and span_id. The log
+	// package's lines (net/http's and the forward's) go to stderr only.
+	tel.SetDefaultLogger(slog.NewJSONHandler(os.Stderr, nil), serviceName, nil)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := run(ctx, os.Getenv, tel); err != nil {

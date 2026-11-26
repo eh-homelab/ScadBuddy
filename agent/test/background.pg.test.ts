@@ -431,7 +431,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     const once = idOf((await call('CronCreate', { cron: '0 9 * * *', prompt: 'once', recurring: false })).text)
     await acts.bg_fire({ taskId: once, waitedMs: 0 })
     expect(await acts.bg_next({ taskId: once })).toEqual({ end: 'fired' })
-    await acts.bg_finish({ taskId: once, state: 'done', detail: 'fired' })
+    await acts.bg_finish({ taskId: once, state: 'done', detail: 'fired', monitor: false })
     expect(await store.get(once)).toMatchObject({ state: 'done', detail: 'fired' })
     await call('CronDelete', { id: cron })
     expect(await acts.bg_next({ taskId: cron })).toEqual({ end: 'gone' })

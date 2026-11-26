@@ -62,7 +62,8 @@ class FarmQueueItem(QueueItem):
     scadbuddy: ScadBuddyJob | None = None
     #: The item's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's for its
     #: own item (`scadbuddy`), else Bambuddy's thumbnail of the item's library file or
-    #: archive through this router (`bambuddy/pictures.py`). ``None`` when there is none.
+    #: archive through this router (`bambuddy/pictures.py`), or for plate 2 or later
+    #: that plate's image (#7458). ``None`` when there is none.
     picture: str | None = None
 
 
@@ -155,6 +156,7 @@ async def _plate_or_cover(
     *,
     plate_operation: Operation,
     cover_operation: Operation,
+    cover_what: str,
 ) -> Response:
     """Bambuddy's image of one plate, else its cover when Bambuddy has no image of that
     plate (#7458): a queue item for plate 2 or later shows its own plate."""
@@ -175,7 +177,7 @@ async def _plate_or_cover(
         request,
         cover_path,
         operation=cover_operation,
-        what="show the thumbnail",
+        what=cover_what,
         cache_control=PICTURE_CACHE_CONTROL,
     )
 
@@ -199,6 +201,7 @@ async def get_library_plate_thumbnail(
         f"/library/files/{file_id}/thumbnail",
         plate_operation="library.plate_thumbnail",
         cover_operation="library.thumbnail",
+        cover_what="show the file's thumbnail",
     )
 
 
@@ -221,6 +224,7 @@ async def get_archive_plate_thumbnail(
         f"/archives/{archive_id}/thumbnail",
         plate_operation="media.plate_thumbnail",
         cover_operation="media.thumbnail",
+        cover_what="show the thumbnail",
     )
 
 
