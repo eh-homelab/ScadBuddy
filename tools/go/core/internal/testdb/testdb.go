@@ -114,7 +114,11 @@ func build(server string) (string, error) {
 			}
 		}
 	}
-	return name, nil
+	// The migrations publish history events (#6949: the property history's back-fill, the
+	// item kinds' schemas). A test starts with the log as it was before them: empty, from
+	// seq 1, behind the history subscriber's cursor.
+	_, err = conn.Exec(ctx, "TRUNCATE events RESTART IDENTITY")
+	return name, err
 }
 
 type migrationError struct {

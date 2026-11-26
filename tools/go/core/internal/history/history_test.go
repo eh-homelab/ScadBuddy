@@ -1,0 +1,329 @@
+package history
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math/rand/v2"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
+)
+
+func TestMain(m *testing.M) { testdb.Main(m) }
+
+const person = `{"kind":"browser"}`
+
+var ctx = context.Background()
+
+// entity makes an entities row of kind and returns its id.
+func entity(t *testing.T, pool *pgxpool.Pool, kind, ref string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx, `INSERT INTO entities (kind, ref) VALUES ($1, $2) RETURNING id::text`,
+		kind, ref).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// set writes key = value (JSON) on the entity as actor, in a transaction of its own.
+func set(t *testing.T, pool *pgxpool.Pool, entityID, key, value, actor string) {
+	t.Helper()
+	write(t, pool, actor, `INSERT INTO entity_properties (entity_id, key, value, updated_by)
+		VALUES ($1, $2, $3::jsonb, $4::jsonb) ON CONFLICT (entity_id, key) DO UPDATE
+		SET value = EXCLUDED.value, updated_at = clock_timestamp(), updated_by = EXCLUDED.updated_by`,
+		entityID, key, value, actor)
+}
+
+func remove(t *testing.T, pool *pgxpool.Pool, entityID, key, actor string) {
+	t.Helper()
+	write(t, pool, actor, `DELETE FROM entity_properties WHERE entity_id = $1 AND key = $2`, entityID, key)
+}
+
+func write(t *testing.T, pool *pgxpool.Pool, actor, sql string, args ...any) {
+	t.Helper()
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('scadbuddy.actor', $1, true)`, actor); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, sql, args...)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func scalar[T any](t *testing.T, pool *pgxpool.Pool, sql string, args ...any) T {
+	t.Helper()
+	var v T
+	if err := pool.QueryRow(ctx, sql, args...).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+func cursor(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	return scalar[int64](t, pool, `SELECT seq FROM event_subscribers WHERE name = 'history'`)
+}
+
+func newest(t *testing.T, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	return scalar[int64](t, pool, `SELECT max(seq) FROM events`)
+}
+
+func rows(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	return scalar[int](t, pool, `SELECT count(*) FROM entity_property_history`)
+}
+
+func apply(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	n, err := Apply(ctx, pool, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// matching counts the history rows that equal their event's payload, field by field.
+func matching(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	return scalar[int](t, pool, `SELECT count(*) FROM entity_property_history h
+		JOIN events e ON e.seq = h.event_seq AND e.kind = 'entity_property.changed'
+		WHERE h.entity_id = (e.payload->>'entity_id')::uuid AND h.kind = e.payload->>'entity_kind'
+		AND h.ref = e.payload->>'ref' AND h.key = e.payload->>'key' AND h.op = e.payload->>'op'
+		AND h.old IS NOT DISTINCT FROM nullif(e.payload->'old', 'null')
+		AND h.new IS NOT DISTINCT FROM nullif(e.payload->'new', 'null')
+		AND h.source IS NOT DISTINCT FROM e.payload->>'source'
+		AND h.actor = e.payload->'actor' AND h.at = (e.payload->>'at')::timestamptz`)
+}
+
+func fourChanges(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	id := entity(t, pool, "item", "i1")
+	set(t, pool, id, "colour_name", `"Gold"`, person)
+	set(t, pool, id, "colour_name", `"Silk Gold"`, person)
+	set(t, pool, id, "label_g", `1000`, person)
+	remove(t, pool, id, "colour_name", person)
+}
+
+func TestTheSubscriberInsertsOneRowPerEvent(t *testing.T) {
+	pool := testdb.New(t)
+	fourChanges(t, pool)
+	apply(t, pool)
+	if n := rows(t, pool); n != 4 {
+		t.Fatalf("%d rows, want 4", n)
+	}
+	if n := matching(t, pool); n != 4 {
+		t.Fatalf("%d rows equal their event, want 4", n)
+	}
+	ops := scalar[[]string](t, pool, `SELECT array_agg(key || ' ' || op ORDER BY event_seq) FROM entity_property_history`)
+	if want := []string{"colour_name set", "colour_name set", "label_g set", "colour_name remove"}; !reflect.DeepEqual(ops, want) {
+		t.Fatalf("rows %v, want %v", ops, want)
+	}
+	if c, n := cursor(t, pool), newest(t, pool); c != n {
+		t.Fatalf("cursor %d, want the last seq %d", c, n)
+	}
+}
+
+func TestAReplayInsertsNothingTwice(t *testing.T) {
+	pool := testdb.New(t)
+	fourChanges(t, pool)
+	apply(t, pool)
+	if _, err := pool.Exec(ctx, `UPDATE event_subscribers SET seq = 0 WHERE name = 'history'`); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, pool)
+	if n := rows(t, pool); n != 4 {
+		t.Fatalf("%d rows after a replay, want 4", n)
+	}
+	if c, n := cursor(t, pool), newest(t, pool); c != n {
+		t.Fatalf("cursor %d, want the last seq %d", c, n)
+	}
+}
+
+func TestTwoSubscribersApplyOnce(t *testing.T) {
+	pool := testdb.New(t)
+	fourChanges(t, pool)
+	var wg sync.WaitGroup
+	applied := make([]int, 2)
+	errs := make([]error, 2)
+	for i := range 2 {
+		wg.Go(func() { applied[i], errs[i] = Apply(ctx, pool, Options{}) })
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if applied[0] != 0 && applied[1] != 0 {
+		t.Fatalf("both applied: %v", applied)
+	}
+	if n := rows(t, pool); n != 4 {
+		t.Fatalf("%d rows, want 4", n)
+	}
+}
+
+func TestAHeldCursorAppliesNothing(t *testing.T) {
+	pool := testdb.New(t)
+	fourChanges(t, pool)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT seq FROM event_subscribers WHERE name = 'history' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+	if n := apply(t, pool); n != 0 {
+		t.Fatalf("applied %d while another replica held the cursor", n)
+	}
+	if n := rows(t, pool); n != 0 {
+		t.Fatalf("%d rows, want 0", n)
+	}
+}
+
+func TestAnUnknownSubscriberIsAnError(t *testing.T) {
+	pool := testdb.New(t)
+	if _, err := Apply(ctx, pool, Options{Name: "nobody"}); err == nil {
+		t.Fatal("Apply took a subscriber with no row")
+	}
+}
+
+func TestOtherKindsMoveTheCursor(t *testing.T) {
+	pool := testdb.New(t)
+	id := entity(t, pool, "item", "i1")
+	set(t, pool, id, "a", `1`, person)
+	if _, err := pool.Exec(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		VALUES ('j1', 'job.progress', now(), '{"id": "j1", "kind": "job.progress"}')`); err != nil {
+		t.Fatal(err)
+	}
+	set(t, pool, id, "b", `2`, person)
+	apply(t, pool)
+	if n := rows(t, pool); n != 2 {
+		t.Fatalf("%d rows, want 2", n)
+	}
+	if c, n := cursor(t, pool), newest(t, pool); c != n {
+		t.Fatalf("cursor %d, want the last seq %d", c, n)
+	}
+}
+
+func TestABadPayloadStopsTheCursor(t *testing.T) {
+	pool := testdb.New(t)
+	id := entity(t, pool, "item", "i1")
+	set(t, pool, id, "a", `1`, person)
+	good := newest(t, pool)
+	var bad int64
+	if err := pool.QueryRow(ctx, `INSERT INTO events (event_id, kind, at, payload)
+		SELECT 'bad', kind, at, payload - 'key' || '{"id": "bad"}' FROM events WHERE seq = $1
+		RETURNING seq`, good).Scan(&bad); err != nil {
+		t.Fatal(err)
+	}
+	set(t, pool, id, "b", `2`, person)
+	_, err := Apply(ctx, pool, Options{})
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprint(bad)) {
+		t.Fatalf("Apply = %v, want an error naming seq %d", err, bad)
+	}
+	if n := rows(t, pool); n != 1 {
+		t.Fatalf("%d rows, want the 1 before the bad event", n)
+	}
+	if c := cursor(t, pool); c != bad-1 {
+		t.Fatalf("cursor %d, want %d, just before the bad event", c, bad-1)
+	}
+	// Once the payload is fixed, the event is applied, and the ones after it.
+	if _, err := pool.Exec(ctx, `UPDATE events SET payload = payload || '{"key": "c"}' WHERE seq = $1`, bad); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, pool)
+	if n := rows(t, pool); n != 3 {
+		t.Fatalf("%d rows after the fix, want 3", n)
+	}
+}
+
+func TestTheHistoryReplaysToTheCurrentProperties(t *testing.T) {
+	pool := testdb.New(t)
+	ids := []string{entity(t, pool, "item", "i1"), entity(t, pool, "spool", "s1"), entity(t, pool, "order", "o1")}
+	keys := []string{"a", "b", "c"}
+	r := rand.New(rand.NewPCG(6949, 1))
+	for range 20 {
+		id, key := ids[r.IntN(len(ids))], keys[r.IntN(len(keys))]
+		if r.IntN(3) == 0 {
+			remove(t, pool, id, key, person)
+			continue
+		}
+		set(t, pool, id, key, fmt.Sprint(r.IntN(4)), person)
+	}
+	apply(t, pool)
+	for _, id := range ids {
+		replayed := map[string]any{}
+		history, err := pool.Query(ctx, `SELECT key, op, new FROM entity_property_history
+			WHERE entity_id = $1 ORDER BY event_seq`, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for history.Next() {
+			var key, op string
+			var value any
+			if err := history.Scan(&key, &op, &value); err != nil {
+				t.Fatal(err)
+			}
+			if op == "remove" {
+				delete(replayed, key)
+				continue
+			}
+			replayed[key] = value
+		}
+		if err := history.Err(); err != nil {
+			t.Fatal(err)
+		}
+		current := scalar[map[string]any](t, pool, `SELECT coalesce(jsonb_object_agg(key, value), '{}')
+			FROM entity_properties WHERE entity_id = $1`, id)
+		if !reflect.DeepEqual(normal(t, replayed), normal(t, current)) {
+			t.Errorf("%s: history replays to %v, entity_properties holds %v", id, replayed, current)
+		}
+	}
+}
+
+// normal is v through JSON, so numbers compare alike whatever decoded them.
+func normal(t *testing.T, v any) any {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestSchemaEventsAreApplied(t *testing.T) {
+	pool := testdb.New(t)
+	write(t, pool, person, `UPDATE entity_property_schemas SET schema = '{"type": "object"}' WHERE kind = 'spool'`)
+	write(t, pool, person, `UPDATE item_kinds SET attribute_schema = '{"type": "object"}' WHERE id = 'nozzle'`)
+	apply(t, pool)
+	events := scalar[int](t, pool, `SELECT count(*) FROM events WHERE kind = 'entity_property_schema.changed'`)
+	if n := scalar[int](t, pool, `SELECT count(*) FROM entity_property_schema_history h
+		JOIN events e ON e.seq = h.event_seq
+		WHERE h.owner = e.payload->>'owner' AND h.new = e.payload->'new'
+		AND h.old IS NOT DISTINCT FROM nullif(e.payload->'old', 'null') AND h.actor = e.payload->'actor'
+		AND h.at = coalesce(e.payload->>'changed_at', e.payload->>'at')::timestamptz`); n != events || n < 2 {
+		t.Fatalf("%d schema rows equal their event, of %d events", n, events)
+	}
+	owners := scalar[[]string](t, pool, `SELECT array_agg(owner ORDER BY event_seq DESC) FROM
+		(SELECT owner, event_seq FROM entity_property_schema_history ORDER BY event_seq DESC LIMIT 2) last`)
+	if want := []string{"item_kind:nozzle", "kind:spool"}; !reflect.DeepEqual(owners, want) {
+		t.Fatalf("the last two owners %v, want %v", owners, want)
+	}
+}

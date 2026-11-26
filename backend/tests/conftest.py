@@ -523,6 +523,10 @@ def _pg_template(_pg_database_url: str | None) -> Iterator[str | None]:
     try:
         with psycopg.connect(make_conninfo(url, dbname=name), autocommit=True) as conn:
             migrate(conn)
+            # The migrations publish history events (#6949: the property history's
+            # back-fill, the item kinds' schemas). A test starts with the log as it was
+            # before them: empty, from seq 1, behind the history subscriber's cursor.
+            conn.execute("TRUNCATE events RESTART IDENTITY")
         yield name
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
