@@ -37,9 +37,10 @@ def _job(client: TestClient, slug: str, width: float = 12) -> str:
     return job_id
 
 
-def _outputs(paths: DataPaths, slug: str) -> list[str]:
-    root = paths.output_dir(slug, "x").parent
-    return sorted(path.name for path in root.iterdir()) if root.exists() else []
+def _outputs(client: TestClient, slug: str) -> list[str]:
+    """The model's saved outputs, by id: their rows (#7257)."""
+    listed = client.get(f"/api/v1/models/{slug}/outputs").json()
+    return sorted(item["id"] for item in listed)
 
 
 def test_a_repeated_output_create_makes_one_output(
@@ -54,7 +55,7 @@ def test_a_repeated_output_create_makes_one_output(
     again = client.post(f"/api/v1/models/{model}/outputs", json=body, headers=headers)
     assert again.status_code == 201, again.text
     assert again.json()["id"] == first.json()["id"]
-    assert _outputs(paths, model) == [first.json()["id"]]
+    assert _outputs(client, model) == [first.json()["id"]]
     assert len(_workflow_ids(app, "output_create")) == 1
 
 
@@ -90,27 +91,6 @@ def test_output_writes_are_operations(client: TestClient, app: FastAPI, model: s
         assert _workflow_ids(app, kind), kind
 
 
-def test_a_renamed_output_writes_meta_json_as_a_save_does(
-    client: TestClient, app: FastAPI, model: str
-) -> None:
-    """#2786 review: a rename rewrites meta.json; renamed back, the file is byte for byte
-    the one the save wrote, so a renamed output's file never differs in format."""
-    created = client.post(
-        f"/api/v1/models/{model}/outputs",
-        json={"job_id": _job(client, model), "name": "Once"},
-        headers=press(),
-    )
-    assert created.status_code == 201, created.text
-    output_id = created.json()["id"]
-    state: AppState = getattr(app.state, STATE_ATTR)
-    meta = state.outputs.directory(output_id) / "meta.json"
-    saved = meta.read_bytes()
-    for name in ("Twice", "Once"):
-        renamed = client.patch(f"/api/v1/outputs/{output_id}", json={"name": name}, headers=press())
-        assert renamed.status_code == 200, renamed.text
-    assert meta.read_bytes() == saved
-
-
 def test_a_job_not_done_is_still_409_without_an_operation_record(
     client: TestClient, app: FastAPI, model: str
 ) -> None:
@@ -140,7 +120,7 @@ def test_an_inbox_copy_that_fails_to_delete_keeps_the_output(
     # Bambuddy's failure, recorded: not a 503 from before the operation started.
     assert response.json()["type"] != STILL_ACCEPTING_PROBLEM, response.text
     assert len(_workflow_ids(app, "output_delete")) == 1
-    assert output_id in _outputs(paths, model)
+    assert output_id in _outputs(client, model)
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
 
 

@@ -226,7 +226,7 @@ class Follower:
             except OutputNotFoundError:
                 return "deleted"
             except Exception:
-                # A disk blip or a half-written meta.json: keep following, slowly.
+                # A database or blob store blip: keep following, slowly.
                 logger.exception(
                     "could not read the print's subject", extra={"subject": subject.key}
                 )

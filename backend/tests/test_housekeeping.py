@@ -54,6 +54,7 @@ from scadbuddy.workflows.housekeeping import (
     NATIVE_COPIES_TIMEOUT,
     NATIVE_SLICES_SWEEP,
     NATIVE_SLICES_TIMEOUT,
+    OUTPUT_BYTES_SWEEP,
     OUTPUT_COPY_SWEEP,
     OUTPUT_COPY_TIMEOUT,
     PAYMENT_CAPTURES_SWEEP,
@@ -100,6 +101,11 @@ from tests.support.temporal import NO_TICK, temporal_client, terminate_open_work
 pytestmark = pytest.mark.requires_temporal
 
 
+#: What a run schedules today: every sweep but the copies of the outputs, which
+#: `OUTPUTS_CUT_OVER_PATCH` retired (#7257).
+RUN_SWEEPS = [sweep for sweep in SWEEPS if sweep not in (OUTPUT_COPY_SWEEP, OUTPUT_BYTES_SWEEP)]
+
+
 class FakeSweeps:
     def __init__(self, failing: str | None = None) -> None:
         self.ran: list[str] = []
@@ -134,7 +140,7 @@ async def test_housekeeping_runs_every_sweep_in_order(client: Client) -> None:
         await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    assert fake.ran == list(SWEEPS)
+    assert fake.ran == RUN_SWEEPS
 
 
 async def test_a_failing_sweep_does_not_stop_the_rest(client: Client) -> None:
@@ -144,7 +150,7 @@ async def test_a_failing_sweep_does_not_stop_the_rest(client: Client) -> None:
         failed = await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    assert fake.ran == list(SWEEPS)
+    assert fake.ran == RUN_SWEEPS
     assert failed == [SWEEPS[1]]
 
 
@@ -184,12 +190,11 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         STOREFRONT_MAIL_SWEEP: STOREFRONT_MAIL_TIMEOUT,
         AUTO_IMPORT_SWEEP: AUTO_IMPORT_TIMEOUT,
         RUN_HOLDS_SWEEP: RUN_HOLDS_TIMEOUT,
-        OUTPUT_COPY_SWEEP: OUTPUT_COPY_TIMEOUT,
         ATTEMPT_MEDIA_SWEEP: ATTEMPT_MEDIA_TIMEOUT,
         WARM_LISTINGS_SWEEP: WARM_LISTINGS_TIMEOUT,
         TEMPLATE_COPY_SWEEP: TEMPLATE_COPY_TIMEOUT,
     }
-    for sweep in SWEEPS:
+    for sweep in RUN_SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
 
 

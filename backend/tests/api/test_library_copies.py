@@ -31,6 +31,7 @@ from tests.api.test_print_filaments import (
 from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, update_row
 
 # Every test here reads or writes an output's upload records, which live in Postgres.
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.usefixtures("recorded_sb_spools")]
@@ -392,16 +393,15 @@ def test_an_old_records_copy_is_not_reused_and_the_next_send_uploads_afresh(
     """No data migration (#455): the keys a ``meta.json`` carried for its uploads, before
     they moved to Postgres, load without error and mean no recorded copy."""
     output_id = set_up(client, model)
-    path = paths.output_dir(model, output_id) / "meta.json"
-    meta = json.loads(path.read_text(encoding="utf-8"))
+    outputs = app_outputs(client)
+    meta = outputs.get(output_id).model_dump(mode="json")
     meta.update(
         library_file_id=41,
         library_file_plate=DEFAULT_PLATE.key,
         library_files=[{"id": 41, "folder_id": INBOX, "target_key": DEFAULT_PLATE.key}],
     )
-    path.write_text(json.dumps(meta), encoding="utf-8")
-    # A record that old has no row until the copy (#7255): its file answers.
-    getattr(client.app.state, STATE_ATTR).outputs.rows.delete(output_id)  # type: ignore[attr-defined]
+    # The copy carried such a record into its row as it was (#7255).
+    update_row(outputs, output_id, meta=meta)
     upload = uploads(42)
 
     response = client.post(

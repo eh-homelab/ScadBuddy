@@ -41,7 +41,7 @@ flowchart TB
     SL[slicer worker<br/>Rust + Bambu Studio CLI]
     PG[(Postgres<br/>backend + ai_* tables)]
     T[(Temporal)]
-    BS[(Blob store<br/>S3, Bambuddy or local)]
+    BS[(Blob store<br/>S3 or local)]
     BB[Bambuddy]
     PR[Bambu printers<br/>MQTT 8883, FTPS 990]
     ANT[Anthropic API]

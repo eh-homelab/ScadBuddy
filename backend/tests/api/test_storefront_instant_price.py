@@ -10,15 +10,12 @@ The charge is unchanged: a cart line takes the firm price only (`line_prices.py`
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
 from psycopg.types.json import Jsonb
 
-from scadbuddy.library.output_bytes import OutputBytes
-from scadbuddy.library.output_rows import ByteWrite
-from scadbuddy.library.outputs import PREVIEW_NAME
+from scadbuddy.library.output_rows import output_blob_key
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.models import MachineRateBreakdown
@@ -44,8 +41,7 @@ from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     render_until_done,
     sliced,
 )
-from tests.support.output_blobs import put_folder_at_keys
-from tests.support.store import local_content, store_pool
+from tests.support.row_outputs import name_blob
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -160,49 +156,34 @@ def test_variant_preview_streams_blob(
     crud: CrudCaller,
     listing: dict[str, Any],
     sliced: type[FakeSlicer],
-    tmp_path: Path,
-    pg_conninfo: str,
 ) -> None:
-    """#7256: the preview is streamed from the output's preview blob, also once its
-    NFS file is gone."""
+    """#7256: the preview is streamed from the output's preview blob."""
     job = render_until_done(crud, TOKEN_A, listing, {"width": 53})
     priced(crud, job["id"])
     key = variant_keys(crud)[job["id"]]
     [row] = rows(crud, "SELECT output_id FROM storefront_slice_prices WHERE variant_key = %s", key)
     outputs = _state(crud.api).outputs
-    with store_pool(pg_conninfo) as pool:
-        outputs.bytes = OutputBytes(local_content(tmp_path / "remote", pool))
-        try:
-            output_id = row["output_id"]
-            directory = outputs.directory(output_id)
-            glb = (directory / PREVIEW_NAME).read_bytes()
-            portal = crud.api.portal
-            assert portal is not None
-            blobs = portal.call(
-                put_folder_at_keys, outputs.bytes, directory, output_id, listing["slug"]
-            )
-            assert outputs.rows is not None
-            outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
-            (directory / PREVIEW_NAME).unlink()
-            r = crud.get(f"/variants/{key}/preview.glb", token=TOKEN_C)
-            assert r.status_code == 200, r.text
-            assert r.headers["content-type"] == GLB
-            assert r.content == glb
-            # #7256 review B-M3: the edge's revalidation is a 304, as the outputs' routes.
-            again = crud.api.get(
-                f"{CRUD}/variants/{key}/preview.glb",
-                headers={
-                    **crud._headers(TOKEN_C, "203.0.113.1", None),
-                    "If-None-Match": r.headers["etag"],
-                },
-            )
-            assert again.status_code == 304 and again.content == b""
-            # No preview at all: no variant.
-            outputs.rows.set_blob(output_id, "preview", "output-gone-preview")
-            assert crud.get(f"/variants/{key}/preview.glb").status_code == 404
-        finally:
-            # #7256 review B-M8: the app state is shared; never leave a closed store on it.
-            outputs.bytes = None
+    output_id = row["output_id"]
+    portal = crud.api.portal
+    assert portal is not None and outputs.bytes is not None
+    glb = portal.call(outputs.bytes.read, output_blob_key(output_id, "preview"))
+    r = crud.get(f"/variants/{key}/preview.glb", token=TOKEN_C)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == GLB
+    assert r.content == glb
+    # #7256 review B-M3: the edge's revalidation is a 304, as the outputs' routes.
+    again = crud.api.get(
+        f"{CRUD}/variants/{key}/preview.glb",
+        headers={
+            **crud._headers(TOKEN_C, "203.0.113.1", None),
+            "If-None-Match": r.headers["etag"],
+        },
+    )
+    assert again.status_code == 304 and again.content == b""
+    # No preview at all: no variant.
+    assert outputs.rows is not None
+    name_blob(outputs.rows, output_id, "preview", "output-gone-preview")
+    assert crud.get(f"/variants/{key}/preview.glb").status_code == 404
 
 
 def test_the_preview_route_refuses_a_key_that_names_no_preview(crud: CrudCaller) -> None:
