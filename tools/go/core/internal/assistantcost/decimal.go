@@ -155,7 +155,40 @@ func (d Decimal) String() string {
 	return s
 }
 
+// sign is -1, 0 or 1.
+func (d Decimal) sign() int {
+	switch {
+	case d.coef.Sign() == 0:
+		return 0
+	case d.neg:
+		return -1
+	}
+	return 1
+}
+
+// magnitude is the decimal exponent of a nonzero value's leading digit.
+func (d Decimal) magnitude() int { return digits(d.coef) + d.exp - 1 }
+
+// cmp compares by sign and magnitude first, so a caller's exponent is never
+// written out in full; only values of one magnitude are scaled, by at most
+// their digit counts.
 func (d Decimal) cmp(e Decimal) int {
+	ds, es := d.sign(), e.sign()
+	if ds != es || ds == 0 {
+		switch {
+		case ds < es:
+			return -1
+		case ds > es:
+			return 1
+		}
+		return 0
+	}
+	if dm, em := d.magnitude(), e.magnitude(); dm != em {
+		if (dm > em) == (ds > 0) {
+			return 1
+		}
+		return -1
+	}
 	a, b := new(big.Int).Set(d.coef), new(big.Int).Set(e.coef)
 	if d.neg {
 		a.Neg(a)
@@ -207,6 +240,15 @@ func costIssue(raw json.RawMessage) (Decimal, string) {
 		}
 	default:
 		return d, "Decimal input should be an integer, float, string or Decimal object"
+	}
+	// A positive exponent means no decimal places, so past 10**7 the value
+	// fails a bound; a large exponent must not be
+	// written out by pydanticNormal.
+	if d.exp > 0 && d.sign() != 0 && d.magnitude() > 7 {
+		if d.neg {
+			return d, "Input should be greater than or equal to 0"
+		}
+		return d, "Input should be less than or equal to 1000000"
 	}
 	d = d.pydanticNormal()
 	if -d.exp > 8 {
