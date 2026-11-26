@@ -14,6 +14,8 @@ import logging
 import random
 from collections.abc import Awaitable, Callable
 
+import httpx
+
 from scadbuddy.crud.client import CrudClient
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,8 @@ RETRY_MIN = 0.5
 RETRY_MAX = 30.0
 #: The API sends a keepalive every 15 s: three of them without a byte mean a dead stream.
 IDLE = 45.0
+#: The client's connect, write and pool bounds; reads wait up to ``IDLE``.
+STREAM_TIMEOUT = httpx.Timeout(10.0, read=IDLE)
 LINE_MAX = 1024 * 1024
 CHANGE_KINDS = frozenset({"printer.changed", "camera.reconnect"})
 #: The frames whose ``id`` is the stream's place.
@@ -77,7 +81,11 @@ class ChangeFollower:
                 headers = {"Accept": "text/event-stream"}
                 if self._last_id is not None:
                     headers["Last-Event-ID"] = self._last_id
-                stream = await self._client.stream("GET", self._path, headers=headers)
+                # The read bound is ``IDLE``, below: the client's 10 s would end a stream
+                # between two keepalives (#7980).
+                stream = await self._client.stream(
+                    "GET", self._path, headers=headers, timeout=STREAM_TIMEOUT
+                )
             frame: dict[str, str] = {}
             buffer = ""
             chunks = stream.aiter_bytes()

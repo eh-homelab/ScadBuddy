@@ -269,8 +269,10 @@ The hooks need `curl`, so the camera images take the release binary on
   fails enough times to restart it (3 failures, 10 s apart, in the README's probe numbers).
 - No retention: nothing is deleted until phase 5.
 - A relay restart is a gap of about 10 to 30 s in every printer's recording (the spec's
-  estimate, §6.9). So the relay's image is not rolled with ScadBuddy's releases: it changes
-  only when the relay's code or MediaMTX changes (spec §6.1). No deploy pin exists for it yet.
+  estimate, §6.9). So the relay's image is not rolled with ScadBuddy's releases: its pin
+  moves by hand, in a reviewed clusters PR, only when the relay's code or MediaMTX changes
+  (spec §6.1). `deploy.reusable.yml` moves the recorders' and the edge's pins with each build
+  (#7997), and never the relay's.
 - Deployment lives in eh-homelab/clusters; the issue that asks for it is drafted with the
   phase 1 PR. The edge's manifests (the Deployment, two secrets, NetworkPolicies, the UDP
   port) are not made yet.

@@ -9,6 +9,7 @@ import { hashTree } from '../src/plugins/packages/hash.js'
 import { PackageInstaller, PackageRefusedError } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
+import { memoryMirror } from './support/memoryMirror.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 
 // A package in one folder of a repository gets only that folder's blobs (#7908):
@@ -157,11 +158,22 @@ describe.skipIf(gitMissing !== undefined)(`a package's path from git${gitMissing
       repos_.mono = gitRepo({ ...PLUGIN, ...OTHER }, { filter: false })
       const source = validateSource({ kind: 'git', url: 'https://git.test/mono.git', path: 'tools/greeter' })
       const pin = pinOf(await installer.prepare(source))
-      // The same server now serves partial fetches: a cold load takes the sparse checkout.
+      // The same server now serves partial fetches: the mirror job (#7907) takes the sparse checkout.
       git(repos_.mono.dir, 'config', 'uploadpack.allowFilter', 'true')
       git(repos_.mono.dir, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
-      rmSync(installer.cacheDir(pin), { recursive: true, force: true })
-      const dir = await installer.materialise(pin)
+      const mirror = memoryMirror()
+      let recorded: string | undefined
+      installer = new PackageInstaller({
+        fetcher: localFetcher(repos_),
+        cacheRoot: temp(),
+        resolve: resolver(),
+        mirror: () => mirror,
+        recordMirror: async (_name, m) => {
+          recorded = m.sha256
+        },
+      })
+      expect((await installer.makeMirror(pin)).outcome).toBe('mirrored')
+      const dir = await installer.materialise({ ...pin, mirrorSha256: recorded })
       expect(dir).toBe(installer.cacheDir(pin))
       expect(existsSync(path.join(dir, 'skills/hello/SKILL.md'))).toBe(true)
     })
