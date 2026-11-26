@@ -1,0 +1,2471 @@
+{
+  "kinds": {
+    "activity.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "activity_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "principal",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "ai_operation.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "operation_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "analyzer.decision": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "decision_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "diagnostic_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "scope",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "scope_key",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "action",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "recorded",
+          "removed"
+        ],
+        "required": true
+      }
+    ],
+    "auth.session_revoked": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "principal",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "session_id",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "bus.resync": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "last_event_id",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "camera.feed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "printer_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "camera.reconnect": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "printer_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "flow.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "name",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "flow_run.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "run_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "definition_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "font.installed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "family",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "job.cancelled": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "job.done": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "job.failed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "job.pending": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "job.progress": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "stage",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "source",
+          "render",
+          "split",
+          "solids",
+          "paint",
+          "thumbnail",
+          "write",
+          "recolour"
+        ],
+        "required": true
+      }
+    ],
+    "job.running": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "job.superseded": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "library.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "name",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "library.removed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "name",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "commits",
+        "nullable": false,
+        "type": "list[str]",
+        "required": true
+      }
+    ],
+    "model.created": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "model.deleted": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "model.updated": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "operation.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "operation_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "op_kind",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "subject",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "order.bank_deposits": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "order_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "order.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "order_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "cart",
+        "nullable": false,
+        "type": "bool",
+        "required": false,
+        "default": false
+      },
+      {
+        "name": "deleted",
+        "nullable": false,
+        "type": "bool",
+        "required": false,
+        "default": false
+      }
+    ],
+    "order_item.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "order_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "item_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "attempt",
+        "nullable": true,
+        "type": "int",
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "cart",
+        "nullable": false,
+        "type": "bool",
+        "required": false,
+        "default": false
+      }
+    ],
+    "output.created": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "output.deleted": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "output.updated": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "plugin_packages.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "name",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "presets.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "preview_slice.progress": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slicer",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "bambuddy",
+          "native"
+        ],
+        "required": true
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      }
+    ],
+    "preview_slice.settled": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slicer",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "bambuddy",
+          "native"
+        ],
+        "required": true
+      },
+      {
+        "name": "job_id",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      }
+    ],
+    "print.outcome": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "run_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "outcome",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "finished",
+          "failed",
+          "cancelled",
+          "unknown"
+        ],
+        "required": true
+      },
+      {
+        "name": "printer",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "print.progress": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "print.run": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "run_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "print.settled": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "output_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "printer.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "printer_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "printer.report": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "printer_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "session.done": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "session_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": true,
+        "type": "str",
+        "choices": [
+          "running",
+          "waiting_input",
+          "waiting_approval",
+          "idle",
+          "done",
+          "failed"
+        ],
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "session.message": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "session_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": true,
+        "type": "str",
+        "choices": [
+          "running",
+          "waiting_input",
+          "waiting_approval",
+          "idle",
+          "done",
+          "failed"
+        ],
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "session.owner": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "session_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": true,
+        "type": "str",
+        "choices": [
+          "running",
+          "waiting_input",
+          "waiting_approval",
+          "idle",
+          "done",
+          "failed"
+        ],
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "session.started": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "session_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": true,
+        "type": "str",
+        "choices": [
+          "running",
+          "waiting_input",
+          "waiting_approval",
+          "idle",
+          "done",
+          "failed"
+        ],
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "session.waiting": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "session_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "seq",
+        "nullable": false,
+        "type": "int",
+        "required": true
+      },
+      {
+        "name": "status",
+        "nullable": true,
+        "type": "str",
+        "choices": [
+          "running",
+          "waiting_input",
+          "waiting_approval",
+          "idle",
+          "done",
+          "failed"
+        ],
+        "required": false,
+        "default": null
+      },
+      {
+        "name": "replica",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "settings.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "section",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "connection",
+          "print_options",
+          "model_choices",
+          "printer_bed_type",
+          "printer_rack_algorithm",
+          "model_project",
+          "remembered"
+        ],
+        "required": true
+      }
+    ],
+    "source.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "task.changed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "task_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "run_id",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "state",
+        "nullable": false,
+        "type": "str",
+        "choices": [
+          "open",
+          "answered",
+          "cancelled",
+          "expired"
+        ],
+        "required": true
+      },
+      {
+        "name": "place",
+        "nullable": true,
+        "type": "str",
+        "required": false,
+        "default": null
+      }
+    ],
+    "upstream.available": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "upstream",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "commit",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ],
+    "version.committed": [
+      {
+        "name": "id",
+        "nullable": false,
+        "type": "str",
+        "required": false
+      },
+      {
+        "name": "at",
+        "nullable": false,
+        "type": "datetime",
+        "required": false
+      },
+      {
+        "name": "kind",
+        "type": "kind",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "name": "slug",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      },
+      {
+        "name": "commit",
+        "nullable": false,
+        "type": "str",
+        "required": true
+      }
+    ]
+  },
+  "changes": [
+    {
+      "name": "a job event",
+      "payload": "{\"id\":\"0123456789abcdef0123456789abcdef\",\"at\":\"2026-11-26T10:00:00.123456Z\",\"kind\":\"job.done\",\"job_id\":\"ab12\",\"slug\":\"name-keychain\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00.123456Z\", \"id\": \"0123456789abcdef0123456789abcdef\", \"kind\": \"job.done\", \"slug\": \"name-keychain\", \"job_id\": \"ab12\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 0123456789abcdef0123456789abcdef\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"0123456789abcdef0123456789abcdef\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.123456Z\\\",\\\"kind\\\":\\\"job.done\\\",\\\"job_id\\\":\\\"ab12\\\",\\\"slug\\\":\\\"name-keychain\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 0123456789abcdef0123456789abcdef\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"0123456789abcdef0123456789abcdef\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.123456Z\\\",\\\"kind\\\":\\\"job.done\\\",\\\"job_id\\\":\\\"ab12\\\",\\\"slug\\\":\\\"name-keychain\\\"}\"}\n\n",
+        "topics": [
+          "job:ab12"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"0123456789abcdef0123456789abcdef\",\"kind\":\"job.done\",\"topics\":[\"job:ab12\"],\"data\":{\"job_id\":\"ab12\",\"slug\":\"name-keychain\"}}"
+      }
+    },
+    {
+      "name": "a slug with text to escape",
+      "payload": "{\"id\":\"11111111111111111111111111111111\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"model.updated\",\"slug\":\"é/\\u2028<>&\\u0001\\u007f\\\"\\\\😀\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"11111111111111111111111111111111\", \"kind\": \"model.updated\", \"slug\": \"é/ <>&\\u0001\\\"\\\\😀\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 11111111111111111111111111111111\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"11111111111111111111111111111111\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"model.updated\\\",\\\"slug\\\":\\\"\\u00e9/\\\\u2028<>&\\\\u0001\\\\u007f\\\\\\\"\\\\\\\\\\ud83d\\ude00\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 11111111111111111111111111111111\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"11111111111111111111111111111111\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"model.updated\\\",\\\"slug\\\":\\\"\\u00e9/\\u2028<>&\\\\u0001\\u007f\\\\\\\"\\\\\\\\\\ud83d\\ude00\\\"}\"}\n\n",
+        "topics": [
+          "models",
+          "model:é/ <>&\u0001\"\\😀"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"11111111111111111111111111111111\",\"kind\":\"model.updated\",\"topics\":[\"models\",\"model:é/ <>&\\u0001\\\"\\\\😀\"],\"data\":{\"slug\":\"é/ <>&\\u0001\\\"\\\\😀\"}}"
+      }
+    },
+    {
+      "name": "an int field",
+      "payload": "{\"id\":\"22222222222222222222222222222222\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"preview_slice.settled\",\"slicer\":\"native\",\"job_id\":42}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"22222222222222222222222222222222\", \"kind\": \"preview_slice.settled\", \"job_id\": 42, \"slicer\": \"native\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 22222222222222222222222222222222\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"22222222222222222222222222222222\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"preview_slice.settled\\\",\\\"slicer\\\":\\\"native\\\",\\\"job_id\\\":42}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 22222222222222222222222222222222\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"22222222222222222222222222222222\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"preview_slice.settled\\\",\\\"slicer\\\":\\\"native\\\",\\\"job_id\\\":42}\"}\n\n",
+        "topics": [
+          "preview-slice:native:42"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"22222222222222222222222222222222\",\"kind\":\"preview_slice.settled\",\"topics\":[\"preview-slice:native:42\"],\"data\":{\"slicer\":\"native\",\"job_id\":42}}"
+      }
+    },
+    {
+      "name": "an int sent as text",
+      "payload": "{\"id\":\"22222222222222222222222222222223\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"preview_slice.progress\",\"slicer\":\"bambuddy\",\"job_id\":\"7\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"22222222222222222222222222222223\", \"kind\": \"preview_slice.progress\", \"job_id\": \"7\", \"slicer\": \"bambuddy\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 22222222222222222222222222222223\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"22222222222222222222222222222223\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"preview_slice.progress\\\",\\\"slicer\\\":\\\"bambuddy\\\",\\\"job_id\\\":\\\"7\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 22222222222222222222222222222223\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"22222222222222222222222222222223\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"preview_slice.progress\\\",\\\"slicer\\\":\\\"bambuddy\\\",\\\"job_id\\\":7}\"}\n\n",
+        "topics": [
+          "preview-slice:bambuddy:7"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"22222222222222222222222222222223\",\"kind\":\"preview_slice.progress\",\"topics\":[\"preview-slice:bambuddy:7\"],\"data\":{\"slicer\":\"bambuddy\",\"job_id\":7}}"
+      }
+    },
+    {
+      "name": "an int sent as a whole float",
+      "payload": "{\"id\":\"22222222222222222222222222222224\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"preview_slice.progress\",\"slicer\":\"bambuddy\",\"job_id\":7.0}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"22222222222222222222222222222224\", \"kind\": \"preview_slice.progress\", \"job_id\": 7.0, \"slicer\": \"bambuddy\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 22222222222222222222222222222224\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"22222222222222222222222222222224\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"preview_slice.progress\\\",\\\"slicer\\\":\\\"bambuddy\\\",\\\"job_id\\\":7.0}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 22222222222222222222222222222224\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"22222222222222222222222222222224\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"preview_slice.progress\\\",\\\"slicer\\\":\\\"bambuddy\\\",\\\"job_id\\\":7}\"}\n\n",
+        "topics": [
+          "preview-slice:bambuddy:7"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"22222222222222222222222222222224\",\"kind\":\"preview_slice.progress\",\"topics\":[\"preview-slice:bambuddy:7\"],\"data\":{\"slicer\":\"bambuddy\",\"job_id\":7}}"
+      }
+    },
+    {
+      "name": "an order with defaults",
+      "payload": "{\"id\":\"33333333333333333333333333333333\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"order.changed\",\"order_id\":\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\",\"status\":\"quoted\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"33333333333333333333333333333333\", \"kind\": \"order.changed\", \"status\": \"quoted\", \"order_id\": \"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 33333333333333333333333333333333\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"33333333333333333333333333333333\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"order.changed\\\",\\\"order_id\\\":\\\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\\\",\\\"status\\\":\\\"quoted\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 33333333333333333333333333333333\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"33333333333333333333333333333333\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"order.changed\\\",\\\"order_id\\\":\\\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\\\",\\\"status\\\":\\\"quoted\\\",\\\"cart\\\":false,\\\"deleted\\\":false}\"}\n\n",
+        "topics": [
+          "orders",
+          "order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"33333333333333333333333333333333\",\"kind\":\"order.changed\",\"topics\":[\"orders\",\"order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\"],\"data\":{\"order_id\":\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\",\"status\":\"quoted\"}}"
+      }
+    },
+    {
+      "name": "a deleted cart",
+      "payload": "{\"id\":\"33333333333333333333333333333334\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"order.changed\",\"order_id\":\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\",\"status\":\"draft\",\"cart\":true,\"deleted\":true}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"33333333333333333333333333333334\", \"cart\": true, \"kind\": \"order.changed\", \"status\": \"draft\", \"deleted\": true, \"order_id\": \"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 33333333333333333333333333333334\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"33333333333333333333333333333334\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"order.changed\\\",\\\"order_id\\\":\\\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\\\",\\\"status\\\":\\\"draft\\\",\\\"cart\\\":true,\\\"deleted\\\":true}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 33333333333333333333333333333334\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"33333333333333333333333333333334\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"order.changed\\\",\\\"order_id\\\":\\\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\\\",\\\"status\\\":\\\"draft\\\",\\\"cart\\\":true,\\\"deleted\\\":true}\"}\n\n",
+        "topics": [
+          "orders",
+          "order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"33333333333333333333333333333334\",\"kind\":\"order.changed\",\"topics\":[\"orders\",\"order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\"],\"data\":{\"order_id\":\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\",\"status\":\"draft\",\"deleted\":true}}"
+      }
+    },
+    {
+      "name": "an order item",
+      "payload": "{\"id\":\"33333333333333333333333333333335\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"order_item.changed\",\"order_id\":\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\",\"item_id\":\"i1\",\"status\":\"printing\",\"attempt\":2}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"33333333333333333333333333333335\", \"kind\": \"order_item.changed\", \"status\": \"printing\", \"attempt\": 2, \"item_id\": \"i1\", \"order_id\": \"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 33333333333333333333333333333335\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"33333333333333333333333333333335\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"order_item.changed\\\",\\\"order_id\\\":\\\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\\\",\\\"item_id\\\":\\\"i1\\\",\\\"status\\\":\\\"printing\\\",\\\"attempt\\\":2}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 33333333333333333333333333333335\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"33333333333333333333333333333335\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"order_item.changed\\\",\\\"order_id\\\":\\\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\\\",\\\"item_id\\\":\\\"i1\\\",\\\"status\\\":\\\"printing\\\",\\\"attempt\\\":2,\\\"cart\\\":false}\"}\n\n",
+        "topics": [
+          "orders",
+          "order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"33333333333333333333333333333335\",\"kind\":\"order_item.changed\",\"topics\":[\"orders\",\"order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\"],\"data\":{\"order_id\":\"8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e\",\"item_id\":\"i1\",\"status\":\"printing\",\"attempt\":2}}"
+      }
+    },
+    {
+      "name": "a task with a place",
+      "payload": "{\"id\":\"44444444444444444444444444444444\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"task.changed\",\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"Shop floor\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"44444444444444444444444444444444\", \"kind\": \"task.changed\", \"place\": \"Shop floor\", \"state\": \"open\", \"run_id\": \"r\", \"task_id\": \"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 44444444444444444444444444444444\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444444\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"Shop floor\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 44444444444444444444444444444444\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444444\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"open\\\",\\\"place\\\":\\\"Shop floor\\\"}\"}\n\n",
+        "topics": [
+          "tasks",
+          "task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+          "tasks:Shop floor"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"44444444444444444444444444444444\",\"kind\":\"task.changed\",\"topics\":[\"tasks\",\"task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"tasks:Shop floor\"],\"data\":{\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"open\",\"place\":\"Shop floor\"}}"
+      }
+    },
+    {
+      "name": "a task with no place",
+      "payload": "{\"id\":\"44444444444444444444444444444445\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"task.changed\",\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"answered\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"44444444444444444444444444444445\", \"kind\": \"task.changed\", \"state\": \"answered\", \"run_id\": \"r\", \"task_id\": \"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 44444444444444444444444444444445\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444445\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"answered\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 44444444444444444444444444444445\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"44444444444444444444444444444445\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"task.changed\\\",\\\"task_id\\\":\\\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\\\",\\\"run_id\\\":\\\"r\\\",\\\"state\\\":\\\"answered\\\",\\\"place\\\":null}\"}\n\n",
+        "topics": [
+          "tasks",
+          "task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"44444444444444444444444444444445\",\"kind\":\"task.changed\",\"topics\":[\"tasks\",\"task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\"],\"data\":{\"task_id\":\"5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f\",\"run_id\":\"r\",\"state\":\"answered\",\"place\":null}}"
+      }
+    },
+    {
+      "name": "a print outcome",
+      "payload": "{\"id\":\"55555555555555555555555555555555\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"print.outcome\",\"output_id\":\"library:12\",\"slug\":\"\",\"run_id\":\"run\",\"outcome\":\"finished\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"55555555555555555555555555555555\", \"kind\": \"print.outcome\", \"slug\": \"\", \"run_id\": \"run\", \"outcome\": \"finished\", \"output_id\": \"library:12\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 55555555555555555555555555555555\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"55555555555555555555555555555555\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"print.outcome\\\",\\\"output_id\\\":\\\"library:12\\\",\\\"slug\\\":\\\"\\\",\\\"run_id\\\":\\\"run\\\",\\\"outcome\\\":\\\"finished\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 55555555555555555555555555555555\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"55555555555555555555555555555555\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"print.outcome\\\",\\\"output_id\\\":\\\"library:12\\\",\\\"slug\\\":\\\"\\\",\\\"run_id\\\":\\\"run\\\",\\\"outcome\\\":\\\"finished\\\",\\\"printer\\\":null}\"}\n\n",
+        "topics": [
+          "print:library:12"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"55555555555555555555555555555555\",\"kind\":\"print.outcome\",\"topics\":[\"print:library:12\"],\"data\":{\"output_id\":\"library:12\",\"slug\":\"\",\"run_id\":\"run\",\"outcome\":\"finished\",\"printer\":null}}"
+      }
+    },
+    {
+      "name": "a printer change",
+      "payload": "{\"id\":\"66666666666666666666666666666666\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"printer.changed\",\"printer_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"66666666666666666666666666666666\", \"kind\": \"printer.changed\", \"printer_id\": \"0f8fad5b-d9cb-469f-a165-70867728950e\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 66666666666666666666666666666666\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"66666666666666666666666666666666\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"printer.changed\\\",\\\"printer_id\\\":\\\"0f8fad5b-d9cb-469f-a165-70867728950e\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": true
+        },
+        "replay": "id: 66666666666666666666666666666666\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"66666666666666666666666666666666\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"printer.changed\\\",\\\"printer_id\\\":\\\"0f8fad5b-d9cb-469f-a165-70867728950e\\\"}\"}\n\n",
+        "topics": [
+          "printers",
+          "printer:0f8fad5b-d9cb-469f-a165-70867728950e"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"66666666666666666666666666666666\",\"kind\":\"printer.changed\",\"topics\":[\"printers\",\"printer:0f8fad5b-d9cb-469f-a165-70867728950e\"],\"data\":{\"printer_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}}"
+      }
+    },
+    {
+      "name": "a camera reconnect",
+      "payload": "{\"id\":\"66666666666666666666666666666667\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"camera.reconnect\",\"printer_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"66666666666666666666666666666667\", \"kind\": \"camera.reconnect\", \"printer_id\": \"0f8fad5b-d9cb-469f-a165-70867728950e\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 66666666666666666666666666666667\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"66666666666666666666666666666667\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"camera.reconnect\\\",\\\"printer_id\\\":\\\"0f8fad5b-d9cb-469f-a165-70867728950e\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": true
+        },
+        "replay": "id: 66666666666666666666666666666667\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"66666666666666666666666666666667\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"camera.reconnect\\\",\\\"printer_id\\\":\\\"0f8fad5b-d9cb-469f-a165-70867728950e\\\"}\"}\n\n",
+        "topics": [
+          "printers",
+          "printer:0f8fad5b-d9cb-469f-a165-70867728950e"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"66666666666666666666666666666667\",\"kind\":\"camera.reconnect\",\"topics\":[\"printers\",\"printer:0f8fad5b-d9cb-469f-a165-70867728950e\"],\"data\":{\"printer_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}}"
+      }
+    },
+    {
+      "name": "a library removed",
+      "payload": "{\"id\":\"77777777777777777777777777777777\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"library.removed\",\"name\":\"BOSL2\",\"commits\":[\"a\",\"b\"]}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"77777777777777777777777777777777\", \"kind\": \"library.removed\", \"name\": \"BOSL2\", \"commits\": [\"a\", \"b\"]}",
+      "want": {
+        "decodes": true,
+        "live": "id: 77777777777777777777777777777777\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"77777777777777777777777777777777\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"library.removed\\\",\\\"name\\\":\\\"BOSL2\\\",\\\"commits\\\":[\\\"a\\\",\\\"b\\\"]}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 77777777777777777777777777777777\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"77777777777777777777777777777777\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"library.removed\\\",\\\"name\\\":\\\"BOSL2\\\",\\\"commits\\\":[\\\"a\\\",\\\"b\\\"]}\"}\n\n",
+        "topics": [
+          "libraries"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"77777777777777777777777777777777\",\"kind\":\"library.removed\",\"topics\":[\"libraries\"],\"data\":{\"name\":\"BOSL2\",\"commits\":[\"a\",\"b\"]}}"
+      }
+    },
+    {
+      "name": "a settings change",
+      "payload": "{\"id\":\"77777777777777777777777777777778\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"settings.changed\",\"section\":\"connection\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"77777777777777777777777777777778\", \"kind\": \"settings.changed\", \"section\": \"connection\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 77777777777777777777777777777778\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"77777777777777777777777777777778\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"settings.changed\\\",\\\"section\\\":\\\"connection\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 77777777777777777777777777777778\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"77777777777777777777777777777778\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"settings.changed\\\",\\\"section\\\":\\\"connection\\\"}\"}\n\n",
+        "topics": [
+          "settings"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"77777777777777777777777777777778\",\"kind\":\"settings.changed\",\"topics\":[\"settings\"],\"data\":{\"section\":\"connection\"}}"
+      }
+    },
+    {
+      "name": "an activity",
+      "payload": "{\"id\":\"77777777777777777777777777777779\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"activity.changed\",\"activity_id\":\"render:abc\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"77777777777777777777777777777779\", \"kind\": \"activity.changed\", \"activity_id\": \"render:abc\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 77777777777777777777777777777779\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"77777777777777777777777777777779\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"activity.changed\\\",\\\"activity_id\\\":\\\"render:abc\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 77777777777777777777777777777779\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"77777777777777777777777777777779\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"activity.changed\\\",\\\"activity_id\\\":\\\"render:abc\\\",\\\"principal\\\":null}\"}\n\n",
+        "topics": [
+          "activity",
+          "activity:render:abc"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"77777777777777777777777777777779\",\"kind\":\"activity.changed\",\"topics\":[\"activity\",\"activity:render:abc\"],\"data\":{\"activity_id\":\"render:abc\",\"principal\":null}}"
+      }
+    },
+    {
+      "name": "a session event (notify only)",
+      "payload": "{\"id\":\"88888888888888888888888888888888\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"session.message\",\"session_id\":\"s\",\"seq\":3,\"status\":\"running\",\"replica\":\"r1\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"88888888888888888888888888888888\", \"seq\": 3, \"kind\": \"session.message\", \"status\": \"running\", \"replica\": \"r1\", \"session_id\": \"s\"}",
+      "want": {
+        "decodes": true,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"88888888888888888888888888888888\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"session.message\\\",\\\"session_id\\\":\\\"s\\\",\\\"seq\\\":3,\\\"status\\\":\\\"running\\\",\\\"replica\\\":\\\"r1\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 88888888888888888888888888888888\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"88888888888888888888888888888888\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"session.message\\\",\\\"session_id\\\":\\\"s\\\",\\\"seq\\\":3,\\\"status\\\":\\\"running\\\",\\\"replica\\\":\\\"r1\\\"}\"}\n\n",
+        "topics": [],
+        "ws": null
+      }
+    },
+    {
+      "name": "an agent operation (notify only)",
+      "payload": "{\"id\":\"88888888888888888888888888888889\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"ai_operation.changed\",\"operation_id\":\"op\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"88888888888888888888888888888889\", \"kind\": \"ai_operation.changed\", \"operation_id\": \"op\"}",
+      "want": {
+        "decodes": true,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"88888888888888888888888888888889\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"ai_operation.changed\\\",\\\"operation_id\\\":\\\"op\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 88888888888888888888888888888889\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"88888888888888888888888888888889\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"ai_operation.changed\\\",\\\"operation_id\\\":\\\"op\\\"}\"}\n\n",
+        "topics": [],
+        "ws": null
+      }
+    },
+    {
+      "name": "a revoked session",
+      "payload": "{\"id\":\"9999999999999999999999999999999a\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"auth.session_revoked\",\"principal\":\"user:iss#sub\",\"session_id\":\"ab\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"9999999999999999999999999999999a\", \"kind\": \"auth.session_revoked\", \"principal\": \"user:iss#sub\", \"session_id\": \"ab\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 9999999999999999999999999999999a\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"9999999999999999999999999999999a\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"auth.session_revoked\\\",\\\"principal\\\":\\\"user:iss#sub\\\",\\\"session_id\\\":\\\"ab\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 9999999999999999999999999999999a\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"9999999999999999999999999999999a\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"auth.session_revoked\\\",\\\"principal\\\":\\\"user:iss#sub\\\",\\\"session_id\\\":\\\"ab\\\"}\"}\n\n",
+        "topics": [],
+        "ws": null
+      }
+    },
+    {
+      "name": "a fleet message (opaque)",
+      "payload": "{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"at\":\"2026-11-26T10:00:00.5Z\",\"kind\":\"fleet.message\",\"topics\":[\"fleet:agent:x\"],\"seq\":12,\"from\":\"é😀\",\"ratio\":1.50,\"big\":1e3,\"tiny\":1e-7,\"huge\":1.5e300,\"neg\":-0.0,\"nested\":{\"b\":[1,true,null],\"a\":\"x\"}}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00.5Z\", \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"big\": 1000, \"neg\": 0.0, \"seq\": 12, \"from\": \"é😀\", \"huge\": 1500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \"kind\": \"fleet.message\", \"tiny\": 0.0000001, \"ratio\": 1.50, \"nested\": {\"a\": \"x\", \"b\": [1, true, null]}, \"topics\": [\"fleet:agent:x\"]}",
+      "want": {
+        "decodes": true,
+        "live": "id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.5Z\\\",\\\"kind\\\":\\\"fleet.message\\\",\\\"topics\\\":[\\\"fleet:agent:x\\\"],\\\"seq\\\":12,\\\"from\\\":\\\"\\u00e9\\ud83d\\ude00\\\",\\\"ratio\\\":1.50,\\\"big\\\":1e3,\\\"tiny\\\":1e-7,\\\"huge\\\":1.5e300,\\\"neg\\\":-0.0,\\\"nested\\\":{\\\"b\\\":[1,true,null],\\\"a\\\":\\\"x\\\"}}\"}\n\n",
+        "keep": {
+          "agent": false,
+          "fleet": true,
+          "camera": false
+        },
+        "replay": "id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"at\\\": \\\"2026-11-26T10:00:00.5Z\\\", \\\"id\\\": \\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\", \\\"big\\\": 1000, \\\"neg\\\": 0.0, \\\"seq\\\": 12, \\\"from\\\": \\\"\\\\u00e9\\\\ud83d\\\\ude00\\\", \\\"huge\\\": 1500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000, \\\"kind\\\": \\\"fleet.message\\\", \\\"tiny\\\": 1e-07, \\\"ratio\\\": 1.5, \\\"nested\\\": {\\\"a\\\": \\\"x\\\", \\\"b\\\": [1, true, null]}, \\\"topics\\\": [\\\"fleet:agent:x\\\"]}\"}\n\n",
+        "topics": [],
+        "ws": null
+      }
+    },
+    {
+      "name": "an opaque kind with a retention",
+      "payload": "{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"widget.made\",\"retention_seconds\":60}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\", \"kind\": \"widget.made\", \"retention_seconds\": 60}",
+      "want": {
+        "decodes": true,
+        "live": "id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"widget.made\\\",\\\"retention_seconds\\\":60}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"at\\\": \\\"2026-11-26T10:00:00Z\\\", \\\"id\\\": \\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\\\", \\\"kind\\\": \\\"widget.made\\\", \\\"retention_seconds\\\": 60}\"}\n\n",
+        "topics": [],
+        "ws": null
+      }
+    },
+    {
+      "name": "an opaque kind with a bad topic",
+      "payload": "{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"widget.made\",\"topics\":[\"models\"]}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\", \"kind\": \"widget.made\", \"topics\": [\"models\"]}",
+      "want": {
+        "decodes": true,
+        "live": "id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"widget.made\\\",\\\"topics\\\":[\\\"models\\\"]}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"at\\\": \\\"2026-11-26T10:00:00Z\\\", \\\"id\\\": \\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaac\\\", \\\"kind\\\": \\\"widget.made\\\", \\\"topics\\\": [\\\"models\\\"]}\"}\n\n",
+        "topics": [],
+        "ws": null
+      }
+    },
+    {
+      "name": "an opaque kind with a bad name",
+      "payload": "{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"Widget\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad\", \"kind\": \"Widget\"}",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaad\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"Widget\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": null
+      }
+    },
+    {
+      "name": "a known kind with an extra field",
+      "payload": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"job.done\",\"job_id\":\"a\",\"slug\":\"s\",\"extra\":1}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\", \"kind\": \"job.done\", \"slug\": \"s\", \"extra\": 1, \"job_id\": \"a\"}",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"job.done\\\",\\\"job_id\\\":\\\"a\\\",\\\"slug\\\":\\\"s\\\",\\\"extra\\\":1}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": null
+      }
+    },
+    {
+      "name": "a known kind with a field missing",
+      "payload": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"job.done\",\"job_id\":\"a\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc\", \"kind\": \"job.done\", \"job_id\": \"a\"}",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"job.done\\\",\\\"job_id\\\":\\\"a\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": null
+      }
+    },
+    {
+      "name": "a known kind with a wrong choice",
+      "payload": "{\"id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"settings.changed\",\"section\":\"nope\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd\", \"kind\": \"settings.changed\", \"section\": \"nope\"}",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbd\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"settings.changed\\\",\\\"section\\\":\\\"nope\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": null
+      }
+    },
+    {
+      "name": "an offset time",
+      "payload": "{\"id\":\"cccccccccccccccccccccccccccccccc\",\"at\":\"2026-11-26T10:00:00.500+02:00\",\"kind\":\"font.installed\",\"family\":\"Lobster Two\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00.500+02:00\", \"id\": \"cccccccccccccccccccccccccccccccc\", \"kind\": \"font.installed\", \"family\": \"Lobster Two\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: cccccccccccccccccccccccccccccccc\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"cccccccccccccccccccccccccccccccc\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.500+02:00\\\",\\\"kind\\\":\\\"font.installed\\\",\\\"family\\\":\\\"Lobster Two\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: cccccccccccccccccccccccccccccccc\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"cccccccccccccccccccccccccccccccc\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.500000+02:00\\\",\\\"kind\\\":\\\"font.installed\\\",\\\"family\\\":\\\"Lobster Two\\\"}\"}\n\n",
+        "topics": [
+          "fonts"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"cccccccccccccccccccccccccccccccc\",\"kind\":\"font.installed\",\"topics\":[\"fonts\"],\"data\":{\"family\":\"Lobster Two\"}}"
+      }
+    },
+    {
+      "name": "a naive time",
+      "payload": "{\"id\":\"cccccccccccccccccccccccccccccccd\",\"at\":\"2026-11-26 10:00\",\"kind\":\"font.installed\",\"family\":\"Lobster Two\"}",
+      "stored": "{\"at\": \"2026-11-26 10:00\", \"id\": \"cccccccccccccccccccccccccccccccd\", \"kind\": \"font.installed\", \"family\": \"Lobster Two\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: cccccccccccccccccccccccccccccccd\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"cccccccccccccccccccccccccccccccd\\\",\\\"at\\\":\\\"2026-11-26 10:00\\\",\\\"kind\\\":\\\"font.installed\\\",\\\"family\\\":\\\"Lobster Two\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: cccccccccccccccccccccccccccccccd\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"cccccccccccccccccccccccccccccccd\\\",\\\"at\\\":\\\"2026-11-26T10:00:00\\\",\\\"kind\\\":\\\"font.installed\\\",\\\"family\\\":\\\"Lobster Two\\\"}\"}\n\n",
+        "topics": [
+          "fonts"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"cccccccccccccccccccccccccccccccd\",\"kind\":\"font.installed\",\"topics\":[\"fonts\"],\"data\":{\"family\":\"Lobster Two\"}}"
+      }
+    },
+    {
+      "name": "a time past microseconds",
+      "payload": "{\"id\":\"ccccccccccccccccccccccccccccccce\",\"at\":\"2026-11-26T10:00:00.1234567+00:00\",\"kind\":\"font.installed\",\"family\":\"Lobster Two\"}",
+      "stored": "{\"at\": \"2026-11-26T10:00:00.1234567+00:00\", \"id\": \"ccccccccccccccccccccccccccccccce\", \"kind\": \"font.installed\", \"family\": \"Lobster Two\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: ccccccccccccccccccccccccccccccce\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"ccccccccccccccccccccccccccccccce\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.1234567+00:00\\\",\\\"kind\\\":\\\"font.installed\\\",\\\"family\\\":\\\"Lobster Two\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: ccccccccccccccccccccccccccccccce\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"ccccccccccccccccccccccccccccccce\\\",\\\"at\\\":\\\"2026-11-26T10:00:00.123456Z\\\",\\\"kind\\\":\\\"font.installed\\\",\\\"family\\\":\\\"Lobster Two\\\"}\"}\n\n",
+        "topics": [
+          "fonts"
+        ],
+        "ws": "{\"type\":\"event\",\"id\":\"ccccccccccccccccccccccccccccccce\",\"kind\":\"font.installed\",\"topics\":[\"fonts\"],\"data\":{\"family\":\"Lobster Two\"}}"
+      }
+    },
+    {
+      "name": "not JSON",
+      "payload": "not json",
+      "stored": null,
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"not json\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": null
+      }
+    },
+    {
+      "name": "not an object",
+      "payload": "[1,2]",
+      "stored": "[1, 2]",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"[1,2]\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": null
+      }
+    },
+    {
+      "name": "the gate's channel",
+      "channel": "scadbuddy_input",
+      "payload": "{\"id\":\"x\"}",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_input\",\"p\":\"{\\\"id\\\":\\\"x\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        }
+      }
+    },
+    {
+      "name": "the warm evictions",
+      "channel": "scadbuddy_warm_evict",
+      "payload": "*",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_warm_evict\",\"p\":\"*\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        }
+      }
+    }
+  ],
+  "topics": [
+    {
+      "topic": "models",
+      "valid": true
+    },
+    {
+      "topic": "plugin-packages",
+      "valid": true
+    },
+    {
+      "topic": "job:0123456789abcdef0123456789abcdef",
+      "valid": true
+    },
+    {
+      "topic": "job:xyz",
+      "valid": false
+    },
+    {
+      "topic": "model:name-keychain",
+      "valid": true
+    },
+    {
+      "topic": "model:",
+      "valid": false
+    },
+    {
+      "topic": "print:library:12",
+      "valid": true
+    },
+    {
+      "topic": "print:library:012",
+      "valid": false
+    },
+    {
+      "topic": "preview-slice:native:5",
+      "valid": true
+    },
+    {
+      "topic": "preview-slice:other:5",
+      "valid": false
+    },
+    {
+      "topic": "workflow-run:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+      "valid": true
+    },
+    {
+      "topic": "printer:0f8fad5b-d9cb-469f-a165-70867728950e",
+      "valid": true
+    },
+    {
+      "topic": "order:8c1b4e0e-6d7f-4f43-9a3e-6f1c2b3a4d5e",
+      "valid": true
+    },
+    {
+      "topic": "order:8C1B4E0E-6D7F-4F43-9A3E-6F1C2B3A4D5E",
+      "valid": false
+    },
+    {
+      "topic": "task:5b8f0c3e-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+      "valid": true
+    },
+    {
+      "topic": "tasks:Shop floor",
+      "valid": true
+    },
+    {
+      "topic": "tasks:",
+      "valid": false
+    },
+    {
+      "topic": "tasks:a\u0001",
+      "valid": false
+    },
+    {
+      "topic": "activity:render:abc",
+      "valid": true
+    },
+    {
+      "topic": "activity:bogus:abc",
+      "valid": false
+    },
+    {
+      "topic": "models\n",
+      "valid": false
+    },
+    {
+      "topic": "fleet:agent:x",
+      "valid": false
+    }
+  ],
+  "reprs": [
+    {
+      "json": "[\"a\", 5, true, null, 1.5, \"it's\", \"é\\n\\u0001\"]",
+      "repr": "['a', 5, True, None, 1.5, \"it's\", 'é\\n\\x01']"
+    },
+    {
+      "json": "[{\"a\": [1, false]}, 1e3, -0.0, 1e-7, 1e16, 12345678901234567890]",
+      "repr": "[{'a': [1, False]}, 1000.0, -0.0, 1e-07, 1e+16, 12345678901234567890]"
+    },
+    {
+      "json": "[\"say \\\"hi\\\" it's\", \"\\u00a0\\u2028\\ud83d\\ude00\"]",
+      "repr": "['say \"hi\" it\\'s', '\\xa0\\u2028😀']"
+    }
+  ],
+  "frames": [
+    {
+      "kind": "ready",
+      "data": {
+        "resync": false,
+        "reconnect": false
+      },
+      "id": "0",
+      "bytes": "id: 0\nevent: ready\ndata: {\"resync\":false,\"reconnect\":false}\n\n"
+    },
+    {
+      "kind": "ready",
+      "data": {
+        "resync": true,
+        "reconnect": true
+      },
+      "id": "0123456789abcdef0123456789abcdef",
+      "bytes": "id: 0123456789abcdef0123456789abcdef\nevent: ready\ndata: {\"resync\":true,\"reconnect\":true}\n\n"
+    },
+    {
+      "kind": "reconnected",
+      "data": {
+        "resync": false
+      },
+      "id": "0123456789abcdef0123456789abcdef",
+      "bytes": "id: 0123456789abcdef0123456789abcdef\nevent: reconnected\ndata: {\"resync\":false}\n\n"
+    }
+  ]
+}
