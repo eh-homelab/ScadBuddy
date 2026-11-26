@@ -1713,7 +1713,7 @@ def _delete_model(
     slug: str, catalogue: Catalogue, render: RenderService, outputs: OutputStore, force: bool
 ) -> list[str]:
     """The blocking part of :func:`delete_template`; returns the ids of the outputs it
-    removed, read before their directories go."""
+    removed, read before the delete drops their rows."""
     refuse_delete(slug, catalogue, render, force)
     output_ids = outputs.ids_for(slug)
     try:

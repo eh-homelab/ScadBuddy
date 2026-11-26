@@ -54,6 +54,20 @@ const grantSpec = z
     sessions: z.boolean().default(false).describe('Whether it covers the outward calls of sessions the run starts'),
     ask_starter_session: z.boolean().default(true).describe('Whether calls outside it go to this session first'),
     rules: z.array(grantRule).max(32),
+    answers: z
+      .object({
+        who: z
+          .array(z.string().regex(/^(starter|sessions|token:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/))
+          .min(1)
+          .max(100),
+      })
+      .strict()
+      .optional()
+      .describe(
+        "Who besides a person may answer the run's questions (#7471), as the setting flow_answerers: `starter` " +
+          "(the session that started the run), `sessions` (any of the user's sessions), `token:<id>` (an MCP token " +
+          "and its sessions). A question the script asks people_only stays a person's.",
+      ),
   })
   .strict()
   .describe(
@@ -104,13 +118,14 @@ export const flowTools: Tool[] = [
     label: 'Register a flow',
     description:
       'Register a flow: a Python script that runs durably, for as long as it needs, over the host functions ' +
-      '`sleep(seconds)`, `wait_for_human(question, timeout_s=None)` (returns {answer}), ' +
-      '`prompt(title, schema, context=None, place=None, ui=None, timeout_s=None)` (a question with typed fields: ' +
+      '`sleep(seconds)`, `wait_for_human(question, timeout_s=None, people_only=False)` (returns {answer}), ' +
+      '`prompt(title, schema, context=None, place=None, ui=None, timeout_s=None, people_only=False)` (a question with typed fields: ' +
       "`schema` declares them as `inputs_schema` does, and a string may have a `format` of email, date or date-time; " +
       'returns the answer as a dict by field: a field left out is its default, and with no default a boolean is False ' +
       'and any other None; raises ValueError for a schema, title, context, place, ui or timeout_s it does not take, where ' +
       "title, context and ui are limited in size and the refusal names the limit, and for an answer that does not fit its field's type), " +
-      'both with no limit unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, ' +
+      'both with no limit unless `timeout_s` (at least 10 s; then a TimeoutError) sets one, and answered by a person; ' +
+      "with people_only False the user's setting flow_answerers or the run's grant may also let an assistant answer, " +
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
       '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
       'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +
@@ -483,8 +498,9 @@ export const flowTools: Tool[] = [
     label: 'Read a flow run',
     description:
       'One flow run: its record, and `pending`, what it waits on now (a question for a person, or an approval). ' +
-      'People answer and approve on the Workflows page, never through a tool. To go back to an earlier point, ' +
-      'see preview_flow_reset.',
+      'People approve on the Workflows page, never through a tool. A question whose `people_only` is false may be ' +
+      "answered with answer_flow_question when the user's setting flow_answerers or the run's approved grant allows it. To go back to an " +
+      'earlier point, see preview_flow_reset.',
     input: z.object({ run_id: runId }),
     risk: 'read',
     routes: ['GET /api/v1/workflow-runs/{run_id}'],
@@ -565,6 +581,55 @@ export const flowTools: Tool[] = [
           }),
         ),
       ),
+  }),
+
+  defineTool({
+    name: 'answer_flow_question',
+    label: "Answer a flow's question",
+    description:
+      "Answer a flow run's question (#7471): a `wait_for_human` with a text, a `prompt` with an object of its " +
+      "task's fields (get_flow_run's `pending` names the call and its `task`). Allowed only when the user's " +
+      "setting flow_answerers, or the run's approved grant (`answers`), names this session (or its MCP token) and " +
+      'the question is not `people_only`; else a ' +
+      '403 says why. The first answer wins: a later one is told that it was answered already. Not for flow runs.',
+    input: z.object({
+      run_id: runId,
+      call_id: z.string().uuid().describe("The question's call id, from get_flow_run's `pending`"),
+      answer: z
+        .union([z.string().min(1).max(10_000), z.record(z.string(), z.unknown())])
+        .describe("A text for wait_for_human; for prompt, an object of the task's fields"),
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/workflow-runs/{run_id}/answer', 'GET /api/v1/tasks/{task_id}', 'POST /api/v1/tasks/{task_id}/answer'],
+    summarize: ({ run_id, call_id }) => `Answer question ${call_id} of flow run ${run_id}`,
+    handler: async ({ run_id, call_id, answer }, ctx) => {
+      if (typeof answer === 'string') {
+        return json(
+          await command(ctx, `answer flow run ${run_id}`, (headers) =>
+            ctx.backend.POST('/api/v1/workflow-runs/{run_id}/answer', {
+              params: { path: { run_id } },
+              body: { call_id, answer },
+              headers,
+            }),
+          ),
+        )
+      }
+      // A prompt's task: its id is the call's. Only one of this run's.
+      const task = await ok(
+        ctx.backend.GET('/api/v1/tasks/{task_id}', { params: { path: { task_id: call_id } } }),
+        `get task ${call_id}`,
+      )
+      if (task.run_id !== run_id) throw new ToolError(`task ${call_id} is not a question of flow run ${run_id}`)
+      return json(
+        await command(ctx, `answer task ${call_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/tasks/{task_id}/answer', {
+            params: { path: { task_id: call_id } },
+            body: { answer },
+            headers,
+          }),
+        ),
+      )
+    },
   }),
 
   defineTool({

@@ -1038,7 +1038,8 @@ jobs:
       # `camera-image` job reads and writes too, at mode=min (the repo's Actions cache is
       # at its ceiling, #743). Only the relay leg writes it, as in ci.yml: a second write
       # to the scope would replace the relay's cache entry. The recorder and the edge build
-      # the `camera` stage the relay caches, plus a config COPY that takes no time.
+      # the `camera` stage the relay caches, plus a config COPY (and, in the recorder, its
+      # ENV TZ) that takes no time.
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7

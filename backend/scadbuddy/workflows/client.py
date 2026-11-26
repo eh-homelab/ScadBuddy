@@ -44,6 +44,7 @@ from scadbuddy.workflows.filament_pull import FilamentBbPull
 from scadbuddy.workflows.filament_sync import FilamentBbSync
 from scadbuddy.workflows.follow import FollowPrint, VersionedFollowPrint, follow_queue
 from scadbuddy.workflows.lan_auto_import import LanAutoImport
+from scadbuddy.workflows.lan_command import LanCommandWorkflow
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_models import HEARTBEAT_THROTTLE
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
@@ -165,7 +166,8 @@ def bambuddy_worker(
     """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
     ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves), and the
     filament sync's ``FilamentBbSync`` (#6265), the Bambuddy pull's ``FilamentBbPull``
-    (#6772), and ``SensorNotifyPass`` (#6646).
+    (#6772), ``SensorNotifyPass`` (#6646), and ``LanCommand`` (#7276), a printer's
+    commands over its LAN link (its ``lan_command`` activity is in `LanActivities.all`).
     With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned, and
     every workflow on it is AUTO_UPGRADE (`print_deployment`): each run moves to the
     current build. Pinned runs were stranded by every deploy (#2066): the Deployment
@@ -216,6 +218,9 @@ def bambuddy_worker(
             # The sensors' alert notifications sent through Bambuddy, a pass a minute on
             # its Schedule (#6646); AUTO_UPGRADE by the worker's default.
             SensorNotifyPass,
+            # One request's commands to a printer over its LAN link (#7276); AUTO_UPGRADE
+            # by the worker's default.
+            LanCommandWorkflow,
         ],
         activities=activities,
         workflow_runner=sandboxed_runner(),

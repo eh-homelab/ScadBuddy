@@ -228,9 +228,10 @@ export type FlowRun = Schemas['Run']
 export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
-/** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`). */
+export type FlowAnswerBy = Schemas['AnswerBy']
+/** #7364 — a flow prompt's question as the run page lists it, and the whole task (`GET /tasks/{id}`), with what admitted an agent's answer (#7471). */
 export type TaskQuestion = Schemas['TaskQuestion']
-export type Task = Schemas['Task']
+export type Task = Schemas['TaskView']
 /** One thing wrong with an answer (a 422's `problems`): a property, an item of one (`tags/0`), or '' for the whole. */
 export interface AnswerProblem {
   field: string
@@ -433,14 +434,16 @@ export type VirtualPrinters = Schemas['VirtualPrintersView']
 export type VirtualPrinterCreate = Schemas['VirtualPrinterCreate']
 export type VirtualPrinterUpdate = Schemas['VirtualPrinterUpdate']
 export type VirtualPrinterDiagnostic = Schemas['VirtualPrinterDiagnostic']
-/** #7154 — a printer's K-profiles (pressure advance), through Bambuddy. */
+/** #7276 P27 — a printer command still running when its route stopped waiting: follow `workflow_id`. */
+export type LanCommandPending = Schemas['LanCommandPending']
+/** #7154, #7276 — a printer's K-profiles (pressure advance), over ScadBuddy's LAN link. */
 export type KProfile = Schemas['KProfile']
 export type KProfileTable = Schemas['KProfileTable']
 export type KProfileNotes = Schemas['KProfileNotes']
 export type KProfileWriteResult = Schemas['KProfileWriteResult']
 export type KProfileSet = Schemas['KProfileSet']
 export type KProfileRemove = Schemas['KProfileRemove']
-/** #7153: a printer's AMS slots through Bambuddy. */
+/** #7153, #7276: a printer's AMS slots over ScadBuddy's LAN link. */
 export type AmsView = Schemas['AmsView']
 export type AmsUnitView = Schemas['AmsUnitView']
 export type SlotView = Schemas['SlotView']
@@ -840,14 +843,19 @@ export interface RenderLimits {
 }
 
 /**
- * The long edge, in pixels, the assistant panel scales an attached image to before
- * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
- * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.
+ * The assistant's image settings (`GET/PUT /api/v1/ai/settings/images`, agent
+ * `src/routes/imageSettings.ts`): the long edge, in pixels, the panel scales an attached
+ * image to before sending it (`min`..`max`), and the largest image, in bytes, a tool shows
+ * the model inline (`tool_inline_min`..`tool_inline_max`; a larger one goes to the session's
+ * files, #7745). The PUT sends only the fields that changed.
  */
 export interface ImageSettings {
   long_edge: number
   min: number
   max: number
+  tool_inline_max_bytes: number
+  tool_inline_min: number
+  tool_inline_max: number
 }
 
 /**

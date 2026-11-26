@@ -26,9 +26,15 @@ from scadbuddy.filament.rfid_mode import (
     reconcile_mode_now,
 )
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.spools.activities import filament_rfid_activity
 from tests.conftest import PgPool
-from tests.filament.test_rfid_push import _bind, _filament, _printers, _settings, _spool
+from tests.filament.test_rfid_push import (
+    _bind,
+    _filament,
+    _printers,
+    _rfid_activity,
+    _settings,
+    _spool,
+)
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -224,7 +230,7 @@ async def test_the_activity_reconciles_the_mode_first_and_each_step_fails_alone(
     f = _filament(pg_pool)
     f.rfid.set_mode(True)
     on = lambda: FilamentSync(tags="sb_to_bb")  # noqa: E731
-    run = filament_rfid_activity(_printers(pg_pool), f, _settings, on)
+    run = _rfid_activity(_printers(pg_pool), f, _settings, on)
     _reads(True, False)
     patch = _patch()
     respx.get(f"{API}/inventory/spools/by-tag").mock(return_value=httpx.Response(404, json={}))
@@ -273,7 +279,7 @@ async def test_the_activity_survives_a_broken_mode_step_and_still_pushes_tags(
     link = respx.patch(f"{API}/inventory/spools/11/link-tag").mock(
         return_value=httpx.Response(200, json={"id": 11, "material": "PLA"})
     )
-    run = filament_rfid_activity(_printers(pg_pool), f, load, lambda: FilamentSync(tags="sb_to_bb"))
+    run = _rfid_activity(_printers(pg_pool), f, load, lambda: FilamentSync(tags="sb_to_bb"))
 
     assert await run() == "failed"
     assert link.call_count == 1
@@ -374,7 +380,7 @@ async def test_no_bambuddy_leaves_the_mode_pending_and_the_activity_not_failed(
     none = lambda: StoredSettings()  # noqa: E731
 
     status = await reconcile_mode_now(f.rfid, none)
-    run = filament_rfid_activity(_printers(pg_pool), f, none, lambda: FilamentSync(tags="sb_to_bb"))
+    run = _rfid_activity(_printers(pg_pool), f, none, lambda: FilamentSync(tags="sb_to_bb"))
 
     assert (status.state, status.detail) == ("pending", NO_BAMBUDDY)
     assert await run() == "done"
@@ -406,7 +412,7 @@ async def test_the_activity_skips_the_mode_step_while_another_holds_the_lock(
 ) -> None:
     f = _filament(pg_pool)
     f.rfid.set_mode(True)
-    run = filament_rfid_activity(_printers(pg_pool), f, _settings, lambda: FilamentSync(tags="off"))
+    run = _rfid_activity(_printers(pg_pool), f, _settings, lambda: FilamentSync(tags="off"))
 
     assert await run() == "done"
     assert len(respx.calls) == 0

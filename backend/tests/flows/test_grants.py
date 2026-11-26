@@ -17,6 +17,7 @@ from scadbuddy.flows.grants import (
     RuleUse,
     admits,
     choose,
+    inherited,
     narrowed_to_order,
     validate_spec,
 )
@@ -229,3 +230,39 @@ def test_narrowed_to_an_order() -> None:
     assert admits(narrowed.rules[2], print_o1, RuleUse()) is not None
     assert admits(narrowed.rules[1], print_o1, RuleUse()) is None
     assert admits(narrowed.rules[1], facts(order_id="o2"), RuleUse()) is not None
+
+
+# -- answers (#7471): left out when empty; who else may answer the run's questions ------
+
+ANSWERS = {"who": ["starter", "token:70ce0000-0000-4000-8000-00000000000c"]}
+
+
+def _plain(**fields: Any) -> GrantSpec:
+    return GrantSpec.model_validate(
+        {"expires_at": (NOW + timedelta(hours=1)).isoformat(), "rules": [], **fields}
+    )
+
+
+def test_a_spec_without_answers_dumps_without_the_key() -> None:
+    plain = _plain()
+    assert "answers" not in plain.model_dump()
+    assert "answers" not in plain.model_dump(mode="json")
+    assert '"answers"' not in plain.model_dump_json()
+
+
+def test_a_spec_with_answers_is_valid_and_its_rules_are_the_settings() -> None:
+    assert validate_spec(_plain(answers=ANSWERS), tool_tiers=TIERS, now=NOW) == []
+    with pytest.raises(ValidationError):
+        _plain(answers={"who": []})
+    with pytest.raises(ValidationError):
+        _plain(answers={"who": ["everyone"]})
+
+
+def test_a_stored_spec_with_answers_still_loads() -> None:
+    stored = _plain(answers=ANSWERS).model_dump(mode="json")
+    assert stored["answers"] == ANSWERS
+    assert GrantSpec.model_validate(stored).answers is not None
+
+
+def test_a_child_runs_grant_has_no_answers() -> None:
+    assert inherited(_plain(answers=ANSWERS), None).answers is None

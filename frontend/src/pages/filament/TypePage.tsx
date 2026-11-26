@@ -4,6 +4,10 @@ import { Link, useLocation, useParams } from 'react-router'
 import { AttachmentsPanel } from '../../components/entities/AttachmentsPanel'
 import { LinksPanel } from '../../components/entities/LinksPanel'
 import { PropertiesPanel } from '../../components/entities/PropertiesPanel'
+import { entityApi, type PropertyValue } from '../../components/entities/api'
+import { DefinedFields } from '../../components/entities/DefinedFields'
+import { fieldErrorsOf, propertiesPatch, refusalText, sentValues, type FieldErrors } from '../../components/entities/definedProperties'
+import { useAsync } from '../../lib/useAsync'
 import { api, ApiError } from '../../api/client'
 import {
   getType,
@@ -322,6 +326,13 @@ export function TypePage() {
   const [adding, setAdding] = useState(false)
   const [filling, setFilling] = useState(false)
   const money = useMoney()
+  // #7703: the type's defined keys are fields of this form, saved with it.
+  const keys = useAsync(() => entityApi.propertySchema('spool_type'), [])
+  const schema = keys.data?.schema ?? {}
+  const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
+  const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [propertiesError, setPropertiesError] = useState<string | null>(null)
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
 
   useEffect(() => {
     let live = true
@@ -329,6 +340,22 @@ export function TypePage() {
     setSaved(null)
     setDraft(BLANK)
     setMadeId(null)
+    setDefined({})
+    setDefinedBefore({})
+    setFieldErrors(undefined)
+    setPropertiesError(null)
+    // Apart from the type, so a failed read leaves the type open (#7951).
+    if (id !== 'new')
+      entityApi.properties(`spool_type:${id}`).then(
+        (own) => {
+          if (!live) return
+          const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
+          // A key typed before the read answered keeps what was typed.
+          setDefined((typed) => ({ ...values, ...typed }))
+          setDefinedBefore(values)
+        },
+        (cause: unknown) => live && setPropertiesError(`The type's properties could not be loaded: ${message(cause)}`),
+      )
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getType(id),
       listCatalog('materials'),
@@ -357,7 +384,8 @@ export function TypePage() {
   }, [id])
 
   const base = useMemo(() => (saved ? draftOf(saved) : BLANK), [saved])
-  const dirty = JSON.stringify(draft) !== JSON.stringify(base)
+  const properties = propertiesPatch(schema, definedBefore, defined)
+  const dirty = JSON.stringify(draft) !== JSON.stringify(base) || Object.keys(properties).length > 0
   const guard = useLeaveGuard(dirty)
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
     setNotice(null)
@@ -387,8 +415,9 @@ export function TypePage() {
     try {
       let presetsWere = base.presets
       let kWere = base.k_values
+      setFieldErrors(undefined)
       if (creating) {
-        const made = await upsertType(body)
+        const made = await upsertType(Object.keys(properties).length > 0 ? { ...body, properties } : body)
         typeId = made.id
         // From here the page is an edit of this type: a later failure retries as one.
         setMadeId(made.id)
@@ -396,9 +425,11 @@ export function TypePage() {
         presetsWere = []
         kWere = []
       } else {
-        const patch = changed(body, bodyOf(base))
+        const patch: SpoolTypePatch = changed(body, bodyOf(base))
+        if (Object.keys(properties).length > 0) patch.properties = properties
         if (Object.keys(patch).length > 0) await upsertType(patch, typeId)
       }
+      setDefinedBefore(sentValues(defined))
       if (JSON.stringify(draft.presets) !== JSON.stringify(presetsWere)) await setTypePresets(typeId, draft.presets)
       if (JSON.stringify(draft.k_values) !== JSON.stringify(kWere)) await setTypeKValues(typeId, draft.k_values)
       setNotice('Saved')
@@ -410,7 +441,9 @@ export function TypePage() {
       setSaved(fresh)
       setDraft(draftOf(fresh))
     } catch (cause) {
-      setError(message(cause))
+      const refused = fieldErrorsOf(cause)
+      setFieldErrors(refused ?? undefined)
+      setError(refused ? refusalText(refused) : message(cause))
       // A write that did land is shown as it now is, unsaved edits kept.
       if (typeId !== 'new') await getType(typeId).then(setSaved, () => {})
     } finally {
@@ -623,6 +656,20 @@ export function TypePage() {
           <Field label="Note" htmlFor="type-note">
             <Textarea id="type-note" rows={3} value={draft.note} onChange={(e) => set('note', e.target.value)} />
           </Field>
+          {propertiesError && (
+            <p role="alert" className="text-[13px] text-warn">
+              {propertiesError}
+            </p>
+          )}
+          <DefinedFields
+            schema={schema}
+            values={defined}
+            onChange={(next) => {
+              setNotice(null)
+              setDefined(next)
+            }}
+            errors={fieldErrors}
+          />
         </div>
       </div>
 

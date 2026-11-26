@@ -137,10 +137,11 @@ def test_a_delegated_session(client: TestClient, app: FastAPI, settings: Setting
     assert client.get("/api/v1/auth/delegated", params={"code": code}).status_code == 400
     session = client.get("/api/v1/auth/session").json()
     assert session["kind"] == "delegated" and session["user"]["principal"] == "token:abc"
-    # It is not a person: a flow's answer is refused, and so is a person's route.
+    # It is not a person: a flow's answer is refused by the answerer policy (#7471), and a
+    # person's route by its class.
     answer = client.post(
         "/api/v1/workflow-runs/some-run/answer", json={"call_id": "c", "answer": "yes"}
     )
     assert answer.status_code == 403
     client.get("/api/v1/auth/config")
-    assert _count(app, "person", "not_a_person") == 2
+    assert _count(app, "person", "not_a_person") == 1

@@ -13,12 +13,11 @@ from scadbuddy.bambuddy.output_reader import LocalOutputs, TemplateSettings
 from scadbuddy.bambuddy.part_settings import MAX_SLOT, PartSettings, by_colour, laid_under
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, InvalidModelMetaError, meta_from_raw
-from scadbuddy.library.outputs import PARAMS_NAME, OutputStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import PgPool
 from tests.support.arrange import finished_job
 from tests.support.media import MemoryMediaStore
-from tests.support.saved_outputs import save_files
+from tests.support.row_outputs import output_store, update_row
 from tests.support.template_rows import open_template_rows
 
 #: A template with one colour parameter, ``base_color``.
@@ -190,15 +189,16 @@ def test_two_parameters_of_one_colour_share_its_slot_and_the_first_wins() -> Non
     }
 
 
+@pytest.mark.requires_postgres
 async def test_an_arranged_output_takes_no_template_part_settings(
     tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#5638 review: an arranged output's parts come from other outputs or library files,
     and it may be filed under any template, so no colour of it is the template's."""
     paths, job, _ = await finished_job(tmp_path)
-    store = OutputStore(paths)
-    plain = save_files(store, job, name="plain", index=0)
-    arranged = save_files(store, job, name="arranged", index=0, arranged_from=[plain.id])
+    store = output_store(tmp_path, pg_pool, paths=paths)
+    plain = await store.save(job, name="plain", index=0)
+    arranged = await store.save(job, name="arranged", index=0, arranged_from=[plain.id])
     meta = json.loads(paths.model_meta("demo").read_text(encoding="utf-8"))
     meta["part_print_settings"] = {"label_color": {"top_shell_layers": 8}}
     paths.model_meta("demo").write_text(json.dumps(meta), encoding="utf-8")
@@ -208,8 +208,7 @@ async def test_an_arranged_output_takes_no_template_part_settings(
         encoding="utf-8",
     )
     for output in (plain, arranged):
-        params = store.directory(output.id) / PARAMS_NAME
-        params.write_text(json.dumps({"label_color": output.colors[0]}), encoding="utf-8")
+        update_row(store, output.id, params={"label_color": output.colors[0]})
     catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
     open_template_rows(catalogue, pg_pool)
     reader = LocalOutputs(store, catalogue)
@@ -218,14 +217,15 @@ async def test_an_arranged_output_takes_no_template_part_settings(
     assert (await reader.naming(arranged)).part_settings is None
 
 
+@pytest.mark.requires_postgres
 async def test_the_naming_takes_settings_read_before_over_the_live_ones(
     tmp_path: Path, pg_pool: PgPool
 ) -> None:
     """#7633: a storefront slice is named with the settings its price key holds, read
     once when the key was made, never the template's as they are now."""
     paths, job, _ = await finished_job(tmp_path)
-    store = OutputStore(paths)
-    plain = save_files(store, job, name="plain", index=0)
+    store = output_store(tmp_path, pg_pool, paths=paths)
+    plain = await store.save(job, name="plain", index=0)
     meta = json.loads(paths.model_meta("demo").read_text(encoding="utf-8"))
     meta["print_settings"] = {"wall_loops": "2"}
     meta["part_print_settings"] = {"label_color": {"wall_loops": 5}}
@@ -235,8 +235,7 @@ async def test_the_naming_takes_settings_read_before_over_the_live_ones(
         'label_color = "#FFFFFF"; // color\n' + source.read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    params = store.directory(plain.id) / PARAMS_NAME
-    params.write_text(json.dumps({"label_color": plain.colors[0]}), encoding="utf-8")
+    update_row(store, plain.id, params={"label_color": plain.colors[0]})
     catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
     open_template_rows(catalogue, pg_pool)
     reader = LocalOutputs(store, catalogue)
@@ -253,6 +252,10 @@ async def test_the_naming_takes_settings_read_before_over_the_live_ones(
     live = await reader.naming(plain)
     assert live.print_settings == {"wall_loops": "2"}
     assert live.part_settings == {1: PartSettings(wall_loops=5)}
+    # #7800 review: a refusal read with the key still refuses, though the model.json is
+    # fixed since.
+    refused = await reader.naming(plain, template_settings=TemplateSettings(refusal="bad"))
+    assert refused.invalid_meta == "bad"
 
 
 def test_the_request_wins_per_key_over_the_template() -> None:

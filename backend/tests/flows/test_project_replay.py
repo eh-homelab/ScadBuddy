@@ -37,7 +37,8 @@ and so `waited_default` (a `wait_for_human` with the hour of its default, then a
 recorded once on that code, by a test that is not kept; `waited_open` on #7364's (a
 `wait_for_human` with no limit, answered) and `prompted` on #7364's (a prompt answered through
 its route, recorded by `tests/api/test_flow_prompt.py`), with `prompt_expired` (a prompt whose
-`timeout_s` ended it) and `prompted_twice` (two prompts at once). Never re-record them.
+`timeout_s` ended it) and `prompted_twice` (two prompts at once); `people_only` on #7471's (an
+open `wait_for_human` and a people-only prompt at once). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -54,7 +55,7 @@ from temporalio.worker import Replayer
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
-from scadbuddy.workflows.flow_tools import FLOW_TOOLS
+from scadbuddy.workflows.flow_tools import FLOW_TOOLS, _people_only
 from scadbuddy.workflows.flows_client import connect_flows, harness_plugins
 from scadbuddy.workflows.payload_codec import flows_converter
 from scadbuddy.workflows.project import ProjectWorkflow
@@ -82,6 +83,7 @@ NAMES = [
     "prompted",
     "prompt_expired",
     "prompted_twice",
+    "people_only",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
@@ -204,6 +206,38 @@ async def test_prompted_twice(flows: Flows) -> None:
     await client.provide_callback_result(asked["A?"], result={"answer": {}})
     assert (await flows.finished(run_id)).result == "result: [None, 'big']"
     await _record(flows, "prompted_twice", run_id)
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.requires_postgres
+async def test_people_only(flows: Flows) -> None:
+    """A question is open unless the script says people only (#7471)."""
+    run_id = await flows.start(
+        script(
+            "a, b = await asyncio.gather(",
+            "    wait_for_human('Open?'),",
+            f"    prompt('People?', {ASKS!r}, people_only=True),",
+            ")",
+            "return [a['answer'], b['size']]",
+        )
+    )
+    asked = await _asked(flows, run_id, 2)
+    run = await flows.row(run_id, lambda r: len(r.waiting_on) == 2)
+    assert {w.prompt: w.people_only for w in run.waiting_on} == {"Open?": False, "People?": True}
+    client = AgentClient(flows.client, f"flow-{run_id}")
+    await client.provide_callback_result(asked["Open?"], result={"answer": "ok"})
+    await _asked(flows, run_id, 1)
+    await client.provide_callback_result(asked["People?"], result={"answer": {"size": "big"}})
+    assert (await flows.finished(run_id)).result == "result: ['ok', 'big']"
+    await _record(flows, "people_only", run_id)
+
+
+@pytest.mark.parametrize("value", [1, None, "yes"])
+def test_people_only_must_be_a_bool(value: object) -> None:
+    """The sandbox's type check refuses such a literal; a value it cannot type is refused
+    here, before the call draws its id."""
+    with pytest.raises(ValueError, match="people_only must be True or False"):
+        _people_only(value)  # type: ignore[arg-type]
 
 
 @pytest.mark.requires_temporal

@@ -18,7 +18,7 @@ Queue names are settings (`scadbuddy/core/config.py:40`, `scadbuddy/core/setting
 | Queue | Served by | Workflows |
 |---|---|---|
 | `render` | render worker, `python -m scadbuddy.worker` (`scadbuddy/worker.py:1081`) | `RenderPiece`, `RenderPreview`, `TemplatePipeline`, `MigrateInputs` (`scadbuddy/workflows/client.py:143`) |
-| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1521`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass` (`scadbuddy/workflows/client.py:199-217`) |
+| `bambuddy` | print worker, `--queue bambuddy` (`scadbuddy/worker.py:1521`) | `PrintRun`, `PrintLanSequence`, `Operation` (bambuddy kinds), `FollowPrint`, `PrinterWatch`, `LanAutoImport`, `FilamentBbSync`, `FilamentBbPull`, `SensorNotifyPass`, `LanCommand` (a printer's K-profile and AMS commands over its LAN link, #7276; started and awaited by the API, `scadbuddy/workflows/lan_command.py`) (`scadbuddy/workflows/client.py:202-224`) |
 | `bambuddy-follow` | print worker | activities only: `follow_print`, `printer_watch` (`scadbuddy/workflows/client.py:229-250`) |
 | `library` | the API process (`scadbuddy/main.py:1899-1989`) | `Housekeeping`, `PreviewBackfill`, `Operation` (library kinds), `FlowTriggerFire`, `StoreMigration`, `LibraryCopy`, `SliceWorkflow`, `SpoolRefresh`, `StagedFile`, `PrepareListing`, `AttemptMedia` (`scadbuddy/main.py:1832-1842`) |
 | `projects` | projects worker, `--queue projects` (`scadbuddy/worker.py:1607`) | `ProjectWorkflow` (flow runs), `Operation` (flow kinds) (`scadbuddy/workflows/projects_worker.py:81-110`) |
@@ -277,8 +277,11 @@ A script's question to a person is a harness callback tool. `wait_for_human` wai
 limit. A prompt also has a row in `tasks`, which the activities `flow_task_open`,
 `flow_task_answered` and `flow_task_close` write through the API
 (`scadbuddy/workflows/flow_activities.py` `FlowTaskActivities`). The answers are the
-operation kinds `flow_answer` and `task_answer` on `projects`
-(`scadbuddy/flows/operations.py` `flow_kinds`).
+operation kinds `flow_answer` and `task_answer` on `projects`, and `flow_agent_answer` for an
+assistant that the setting `flow_answerers` or the run's grant admits (#7471;
+`scadbuddy/flows/operations.py` `flow_kinds`). A grant-admitted answer is recorded only
+while the grant chain is in force (`FlowStore.record_decision`, 409 `grant_lapsed` over the
+CRUD route).
 See [features/flows.md](../features/flows.md#questions-to-a-person).
 
 ## Housekeeping

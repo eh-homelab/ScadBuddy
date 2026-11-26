@@ -1,9 +1,10 @@
 import { ApiError } from '../../api/client'
 import {
-  patchSpool,
+  bulkUpdateSpools,
   resolveCatalog,
   setSpoolKValues,
   setSpoolPresets,
+  setTypeCost,
   setTypeKValues,
   setTypePresets,
   upsertCatalog,
@@ -15,6 +16,7 @@ import {
   type SpoolType,
 } from '../../api/filament'
 import type { Filament } from '../../api/types'
+import type { PropertyValue } from '../entities/api'
 
 /** What `makeTypeFromBook` added to the catalog, then the refusal of the type itself. */
 export class MakeTypeError extends Error {
@@ -71,7 +73,7 @@ export function typeCodeOf(row: Pick<Filament, 'brand' | 'material' | 'subtype' 
  * has the row's identity. A name the catalog lacks is added first (the type needs its id),
  * and stays if the type is then refused: the refusal is a `MakeTypeError` that lists them.
  */
-export async function makeTypeFromBook(row: Filament): Promise<SpoolType> {
+export async function makeTypeFromBook(row: Filament, properties?: Record<string, PropertyValue>): Promise<SpoolType> {
   const added: string[] = []
   const material = await named('materials', row.material, added)
   const brand = row.brand ? await named('brands', row.brand, added) : null
@@ -92,6 +94,7 @@ export async function makeTypeFromBook(row: Filament): Promise<SpoolType> {
     cost_per_kg: row.cost_per_kg,
     diameter_mm: '1.75',
     label_weight_g: 1000,
+    ...(properties && Object.keys(properties).length > 0 ? { properties } : {}),
   }).catch((cause: unknown) => {
     throw new MakeTypeError(cause, added)
   })
@@ -186,7 +189,8 @@ export async function bookRowIds(row: Pick<Filament, 'brand' | 'material' | 'sub
  * row, the server adds it if the book has none. The answer's `filament_id` says which.
  */
 export function linkTypeToBook(type: SpoolType, row: Pick<Filament, 'cost_per_kg'>): Promise<SpoolType> {
-  return upsertType({ cost_per_kg: row.cost_per_kg }, type.id)
+  // The cost route (#7703): a type its required keys leave incomplete still takes a price.
+  return setTypeCost(type.id, row.cost_per_kg)
 }
 
 /** The spool fields a type holds: once a spool has the type they are the type's, so the spool's own are cleared. */
@@ -219,7 +223,7 @@ const TYPE_FIELDS = [
  * type's code is `BRAND-MATERIAL-SUBTYPE-COLOUR`; a code another type has is the server's
  * refusal (it names it), which the caller shows.
  */
-export async function makeTypeFromSpool(spool: SpoolDetail): Promise<SpoolType> {
+export async function makeTypeFromSpool(spool: SpoolDetail, properties?: Record<string, PropertyValue>): Promise<SpoolType> {
   const e = spool.effective
   if (!e.material_id) throw new Error('Choose the material first.')
   if (!e.rgba) throw new Error('Choose the colour first.')
@@ -250,6 +254,7 @@ export async function makeTypeFromSpool(spool: SpoolDetail): Promise<SpoolType> 
     nozzle_temp_max: e.nozzle_temp_max ?? null,
     bed_temp_min: e.bed_temp_min ?? null,
     bed_temp_max: e.bed_temp_max ?? null,
+    ...(properties && Object.keys(properties).length > 0 ? { properties } : {}),
   })
   // Only the input fields: an effective row also carries `overridden` and `migrated`, which the server refuses.
   const presets = spool.presets
@@ -260,7 +265,8 @@ export async function makeTypeFromSpool(spool: SpoolDetail): Promise<SpoolType> 
     .map(({ printer_id, extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id }) => ({ printer_id, extruder, nozzle_diameter, nozzle_type, k_value, name, cali_idx, setting_id }))
   if (presets.length > 0) await setTypePresets(type.id, presets)
   if (kValues.length > 0) await setTypeKValues(type.id, kValues)
-  await patchSpool(spool.id, { type_id: type.id, ...Object.fromEntries(TYPE_FIELDS.map((field) => [field, null])) })
+  // The unchecked bulk route (#7703): a spool its required keys leave incomplete still takes the type.
+  await bulkUpdateSpools([spool.id], { type_id: type.id, ...Object.fromEntries(TYPE_FIELDS.map((field) => [field, null])) })
   // The type holds them now; the first type may already have dropped migrated ones.
   if (presets.length > 0) await setSpoolPresets(spool.id, [])
   if (kValues.length > 0) await setSpoolKValues(spool.id, [])

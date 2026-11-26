@@ -660,11 +660,27 @@ same UI guard as credential writes, with the same limitation (Known limitations,
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
 and file SHA-256 (`hashTree()`, `hash.ts`). The cached copy is hashed again before every
-load. If it does not match, it is deleted and fetched again at the pinned commit, and the
-package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
+load. If it does not match, it is deleted and read again from the pin's mirror (below;
+a load never fetches git), and the package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
 package is also vetted again at every load, so rules that have tightened since approval
 still apply. A process that writes the cache between the check and Claude Code's read is
 not caught; such a process already controls the pod.
+
+**Commit pin mirrors (#7907).** A commit pin's files are also kept in the blob store as a
+zip, through the same area `package-mirrors` and hold rules as a bytes pin (below). The
+row records the zip's SHA-256 (`mirror_sha256`, or `pending_mirror_sha256` for a re-pin)
+through `POST …/plugin-packages/{name}/mirror`, which the API accepts only for the commit
+and content hash that the row names, only while that package holds the zip, and which
+changes no pin, approval or switch. A cache miss unpacks the recorded zip with the
+unpacking rules below, under the content hash's caps (2,000 files, 5 MiB each, 20 MiB in
+all; `install.ts` `COMMIT_MIRROR_LIMITS`) rather than a download's, and uses it only when
+its files hash to `content_hash`; then it is
+vetted as a git copy is. So the mirror can only give back the files that the admin
+approved. A load never fetches git (the owner's
+[decision of 2026-11-26](https://github.com/eh-homelab/ScadBuddy/issues/7907)): with no
+usable mirror the package is left out of the turn, and the `PackageMirror` workflow on
+`agent-tools` fetches the pinned commit, checks the content hash, and only then writes and
+records the zip. A fetch whose files hash to anything else is refused and never recorded.
 
 **Bytes pins (#6935, spec 2026-11-21 §6.6).** An archive or npm package has no commit,
 so it is pinned to the SHA-256 of the file fetched at install (`pin_kind` `bytes`,
@@ -726,6 +742,13 @@ an npm package is installed or run.
   `http.followRedirects=false`, `core.hooksPath=/dev/null`, `transfer.fsckObjects` and
   `GIT_TERMINAL_PROMPT=0` are set. The fetch is shallow, takes no tags or submodules,
   and has a time limit.
+- A package in one folder of a repository (a `path`) gets a partial fetch with no blobs
+  (`--filter=blob:none`) and a sparse checkout of that folder (#7908). git then fetches
+  that folder's blobs from the same remote URL, in a child git that gets the same config
+  and environment, so `transfer.fsckObjects` checks them too (its `index-pack` runs with
+  `--fsck-objects`, seen with `GIT_TRACE=1` on git 2.39.5 and 2.43.0, 2026-11-26). A
+  server with no partial fetch sends every blob. When the partial fetch fails for a
+  reason other than the time limit, git fetches the whole commit again.
 - Refs and paths are held to an alphabet that cannot start with `-` or contain `..`.
 - A symlink or submodule anywhere in the plugin's directory is refused, from `git
   ls-tree`, before any file is used. `hashTree()` refuses any non-regular file again.
@@ -981,16 +1004,17 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   takes a bearer token that the agent made for that pod. It runs each command in `/work` with
   `bash -c` or `pwsh -NonInteractive -Command`, with an environment of its own (`PATH`,
   `HOME`, `LANG`, `TERM`, the proxy), `ulimit -u 512`, and its own process group. It runs one
-  command at a time, and kills it when its caller goes away (the request's socket closes). At the deadline (default 120 s, at most 600 s) and when the shell exits,
-  it kills that group and then every other process of the sandbox's uid but itself and PID 1
-  (`reapStrays`), so a process that left the group (`setsid`, a double fork) does not outlive
-  its command. A PID namespace per command would be cleaner, but the pod cannot make one:
+  foreground command at a time, and kills it when its caller goes away (the request's socket closes). At the deadline (default 120 s, at most 600 s) and when the shell exits,
+  it kills that group and then every other process of the sandbox's uid but itself, PID 1
+  and the running background slots' groups (`reapStrays`), so a process that left the group
+  (`setsid`, a double fork) does not outlive its command. A PID namespace per command would be cleaner, but the pod cannot make one:
   `unshare --user --map-root-user --pid --fork` fails with "Operation not permitted" under
   the runtime's default seccomp profile, with no capabilities (measured 2026-11-10 in the
   `sandbox` image under Docker's default profile). A pod is never shared between sessions,
   so nothing a command leaves can reach another session's commands. It
   keeps at most 1 MiB of each stream; the tool shows the model at most 30,000 characters.
-  After 15 minutes with no request it exits, the pod ends, and the workers' sweep deletes it.
+  After 15 minutes with no request and no running background slot it exits, the pod ends, and
+  the workers' sweep deletes it.
   A command can read the token from the server's environment. That token reaches only its own
   pod, and the network policy admits only the agent workers.
 - **The files.** Before each command the worker makes the pod's `/work` match the session's
@@ -1027,11 +1051,39 @@ is the comment on [#5864](https://github.com/eh-homelab/ScadBuddy/issues/5864).
   `http://` through the proxy and every other protocol are refused. It holds at most 256
   tunnels at once, 32 from one pod, and frees a slot as soon as its client leaves. It logs one JSON line per tunnel. Its own NetworkPolicy
   allows only public addresses on 80 and 443.
+- **Background commands** (#5916, #7310). A `Monitor`'s `command` and a `Bash` or
+  `PowerShell` call with `run_in_background` run in the same pod, never on the worker, in a
+  background slot ([`agent/src/sandbox/slots.ts`](../../agent/src/sandbox/slots.ts)): the same
+  uid, `ulimit -u`, environment, egress proxy and `/work` as a foreground command, in a process
+  group of its own that the sweep after each command spares while it runs. A process that
+  leaves that group is killed at the next sweep, and the whole group when the slot's shell
+  exits, as for a foreground command. At most 4 slots run at once in a pod (`MAX_SLOTS`); a
+  slot keeps the newest 1 MiB of its output in the server's memory (`SLOT_KEEP_BYTES`, older
+  bytes are reported lost) and writes its first 16 MiB to an output file under the pod's HOME,
+  which a later command can read. A Monitor's slot has the Monitor's timeout (at most 30
+  minutes); a background shell's has none but the pod's 4-hour deadline. While a slot runs, the
+  pod does not idle out. The slot is started by the tool in the turn, after the usual sync in;
+  the task's activity, on the replica that ran the turn, follows it through
+  `GET /v1/slots/<id>/watch` (JSON lines, each data line followed by the raw bytes it names, at
+  most 32 KiB, with a heartbeat every 10 s; the client fails a watch that is silent for 30 s, a
+  line past its cap, a frame past its cap, or a line that is not a watch line, and treats every
+  byte as untrusted) and applies Monitor's caps there (200 ms batching,
+  8000-character lines, 200 events, end on exit). A slot no watch has followed for 6 minutes is
+  stopped (`SLOT_UNWATCHED_MS`), so a slot whose activity died does not run on. `TaskStop`, the
+  panel's cancel and the session's end stop the task, and the activity stops the slot
+  (`DELETE /v1/slots/<id>`, which kills its group); a pod that ended (idle or its deadline)
+  ends the task with that reason. A slot's id is the server's own random 32-hex id; any other
+  form is refused, and another pod (another session's) does not know it. A background
+  command's writes to `/work` come back to the session through the same sync and the same caps:
+  the exec server keeps the pod's files as the last sync left them (`/v1/base`, in its memory,
+  untrusted like `/v1/kept`), so the sync before each later command first brings back what a
+  slot changed where the session's copy did not change (`files_changed_in_background`), and
+  the session's copy counts where both changed (`files_overwritten_in_sandbox`); the activity
+  does the same at the slot's end, into the session directory on its replica, which the next
+  write-back records.
 - **Results** are untrusted data (`untrusted_data`, tool `Bash` or `PowerShell`, source "the
   session sandbox").
-- **Not covered.** `run_in_background` is refused. `Monitor`'s `command` would run on the
-  worker, where Claude Code's native Bash runs, so with the sandbox the turn's `Monitor` refuses
-  a command (`turnRunner.ts` gives it no command queue); a `ws` source still works. The cluster has no
+- **Not covered.** The cluster has no
   gVisor or Kata RuntimeClass (`kubectl get runtimeclass` on `primary`, 2026-11-09: `crun`,
   `nvidia`, `nvidia-experimental`); the pod shares the node's kernel.
 

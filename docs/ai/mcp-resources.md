@@ -110,6 +110,11 @@ or from the source tree when run from it.
 - **Binary content** is a base64 `blob`. Above the 8 MiB inline limit
   (`DEFAULT_MAX_INLINE_BYTES`, [`agent/src/tools/binary.ts`](../../agent/src/tools/binary.ts))
   the content is instead an `application/json` note naming the backend route to fetch.
+  An image resource (a thumbnail) is not under that limit: it is a `blob` up to the largest
+  image block (3.75 MiB, `MAX_TOOL_IMAGE_INLINE_MAX` in
+  [`agent/src/tools/imageLimits.ts`](../../agent/src/tools/imageLimits.ts)), whatever
+  `tool_image_inline_max_bytes` says, and above it an `application/json` note with no route;
+  a read writes nothing to a workspace (#7745).
 - **Errors** follow the resources page's "Error Handling": `-32002` when the URI names
   no resource or the backend answers 404; `-32602` when a variable fails the tool's
   validation (a malformed slug); `-32603` otherwise.

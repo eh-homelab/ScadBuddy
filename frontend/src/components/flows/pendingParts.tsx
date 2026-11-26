@@ -1,4 +1,5 @@
 import type { FlowPending, FlowQueueStep } from '../../api/types'
+import { answererLabel, sessionHref } from '../../lib/flows'
 
 // What every card of a run's parked calls shares.
 
@@ -24,4 +25,28 @@ export function StepLine({ step, child = false }: { step: FlowQueueStep; child?:
       {child ? 'From a session the run talks to, at step' : 'Step'} {step.seq} ({step.fn})
     </p>
   )
+}
+
+/** #7471 — who answered a flow's question; the assistant links its session. */
+export function AnsweredBy({ by, admittedBy }: { by: string | null | undefined; admittedBy?: string | null }) {
+  const { text, sessionId } = answererLabel(by)
+  const label = sessionId ? (
+    <a href={sessionHref(sessionId)} className="underline underline-offset-2">
+      {text}
+    </a>
+  ) : (
+    <span>{text}</span>
+  )
+  // #7471: an assistant the run's grant let answer, not the setting.
+  if (!admittedBy || admittedBy === 'setting') return label
+  return (
+    <>
+      {label} <span>under the run&apos;s grant</span>
+    </>
+  )
+}
+
+/** #7471 — a question the flow asked of people only: no assistant answers it, whatever the settings say. */
+export function PeopleOnly() {
+  return <p className="mb-2 text-[12px] text-muted-foreground">The flow asks this of people only.</p>
 }

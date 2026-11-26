@@ -123,6 +123,10 @@ updates:
       - "/tools/go/core"
       - "/tools/go/fleetchat"
       - "/tools/go/fleet"
+      - "/tools/go/fleetd"
+      # The only module that requires the OTel SDK, the OTLP exporters, contrib's
+      # runtime instrumentation and otelslog directly.
+      - "/tools/go/telemetry"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -140,6 +144,10 @@ updates:
         patterns: ["github.com/microsoft/kiota-*"]
       go-fuse:
         patterns: ["github.com/hanwen/go-fuse/*"]
+      # The OTel SDK, its exporters and contrib release in lockstep and require
+      # each other's matching versions, so they move together.
+      opentelemetry:
+        patterns: ["go.opentelemetry.io/*"]
 
   # The frontend and the AI agent service (#261), one entry for both. A group
   # in a multi-directory entry is one PR across every directory it touches,

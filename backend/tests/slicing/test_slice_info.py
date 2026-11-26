@@ -280,6 +280,35 @@ def test_a_slot_with_no_length_books_grams_only() -> None:
     assert plate_uses(b"not a zip", 1) == PlateUses()
 
 
+def test_a_merged_slot_keeps_its_metres_only_with_every_sources_length() -> None:
+    """The review of #7865 (#7932): a slot moved onto the plate's first filament carries
+    its metres only when every source slot with grams has a length, so no slot's metres
+    cover part of its grams (which would skew the implied density). Here ``id="1"``, the
+    unprinted slot that moves onto filament 3, has grams but no ``used_m``."""
+    file = sliced_3mf(
+        plates={1: (60, [0.2, 0.0, 1.0])},
+        metres={1: [None, None, 0.3]},
+        gcode={1: b"; HEADER_BLOCK_START\n; filament: 3\n; HEADER_BLOCK_END\nM620 S2A\n"},
+    )
+    assert plate_uses(file, 1) == PlateUses(grams_by_slot={3: 1.2}, length_by_slot={})
+    assert read_sliced(file, 1).length_by_slot == {}
+    # Both sources with a length: the merged slot sums them, as before.
+    both = sliced_3mf(
+        plates={1: (60, [0.2, 0.0, 1.0])},
+        metres={1: [0.1, None, 0.3]},
+        gcode={1: b"; HEADER_BLOCK_START\n; filament: 3\n; HEADER_BLOCK_END\nM620 S2A\n"},
+    )
+    assert plate_uses(both, 1) == PlateUses(grams_by_slot={3: 1.2}, length_by_slot={3: 0.4})
+    # A source with a length but no grams (the review of #7933, #7964) is dropped before the
+    # merge (``filaments3mf.py`` keeps the slots with ``used_g > 0``): it adds neither.
+    weightless = sliced_3mf(
+        plates={1: (60, [0.0, 0.0, 1.0])},
+        metres={1: [0.1, None, 0.3]},
+        gcode={1: b"; HEADER_BLOCK_START\n; filament: 3\n; HEADER_BLOCK_END\nM620 S2A\n"},
+    )
+    assert plate_uses(weightless, 1) == PlateUses(grams_by_slot={3: 1.0}, length_by_slot={3: 0.3})
+
+
 def test_the_metres_move_with_the_grams_onto_the_filament_the_plate_prints() -> None:
     """A one-filament plate's ``id="1"`` is the filament it prints (#4711): its length
     moves as its grams do."""

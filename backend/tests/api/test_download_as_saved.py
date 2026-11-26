@@ -18,6 +18,7 @@ from scadbuddy.core.paths import DataPaths
 from tests.api.conftest import wait_for_job
 from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
+from tests.support.saved_outputs import stored_bytes
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -30,8 +31,8 @@ def _project_settings(payload: bytes) -> dict[str, Any]:
         return loaded
 
 
-def _stored(paths: DataPaths, model: str, output_id: str) -> bytes:
-    return (paths.output_dir(model, output_id) / "model.3mf").read_bytes()
+def _stored(client: TestClient, output_id: str) -> bytes:
+    return stored_bytes(client, output_id)
 
 
 def _declare(paths: DataPaths, model: str, settings: dict[str, Any]) -> None:
@@ -56,7 +57,7 @@ def test_a_download_is_the_saved_file_and_asks_bambuddy_nothing(
     assert response.status_code == 200
     assert response.headers["content-type"] == "model/3mf"
     assert 'filename="demo-elan.3mf"' in response.headers["content-disposition"]
-    assert response.content == _stored(paths, model, output_id)
+    assert response.content == _stored(client, output_id)
     assert not bambuddy.called
 
 
@@ -72,7 +73,7 @@ def test_a_range_gets_the_whole_saved_file(
 
     assert response.status_code == 200
     assert response.headers["accept-ranges"] == "none"
-    assert response.content == _stored(paths, model, output_id)
+    assert response.content == _stored(client, output_id)
 
 
 def test_the_templates_print_settings_are_saved_into_the_file(
@@ -84,7 +85,7 @@ def test_the_templates_print_settings_are_saved_into_the_file(
     _declare(paths, model, KEYCHAIN)
     output_id = make_output(client, model)
 
-    stored = _stored(paths, model, output_id)
+    stored = _stored(client, output_id)
     settings = _project_settings(stored)
     assert settings["enable_prime_tower"] == "1"
     assert settings["wipe_tower_no_sparse_layers"] == "1"
@@ -104,7 +105,7 @@ def test_print_settings_declared_after_the_save_leave_its_file_alone(
 ) -> None:
     configure(client)
     output_id = make_output(client, model)
-    stored = _stored(paths, model, output_id)
+    stored = _stored(client, output_id)
     _declare(paths, model, KEYCHAIN)
 
     assert client.get(f"/api/v1/outputs/{output_id}/model.3mf").content == stored
@@ -139,6 +140,4 @@ def test_a_template_s_invalid_model_json_fails_the_save_naming_the_key(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Elan"}, headers=press()
     )
     assert retried.status_code == 201, retried.text
-    assert (
-        _project_settings(_stored(paths, model, retried.json()["id"]))["enable_prime_tower"] == "1"
-    )
+    assert _project_settings(_stored(client, retried.json()["id"]))["enable_prime_tower"] == "1"

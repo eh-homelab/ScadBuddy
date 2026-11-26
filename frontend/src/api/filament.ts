@@ -398,6 +398,9 @@ export function upsertType(body: SpoolTypeCreate | SpoolTypePatch, id?: string):
     : request<SpoolType>(`${BASE}/types/${seg(id)}`, json('PATCH', body))
 }
 
+/** #7703 — only a type's cost (`null` clears it), not checked for required properties: a one-field action. */
+export const setTypeCost = (id: string, costPerKg: string | null) => request<SpoolType>(`${BASE}/types/${seg(id)}/cost-per-kg`, json('PUT', { cost_per_kg: costPerKg }))
+
 export const setTypePresets = (id: string, rows: TypePresetInput[]) =>
   request<TypePreset[]>(`${BASE}/types/${seg(id)}/presets`, json('PUT', rows))
 

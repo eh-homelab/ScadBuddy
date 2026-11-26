@@ -54,6 +54,7 @@ import { loadTypeSkus, spoolSearchDoc, tagsBySpool, traysBySpool } from '../../l
 import { toast } from '../../lib/toast'
 import { syncText } from './syncText'
 import { cn } from '@/lib/utils'
+import { Checkbox } from '@/components/ui/checkbox'
 import { filamentLinks } from '../../lib/filamentLinks'
 
 interface Loaded {
@@ -85,6 +86,7 @@ const CHIPS: { key: keyof SpoolsQuery; title: (q: SpoolsQuery, place: string) =>
   { key: 'used', title: (q) => (q.used ? 'Used' : 'Unused') },
   { key: 'fresh', title: (q) => (q.fresh ? 'New' : 'Not new') },
   { key: 'loaded', title: (q) => (q.loaded ? 'Loaded' : 'Not loaded') },
+  { key: 'incomplete', title: (q) => (q.incomplete ? 'Incomplete' : 'Complete') },
   { key: 'material', title: (q) => `Material: ${q.material}` },
   { key: 'brand', title: (q) => `Brand: ${q.brand}` },
   { key: 'insertType', title: (q) => `Insert: ${q.insertType}` },
@@ -351,6 +353,10 @@ export function SpoolsTab() {
             <CalendarClockIcon className="size-4" />
           </button>
         </div>
+        <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Checkbox checked={q.incomplete === true} aria-label="Only incomplete" onCheckedChange={(on) => update({ incomplete: on === true ? true : undefined })} />
+          Incomplete
+        </label>
         <label className="flex items-center gap-2 text-[12px] text-muted-foreground">
           <Switch
             size="sm"

@@ -6,6 +6,7 @@
  * convenience used when the URL names none.
  */
 import type { Spool } from '../../api/filament'
+import { isIncomplete } from '../entities/definedProperties'
 import { matchesSearch, parseSearch, spoolSearchDoc, type SearchDoc } from '../../lib/filamentSearch'
 
 /** `forecast` (#6269): each shown spool's burn and empty day, then the types to reorder. */
@@ -59,6 +60,8 @@ export interface SpoolsQuery {
   fresh?: boolean
   /** In a printer's tray (a place with a printer). */
   loaded?: boolean
+  /** #7703: only spools their required properties leave incomplete. */
+  incomplete?: boolean
   material?: string
   brand?: string
   insertType?: string
@@ -78,6 +81,7 @@ const FLAGS = [
   ['used', 'used'],
   ['fresh', 'new'],
   ['loaded', 'loaded'],
+  ['incomplete', 'incomplete'],
 ] as const
 const NAMES = [
   ['q', 'q'],
@@ -197,6 +201,7 @@ export function filterSpools(
     if (q.insertType && !same(spool.names?.insert_type, q.insertType)) return false
     if (q.location && !same(spool.names?.location, q.location)) return false
     if (q.place && spool.location_id !== q.place) return false
+    if (q.incomplete !== undefined && isIncomplete(spool) !== q.incomplete) return false
     if (tokens.length && !matchesSearch(searchDoc(spool), tokens)) return false
     return true
   })

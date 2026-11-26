@@ -21,6 +21,7 @@ import { mockSettings } from '../handlers'
 import { announcePreviewSlice, emitRealtime } from '../realtime'
 import { demoToolpath } from '../toolpath'
 import { acceptOperation } from './operations'
+import { withLanLinked } from './printers'
 
 /**
  * #3818 — the hot path without Bambuddy (plan 2026-10-18, Task 11): render, print
@@ -54,7 +55,7 @@ export const NO_BAMBUDDY = 'no Bambuddy URL is configured'
  * (`_not_on_bambuddy`) until plan 3a Task 9; nothing on the native path asks Bambuddy
  * about it, so the walk still makes no Bambuddy call.
  */
-export const HOT_PRINTER: PrinterRow = {
+export const HOT_PRINTER: PrinterRow = withLanLinked({
   id: '00000000-0000-4000-8000-0000000000c2',
   serial: '31B8BP000000C2',
   kind: 'physical',
@@ -71,7 +72,7 @@ export const HOT_PRINTER: PrinterRow = {
   camera_recording: true,
   created_at: '2026-10-18T12:00:00Z',
   updated_at: '2026-10-18T12:00:00Z',
-}
+})
 
 /** The report's own id, the Bambuddy printer the row links (`status_from_report`). */
 const HERE = 1
