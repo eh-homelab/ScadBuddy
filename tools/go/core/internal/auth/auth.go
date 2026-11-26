@@ -1,5 +1,8 @@
-// Package auth resolves a service credential, as backend/scadbuddy/auth does
-// (service_auth.py, service_credentials.py `resolve`, gate.py).
+// Package auth resolves who a request is from, as backend/scadbuddy/auth does: a service
+// credential (service_credentials.py `resolve`), a person's session cookie (store.py) or
+// access token (personal_tokens.py), as gate.py picks one. check.go applies
+// SCADBUDDY_AUTH_MODE to a public route as check.py does. The shared vectors
+// (backend/tests/fixtures/auth-vectors.json) hold the two equal.
 package auth
 
 import (
@@ -10,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -52,6 +56,11 @@ func ServiceOf(ctx context.Context) *Service {
 type Resolver struct {
 	Pool *pgxpool.Pool
 	Now  func() time.Time
+
+	// mu guards the failed lookups' log (caller.go failed).
+	mu       sync.Mutex
+	loggedAt time.Time
+	unlogged int
 }
 
 // Resolve is the service the Authorization header names, or nil. A database that does not
