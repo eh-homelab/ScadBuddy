@@ -43,7 +43,8 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { startCredentialGateway, stopCredentialGateway } from './gateway/server.js'
 import { CrudPluginSessions, endOwnSessions, replicaIdentity, runPluginSessionSweep } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
-import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
+import { localMirrorJobs, packageMirrorActivities, temporalMirrorJobs } from './plugins/packages/mirrorJob.js'
+import { loadPackagesForRun, type MirrorJobs, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { CrudPackageStore } from './plugins/packages/store.js'
 import { CrudPackageMirror } from './plugins/packages/mirror.js'
@@ -456,13 +457,22 @@ const packageMirror = new CrudPackageMirror(crudTarget)
 // A hosted plugin's versions (#6934) are read from the API too (area `hosted-plugins`, one of
 // `STORE_AREAS`).
 const hostedPlugins = new CrudHostedPlugins(crudTarget)
+// A commit pin's mirror job (#7907) fetches with git only there, never on a load: a depth-1
+// fetch of the hindsight monorepo took 132 s on a 2-CPU worker pod, past the install fetcher's
+// 120 s, so the job's fetcher waits 10 minutes (under the PackageMirror activity's 20).
+const MIRROR_FETCH_TIMEOUT_MS = 10 * 60_000
+// The PackageMirror workflow when this process has a Temporal client (it is made below), else
+// the same job in this process.
+const mirrorJobs: { current?: MirrorJobs } = {}
 const packageInstaller = new PackageInstaller({
   fetcher: new GitFetcher(),
+  mirrorFetcher: new GitFetcher({ timeoutMs: MIRROR_FETCH_TIMEOUT_MS }),
   cacheRoot: pluginCacheDir(paths),
   mirror: () => packageMirror,
   hosted: () => hostedPlugins,
   // A commit pin's files are mirrored too, and recorded on its row (#7907).
   recordMirror: (name, mirror) => pluginPackages.recordMirror(name, mirror),
+  mirrorJobs: () => mirrorJobs.current,
 })
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.
@@ -872,6 +882,9 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+mirrorJobs.current = temporalClient
+  ? temporalMirrorJobs(temporalClient)
+  : localMirrorJobs({ packages: pluginPackages, installer: packageInstaller })
 // This process's agent-tools worker (below), once it starts: a turn here starts its calls eagerly on
 // that worker's connection (activityProjection.ts `ToolCallStarterDeps`, #5865).
 const eager: { worker: AgentWorker | undefined } = { worker: undefined }
@@ -966,6 +979,8 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sessions: sessionRows, flows: flowRuns, events: eventRows }),
           ...operationActivities(commandKinds, operationStore),
+          // A commit pin's mirror (#7907): the PackageMirror workflow's one activity.
+          ...packageMirrorActivities({ packages: pluginPackages, installer: packageInstaller }),
           ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),

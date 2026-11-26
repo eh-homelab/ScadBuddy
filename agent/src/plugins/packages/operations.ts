@@ -46,7 +46,8 @@ export const REPIN_KIND = 'plugin_package_repin'
 
 export type PackageKindDeps = {
   packages: PackageRepo
-  installer: Pick<PackageInstaller, 'prepare'>
+  /** `wantMirror` starts a commit pin's mirror job when the install's own mirror was not recorded (#7907). */
+  installer: Pick<PackageInstaller, 'prepare'> & Partial<Pick<PackageInstaller, 'wantMirror'>>
   /** Fetches at once across all packages; more are refused with 429. */
   maxConcurrentFetches?: number
 }
@@ -130,10 +131,10 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
     }
   }
 
-  /** `prepared` stored by `store`, then its commit mirror recorded on the row (#7907, best effort). */
+  /** `prepared` stored by `store`, then its commit mirror recorded on the row, or its mirror job started (#7907). */
   async function stored(prepared: PreparedPackage, store: (prepared: PreparedPackage) => Promise<PackageView>): Promise<PackageView> {
     const view = await store(prepared)
-    await recordPreparedMirror(deps.packages, prepared)
+    await recordPreparedMirror(deps.packages, deps.installer, prepared)
     return view
   }
 

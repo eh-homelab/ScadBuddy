@@ -58,7 +58,7 @@ export type PackagePin = {
   bytesSha256?: string
   /** A hosted plugin's version: the pin loads from that version's zip (hosted.ts). */
   version?: number
-  /** A commit pin's recorded mirror (#7907): a cold cache loads it from there before it fetches git. */
+  /** A commit pin's recorded mirror (#7907): a cold cache loads it from there; a load never fetches git. */
   mirrorSha256?: string
   contentHash: string
   /** Approved with `allow_refused`: loaded despite what the rules refuse (vet.ts). */

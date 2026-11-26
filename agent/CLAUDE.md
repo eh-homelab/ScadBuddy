@@ -613,15 +613,21 @@ opens every one and seals it again byte for byte).
     `src/routes/pluginPackages.ts`). Postgres holds the pin (a commit, or for an archive
     or npm package the file's sha256, `pin_kind` `bytes`, plus the content hash);
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
-    re-fetched from the pin: a bytes pin from its mirror in the API's area
-    `package-mirrors` (`mirror.ts`), never upstream; a commit from its mirror there too
-    when the row records one (#7907: `mirror_sha256`, or `pending_mirror_sha256` for a
-    re-pin, a deterministic zip of the files, `zip.ts`, used only when its files hash to
-    the pin), else from git. Install and re-pin send that zip and record it once the pin
-    is stored (`recordPreparedMirror`), and a load that had to fetch git sends and records
-    it after the fetch, without waiting (`mirrorsSent` in tests); a mirror that cannot be
-    read falls back to git, and one that cannot be sent is only logged. A package past the
-    unpack caps is not mirrored. Downloads go through
+    rebuilt from the pin's mirror in the API's area `package-mirrors` (`mirror.ts`), never
+    upstream: a bytes pin's file, or a commit pin's files as a deterministic zip (#7907,
+    `zip.ts`; `mirror_sha256`, or `pending_mirror_sha256` for a re-pin), used only when
+    its files hash to the pin. A load (turn, warm-up, file read, header secrets) never runs
+    git (the owner's decision of 2026-11-26 on #7907): with no usable mirror it leaves the
+    package out (`MirrorNotReadyError`, "its mirror is not ready yet") and starts the
+    mirror job (`mirrorJob.ts`): on Temporal the `PackageMirror` workflow on `agent-tools`
+    (`temporal/packageMirror.ts`, id `package-mirror-<name>-<commit>-<16 of the hash>`,
+    `USE_EXISTING` + `ALLOW_DUPLICATE`, so a run open is joined and a finished one can run
+    again), else in this process. Its activity reads the pin from the row, keeps a recorded
+    mirror that reads back, else fetches with `MIRROR_FETCH_TIMEOUT_MS` (10 min), checks
+    the hash, and writes and records the zip (`makeMirror`); a hash mismatch or a package
+    past the unpack caps is `PackageMirrorRefused`, never retried. Install and re-pin put
+    and record their own zip (`recordPreparedMirror`) and start the job only when that
+    failed; approving a commit pin with no mirror starts it. Downloads go through
     the egress check at every hop (`download.ts`), archives are unpacked by
     `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
     approving needs the exact commit (or `bytes_sha256`, or `version`) and hash. `vet.ts` adds rules
