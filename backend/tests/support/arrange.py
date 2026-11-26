@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import json
-import shutil
 from pathlib import Path
 
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.job_models import BomEntry, Job, PipelineOutput, now
+from scadbuddy.store.index import Pool
 from scadbuddy.workflows.models import Layout, LayoutPlate, OutputRequest, Placed
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
-from tests.support.saved_outputs import save_files
+from tests.support.row_outputs import copy_row, output_store
 from tests.test_packing_and_outputs import _deps, _record, _render
 
 
@@ -67,20 +66,17 @@ async def finished_job(
 
 
 async def saved_output(
-    tmp_path: Path, *, width: int = 12, count: int = 2, name: str = "two"
-) -> tuple[DataPaths, OutputMeta, PipelineOutput]:
+    tmp_path: Path, pool: Pool, *, width: int = 12, count: int = 2, name: str = "two"
+) -> tuple[OutputStore, OutputMeta, PipelineOutput]:
+    """The job of `finished_job` saved with its rows on ``pool`` and its blobs where an
+    app on the same data directory reads them (`output_store`)."""
     paths, job, written = await finished_job(tmp_path, width=width, count=count, name=name)
-    meta = save_files(OutputStore(paths), job, name=name, index=0)
-    return paths, meta, written
+    store = output_store(tmp_path, pool, paths=paths)
+    meta = await store.save(job, name=name, index=0)
+    return store, meta, written
 
 
-def copied_output(paths: DataPaths, meta: OutputMeta, *, slug: str, output_id: str) -> OutputMeta:
+def copied_output(store: OutputStore, meta: OutputMeta, *, slug: str, output_id: str) -> OutputMeta:
     """``meta``'s output again, as ``output_id`` of template ``slug``: a second
     template's output without rendering a second template (#1864)."""
-    source = OutputStore(paths).directory(meta.id)
-    target = paths.outputs / slug / output_id
-    shutil.copytree(source, target)
-    record = target / META_NAME
-    data = json.loads(record.read_text(encoding="utf-8"))
-    record.write_text(json.dumps({**data, "id": output_id, "slug": slug}), encoding="utf-8")
-    return OutputStore(paths).get(output_id)
+    return copy_row(store, meta, slug=slug, output_id=output_id)

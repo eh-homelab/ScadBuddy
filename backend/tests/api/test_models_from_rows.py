@@ -9,7 +9,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -31,7 +30,6 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
 )
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.output_copy import copy_outputs
 from scadbuddy.library.template_refresh import TemplateRefresh
 from scadbuddy.library.template_rows import TemplateRows
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
@@ -98,18 +96,9 @@ def _output(client: TestClient, slug: str) -> str:
 
 
 def _copy(client: TestClient) -> None:
-    """The outputs copied first (so the output covers read rows), then the templates:
-    the copy that repairs the hand edits a test made (#7317 phase 3: the app's start
-    already copied once, so the catalogue reads rows before it too)."""
-    state = _state(client)
-    outputs = state.outputs.rows
-    assert outputs is not None
-    if not outputs.copied():
-        copy_outputs(state.outputs, outputs, state.projection.conninfo)
-    deadline = time.monotonic() + 30
-    while not outputs.copied():
-        assert time.monotonic() < deadline, "no finished outputs copy"
-        time.sleep(0.1)
+    """The templates' copy that repairs the hand edits a test made (#7317 phase 3: the
+    app's start already copied once, so the catalogue reads rows before it too). The
+    outputs need no copy: their rows are their only record (#7257)."""
     sync_template_rows(client)
 
 

@@ -114,9 +114,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, error) {
-	if p := rt.refusal(route.caller, r); p != nil {
+	service, p := rt.refusal(route.caller, r)
+	if p != nil {
 		return nil, p
 	}
+	r = r.WithContext(auth.WithService(r.Context(), service))
 	if route.MaxBody > 0 {
 		if r.ContentLength < 0 {
 			return nil, &httpx.Problem{
@@ -167,7 +169,7 @@ next:
 	return nil, nil
 }
 
-func (rt *Router) refusal(caller string, r *http.Request) *httpx.Problem {
+func (rt *Router) refusal(caller string, r *http.Request) (*auth.Service, *httpx.Problem) {
 	service := rt.Resolver.Resolve(r.Context(), r.Header.Get("Authorization"))
 	if service == nil {
 		detail := "This route needs a service credential."
@@ -177,7 +179,7 @@ func (rt *Router) refusal(caller string, r *http.Request) *httpx.Problem {
 		p := httpx.WithReason(http.StatusUnauthorized, detail, "no_credential")
 		p.Type = problems + "signed-out"
 		p.Headers = map[string]string{"WWW-Authenticate": `Bearer realm="scadbuddy"`}
-		return p
+		return nil, p
 	}
 	var p *httpx.Problem
 	switch {
@@ -191,10 +193,10 @@ func (rt *Router) refusal(caller string, r *http.Request) *httpx.Problem {
 		}
 		p = httpx.WithReason(http.StatusForbidden, detail, "out_of_scope")
 	default:
-		return nil
+		return service, nil
 	}
 	p.Type = problems + "forbidden"
-	return p
+	return nil, p
 }
 
 // problemOf is the answer to a handler's error.

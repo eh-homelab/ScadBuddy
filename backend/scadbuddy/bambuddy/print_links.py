@@ -225,6 +225,9 @@ class ScadBuddyJob(BaseModel):
     #: ``/prints/{archive_id}``); ``None`` until one is linked.
     archive_id: int | None = None
     matched_by: JobMatchedBy
+    #: The plate it prints (#8031): what its send, its LAN start or the archive it
+    #: reprints recorded; ``None`` when none did, which pictures as plate 1.
+    plate: int | None = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +253,7 @@ def _job(row: dict[str, Any], subject: PrintSubject, matched_by: JobMatchedBy) -
         run_id=row["run_id"],
         archive_id=row["archive_id"],
         matched_by=matched_by,
+        plate=row["plate_id"],
     )
 
 
@@ -263,20 +267,23 @@ _QUEUE_JOBS = (
     "SELECT 0 AS rank, s.queue_item_id, s.subject, s.run_id,"
     " COALESCE(o.slug, r.slug) AS slug,"
     " (SELECT l.archive_id FROM print_links l WHERE l.queue_item_id = s.queue_item_id"
-    "  AND l.subject = s.subject ORDER BY l.first_seen LIMIT 1) AS archive_id"
+    "  AND l.subject = s.subject ORDER BY l.first_seen LIMIT 1) AS archive_id,"
+    " s.plate_id"
     " FROM print_sends s"
     " LEFT JOIN print_runs r ON r.id = s.run_id"
     f" LEFT JOIN outputs o ON o.output_id = {_output_id_of('s.subject')}"
     " WHERE s.queue_item_id = ANY(%(ids)s)"
     " UNION ALL"
     " SELECT 1 AS rank, p.queue_item_id, p.subject, NULL::text AS run_id, o.slug,"
-    " p.archive_id"
+    " p.archive_id,"
+    " (SELECT l.plate_id FROM print_links l WHERE l.archive_id = p.archive_id"
+    "  AND l.subject = p.subject ORDER BY l.first_seen LIMIT 1) AS plate_id"
     " FROM print_reprints p"
     f" LEFT JOIN outputs o ON o.output_id = {_output_id_of('p.subject')}"
     " WHERE p.queue_item_id = ANY(%(ids)s)"
     " UNION ALL"
     " SELECT * FROM (SELECT DISTINCT ON (l.queue_item_id) 2 AS rank, l.queue_item_id,"
-    " l.subject, NULL::text AS run_id, o.slug, l.archive_id"
+    " l.subject, NULL::text AS run_id, o.slug, l.archive_id, l.plate_id"
     " FROM print_links l"
     f" LEFT JOIN outputs o ON o.output_id = {_output_id_of('l.subject')}"
     " WHERE l.queue_item_id = ANY(%(ids)s) AND NOT EXISTS"
@@ -288,11 +295,15 @@ _QUEUE_JOBS = (
 
 #: The runs on these printers whose result records a LAN start under one of these
 #: names that the run has not seen end (`LanStarted.ended`), with the archive that
-#: start became when one is recorded.
+#: start became when one is recorded, and the plate the start recorded
+#: (`LanStarted.plate_id`), else the plate its archive link recorded.
 _LAN_JOBS = (
     "SELECT r.id AS run_id, r.output_id AS run_subject, r.printer::text AS printer,"
-    " e.name, COALESCE(o.slug, r.slug) AS slug, a.archive_id"
-    " FROM print_runs r CROSS JOIN LATERAL (SELECT x->>'subtask_name' AS name"
+    " e.name, COALESCE(o.slug, r.slug) AS slug, a.archive_id,"
+    " COALESCE(e.plate_id, a.plate_id) AS plate_id"
+    " FROM print_runs r CROSS JOIN LATERAL (SELECT x->>'subtask_name' AS name,"
+    "  CASE WHEN jsonb_typeof(x->'plate_id') = 'number' THEN (x->>'plate_id')::int END"
+    "  AS plate_id"
     "  FROM jsonb_array_elements(CASE WHEN jsonb_typeof(r.result->'lan') = 'array'"
     "   THEN r.result->'lan' END) AS x WHERE x->>'ended' IS NULL) AS e"
     " LEFT JOIN lan_print_archives a ON a.run_id = r.id AND a.subtask_name = e.name"

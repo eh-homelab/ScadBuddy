@@ -78,6 +78,7 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         "run_id": "run-3741",
         "archive_id": None,
         "matched_by": "queue_item",
+        "plate": 1,
     }
     assert items[199]["scadbuddy"] == {
         "subject": "library:1630",
@@ -87,6 +88,7 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         "run_id": None,
         "archive_id": 130,
         "matched_by": "queue_item",
+        "plate": None,
     }
     assert items[257]["scadbuddy"] is None
     assert items[205]["scadbuddy"] is None
@@ -308,6 +310,31 @@ def test_a_library_cover_bambuddy_lacks_reads_as_on_its_own_route(client: TestCl
     assert plate.status_code == own.status_code == 404
     assert "show the file's thumbnail" in plate.json()["detail"]
     assert plate.json()["detail"] == own.json()["detail"]
+
+
+@respx.mock
+def test_a_library_plate_bambuddy_lacks_shows_the_files_thumbnail_when_asked(
+    client: TestClient,
+) -> None:
+    """#8030 (#7939): on Bambuddy's library, a plate it has no image of answers with the
+    file's thumbnail when the queue picture asks with ``cover_if_missing``; unasked, it
+    is still a 404."""
+    configure(client)
+    plate = respx.get(f"{API}/library/files/1615/plate-thumbnail/2").mock(
+        return_value=httpx.Response(404, json={"detail": "Plate thumbnail not found"})
+    )
+    cover = respx.get(f"{API}/library/files/1615/thumbnail").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+    route = "/api/v1/print/library/1615/plates/2/thumbnail"
+
+    asked = client.get(route, params={"cover_if_missing": "true"})
+    plain = client.get(route)
+
+    assert asked.status_code == 200, asked.text
+    assert asked.content == b"\x89PNG"
+    assert plain.status_code == 404
+    assert (plate.call_count, cover.call_count) == (2, 1)
 
 
 @respx.mock

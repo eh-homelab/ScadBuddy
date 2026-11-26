@@ -36,10 +36,9 @@ from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.dialog_reads.component import DIALOG_READS
 from scadbuddy.dialog_reads.reads import DIALOG_TTL, DialogReads
-from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
-from tests.api.conftest import files_only, wait_for_job
+from tests.api.conftest import wait_for_job
 from tests.api.test_print import printers_route
 from tests.api.test_print_choices import MIXED_ARCHIVES, h2c_presets
 from tests.api.test_print_filaments import (
@@ -60,6 +59,7 @@ from tests.api.test_send import (
 )
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
+from tests.support.saved_outputs import rewrite_model
 from tests.support.sb_rows import drop_app_sb_presets
 from tests.test_bambu3mf import add_plate
 
@@ -871,10 +871,8 @@ def test_all_plates_pads_a_plate_that_uses_only_slot_2(
     length-2 ``filament_presets`` array with slot 2's spool at index 1 — not a length-1
     array that slices the wrong preset onto the wrong filament."""
     configure(client)
-    files_only(client)
     output_id = make_output(client, model)
-    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    add_plate(output_3mf, 2)
+    rewrite_model(client, output_id, lambda output_3mf: add_plate(output_3mf, 2))
     upload_route()
     printers_route()
     h2c_presets()
@@ -1145,10 +1143,8 @@ def split_plates_routes() -> None:
 
 def two_plate_output(client: TestClient, model: str, paths: DataPaths) -> str:
     configure(client)
-    files_only(client)
     output_id = make_output(client, model)
-    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    add_plate(output_3mf, 2)
+    rewrite_model(client, output_id, lambda output_3mf: add_plate(output_3mf, 2))
     return output_id
 
 
@@ -1205,16 +1201,18 @@ def test_the_all_plates_local_read_combines_every_plates_slots(
     """#2720, the #2780 review: plate 1 uses slot 1 and plate 2 slot 2, so the whole
     file's read from the output's own 3MF must offer both, and each plate its own."""
     configure(client)
-    files_only(client)
     output_id = make_output(client, model)
-    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
     body = ColourPart(1, "Body", "#FF0000", trimesh.creation.box(extents=(10, 10, 4)))
     lid = ColourPart(2, "Lid", "#0047BB", trimesh.creation.box(extents=(12, 12, 2)))
-    write_plates_3mf(
-        [PlateParts((body,), (1,)), PlateParts((lid,), (2,))],
-        ["#FF0000", "#0047BB"],
-        output_3mf,
-        thumbnails=None,
+    rewrite_model(
+        client,
+        output_id,
+        lambda output_3mf: write_plates_3mf(
+            [PlateParts((body,), (1,)), PlateParts((lid,), (2,))],
+            ["#FF0000", "#0047BB"],
+            output_3mf,
+            thumbnails=None,
+        ),
     )
     uploaded = upload_route()
     split_plates_routes()
@@ -1239,19 +1237,21 @@ def test_the_chosen_plates_filament_read_offers_just_those_plates_slots(
     rows are plates 1 and 3's slots, never slot 2, which only plate 2 uses. Past
     ``MAX_PLATES`` entries the read is refused."""
     configure(client)
-    files_only(client)
     output_id = make_output(client, model)
-    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
     colours = ["#FF0000", "#0047BB", "#FFFFFF"]
     box = trimesh.creation.box(extents=(10, 10, 2))
-    write_plates_3mf(
-        [
-            PlateParts((ColourPart(slot, f"Part {slot}", colours[slot - 1], box),), (slot,))
-            for slot in (1, 2, 3)
-        ],
-        colours,
-        output_3mf,
-        thumbnails=None,
+    rewrite_model(
+        client,
+        output_id,
+        lambda output_3mf: write_plates_3mf(
+            [
+                PlateParts((ColourPart(slot, f"Part {slot}", colours[slot - 1], box),), (slot,))
+                for slot in (1, 2, 3)
+            ],
+            colours,
+            output_3mf,
+            thumbnails=None,
+        ),
     )
     upload_route()
     split_plates_routes()
@@ -1468,29 +1468,29 @@ def two_colour_output(
 ) -> str:
     """The test model rewritten in two colours, one plate per entry of ``plates`` naming
     the filaments its parts print with (by default one plate using both)."""
-    files_only(client)
     output_id = prepared(client, model)
-    directory = paths.output_dir(model, output_id)
     colours = ["#FF0000", "#0000FF"]
-    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
-    meta["colors"] = colours
-    (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
-    # The row is the record a read answers from (#7255): it gets the same colours.
+    # The row is the record a read answers from (#7255, #7257).
     store = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
-    store.rows.update_meta(output_id, OutputMeta.model_validate(meta))
+    meta = store.get(output_id).model_copy(update={"colors": colours})
+    store.rows.update_meta(output_id, meta)
     box = trimesh.creation.box(extents=(10, 10, 5))
-    write_plates_3mf(
-        [
-            PlateParts(
-                tuple(ColourPart(n, f"Color {n}", colours[n - 1], box) for n in extruders),
-                extruders,
-            )
-            for extruders in plates or [(1, 2)]
-        ],
-        colours,
-        directory / "model.3mf",
-        thumbnails=None,
-        model_name=model,
+    rewrite_model(
+        client,
+        output_id,
+        lambda path: write_plates_3mf(
+            [
+                PlateParts(
+                    tuple(ColourPart(n, f"Color {n}", colours[n - 1], box) for n in extruders),
+                    extruders,
+                )
+                for extruders in plates or [(1, 2)]
+            ],
+            colours,
+            path,
+            thumbnails=None,
+            model_name=model,
+        ),
     )
     return output_id
 
