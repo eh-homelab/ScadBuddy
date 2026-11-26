@@ -1747,12 +1747,36 @@ function csvRows(body: { rows?: unknown }): Record<string, string | null>[] | Re
 // -- codes and printer labels (#6955) --
 
 /** `codes/parse.py`: any case, an optional dash, a one-letter prefix and a number. */
-function parseCode(text: string): { prefix: string; number: number } | null {
+export function parseCode(text: string): { prefix: string; number: number } | null {
   const hit = /^([A-Z])-?([0-9]+)$/.exec(text.trim().toUpperCase())
   return hit ? { prefix: hit[1]!, number: Number(hit[2]) } : null
 }
 
 const placeCode = (place: S['Location']) => `L-${place.number}`
+
+/**
+ * `codes/resolve.py` `resolve` over `parseCode`: the row a code's text names, in the
+ * `/codes/{code}` shape, or null. Shared by `GET /codes/{code}` and the tag-read mock
+ * (`tags.ts` `readOn`), so a scanned label and a typed code resolve by one rule (#6955).
+ */
+export function resolveCodeText(text: string): S['Resolved'] | null {
+  const parsed = parseCode(text)
+  if (!parsed) return null
+  if (parsed.prefix === 'L') {
+    const place = state.locations.find((one) => one.number === parsed.number)
+    return place ? { kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } : null
+  }
+  if (parsed.prefix === 'S') {
+    const row = state.spools.find((one) => one.number === parsed.number)
+    return row ? resolvedSpool(row) : null
+  }
+  return null
+}
+
+/** A spool in the `/codes/{code}` shape; also what a `scadbuddy:spool:<id>` text resolves to. */
+export function resolvedSpool(row: { id: string; number: number; archived_at?: string | null }): S['Resolved'] {
+  return { kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at }
+}
 const step = (place: S['Location']): S['PathStep'] => ({ id: place.id, code: placeCode(place), name: place.name })
 const byOrder = (a: S['Location'], b: S['Location']) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)
 
@@ -1874,6 +1898,9 @@ export function spoolViewOf(spoolId: string): FilamentSpool | null {
   const row = findSpool(spoolId)
   return row ? view(row) : null
 }
+
+/** The spool's own row by its id, archived or not; null for an unknown id. */
+export const spoolRowOf = (spoolId: string) => findSpool(spoolId) ?? null
 
 /** The tag by its id. */
 export const tagOf = (tagId: string): S['Tag'] | undefined => tagById(tagId)
@@ -2625,18 +2652,8 @@ export const handlers = [
   // -- places --
   http.get('/api/v1/codes/:code', ({ params }) => {
     const code = String(params.code)
-    const parsed = parseCode(code)
-    const unknown = () => problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
-    if (!parsed) return unknown()
-    if (parsed.prefix === 'L') {
-      const place = state.locations.find((one) => one.number === parsed.number)
-      return place ? HttpResponse.json({ kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } satisfies S['Resolved']) : unknown()
-    }
-    if (parsed.prefix === 'S') {
-      const row = state.spools.find((one) => one.number === parsed.number)
-      return row ? HttpResponse.json({ kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at } satisfies S['Resolved']) : unknown()
-    }
-    return unknown()
+    const resolved = resolveCodeText(code)
+    return resolved ? HttpResponse.json(resolved) : problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
   }),
   http.get(`${BASE}/locations/:id`, ({ params }) => {
     const place = state.locations.find((one) => one.id === params.id)
