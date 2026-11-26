@@ -15,7 +15,9 @@ from uuid import UUID
 from psycopg import Connection
 from psycopg.rows import DictRow
 
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.refs import EntityRef
+from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
 
@@ -99,11 +101,14 @@ def _ref_as_id(kind: EntityKind) -> str:
     return f"CASE WHEN e.ref ~ {_UUID_TEXT} THEN e.ref::uuid END"
 
 
-def repoint_entity(conn: Conn, kind: str, gone: str, kept: str) -> None:
+def repoint_entity(conn: Conn, kind: str, gone: str, kept: str, by: Actor) -> None:
     """Make `kind:kept` own what `kind:gone` owned: its files, links and properties (a key
     both have keeps `kept`'s value), and the stock moves that name it. For a merge that
     deletes `gone`'s row and keeps `kept`'s (the printers' `PRINTER_REFERENCES`), in its
-    transaction; without it the sweep would take them as an orphan's."""
+    transaction; without it the sweep would take them as an orphan's. ``by`` is the
+    history's actor of each key moved or removed (`set_actor`, which takes the event
+    log's lock before the rows below)."""
+    set_actor(conn, by)
     # Locked in id order, as `apply` locks an entity, so a property write on `gone` cannot
     # commit between the copy below and the delete, which cascades.
     rows = conn.execute(

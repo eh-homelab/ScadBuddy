@@ -30,6 +30,7 @@ from scadbuddy.library.settings_store import (
     StoredSettings,
 )
 from scadbuddy.operations.store import OperationStore
+from scadbuddy.orders.models import Actor
 from scadbuddy.printers import store as printer_store
 from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.printers.store import PrinterStore
@@ -37,6 +38,7 @@ from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.operation_models import InsertOp, OperationInput
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 
 @pytest.fixture
@@ -323,20 +325,20 @@ async def test_a_printer_merge_drops_the_cache_after_its_commit(
     store: SettingsStore, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     printers = PrinterStore(store.pool, KEK)
-    synthetic = printers.ensure_bambuddy(7, serial=None, name="Seven", model=None).id
+    synthetic = printers.ensure_bambuddy(7, serial=None, name="Seven", model=None, by=MERGED_BY).id
     kept = printers.create(PrinterCreate(serial="01P00A000000001", name="One")).id
     _skip_lan(settings, [synthetic])
     async with _listening(settings.database_url, store):
         assert store.get(_SKIP_LAN) == [synthetic]
 
-        def read(conn: Any, gone: str, into: str) -> None:
+        def read(conn: Any, gone: str, into: str, by: Actor) -> None:
             # Another request reads before the merge commits: it sees the old rows.
             assert store.get(_SKIP_LAN) == [synthetic]
 
         monkeypatch.setattr(
             printer_store, "PRINTER_REFERENCES", (*printer_store.PRINTER_REFERENCES, read)
         )
-        printers.link_bambuddy(kept, 7)
+        printers.link_bambuddy(kept, 7, by=MERGED_BY)
         assert store.get(_SKIP_LAN) == [kept]
 
 

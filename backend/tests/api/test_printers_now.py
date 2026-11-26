@@ -27,6 +27,7 @@ from tests.api.test_send import API
 from tests.api.test_send import configure as configure_bambuddy
 from tests.bambuddy.conftest import recording
 from tests.printers.conftest import KEK
+from tests.support.printers import MERGED_BY
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -548,10 +549,10 @@ def test_now_with_bambuddy_down_still_lists_lan_printers(client: TestClient) -> 
     lan_only = _lan_printer(client, serial="01P00A000000002", name="Attic")
     _registry(client).reports.put(lan_only, {"gcode_state": "IDLE"}, datetime.now(UTC))
     both = _lan_printer(client)
-    _registry(client).store.link_bambuddy(both, 1)
+    _registry(client).store.link_bambuddy(both, 1, by=MERGED_BY)
     _registry(client).reports.put(both, {"gcode_state": "RUNNING"}, datetime.now(UTC))
     bambuddy_only = _registry(client).store.ensure_bambuddy(
-        2, serial="01P00A000000003", name="P2", model=None
+        2, serial="01P00A000000003", name="P2", model=None, by=MERGED_BY
     )
 
     response = client.get("/api/v1/print/printers/now")
@@ -735,7 +736,7 @@ def test_a_native_printer_never_asks_bambuddy_for_its_status(client: TestClient)
     )
     registry = _registry(client)
     pid = _lan_printer(client)
-    registry.store.link_bambuddy(pid, 1)
+    registry.store.link_bambuddy(pid, 1, by=MERGED_BY)
     registry.reports.put(pid, {"gcode_state": "IDLE"}, datetime.now(UTC) - timedelta(seconds=91))
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
 

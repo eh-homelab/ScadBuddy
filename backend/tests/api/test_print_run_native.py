@@ -61,6 +61,7 @@ from tests.api.test_send import API, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
+from tests.support.printers import MERGED_BY
 from tests.support.sb_rows import seed_app_sb_spools
 
 pytestmark = [
@@ -673,7 +674,9 @@ def _lan_routed(client: TestClient) -> str:
     """Bambuddy printer 1's registry row, linked over the LAN, set to print natively,
     with a fresh report: on the hot path's backends a run on it goes over the LAN."""
     printers: Printers = _state(client).components.get(PRINTERS)
-    row = printers.store.ensure_bambuddy(1, serial="0938AB000000001", name="Garage", model="H2C")
+    row = printers.store.ensure_bambuddy(
+        1, serial="0938AB000000001", name="Garage", model="H2C", by=MERGED_BY
+    )
     printers.store.link_lan(
         row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="cd" * 32
     )
