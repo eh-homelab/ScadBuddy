@@ -2543,8 +2543,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`order_item_render`) and its slice quote (`ensure_output`) save each later output under
   `orders/rendering.py` `kit_output_id(<the item's output>, index)`, `kit_output_ids` finds
   them by that id and the job (`ItemDetail.kit_outputs`), and the item's print refuses a kit
-  (409 `item_kit`; also by the output's render job while it lasts, `kit_count`), whose
-  outputs the order page prints one by one. A pipeline's cart line needs its row's
+  (409 `item_kit`; also by the output's render job while it lasts, `kit_count`, which the
+  order read gives as `ItemDetail.kit_count`), whose outputs the order page prints one by one. A pipeline's cart line needs its row's
   `every_output`. A file listing has no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
