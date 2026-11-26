@@ -251,7 +251,13 @@ export const storefrontTools: Tool[] = [
         `draft a storefront listing of ${name}`,
       )
       const page = `/storefront/listings/${encodeURIComponent(made.id)}`
-      if (schema.pipeline && !output) {
+      // #7879: a version whose pipeline declares no inputs has no "Set up the design" in the
+      // editor (`DesignBlock`), and publish refuses it, so the note says so instead.
+      if (schema.pipeline && schema.pipeline.inputs == null) {
+        notes.push(
+          `This version of ${record.name} cannot be listed: its pipeline declares no inputs (${schema.pipeline.fault || 'no reason given'}), so the editor offers no "Set up the design" and publish refuses it (listing_inputs_undeclared). Choose another version in the editor, or fix the template and draft it again.`,
+        )
+      } else if (schema.pipeline && !output) {
         notes.push(
           `${record.name} has a design of its own to set up (its pipeline's inputs), which a model brings none of: open the listing at ${page} and press "Set up the design" before you publish it, or draft it from a saved output of that design.`,
         )
