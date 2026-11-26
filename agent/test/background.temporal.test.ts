@@ -18,8 +18,9 @@ import { AgentWorker } from '../src/temporal/worker.js'
 import { TEST_DATABASE_URL, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { Worker } from '@temporalio/worker'
 import { LocalSandboxes } from './support/sandbox.js'
-import { SandboxClient, startInSandbox } from '../src/sandbox/client.js'
+import { type Sandboxes, SandboxClient, startInSandbox } from '../src/sandbox/client.js'
 import { ensureSessionDir } from '../src/harness/stateDirs.js'
 import type { HarnessPaths } from '../src/harness/options.js'
 
@@ -241,6 +242,50 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     // The panel's cancel goes through the service alone (routes/backgroundTasks.ts), not TaskStop.
     await tasks.cancel(sessionId, t.id, 'the user in the panel')
     await expect.poll(async () => (await client.slotStatus(slot.id))?.running ?? false, { timeout: 30_000 }).toBe(false)
+  }, 90_000)
+
+  it('stops a sandbox slot whose watch failed and could not stop it: the task ends done, the slot stops anyway (#5916)', async () => {
+    const dir = await ensureSessionDir(workPaths, sessionId)
+    const { slot } = await startInSandbox({ sandboxes: boxes, sessionId, dir, limits, signal: AbortSignal.timeout(30_000) }, 'bash', 'sleep 120', 3_600_000)
+    // The replica that ran the turn cannot reach the pod: its watch fails, and so does its own stop.
+    const queue = `${TASK_QUEUE}.cut-off-replica`
+    const unreachable: Sandboxes = {
+      acquire: async () => {
+        throw new Error('unreachable')
+      },
+      find: async () => {
+        throw new Error('unreachable')
+      },
+    }
+    const replica = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: queue,
+      activities: backgroundActivities({ store, tz: 'UTC', paths: workPaths, sandbox: { sandboxes: unreachable, limits: async () => limits }, send: async () => ({ result: 'sent' }) }),
+    })
+    const running = replica.run()
+    try {
+      const t = (await store.create({
+        sessionId,
+        kind: 'monitor',
+        description: 'serve',
+        spec: { description: 'serve', command: 'serve', queue, timeoutMs: 3_600_000, background: 'shell', sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } },
+        createdBy: browser,
+      }))!
+      await (
+        await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+          workflowId: backgroundWorkflowId(sessionId, t.id),
+          taskQueue: TASK_QUEUE,
+          args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+        })
+      ).result()
+      // The workflow finishes a failed watch as done (its end is the detail), never as failed.
+      expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'failed' })
+      const client = new SandboxClient(boxes.started.get(sessionId)!.endpoint, AbortSignal.timeout(30_000))
+      expect((await client.slotStatus(slot.id))?.running ?? false).toBe(false)
+    } finally {
+      replica.shutdown()
+      await running
+    }
   }, 90_000)
 
   it('sends a backlog past one delivery\'s budget over several messages, none past it', async () => {

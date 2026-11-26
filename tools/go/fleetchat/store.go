@@ -46,14 +46,16 @@ type Store interface {
 	Agents(ctx context.Context) ([]AgentInfo, error)
 	// Join adds the agent to the channel, creating the channel.
 	Join(ctx context.Context, sessionID, channel string) error
-	// Leave returns ErrNotMember when the agent is not in the channel.
+	// Leave returns ErrUnknownChannel when no channel has the name, and
+	// ErrNotMember when the agent is not in it.
 	Leave(ctx context.Context, sessionID, channel string) error
 	Channels(ctx context.Context, sessionID string) ([]ChannelInfo, error)
 	// Send stores the message and delivers it: to the agent of a DM, or to
 	// the channel's members at send time (sender included). It returns the
 	// message's seq and the recipients' session ids. It returns
-	// ErrUnknownAgent for a handle no agent has, and ErrNotMember when the
-	// sender is not in the channel.
+	// ErrUnknownAgent for a handle no agent has, ErrUnknownChannel for a
+	// channel name no channel has, and ErrNotMember when the sender is not in
+	// the channel.
 	Send(ctx context.Context, sessionID string, t Target, text string) (int64, []string, error)
 	// Inbox returns up to limit deliveries above the agent's cursor, oldest
 	// first, and whether more are waiting. Unless peek, it moves the cursor
@@ -72,4 +74,6 @@ var (
 	ErrBadSeq       = errors.New("seq must be 0 or more, and not past your cursor")
 	ErrUnknownAgent = errors.New("no agent has that handle")
 	ErrNotMember    = errors.New("not a member of that channel")
+	// ErrUnknownChannel is a channel nobody has joined: fleet_join creates it.
+	ErrUnknownChannel = errors.New("no channel has that name; fleet_join creates it")
 )

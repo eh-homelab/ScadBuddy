@@ -39,6 +39,8 @@ export { AgentSession } from './session/workflow.js'
 export { BridgeCall } from './bridgeCall.js'
 // A session turn's tool calls, each an execution of its own (plan 2026-10-13 Step 9.2).
 export { ToolCall } from './toolCall.js'
+// A commit pin's mirror, made once per pin across the cluster (#7907).
+export { PackageMirror } from './packageMirror.js'
 
 // AgentOperation: the agent's commands in the shape of spec 2026-10-01 §4.2 (#1055),
 // the backend `Operation`'s order and answers (backend/scadbuddy/workflows/operation.py):

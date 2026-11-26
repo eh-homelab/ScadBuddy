@@ -157,6 +157,10 @@ KEY_VERSION: Final = 4
 #: reads its price every `PENDING_RETRY` seconds while the slice runs, and each
 #: live read may ask Bambuddy for the printer's tasks.
 RATE_TTL: Final = 60.0
+#: How long a template's settings the key holds are read again only after (#7800
+#: review), as `RATE_TTL`, but short: a shop's edit should move the price soon. Not
+#: `Final`: an api test sets it to 0 to read an edit at once.
+TEMPLATE_TTL = 5.0
 #: The advisory lock every claim takes, so the capacity is counted once at a time.
 _CLAIM_LOCK: Final = "storefront_slice_prices"
 
@@ -556,6 +560,9 @@ def key_setup(
     setup = request.model_dump(mode="json", include=set(SETUP_FIELDS))
     if template_settings is None:
         return setup
+    if template_settings.refusal is not None:
+        # The slice refuses (#7800 review): its failed row is a key of its own.
+        setup["template_refused"] = True
     if template_settings.print_settings:
         setup["template_print_settings"] = dict(template_settings.print_settings)
     parts = {
@@ -754,8 +761,8 @@ class SliceVariant(BaseModel):
     #: holds the visitor's colours already.
     slot_colours: dict[int, str] = Field(default_factory=dict)
     #: A render's template settings as the key holds them (#7633, :func:`key_setup`),
-    #: which its slice takes in place of the template's as they are when it runs. None
-    #: for a file, a model.json that refused them (the slice refuses too), and an
+    #: which its slice takes in place of the template's as they are when it runs; a
+    #: refusal of them, which the slice refuses with. None for a file, and for an
     #: operation started before #7633 (the slice reads them as it did).
     template_settings: TemplateSettings | None = None
 
@@ -955,8 +962,9 @@ def _kit(
 ) -> tuple[Callable[[], Awaitable[list[Any]]], Callable[[int, Plate], Plate]]:
     """:func:`slice_and_price`'s ``start`` and ``place`` of a render of several outputs
     (#5701), whose slots are ``kit``. Every output is started whole, output after output,
-    each with the presets of its own slot ids. Each plate takes the next number across the
-    outputs and the kit's slots. A slot its output has no colour for is a
+    each with the presets of its own slot ids and the variant's template settings: every
+    output is of one render of the reference's template (#7633). Each plate takes the next
+    number across the outputs and the kit's slots. A slot its output has no colour for is a
     :class:`QuoteError`: its number may be another output's slot of the kit."""
     maps = [slot_map(one.colours, kit) for one in rendered]
     #: The slots of the output each started plate is of.
@@ -1184,8 +1192,8 @@ async def planned_variant(
     type preset for a slot's material). Its subject is a render (``reference`` and the
     sha256 of its 3MF) or a file listing's file (``library_file``, #6710), as
     :func:`plan_variant` takes them: every read of a price builds its key here. A render's
-    template settings are read here once (#7633), as the template's model.json has them
-    now: the key holds them and the slice takes them."""
+    template settings are read here once (#7633, :func:`live_template_settings`): the key
+    holds them and the slice takes them."""
     if filaments is None:
         return None
     orders = _orders(state)
@@ -1204,9 +1212,7 @@ async def planned_variant(
     wanted = {profile.materials.get(f.material.casefold()) for f in filaments}
     type_presets = await read_type_presets(state, [t for t in wanted if t is not None])
     template_settings = (
-        None
-        if reference is None
-        else await asyncio.to_thread(read_template_settings, state.catalogue, reference.slug)
+        None if reference is None else await live_template_settings(state.catalogue, reference.slug)
     )
     return plan_variant(
         settings=settings,
@@ -1519,6 +1525,30 @@ async def live_rate(rates: Any, printer: str) -> MachineRateBreakdown | None:
     rate: MachineRateBreakdown | None = await rates.for_quote(printer, None)
     kept[printer] = (now, rate)
     return rate
+
+
+#: Each template's settings as last read, per `Catalogue` (one per app).
+_template_settings: weakref.WeakKeyDictionary[Any, dict[str, tuple[float, TemplateSettings]]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+async def live_template_settings(catalogue: Any, slug: str) -> TemplateSettings:
+    """The template's settings (`read_template_settings`, #7633), read again only
+    `TEMPLATE_TTL` after the last read in this process (#7800 review): a page re-reads its
+    price every `PENDING_RETRY` seconds. So an edit of the settings moves the key at most
+    that late; the key and its slice still take one read."""
+    now = time.monotonic()
+    kept = _template_settings.setdefault(catalogue, {})
+    found = kept.get(slug)
+    if found is not None and now - found[0] < TEMPLATE_TTL:
+        return found[1]
+    settings = await asyncio.to_thread(read_template_settings, catalogue, slug)
+    # A read drops what is past `TEMPLATE_TTL`, so a deleted template's entry goes too.
+    for stale in [name for name, (at, _) in kept.items() if now - at >= TEMPLATE_TTL]:
+        del kept[stale]
+    kept[slug] = (now, settings)
+    return settings
 
 
 #: The printer each registry printer was last read as, per `Printers` (one per app).

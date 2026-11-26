@@ -1,6 +1,8 @@
 import hashlib
 import os
+import threading
 import time
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -111,28 +113,55 @@ def test_a_put_survives_the_sweep_removing_the_claim_under_it(
     assert claims.get(name) == b"a"
 
 
-def test_a_claim_renewed_while_the_sweep_looks_at_it_survives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.fixture
+def puts() -> Iterator[list[threading.Thread]]:
+    """The puts `_put_waits_on_the_lock` starts, joined at teardown whether or not the
+    test passed, so none runs on into the next test (#7966)."""
+    started: list[threading.Thread] = []
+    yield started
+    for put in started:
+        put.join(timeout=5)
+
+
+def _put_waits_on_the_lock(
+    claims: ClaimStore,
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+    puts: list[threading.Thread],
+) -> list[bool]:
+    """Patch ``os.stat`` so that the first stat of the claim ``name`` (the check of a
+    release or the sweep) starts a put of its bytes in a thread, and records whether that
+    put was still waiting on the store's lock when the check went on (#7947)."""
+    stat = os.stat
+    waited: list[bool] = []
+
+    def stat_with_a_put(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if Path(path).name == name and not waited:
+            put = threading.Thread(target=claims.put, args=(b"a",))
+            put.start()
+            puts.append(put)
+            put.join(timeout=0.3)
+            waited.append(put.is_alive())
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_with_a_put)
+    return waited
+
+
+def test_a_put_waits_while_the_sweep_checks_and_removes_a_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, puts: list[threading.Thread]
 ) -> None:
-    """Review 3c 1.4: a put between the sweep's stat and its removal keeps the claim."""
-    claims = ClaimStore(tmp_path)
+    """#7947 (review 3c 1.4): a put of an old claim's bytes cannot come between the
+    sweep's check and its removal; it waits on the lock, then writes the claim anew."""
+    claims = ClaimStore(tmp_path / "claims")
     name = claims.put(b"a")
     past = time.time() - timedelta(days=2).total_seconds()
-    os.utime(tmp_path / name, (past, past))
-    stat = Path.stat
-    renewed = False
-
-    def stat_then_renew(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
-        nonlocal renewed
-        result = stat(self, *args, **kwargs)
-        if self.name == name and not renewed:
-            renewed = True
-            claims.put(b"a")
-        return result
-
-    monkeypatch.setattr(Path, "stat", stat_then_renew)
-    assert claims.sweep(timedelta(days=1)) == 0
-    assert renewed
+    os.utime(tmp_path / "claims" / name, (past, past))
+    waited = _put_waits_on_the_lock(claims, name, monkeypatch, puts)
+    assert claims.sweep(timedelta(days=1)) == 1
+    for put in puts:
+        put.join(timeout=5)
+    assert waited == [True]
     assert claims.get(name) == b"a"
 
 
@@ -198,29 +227,22 @@ def test_release_never_moves_a_claim_another_request_put_since(
     assert claims.get(a.name) == b"a"
 
 
-def test_a_claim_renewed_between_the_release_check_and_its_move_is_put_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_put_waits_while_a_release_checks_and_removes_its_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, puts: list[threading.Thread]
 ) -> None:
-    """#7897: a put between `release`'s check (still the file its hold wrote) and its move
-    aside is moved with it; `release` sees the other file and puts it back."""
-    claims = ClaimStore(tmp_path)
+    """#7947: a put of the same bytes cannot come between `release`'s check (still the
+    file its hold wrote) and its removal, so the claim's name is never missing while
+    another put's file is there (two copies of one archive photo, #7232). The put waits
+    on the lock, then writes the claim anew."""
+    claims = ClaimStore(tmp_path / "claims")
     held = claims.hold(b"a")
-    stat = Path.stat
-    renewed = False
-
-    def stat_then_renew(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
-        nonlocal renewed
-        result = stat(self, *args, **kwargs)
-        if self.name == held.name and not renewed:
-            renewed = True
-            claims.hold(b"a")
-        return result
-
-    monkeypatch.setattr(Path, "stat", stat_then_renew)
+    waited = _put_waits_on_the_lock(claims, held.name, monkeypatch, puts)
     claims.release(held)
-    assert renewed
+    for put in puts:
+        put.join(timeout=5)
+    assert waited == [True]
     assert claims.get(held.name) == b"a"
-    assert [path.name for path in tmp_path.iterdir()] == [held.name]
+    assert [path.name for path in (tmp_path / "claims").iterdir()] == [held.name]
 
 
 def test_hold_file_moves_a_streamed_file_in_and_a_second_renews_it(tmp_path: Path) -> None:

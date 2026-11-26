@@ -5,6 +5,7 @@ import {
   groupStatus,
   isLiveStatus,
   stopReasonText,
+  STOPPED_RESULT,
   stoppedBy,
   toolStatus,
   type ToolStatus,
@@ -129,6 +130,15 @@ describe('toolStatus (#782)', () => {
     const two = tool('t2', { result: { ok: false, summary: 'refused', sources: [] }, resultAfter: 't2' })
     expect(statusOf([one, two, restarted], 't1')).toBe('stopped')
     expect(statusOf([one, two, restarted], 't2')).toBe('stopped')
+  })
+
+  // #7874: a restart of the agent service stopped the call. No `interrupted` error follows it (the
+  // turn goes on elsewhere), and Claude Code's refusal text is not the user's.
+  it('stopped when its result is Claude Code`s answer to a stop, and no approval names it', () => {
+    const cut = tool('t1', { result: { ok: false, summary: `${STOPPED_RESULT} The tool use was rejected…`, sources: [] } })
+    expect(statusOf([cut, text('m1')], 't1')).toBe('stopped')
+    // A refused approval still says it was not run.
+    expect(statusOf([cut, approval('a1', 't1', 'denied')], 't1')).toBe('not_run')
   })
 
   it('waits for the user while its question is open', () => {

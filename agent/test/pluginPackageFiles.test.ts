@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { builtInFiles, readBuiltInFile } from '../src/plugins/packages/builtins.js'
 import { FULL_MAX_BYTES, fileContent, PREVIEW_CHARS } from '../src/plugins/packages/files.js'
 import { PackageInstaller } from '../src/plugins/packages/install.js'
+import { memoryMirror } from './support/memoryMirror.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
@@ -80,12 +81,15 @@ describe.skipIf(gitMissing !== undefined)(`reading an installed package's files$
   let cacheRoot: string
   let fetcher: ReturnType<typeof localFetcher>
   let installer: PackageInstaller
+  let mirror: ReturnType<typeof memoryMirror>
 
   beforeEach(() => {
     repos = {}
     cacheRoot = mkdtempSync(path.join(os.tmpdir(), 'pkg-files-'))
     fetcher = localFetcher(repos)
-    installer = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver() })
+    mirror = memoryMirror()
+    // A commit pin's files are mirrored at install; a read rebuilds the cache from there (#7907).
+    installer = new PackageInstaller({ fetcher, cacheRoot, resolve: resolver(), mirror: () => mirror, recordMirror: async () => undefined })
   })
   afterEach(() => {
     for (const repo of Object.values(repos)) repo.remove()
@@ -94,10 +98,17 @@ describe.skipIf(gitMissing !== undefined)(`reading an installed package's files$
 
   const install = async (): Promise<PackagePin> => {
     const p = await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' }))
-    return { name: p.review.name, fetchUrl: p.fetchUrl, fetchPath: p.fetchPath, commit: p.commit, contentHash: p.contentHash }
+    return {
+      name: p.review.name,
+      fetchUrl: p.fetchUrl,
+      fetchPath: p.fetchPath,
+      commit: p.commit,
+      ...(p.mirrorSha256 ? { mirrorSha256: p.mirrorSha256 } : {}),
+      contentHash: p.contentHash,
+    }
   }
 
-  it('reads from the verified copy, fetching the pin again when the cache is altered or gone', async () => {
+  it('reads from the verified copy, rebuilt from the mirror when the cache is altered or gone', async () => {
     repos.greeter = gitRepo(GREETER)
     const pin = await install()
     expect((await installer.readFile(pin, 'README.md')).toString()).toBe('# greeter\n\nA fixture.\n')
@@ -107,7 +118,8 @@ describe.skipIf(gitMissing !== undefined)(`reading an installed package's files$
     expect((await installer.readFile(pin, 'README.md')).toString()).toBe('# greeter\n\nA fixture.\n')
     rmSync(cacheRoot, { recursive: true, force: true })
     expect((await installer.readFile(pin, 'agents/helper.md')).toString()).toContain('name: helper')
-    expect(fetcher.checkouts).toHaveLength(3)
+    expect(fetcher.checkouts).toHaveLength(1)
+    expect(mirror.gets).toBe(2)
   })
 
   it('reads a package the rules refuse, which is when it most needs reading', async () => {

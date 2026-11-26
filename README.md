@@ -835,10 +835,13 @@ and "Not this order" hides it for good, after an unlink and a new link too. If t
 later changes or removes a deposit already recorded, the order page warns until the shop
 records the difference as a `bank_transfer` payment with the transaction id as reference
 (payments are never edited). A cancelled order takes no payment and shows no such warning.
-With `SCADBUDDY_PUBLIC_URL` set, Link registers
-`https://<public host>/api/v1/payments/bank/webhook` for the account's webhooks
-([webhooks](https://plaid.com/docs/api/webhooks/)); an account linked before the public URL
-was set gets none until it is linked again. Each webhook is checked by its
+With `SCADBUDDY_STOREFRONT_PUBLIC_URL` (else `SCADBUDDY_PUBLIC_URL`) set, Link registers
+`https://<that host>/api/v1/payments/bank/webhook` for the account's webhooks
+([webhooks](https://plaid.com/docs/api/webhooks/)). The storefront's host comes first because
+Plaid must reach it from the internet, and the back office may be LAN-only; the deployment
+then routes that one path to the API (eh-homelab/clusters `httproute-storefront.yaml`). An
+account linked before that URL was set, or while it named another host, keeps the old one
+until it is linked again. Each webhook is checked by its
 `Plaid-Verification` JWT
 ([webhook verification](https://plaid.com/docs/api/webhooks/webhook-verification/)).
 `SYNC_UPDATES_AVAILABLE` reads the new deposits at once. When the bank needs the shop to
@@ -1462,6 +1465,13 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   pull started during the roll can reach an old build that does not register it; its
   workflow task fails until the new build is current, at most the run's 4.5 minutes, and
   the next tick of the spool refresh pulls again.
+- **Upgrading to the release with #7276** adds one workflow type, `LanCommand` (a printer's
+  K-profile and AMS slot commands over its LAN link, started and awaited by the API,
+  `backend/scadbuddy/workflows/lan_command.py`), to the `bambuddy` queue. Roll
+  `scadbuddy-print` out with `Recreate` (see "A release that needs `Recreate`" below). A
+  K-profile or slot request during the roll can reach an old build that does not register
+  it; that run's workflow task fails until the new build is current, and the route answers
+  202 with the run's id, which `GET /printers/{id}/commands/{command_id}` follows.
 - **Retention:** Settings' "Keep finished Bambuddy operations for" (at least a day)
   must be at least the Temporal namespace's retention (`DescribeNamespace`'s
   `workflow_execution_retention_ttl`): a save below it is refused with a 422 beside the
@@ -2241,6 +2251,20 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   URL (`SCADBUDDY_API_INTERNAL_URL`, the API's Service) and, when `store_backend` is
   `s3`, the bucket's endpoint.
 - It serves `/healthz` and `/metrics` on `9090`.
+- It exports OpenTelemetry traces, metrics and logs over OTLP
+  (`workers/rust/crates/sb-temporal/src/telemetry.rs`, #7667). Each signal is on when
+  its endpoint is set (`OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT`, or else
+  `OTEL_EXPORTER_OTLP_ENDPOINT` plus `/v1/traces`, `/v1/metrics` or `/v1/logs`), and off
+  with `OTEL_SDK_DISABLED=true` or when its `OTEL_<SIGNAL>_EXPORTER` names no `otlp`. The
+  protocol is `http/protobuf` unless `OTEL_EXPORTER_OTLP_PROTOCOL` (or the signal's own
+  variable) says `grpc`. The metrics are cumulative and include the process's own:
+  `process.cpu.time`, `process.memory.usage`, `process.unix.file_descriptor.count` and
+  `process.uptime`. Every `tracing` event at `info` or above is also a log record, except
+  an event with a field the spans drop (`error`, a URL, a path), which stays on stdout
+  only; a record or a stdout JSON line logged inside a span carries its `trace_id` and
+  `span_id`. On exit it flushes the three providers within 5 s, after the shutdown grace
+  below. A log record that goes out carries the same fields as the stdout line; spans
+  pass the scrub.
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
   details are always one `{"exit_code", "stderr_tail", "errors"}` object, `errors`
@@ -2530,6 +2554,7 @@ holds the manifests (the clusters PR, plan Task 11, applies the pod settings bel
   of its key (`filament_presets`, a changed file a new version of it, #7176), sets the
   type's presets for the fetched `(printer model, nozzle)` keys to them (`sb-<id>`), reads
   K values from `GET /printers/{id}/kprofiles/`
+  (Bambuddy's route, through `BambuddyClient.k_profiles`: this read stays on Bambuddy until #7604)
   where one matches exactly, and removes an old K value of a fetched key that the new
   preset does not match (the run's notes name each one; a printer whose K table did not
   answer keeps its values). It writes and removes only K values an earlier fetch set
@@ -2732,10 +2757,11 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   `deploy/camera/`. The recorder image sets `TZ=UTC`. MediaMTX names segment files in local
   time, and the recorder refuses any other `TZ` (`RecorderSettings.check_environment`).
   `build-image.yml` job `camera` publishes all three (amd64); `ci.yml` job `camera-image` builds and
-  checks all three. `deploy.reusable.yml` does not pin them yet. When a pin comes, it must move the
-  relay's image only when the relay's code or MediaMTX changes, not with each ScadBuddy release
-  (spec §6.1): each relay restart is a gap of about 10 to 30 s in every printer's recording
-  (the spec's estimate, §6.9).
+  checks all three. `deploy.reusable.yml` pins the recorder and the edge in eh-homelab/clusters
+  `applications/scadbuddy-camera/` to each build's `sha-<7>@sha256:<digest>` (#7997), both
+  containers of each. It never moves the relay. The relay's pin moves by hand, in a reviewed
+  clusters PR, only when the relay's code or MediaMTX changes (spec §6.1): each relay restart
+  is a gap of about 10 to 30 s in every printer's recording (the spec's estimate, §6.9).
 - **Two containers per pod.** Each pod runs its image twice: MediaMTX
   (`args: [mediamtx, /etc/mediamtx/mediamtx.yml]`) and the controller (the default command,
   `python -m scadbuddy.camera.relay`, `.recorder` or `.edge`). The controller
@@ -2945,6 +2971,16 @@ worker's exists), and copying `deploy/grafana/` at that revision over
 `kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
+
+The Go services (scadbuddy-core, scadbuddy-fleet and bambuddy-fs, through the shared `tools/go/telemetry`)
+and the Rust slicer worker export traces, metrics and logs natively over OTLP/HTTP, with
+`OTEL_EXPORTER_OTLP_ENDPOINT` as the base of `/v1/traces`, `/v1/metrics` and `/v1/logs`. They
+share these rules with the services below: the endpoint and per-signal endpoint variables,
+`OTEL_<SIGNAL>_EXPORTER` and `OTEL_SDK_DISABLED`. Two differ: bambuddy-fs, with no endpoint, sends
+to eh-homelab's collector (`--no-telemetry` turns that off; `tools/go/bambuddy-fs/README.md`
+"Telemetry"), and only core samples with the rule that drops parentless client spans. See
+`tools/go/core/README.md` ("Telemetry"). A request that
+core forwards is one trace: core's span is the parent of the API's.
 
 The API, the render worker and the agent sidecar export OpenTelemetry traces over
 OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the

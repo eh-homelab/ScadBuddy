@@ -11,7 +11,7 @@ import {
   sleep,
   workflowInfo,
 } from '@temporalio/workflow'
-import type { DeliverResult, FireResult, MonitorPlan, MonitorResult, NextStep, WorkflowOutcome } from '../background/activities.js'
+import type { DeliverResult, FinishInput, FireResult, MonitorPlan, MonitorResult, NextStep, WorkflowOutcome } from '../background/activities.js'
 import type { MonitorEnd } from '../background/monitor.js'
 
 // A session's background task (src/background/): a cron job or a wakeup, fired as the
@@ -26,7 +26,7 @@ import type { MonitorEnd } from '../background/monitor.js'
 type Activities = {
   bg_next(input: { taskId: string }): Promise<NextStep>
   bg_fire(input: { taskId: string; waitedMs: number }): Promise<FireResult>
-  bg_finish(input: { taskId: string; state: 'done' | 'cancelled' | 'failed'; detail?: string }): Promise<void>
+  bg_finish(input: FinishInput): Promise<void>
   bg_monitor_plan(input: { taskId: string }): Promise<MonitorPlan>
   bg_monitor_end(input: { taskId: string; end: MonitorEnd }): Promise<void>
   bg_deliver(input: { taskId: string; waitedMs: number }): Promise<DeliverResult>
@@ -71,7 +71,7 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; rec
       if (input.kind === 'cron' && input.recurring !== false && patched(CRON_SCHEDULE_PATCH) && (await acts.bg_schedule({ taskId }))) return
       const step = await acts.bg_next({ taskId })
       if ('end' in step) {
-        await acts.bg_finish({ taskId, state: 'done', detail: step.end })
+        await acts.bg_finish({ taskId, state: 'done', detail: step.end, monitor: false })
         return
       }
       const wait = step.at - Date.now()
@@ -81,7 +81,7 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; rec
         const fired = await acts.bg_fire({ taskId, waitedMs: Date.now() - due })
         if (fired.result === 'sent' || fired.result === 'skipped') break
         if (fired.result === 'end') {
-          await acts.bg_finish({ taskId, state: fired.state, detail: fired.reason })
+          await acts.bg_finish({ taskId, state: fired.state, detail: fired.reason, monitor: false })
           return
         }
         await sleep(retryMs)
@@ -93,7 +93,7 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; rec
     if (!isCancellation(err)) throw err
     // The row was ended by the cancel already (service.ts); this covers a cancel from
     // elsewhere (the Temporal UI, an operator).
-    await CancellationScope.nonCancellable(() => acts.bg_finish({ taskId, state: 'cancelled', detail: 'cancelled' }))
+    await CancellationScope.nonCancellable(() => acts.bg_finish({ taskId, state: 'cancelled', detail: 'cancelled', monitor: input.kind === 'monitor' }))
   }
 }
 
@@ -119,7 +119,7 @@ export async function BackgroundFire(input?: { retryMs?: number }): Promise<void
     const fired = await acts.bg_fire({ taskId, waitedMs: Date.now() - due })
     if (fired.result === 'sent' || fired.result === 'skipped') break
     if (fired.result === 'end') {
-      await acts.bg_finish({ taskId, state: fired.state, detail: fired.reason })
+      await acts.bg_finish({ taskId, state: fired.state, detail: fired.reason, monitor: false })
       await acts.bg_unschedule(fire)
       return
     }
@@ -127,7 +127,7 @@ export async function BackgroundFire(input?: { retryMs?: number }): Promise<void
   }
   const step = await acts.bg_next({ taskId })
   if ('end' in step) {
-    await acts.bg_finish({ taskId, state: 'done', detail: step.end })
+    await acts.bg_finish({ taskId, state: 'done', detail: step.end, monitor: false })
     await acts.bg_unschedule(fire)
   }
 }
@@ -142,7 +142,7 @@ export async function BackgroundFire(input?: { retryMs?: number }): Promise<void
 async function monitor(taskId: string, retryMs: number): Promise<void> {
   const plan = await acts.bg_monitor_plan({ taskId })
   if ('end' in plan) {
-    await acts.bg_finish({ taskId, state: 'done', detail: plan.end })
+    await acts.bg_finish({ taskId, state: 'done', detail: plan.end, monitor: true })
     return
   }
   let pending = false
@@ -181,7 +181,7 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
       // The session takes no more messages (or stayed busy past the give-up): the watch ends with it.
       scope.cancel()
       await source
-      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason })
+      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason, monitor: true })
       return
     }
     // Busy: ask again after retryMs, events or not; delivered with more left: deliver
@@ -195,12 +195,12 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
     const sent = await acts.bg_deliver({ taskId, waitedMs: Date.now() - due })
     if (sent.result === 'none') break
     if (sent.result === 'end') {
-      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason })
+      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason, monitor: true })
       return
     }
     if (sent.result === 'busy') await sleep(retryMs)
   }
-  await acts.bg_finish({ taskId, state: 'done', detail: ended.outcome })
+  await acts.bg_finish({ taskId, state: 'done', detail: ended.outcome, monitor: true })
 }
 
 /** A Workflow script's run: as long as its agents take, past any one worker (its journal resumes it). */
@@ -228,7 +228,7 @@ async function scriptRun(taskId: string, retryMs: number): Promise<void> {
     outcome = { status: 'failed', error: err instanceof Error ? err.message : String(err), usage: zero }
   }
   if (outcome.status === 'gone') {
-    await acts.bg_finish({ taskId, state: 'done', detail: 'gone' })
+    await acts.bg_finish({ taskId, state: 'done', detail: 'gone', monitor: false })
     return
   }
   await acts.wf_end({ taskId, outcome })
@@ -237,11 +237,11 @@ async function scriptRun(taskId: string, retryMs: number): Promise<void> {
     const sent = await acts.bg_deliver({ taskId, waitedMs: Date.now() - due })
     if (sent.result === 'none') break
     if (sent.result === 'end') {
-      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason })
+      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason, monitor: false })
       return
     }
     if (sent.result === 'busy') await sleep(retryMs)
   }
   const detail = outcome.status === 'failed' && outcome.expired ? 'expired' : outcome.status
-  await acts.bg_finish({ taskId, state: outcome.status === 'completed' ? 'done' : 'failed', detail })
+  await acts.bg_finish({ taskId, state: outcome.status === 'completed' ? 'done' : 'failed', detail, monitor: false })
 }

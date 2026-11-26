@@ -192,8 +192,13 @@ func TestAnUnknownAgentIs404(t *testing.T) {
 func TestAPostNeedsMembership(t *testing.T) {
 	a := newFleet(t)
 	ann, bob := a.agent(), a.agent()
-	expect(t, a.send(ann, "ops", "hi").status, 403)
+	// A channel nobody has joined does not exist: posting to it or leaving it names that.
+	unknown := a.send(ann, "ops", "hi")
+	expect(t, unknown.status, 404)
+	expect(t, unknown.body["reason"], "unknown-channel")
+	expect(t, a.fleet("DELETE", "/channels/ops/members/"+ann, "", 404).body["reason"], "unknown-channel")
 	a.fleet("PUT", "/channels/ops/members/"+bob, "", 200)
+	expect(t, a.fleet("DELETE", "/channels/ops/members/"+ann, "", 403).body["reason"], "not-member")
 	got := a.send(ann, "ops", "hi")
 	expect(t, got.status, 403)
 	expect(t, got.body["reason"], "not-member")

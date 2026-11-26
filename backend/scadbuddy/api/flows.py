@@ -55,6 +55,7 @@ from scadbuddy.flow_triggers.component import Triggers, TriggersDep
 from scadbuddy.flow_triggers.fire import pause_for_flow
 from scadbuddy.flow_triggers.models import RunTrigger
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
+from scadbuddy.flows.answerers import BY_SETTING, Answerer, admitted, answerer_of
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
@@ -91,11 +92,14 @@ from scadbuddy.flows.models import (
     RunStatus,
 )
 from scadbuddy.flows.operations import (
+    AGENT_ANSWER,
     FLOW_ANSWER,
     FLOW_DECIDE,
     FLOW_ESCALATE,
     FLOW_RESET,
     NOT_PARENT,
+    not_allowed,
+    people_only,
     seal_answer,
 )
 from scadbuddy.flows.print_binding import DraftLookup, NativeCheck, PrinterLookup, bind_call
@@ -278,6 +282,14 @@ class PendingEntry(BaseModel):
     #: A prompt's task (#7364), which takes its answer at `POST /tasks/{id}/answer`; None
     #: for a `wait_for_human`, whose answer is a text. Its own route has the answer.
     task: TaskQuestion | None = None
+    #: Whether only a person may answer the question (#7471). True for an approval and for
+    #: a question parked before the flag: only a script's False opens it.
+    people_only: bool = True
+
+    @field_validator("people_only", mode="before")
+    @classmethod
+    def _unset_is_people_only(cls, value: object) -> object:
+        return True if value is None else value
 
 
 class GrantUseView(BaseModel):
@@ -332,6 +344,15 @@ def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantV
     )
 
 
+class AnswerBy(BaseModel):
+    """Who answered a run's question: `browser` for a person, `session:<id>` or
+    `token:<id>` for an agent, and what admitted the agent (`setting`)."""
+
+    call_id: str
+    answered_by: str
+    admitted_by: str | None = None
+
+
 class RunView(BaseModel):
     """A run, with what it waits on now."""
 
@@ -354,6 +375,8 @@ class RunView(BaseModel):
     grant: GrantView | None = None
     #: The trigger that started it (#2484); None for a run a request started.
     trigger: RunTrigger | None = None
+    #: Who answered each answered question (#7471), by call id.
+    answers: list[AnswerBy] = []
 
 
 def may_inherit(
@@ -957,6 +980,7 @@ async def _pending(
                 fn=seen.fn if seen else HOST_FN.get(callback.tool_name, callback.tool_name),
                 prompt=seen.prompt if seen else None,
                 since=seen.since if seen else None,
+                people_only=seen is None or seen.people_only is not False,
             )
         )
     return entries, True
@@ -1017,6 +1041,10 @@ async def _run_view(
         view.grant = run_grant_view(
             grant, await flows.store.grant_uses(run.id), await flows.store.grant_in_force(grant)
         )
+    view.answers = [
+        AnswerBy(call_id=d.call_id, answered_by=d.responder, admitted_by=d.admitted_by)
+        for d in await flows.store.answers_of(run.id)
+    ]
     if run.status in TERMINAL:
         return view
     if flows.client is None:
@@ -1235,14 +1263,56 @@ class Decided(BaseModel):
 
 
 def browser_only(
-    detail: str = "Only a person answers a flow's questions and approvals.",
+    detail: str = "Only a person decides a flow's approvals.",
     type_: str = ENTRY_BROWSER_ONLY,
 ) -> None:
-    # Spec §6.6, plan 6 Ruling 6: a flow's entries are answered on the Workflows page,
-    # never by an agent, whatever grant it holds; nor by a service credential or the
-    # agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
+    # Spec §6.6, plan 6 Ruling 6: a flow's approvals and grants are decided on the
+    # Workflows page, never by an agent, whatever grant it holds; nor by a service
+    # credential or the agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
+    # Its questions go by the setting `flow_answerers` (#7471, `answerer`, `admit`).
     if not by_a_person():
         raise ApiError(status.HTTP_403_FORBIDDEN, detail, type_=type_)
+
+
+def answerer(caller: Caller) -> Answerer:
+    """Who an answer is from (#7471, spec §4.1), from the request alone: a person, or an
+    agent's session or MCP token on the agent's credential. 403 for anyone else."""
+    found = answerer_of(caller, current_author(), person=by_a_person())
+    if found is None:
+        raise not_allowed()
+    return found
+
+
+def agent_answer(found: Answerer) -> dict[str, Any]:
+    """The request fields of an agent's answer, which its operation kind records."""
+    return {"responder": found.responder, "admitted_by": BY_SETTING, "principal": found.principal}
+
+
+async def admit(
+    found: Answerer, settings: SettingsStore, flows: Flows, run_id: str, call_id: str
+) -> None:
+    """403 unless the setting `flow_answerers` lets the agent `found` answer the question
+    `call_id` of run `run_id` now, and the question is not for people only (spec §4.2,
+    §4.4). A route's refusal before the operation starts: a repeat gets its first answer."""
+    rules = (await asyncio.to_thread(settings.load)).flow_answerers or []
+    if not rules:
+        raise not_allowed()
+    if found.kind == "session" and found.id is not None and found.principal is not None:
+        found.owner = await flows.store.answer_session(found.id, found.principal)
+        if found.owner is None:
+            raise not_allowed()
+    elif found.kind != "token" or found.id is None or not await flows.store.answer_token(found.id):
+        raise not_allowed()
+    run = await flows.store.get_run(run_id)
+    if run is None:
+        # The operation's check answers it.
+        return
+    if not admitted(found, rules, run.started_by):
+        raise not_allowed()
+    entry = next((w for w in run.waiting_on if w.call_id == call_id and w.kind == "answer"), None)
+    # No parked entry: the operation's check refuses it (it is not waiting, or answered).
+    if entry is not None and entry.people_only is not False:
+        raise people_only()
 
 
 def _grant_browser_only() -> None:
@@ -1272,9 +1342,13 @@ async def answer_flow_run(
     ops: OperationsDep,
     flows: FlowsDep,
     tasks: TasksDep,
+    settings: SettingsStoreDep,
+    caller: CallerDep,
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
-    browser_only()
+    """A person answers; an assistant session or MCP token only when the setting
+    `flow_answerers` names it and the question is not for people only (#7471)."""
+    found = answerer(caller)
     if await _asks_a_task(tasks, body.call_id):
         # Its answer is checked against the task's schema there, and never reaches the run
         # from here.
@@ -1294,13 +1368,20 @@ async def answer_flow_run(
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
     except psycopg.errors.UndefinedTable:
         raise unavailable() from None
+    request: dict[str, Any] = {"run_id": run_id, "call_id": body.call_id, "answer_sealed": sealed}
+    person = found.kind == "person"
+
+    async def refuse() -> None:
+        await admit(found, settings, flows, run_id, body.call_id)
+
     result = await run_operation(
         ops,
         response,
-        kind=ops.kinds[FLOW_ANSWER],
+        kind=ops.kinds[FLOW_ANSWER if person else AGENT_ANSWER],
         subject=f"flow:{run_id}",
-        request={"run_id": run_id, "call_id": body.call_id, "answer_sealed": sealed},
+        request=request if person else {**request, **agent_answer(found)},
         idempotency_key=idempotency_key,
+        before_start=None if person else refuse,
     )
     return operation_answer(result, Decided)
 

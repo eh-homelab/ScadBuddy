@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { ApiError } from '../../api/client'
 import { archiveSpool, type ArchiveReason, type Spool } from '../../api/filament'
 import { DECIMAL } from './spoolWeight'
@@ -69,6 +69,8 @@ function ArchiveForm({
 }) {
   const [reason, setReason] = useState<ArchiveReason | null>(null)
   const [reading, setReading] = useState('')
+  // #7909: whether the field meant a scale reading when the number in it was started.
+  const [typedWithEmpty, setTypedWithEmpty] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
   const fieldId = useId()
   const trimmed = reading.trim()
@@ -84,9 +86,27 @@ function ArchiveForm({
   const { preview, pending } = useClosingPreview(spool.id, reason, finalReadingG, finalGrams)
   if (preview && preview.empty_g !== previewEmptyG) setPreviewEmptyG(preview.empty_g)
   const closing = preview?.closing ?? null
-  // #7909: the preview's answer can change what the number in the field means, under a number
-  // already typed; say so rather than let the label change alone.
-  const meaningChanged = previewEmptyG !== undefined && withEmpty !== (emptyWeightG != null) && trimmed !== ''
+  // #7909: the preview's answer can change what the number in the field means under a number
+  // already typed; say so rather than let the label change alone. A number typed after the
+  // change was typed under the label it has now, so nothing is said for it.
+  const meaningChanged = typedWithEmpty !== null && typedWithEmpty !== withEmpty && trimmed !== ''
+  // #7945: whether the keystroke or paste about to change the field lands on the whole of its text. The
+  // text alone cannot tell a replace-all from a shortening: "210" to "2" is the first keystroke of both.
+  // Read again on every selection change, and dropped on blur, so a keydown that changed nothing (Shift
+  // over a select-all) cannot leave it standing for a later edit that fires no keydown or paste (a drop).
+  const replacingAll = useRef(false)
+  function noteSelection(input: HTMLInputElement) {
+    replacingAll.current = input.value !== '' && input.selectionStart === 0 && input.selectionEnd === input.value.length
+  }
+  function changeReading(next: string) {
+    setReading(next)
+    const value = next.trim()
+    // A number is started when the field was empty, or when the change replaced the whole of the old one
+    // (the review of #7931): it was typed under the label the field has now.
+    if (value === '') setTypedWithEmpty(null)
+    else if (trimmed === '' || replacingAll.current) setTypedWithEmpty(withEmpty)
+    replacingAll.current = false
+  }
 
   async function archive(andContinue: boolean) {
     if (!reason || !readingOk || busy) return
@@ -120,7 +140,7 @@ function ArchiveForm({
         </RadioGroup>
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${fieldId}-reading`}>{withEmpty ? 'Scale reading, with the spool (g)' : 'Filament left (g)'}</Label>
-          <Input id={`${fieldId}-reading`} inputMode="decimal" value={reading} onChange={(event) => setReading(event.target.value)} aria-invalid={readingOk ? undefined : true} className="max-w-40" />
+          <Input id={`${fieldId}-reading`} inputMode="decimal" value={reading} onKeyDown={(event) => noteSelection(event.currentTarget)} onPaste={(event) => noteSelection(event.currentTarget)} onSelect={(event) => noteSelection(event.currentTarget)} onBlur={() => { replacingAll.current = false }} onChange={(event) => changeReading(event.target.value)} aria-invalid={readingOk ? undefined : true} className="max-w-40" />
           {emptyG != null && <p className="text-[13px] text-muted-foreground">The empty spool weighs {grams(emptyG)}; it is taken off the reading.</p>}
           {meaningChanged && (
             <p role="status" className="text-[13px] text-warn">

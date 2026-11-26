@@ -160,7 +160,8 @@ export function runCommand(
   request: ExecRequest,
   signal?: AbortSignal,
 ): Promise<ExecResult> {
-  const started = Date.now()
+  // A monotonic clock: the wall clock may step back while a command runs (WSL steps it by seconds).
+  const started = performance.now()
   return new Promise((resolve) => {
     const child = spawn('bash', argv(request.shell, request.command, options.maxProcesses), {
       cwd: options.work,
@@ -222,7 +223,7 @@ export function runCommand(
         stderr: spawnError ? `${spawnError.message}\n` : Buffer.concat(streams.stderr.chunks).toString('utf8'),
         stdout_bytes: streams.stdout.total,
         stderr_bytes: streams.stderr.total,
-        duration_ms: Date.now() - started,
+        duration_ms: Math.round(performance.now() - started),
       })
     }
   })

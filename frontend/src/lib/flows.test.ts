@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { actorText, hopUntilText, markdownText } from './flows'
+import { actorText, answererLabel, hopUntilText, markdownText } from './flows'
 
 // #2482 — when a hop ends: the time alone today, with the date on any other day.
 describe('hopUntilText', () => {
@@ -34,5 +34,15 @@ describe('actorText', () => {
   it('names a built-in author', () => {
     expect(actorText({ kind: 'builtin', name: 'order-fulfilment' })).toBe('ScadBuddy (built in)')
     expect(actorText({ kind: 'other' })).toBe('someone else')
+  })
+})
+
+describe('answererLabel (#7471)', () => {
+  it('names the assistant with its session, a token, and a person', () => {
+    expect(answererLabel('session:abc')).toEqual({ text: 'Answered by the assistant', sessionId: 'abc' })
+    expect(answererLabel('token:70ce0000-0000-4000-8000-00000000000c')).toEqual({ text: 'Answered by MCP token 70ce0000' })
+    expect(answererLabel('browser')).toEqual({ text: 'Answered by a person' })
+    expect(answererLabel('user:https://idp#alice')).toEqual({ text: 'Answered by a person' })
+    expect(answererLabel(null)).toEqual({ text: 'Answered by a person' })
   })
 })
