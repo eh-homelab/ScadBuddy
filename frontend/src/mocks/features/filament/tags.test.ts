@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../../api/client'
-import { claimNfcJob, createTagBackup, getSpool, listTags, postNfcJobResult, spoolTagRecords, spoolTagWritten } from '../../../api/filament'
+import { claimNfcJob, createTagBackup, getSpool, listTags, postNfcJobResult, postTagRead, spoolTagRecords, spoolTagWritten } from '../../../api/filament'
 import { resetMockState } from '../../handlers'
-import { spoolId } from './seed'
+import { L, spoolId } from './seed'
 import { seedNfcJob } from './tags'
 
 // #7273 — the tag mocks answer as the real routes do (`backend/scadbuddy/api/filament.py`, `filament/tags.py`).
@@ -29,6 +29,57 @@ describe('the tag mocks (#7273)', () => {
     expect(done.result).toHaveProperty('tag.last_seen_source', 'agent')
     const tag = (await listTags()).find((one) => one.tag_uid === '04A1B2C3D4E5F6')!
     expect(tag.last_seen_source).toBe('agent')
+  })
+
+  // The hand-held Scan mode (#6955): `tag_codes.resolve_records` over the seed's places and spools.
+  const hex = (text: string) => Array.from(new TextEncoder().encode(text), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  const url = (href: string) => ({ record_type: 'url', data_hex: hex(href) })
+  const text = (value: string) => ({ record_type: 'text', encoding: 'utf-8', data_hex: hex(value) })
+
+  it('a read with a place-code URL answers open_code and the place', async () => {
+    const got = await postTagRead({ uid: '04:0c:0c:0c:0c:0c:0c', tag_type: null, records: [url('https://scadbuddy.example/x/L-4?from=label')] })
+    expect(got.next).toBe('open_code')
+    expect(got.resolved).toEqual({ kind: 'location', id: L.AMS_A1, code: 'L-4', name: expect.any(String), archived: false })
+    expect(got.tag?.tag_uid).toBe('040C0C0C0C0C0C')
+    expect(got.spool).toBeNull()
+  })
+
+  it('a read with a text S-<n> answers the spool', async () => {
+    const got = await postTagRead({ uid: null, tag_type: null, records: [text('s3')] })
+    expect(got.next).toBe('open_code')
+    expect(got.resolved).toEqual({ kind: 'spool', id: spoolId(3), code: 'S-3', name: null, archived: false })
+    expect(got.tag).toBeNull()
+  })
+
+  it('a scadbuddy:spool text answers the spool', async () => {
+    const got = await postTagRead({ uid: null, tag_type: null, records: [text(`scadbuddy:spool:${spoolId(3)}`)] })
+    expect(got.next).toBe('open_code')
+    expect(got.resolved).toMatchObject({ kind: 'spool', id: spoolId(3), code: 'S-3' })
+  })
+
+  it('a bound tag ignores a code in its records', async () => {
+    const got = await postTagRead({ uid: '04:a1:b2:c3:d4:e5:f6', tag_type: null, records: [url('https://h/x/L-4')] })
+    expect(got.next).toBe('open_spool')
+    expect(got.spool?.number).toBe(3)
+    expect(got.resolved ?? null).toBeNull()
+  })
+
+  it('an unknown code is a new tag', async () => {
+    const got = await postTagRead({ uid: '04:0c:0c:0c:0c:0c:0c', tag_type: null, records: [text('L-999999')] })
+    expect(got.next).toBe('bind_or_create')
+    expect(got.resolved ?? null).toBeNull()
+  })
+
+  it('stops at the first record that is a code, as `tag_codes.code_in` does, even when it names nothing', async () => {
+    const got = await postTagRead({ uid: '04:0c:0c:0c:0c:0c:0c', tag_type: null, records: [text('L-999999'), url('https://h/x/L-4')] })
+    expect(got.next).toBe('bind_or_create')
+    expect(got.resolved ?? null).toBeNull()
+  })
+
+  it('a record that is no code is skipped for a later one that is', async () => {
+    const got = await postTagRead({ uid: null, tag_type: null, records: [text('hello'), url('https://h/x/L-4')] })
+    expect(got.next).toBe('open_code')
+    expect(got.resolved).toMatchObject({ kind: 'location', code: 'L-4' })
   })
 
   it('looks the spool up before it checks the backup', async () => {

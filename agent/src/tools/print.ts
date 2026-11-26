@@ -29,7 +29,8 @@ import { errorName } from '../telemetry/scrub.js'
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
 //   per-slot remaining grams (get_print_filaments), print progress, and a
-//   printer's current camera frame (get_printer_camera, #796). The queue, the
+//   printer's current camera frame (get_printer_camera, #796), and its recorded
+//   camera's feed state (get_printer_camera_state, #7330). The queue, the
 //   print archive, aggregate stats and the whole spool inventory are farm.ts
 //   (#1912).
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
@@ -906,6 +907,54 @@ export const printTools: Tool[] = [
         ctx,
         { path: `/api/v1/print/printers/${printer_id}/camera`, name: `printer-${printer_id}-camera.jpg`, fallbackType: 'image/jpeg' },
         image,
+      ),
+  }),
+
+  // Camera live view, phase 3 (#7330; routes backend/scadbuddy/api/camera.py): the recorded
+  // camera's feed state, and a restart of its relay pull. The pull reads the printer's camera
+  // only; a restart sends nothing to the printer and changes no setting, so it is `write`.
+  defineTool({
+    name: 'get_printer_camera_state',
+    label: "Check a printer's camera feed",
+    description:
+      "Whether ScadBuddy records a printer's camera and how its feed is: `recorded` (a LAN link, an RTSPS " +
+      'camera and recording on), `live` (a live view is on offer) and `feeds`, one per part (`relay`, ' +
+      '`recorder`) with `state` (`pulling`, `retrying`, `stalled`, `stopped`), `detail` and `updated_at`. ' +
+      'printer_id is a registry printer id (the `id` list_printers or get_printers_now lists). 404 for an ' +
+      'unknown printer.',
+    input: z.object({ printer_id: z.string().uuid().describe("A registry printer's id (the `id` list_printers or get_printers_now lists)") }),
+    risk: 'read',
+    source: "ScadBuddy's camera relay and recorder, with error text from the printer's camera stream",
+    routes: ['GET /api/v1/printers/{printer_id}/camera'],
+    handler: async ({ printer_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/printers/{printer_id}/camera', { params: { path: { printer_id } } }),
+          `get the camera feed state of printer ${printer_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'reconnect_printer_camera',
+    label: "Reconnect a printer's camera",
+    description:
+      "Restarts ScadBuddy's pull of a recorded printer's camera, as the camera dialog's Reconnect does: for a " +
+      'feed get_printer_camera_state shows `retrying` or `stalled`. Answers 202 with `printer_id`; the ' +
+      'relay restarts the pull, so live viewers and the recording may drop for a few seconds. 409 ' +
+      '`camera-not-recorded` when the printer is not recorded. printer_id is a registry printer id (the `id` ' +
+      'list_printers or get_printers_now lists). Only when the user asks.',
+    input: z.object({ printer_id: z.string().uuid().describe("A registry printer's id (the `id` list_printers or get_printers_now lists)") }),
+    risk: 'write',
+    source: "ScadBuddy's camera relay",
+    routes: ['POST /api/v1/printers/{printer_id}/camera/reconnect'],
+    summarize: ({ printer_id }) => `Reconnect the camera of printer ${printer_id}`,
+    handler: async ({ printer_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/printers/{printer_id}/camera/reconnect', { params: { path: { printer_id } } }),
+          `reconnect the camera of printer ${printer_id}`,
+        ),
       ),
   }),
 

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from scadbuddy.camera.settings import CameraRefusal, RecorderSettings, RelaySettings
+from scadbuddy.camera.settings import (
+    CameraRefusal,
+    EdgeSettings,
+    RecorderSettings,
+    RelaySettings,
+)
 
 
 @pytest.mark.parametrize(
@@ -42,3 +47,36 @@ def test_recorder_settings_read_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.camera_disk_max_bytes == 2 * 1024**3
     assert settings.camera_recorder_name
     assert "s3-secret-value" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "SCADBUDDY_DATABASE_URL",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "SCADBUDDY_SECRET_KEY_FILE",
+        "SCADBUDDY_SECRET_KEY_PREVIOUS_FILE",
+    ],
+)
+def test_edge_refuses_database_secrets(name: str) -> None:
+    with pytest.raises(CameraRefusal, match=name):
+        EdgeSettings.check_environment({name: "x"})
+    EdgeSettings.check_environment({})
+
+
+def test_edge_settings_read_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in {
+        "API_INTERNAL_URL": "http://api",
+        "SERVICE_TOKEN_FILE": "/var/run/secrets/scadbuddy/token",
+        "LOG_LEVEL": "DEBUG",
+        "CAMERA_RELAY_RTSP_URL": "rtsp://relay:8554",
+        "CAMERA_RELAY_READ_USER": "u",
+        "CAMERA_RELAY_READ_PASS": "relay-read-secret",
+    }.items():
+        monkeypatch.setenv(f"SCADBUDDY_{key}", value)
+    settings = EdgeSettings()  # type: ignore[call-arg]
+    assert settings.camera_mediamtx_api_url == "http://127.0.0.1:9997"
+    assert settings.log_level == "DEBUG"
+    assert settings.camera_relay_read_pass.get_secret_value() == "relay-read-secret"
+    assert "relay-read-secret" not in repr(settings)

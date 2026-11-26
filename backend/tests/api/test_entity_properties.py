@@ -148,3 +148,23 @@ def test_an_items_schema_is_set_on_its_kind(client: TestClient) -> None:
     assert "attribute_schema" in refused.json()["detail"]
     read = client.get("/api/v1/entity-kinds/item/property-schema")
     _code(read, 409, "schema_owned_by_item_kind")
+
+
+def test_a_patch_that_empties_a_required_value_is_refused(client: TestClient) -> None:
+    schema = {"type": "object", "properties": {"mpn": {"type": "string"}}, "required": ["mpn"]}
+    assert client.put(SCHEMA, json={"schema": schema}, headers=press()).status_code == 200
+    entity = _spool_type(client)
+    assert _patch(client, entity, {"other": "x"}).status_code == 200
+    assert _patch(client, entity, {"mpn": "A1"}).status_code == 200
+    refused = _patch(client, entity, {"mpn": None})
+    _code(refused, 422, "missing_required_properties")
+    assert refused.json()["missing"] == ["mpn"]
+    assert refused.json()["invalid"] == []
+
+
+def test_required_is_refused_on_a_kind_that_does_not_check(client: TestClient) -> None:
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+    put = client.put(
+        "/api/v1/entity-kinds/supplier/property-schema", json={"schema": schema}, headers=press()
+    )
+    _code(put, 422, "bad_property_schema")

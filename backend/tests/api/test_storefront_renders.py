@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.output_reader import TemplateSettings
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import SettingsPatch
@@ -61,6 +62,7 @@ from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.sb_rows import seed_app_type
 from tests.support.sliced3mf import sliced_3mf
+from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -440,6 +442,8 @@ class FakeSlicer:
 
     file: ClassVar[bytes] = sliced_3mf(plates={1: (3600, [10.0])}, gcode={1: b"M620 S0A\n"})
     started: ClassVar[list[tuple[str, SliceQuoteRequest, str, SlotPresets | None]]] = []
+    #: Each output start's template settings (#7633).
+    template_settings: ClassVar[list[TemplateSettings | None]] = []
 
     def __init__(self, *_args: Any) -> None:
         pass
@@ -451,8 +455,10 @@ class FakeSlicer:
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         FakeSlicer.started.append((output_id, request, subject, slot_presets))
+        FakeSlicer.template_settings.append(template_settings)
         return [PreviewStarted(job_id=1, plate_id=1)]
 
     async def start_library(
@@ -485,6 +491,7 @@ def sliced(crud: CrudCaller, monkeypatch: pytest.MonkeyPatch) -> type[FakeSlicer
     import scadbuddy.orders.storefront.slice_price as slice_price
 
     monkeypatch.setattr(FakeSlicer, "started", [])
+    monkeypatch.setattr(FakeSlicer, "template_settings", [])
     monkeypatch.setattr(order_operations, "PreviewSlicer", FakeSlicer)
     status = PrinterStatus.model_validate(recording("printer-status-rack.json"))
 
@@ -555,6 +562,37 @@ def test_the_price_is_a_slice_through_the_quote_path(
     assert crud.get(f"/renders/{job['id']}/estimate", token=TOKEN_B).json() == est
     assert len(sliced.started) == 1
     assert output_id
+
+
+def _set_print_settings(crud: CrudCaller, slug: str, settings: dict[str, Any]) -> None:
+    """The template's ``print_settings`` in its model.json, as a shop's edit leaves them."""
+    model_json = _state(crud.api).paths.model_meta(slug)
+    body = json.loads(model_json.read_text()) if model_json.is_file() else {}
+    model_json.write_text(json.dumps({**body, "print_settings": settings}))
+    sync_template_rows(crud.api)
+
+
+def test_a_templates_print_settings_move_its_price(
+    crud: CrudCaller, listing: dict[str, Any], sliced: type[FakeSlicer]
+) -> None:
+    """#7633: the shop turns supports on in the template after a price was made. The old
+    price is not the price any more: the key moves, and the slice takes the settings the
+    key holds. With the settings gone again, the key is the one of before, which a
+    template with no settings has always had."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 41})
+    first = priced(crud, job["id"])
+    assert first["source"] == "slice"
+    assert sliced.template_settings == [TemplateSettings()]
+    _set_print_settings(crud, listing["slug"], {"enable_support": "1"})
+    again = priced(crud, job["id"])
+    assert again["source"] == "slice" and again["price_key"] != first["price_key"]
+    assert sliced.template_settings == [
+        TemplateSettings(),
+        TemplateSettings(print_settings={"enable_support": "1"}),
+    ]
+    _set_print_settings(crud, listing["slug"], {})
+    assert priced(crud, job["id"])["price_key"] == first["price_key"]
+    assert len(sliced.started) == 2
 
 
 def test_a_render_of_the_listing_before_it_moved_has_no_price(
@@ -970,6 +1008,78 @@ def test_a_render_whose_files_are_lost_names_its_preview_after_a_few_tries(
     r = crud.get(f"/renders/{job['id']}/estimate")
     assert r.status_code == 200, r.text
     assert r.json()["source"] == "none" and r.json()["price_minor"] is None
+
+
+def test_a_preview_read_answers_at_once_while_its_files_are_fetched(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6968: the status named the preview on one replica; the read reaches another, whose
+    cache has no files yet. It answers 503 after `READY_WAIT`, never holds the request for
+    the whole fetch, and a later read streams the mesh. One fetch serves them all."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 72})
+    # Another replica: it has fetched nothing.
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
+    monkeypatch.setattr(renders_module, "READY_WAIT", 0.1)
+    real = materialize_result
+    fetches = 0
+
+    async def slow(blobs: Any, result: Any) -> None:
+        nonlocal fetches
+        fetches += 1
+        await asyncio.sleep(0.6)
+        await real(blobs, result)
+
+    monkeypatch.setattr(renders_module, "materialize_result", slow)
+    path = f"/renders/{job['id']}/preview.glb"
+    began = time.monotonic()
+    first = crud.get(path)
+    assert time.monotonic() - began < 0.5
+    assert first.status_code == 503, first.text
+    assert first.json()["type"] == STOREFRONT_PROBLEMS + "preview_not_ready"
+    assert fetches == 1
+    # The same fetch, at its end.
+    monkeypatch.setattr(renders_module, "READY_WAIT", 10.0)
+    r = crud.get(path)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == GLB and r.content[:4] == b"glTF"
+    assert fetches == 1
+
+
+def test_a_preview_read_of_fetched_files_starts_no_fetch(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6968 review: a job this replica fetched, whose files are still in its cache, is
+    read at once; no new fetch starts for it."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 74})
+    assert job["id"] in renders_module._ready
+
+    async def refused(_blobs: Any, _result: Any) -> None:
+        raise AssertionError("a fetch started for files already cached")
+
+    monkeypatch.setattr(renders_module, "materialize_result", refused)
+    r = crud.get(f"/renders/{job['id']}/preview.glb")
+    assert r.status_code == 200, r.text
+    assert r.content[:4] == b"glTF"
+
+
+def test_a_preview_whose_files_are_lost_is_not_asked_for_for_good(
+    crud: CrudCaller, listing: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#6968: a fetch that fails `FETCH_TRIES` times is taken as lost, so the read goes on
+    to the preview's own read, which says what is there, not "ask again" for ever."""
+    job = render_until_done(crud, TOKEN_A, listing, {"width": 73})
+    monkeypatch.setattr(renders_module, "_ready", OrderedDict())
+    monkeypatch.setattr(renders_module, "_failed", OrderedDict())
+
+    async def lost(_blobs: Any, _result: Any) -> None:
+        raise FileNotFoundError("the blob is gone")
+
+    monkeypatch.setattr(renders_module, "materialize_result", lost)
+    path = f"/renders/{job['id']}/preview.glb"
+    seen = [crud.get(path).status_code for _ in range(renders_module.FETCH_TRIES)]
+    assert seen[:-1] == [503] * (renders_module.FETCH_TRIES - 1)
+    # Only this module's fetch fails here: the preview's own read finds the files.
+    assert seen[-1] == 200
 
 
 def test_the_estimate_fetches_files_the_cache_evicted_after_the_preview_was_named(

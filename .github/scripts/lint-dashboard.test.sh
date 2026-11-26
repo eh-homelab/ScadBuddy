@@ -158,6 +158,17 @@ check 'a camera series renamed in its module fails the dashboard that reads it (
   "$(run | cut -d'|' -f1)"
 
 good
+sed -i 's/"scadbuddy_camera_viewers"/"scadbuddy_camera_viewerz"/' "$r/backend/scadbuddy/camera/edge.py"
+check 'a GaugeMetricFamily series named by a constant is read, so a rename fails the dashboard (#7330)' \
+  "1:deploy/grafana/scadbuddy-printing.json: scadbuddy_camera_viewers is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \
+  "$(run | cut -d'|' -f1)"
+
+good
+sed -i 's/labels=\["printer"\]/labels=["pod"]/' "$r/backend/scadbuddy/camera/edge.py"
+check 'a GaugeMetricFamily labels= list is read: a label it does not declare fails (#7330)' \
+  "1" "$(run | grep -c 'by (printer): "printer" is not a label of the series the query reads')"
+
+good
 sed -i 's/"scadbuddy_filament_stock_grams",/"scadbuddy_filament_stock_gramz",/' "$r/backend/scadbuddy/core/metrics.py"
 check 'a series renamed in the FILAMENT_SERIES table fails the dashboard that reads it (#6785)' \
   "1:deploy/grafana/scadbuddy-filament.json: scadbuddy_filament_stock_grams is not a metric backend/scadbuddy/core/metrics.py or backend/scadbuddy/camera/ declares, nor a Temporal SDK series this lint lists" \

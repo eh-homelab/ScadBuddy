@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.choices import PrinterOpening
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.output_reader import TemplateSettings
 from scadbuddy.bambuddy.part_settings import PartSettings
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.resolver import PrintChoices
@@ -49,6 +50,7 @@ from scadbuddy.orders.storefront.slice_price import (
     SliceUnavailableError,
     SliceVariant,
     _start,
+    key_setup,
     kit_colours,
     kit_digest,
     live_rate,
@@ -433,6 +435,90 @@ def test_any_remembered_setup_is_another_key(setup: dict[str, Any]) -> None:
         price_key(**{**PINNED, "setup": {**NO_SETUP, **setup}}),
     }
     assert len(keys) == 3
+
+
+#: A template's print settings and settings per part, as its model.json has them (#7633).
+SUPPORTED = TemplateSettings(print_settings={"enable_support": "1"})
+WALLED = TemplateSettings(part_settings={"letter_color": PartSettings(wall_loops=4)})
+
+
+def test_a_templates_settings_are_in_its_key_only_when_it_has_some() -> None:
+    """#7633: the slice takes the template's print settings and settings per part, so the
+    key holds them. A template with none keeps the key it had (`KEY_VERSION` stays 4), so
+    its prices stand: the pinned digest of `PINNED` does not move."""
+    request = SliceQuoteRequest(
+        printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
+    )
+    assert key_setup(request) == NO_SETUP
+    assert key_setup(request, TemplateSettings()) == NO_SETUP
+    empty = key_setup(request, TemplateSettings())
+    assert price_key(**{**PINNED, "setup": empty}) == price_key(**PINNED)
+    supported = key_setup(request, SUPPORTED)
+    walled = key_setup(request, WALLED)
+    both = key_setup(request, SUPPORTED.model_copy(update={"part_settings": WALLED.part_settings}))
+    assert supported == {**NO_SETUP, "template_print_settings": {"enable_support": "1"}}
+    assert walled == {
+        **NO_SETUP,
+        "template_part_settings": {"letter_color": {"wall_loops": 4}},
+    }
+    keys = {
+        price_key(**PINNED),
+        price_key(**{**PINNED, "setup": supported}),
+        price_key(**{**PINNED, "setup": walled}),
+        price_key(**{**PINNED, "setup": both}),
+    }
+    assert len(keys) == 4
+
+
+def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
+    shop: Shop,
+) -> None:
+    """#7633: the settings that made the key are the ones the slice gets, from one read."""
+    item = shop.get_item()
+    assert item.reference is not None
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    asked: dict[str, Any] = {
+        "settings": StoredSettings(storefront_slice_profile=PROFILE),
+        "reference": item.reference,
+        "model_sha256": SHA,
+        "filaments": [pla, petg],
+        "currency": "USD",
+        "policy": POLICY,
+        "machine_rate": None,
+        "printer": OPENING,
+        "type_presets": TYPE_PRESETS,
+    }
+    plain = plan_variant(**asked)
+    empty = plan_variant(**asked, template_settings=TemplateSettings())
+    supported = plan_variant(**asked, template_settings=SUPPORTED)
+    assert plain is not None and empty is not None and supported is not None
+    assert empty.key == plain.key
+    assert supported.key != plain.key
+    assert supported.variant.template_settings == SUPPORTED
+    assert plain.variant.template_settings is None
+    # A file listing's key never takes a template's settings.
+    with pytest.raises(ValueError, match="template"):
+        plan_variant(
+            **{**asked, "reference": None, "model_sha256": None},
+            library_file=priced_file(),
+            template_settings=SUPPORTED,
+        )
+
+
+async def test_the_slice_takes_the_settings_its_key_holds(shop: Shop, prices: SlicePrices) -> None:
+    """#7633: the run hands the variant's template settings to the slice, so an edit of
+    the template between the key and the slice cannot price the edit under the old key.
+    An operation from before carries none, and the slice reads them as it did."""
+    slicer = FakeSlicer({1: sliced_plate(1, 3600, [10.0, 5.0])})
+    run = slice_run(shop, prices, slicer)
+    variant = variant_of(shop).model_copy(update={"template_settings": SUPPORTED})
+    assert (await price_variant(run, variant)).status == "done"
+    old = variant_of(shop, "b" * 64).model_dump(mode="json")
+    old.pop("template_settings", None)
+    assert (await price_variant(run, SliceVariant.model_validate(old))).status == "done"
+    assert slicer.template_settings == [SUPPORTED, None]
 
 
 def test_a_variant_with_no_profile_type_or_type_preset_has_no_plan(
@@ -1202,11 +1288,13 @@ class KitSlicer(FakeSlicer):
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         output = len(self.started)
         self.started.append(output_id)
         self.subjects.append(subject)
         self.slot_presets.append(slot_presets)
+        self.template_settings.append(template_settings)
         plates = sorted(self.outputs[output])
         return [PreviewStarted(job_id=output, plate_id=plate) for plate in plates]
 
@@ -1279,6 +1367,17 @@ async def test_a_kit_is_one_price_of_every_outputs_plates(shop: Shop, prices: Sl
     assert row.slot_colours == ["#ff0000", "#00ff00", "#0000ff"]
     assert row.slot_filaments == [shop.pla, shop.petg, shop.pla]
     assert (row.variant_key, row.listing_id) == ("d" * 64, "listing-1")
+
+
+async def test_every_output_of_a_kit_is_sliced_with_the_keys_settings(
+    shop: Shop, prices: SlicePrices
+) -> None:
+    """#7633: each output of a render of several takes the variant's template settings."""
+    slicer = KitSlicer()
+    variant = kit_variant(shop, template_settings=SUPPORTED)
+    row = await price_variant(kit_run(shop, prices, slicer), variant)
+    assert row.status == "done", row.failure
+    assert slicer.template_settings == [SUPPORTED, SUPPORTED]
 
 
 async def test_two_outputs_of_one_colour_are_one_slot(shop: Shop, prices: SlicePrices) -> None:

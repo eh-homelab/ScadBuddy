@@ -130,6 +130,7 @@ import type {
   Activity,
   PrintProgress,
   PrintersNow,
+  PrinterCamera,
   PrinterRow,
   PrinterCreate,
   PrinterPatch,
@@ -2446,6 +2447,13 @@ export const api = {
 
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+  /** #7330 — a recorded printer's camera: its feed states, and whether the live view is on offer. */
+  printerCamera: (id: string) => request<PrinterCamera>(`/printers/${seg(id)}/camera`),
+  /** #7330 — asks the relay to restart the printer's camera pull; 409 `camera-not-recorded`. */
+  reconnectPrinterCamera: (id: string) =>
+    request<unknown>(`/printers/${seg(id)}/camera/reconnect`, { method: 'POST' }),
+  /** #7330 — the live view's base: `…/whep` (WebRTC) and `…/hls/index.m3u8` (LL-HLS) under it. */
+  cameraLiveUrl: (id: string) => `${API_BASE}/camera/live/${seg(id)}`,
 
   // #3823 — the printer registry: one row per physical printer, keyed by serial, with
   // its Bambuddy link and its LAN link. The LAN access code is sent once (`PUT /lan`,

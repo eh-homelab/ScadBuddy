@@ -38,6 +38,7 @@ export SLICER_IMAGE=ghcr.io/eh-homelab/scadbuddy-slicer
 export SANDBOX_IMAGE=ghcr.io/eh-homelab/scadbuddy-sandbox
 export PROFILE_FETCH_IMAGE=ghcr.io/eh-homelab/scadbuddy-profile-fetch
 export PLAYWRIGHT_MCP_IMAGE=ghcr.io/eh-homelab/scadbuddy-playwright-mcp
+export FLEET_IMAGE=ghcr.io/eh-homelab/scadbuddy-fleet
 export CORE_IMAGE=ghcr.io/eh-homelab/scadbuddy-core
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
@@ -49,6 +50,7 @@ export MANIFEST_STOREFRONT=applications/scadbuddy/scadbuddy-storefront.yaml
 export MANIFEST_INTAKE=applications/scadbuddy/scadbuddy-intake.yaml
 export MANIFEST_PROFILE_FETCH=applications/scadbuddy/scadbuddy-profile-fetch.yaml
 export MANIFEST_PLAYWRIGHT_MCP=applications/scadbuddy/playwright-mcp.yaml
+export MANIFEST_FLEET=applications/scadbuddy/scadbuddy-fleet.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_DIR=clusters/prod/scadbuddy/grafana
 # What the step before it found: deploy/grafana exists at REVISION (its files
@@ -63,8 +65,9 @@ SLICER_DIGEST="sha256:$(printf '7%.0s' {1..64})"
 SANDBOX_DIGEST="sha256:$(printf '9%.0s' {1..64})"
 PROFILE_FETCH_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
 PLAYWRIGHT_MCP_DIGEST="sha256:$(printf 'd%.0s' {1..64})"
+FLEET_DIGEST="sha256:$(printf 'cd%.0s' {1..32})"
 CORE_DIGEST="sha256:$(printf 'f%.0s' {1..64})"
-export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST PLAYWRIGHT_MCP_DIGEST CORE_DIGEST
+export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST PLAYWRIGHT_MCP_DIGEST FLEET_DIGEST CORE_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -80,6 +83,8 @@ pf_old="$PROFILE_FETCH_IMAGE:sha-3333333@sha256:$(printf 'c%.0s' {1..64})"
 pf_pinned="$PROFILE_FETCH_IMAGE:$VERSION@$PROFILE_FETCH_DIGEST"
 pm_old="$PLAYWRIGHT_MCP_IMAGE:sha-3333333@sha256:$(printf 'e%.0s' {1..64})"
 pm_pinned="$PLAYWRIGHT_MCP_IMAGE:$VERSION@$PLAYWRIGHT_MCP_DIGEST"
+fl_old="$FLEET_IMAGE:sha-3333333@sha256:$(printf 'ce%.0s' {1..32})"
+fl_pinned="$FLEET_IMAGE:$VERSION@$FLEET_DIGEST"
 core_old="$CORE_IMAGE:sha-3333333@sha256:$(printf '0%.0s' {1..64})"
 core_pinned="$CORE_IMAGE:$VERSION@$CORE_DIGEST"
 failures=0
@@ -152,6 +157,7 @@ run() {
   [ -z "${slicer_manifest:-}" ] || printf '%s\n' "$slicer_manifest" > "$work/repo/$MANIFEST_SLICER"
   [ -z "${pf_manifest:-}" ] || printf '%s\n' "$pf_manifest" > "$work/repo/$MANIFEST_PROFILE_FETCH"
   [ -z "${pm_manifest:-}" ] || printf '%s\n' "$pm_manifest" > "$work/repo/$MANIFEST_PLAYWRIGHT_MCP"
+  [ -z "${fl_manifest:-}" ] || printf '%s\n' "$fl_manifest" > "$work/repo/$MANIFEST_FLEET"
   [ -z "${extra_path:-}" ] || printf '%s\n' "$extra_content" > "$work/repo/$extra_path"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   [ -z "${vendored:-}" ] || vendor_dir
@@ -492,6 +498,44 @@ else
 fi
 pm_manifest=
 
+# 8a'''. The agent fleet chat server (#7903), pinned exactly as playwright-mcp:
+#      its own file, optional until clusters has it; a build with no fleet image
+#      (build-go-image.yml publishes one only for a push that touches Go) keeps
+#      the pin, and the final check accepts the kept pin in its own file only.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^fleet=none$' "$work/out" || fail "no fleet file: output is not none"
+else
+  fail "no fleet file: step failed: $(grep '::error' "$work/log")"
+fi
+fl_manifest=$(deployment scadbuddy-fleet "$fl_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "fleet: api image not pinned"
+  has_line "$fl_pinned" "$MANIFEST_FLEET" || fail "fleet: image not pinned"
+  grep -q '^fleet=pinned$' "$work/out" || fail "fleet: output is not pinned"
+  grep -q "^files=.*$MANIFEST_FLEET" "$work/out" || fail "fleet: not among the changed files"
+  rerun || fail "fleet: rerun failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=true' "$work/out" || fail "fleet: rerun expected unchanged=true"
+else
+  fail "fleet: step failed: $(grep '::error' "$work/log")"
+fi
+if FLEET_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "fleet, no image: api image not pinned"
+  has_line "$fl_old" "$MANIFEST_FLEET" || fail "fleet, no image: old pin was not kept"
+  grep -q '^fleet=kept$' "$work/out" || fail "fleet, no image: output is not kept"
+  grep -q '::warning.*keeping the fleet pin' "$work/log" || fail "fleet, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_FLEET" "$work/out" && fail "fleet, no image: kept file listed as changed"
+else
+  fail "fleet, no image: step failed: $(grep '::error' "$work/log")"
+fi
+fl_manifest=$(deployment scadbuddy-fleet "$fl_old" "$fl_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "two fleet lines: step passed, expected an error"
+else
+  grep -q 'expected exactly one fleet image line, found 2' "$work/log" \
+    || fail "two fleet lines: wrong error: $(grep '::error' "$work/log")"
+fi
+fl_manifest=
+
 # 8a''. The API in Go (#7667), the `core` container in the API's pod, pinned as
 #       the slicer is: optional until the API's manifest names it, then exactly
 #       one line; a build with no image keeps the pin and warns.
@@ -608,6 +652,8 @@ stale_fails "profile-fetch outside its file" applications/scadbuddy/scadbuddy-ex
   "$(deployment scadbuddy-extra "$pf_old")" "names $pf_old, $not_moved"
 stale_fails "playwright-mcp outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
   "$(deployment scadbuddy-extra "$pm_old")" "names $pm_old, $not_moved"
+stale_fails "fleet outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$fl_old")" "names $fl_old, $not_moved"
 stale_fails "an overlay images: entry" clusters/prod/scadbuddy/images.yaml \
   "$(printf '%s\n' 'images:' "  - name: $IMAGE" "    newName: $IMAGE:sha-1111111")" "names $IMAGE:sha-1111111, $not_moved"
 stale_fails "an alias of an old pin" applications/scadbuddy/scadbuddy-alias.yaml \

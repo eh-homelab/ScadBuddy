@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import type * as Three from 'three'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { server } from './mocks/server'
@@ -63,11 +63,25 @@ describe('App routes (#2356)', () => {
     ['/inventory/kinds', 'Item kinds'],
     // #7067 — the old parts page opens the Inventory on the Part kind.
     ['/orders/parts', 'Inventory'],
+    // The hand-held Scan mode (#7273): top-level, with a nav entry.
+    ['/scan', 'Scan'],
   ])('renders %s through its lazy chunk', async (route, heading) => {
     const { App } = await import('./App')
     const done = settled()
     renderPage(<App />, { route })
     expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument()
+    await done()
+  })
+
+  it('redirects /filament/scan to /scan, where the nav marks Scan current', async () => {
+    const { App } = await import('./App')
+    const done = settled()
+    renderPage(<App />, { route: '/filament/scan' })
+    expect(await screen.findByRole('heading', { name: 'Scan', level: 1 })).toBeInTheDocument()
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    const link = within(nav).getByRole('link', { name: 'Scan' })
+    expect(link).toHaveAttribute('href', '/scan')
+    await waitFor(() => expect(link).toHaveAttribute('aria-current', 'page'))
     await done()
   })
 })

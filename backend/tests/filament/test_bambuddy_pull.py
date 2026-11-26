@@ -1268,6 +1268,19 @@ def test_a_bb_archive_archives_the_sb_spool(pg_pool: PgPool) -> None:
     assert spool is not None and spool.archived_at is None
 
 
+def test_the_syncs_archive_records_other(pg_pool: PgPool) -> None:
+    """#7684: the pull's archive of a linked spool is reason ``other``, closed on the
+    ledger with no final reading."""
+    f = _filament(pg_pool)
+    (made,) = pull(f, [bb(updated_at=_bb_time(-2))], now=NOW).created_ids
+    pull(f, [bb(archived_at=_bb_time(-1), updated_at=_bb_time(-1))], now=NOW)
+    archived = f.spools.events(made)[-1]
+    assert archived.kind == "archived"
+    assert archived.data["reason"] == "other"
+    assert archived.data["scale_consumed_g"] is None and archived.data["drift_g"] is None
+    assert "final_filament_g" in archived.data and "started_g" in archived.data
+
+
 def test_a_bb_archive_of_a_linked_spool_adds_its_type_to_the_shopping_list(
     pg_pool: PgPool,
 ) -> None:
@@ -2880,10 +2893,11 @@ def test_an_unchanged_pull_reads_in_a_fixed_number_of_queries(pg_pool: PgPool, c
     with scale.counting() as counts:
         report = pull(f, rows, now=NOW + timedelta(minutes=1))
     # The pull's reads before the spools and `_quiet`'s; 259 statements and 13
-    # transactions for 12 spools before #6768. 20 is the exact count (Decision 238): a new
-    # batch read in `_quiet` raises it here, on purpose.
+    # transactions for 12 spools before #6768. 22 is the exact count (Decision 238; 20 before
+    # #7703 added the spool kind's property schema read): a new batch read in `_quiet` raises
+    # it here, on purpose.
     assert counts.transactions == 2
-    assert counts.statements <= 20
+    assert counts.statements <= 22
     assert report.archived == 2
     assert (report.created, report.linked, report.updated, report.failed_bb_ids) == (0, 0, 0, [])
     assert _quiet_state(pg_pool) == before
