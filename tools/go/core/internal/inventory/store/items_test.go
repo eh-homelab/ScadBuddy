@@ -557,3 +557,11 @@ func TestAStepChangeIsAConfigEvent(t *testing.T) {
 		t.Fatalf("a refused save published %d events", n)
 	}
 }
+
+func TestALimitOutOfRangeIsRefused(t *testing.T) {
+	pool, s := testdb.New(t), itemStore()
+	for _, n := range []int{-1, 5001} {
+		_, err := s.List(context.Background(), pool, ItemFilter{Limit: n})
+		refusal(t, err, 422, "bad_limit")
+	}
+}

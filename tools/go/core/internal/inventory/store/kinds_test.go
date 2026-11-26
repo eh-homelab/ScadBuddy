@@ -415,3 +415,62 @@ func TestTrackingIsDerived(t *testing.T) {
 	_, err := createKind(t, pool, k, wire.KindInput{ID: "oil", Name: "Oil", ParentID: ptr("durable"), Tracking: ptr("lot")})
 	refusal(t, err, 422, "class_changed")
 }
+
+// Fix round 1.
+
+func TestAHandlerSwapThatBreaksAChildKindIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "spindle", Name: "Spindle", ParentID: ptr("durable"),
+		Steps: model.Steps{"life": {Handler: "life.hours", Params: map[string]any{"hours": 100, "source": "manual"}}}}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "fast_spindle", Name: "Fast spindle", ParentID: ptr("spindle"),
+		Steps: model.Steps{"life": {Params: map[string]any{"hours": 50}}}}))
+
+	_, err := updateKind(t, pool, k, "spindle", wire.KindPatch{Steps: &model.Steps{"life": {Handler: "life.months", Params: map[string]any{"months": 6}}}})
+	r := refusal(t, err, 422, "steps_invalid")
+	want := []StepProblem{{Owner: "item_kind:fast_spindle", Step: "life", Handler: "life.months", Reason: "unknown_param", Missing: []string{"hours"}}}
+	if !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("problems %#v", r.Problems)
+	}
+	if got := getKind(t, pool, k, "spindle").Steps["life"].Handler; got != "life.hours" {
+		t.Fatalf("the swap was saved: %s", got)
+	}
+}
+
+func TestAHandlerSwapThatBreaksAnItemIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "spindle", Name: "Spindle", ParentID: ptr("durable"),
+		Steps: model.Steps{"life": {Handler: "life.hours", Params: map[string]any{"hours": 100, "source": "manual"}}}}))
+	made := must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "spindle", Name: "S1",
+		Steps: model.Steps{"life": {Params: map[string]any{"hours": 50}}}}))
+
+	_, err := updateKind(t, pool, k, "spindle", wire.KindPatch{Steps: &model.Steps{"life": {Handler: "life.months", Params: map[string]any{"months": 6}}}})
+	r := refusal(t, err, 422, "steps_invalid")
+	want := []StepProblem{{Owner: "item:" + made.ID, Step: "life", Handler: "life.months", Reason: "unknown_param", Missing: []string{"hours"}}}
+	if !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("problems %#v", r.Problems)
+	}
+}
+
+func TestALifeBasisNoneUnderPrinterReadsNone(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	made := must(createKind(t, pool, k, wire.KindInput{ID: "printer_dummy", Name: "Dummy", ParentID: ptr("printer"), LifeBasis: ptr("none")}))
+	if made.LifeBasis != "none" {
+		t.Fatalf("life_basis %s", made.LifeBasis)
+	}
+	if got := getKind(t, pool, k, "printer_dummy").LifeBasis; got != "none" {
+		t.Fatalf("read life_basis %s", got)
+	}
+}
+
+func TestABuiltinKindKeepsItsResolvedClass(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	_, err := updateKind(t, pool, k, "part", wire.KindPatch{ParentID: wire.Some("general_consumable")})
+	refusal(t, err, 409, "kind_in_use")
+	_, err = updateKind(t, pool, k, "nozzle", wire.KindPatch{SpecialType: wire.Some("printer")})
+	refusal(t, err, 409, "kind_in_use")
+	if got := getKind(t, pool, k, "part"); *got.ParentID != "durable" {
+		t.Fatalf("part moved to %s", *got.ParentID)
+	}
+	// A move that keeps the resolved class is no class change.
+	must(updateKind(t, pool, k, "spool_part", wire.KindPatch{ParentID: wire.Some("part")}))
+}

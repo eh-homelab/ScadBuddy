@@ -36,6 +36,9 @@ type Catalog interface {
 
 // StepProblem is one handlers.Problem in a steps_invalid refusal.
 type StepProblem struct {
+	// Owner is the kind (item_kind:<id>) or item (item:<uuid>) the problem is in, when a
+	// kind save breaks a descendant kind's or an item's steps; empty for the saved owner.
+	Owner   string   `json:"owner,omitempty"`
 	Step    string   `json:"step,omitempty"`
 	Handler string   `json:"handler,omitempty"`
 	Reason  string   `json:"reason"`
@@ -103,13 +106,18 @@ func classRefusal(err error) error {
 
 // stepsRefusal is the problems that refuse a save (handlers.Blocking), or nil (R-K1-8).
 func stepsRefusal(problems []handlers.Problem) error {
+	return ownedRefusal("", problems)
+}
+
+// ownedRefusal is stepsRefusal with each problem naming owner.
+func ownedRefusal(owner string, problems []handlers.Problem) error {
 	blocking := handlers.Blocking(problems)
 	if len(blocking) == 0 {
 		return nil
 	}
 	out := make([]StepProblem, 0, len(blocking))
 	for _, p := range blocking {
-		out = append(out, StepProblem{Step: string(p.Step), Handler: p.Handler, Reason: p.Reason, Missing: p.Missing})
+		out = append(out, StepProblem{Owner: owner, Step: string(p.Step), Handler: p.Handler, Reason: p.Reason, Missing: p.Missing})
 	}
 	return &Refused{Status: 422, Code: "steps_invalid", Detail: "a step does not resolve to a handler it can use", Problems: out}
 }
@@ -521,7 +529,11 @@ func (k *Kinds) Create(ctx context.Context, tx pgx.Tx, in wire.KindInput, by Act
 		kind.Special = *in.SpecialType
 	}
 	if in.LifeBasis != nil {
-		kind.Steps = withLifeBasis(kind.Steps, *in.LifeBasis, "none")
+		_, current, _, _ := derived(k.Cat, up)
+		if current == "" {
+			current = "none"
+		}
+		kind.Steps = withLifeBasis(kind.Steps, *in.LifeBasis, current)
 	}
 	if err := checkSchema(kind.Schema, defined(up)); err != nil {
 		return wire.ItemKind{}, err
@@ -602,7 +614,9 @@ func classChange(oldCls model.Class, oldSpecial string, newCls model.Class, newS
 // class or special type change of a built-in kind, or a tracking change of a kind with
 // items; kind_cycle for a parent at or below the kind; kind_archived for an archived parent;
 // bad_property_schema; class_changed for a change that changes the class of a kind with
-// items (its own or a descendant's) or that a descendant contradicts; steps_invalid. It
+// items (its own or a descendant's) or that a descendant contradicts; steps_invalid when a
+// step of the kind, of a kind below it, or of an item of those that sets its own steps no
+// longer resolves (the problem names that kind or item). It
 // publishes one handler_config.changed per step whose handler or parameters changed, and
 // rewrites the tracking and life_basis of the kind and its descendants.
 func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPatch, by Actor) (wire.ItemKind, error) {
@@ -676,9 +690,6 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 	if p.SpecialType.Set {
 		kind.Special = deref(p.SpecialType.Value)
 	}
-	if builtin && (kind.Class != old.Class || kind.Special != old.Special) {
-		return wire.ItemKind{}, kindInUse(id + " is built in; its class stays")
-	}
 	if p.LifeBasis != nil {
 		kind.Steps = withLifeBasis(kind.Steps, *p.LifeBasis, basis)
 	}
@@ -691,6 +702,13 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 		next[key] = v
 	}
 	next[id] = kind
+	if builtin {
+		oldCls, oldSpecial, _ := set.chain(id).Class()
+		cls, special, err := next.chain(id).Class()
+		if err != nil || classChange(oldCls, oldSpecial, cls, special) != nil {
+			return wire.ItemKind{}, kindInUse(id + " is built in; its class stays")
+		}
+	}
 	below := next.subtree(id)
 	has, err := kindsWithItems(ctx, tx, below)
 	if err != nil {
@@ -707,11 +725,20 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 			return wire.ItemKind{}, &Refused{Status: 422, Code: "class_changed",
 				Detail: "the change would change the class of " + d + ", which has items", Problems: []ClassProblem{*change}}
 		}
-		if change != nil && d != id {
-			if _, _, _, err := k.resolve(next.chain(d)); err != nil {
-				return wire.ItemKind{}, err
-			}
+		if d == id {
+			continue
 		}
+		// Design §4.2: every step of every kind below must still resolve.
+		_, problems, err := k.Cat.ResolveKind(next.chain(d))
+		if err != nil {
+			return wire.ItemKind{}, classRefusal(err)
+		}
+		if err := ownedRefusal("item_kind:"+d, problems); err != nil {
+			return wire.ItemKind{}, err
+		}
+	}
+	if err := k.checkItems(ctx, tx, next, below); err != nil {
+		return wire.ItemKind{}, err
 	}
 	_, _, res, err := k.resolve(next.chain(id))
 	if err != nil {
@@ -736,6 +763,47 @@ func (k *Kinds) Update(ctx context.Context, tx pgx.Tx, id string, p wire.KindPat
 		return wire.ItemKind{}, err
 	}
 	return k.Get(ctx, tx, id)
+}
+
+// checkItems re-resolves each item of the kinds that sets its own steps: a kind save that
+// leaves one with a blocking problem is steps_invalid, naming the item (design §4.2).
+func (k *Kinds) checkItems(ctx context.Context, tx pgx.Tx, set kindSet, kinds []string) error {
+	rows, err := tx.Query(ctx, `SELECT id::text, kind_id, steps FROM items
+		WHERE kind_id = ANY($1) AND steps <> '{}' ORDER BY id`, kinds)
+	if err != nil {
+		return err
+	}
+	type item struct {
+		id, kind string
+		steps    model.Steps
+	}
+	var items []item
+	for rows.Next() {
+		var it item
+		var raw []byte
+		if err := rows.Scan(&it.id, &it.kind, &raw); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := json.Unmarshal(raw, &it.steps); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, it := range items {
+		_, problems, err := k.Cat.Resolve(set.chain(it.kind), it.steps, nil)
+		if err != nil {
+			return classRefusal(err)
+		}
+		if err := ownedRefusal("item:"+it.id, problems); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func deref(s *string) string {

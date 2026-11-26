@@ -120,7 +120,7 @@ func (s *Items) List(ctx context.Context, q Querier, f ItemFilter) ([]wire.Item,
 		f.Limit = 1000
 	}
 	if f.Limit < 1 || f.Limit > 5000 {
-		return nil, fmt.Errorf("store: a limit is 1 to 5000, not %d", f.Limit)
+		return nil, &Refused{Status: 422, Code: "bad_limit", Detail: fmt.Sprintf("a limit is 1 to 5000, not %d", f.Limit)}
 	}
 	var where []string
 	var args []any
