@@ -515,6 +515,38 @@ async def test_the_template_settings_are_read_again_only_after_a_while(
     assert set(slice_price._template_settings[catalogue]) == {"demo"}
 
 
+async def test_a_fixed_model_json_gives_a_new_key_after_the_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7842 review: a refused read is kept `TEMPLATE_TTL` like any other. Once the
+    model.json is fixed, the next read after it gives the settings, and so a new key."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
+
+    answers = [TemplateSettings(refusal="print_settings.x: not a value"), SUPPORTED]
+
+    def read(_catalogue: object, _slug: str) -> TemplateSettings:
+        return answers[0]
+
+    monkeypatch.setattr(slice_price, "read_template_settings", read)
+    clock = [100.0]
+    monkeypatch.setattr("scadbuddy.orders.storefront.slice_price.time.monotonic", lambda: clock[0])
+
+    class Catalogue:
+        """A catalogue as the key of the kept reads (a weak key)."""
+
+    catalogue = Catalogue()
+    request = SliceQuoteRequest(
+        printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
+    )
+    refused = await slice_price.live_template_settings(catalogue, "demo")
+    answers.pop(0)
+    assert await slice_price.live_template_settings(catalogue, "demo") == refused
+    clock[0] += slice_price.TEMPLATE_TTL
+    fixed = await slice_price.live_template_settings(catalogue, "demo")
+    assert fixed == SUPPORTED
+    assert key_setup(request, fixed) != key_setup(request, refused)
+
+
 def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
     shop: Shop,
 ) -> None:
