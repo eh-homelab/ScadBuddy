@@ -1,16 +1,23 @@
 """The bytes of a plugin package's bytes pin, kept as a blob (#6935, spec 2026-11-21
-§6.6, area ``package-mirrors``, `api/crud_agent_packages.py`).
+§6.6, area ``package-mirrors``, `api/crud_agent_packages.py`), and a zip of a commit pin's
+files (#7907).
 
 An ``archive`` or ``npm`` package (or a marketplace entry of either) is pinned to the
 sha256 of the file the agent fetched once at install. The agent sends that file here
 before it stores the pin; a load unpacks this copy, never the upstream URL, so an approved
 pin still loads after upstream deletes or changes the file.
 
+A commit pin is fetched from git. After a fetch whose files hash to the pin, the agent sends
+a zip of those files here and records its sha256 on the row (``mirror_sha256``, or
+``pending_mirror_sha256`` for the re-pin). A load with a cold cache then unpacks that zip
+and does not fetch the repository again.
+
 Each mirror is the blob ``plugin-mirror-<sha256>`` (one file, `BLOB_FILE`), held in
 ``blob_refs`` by ``(HOLDER, <package name>/<sha256>)`` (`holder_id`): the package the agent
-sent the file for. A pin of a package is stored only while that package's hold of its
-sha256 stands (`held`), so one package's upload never stands in for another's. A hold
-stays while that package's pin or pending re-pin names the sha256 (`release_unnamed`); a
+sent the file for. A pin of a package is stored, and a commit pin's mirror recorded, only
+while that package's hold of its sha256 stands (`held`), so one package's upload never
+stands in for another's. A hold stays while that package's row names the sha256 in one of
+`NAMING_COLUMNS` (`release_unnamed`); a
 hold no row names goes once it is older than `UNNAMED_GRACE`, so an install between its
 upload and its row is never cut short. The blob sweep removes the bytes once no hold of
 any package is left.
@@ -36,12 +43,18 @@ from scadbuddy.store.content_models import BlobScope
 HOLDER = "plugin_package_mirror"
 #: The one file in a mirror's blob directory.
 BLOB_FILE = "file"
-#: The largest mirror: the largest file the agent downloads, its ``ARCHIVE_MAX_BYTES``
-#: (``agent/src/plugins/packages/download.ts``: the unpacked cap of 20 MiB plus 1 MiB;
-#: spec 2026-11-21 §6.6).
-MAX_MIRROR_BYTES = 21 * 1024 * 1024
+#: The largest mirror (the agent's ``MIRROR_MAX_BYTES``, ``agent/src/plugins/packages/mirror.ts``;
+#: keep the two equal): the larger of the largest file the agent downloads, its
+#: ``ARCHIVE_MAX_BYTES`` (``download.ts``: the unpacked cap of 20 MiB plus 1 MiB; spec
+#: 2026-11-21 §6.6), and a commit pin's stored zip (#7907): at most 20 MiB of files plus
+#: 76 bytes and twice the path for each of at most 2,000 entries, so 4 MiB of room fits
+#: paths of 1,010 bytes on average.
+MAX_MIRROR_BYTES = 24 * 1024 * 1024
 #: How long a hold no package names is kept: far longer than an install's run (300 s).
 UNNAMED_GRACE = "1 day"
+#: The columns of ``ai_plugin_packages`` that name a mirror: a bytes pin's file, and a commit
+#: pin's zip (#7907), each for the pin and for its pending re-pin.
+NAMING_COLUMNS = ("bytes_sha256", "pending_bytes_sha256", "mirror_sha256", "pending_mirror_sha256")
 
 
 def blob_key(sha256: str) -> str:
@@ -115,15 +128,15 @@ def held(conn: psycopg.Connection[Any], name: str, sha256: str) -> bool:
 
 
 def release_unnamed(conn: psycopg.Connection[Any]) -> None:
-    """Drops each package's mirror hold that its pin or pending re-pin does not name and
+    """Drops each package's mirror hold that its row does not name (`NAMING_COLUMNS`) and
     that is older than `UNNAMED_GRACE`. Runs in every package write's transaction."""
+    named = " UNION ".join(
+        f"SELECT name || '/' || {c} FROM ai_plugin_packages WHERE {c} IS NOT NULL"
+        for c in NAMING_COLUMNS
+    )
     conn.execute(
         "DELETE FROM blob_refs WHERE holder_kind = %s"
         f" AND created_at < now() - interval '{UNNAMED_GRACE}'"
-        " AND holder_id NOT IN ("
-        "   SELECT name || '/' || bytes_sha256 FROM ai_plugin_packages"
-        "   WHERE bytes_sha256 IS NOT NULL"
-        "   UNION SELECT name || '/' || pending_bytes_sha256 FROM ai_plugin_packages"
-        "   WHERE pending_bytes_sha256 IS NOT NULL)",
+        f" AND holder_id NOT IN ({named})",
         (HOLDER,),
     )
