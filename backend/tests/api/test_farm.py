@@ -200,12 +200,94 @@ def test_each_queue_item_has_a_picture_and_no_bambuddy_path(client: TestClient) 
 
 
 @respx.mock
+def test_a_queue_item_for_a_later_plate_shows_that_plate(client: TestClient) -> None:
+    """#7458: an item for plate 2 or later shows its plate's image, not the cover (plate
+    1's); an item for plate 1, or with no plate, keeps the cover."""
+    configure(client)
+    rows = recording("queue.json")
+    queue = [
+        {**rows[3], "id": 270, "status": "pending", "plate_id": 1},
+        {**rows[3], "id": 271, "status": "pending", "plate_id": 2},
+        {**rows[3], "id": 272, "status": "pending", "plate_id": None},
+        {**rows[0], "id": 273, "status": "pending", "plate_id": 3},
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    assert {item["id"]: item["picture"] for item in response.json()} == {
+        270: "/api/v1/farm/archives/107/thumbnail",
+        271: "/api/v1/farm/archives/107/plates/2/thumbnail",
+        272: "/api/v1/farm/archives/107/thumbnail",
+        273: "/api/v1/farm/library/1615/plates/3/thumbnail",
+    }
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("route", "plate_path", "cover_path"),
+    [
+        (
+            "/api/v1/farm/archives/107/plates/2/thumbnail",
+            "/archives/107/plate-thumbnail/2",
+            "/archives/107/thumbnail",
+        ),
+        (
+            "/api/v1/farm/library/1615/plates/2/thumbnail",
+            "/library/files/1615/plate-thumbnail/2",
+            "/library/files/1615/thumbnail",
+        ),
+    ],
+)
+def test_a_plate_bambuddy_has_no_image_of_shows_the_cover(
+    client: TestClient, route: str, plate_path: str, cover_path: str
+) -> None:
+    """#7458: the cover only when Bambuddy has no image of the plate."""
+    configure(client)
+    plate = respx.get(f"{API}{plate_path}").mock(
+        return_value=httpx.Response(404, json={"detail": "Plate thumbnail not found"})
+    )
+    cover = respx.get(f"{API}{cover_path}").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+
+    response = client.get(route)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"\x89PNG"
+    assert plate.called and cover.called
+
+
+@respx.mock
+def test_a_plate_image_bambuddy_refuses_is_not_hidden_by_the_cover(client: TestClient) -> None:
+    """#7458: only a missing plate image falls back; any other refusal is the answer."""
+    configure(client)
+    respx.get(f"{API}/archives/107/plate-thumbnail/2").mock(
+        return_value=httpx.Response(403, json={"detail": "forbidden"})
+    )
+    cover = respx.get(f"{API}/archives/107/thumbnail").mock(
+        return_value=httpx.Response(200, content=b"\x89PNG", headers={"content-type": "image/png"})
+    )
+
+    response = client.get("/api/v1/farm/archives/107/plates/2/thumbnail")
+
+    assert response.status_code == 409
+    assert not cover.called
+
+
+@respx.mock
 @pytest.mark.parametrize(
     ("route", "bambuddy_path"),
     [
         ("/api/v1/farm/library/1615/thumbnail", "/library/files/1615/thumbnail"),
         ("/api/v1/farm/archives/107/thumbnail", "/archives/107/thumbnail"),
         ("/api/v1/farm/printers/1/cover?archive=90", "/printers/1/cover"),
+        (
+            "/api/v1/farm/library/1615/plates/2/thumbnail",
+            "/library/files/1615/plate-thumbnail/2",
+        ),
+        ("/api/v1/farm/archives/107/plates/2/thumbnail", "/archives/107/plate-thumbnail/2"),
     ],
 )
 def test_the_farm_serves_bambuddys_pictures(

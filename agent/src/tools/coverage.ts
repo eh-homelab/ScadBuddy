@@ -602,6 +602,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'GET /api/v1/farm/library/{file_id}/thumbnail',
       'GET /api/v1/farm/archives/{archive_id}/thumbnail',
+      'GET /api/v1/farm/library/{file_id}/plates/{plate}/thumbnail',
+      'GET /api/v1/farm/archives/{archive_id}/plates/{plate}/thumbnail',
       'GET /api/v1/farm/printers/{printer_id}/cover',
     ] as const
   ).map((operation) => ({
