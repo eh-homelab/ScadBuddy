@@ -166,6 +166,12 @@ describe('the designer', () => {
     expect(described()).not.toContain('wall_window')
   })
 
+  it('describes an unknown piece by its key, and no piece as the default one (#7871 review)', async () => {
+    const house = { cols: 2, rows: 1, storeys: 1, windows: 2 }
+    expect((await mounted({ params: { piece: 'balcony' }, house })).described()).toMatch(/; showing balcony\.$/)
+    expect((await mounted({ params: {}, house })).described()).toMatch(/; showing the default piece\.$/)
+  })
+
   it('lists the pieces and shows the one picked', async () => {
     const { root, set, button } = await mounted({ params: {} })
     expect(root.querySelector('sb-preview')).not.toBeNull()
