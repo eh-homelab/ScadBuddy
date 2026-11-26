@@ -430,6 +430,22 @@ def test_a_failed_plate_adds_no_metres() -> None:
     assert found.implied_density_g_cm3 == pytest.approx(1.239, abs=0.001)
 
 
+def test_a_paired_plate_takes_its_length_from_the_sb_end() -> None:
+    """Bambuddy's usage row carries no length, so a plate it also booked keeps the length
+    of ScadBuddy's own ``print_ended`` of the job (the review of #7865)."""
+    bb = bb_end(days(1), 28, "a")
+    events = [sb_start(days(1.1), 30, "a"), sb_end(days(1), 30, "a", length_m=9.4), bb]
+    (found,) = metrics.plates(events)
+    assert (found.grams, found.event_id, found.length_m) == (28.0, bb.id, 9.4)
+    assert metrics.plates([bb_end(days(1), 3, "c")])[0].length_m is None
+
+
+def test_only_failed_plates_give_no_metres() -> None:
+    """A spool whose lengthed plates all failed (0 m) has no metres, not 0 m."""
+    found = _metrics([sb_end(days(1), 0, "b", basis="not_applied", length_m=0.0)])
+    assert (found.used_m, found.implied_density_g_cm3, found.prints) == (None, None, 1)
+
+
 def test_a_density_off_by_more_than_five_percent_is_a_mismatch() -> None:
     off = _metrics([sb_end(days(1), 3.3, "a", length_m=1.0)])
     assert off.implied_density_g_cm3 == pytest.approx(1.372, abs=0.001)

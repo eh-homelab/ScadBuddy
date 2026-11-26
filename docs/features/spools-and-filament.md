@@ -262,9 +262,12 @@ filament (Bambu Studio writes it beside `used_g` in `Metadata/slice_info.config`
 `slicing/slice_info.py` `plate_uses` with the grams, rides in `LanUploaded.length_by_slot`
 and `SlotUse.length_m`, and is kept as `data.length_m` on the `print_started` event (absent
 when the plate gave the slot no length) and copied onto its `print_ended` (`0.0` on a failed
-plate, as its grams are 0). Bambuddy's usage rows have no length and keep none. The spool's
-history (`GET /filament/spools/{id}/history`) sums the metres of the plates that carry one
-(`metrics.used_m`, null when none does), derives the density those plates' grams and metres
+plate, as its grams are 0). Bambuddy's usage rows have no length and keep none, so a plate
+Bambuddy also booked (the paired plate counts once, as the BB row) takes the length of
+ScadBuddy's own end of the job. The spool's
+history (`GET /filament/spools/{id}/history`) sums the metres of the plates that carry a
+length over 0 m (`metrics.used_m`, null when none does: a spool whose lengthed plates all
+failed has no metres, not 0 m), derives the density those plates' grams and metres
 imply over the spool's effective diameter (`implied_density_g_cm3`; 1 m of 1.75 mm filament
 at 1.24 g/cm³ is 2.98 g) and compares it with the type's (`density_g_cm3`): apart by more
 than 5 % is `density_mismatch`. Both numbers are the slicer's, so the implied density is

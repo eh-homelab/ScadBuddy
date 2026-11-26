@@ -51,9 +51,27 @@ def _grams(event: SpoolEvent) -> float:
     return -event.delta_g if event.delta_g else 0.0
 
 
+def _length(event: SpoolEvent) -> float | None:
+    """The plate's metres from its end's ``data.length_m`` (#7685); ``None`` without one."""
+    metres = event.data.get("length_m")
+    if isinstance(metres, (int, float)) and not isinstance(metres, bool):
+        return float(metres)
+    return None
+
+
 def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
     """The spool's plates, oldest first, each counted once (module docstring)."""
     paired = ledger.pairs(events)
+    # #7685: Bambuddy's usage rows carry no length, so a paired plate takes the length of
+    # ScadBuddy's own end of the job.
+    sb_lengths = {
+        sb_job: sb_length
+        for event in events
+        if event.kind == ledger.PRINT_ENDED
+        and event.ref_kind == ledger.PRINT_RUN
+        and (sb_job := ledger.job_of(event)) is not None
+        and (sb_length := _length(event)) is not None
+    }
     found: list[Plate] = []
     for event in _ordered(events):
         if event.kind != ledger.PRINT_ENDED:
@@ -66,15 +84,14 @@ def plates(events: Sequence[SpoolEvent]) -> list[Plate]:
             outcome = _STAGE_OUTCOMES.get(
                 stage_of(status if isinstance(status, str) else None), "unknown"
             )
+            length = sb_lengths.get(job) if job is not None else None
         elif event.ref_kind == ledger.PRINT_RUN and job not in paired:
             basis = event.data.get("basis")
             if basis == "covered":
                 continue
             outcome = "failed" if basis == "not_applied" else "completed"
             grams = 0.0 if basis == "not_applied" else grams
-            metres = event.data.get("length_m")
-            if isinstance(metres, (int, float)) and not isinstance(metres, bool):
-                length = float(metres)
+            length = _length(event)
         else:
             continue
         found.append(
@@ -245,11 +262,12 @@ def spool_metrics(
     """One spool's metrics. "Opened" is its first ``loaded`` event, else its first plate
     (Decision 15). Money is quantized to the cent. The consumed counter counts the plates
     after the newest ``consumed_reset`` (#7149 R-7149-4); the other figures are lifetime.
-    The metres and the implied density (#7685) are over the plates that carry a length,
-    at ``diameter_mm``, against ``density_g_cm3``, the spool's effective type density."""
+    The metres and the implied density (#7685) are over the plates that carry a length
+    over 0 m (a failed plate's 0 m counts for nothing), at ``diameter_mm``, against
+    ``density_g_cm3``, the spool's effective type density."""
     found = plates(events)
     used = sum(p.grams for p in found)
-    lengthed = [p for p in found if p.length_m is not None]
+    lengthed = [p for p in found if p.length_m is not None and p.length_m > 0]
     metres = sum(p.length_m or 0.0 for p in lengthed) if lengthed else None
     implied = (
         None

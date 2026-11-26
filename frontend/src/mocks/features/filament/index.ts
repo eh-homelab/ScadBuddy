@@ -1340,18 +1340,20 @@ export interface MockPlate {
  */
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
+  // #7685: Bambuddy's rows carry no length, so a paired plate takes the length of SB's own end of the job.
+  const sbLengths = new Map(events.filter((event) => event.kind === 'print_ended' && event.ref_kind === 'print_run' && lengthOf(event) != null).map((event) => [jobOf(event), lengthOf(event)]))
   return [...events].sort(byTime).flatMap((event) => {
     if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0
     if (event.ref_kind === 'bb_usage') {
       const status = event.data?.bb_status
       const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
-      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id, length_m: sbLengths.get(jobOf(event)) ?? null }]
     }
     if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
     const failed = event.data?.basis === 'not_applied'
-    const length = event.data?.length_m
-    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id, length_m: typeof length === 'number' ? length : null }]
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id, length_m: lengthOf(event) }]
   })
 }
 
@@ -1457,9 +1459,10 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const effective = view(row).effective
   const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
   const labelWeight = effective?.label_weight_g
-  // #7685 (`metrics.spool_metrics`): the metres of the plates with a length, and the density
-  // their grams imply over the spool's diameter, against the type's.
-  const lengthed = plates.filter((plate) => plate.length_m != null)
+  // #7685 (`metrics.spool_metrics`): the metres of the plates with a length over 0 m (a failed
+  // plate's 0 m counts for nothing), and the density their grams imply over the spool's
+  // diameter, against the type's.
+  const lengthed = plates.filter((plate) => plate.length_m != null && plate.length_m > 0)
   const usedMetres = lengthed.length > 0 ? lengthed.reduce((sum, plate) => sum + (plate.length_m ?? 0), 0) : null
   const implied = usedMetres != null ? impliedDensity(lengthed.reduce((sum, plate) => sum + plate.grams, 0), usedMetres, Number(effective?.diameter_mm ?? '1.75')) : null
   const typeDensity = effective?.density_g_cm3 != null ? Number(effective.density_g_cm3) : null
