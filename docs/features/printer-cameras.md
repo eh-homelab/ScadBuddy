@@ -10,8 +10,10 @@ records and indexes only. Phase 3
 view" below). Per-print video, timelapses and retention are phases 2, 4 and 5 (spec
 [§9](../superpowers/specs/2026-11-23-printer-camera-recording-design.md#9-phases-each-one-issue-under-one-new-epic)).
 
-A printer qualifies when all three are true (`camera/store.py` `CameraStore.sources`):
+A printer qualifies when all four are true (`camera/store.py` `CameraStore.sources`):
 
+- it is a physical printer (`kind` `physical`). A Bambuddy virtual printer has a LAN link
+  and the report of the printer it forwards to, but no camera (#7996);
 - its LAN link has a sealed access code;
 - its last LAN report's `ipcam.rtsp_url` starts with `rtsps://`;
 - its toggle `printers.camera_recording` is on. The default is on. The API's

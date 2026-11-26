@@ -84,7 +84,9 @@ class CameraStore:
             rows = conn.execute(
                 "SELECT p.id, p.lan_host, p.lan_cert_sha256, r.report FROM printers p"
                 " JOIN printer_reports r ON r.printer_id = p.id"
-                " WHERE p.camera_recording AND p.lan_host IS NOT NULL"
+                # A Bambuddy virtual printer has the forwarded printer's report, so an
+                # RTSP URL, but no camera (#7996).
+                " WHERE p.kind = 'physical' AND p.camera_recording AND p.lan_host IS NOT NULL"
                 " AND p.access_code_sealed IS NOT NULL AND p.lan_cert_sha256 IS NOT NULL"
                 f"{where} ORDER BY p.created_at, p.id",
                 args,
