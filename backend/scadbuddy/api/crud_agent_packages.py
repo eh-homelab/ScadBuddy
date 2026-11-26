@@ -7,14 +7,17 @@ write the blob store.
 
 A bytes pin (#6935: an archive or npm package, or a marketplace entry of either, pinned to the
 sha256 of the file the agent fetched) is stored only while the package holds its mirror; the
-agent sends the file first to area ``package-mirrors``:
+agent sends the file first to area ``package-mirrors``. A commit pin's files are sent there
+too, as a zip, once a fetch hashes to the pin, and recorded by Go's
+``POST …/plugin-packages/{name}/mirror`` (#7907):
 
 - ``POST …/package-mirrors/{name}`` the raw bytes of a file for the package ``name``, at
   most `MAX_MIRROR_BYTES`, kept as a blob under their sha256 and held for ``name``
   (`agent_data/package_mirrors.py`); answers ``{bytes_sha256}``;
-- ``GET …/package-mirrors/{name}/{sha256}`` the bytes, only while a row of ``name`` has that
-  sha256 as its ``bytes_sha256`` or ``pending_bytes_sha256``; else 404
-  ``mirror-not-found``, even while the blob is still in the store.
+- ``GET …/package-mirrors/{name}/{sha256}`` the bytes, only while a row of ``name`` names that
+  sha256 (``bytes_sha256``, ``pending_bytes_sha256``, ``mirror_sha256`` or
+  ``pending_mirror_sha256``); else 404 ``mirror-not-found``, even while the blob is still in
+  the store.
 
 Area ``hosted-plugins`` (#6932): ``GET …/hosted-plugins/{name}/versions/{N}.zip`` that
 version's zip, as published (404 ``hosted-version-not-found``).
@@ -125,7 +128,8 @@ async def package_mirror_post(name: Name, request: Request, state: StateDep) -> 
 )
 async def package_mirror(name: Name, sha256: Sha256, state: StateDep) -> FileResponse:
     """The kept bytes of ``sha256``, only while the package ``name``'s pin or pending re-pin
-    names them: a hold released, or another package's file, is not served."""
+    names them (its bytes, or a commit pin's recorded mirror): a hold released, or another
+    package's file, is not served."""
     not_found = ApiError(
         status.HTTP_404_NOT_FOUND,
         f"no mirror of the bytes {sha256} is kept for {name}",
@@ -136,8 +140,9 @@ async def package_mirror(name: Name, sha256: Sha256, state: StateDep) -> FileRes
         return (
             conn.execute(
                 "SELECT 1 FROM ai_plugin_packages WHERE name = %s"
-                " AND (bytes_sha256 = %s OR pending_bytes_sha256 = %s)",
-                (name, sha256, sha256),
+                " AND %s IN (bytes_sha256, pending_bytes_sha256, mirror_sha256,"
+                " pending_mirror_sha256)",
+                (name, sha256),
             ).fetchone()
             is not None
         )

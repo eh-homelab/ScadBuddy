@@ -21,7 +21,6 @@ from temporalio import activity
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
-from scadbuddy.bambuddy.kprofiles import kprofile_kinds
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
 from scadbuddy.bambuddy.options import PrintOptions, options_scope
@@ -510,8 +509,6 @@ def bambuddy_kinds_over(
         ),
         # #4747: Bambuddy's virtual printers, written from Settings > Printers.
         *virtual_printer_kinds(settings_store=settings_store, printers=printers),
-        # #7154: a printer's K-profiles and their notes, written from Settings > Printers.
-        *kprofile_kinds(settings_store=settings_store, printers=printers),
     ]
 
 

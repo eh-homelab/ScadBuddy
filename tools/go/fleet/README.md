@@ -7,10 +7,25 @@ over ScadBuddy's own store and bus. The design is
 The image is `ghcr.io/eh-homelab/scadbuddy-fleet`, published by
 `.github/workflows/build-go-image.yml`. It runs as uid 10003 and listens on 8080.
 
+## Telemetry
+
+The server exports traces, metrics and logs over OTLP/HTTP with the shared
+`tools/go/telemetry` (service name `scadbuddy-fleet`), set by the standard `OTEL_*`
+variables; with no endpoint every signal is off. Each request it serves is a SERVER span
+(not `/healthz`), each request to core (the store, the bus stream and the credential
+exchange) a CLIENT span whose traceparent core continues, and the Go runtime and process
+are measured. Its JSON log lines stay on stderr; with logs on, each also goes over OTLP
+without its path, error or credential fields. The `log` package's lines (net/http's) stay
+on stderr only.
+A setting telemetry cannot use (such as a malformed endpoint URL) is logged as
+"telemetry is off", and the server runs with every signal off.
+
 ## Package `sbfleet`
 
 `sbfleet` imports `fleetchat` and nothing from `tools/go/core`: it reaches core only
-over HTTP (`TestNoCoreImports` checks it).
+over HTTP (`TestNoCoreImports` checks it; the binary also imports `tools/go/telemetry`).
+`WrapTransport` wraps the transport of its requests to core (the binary passes
+telemetry's `Transport`); `(*Exchange).WrapTransport` does the same for the exchange.
 
 - `NewStore(coreURL, token)`: a `fleetchat.Store` over core's routes under
   `/api/v1/internal/crud/fleet/` (caller `fleet`; `tools/go/core/internal/fleet`):
@@ -26,7 +41,9 @@ over HTTP (`TestNoCoreImports` checks it).
   | `Rewind` | `PUT /agents/{session_id}/cursor` `{"seq"}` |
 
   A problem's `reason` maps to an error that `errors.Is` finds: `unknown-agent` (404)
-  to `fleetchat.ErrUnknownAgent`, `not-member` (403) to `fleetchat.ErrNotMember`, and
+  to `fleetchat.ErrUnknownAgent`, `unknown-channel` (404, a post to or a leave of a
+  channel nobody has joined) to `fleetchat.ErrUnknownChannel`, `not-member` (403) to
+  `fleetchat.ErrNotMember`, and
   `handle-taken` (409, two session ids that share their first 8 hex characters) to
   `sbfleet.ErrHandleTaken`, `seq-ahead` (422, a rewind past the cursor) to
   `fleetchat.ErrBadSeq`, and `text-too-long` (422, a text over core's 16 MiB, detail

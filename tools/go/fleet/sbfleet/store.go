@@ -32,17 +32,19 @@ var ErrHandleTaken = errors.New("another session has this session's handle")
 
 // reasons map core's problem reasons to the errors fleetchat knows.
 var reasons = map[string]error{
-	"unknown-agent": fleetchat.ErrUnknownAgent,
-	"not-member":    fleetchat.ErrNotMember,
-	"handle-taken":  ErrHandleTaken,
-	"seq-ahead":     fleetchat.ErrBadSeq,
-	"text-too-long": fleetchat.ErrTooLong,
+	"unknown-agent":   fleetchat.ErrUnknownAgent,
+	"not-member":      fleetchat.ErrNotMember,
+	"unknown-channel": fleetchat.ErrUnknownChannel,
+	"handle-taken":    ErrHandleTaken,
+	"seq-ahead":       fleetchat.ErrBadSeq,
+	"text-too-long":   fleetchat.ErrTooLong,
 }
 
 type client struct {
 	base       string
 	token      func() (string, error)
 	invalidate func(string)
+	wrap       func(http.RoundTripper) http.RoundTripper
 	http       *http.Client
 }
 
@@ -57,12 +59,27 @@ func OnUnauthorized(invalidate func(token string)) Option {
 	return func(c *client) { c.invalidate = invalidate }
 }
 
+// WrapTransport wraps the transport of every request to core, such as
+// (*telemetry.Telemetry).Transport for a CLIENT span per request.
+func WrapTransport(wrap func(http.RoundTripper) http.RoundTripper) Option {
+	return func(c *client) { c.wrap = wrap }
+}
+
 func newClient(baseURL string, token func() (string, error), timeout time.Duration, opts []Option) *client {
 	c := &client{base: strings.TrimRight(baseURL, "/") + path, token: token, http: &http.Client{Timeout: timeout}}
 	for _, o := range opts {
 		o(c)
 	}
+	c.setTransport(http.DefaultTransport)
 	return c
+}
+
+// setTransport sets base, wrapped when WrapTransport was given.
+func (c *client) setTransport(base http.RoundTripper) {
+	if c.wrap != nil {
+		base = c.wrap(base)
+	}
+	c.http.Transport = base
 }
 
 // send sends a request built with the credential token returns now, and, when core

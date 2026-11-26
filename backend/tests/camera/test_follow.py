@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -8,7 +9,7 @@ from typing import Any
 import httpx
 
 from scadbuddy.auth.service_credentials import ServiceAuth
-from scadbuddy.camera.follow import ChangeFollower
+from scadbuddy.camera.follow import IDLE, ChangeFollower
 from scadbuddy.crud.client import CrudClient
 
 PATH = "/api/v1/internal/crud/camera/changes"
@@ -327,3 +328,27 @@ async def test_a_reconnect_event_through_keep_camera_reaches_on_reconnect() -> N
     await until(lambda: reconnects)
     task.cancel()
     assert reconnects == ["p9"]
+
+
+async def test_the_stream_reads_past_the_keepalive_gap() -> None:
+    """The API sends a keepalive every 15 s. The stream's read timeout is ``IDLE``, not the
+    client's per-request 10 s, which ended every quiet stream on prod (#7980)."""
+    seen: list[dict[str, float | None]] = []
+    hold = asyncio.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions["timeout"])
+        return sse([frame("ready", {}, "1")], hold)
+
+    resyncs: list[int] = []
+    follow = follower(handler, [], resyncs)
+    task = asyncio.create_task(follow.run())
+    try:
+        await until(lambda: seen)
+    finally:
+        hold.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert seen[0]["read"] == IDLE
+    assert seen[0]["connect"] == 10.0

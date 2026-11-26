@@ -7,8 +7,8 @@ Which library that is depends on ScadBuddy's `library_backend` (#3827): Bambuddy
 trash and external-file notes below apply to `bambuddy`, while on `native` every
 delete goes to ScadBuddy's trash for 30 days.
 
-It needs `fuse3` (`fusermount3`) and `/dev/fuse`. By default it sends traces and
-metrics, with the host's name, to eh-homelab's collector; `--no-telemetry` turns that
+It needs `fuse3` (`fusermount3`) and `/dev/fuse`. By default it sends traces,
+metrics and logs, with the host's name, to eh-homelab's collector; `--no-telemetry` turns that
 off (see "Telemetry").
 
 ## Build and run
@@ -122,8 +122,8 @@ bambuddy-fs allow-other
 | `--cache-dir` | Downloaded contents and files being written, under `<cache-dir>/<API host>[_<port>]/`, so two ScadBuddy instances never share contents (file IDs are each one's own). Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. One mount at a time uses an API's cache (it holds a `lock` there). |
 | `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
 | `--state-dir` | Writes not yet sent, under `unsent/`: those whose upload failed and, with `--write-back`, every write until the retrier sends it (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
-| `--otel-endpoint` | OTLP/HTTP collector base URL for traces and metrics (see "Telemetry"). |
-| `--no-telemetry` | Send no traces or metrics. `--no-tracing` is the same. |
+| `--otel-endpoint` | OTLP/HTTP collector base URL for traces, metrics and logs (see "Telemetry"). |
+| `--no-telemetry` | Send no traces, metrics or logs. `--no-tracing` is the same. |
 
 `bambuddy-fs --help` and `bambuddy-fs mount --help` print the usage and exit 0; an
 unknown command exits 2.
@@ -360,27 +360,30 @@ cut off after 30 minutes and queued.
 ## Telemetry
 
 Telemetry is on by default: unless told otherwise, the mount sends OpenTelemetry
-traces and metrics, including this machine's host name as `service.instance.id`, to
+traces, metrics and logs, including this machine's host name as `service.instance.id`, to
 eh-homelab's collector. Pass `--no-telemetry` (or set `OTEL_SDK_DISABLED=true`) to send
 nothing, which anyone running the published image outside eh-homelab should do.
 
 They go over OTLP/HTTP to `https://otlp.internal.nullreference.io` (`/v1/traces`,
-`/v1/metrics`), with TLS checked against the system roots (eh-homelab/clusters#2221).
+`/v1/metrics`, `/v1/logs`), with TLS checked against the system roots (eh-homelab/clusters#2221).
 That endpoint takes no credentials, and its address is also the gateway's public HTTPS
 target, so it is reachable from outside the LAN as well, not only from it.
 
 The standard `OTEL_*` variables apply as the OpenTelemetry
 SDK reads them (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_CERTIFICATE`,
 `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER` and `_ARG`,
-`OTEL_METRIC_EXPORT_INTERVAL`, default 60 s). Where each signal goes, first match wins:
+`OTEL_METRIC_EXPORT_INTERVAL`, default 60 s). The setup is the shared `tools/go/telemetry`
+module, which every Go module of ScadBuddy uses. Where each signal goes, first match wins:
 
-1. `--otel-endpoint <base>`: `<base>/v1/traces` and `<base>/v1/metrics`;
-2. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, as is;
+1. `--otel-endpoint <base>`: `<base>/v1/traces`, `<base>/v1/metrics` and `<base>/v1/logs`;
+2. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` /
+   `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, as is;
 3. `OTEL_EXPORTER_OTLP_ENDPOINT` plus the signal's path;
 4. the default above.
 
-`--no-telemetry` (or `--no-tracing`) or `OTEL_SDK_DISABLED=true` turns both off;
-`OTEL_TRACES_EXPORTER=none` or `OTEL_METRICS_EXPORTER=none` turns off one. Off, no
+`--no-telemetry` (or `--no-tracing`) or `OTEL_SDK_DISABLED=true` turns all three off;
+`OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER` or `OTEL_LOGS_EXPORTER` set to `none`, or to
+anything that does not name `otlp` (with a warning), turns off one. Off, no
 exporter is built and nothing touches the network. Metrics are always cumulative,
 whatever `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` says, since Prometheus
 refuses delta.
@@ -423,7 +426,17 @@ Metrics: `bambuddy_fs.fuse.operations` and `bambuddy_fs.fuse.operation.duration`
 `download`), the gauges `bambuddy_fs.cache.bytes`,
 `bambuddy_fs.unsent.entries` and `bambuddy_fs.unsent.bytes`,
 `bambuddy_fs.unsent.uploads` (by `result`), and `bambuddy_fs.unsent.queued` (writes
-put in the queue, by `reason`: `write_back` or `upload_failed`).
+put in the queue, by `reason`: `write_back` or `upload_failed`). Also the Go runtime's
+metrics (`go.goroutine.count`, `go.memory.used`, `go.memory.class`, `go.gc.count`,
+`go.gc.pause.time`, `go.processor.limit`, `go.schedule.duration`, …) and the process's
+(`process.cpu.time`, `process.memory.usage`, `process.unix.file_descriptor.count`,
+`process.uptime`).
+
+Logs: every `slog` record goes over OTLP too, with its `trace_id` and `span_id` when it was
+logged inside a span. The OTLP copy keeps only the `file`, `files` and `folder` attributes
+(ids); a name, a path or an error's text stays on stderr, and a message is a fixed text.
+A line on stderr is `<date> <time> LEVEL message key=value …`, as before. The command's own
+start-up errors go to stderr only.
 
 What is recorded is ids (file, folder, operation), byte counts, operation names, errno
 names, status codes and durations. Never a file or folder name, a path, file contents,

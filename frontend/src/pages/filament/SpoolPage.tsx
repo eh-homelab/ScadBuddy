@@ -477,6 +477,7 @@ export function SpoolPage() {
   const schema = keys.data?.schema ?? {}
   const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
   const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [propertiesError, setPropertiesError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
   // #7703: "Create type from this spool" asks first for the keys a type requires.
   const typeKeys = useAsync(() => entityApi.propertySchema('spool_type'), [])
@@ -498,13 +499,18 @@ export function SpoolPage() {
     setDefined({})
     setDefinedBefore({})
     setFieldErrors(undefined)
+    setPropertiesError(null)
     if (id !== 'new')
-      entityApi.properties(`spool:${id}`).then((own) => {
-        if (!live) return
-        const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
-        setDefined(values)
-        setDefinedBefore(values)
-      }, () => {})
+      entityApi.properties(`spool:${id}`).then(
+        (own) => {
+          if (!live) return
+          const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
+          // A key typed before the read answered keeps what was typed (#7951).
+          setDefined((typed) => ({ ...values, ...typed }))
+          setDefinedBefore(values)
+        },
+        (cause: unknown) => live && setPropertiesError(`The spool's properties could not be loaded: ${message(cause)}`),
+      )
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getSpool(id),
       asked ? copySpool(asked) : Promise.resolve(null),
@@ -961,6 +967,11 @@ export function SpoolPage() {
               </Label>
               <Textarea id="spool-note" rows={2} value={draft.note} onChange={(e) => set('note', e.target.value)} />
             </div>
+            {propertiesError && (
+              <p role="alert" className="text-[13px] text-warn">
+                {propertiesError}
+              </p>
+            )}
             <DefinedFields
               schema={schema}
               values={defined}

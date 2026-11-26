@@ -113,7 +113,8 @@ flowchart LR
   `bambuddy-follow`: print runs, LAN upload and start, follow, printer watches
   ([workflows.md](workflows.md#print-to-the-h2c)), and the filament sync with Bambuddy,
   the Bambuddy pull and the location-sensor alerts (`FilamentBbSync`, `FilamentBbPull`,
-  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-217`).
+  `SensorNotifyPass`, `scadbuddy/workflows/client.py:211-223`), and a printer's K-profile and
+  AMS slot commands over its LAN link (`LanCommand`, #7276, started and awaited by the API).
 - **Reads.** The API URL and a service proof as above. Its Bambuddy key comes from the
   CRUD settings route; a printer's access code is opened by the API and handed over a
   CRUD route (`scadbuddy/api/crud_print.py:2242`).
@@ -232,7 +233,7 @@ and mounts no database secret and no KEK; see
 The Rust `scadbuddy-slicer` serves the `slice_plate` activity on `slicer` and runs the
 Bambu Studio CLI (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`,
 `workers/rust/crates/sb-slicer/src/runner.rs:103-135`). It reads only the Temporal and
-concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`) and
+concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`; traces, metrics and logs over OTLP, `workers/rust/crates/sb-temporal/src/telemetry.rs`) and
 holds no credential: its inputs carry transfer URLs. See
 [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md).
 

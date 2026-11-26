@@ -8,6 +8,8 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 // Field is one extension member of a problem, in the order it is written.
@@ -32,6 +34,17 @@ type Problem struct {
 }
 
 func (p *Problem) Error() string { return p.Detail }
+
+// reason is the problem's reason extension, when it has one.
+func (p *Problem) reason() (string, bool) {
+	for _, f := range p.Extensions {
+		if f.Key == "reason" {
+			s, ok := f.Value.(string)
+			return s, ok
+		}
+	}
+	return "", false
+}
 
 // WithReason is a problem with the machine-readable reason a client branches on.
 func WithReason(status int, detail, reason string) *Problem {
@@ -132,6 +145,8 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, p *Problem) {
 		panic(errors.Join(errors.New("a problem that is not JSON"), err))
 	}
 	b.WriteByte('}')
+	reason, _ := p.reason()
+	telemetry.RecordProblem(r.Context(), p.Status, kind, reason)
 	for k, v := range p.Headers {
 		w.Header().Set(k, v)
 	}

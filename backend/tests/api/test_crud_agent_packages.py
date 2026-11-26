@@ -146,6 +146,36 @@ def test_a_pending_repin_reads_its_mirror(
         assert (got.status_code, got.content) == (200, data)
 
 
+# A commit pin's mirror (#7907): a zip of its files, recorded on the row.
+
+
+def test_a_commit_pins_recorded_mirror_is_read_back(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    # #7907: Go's POST …/plugin-packages/{name}/mirror records a commit pin's zip as
+    # mirror_sha256 (and a re-pin's as pending_mirror_sha256); this route serves either.
+    _mirror(client, agent, ZIP)
+    _mirror(client, agent, OTHER)
+    _insert(db, "greeter")
+    for sha in (ZIP_SHA, OTHER_SHA):
+        assert client.get(f"{MIRRORS}/greeter/{sha}", headers=agent).status_code == 404
+    db.execute(
+        "UPDATE ai_plugin_packages SET mirror_sha256 = %s WHERE name = 'greeter'", (ZIP_SHA,)
+    )
+    got = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
+    assert (got.status_code, got.content) == (200, ZIP)
+    _insert(db, "repinned", pin_kind="commit", commit_sha=C2, content_hash=H2)
+    _mirror(client, agent, OTHER, name="repinned")
+    db.execute(
+        "UPDATE ai_plugin_packages SET pending_mirror_sha256 = %s WHERE name = 'repinned'",
+        (OTHER_SHA,),
+    )
+    staged = client.get(f"{MIRRORS}/repinned/{OTHER_SHA}", headers=agent)
+    assert (staged.status_code, staged.content) == (200, OTHER)
+    # Another package's recorded mirror is not served for this one.
+    assert client.get(f"{MIRRORS}/greeter/{OTHER_SHA}", headers=agent).status_code == 404
+
+
 # #7191: the strict pending CHECKs of 20261123T1756Z_plugin_package_pending_kind_strict.sql,
 # and its backfill of the rows that the looser CHECKs of 20261122T0323Z let in.
 STRICT = "20261123T1756Z_plugin_package_pending_kind_strict"

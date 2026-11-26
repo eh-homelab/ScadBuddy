@@ -433,9 +433,11 @@ class CrudClient(_Base):
         headers: Mapping[str, str] | None = None,
         budget: float | None = None,
         content: bytes | None = None,
+        timeout: float | httpx.Timeout | None = None,
     ) -> CrudStream:
         """``request``'s retries and refusals, with the body of a success still unread.
-        ``content`` is a JSON body, sent again on each retry."""
+        ``content`` is a JSON body, sent again on each retry. ``timeout`` replaces the
+        client's per-request timeout, whose read part also bounds each wait for the body."""
         call = _Call(self, path, budget)
         while True:
             started = time.perf_counter()
@@ -446,7 +448,7 @@ class CrudClient(_Base):
                 # decode a gzipped body to more bytes than that length declares.
                 plain = {"Accept-Encoding": "identity", **(headers or {})}
                 sent = http.build_request(
-                    method, path, params=params, **self._kwargs(None, None, None, plain, content)
+                    method, path, params=params, **self._kwargs(None, None, timeout, plain, content)
                 )
                 response = await http.send(sent, stream=True)
             except httpx.TransportError as error:

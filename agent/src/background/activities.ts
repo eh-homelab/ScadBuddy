@@ -28,6 +28,8 @@ import { type AgentOptions, callKey, WORKFLOW_CONCURRENCY, WORKFLOW_MAX_AGENTS }
 export const BG_NEXT = 'bg_next'
 export const BG_FIRE = 'bg_fire'
 export const BG_FINISH = 'bg_finish'
+/** bg_finish's input. `monitor`: whether the task is a monitor, the one kind that may hold a sandbox slot. */
+export type FinishInput = { taskId: string; state: 'done' | 'cancelled' | 'failed'; detail?: string; monitor?: boolean }
 export const BG_MONITOR_PLAN = 'bg_monitor_plan'
 export const BG_MONITOR_COMMAND = 'bg_monitor_command'
 export const BG_MONITOR_WS = 'bg_monitor_ws'
@@ -263,11 +265,15 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       return sent
     },
 
-    async [BG_FINISH](input: { taskId: string; state: 'done' | 'cancelled' | 'failed'; detail?: string }): Promise<void> {
+    async [BG_FINISH](input: FinishInput): Promise<void> {
       await deps.store.finish(input.taskId, input.state, input.detail)
-      // A cancel (the panel's, TaskStop's, the session's end) may land before the watch of a
-      // command in the sandbox began, and an unstarted watch never runs: its slot stops here.
-      if (input.state === 'cancelled' && deps.sandbox) {
+      // A command in the sandbox stops here at any end: a cancel (the panel's, TaskStop's, the
+      // session's end) may land before its watch began, and an unstarted watch never runs; a
+      // watch that never started or died (its replica gone, its activity timed out) ends the task
+      // `done` with `failed` as its detail and stopped nothing. A slot that ended already answers
+      // the stop with nothing (stopSlot never throws). Only a monitor has a slot: another task's
+      // end reads nothing back (a workflow started before `monitor` was sent reads it).
+      if (deps.sandbox && input.monitor !== false) {
         const t = await deps.store.get(input.taskId)
         if (t && sandboxSpec(t)) await stopSlot(deps.sandbox, t)
       }

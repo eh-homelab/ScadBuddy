@@ -24,6 +24,8 @@ images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs
   (#4541), so the fake-printer tests (`tests/test_print_native_workflow.py`,
   `tests/api/test_hot_path_native.py` and the fakes' own) run in every backend-pytest shard;
   locally they skip without a `mosquitto` on `PATH` or `SCADBUDDY_TEST_MQTT`.
+  `backend/tests/printers/test_lan_command_fake.py` (the `lan_command` activity against the
+  fake, #7276) needs Postgres too, so it runs in the backend shards, not the `fakes` job.
 
 ## See also
 

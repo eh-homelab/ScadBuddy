@@ -33,11 +33,19 @@ export function isLiveStatus(status: ToolStatus): boolean {
 }
 
 /**
+ * What Claude Code's error result for a call it stopped begins with: its answer to an interrupt
+ * (a Stop, or a restart of the agent service, #7874). With no approval that names the call, nobody
+ * refused it: the call was stopped while it ran.
+ */
+export const STOPPED_RESULT = "The user doesn't want to proceed with this tool use."
+
+/**
  * How a call stands. An approval that names it and was not given says it was not run,
  * even when Claude Code went on to record an error result for it (#2149); one still
  * pending says it waits. Else its result says done or failed, unless the turn was
- * stopped while it ran (Claude Code then records a refusal as its result), which is
- * stopped. Else a question that names it says it waits on the user; else it runs.
+ * stopped while it ran (Claude Code then records a refusal as its result: STOPPED_RESULT, or
+ * the turn's `interrupted` error follows it), which is stopped. Else a question that names it
+ * says it waits on the user; else it runs.
  * `settled`: the session's turn has ended, so a call with nothing to show for it stopped.
  */
 export function toolStatus(call: ToolCall, items: readonly FeedItem[], options: { settled?: boolean } = {}): ToolStatus {
@@ -49,7 +57,7 @@ export function toolStatus(call: ToolCall, items: readonly FeedItem[], options: 
   }
   if (call.result) {
     if (call.result.ok) return 'done'
-    return stoppedBy(call, items) ? 'stopped' : 'failed'
+    return call.result.summary.startsWith(STOPPED_RESULT) || stoppedBy(call, items) ? 'stopped' : 'failed'
   }
   for (const item of items) {
     if (item.kind === 'question' && item.tool === call.id && (item.state === 'pending' || item.state === 'sent')) {

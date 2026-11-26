@@ -260,6 +260,26 @@ def test_a_plate_bambuddy_has_no_image_of_shows_the_cover(
 
 
 @respx.mock
+def test_a_library_cover_bambuddy_lacks_reads_as_on_its_own_route(client: TestClient) -> None:
+    """#7955: a library file's cover that Bambuddy lacks, reached through its plate's
+    route, names the file's thumbnail, as `get_library_thumbnail`'s miss does."""
+    configure(client)
+    respx.get(f"{API}/library/files/1615/plate-thumbnail/2").mock(
+        return_value=httpx.Response(404, json={"detail": "Plate thumbnail not found"})
+    )
+    respx.get(f"{API}/library/files/1615/thumbnail").mock(
+        return_value=httpx.Response(404, json={"detail": "Thumbnail not found"})
+    )
+
+    plate = client.get("/api/v1/farm/library/1615/plates/2/thumbnail")
+    own = client.get("/api/v1/farm/library/1615/thumbnail")
+
+    assert plate.status_code == own.status_code == 404
+    assert "show the file's thumbnail" in plate.json()["detail"]
+    assert plate.json()["detail"] == own.json()["detail"]
+
+
+@respx.mock
 def test_a_plate_image_bambuddy_refuses_is_not_hidden_by_the_cover(client: TestClient) -> None:
     """#7458: only a missing plate image falls back; any other refusal is the answer."""
     configure(client)

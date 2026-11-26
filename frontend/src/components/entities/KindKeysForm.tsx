@@ -5,7 +5,8 @@ import { useAsync } from '../../lib/useAsync'
 import { CATALOGS } from '../filament/catalogs'
 import { REQUIRED_KINDS, entityApi, hasValue, type PropertyValue } from './api'
 import { PropertyKeyTable } from './PropertyKeyTable'
-import { namedTwice, requiredOf, rowsOf, schemaOf } from './propertyKeys'
+import { requiredOf } from './definedProperties'
+import { namedTwice, rowsOf, schemaOf } from './propertyKeys'
 import { Button } from '@/components/ui/button'
 
 type Props = { kind: string; onSaved: () => void; onCancel: () => void }

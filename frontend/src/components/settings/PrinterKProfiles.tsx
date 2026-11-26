@@ -1,7 +1,7 @@
 import { ChevronRightIcon, PencilIcon, PlusIcon, RotateCwIcon, Trash2Icon } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
-import { api, ApiError } from '../../api/client'
-import type { KProfile, KProfileSet, KProfileWriteResult, PrinterRow } from '../../api/types'
+import { api, ApiError, mayHaveRun } from '../../api/client'
+import type { KProfile, KProfileRemove, KProfileSet, KProfileWriteResult, PrinterRow } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,14 +10,18 @@ import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { ChoiceSelect, LabeledInput, LoadingLines } from './form'
 import { Spinner } from '../ui/spinner'
+import { Said, stopped, usePrinterCommand } from './usePrinterCommand'
 
 /**
- * #7154 — a printer's K-profiles (pressure advance), read from and written to the printer
- * through Bambuddy (`backend/scadbuddy/api/printer_kprofiles.py`), as Bambuddy's own
- * K-Profiles page does (plan 2026-11-23-printer-kprofiles). Closed until opened: each read
- * asks the printer over MQTT (R-7154-9). A write goes once (R-7154-5) and says when the
- * printer did not confirm it (R-7154-7). Notes stay in Bambuddy, under the keys its page
- * uses, so a note made in either shows in both (R-7154-8).
+ * #7154, #7276 — a printer's K-profiles (pressure advance), read from and written to the
+ * printer over ScadBuddy's own LAN link (`backend/scadbuddy/api/printer_kprofiles.py`), shown
+ * on a printer whose row is `lan_linked`. Closed until opened: each read asks the printer over
+ * MQTT (R-7154-9). A write goes once under one key (R-7154-5, `printerCommand`, which follows a
+ * slow command's 202), says it was sent while the printer has not answered, and says when the
+ * printer did not confirm it (R-7154-7). A press that repeats a command the page stopped
+ * following sends its key again (P55, `usePrinterCommand`); closing the panel or changing the
+ * nozzle stops every follow. Notes are ScadBuddy's own and start empty: nothing is copied from
+ * Bambuddy (R-7276-16). They only keep the keys Bambuddy's K-Profiles page used (R-7154-8).
  */
 
 export const NOZZLES = ['0.2', '0.4', '0.6', '0.8'] as const
@@ -76,9 +80,12 @@ function noteOf(notes: Record<string, string>, profile: KProfile): { key: string
 /** What a write's answer says to the person: never "saved" when the printer did not confirm it. */
 function said(result: KProfileWriteResult, done: string): { text: string; warn: boolean } {
   return result.confirmed === false
-    ? { text: 'Sent, but the printer did not confirm it. Check the list before you send it again.', warn: true }
+    ? { text: 'Sent; the printer did not confirm it. Check the list before you send it again.', warn: true }
     : { text: done, warn: false }
 }
+
+/** #7276 — a write the printer has not answered yet (its route's 202): it was sent, and runs. */
+const WAITING = { text: 'Sent to the printer. Waiting for it to answer.', warn: false }
 
 export function PrinterKProfiles({ row }: { row: PrinterRow }) {
   const [open, setOpen] = useState(false)
@@ -97,16 +104,22 @@ export function PrinterKProfiles({ row }: { row: PrinterRow }) {
 
 type Editing = { kind: 'add' } | { kind: 'edit'; profile: KProfile }
 
+type Send = ReturnType<typeof usePrinterCommand>['send']
+
 function KProfilesBody({ row }: { row: PrinterRow }) {
   const [nozzle, setNozzle] = useState<string>('0.4')
-  const table = useAsync(() => api.listKProfiles(row.id, nozzle), [row.id, nozzle])
+  const commands = usePrinterCommand(row.id)
+  const table = useAsync(() => commands.track((signal) => api.listKProfiles(row.id, nozzle, { signal })), [row.id, nozzle])
   const notes = useAsync(() => api.kProfileNotes(row.id), [row.id])
   const [editing, setEditing] = useState<Editing | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ text: string; warn: boolean } | null>(null)
-  const dual = row.bambuddy_view?.nozzle_count === 2
   const profiles = table.data?.profiles ?? []
+  // P54: the count is the printer's own report's (`extruders`); a list that names none is two
+  // when a profile is on extruder 1.
+  const extruders = table.data?.extruders ?? (profiles.some((profile) => profile.extruder_id === 1) ? 2 : 1)
+  const dual = extruders > 1
   const noted = notes.data?.notes ?? {}
   const rowKey = (profile: KProfile) => `${profile.slot_id}-${profile.extruder_id}-${profile.filament_id}`
 
@@ -118,19 +131,29 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
   async function remove(profile: KProfile) {
     setBusy(true)
     setMessage(null)
+    const body: KProfileRemove = {
+      slot_id: profile.slot_id,
+      extruder_id: profile.extruder_id,
+      nozzle_id: profile.nozzle_id,
+      nozzle_diameter: profile.nozzle_diameter as KProfileSet['nozzle_diameter'],
+      filament_id: profile.filament_id,
+      setting_id: profile.setting_id ?? null,
+    }
     try {
-      const result = await api.deleteKProfile(row.id, {
-        slot_id: profile.slot_id,
-        extruder_id: profile.extruder_id,
-        nozzle_id: profile.nozzle_id,
-        nozzle_diameter: profile.nozzle_diameter as KProfileSet['nozzle_diameter'],
-        filament_id: profile.filament_id,
-        setting_id: profile.setting_id ?? null,
-      })
+      const result = await commands.send('kprofiles', 'delete', body, (options) =>
+        api.deleteKProfile(row.id, body, { ...options, onWaiting: () => setMessage(WAITING) }),
+      )
       setMessage(said(result, `Deleted ${profile.name}.`))
       setDeleting(null)
       refresh()
     } catch (cause) {
+      if (stopped(cause)) {
+        // The follow is over: leave the status empty rather than a stale "Waiting…".
+        setMessage(null)
+        return
+      }
+      // A delete that may have reached the printer closes its confirm, so it is not sent again.
+      if (mayHaveRun(cause)) setDeleting(null)
       setMessage({ text: problem(cause, 'Could not delete the K-profile.'), warn: true })
     } finally {
       setBusy(false)
@@ -147,6 +170,8 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
           value={nozzle}
           choices={NOZZLES.map((value) => ({ value, label: `${value} mm` }))}
           onValueChange={(next) => {
+            // The old nozzle's read and any write's follow stop; a write already sent still runs.
+            commands.stop()
             setNozzle(next)
             setEditing(null)
             setDeleting(null)
@@ -256,8 +281,11 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
           nozzle={nozzle}
           dual={dual}
           editing={editing}
+          send={commands.send}
           note={editing.kind === 'edit' ? noteOf(noted, editing.profile) : undefined}
           onCancel={() => setEditing(null)}
+          onWaiting={() => setMessage(WAITING)}
+          onStopped={() => setMessage(null)}
           onDone={(next) => {
             setMessage(next)
             setEditing(null)
@@ -266,11 +294,7 @@ function KProfilesBody({ row }: { row: PrinterRow }) {
         />
       )}
 
-      {message && (
-        <p role="status" className={message.warn ? 'text-xs text-warn' : 'text-xs text-muted-foreground'}>
-          {message.text}
-        </p>
-      )}
+      <Said message={message} />
     </div>
   )
 }
@@ -282,16 +306,23 @@ function KProfileForm({
   nozzle,
   dual,
   editing,
+  send,
   note,
   onCancel,
+  onWaiting,
+  onStopped,
   onDone,
 }: {
   row: PrinterRow
   nozzle: string
   dual: boolean
   editing: Editing
+  send: Send
   note: { key: string; note: string } | undefined
   onCancel: () => void
+  onWaiting: () => void
+  /** The follow was stopped: leave the status empty rather than a stale "Waiting…". */
+  onStopped: () => void
   onDone: (message: { text: string; warn: boolean }) => void
 }) {
   const was = editing.kind === 'edit' ? editing.profile : undefined
@@ -329,12 +360,26 @@ function KProfileForm({
     let result: KProfileWriteResult | undefined
     try {
       if (profileChanged) {
-        result =
-          extruders === 'both' && !was
-            ? await api.setKProfilesBatch(row.id, [body(0), body(1)])
-            : await api.setKProfile(row.id, body(was ? was.extruder_id : Number(extruders)))
+        if (extruders === 'both' && !was) {
+          const profiles = [body(0), body(1)]
+          result = await send('kprofiles', 'batch', profiles, (options) =>
+            api.setKProfilesBatch(row.id, profiles, { ...options, onWaiting }),
+          )
+        } else {
+          const one = body(was ? was.extruder_id : Number(extruders))
+          result = await send('kprofiles', 'set', one, (options) => api.setKProfile(row.id, one, { ...options, onWaiting }))
+        }
       }
     } catch (cause) {
+      if (stopped(cause)) {
+        onStopped()
+        return
+      }
+      // A write that may have reached the printer closes the form, so it is not sent again.
+      if (mayHaveRun(cause)) {
+        onDone({ text: problem(cause, 'The printer has not answered. Do not send it again.'), warn: true })
+        return
+      }
       setError(problem(cause, 'Could not save the K-profile.'))
       setBusy(false)
       return
@@ -411,7 +456,7 @@ function KProfileForm({
           Note
         </Label>
         <Textarea id={`kp-note-${row.id}`} maxLength={2000} rows={2} value={text} onChange={(e) => setText(e.target.value)} />
-        <p className="text-xs text-muted-foreground">Kept in Bambuddy, not on the printer. Clear it to delete it.</p>
+        <p className="text-xs text-muted-foreground">Kept in ScadBuddy, not on the printer. Clear it to delete it.</p>
       </div>
       {error && (
         <p role="alert" className="text-xs text-warn">

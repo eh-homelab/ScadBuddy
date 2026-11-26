@@ -430,7 +430,9 @@ FLOW_BEATLESS_CALL_PATCH = "flow-beatless-call-4281"
 #: attempt missed its beats, is asked once more under the same activity id (#6345): the same
 #: approval, and the same Idempotency-Key (the agent keys a flow call's commands on its gate
 #: request id, the same on every attempt), so the backend answers it from the first
-#: attempt's operation (`op-<kind>-<key>`, api/operations.py) and nothing runs twice. Before,
+#: attempt's operation (`op-<kind>-<key>`, api/operations.py), or a printer command from its
+#: first run under that key (printers/native.py `command_response`, #7276 P53), and nothing
+#: runs twice. Before,
 #: it failed as "may have run" even where a second send was provably the same operation.
 #: An agent that does not say `keyed` (any build before #6350) gets no second try.
 FLOW_KEYED_RETRY_PATCH = "flow-keyed-retry-6345"
