@@ -402,6 +402,20 @@ describe("a slot's files come back to the session", () => {
     expect(await readFile(path.join(dir, 'late.txt'), 'utf8')).toBe('slot\n')
   }, 60_000)
 
+  it("keeps the base past a slot's start whose manifest is truncated", async () => {
+    const client = new SandboxClient(await sandboxes.acquire(SESSION), signal())
+    // A base from an earlier slot, naming a file the truncated manifest below does not reach.
+    const earlier = new Map([['far/away.txt', 'e'.repeat(64)]])
+    await client.setBase(earlier)
+    await runInSandbox(call(), 'bash', `mkdir many && cd many && seq 1 ${MANIFEST_MAX_ENTRIES + 1} | sed 's/^/./' | xargs touch`, 60_000)
+    expect(await client.base()).toEqual(earlier)
+    const { slot } = await startInSandbox(call(), 'bash', 'true', 10_000)
+    await drain(client, slot.id)
+    // Taken from the truncated manifest, the base would lose that entry, and a slot's write
+    // there would be taken for the session's to overwrite.
+    expect(await client.base()).toEqual(earlier)
+  }, 60_000)
+
   it('under the same caps as a foreground command', async () => {
     const { slot } = await startInSandbox({ ...call(), limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 } }, 'bash', 'head -c 100 /dev/zero > big.bin', 10_000)
     await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
