@@ -213,7 +213,9 @@ def test_fetch_grant_vectors(monkeypatch: pytest.MonkeyPatch) -> None:
     key = fetch_grants.fetch_grant_key(kek_from_base64(KEK))
     grants = []
     for host, url, expires, nonce in GRANTS:
-        monkeypatch.setattr(fetch_grants.secrets, "token_hex", lambda _n, nonce=nonce: nonce)
+        monkeypatch.setattr(
+            "scadbuddy.library.fetch_grants.secrets.token_hex", lambda _n, nonce=nonce: nonce
+        )
         now = datetime.fromtimestamp(expires - fetch_grants.FETCH_GRANT_TTL_SECONDS, UTC)
         grant = fetch_grants.mint(key, host, url, now=now)
         assert fetch_grants.verify(key, grant, host=host, url=url, now=now) == nonce
