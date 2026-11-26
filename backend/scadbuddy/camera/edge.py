@@ -7,7 +7,10 @@ reads the recorded printers from the API's ``camera`` CRUD routes (`api/crud_cam
 the recorders do, and gives MediaMTX one path per printer, named by the printer id, through
 its control API only (`mediamtx.MediaMtx`). Each path reads the relay's path of that printer
 with the relay read secret (`mediamtx.relay_source`), on demand: MediaMTX pulls from the relay
-only while someone watches, and closes the pull 10 s after the last viewer leaves.
+only while someone watches. It closes the pull 10 s after the path's last reader goes
+(`sourceOnDemandCloseAfter`). A WebRTC viewer stops reading when it leaves. An HLS viewer's
+session stays a reader for about 40 s more, so after the last HLS viewer the pull closes about
+50 s later (measured 2026-11-25, MediaMTX v1.21.4, the edge e2e).
 
 A path that has not changed is never put again, so a resync cuts no viewer; the edge deletes
 a path only when its printer stops being recorded. After a restart the controller has no copy
