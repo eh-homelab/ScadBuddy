@@ -24,7 +24,7 @@ backend is listed by `python -m scadbuddy.tools.settings_reference`. Paths under
 | [Storefront edge](#storefront-edge) | `scadbuddy` (`runtime`) | `python -m scadbuddy.storefront` | 8083 | no |
 | [Intake worker and sandbox](#intake-worker-and-sandbox) | `scadbuddy` (`runtime`) | `python -m scadbuddy.intake_worker`, `python -m scadbuddy.intake_worker.sandbox` | 9090, 8090 | no |
 | [Profile-fetch worker and browser](#profile-fetch-worker-and-browser) | `scadbuddy-profile-fetch` (`profile-fetch`) | `python -m scadbuddy.profile_fetch`, `python -m scadbuddy.profile_fetch.browser` | 9090, 8091 | no |
-| [Camera relay and recorders](#camera-relay-and-recorders) | `scadbuddy-camera-relay` (`camera-relay`), `scadbuddy-camera-recorder` (`camera-recorder`) | `python -m scadbuddy.camera.relay`, `python -m scadbuddy.camera.recorder`, each beside `mediamtx` | 9090 (health); relay RTSP 8554 | no |
+| [Camera relay and recorders](#camera-relay-and-recorders) | `scadbuddy-camera-relay` (`camera-relay`), `scadbuddy-camera-recorder` (`camera-recorder`), `scadbuddy-camera-edge` (`camera-edge`, #7330) | `python -m scadbuddy.camera.relay`, `.recorder`, `.edge`, each beside `mediamtx` | 9090 (health); relay RTSP 8554; edge HLS 8888, WHEP 8889, UDP 8189 | no |
 | [Agent sidecar](#agent-sidecar-and-agent-worker) | `scadbuddy-agent` (`agent`) | `node dist/main.js`, role `api` | 8081 | yes (today's code) |
 | [Agent worker](#agent-sidecar-and-agent-worker) | `scadbuddy-agent` (`agent`) | `node dist/main.js`, role `worker` | 8081 (health) | yes (today's code) |
 | [Session sandbox and egress proxy](#session-sandbox-and-egress-proxy) | `scadbuddy-sandbox` (`sandbox`) | `node dist/sandbox/main.js` | 8090, 3128 | no |
@@ -177,18 +177,24 @@ its image: MediaMTX and the controller. They share the pod's network (the contro
 - **Relay.** `python -m scadbuddy.camera.relay` (`scadbuddy/camera/relay.py`), one pod. It
   reads the qualifying printers, access codes included, as CRUD caller `camera-relay`
   (`scadbuddy/api/crud_camera_relay.py`), and gives MediaMTX one RTSPS pull per printer
-  through the control API. MediaMTX serves the streams to the recorders on 8554 with one
-  read user.
+  through the control API. MediaMTX serves the streams to the recorders and the edge on 8554
+  with one read user.
+- **Edge.** `python -m scadbuddy.camera.edge` (`scadbuddy/camera/edge.py`), one pod, CRUD
+  caller `camera` (ServiceAccount `scadbuddy-camera-edge`). Its MediaMTX pulls each recorded
+  printer from the relay on demand and serves WebRTC (8889) and LL-HLS (8888) to the API's
+  proxy (`scadbuddy/api/camera.py`) behind its own read user. The controller sets
+  `scadbuddy_camera_viewers`. It holds no bucket key and no access code.
 - **Recorders.** `python -m scadbuddy.camera.recorder` (`scadbuddy/camera/recorder.py`), two
   pods. Each MediaMTX reads every stream from the relay and writes fMP4 segments to a shared
   `/segments` volume. Per printer, the recorder that holds the lease puts the segments in the
   bucket and indexes them as CRUD caller `camera` (`scadbuddy/api/crud_camera.py`). Only these
   pods hold the bucket's camera keys.
-- **Reads.** The API URL and a service proof; the recorders also the bucket keys and the
-  relay read user. Both refuse a database secret and the KEK (`scadbuddy/camera/settings.py`).
-  Neither reaches Temporal in phase 1.
-- **Images.** `scadbuddy-camera-relay` and `scadbuddy-camera-recorder`, Dockerfile stages
-  `camera-relay` and `camera-recorder`, both off `camera`, with MediaMTX from the `mediamtx`
+- **Reads.** The API URL and a service proof; the recorders and the edge also the relay read
+  user, and the recorders the bucket keys. The edge's MediaMTX also reads the edge read user
+  (`MTX_AUTHINTERNALUSERS_0_*`). All three refuse a database secret and the KEK (`scadbuddy/camera/settings.py`).
+  None reaches Temporal.
+- **Images.** `scadbuddy-camera-relay`, `scadbuddy-camera-recorder` and `scadbuddy-camera-edge`,
+  Dockerfile stages `camera-relay`, `camera-recorder` and `camera-edge`, all off `camera`, with MediaMTX from the `mediamtx`
   stage.
 
 ## Agent sidecar and agent worker
@@ -208,7 +214,9 @@ One image, two roles ([agent.md](agent.md#processes-and-roles)). The sidecar ser
 ## Session sandbox and egress proxy
 
 `SCADBUDDY_SANDBOX_ROLE=exec` is one pod per assistant session that runs sandboxed `Bash`
-and `PowerShell`; `egress` is those pods' CONNECT proxy (`agent/src/sandbox/main.ts:13-19`).
+and `PowerShell`, and their background commands and a `Monitor`'s command in background
+slots (`agent/src/sandbox/slots.ts`, #5916, #7310); `egress` is those pods' CONNECT proxy
+(`agent/src/sandbox/main.ts:13-19`).
 The agent worker creates the pods through the Kubernetes API (`agent/src/sandbox/pods.ts:192`).
 
 ## agent-durable

@@ -25,7 +25,9 @@
 #     *.py, #7328: those processes register on prometheus_client's own registry,
 #     not core/metrics.py's), by its constructor: a Gauge as its name, a Counter as
 #     `<name>_total`, a Histogram as `<name>_bucket`/`_sum`/`_count`, an Info as
-#     `<name>_info` (prometheus_client's exposition names), so a `_total` on a
+#     `<name>_info`, a custom collector's GaugeMetricFamily as its name, its name a literal
+#     or a module constant, its labels `labels=` (the camera edge's viewers gauge, #7330)
+#     (prometheus_client's exposition names), so a `_total` on a
 #     gauge or a bare counter is an error, not an empty panel
 #   - every `temporal_*` series is one of the Temporal SDK's that this lint lists
 #     with its labels (#3788): the SDK declares them in its Rust core
@@ -135,8 +137,22 @@ suffixes = {
     "Histogram": lambda n: [n + "_bucket le", n + "_sum", n + "_count"],
     "Summary": lambda n: [n + "_sum", n + "_count"],
     "Info": lambda n: [n.removesuffix("_info") + "_info"],
+    # A custom collector's family (the camera edge's viewers gauge, #7330): its name
+    # may be a module constant, and its labels are `labels=` (or the 4th argument).
+    "GaugeMetricFamily": lambda n: [n],
 }
 def declarations(tree):
+    consts = {}  # module-level NAME = "literal", for a family named by a constant
+    for node in tree.body:
+        target = node.target if isinstance(node, ast.AnnAssign) else (
+            node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
+        )
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(getattr(node, "value", None), ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            consts[target.id] = node.value.value
     # FILAMENT_SERIES: a table of (name, help, labels), each a Gauge family (#6785).
     for node in ast.walk(tree):
         target = node.target if isinstance(node, ast.AnnAssign) else (
@@ -172,10 +188,16 @@ def declarations(tree):
         if kind not in suffixes or not call.args:
             continue
         name = call.args[0]
+        if isinstance(name, ast.Name) and name.id in consts:
+            name = ast.Constant(consts[name.id])
         if not (isinstance(name, ast.Constant) and str(name.value).startswith("scadbuddy_")):
             continue
-        labels = call.args[2] if len(call.args) > 2 else None
-        labels = next((k.value for k in call.keywords if k.arg == "labelnames"), labels)
+        if kind == "GaugeMetricFamily":
+            labels = call.args[3] if len(call.args) > 3 else None
+            labels = next((k.value for k in call.keywords if k.arg == "labels"), labels)
+        else:
+            labels = call.args[2] if len(call.args) > 2 else None
+            labels = next((k.value for k in call.keywords if k.arg == "labelnames"), labels)
         names = []
         if isinstance(labels, (ast.List, ast.Tuple)):
             names = [e.value for e in labels.elts if isinstance(e, ast.Constant)]

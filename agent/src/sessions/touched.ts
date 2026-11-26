@@ -298,6 +298,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   revoke_flow_trigger_grant: () => [],
   // A starting session's answer to its run's call (#2482) is recorded on the call's hops.
   escalation_respond: () => [],
+  // An answer to a flow's question (#7471) is the run's: its decision names the session.
+  answer_flow_question: () => [],
   // Orders (#4249) are their own record: an order's page carries its audit line, one row
   // per status change, quote, attempt, shipment and payment, with who made each.
   customer_upsert: () => [],
@@ -760,6 +762,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'printer_slot_preset_clear',
   'printer_ams_label_set',
   'printer_ams_label_clear',
+  // #7330: a camera reconnect restarts ScadBuddy's pull; a camera is no recorded resource kind.
+  'reconnect_printer_camera',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',

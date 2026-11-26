@@ -1,9 +1,9 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { command } from './command.js'
-import { binary } from './binary.js'
+import { binary, binaryImage } from './binary.js'
 import { CAMERA, cameraQuery, outputId, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
-import { blob, defineTool, image, json, type Tool } from './registry.js'
+import { blob, defineTool, json, type Tool } from './registry.js'
 import { backendPage, compositeKey, page, PAGED, pageInput, totalCount } from './pagination.js'
 import { getPlates, sourceOf, withSource } from './print.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
@@ -85,16 +85,18 @@ export const outputTools: Tool[] = [
   defineTool({
     name: 'save_output',
     label: 'Keep a render as an output',
-    description: 'Keep a finished render job as an output. render_model does this itself with `save_output: true`.',
-    input: z.object({ slug, job_id: z.string().min(1), name: z.string().optional() }),
+    description:
+      'Keep a finished render job as an output. render_model does this itself with `save_output: true`. ' +
+      "`index` picks which of a pipeline job's outputs (0, the first, by default).",
+    input: z.object({ slug, job_id: z.string().min(1), name: z.string().optional(), index: z.number().int().min(0).optional() }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/outputs'],
-    handler: async ({ slug, job_id, name }, ctx) =>
+    handler: async ({ slug, job_id, name, index }, ctx) =>
       json(
         await command(ctx, `save output of ${job_id}`, (headers) =>
           ctx.backend.POST('/api/v1/models/{slug}/outputs', {
             params: { path: { slug } },
-            body: { job_id, name: name ?? null },
+            body: { job_id, name: name ?? null, ...(index === undefined ? {} : { index }) },
             headers,
           }),
         ),
@@ -281,7 +283,7 @@ export const outputTools: Tool[] = [
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/views/{view}.png'],
     handler: async ({ output_id, view, size, ...camera }, ctx) =>
-      binary(
+      binaryImage(
         ctx.backend.GET('/api/v1/outputs/{output_id}/views/{view}.png', {
           params: { path: { output_id, view }, query: { size, ...cameraQuery(camera) } },
           parseAs: 'stream',
@@ -293,7 +295,6 @@ export const outputTools: Tool[] = [
           name: `${output_id}-${view}.png`,
           fallbackType: 'image/png',
         },
-        image,
       ),
   }),
 
@@ -308,14 +309,13 @@ export const outputTools: Tool[] = [
     title: ({ output_id, plate }) => `Get the picture of output ${output_id}${plate ? `, plate ${plate}` : ''}`,
     handler: async ({ output_id, plate }, ctx) =>
       plate === undefined
-        ? binary(
+        ? binaryImage(
             ctx.backend.GET('/api/v1/outputs/{output_id}/thumbnail', { params: { path: { output_id } }, parseAs: 'stream' }),
             `get thumbnail of ${output_id}`,
             ctx,
             { path: `/api/v1/outputs/${output_id}/thumbnail`, name: `${output_id}-thumbnail.png`, fallbackType: 'image/png' },
-            image,
           )
-        : binary(
+        : binaryImage(
             ctx.backend.GET('/api/v1/outputs/{output_id}/plates/{index}/thumbnail', {
               params: { path: { output_id, index: plate } },
               parseAs: 'stream',
@@ -327,7 +327,6 @@ export const outputTools: Tool[] = [
               name: `${output_id}-plate-${plate}.png`,
               fallbackType: 'image/png',
             },
-            image,
           ),
   }),
 

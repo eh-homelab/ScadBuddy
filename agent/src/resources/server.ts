@@ -25,6 +25,7 @@ import {
   type ToolServices,
   UNEXPECTED_ERROR_SOURCE,
 } from '../tools/registry.js'
+import { MAX_TOOL_IMAGE_INLINE_MAX } from '../tools/imageLimits.js'
 import { allPages, isPaged, MAX_PAGE_SIZE } from '../tools/pagination.js'
 import { expand, isTemplate, matchUri, PAIRED_TAB, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
 import { type ResourceHub, SubscriptionLimitError } from './hub.js'
@@ -71,6 +72,17 @@ function notFound(uri: string, why = 'Resource not found'): McpError {
   return new McpError(RESOURCE_NOT_FOUND, why, { uri })
 }
 
+/** An image tool's note that the image is not shown (tools/imageResult.ts `imageOrRef`): JSON, not the image's type. */
+function notShown(text: string): boolean {
+  if (!text.startsWith('{')) return false
+  try {
+    const parsed = JSON.parse(text) as { inline?: unknown; viewable?: unknown }
+    return parsed.inline === false || parsed.viewable === false
+  } catch {
+    return false
+  }
+}
+
 /** A tool result as resource contents, in the resource's own MIME type. */
 export function toContents(uri: string, def: ResourceDef, result: CallToolResult): ReadResourceResult['contents'] {
   if (result.isError) {
@@ -86,7 +98,7 @@ export function toContents(uri: string, def: ResourceDef, result: CallToolResult
   return result.content.flatMap((c): ReadResourceResult['contents'] => {
     switch (c.type) {
       case 'text':
-        return [{ uri, mimeType: def.mimeType, text: c.text }]
+        return [{ uri, mimeType: notShown(c.text) ? 'application/json' : def.mimeType, text: c.text }]
       case 'image':
         return [{ uri, mimeType: c.mimeType, blob: c.data }]
       case 'resource':
@@ -128,8 +140,13 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
     return principal
   }
   const readable = (principal: Principal, def: ResourceDef) => hasTier(principal, tierFor(def, toolOf(def)))
+  // A resource read only reads (#7745 review): an image comes back whole up to the
+  // largest an image block may be, never kept in a workspace, and over that is a
+  // JSON note (`toContents`), whatever the assistant's inline limit says.
   const ctx = (principal: Principal, extra: Extra): ToolContext => ({
     ...deps.services,
+    workspace: undefined,
+    toolImageInlineMaxBytes: async () => MAX_TOOL_IMAGE_INLINE_MAX,
     principal,
     progress: async () => {},
     signal: extra.signal,

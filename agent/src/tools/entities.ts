@@ -5,9 +5,10 @@ import { ok } from './call.js'
 import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
-import { defineTool, image, json, ToolError } from './registry.js'
+import { imageOrRef } from './imageResult.js'
+import { defineTool, json, ToolError } from './registry.js'
 import { WorkspaceError, workspaceOf } from '../workspace/store.js'
-import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
+import { IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
@@ -79,7 +80,10 @@ export const PROPERTY_RULES =
   'old key `null` and the new key its value. Suggested keys, which the kind\'s schema documents and checks: on a ' +
   'spool type `mpn`, `gtin` and `asin` (the last two lists), `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
   "`lot_number`; on an inventory item the keys its kind's schema types (entity_property_schema_get lists them). " +
-  'Any other key is kept as given.'
+  "Any other key is kept as given. A kind's schema can mark keys required: a checked save of a row that leaves " +
+  'one empty or ill-fitting is refused whole and writes nothing (422 `missing_required_properties` names each ' +
+  'key). A write of properties alone is not checked for completeness; it refuses only emptying a required key ' +
+  'that has a value.'
 
 const code = (k: string) => `\`${k}\``
 /** The keywords the backend allows (entities/properties.py TOP_KEYWORDS, KEY_KEYWORDS): `type` is described apart. */
@@ -93,9 +97,9 @@ export const SCHEMA_KEY_KEYWORDS = [
 const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, `insert_type`, ...')
 
 /**
- * Sets `set` on `ref` and answers its properties. With `saved` (the type or spool whose own write
- * succeeded first), a refusal says it was saved and the properties were not, with the backend's
- * reason, and points at entity_property_set so a retry does not repeat that write.
+ * Set properties through the property patch: the path for an edit that sends only `properties`
+ * (#7026), which is not a completeness check (#7703). Answers the entity's properties; with
+ * `saved`, a failure says that row was saved and its properties were not.
  */
 export async function setPropertiesAfter(backend: BackendClient, ref: string, set: PropertySet, saved?: string) {
   try {
@@ -107,7 +111,20 @@ export async function setPropertiesAfter(backend: BackendClient, ref: string, se
   }
 }
 
-/** A failed property write after its row was saved, led by what was saved and what is left to set. */
+/**
+ * The properties a row was just saved with (#7703): the row routes write them in the row's own
+ * request but answer the row alone, so they are read back. A failed read says what was saved.
+ */
+export async function savedProperties(backend: BackendClient, ref: string, lead: string) {
+  try {
+    const { properties } = await ok(backend.GET('/api/v1/entities/{ref}/properties', { params: { path: { ref } } }), `read the properties of ${ref}`)
+    return properties
+  } catch (e) {
+    throw propertiesNotSet(`${lead} was saved with its properties, but reading them back failed (entity_property_list on ${ref} shows them)`, e)
+  }
+}
+
+/** A failed property write or read after its row was saved, led by what was saved. */
 export function propertiesNotSet(lead: string, e: unknown): ToolError {
   if (e instanceof ToolError) return new ToolError(`${lead}: ${e.summary}`, e.status, e.untrusted, e.problem)
   return new ToolError(`${lead}: ${e instanceof Error ? e.message : String(e)}`)
@@ -135,6 +152,12 @@ const CATALOG_OF: ReadonlyMap<string, string> = new Map([
   ['colour', 'colours'],
   ['location_kind', 'location-kinds'],
 ])
+
+/** The entity ref of a filament catalog row: `brand:<id>` for a `brands` row. */
+export function catalogRowRef(catalog: string, id: string): string {
+  for (const [kind, of] of CATALOG_OF) if (of === catalog) return `${kind}:${id}`
+  throw new ToolError(`${catalog} rows have no properties`)
+}
 
 /** The page of an entity that has one (the filament and inventory kinds; a catalog row's is its catalog); others have none. */
 function uiPath(ref: string): string | undefined {
@@ -201,9 +224,11 @@ export const entityTools = [
     name: 'entity_attachment_get',
     label: "See an entity's file",
     description:
-      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
-      'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
-      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; an SVG, and any other file (a PDF ' +
+      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo up to the " +
+      'inline limit (Settings → Assistant → Images, 512 KB by default) as an image you can see; a larger one kept in ' +
+      'your workspace and answered as `workspace_file`, which workspace_read shows (one over 5 MB as base64 cannot be ' +
+      'viewed: ask for the thumbnail); any other image type (HEIC, AVIF, TIFF, ...) only as a note that you cannot ' +
+      'view it; an SVG, and any other file (a PDF ' +
       'manual, a receipt) kept in your workspace and answered as `workspace_file`: workspace_read reads a text ' +
       'file, and a binary one (a PDF) can be attached or uploaded from there but not read. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
       'it for a photo too large to view, or when a glance is enough.',
@@ -245,16 +270,9 @@ export const entityTools = [
       }
       const bytes = read.bytes
       if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
-        // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
-        if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
-        return json({
-          viewable: false,
-          media_type: mimeType,
-          size_bytes: bytes.byteLength,
-          note:
-            'A photo too large for you to view (over 5 MB as base64).' +
-            (mimeType === 'image/gif' ? '' : ' Call again with `thumbnail: true` for a small copy.'),
-        })
+        // Inline up to the configurable limit, else a workspace pointer (#7745, tools/imageResult.ts).
+        const route = `/api/v1/entities/${ref}/attachments/${attachment_id}/${thumbnail ? 'thumbnail' : 'content'}`
+        return imageOrRef(new Uint8Array(bytes), mimeType, ctx, { name: `${attachment_id}-${record.filename}`, path: route })
       }
       // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
       if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {

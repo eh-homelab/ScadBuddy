@@ -470,6 +470,8 @@ func TestTheFlowReadsLeaveOutMalformedEntries(t *testing.T) {
 		'{"session":"s","principal":7}', '{}')`, run, waiting)
 	queue := a.ok("GET", "/flow-runs/"+run+"/queue", "").body["run"].(map[string]any)
 	expect(t, len(queue["waiting_on"].([]any)), 1)
+	// A call parked before #7471 has no people_only: it reads as people only.
+	expect(t, queue["waiting_on"].([]any)[0].(map[string]any)["people_only"], true)
 	expect(t, queue["steps"], []any{map[string]any{"seq": 1.0, "fn": "f", "call_id": "c1",
 		"status": "done", "session_id": nil}})
 	expect(t, queue["starter_session"], "s")
@@ -537,4 +539,25 @@ func TestAGrantHoldsOnlyWhileItsWholeChainIsInForce(t *testing.T) {
 		expect(t, a.ok("GET", "/flow-decisions?request_id=flow:"+id+"&input_hash=h1", "").raw,
 			fmt.Sprintf(`{"approved":%t,"approved_unresolved":%t,"by_person":false,"lapsed":%t}`, held, held, !held))
 	}
+}
+
+// TestOnlyAScriptsFalseOpensAQuestionToOthers: people_only reads false only when the
+// parked call says false; a missing flag or any other value is people only (#7471).
+func TestOnlyAScriptsFalseOpensAQuestionToOthers(t *testing.T) {
+	a := agentAPI(t)
+	run := uuid()
+	waiting := js([]any{
+		map[string]any{"call_id": "c1", "kind": "answer", "fn": "wait_for_human", "people_only": false},
+		map[string]any{"call_id": "c2", "kind": "answer", "fn": "wait_for_human", "people_only": "no"},
+		map[string]any{"call_id": "c3", "kind": "answer", "fn": "wait_for_human", "people_only": true},
+	})
+	a.sql(`INSERT INTO workflow_definitions (id, name, version, created_by) VALUES ('def-1', 'reads', 1, '{}')`)
+	a.sql(`INSERT INTO workflow_runs (id, definition_id, version, name, status, waiting_on, steps,
+		workflow_id, workflow_run_id, started_by, superseded_run_ids)
+		VALUES ($1, 'def-1', 1, 'n', 'waiting', $2::jsonb, '[]', 'flow-' || $1, 'e1', '{}', '{}')`, run, waiting)
+	var got []any
+	for _, w := range a.ok("GET", "/flow-runs/"+run+"/queue", "").body["run"].(map[string]any)["waiting_on"].([]any) {
+		got = append(got, w.(map[string]any)["people_only"])
+	}
+	expect(t, got, []any{false, true, true})
 }

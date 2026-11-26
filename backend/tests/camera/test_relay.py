@@ -535,3 +535,27 @@ async def test_a_host_name_is_dialled_by_its_checked_address(
         await subject.reconcile("p1")
     assert mtx.paths == {}
     await subject.aclose()
+
+
+async def test_restart_removes_then_puts_the_path() -> None:
+    api = FakeApi([source("p1"), source("p2")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    mtx.calls.clear()
+    await subject.restart("p1")
+    # The put tries ``replace`` first and adds on its 404.
+    assert mtx.calls == [("delete", "p1"), ("replace", "p1"), ("add", "p1")]
+    assert set(mtx.paths) == {"p1", "p2"}
+
+
+async def test_restart_of_a_printer_no_longer_recorded_only_removes() -> None:
+    api = FakeApi([source("p1")])
+    mtx = FakeMtx()
+    subject = relay(api, mtx)
+    await subject.reconcile_all()
+    api.sources = []
+    mtx.calls.clear()
+    await subject.restart("p1")
+    assert mtx.calls == [("delete", "p1")]
+    assert mtx.paths == {}

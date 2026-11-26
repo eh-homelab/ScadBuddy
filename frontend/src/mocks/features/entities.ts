@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { EntityAttachment, EntityLink, EntityLinkInput, EntityLinkPatch, EntityAttachmentPatch, EntityProperty, PropertyValue } from '../../components/entities/api'
-import { ORDER_KINDS, PRINT_ARCHIVE, entityParts } from '../../components/entities/api'
+import { ORDER_KINDS, PRINT_ARCHIVE, REQUIRED_KINDS, entityParts, hasValue } from '../../components/entities/api'
 import { THUMBNAILED } from '../../components/entities/attachmentMedia'
 import { parts, sha256, sniff } from './orders/attachments'
 import { itemSchemaOf, itemsTypedLike } from './inventory'
@@ -148,6 +148,69 @@ function propertyRefusal(entity: string, key: string, value: unknown): string | 
   return null
 }
 
+/** The values an entity would hold after `patch` (a `null` removes a key). */
+function valuesAfter(entity: string, patch: Record<string, unknown> = {}): Record<string, unknown> {
+  const values: Record<string, unknown> = Object.fromEntries((entityMock.properties.get(entity) ?? []).map((p) => [p.key, p.value]))
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete values[key]
+    else values[key] = value
+  }
+  return values
+}
+
+/** `entities/required.py` `completeness` (#7703): the required keys with no value, and the defined keys whose value does not fit. */
+export function completenessOf(entity: string, patch?: Record<string, unknown>): { missing: string[]; invalid: { key: string; reason: string }[] } {
+  const schema = schemaOf(entity) ?? {}
+  const values = valuesAfter(entity, patch)
+  const required = Array.isArray(schema.required) ? (schema.required as string[]) : []
+  const missing = required.filter((key) => !hasValue(values[key] as PropertyValue | undefined))
+  const defined = Object.keys((schema.properties ?? {}) as Record<string, unknown>)
+  const invalid = defined.flatMap((key) => {
+    if (!(key in values) || missing.includes(key)) return []
+    const reason = propertyRefusal(entity, key, values[key])
+    return reason ? [{ key, reason }] : []
+  })
+  return { missing, invalid }
+}
+
+/** A read's marks (#7703): none for an archived row. */
+export function marksOf(entity: string, archived: boolean): { missing_properties: string[]; invalid_properties: string[] } {
+  if (archived) return { missing_properties: [], invalid_properties: [] }
+  const found = completenessOf(entity)
+  return { missing_properties: found.missing, invalid_properties: found.invalid.map((one) => one.key) }
+}
+
+/**
+ * A row's own create or save with `properties` (#7703): 422 `bad_property_value` for a value
+ * that does not fit, and, when `checked`, 422 `missing_required_properties` for a row the save
+ * would leave incomplete. Null when the save may go on; it writes nothing.
+ */
+export function rowPropertiesRefusal(request: Request, entity: string, properties: unknown, checked: boolean): Response | null {
+  const patch = (properties ?? {}) as Record<string, unknown>
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) continue
+    const reason = propertyRefusal(entity, key, value)
+    if (reason) return coded(request, 422, 'bad_property_value', `property '${key}': ${reason}`)
+  }
+  if (!checked) return null
+  const { missing, invalid } = completenessOf(entity, patch)
+  if (missing.length === 0 && invalid.length === 0) return null
+  const named = [...missing, ...invalid.map((one) => one.key)].join(', ')
+  return problem(request, 422, `the row is missing required properties or holds ones that do not fit: ${named}`, PROBLEMS + 'missing_required_properties', { code: 'missing_required_properties', missing, invalid })
+}
+
+/** Writes a row's `properties` after its create or save went through. */
+export function saveRowProperties(entity: string, properties: unknown): void {
+  const patch = (properties ?? {}) as Record<string, PropertyValue | null>
+  const list = (entityMock.properties.get(entity) ?? []).filter((p) => !(p.key in patch))
+  for (const [key, value] of Object.entries(patch)) if (value !== null) list.push({ key, value, source: 'manual', updated_at: now(), updated_by: BROWSER })
+  if (list.length) entityMock.properties.set(entity, list.sort((a, b) => a.key.localeCompare(b.key)))
+  else entityMock.properties.delete(entity)
+}
+
+/** Whether a save that sends `body`'s keys is checked: not one that sends only `archived` or `sort_order`. */
+export const checksSave = (body: Record<string, unknown>) => Object.keys(body).some((key) => key !== 'archived' && key !== 'sort_order')
+
 /** `schema_for`: an item's is its item kind's merged `attribute_schema` (#7067); any other entity's is its kind's. */
 function schemaOf(entity: string): Record<string, unknown> | undefined {
   const { kind, ref } = entityParts(entity)
@@ -260,9 +323,20 @@ function keyProblem(sub: unknown, where: string, item: boolean): string | null {
   return null
 }
 
-export function schemaProblem(schema: Record<string, unknown> | undefined): string | null {
+export function schemaProblem(schema: Record<string, unknown> | undefined, kind?: string): string | null {
   if (!schema || typeof schema !== 'object') return 'a schema is a JSON object'
-  for (const k of Object.keys(schema)) if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
+  for (const k of Object.keys(schema)) {
+    if (k === 'required' && kind !== undefined && REQUIRED_KINDS.has(kind)) continue
+    if (!TOP_KEYWORDS.has(k)) return `keyword '${k}' is not allowed at the top level`
+  }
+  if ('required' in schema) {
+    // `_check_required`: a list of distinct keys the schema defines (#7703).
+    const required = schema.required
+    if (!Array.isArray(required) || required.some((k) => typeof k !== 'string') || new Set(required).size !== required.length) return '"required" is a list of distinct keys'
+    const defined = (schema.properties ?? {}) as Record<string, unknown>
+    const undefinedKey = required.find((k) => !(k in defined))
+    if (undefinedKey !== undefined) return `"required" names '${undefinedKey}', which "properties" does not define`
+  }
   if (schema.type !== 'object') return 'a schema\'s "type" is "object"'
   if ('additionalProperties' in schema && schema.additionalProperties !== true) return '"additionalProperties" may only be true'
   if ('$schema' in schema && schema.$schema !== DRAFT_2020_12) return `"$schema" may only be "${DRAFT_2020_12}"`
@@ -387,6 +461,10 @@ export const handlers = [
       const reason = propertyRefusal(entity, key, value)
       if (reason) return coded(request, 422, 'bad_property_value', `property '${key}': ${reason}`)
     }
+    // #7703: a required key that has a value may not be removed or emptied; one still missing refuses nothing.
+    const had = completenessOf(entity).missing
+    const emptied = completenessOf(entity, set).missing.filter((key) => !had.includes(key))
+    if (emptied.length) return problem(request, 422, `a required property may not be removed or emptied: ${emptied.join(', ')}`, PROBLEMS + 'missing_required_properties', { code: 'missing_required_properties', missing: emptied, invalid: [] })
     const before = entityMock.properties.get(entity) ?? []
     const kept = before.filter((p) => !(p.key in set))
     for (const [key, value] of Object.entries(set)) {
@@ -429,7 +507,7 @@ export const handlers = [
     if (kind === ITEM) return schemaOwnedByItemKind(request)
     const body = (await request.json()) as { schema?: Record<string, unknown> }
     const schema = body.schema
-    const problem = schemaProblem(schema)
+    const problem = schemaProblem(schema, kind)
     if (problem || !schema) return coded(request, 422, 'bad_property_schema', problem ?? 'a property schema is an object schema')
     entityMock.schemas[kind] = schema
     return HttpResponse.json({ kind, schema, keys_in_use: keysInUse(kind) })

@@ -2,6 +2,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PRINTERS_NOW, setPrintersNow } from '../../mocks/features/printersNow'
+import { cameraReconnects, setCameraFeeds } from '../../mocks/features/camera'
 import { server } from '../../mocks/server'
 import { emitRealtime } from '../../mocks/realtime'
 import { renderPage } from '../../test/utils'
@@ -274,6 +275,7 @@ describe('NowPrinting (#977)', () => {
       path: 'native',
       printer_id: null,
       name: 'Garage',
+      camera_live: false,
     }
     setPrintersNow([...PRINTERS_NOW, lan])
     renderPage(<NowPrinting />)
@@ -615,5 +617,177 @@ describe('NowPrinting (#977)', () => {
       const again = { ...failed, error: 'boom again' }
       expect(mergeCards(first, [again], 2)).toEqual([{ printer: again, seenAt: 2, stale: null }])
     })
+  })
+})
+
+describe('the live camera (#7330)', () => {
+  const SPARE = '00000000-0000-4000-8000-000000000003'
+
+  it('plays the live view with each feed state beside it', async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+
+    expect(within(dialog).queryByRole('img', { name: /Live camera/ })).toBeNull()
+    expect(within(dialog).getByTestId('live-player').querySelector('video')).not.toBeNull()
+    const feeds = await within(dialog).findByRole('list', { name: 'Camera feeds' })
+    expect(within(feeds).getByTestId('camera-feed-relay')).toHaveTextContent('Live feed')
+    expect(within(feeds).getByTestId('camera-feed-relay')).toHaveTextContent('Receiving')
+    expect(within(feeds).getByTestId('camera-feed-recorder')).toHaveTextContent('Recording')
+    expect(within(feeds).getByTestId('camera-feed-recorder')).toHaveTextContent('Receiving')
+  })
+
+  it('reads the feed states again on the printer topic', async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await within(dialog).findByRole('list', { name: 'Camera feeds' })
+
+    setCameraFeeds(SPARE, [
+      { part: 'relay', state: 'retrying', detail: 'connection refused', updated_at: '2026-11-25T12:00:00Z' },
+    ])
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('camera-feed-relay')).toHaveTextContent('Retrying'))
+    expect(within(dialog).getByTestId('camera-feed-relay')).toHaveTextContent('connection refused')
+    expect(within(dialog).queryByTestId('camera-feed-recorder')).toBeNull()
+  })
+
+  it('asks the relay to reconnect, once per click', async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await user.click(await within(dialog).findByRole('button', { name: 'Reconnect' }))
+    await waitFor(() => expect(cameraReconnects()).toEqual([SPARE]))
+  })
+
+  /** A 202 with no mocked relay restart, so the test drives the relay's reports itself. */
+  const plainReconnect = () => {
+    const sent: string[] = []
+    server.use(
+      http.post('/api/v1/printers/:id/camera/reconnect', ({ params }) => {
+        sent.push(String(params.id))
+        return HttpResponse.json({ printer_id: String(params.id) }, { status: 202 })
+      }),
+    )
+    return sent
+  }
+
+  it('starts the player over only when the relay next reports pulling', async () => {
+    const sent = plainReconnect()
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await within(dialog).findByRole('list', { name: 'Camera feeds' })
+    // A player that starts over is a new element (LivePlayer is keyed by the attempt).
+    const first = within(dialog).getByTestId('live-player')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Reconnect' }))
+    await waitFor(() => expect(sent).toEqual([SPARE]))
+    expect(await within(dialog).findByText('Reconnecting the camera.')).toBeInTheDocument()
+    // The event itself, and the teardown's reports, are no reason to start over.
+    act(() => emitRealtime('camera.reconnect', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    setCameraFeeds(SPARE, [{ part: 'relay', state: 'stopped', detail: null, updated_at: '2026-11-25T12:00:05Z' }])
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('camera-feed-relay')).toHaveTextContent('Stopped'))
+    expect(within(dialog).getByTestId('live-player')).toBe(first)
+
+    setCameraFeeds(SPARE, [{ part: 'relay', state: 'pulling', detail: null, updated_at: '2026-11-25T12:00:08Z' }])
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('live-player')).not.toBe(first))
+    // Later reports do not start it over again.
+    const second = within(dialog).getByTestId('live-player')
+    act(() => emitRealtime('camera.feed', ['printers', `printer:${SPARE}`], { printer_id: SPARE }))
+    await waitFor(() => expect(within(dialog).getByTestId('camera-feed-relay')).toHaveTextContent('Receiving'))
+    expect(within(dialog).getByTestId('live-player')).toBe(second)
+  })
+
+  it('starts the player over 20 s after a reconnect when the relay never reports pulling', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const sent = plainReconnect()
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await within(dialog).findByRole('list', { name: 'Camera feeds' })
+    // A player that starts over is a new element (LivePlayer is keyed by the attempt).
+    const first = within(dialog).getByTestId('live-player')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Reconnect' }))
+    await waitFor(() => expect(sent).toEqual([SPARE]))
+    await act(() => vi.advanceTimersByTimeAsync(19_000))
+    expect(within(dialog).getByTestId('live-player')).toBe(first)
+    await act(() => vi.advanceTimersByTimeAsync(1_500))
+    await waitFor(() => expect(within(dialog).getByTestId('live-player')).not.toBe(first))
+  })
+
+  it("shows the refusal's text when the reconnect is refused", async () => {
+    server.use(
+      http.post('/api/v1/printers/:id/camera/reconnect', () =>
+        HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/camera-not-recorded',
+            title: 'Conflict',
+            status: 409,
+            detail: 'printer x is not recorded',
+          },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await user.click(await within(dialog).findByRole('button', { name: 'Reconnect' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('printer x is not recorded')
+  })
+
+  it("shows the refusal's title when it has no detail", async () => {
+    server.use(
+      http.post('/api/v1/printers/:id/camera/reconnect', () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/camera-not-recorded', title: 'Camera not recorded', status: 409, detail: '' },
+          { status: 409 },
+        ),
+      ),
+    )
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Spare' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Spare camera' })
+    await user.click(await within(dialog).findByRole('button', { name: 'Reconnect' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Camera not recorded')
+  })
+
+  it('keeps the Bambuddy MJPEG image for a printer without a live view', async () => {
+    const reads: string[] = []
+    server.use(
+      http.get('/api/v1/printers/:id/camera', ({ params }) => {
+        reads.push(String(params.id))
+        return undefined
+      }),
+    )
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of 3DP-77A-114' }))
+    const dialog = await screen.findByRole('dialog', { name: '3DP-77A-114 camera' })
+    expect(within(dialog).getByRole('img', { name: 'Live camera of 3DP-77A-114' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/printers/2/camera/stream',
+    )
+    expect(within(dialog).queryByTestId('live-player')).toBeNull()
+    expect(reads).toEqual([])
+  })
+
+  it('offers the live camera of a printer with no Bambuddy link', async () => {
+    const lan: PrinterNow = {
+      ...(PRINTERS_NOW[2] as PrinterNow),
+      id: '00000000-0000-4000-8000-0000000000aa',
+      path: 'native',
+      printer_id: null,
+      name: 'Garage',
+      camera_live: true,
+    }
+    setPrintersNow([...PRINTERS_NOW, lan])
+    const { user } = renderPage(<NowPrinting />)
+    await user.click(await screen.findByRole('button', { name: 'Camera of Garage' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Garage camera' })
+    expect(within(dialog).getByTestId('live-player')).toBeInTheDocument()
   })
 })

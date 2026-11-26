@@ -2396,11 +2396,12 @@ jobs:
             -e SCADBUDDY_TEST_CHROMIUM_REQUIRED=1 scadbuddy-profile-fetch-test:ci \
             xvfb-run -a python -m pytest -rs tests/profile_fetch/test_site.py
 
-  # The camera relay's and recorder's images (#7328, docs/features/printer-cameras.md):
-  # the Dockerfile's `camera-relay` and `camera-recorder` targets, checked as the cluster
-  # runs them. The build itself checks the pinned MediaMTX's version and that neither
-  # process imports Postgres code. Then: uid 10001, MediaMTX and curl (its hooks run curl)
-  # in both, TZ=UTC in the recorder, each controller's refusals (exit 2), and each MediaMTX
+  # The camera relay's, recorder's and edge's images (#7328, #7330,
+  # docs/features/printer-cameras.md): the Dockerfile's `camera-relay`, `camera-recorder` and
+  # `camera-edge` targets, checked as the cluster runs them. The build itself checks the
+  # pinned MediaMTX's version and that no process imports Postgres code. Then: uid 10001,
+  # MediaMTX and curl (its hooks run curl) in all three, TZ=UTC in the recorder, each
+  # controller's refusals (exit 2), and each MediaMTX
   # started on its own config with its control API answering on localhost. The relay's
   # read user comes from MTX_AUTHINTERNALUSERS_0_USER/_PASS, as in the Deployment: a
   # DESCRIBE with that user gets past auth (404, no stream), a wrong password gets 401.
@@ -2450,10 +2451,22 @@ jobs:
           tags: scadbuddy-camera-recorder:ci
           cache-from: type=gha,scope=camera
 
+      # No cache-to, for the recorder's reason: the edge's layers are the `camera` stage's,
+      # which the relay's build caches, plus its own config COPY, which takes no time.
+      - name: Build the camera edge image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: camera-edge
+          platforms: linux/amd64
+          load: true
+          tags: scadbuddy-camera-edge:ci
+          cache-from: type=gha,scope=camera
+
       - name: Camera smoke
         run: |
           set -euo pipefail
-          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci; do
+          for image in scadbuddy-camera-relay:ci scadbuddy-camera-recorder:ci scadbuddy-camera-edge:ci; do
             test "$(docker run --rm "$image" id -u)" = 10001
             test "$(docker run --rm "$image" mediamtx --version)" = v1.21.4
             docker run --rm "$image" curl --version | head -n 1
@@ -2471,6 +2484,12 @@ jobs:
           test "$status" -eq 2
           grep -q 'SCADBUDDY_DATABASE_URL is set' "$RUNNER_TEMP/recorder.log"
           grep -q 'so TZ must be UTC' "$RUNNER_TEMP/recorder.log"
+          status=0
+          docker run --rm --network none -e SCADBUDDY_DATABASE_URL=x \
+            scadbuddy-camera-edge:ci > "$RUNNER_TEMP/edge.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/edge.log"
+          test "$status" -eq 2
+          grep -q 'SCADBUDDY_DATABASE_URL is set; the camera edge holds no database secret' "$RUNNER_TEMP/edge.log"
 
       - name: MediaMTX on each image's config
         run: |
@@ -2480,7 +2499,10 @@ jobs:
             scadbuddy-camera-relay:ci mediamtx /etc/mediamtx/mediamtx.yml
           docker run -d --name recorder-mtx --network none \
             scadbuddy-camera-recorder:ci mediamtx /etc/mediamtx/mediamtx.yml
-          for c in relay-mtx recorder-mtx; do
+          docker run -d --name edge-mtx --network none \
+            -e MTX_AUTHINTERNALUSERS_0_USER=reader -e MTX_AUTHINTERNALUSERS_0_PASS=ci-secret \
+            scadbuddy-camera-edge:ci mediamtx /etc/mediamtx/mediamtx.yml
+          for c in relay-mtx recorder-mtx edge-mtx; do
             for _ in $(seq 30); do
               docker exec "$c" curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list && break
               sleep 1
@@ -2505,6 +2527,21 @@ jobs:
               if status.split(b" ")[1] != code:
                   sys.exit(f"{label}: want {code.decode()}, got {status.decode()}")
           PY
+          # The edge fails closed: HLS and WHEP answer 401 without the read user's password.
+          # With it, both get past the check to the path, which has no stream (404).
+          docker exec edge-mtx curl -fsS -X POST -H 'Content-Type: application/json' \
+            -d '{"source":"publisher"}' http://127.0.0.1:9997/v3/config/paths/add/ci
+          edge() {
+            docker exec edge-mtx curl -s -o /dev/null -w '%{http_code}' "$@"
+          }
+          hls='http://127.0.0.1:8888/ci/index.m3u8?cookieCheck=1'
+          whep=(-X POST -H 'Content-Type: application/sdp' --data-binary x http://127.0.0.1:8889/ci/whep)
+          test "$(edge "$hls")" = 401
+          test "$(edge -u reader:wrong "$hls")" = 401
+          test "$(edge -u reader:ci-secret "$hls")" = 404
+          test "$(edge "${whep[@]}")" = 401
+          test "$(edge -u reader:wrong "${whep[@]}")" = 401
+          test "$(edge -u reader:ci-secret "${whep[@]}")" = 404
 
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #

@@ -126,6 +126,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " itself, and keeps the printer's file in ScadBuddy's own library. It records no"
             " print from a printer checked here.",
         ),
+        "flow_answerers": SettingDoc(
+            "Who else may answer a flow's question",
+            "A person always may. By default, nobody else may. Add `starter` for the session"
+            " that started the run, `sessions` for any session that a person owns, or"
+            " `token:<id>` for one MCP token and its sessions. Only a person can change this.",
+        ),
         # -- Projects & files ----------------------------------------------------------
         "library_folder_id": SettingDoc(
             "Inbox folder, for sends without a project",
@@ -924,6 +930,26 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Agent sidecar URL",
             "Where the API reaches the agent sidecar in its own pod. The flow routes read the"
             " agent's tools from it, and refuse when it does not answer.",
+        ),
+        "camera_edge_whep_url": SettingDoc(
+            "Camera edge WHEP URL",
+            "Where the API reaches the live camera edge's WebRTC (WHEP) port inside the"
+            " cluster. Unset, the camera dialog offers no live view.",
+        ),
+        "camera_edge_hls_url": SettingDoc(
+            "Camera edge HLS URL",
+            "Where the API reaches the live camera edge's LL-HLS port inside the cluster."
+            " Unset, the camera dialog offers no live view.",
+        ),
+        "camera_edge_read_user": SettingDoc(
+            "Camera edge read user",
+            "The user the API reads the live camera edge as. Unset, the camera dialog offers"
+            " no live view.",
+        ),
+        "camera_edge_read_pass": SettingDoc(
+            "Camera edge read password",
+            "The password of the camera edge read user. It is never shown. Unset, the camera"
+            " dialog offers no live view.",
         ),
         "api_internal_url": SettingDoc(
             "API internal URL",

@@ -59,7 +59,7 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Final, Literal, Protocol
-from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import httpx
 from prometheus_client import Counter, Gauge
@@ -68,7 +68,7 @@ from pydantic import TypeAdapter, ValidationError
 from scadbuddy.auth.service_auth import ServiceAuth, exchange_source
 from scadbuddy.camera.feed import RETRY_MAX, RETRY_MIN, FeedSender
 from scadbuddy.camera.follow import ChangeFollower
-from scadbuddy.camera.mediamtx import MediaMtx, MediaMtxError, why
+from scadbuddy.camera.mediamtx import MediaMtx, MediaMtxError, relay_source, why
 from scadbuddy.camera.models import CameraSource, LeaseAnswer, SegmentIn
 from scadbuddy.camera.mp4 import init_span, segment_start
 from scadbuddy.camera.process import (
@@ -323,20 +323,8 @@ class Recorder:
     # MediaMTX paths
 
     def _conf(self, printer_id: str) -> dict[str, Any]:
-        parts = urlsplit(self._relay_url)
-        user = quote(self._read_user, safe="")
-        password = quote(self._read_pass.get_secret_value(), safe="")
-        source = urlunsplit(
-            (
-                parts.scheme,
-                f"{user}:{password}@{parts.netloc}",
-                f"{parts.path.rstrip('/')}/{quote(printer_id, safe='')}",
-                "",
-                "",
-            )
-        )
         return {
-            "source": source,
+            "source": relay_source(self._relay_url, self._read_user, self._read_pass, printer_id),
             "sourceOnDemand": False,
             "record": True,
             "recordPath": f"{self._segments}/%path/%Y-%m-%d_%H-%M-%S-%f",

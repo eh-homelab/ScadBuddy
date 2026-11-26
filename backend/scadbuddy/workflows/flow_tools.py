@@ -85,20 +85,23 @@ _TASK_WRITE = timedelta(seconds=60)
 
 
 class HumanAnswer(BaseModel):
-    """A person's answer on the Workflows page."""
+    """The answer to a `wait_for_human`: a person's, or an assistant's that the setting
+    `flow_answerers` admitted (#7471)."""
 
     answer: str
 
 
 @agent.callback_tool_defn(inherently_safe=True, timeout=timedelta(seconds=MAX_WAIT_S))
 async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body]
-    """Wait for a person to answer `question` on the Workflows page."""
+    """Wait for an answer to `question`: a person's on the Workflows page, or an admitted
+    assistant's (#7471)."""
     ...
 
 
 @agent.callback_tool_defn(inherently_safe=True, timeout=OPEN_WAIT)
 async def human_answer_open(question: str) -> HumanAnswer:  # type: ignore[empty-body]
-    """Wait for a person to answer `question` on the Workflows page, with no limit."""
+    """Wait for an answer to `question`, with no limit: a person's on the Workflows page,
+    or an admitted assistant's (#7471)."""
     ...
 
 
@@ -112,10 +115,23 @@ def _wait_s(timeout_s: int | None) -> int | None:
     return min(timeout_s, int(OPEN_WAIT.total_seconds()))
 
 
+def _people_only(people_only: bool) -> bool:
+    """The script's `people_only`. Checked before the call draws its id: a stored history
+    has no call that passed it (#7471)."""
+    if not isinstance(people_only, bool):
+        raise ValueError("people_only must be True or False")
+    return people_only
+
+
 @agent.tool_defn(inherently_safe=True)
-async def wait_for_human(question: str, timeout_s: int | None = None) -> HumanAnswer:
+async def wait_for_human(
+    question: str, timeout_s: int | None = None, people_only: bool = False
+) -> HumanAnswer:
     """Ask a person `question` and wait for the answer, with no limit unless `timeout_s`
-    (at least 10 seconds) sets one. Raises TimeoutError if nobody answers in that time."""
+    (at least 10 seconds) sets one. Raises TimeoutError if nobody answers in that time.
+    With `people_only`, only a person may answer; otherwise the setting `flow_answerers`
+    may also let an assistant answer."""
+    people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     drawn = workflow.random().getstate() if timeout_s and timeout_s > MAX_WAIT_S else None
@@ -129,7 +145,14 @@ async def wait_for_human(question: str, timeout_s: int | None = None) -> HumanAn
             # Such a call was refused before it drew an id: the next call draws this one.
             workflow.random().setstate(drawn)
             raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
-    async with step("wait_for_human", call_id, outward=False, waiting="answer", prompt=question):
+    async with step(
+        "wait_for_human",
+        call_id,
+        outward=False,
+        waiting="answer",
+        prompt=question,
+        people_only=people_only,
+    ):
         answer: HumanAnswer = await run_callback(
             owner.runner.run_tool, callback, timeout_s, call_id=call_id, question=question
         )
@@ -137,7 +160,7 @@ async def wait_for_human(question: str, timeout_s: int | None = None) -> HumanAn
 
 
 class TaskAnswer(BaseModel):
-    """A person's answer to a prompt, as they sent it."""
+    """An answer to a prompt, as its answerer sent it."""
 
     answer: dict[str, Any]
 
@@ -193,6 +216,7 @@ async def prompt(
     place: str | None = None,
     ui: str | None = None,
     timeout_s: int | None = None,
+    people_only: bool = False,
 ) -> dict[str, Any]:
     """Ask a person the question `title` and wait for a typed answer, with no limit unless
     `timeout_s` (at least 10 seconds) sets one. `schema` declares the answer's fields as a
@@ -203,7 +227,10 @@ async def prompt(
     it, and `ui` the name of its screen. `title`, `context` and `ui` are limited in size,
     and a refusal names the limit. Raises ValueError for a schema, title, context, place,
     ui or timeout_s it does not take, and for an answer that fits the schema and not the
-    field's type (a huge number). Raises TimeoutError if nobody answers in time."""
+    field's type (a huge number). Raises TimeoutError if nobody answers in time. With
+    `people_only`, only a person may answer; otherwise the setting `flow_answerers` may
+    also let an assistant answer."""
+    people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
     call_id = str(workflow.uuid4())
@@ -220,7 +247,14 @@ async def prompt(
     )
     await _open_task(task)
     try:
-        async with step("prompt", call_id, outward=False, waiting="answer", prompt=title):
+        async with step(
+            "prompt",
+            call_id,
+            outward=False,
+            waiting="answer",
+            prompt=title,
+            people_only=people_only,
+        ):
             answered: TaskAnswer = await run_callback(
                 owner.runner.run_tool,
                 task_answer,

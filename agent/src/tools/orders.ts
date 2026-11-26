@@ -2231,7 +2231,9 @@ export const orderTools: Tool[] = [
       'again), `item_not_approved` (printing already), `item_made` (its attempts made its quantity: accept them), ' +
       "`item_kit` (the item's render made `count` outputs, order_get's `kit_count`; the saved ones are in `outputs` " +
       "and order_get's `kit_outputs`: print each one with print_output, then record the attempt with " +
-      'order_item_fulfil; when fewer are saved than `count`, save the others from the render job first), ' +
+      "order_item_fulfil; when fewer are saved than `count`, save the others first with save_output (the job_id " +
+      "get_output gives for the item's output, and `index` 1 to `count` - 1); those saves take new ids, which " +
+      "order_get's `kit_outputs` does not list, so print each by its new id with print_output), " +
       '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. With Bambuddy, a slot whose ' +
       "filament the item names and the plan leaves out takes that filament's spool loaded on the printer, else the " +
       'shelf spool with most left (never one loaded in another printer); `needs_spool_choice` names the slots with ' +

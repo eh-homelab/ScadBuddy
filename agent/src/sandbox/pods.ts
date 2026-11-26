@@ -290,6 +290,17 @@ export class KubernetesSandboxes implements Sandboxes {
     return first
   }
 
+  /** The session's pod as `acquire` finds it, but never a new one: undefined when it has none (#5916, a background slot's watch). */
+  async find(sessionId: string, signal: AbortSignal): Promise<SandboxEndpoint | undefined> {
+    const known = this.#known.get(sessionId)
+    if (known) return known
+    const pod = await this.#oldest(sessionId)
+    if (!pod) return undefined
+    const endpoint = await this.#waitReady(pod.metadata.name, signal)
+    this.#known.set(sessionId, endpoint)
+    return endpoint
+  }
+
   release(sessionId: string, endpoint: SandboxEndpoint): void {
     const known = this.#known.get(sessionId)
     if (known && known.url === endpoint.url) this.#known.delete(sessionId)
