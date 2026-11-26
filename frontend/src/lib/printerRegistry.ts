@@ -31,8 +31,9 @@ export function syncSummary(result: PrinterSyncResult): string {
 
 /**
  * #3818 — the backends the hot path needs (plan 2026-10-18 D2, `hot_path_native`): the
- * native slicer and library, on a store that is not the workers' local disk. Anything
- * else prints through Bambuddy as it always has.
+ * native slicer and library, on the S3 store (the only store that is not the workers' local
+ * disk since #7257 refused the Bambuddy library). Anything else prints through Bambuddy as
+ * it always has.
  */
 export function nativeBackends(
   settings: Pick<Settings, 'slicer_backend' | 'library_backend' | 'store_backend'> | null | undefined,
@@ -40,7 +41,7 @@ export function nativeBackends(
   return (
     settings?.slicer_backend === 'native' &&
     settings.library_backend === 'native' &&
-    (settings.store_backend === 's3' || settings.store_backend === 'bambuddy')
+    settings.store_backend === 's3'
   )
 }
 

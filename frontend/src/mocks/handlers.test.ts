@@ -973,24 +973,22 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     expect(accepted.inputs).toEqual({ params: { name: 'Echo' }, tab: 'a', v: 0 })
   })
 
-  it('refuses the Bambuddy store without a URL and an inbox, as the backend does (#700)', async () => {
+  it('refuses the Bambuddy store with the reason the backend gives (#7257)', async () => {
     const put = (body: Record<string, unknown>) =>
       fetch('/api/v1/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-    const noInbox = await put({ store_backend: 'bambuddy', library_folder_id: null })
-    expect(noInbox.status).toBe(422)
-    expect(((await noInbox.json()) as { detail: string }).detail).toBe(
-      'the Bambuddy store needs a Bambuddy URL and a library folder (its inbox) saved first',
-    )
-    expect((await put({ store_backend: 'bambuddy', bambuddy_url: null })).status).toBe(422)
+    const refused = await put({ store_backend: 'bambuddy' })
+    expect(refused.status).toBe(422)
+    expect(await refused.json()).toMatchObject({
+      reason: 'outputs-need-a-blob-store',
+      detail:
+        'the outputs are kept only in the blob store (#7257), and the bambuddy store holds none (spec 6.4): use the s3 store (or local)',
+    })
     // Nothing of a refused save is kept.
     expect((await api.getSettings()).store_backend).toBe('local')
-    expect((await put({ store_backend: 'bambuddy' })).status).toBe(200)
-    // With the store on Bambuddy, clearing the inbox alone is refused too.
-    expect((await put({ library_folder_id: null })).status).toBe(422)
   })
 
   it('refuses drying hours out of range with the side they are out on, as the backend does (#7156)', async () => {
