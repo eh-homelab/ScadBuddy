@@ -69,6 +69,36 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     expect(posts).toEqual([{ archived: true, reason: 'damaged' }])
   })
 
+  it('takes the empty weight the preview answers when the page knows none', async () => {
+    // The page knows no insert, but the spool's effective empty weight (its cardboard spool's 180 g) is the preview's.
+    const posts = recorded()
+    const { dialog, onArchived } = await show(10, null)
+    const reading = await within(dialog).findByLabelText('Scale reading, with the spool (g)')
+    expect(within(dialog).getByText('The empty spool weighs 180 g; it is taken off the reading.')).toBeInTheDocument()
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Finished' }))
+    await userEvent.type(reading, '210')
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    await waitFor(() => expect(onArchived).toHaveBeenCalledTimes(1))
+    expect(posts).toEqual([{ archived: true, reason: 'finished', final_reading_g: 210 }])
+  })
+
+  it('starts afresh each time it opens', async () => {
+    const spool = await getSpool(spoolId(10))
+    const noop = vi.fn()
+    const view = renderPage(<ArchiveSpoolDialog spool={spool} emptyWeightG={180} open onOpenChange={noop} onArchived={noop} />)
+    const dialog = await screen.findByRole('dialog', { name: 'Archive spool #10' })
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Damaged' }))
+    await userEvent.type(within(dialog).getByLabelText('Scale reading, with the spool (g)'), '210')
+    expect(within(dialog).getByRole('button', { name: 'Archive' })).toBeEnabled()
+    view.rerender(<ArchiveSpoolDialog spool={spool} emptyWeightG={180} open={false} onOpenChange={noop} onArchived={noop} />)
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    view.rerender(<ArchiveSpoolDialog spool={spool} emptyWeightG={180} open onOpenChange={noop} onArchived={noop} />)
+    const again = await screen.findByRole('dialog', { name: 'Archive spool #10' })
+    expect(within(again).getByRole('radio', { name: 'Damaged' })).not.toBeChecked()
+    expect(within(again).getByLabelText('Scale reading, with the spool (g)')).toHaveValue('')
+    expect(within(again).getByRole('button', { name: 'Archive' })).toBeDisabled()
+  })
+
   it('holds the buttons on a reading that is not a number, and shows a refused archive', async () => {
     server.use(
       http.post('*/api/v1/filament/spools/:id/archive', () =>

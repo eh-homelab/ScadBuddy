@@ -438,6 +438,35 @@ def test_the_preview_without_a_reading_closes_on_the_ledger(pg_pool: PgPool) -> 
 
 
 @pg
+def test_the_preview_says_when_the_reading_cannot_be_resolved(pg_pool: PgPool) -> None:
+    """The archive refuses a reading with no empty weight known, or one under it (422);
+    the preview says so as a notice, so the dialog and the agent can tell the person
+    before they press Archive (the review of #7844)."""
+    bare = _spool(pg_pool, None)
+    _weighed_once(pg_pool, bare)
+    preview = _store(pg_pool).closing_preview(
+        bare, "finished", final_reading_g=230, final_grams=None
+    )
+    assert preview is not None and preview.final_filament_g is None
+    assert [n.code for n in preview.notices] == ["no_empty_weight"]
+    assert preview.notices[0].text == (
+        "No empty weight is known for this spool, so the reading cannot be turned into"
+        " filament: enter the filament left instead, or give the spool an insert."
+    )
+    spool = _spool(pg_pool, _insert(pg_pool))
+    _weighed_once(pg_pool, spool)
+    under = _store(pg_pool).closing_preview(
+        spool, "finished", final_reading_g=150, final_grams=None
+    )
+    assert under is not None and under.final_filament_g is None
+    assert [n.code for n in under.notices] == ["reading_below_empty"]
+    assert under.notices[0].text == "The reading is under the empty spool's 200 g."
+    # `final_grams` is the filament itself: no reading, no notice.
+    given = _store(pg_pool).closing_preview(bare, "finished", final_reading_g=None, final_grams=30)
+    assert given is not None and [n.code for n in given.notices] == ["filament_left"]
+
+
+@pg
 def test_the_preview_of_a_reading_under_the_empty_weight_has_no_final(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool, _insert(pg_pool))
     _weighed_once(pg_pool, spool)
@@ -446,7 +475,8 @@ def test_the_preview_of_a_reading_under_the_empty_weight_has_no_final(pg_pool: P
     )
     assert preview is not None
     assert preview.final_filament_g is None and preview.closing.final_filament_g is None
-    assert preview.notices == []
+    # The reason's notices need a final filament; the reading's own notice stands.
+    assert [n.code for n in preview.notices] == ["reading_below_empty"]
 
 
 @pg

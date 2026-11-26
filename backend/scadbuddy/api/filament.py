@@ -1586,7 +1586,9 @@ async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
         "both, the net). With neither the closing is on the ledger's grams left and has no "
         "scale side. `notices` says what disagrees with the reason: `filament_left` for a "
         "finished spool with more than the setting `filament_weighing_finished_left_g` on "
-        "it, `not_finished_but_empty` for any other reason at or under it. Nothing is "
+        "it, `not_finished_but_empty` for any other reason at or under it; and what the "
+        "archive would refuse: `no_empty_weight` for a reading with no empty weight known, "
+        "`reading_below_empty` for a reading under it. Nothing is "
         "refused by a notice. 404 for no such spool, 422 for a reason that is not "
         "`finished`, `respooled`, `damaged` or `other`."
     ),

@@ -219,7 +219,9 @@ The change:
   (`SpoolArchive.reason`, `final_reading_g`, `final_grams`; a patch's `archived` records no
   reason), not on `SpoolPatch`; the closing also keeps `started_from` (`reading` or
   `label`) and `final_filament_g`; the preview is `GET /filament/spools/{id}/closing` with
-  its `notices`, against the setting `filament_weighing_finished_left_g` (5 g); the sync's
+  its `notices`, against the setting `filament_weighing_finished_left_g` (5 g), which also
+  name a reading the archive would refuse (`no_empty_weight`, `reading_below_empty`); the
+  dialog takes the spool's effective empty weight from the preview's `empty_g`; the sync's
   archives record `other`; and `continued_from` is a field of `SpoolDraft`, sent with
   `copy_of`, for one spool. `SpoolDetail.closing` carries the archived spool's closing.
 

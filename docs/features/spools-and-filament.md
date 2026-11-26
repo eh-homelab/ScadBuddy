@@ -228,7 +228,9 @@ scale reading with the spool when its empty weight is known, else the filament l
 record, and says when the numbers disagree with the reason: a finished spool with more
 than the setting `filament_weighing_finished_left_g` (5 g by default) still on it ("30 g of
 filament are still on it."), or any other reason at or under it ("It reads empty; is it
-finished?"). The person can go on; nothing refuses. `POST /filament/spools/{id}/archive`
+finished?"), and what the archive would refuse: a reading with no empty weight known
+(`no_empty_weight`) or under it (`reading_below_empty`). The person can go on; nothing
+refuses. `POST /filament/spools/{id}/archive`
 takes `reason`, `final_reading_g` and `final_grams`: a final weighing is booked as a
 `weighed` event just before the `archived` event, by the same rules as any weighing
 (422 `no_empty_weight`, `reading_below_empty`; a restore takes neither).

@@ -1891,7 +1891,9 @@ class Closing(BaseModel):
 class ClosingNotice(BaseModel):
     """What the archive dialog says when the numbers disagree with the reason."""
 
-    code: Literal["filament_left", "not_finished_but_empty"]
+    code: Literal[
+        "filament_left", "not_finished_but_empty", "no_empty_weight", "reading_below_empty"
+    ]
     text: str
 
 

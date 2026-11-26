@@ -1122,8 +1122,9 @@ const tools: Tool[] = [
       'is null with no empty weight known or a reading under it, which the archive refuses) or `final_grams` (the filament ' +
       "left; with both, the net). With neither the closing is on the ledger's grams left and has no scale side. " +
       '`notices` says what disagrees with the reason: `filament_left` for a finished spool with more than the setting ' +
-      '`filament_weighing_finished_left_g` on it, `not_finished_but_empty` for another reason at or under it; tell the ' +
-      'user before archiving. 404 for no such spool.',
+      '`filament_weighing_finished_left_g` on it, `not_finished_but_empty` for another reason at or under it, and what ' +
+      'filament_spool_archive would refuse: `no_empty_weight` for a reading with no empty weight known (send `final_grams` ' +
+      'instead), `reading_below_empty` for a reading under it; tell the user before archiving. 404 for no such spool.',
     input: z.object({
       spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list"),
       reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it would be archived'),

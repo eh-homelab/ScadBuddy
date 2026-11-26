@@ -1014,6 +1014,14 @@ function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: Ar
   }
 }
 
+/** `_reading_notice`: a reading the archive would refuse, said first. */
+function readingNotice(readingG: number | null, emptyG: number | null): S['ClosingNotice'][] {
+  if (readingG == null) return []
+  if (emptyG == null) return [{ code: 'no_empty_weight', text: 'No empty weight is known for this spool, so the reading cannot be turned into filament: enter the filament left instead, or give the spool an insert.' }]
+  if (readingG < emptyG) return [{ code: 'reading_below_empty', text: `The reading is under the empty spool's ${emptyG} g.` }]
+  return []
+}
+
 /** `_closing_notices`: what the archive dialog says when the numbers disagree with the reason. */
 function closingNotices(reason: ArchiveReason | null, finalFilament: number | null): S['ClosingNotice'][] {
   if (finalFilament == null || reason == null) return []
@@ -2554,7 +2562,8 @@ export const handlers = [
     const weighed = readingG != null || grams != null
     const events = state.events.filter((event) => event.spool_id === row.id)
     const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
-    return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices: closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null) } satisfies S['ClosingPreview'])
+    const notices = [...readingNotice(grams != null ? null : readingG, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
+    return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
   http.post(`${BASE}/spools/:id/tags`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagBind']

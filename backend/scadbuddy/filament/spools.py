@@ -489,6 +489,28 @@ def _final_filament(
     return reading_g - empty.grams
 
 
+def _reading_notice(reading_g: float | None, empty: EmptyWeight | None) -> m.ClosingNotice | None:
+    """The preview's word on a reading the archive would refuse (the review of #7844):
+    ``no_empty_weight`` with no empty weight known, ``reading_below_empty`` for a reading
+    under it. `_final_filament` answers ``None`` for both."""
+    if reading_g is None:
+        return None
+    if empty is None:
+        return m.ClosingNotice(
+            code="no_empty_weight",
+            text=(
+                "No empty weight is known for this spool, so the reading cannot be turned"
+                " into filament: enter the filament left instead, or give the spool an insert."
+            ),
+        )
+    if reading_g < empty.grams:
+        return m.ClosingNotice(
+            code="reading_below_empty",
+            text=f"The reading is under the empty spool's {empty.grams} g.",
+        )
+    return None
+
+
 def _closing_notices(
     reason: m.ArchiveReason | None, final_filament_g: float | None, finished_left_g: int
 ) -> list[m.ClosingNotice]:
@@ -1285,7 +1307,8 @@ class FilamentSpoolStore:
         effective empty weight off, and ``None`` where that cannot be done (no empty
         weight, or a reading under it: the archive refuses those); neither closes on the
         spool's ``grams_left`` with no scale side. The notices follow the setting
-        ``filament_weighing_finished_left_g``."""
+        ``filament_weighing_finished_left_g``; a reading the archive would refuse is said
+        first (`_reading_notice`)."""
         defaults = self._defaults()
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -1297,11 +1320,13 @@ class FilamentSpoolStore:
             weighed = final_reading_g is not None or final_grams is not None
             closed = _closing_on(conn, spool_id, reason, final, grams_left=not weighed)
         left = closed["final_filament_g"]
+        refused = _reading_notice(None if final_grams is not None else final_reading_g, empty)
         return m.ClosingPreview(
             closing=m.Closing.model_validate(closed),
             final_filament_g=left,
             empty_g=None if empty is None else empty.grams,
-            notices=_closing_notices(reason, left, defaults.finished_left_g),
+            notices=([refused] if refused else [])
+            + _closing_notices(reason, left, defaults.finished_left_g),
         )
 
     def archive(
