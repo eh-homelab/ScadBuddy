@@ -25,6 +25,7 @@ from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from scadbuddy.workflows.housekeeping import OUTPUT_BYTES_SWEEP, OUTPUT_COPY_SWEEP, SWEEPS
 from tests.support.arrange import finished_job
+from tests.support.row_outputs import mark_cut_over
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -70,7 +71,7 @@ async def saved(
 
 
 def _folder(store: OutputStore, meta: OutputMeta) -> Path:
-    return store.paths.output_dir(meta.slug, meta.id)
+    return store.paths.root / "outputs" / meta.slug / meta.id
 
 
 def _rows(store: OutputStore) -> OutputRows:
@@ -81,21 +82,7 @@ def _rows(store: OutputStore) -> OutputRows:
 def _mark(rows: OutputRows) -> None:
     """Write the cut-over mark as release A wrote it: a finished row copy run, then a
     finished byte run with no refusal and no failure."""
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
-    rows.end_byte_run(
-        rows.start_byte_run(),
-        finished=True,
-        incomplete=False,
-        refused=None,
-        copied=0,
-        verified=0,
-        skipped=0,
-        needed_bytes=0,
-        needed_count=0,
-        failed=[],
-        damaged=[],
-    )
-    assert rows.try_cut_over()
+    mark_cut_over(rows)
 
 
 def _runs(pool: Pool) -> tuple[int, int]:

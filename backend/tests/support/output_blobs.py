@@ -29,7 +29,7 @@ async def put_folder_at_keys(
     blobs: OutputBytes, directory: Path, output_id: str, slug: str
 ) -> OutputBlobs:
     """`OutputBytes.put_folder`, then each of the output's keys names its object: for a
-    test that names the keys in the row with `OutputRows.write_byte_copy`. A save's keys
+    test that names the keys in the row with `row_outputs.name_blobs`. A save's keys
     take their objects in the row's transaction instead (`OutputRows.insert`)."""
     got = await blobs.put_folder(directory, output_id, slug)
     for item in got.staged:

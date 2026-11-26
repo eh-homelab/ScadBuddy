@@ -17,7 +17,14 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_prints import OutputPrintStore
-from scadbuddy.library.output_rows import OutputRow, OutputRows
+from scadbuddy.library.output_rows import (
+    OUTPUT_HOLDER,
+    OutputBlobs,
+    OutputRow,
+    OutputRows,
+    Role,
+    plate_cover_prefix,
+)
 from scadbuddy.library.outputs import STOREFRONT, OutputMeta, OutputStore
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import Job
@@ -124,3 +131,105 @@ def mark_storefront(store: OutputStore, output_id: str) -> None:
     row = store.rows.get(output_id)
     assert row is not None
     store.rows.update_meta(output_id, row.meta.model_copy(update={"source": STOREFRONT}))
+
+
+def name_blobs(
+    rows: OutputRows,
+    output_id: str,
+    blobs: OutputBlobs,
+    *,
+    damaged: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Name ``blobs`` as the output's bytes, its ``output_files`` rows too, and hold each
+    key, in one transaction: a test's stand-in for an output whose bytes it put itself
+    (`put_folder_at_keys`). The holds of byte keys it no longer names go; the plate
+    cover's stays. False when the row is gone: then nothing is written."""
+    keys = blobs.keys()
+    with rows._pool.connection() as conn, conn.transaction():
+        cursor = conn.execute(
+            "UPDATE outputs SET model_blob = %s, preview_blob = %s, thumbnail_blob = %s,"
+            " damaged = %s, bytes_at = clock_timestamp() WHERE output_id = %s",
+            (blobs.model, blobs.preview, blobs.thumbnail, Jsonb(damaged or []), output_id),
+        )
+        if not cursor.rowcount:
+            return False
+        conn.execute("DELETE FROM output_files WHERE output_id = %s", (output_id,))
+        for item in blobs.files:
+            conn.execute(
+                "INSERT INTO output_files (output_id, name, blob_key, size)"
+                " VALUES (%s, %s, %s, %s)",
+                (output_id, item.name, item.blob_key, item.size),
+            )
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+            " AND starts_with(key, 'output-' || holder_id || '-')"
+            " AND NOT key = ANY(%s) AND NOT starts_with(key, %s)",
+            (OUTPUT_HOLDER, output_id, keys, plate_cover_prefix(output_id)),
+        )
+        for key in keys:
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT DO NOTHING",
+                (key, OUTPUT_HOLDER, output_id),
+            )
+    return True
+
+
+def _record_run(rows: OutputRows, table: str, columns: dict[str, Any]) -> int:
+    """Insert one run row; ``finished_at`` is the database's clock unless given, so it is
+    never before the row's own ``started_at``."""
+    values = {
+        name: Jsonb(value) if isinstance(value, (list, dict)) else value
+        for name, value in columns.items()
+    }
+    names = [sql.Identifier(name) for name in values]
+    slots: list[sql.Composable] = [sql.Placeholder() for _ in values]
+    if "finished_at" not in values:
+        names.append(sql.Identifier("finished_at"))
+        slots.append(sql.SQL("clock_timestamp()"))
+    query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
+        sql.Identifier(table), sql.SQL(", ").join(names), sql.SQL(", ").join(slots)
+    )
+    with rows._pool.connection() as conn:
+        found = conn.execute(query, list(values.values())).fetchone()
+    assert found is not None
+    return int(found["id"])
+
+
+def record_copy_run(rows: OutputRows, **columns: Any) -> int:
+    """A row copy run as release A recorded it (#7255); its id. Release B writes none
+    (#7257), but `GET /outputs/copy-status` still reads the last one. ``columns`` are
+    ``output_copy_runs`` columns; ``finished_at`` is now unless given."""
+    return _record_run(rows, "output_copy_runs", columns)
+
+
+def record_byte_run(rows: OutputRows, **columns: Any) -> int:
+    """A byte copy run as release A recorded it (#7256); its id. ``columns`` are
+    ``output_byte_runs`` columns; ``finished_at`` is now unless given."""
+    return _record_run(rows, "output_byte_runs", columns)
+
+
+def mark_cut_over(rows: OutputRows) -> None:
+    """The cut-over mark as release A wrote it (#7257): a finished row copy run, then a
+    finished byte run, and the mark that names it."""
+    record_copy_run(rows)
+    byte_run = record_byte_run(rows)
+    with rows._pool.connection() as conn:
+        conn.execute("INSERT INTO output_cutover (byte_run_id) VALUES (%s)", (byte_run,))
+
+
+def name_blob(rows: OutputRows, output_id: str, role: Role, key: str) -> None:
+    """Name ``key`` as the blob of the output's ``role`` and hold it: a test's row that
+    names a blob the store may not have."""
+    with rows._pool.connection() as conn, conn.transaction():
+        conn.execute(
+            sql.SQL("UPDATE outputs SET {} = %s WHERE output_id = %s").format(
+                sql.Identifier(f"{role}_blob")
+            ),
+            (key, output_id),
+        )
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (key, OUTPUT_HOLDER, output_id),
+        )

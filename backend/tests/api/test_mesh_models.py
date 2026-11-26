@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import print_source
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.output_rows import ByteWrite, OutputBlobs, output_blob_key
+from scadbuddy.library.output_rows import OutputBlobs, output_blob_key
 from scadbuddy.library.presets import ParamPresetCreate
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
@@ -30,7 +30,7 @@ from tests.api.test_print_library import library_file
 from tests.api.test_send import configure, make_output
 from tests.support.fixtures import makerworld_path
 from tests.support.operations import press
-from tests.support.row_outputs import app_outputs, insert_row, output_meta
+from tests.support.row_outputs import app_outputs, insert_row, name_blobs, output_meta
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -443,7 +443,7 @@ def test_an_output_opens_as_a_scene_model(client: TestClient, paths: DataPaths) 
     blobs = outputs.bytes
     assert blobs is not None and client.portal is not None
     client.portal.call(lambda: blobs.put_file(key, model_3mf, slug="somewhere"))
-    outputs.rows.write_byte_copy([ByteWrite(output_id, OutputBlobs(model=key), "stamp", [])])
+    name_blobs(outputs.rows, output_id, OutputBlobs(model=key))
     created = client.post(
         "/api/v1/models/from-mesh",
         json={"name": "From Output", "output_id": output_id},

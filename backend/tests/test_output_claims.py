@@ -51,10 +51,10 @@ def test_claim_takes_a_row_and_makes_no_folder(tmp_path: Path, pool: Pool) -> No
 
     assert one.claim(SLUG, first) is True
     assert _claims(pool) == {first: SLUG}
-    assert not paths.output_dir(SLUG, first).exists()
+    assert not (paths.root / "outputs" / SLUG / first).exists()
     assert two.claim(SLUG, first) is False
 
-    paths.output_dir(SLUG, second).mkdir(parents=True)
+    (paths.root / "outputs" / SLUG / second).mkdir(parents=True)
     assert two.claim(SLUG, second) is True
     assert _claims(pool) == {first: SLUG, second: SLUG}
 

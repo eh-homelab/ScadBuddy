@@ -16,7 +16,6 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.output_rows import ByteWrite
 from scadbuddy.library.outputs import MODEL_NAME, OutputBytesLostError, OutputMeta
 from scadbuddy.print_library.filing import (
     file_output,
@@ -32,6 +31,7 @@ from scadbuddy.rows.component import POOL_SIZE as ROW_POOL_SIZE
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.output_blobs import blob_output
+from tests.support.row_outputs import name_blob, name_blobs
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -102,7 +102,7 @@ async def test_filing_uploads_blob_bytes(
         )
         assert created and placed.sha256 == hashlib.sha256(data).hexdigest()
         rows = output.store.rows
-        rows.set_blob(output.meta.id, "model", "output-gone-model")
+        name_blob(rows, output.meta.id, "model", "output-gone-model")
         with pytest.raises(OutputBytesLostError):
             await put_saved_in_folder(
                 native, output.store, output.meta, native.rows.create_folder("A", None).id, "x"
@@ -110,7 +110,7 @@ async def test_filing_uploads_blob_bytes(
         row = rows.get(output.meta.id)
         assert row is not None
         blobs = dataclasses.replace(row.blobs, model=None)
-        rows.write_byte_copy([ByteWrite(output.meta.id, blobs, "stamp", [])])
+        name_blobs(rows, output.meta.id, blobs)
         with pytest.raises(ApiError) as refused:
             await put_saved_in_folder(
                 native, output.store, output.meta, native.rows.create_folder("B", None).id, "x"

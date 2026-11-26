@@ -31,7 +31,6 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
-    ByteWrite,
     OutputRows,
     lock_thumbnail,
     output_blob_key,
@@ -63,6 +62,7 @@ from scadbuddy.store.index import (
 from scadbuddy.store.local import LocalContentBackend
 from tests.support.arrange import finished_job
 from tests.support.output_blobs import put_folder_at_keys
+from tests.support.row_outputs import name_blobs
 from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -118,7 +118,7 @@ async def copied(
     (directory / THUMBNAIL_NAME).write_bytes(b"thumbnail png")
     (directory / FILES_DIR / "a.stl").write_bytes(b"a stl")
     blobs = await put_folder_at_keys(store.bytes, directory, meta.id, meta.slug)
-    store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
+    name_blobs(store.rows, meta.id, blobs)
     return store, meta
 
 
@@ -333,7 +333,7 @@ async def test_local_role_gives_none_when_the_row_names_no_blob(
     row = store.rows.get(meta.id)
     assert row is not None
     blobs = dataclasses.replace(row.blobs, model=None)
-    store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
+    name_blobs(store.rows, meta.id, blobs)
     # The folder still holds the 3MF; no reader reads it.
     assert (_dir(store, meta.id) / MODEL_NAME).is_file()
     async with store.local_role(meta.id, "model") as path:
@@ -669,7 +669,7 @@ async def test_a_save_that_deadlocks_every_time_removes_what_it_uploaded(
     with pytest.raises(DeadlockDetected):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
     monkeypatch.undo()
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows is not None and store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     assert refs
@@ -760,7 +760,7 @@ async def test_save_without_a_blob_store_is_refused(
     output_id = "a" * 32
     with pytest.raises(OutputStoreUnusableError):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
 
@@ -788,7 +788,7 @@ async def test_save_put_failure_removes_folder_and_row(
     output_id = "f" * 32
     with pytest.raises(OSError, match="the store went away"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     # The first put's object is removed; no index row ever named it.
@@ -841,7 +841,7 @@ async def test_a_save_whose_stage_lock_stays_claimed_fails_and_frees_its_slot(
     assert uploaded
     for backend_id in uploaded:
         assert not await content.backend.exists(backend_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows is not None and store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     async with asyncio.timeout(30):
@@ -866,7 +866,7 @@ async def test_a_save_that_loses_on_the_id_keeps_the_outputs_bytes(
     other = job.model_copy(update={"slug": "other"})
     with pytest.raises(UniqueViolation):
         await store.save(other, name="second", files_dir=files, output_id=output_id)
-    assert not paths.output_dir("other", output_id).exists()
+    assert not (paths.root / "outputs" / "other" / output_id).exists()
     assert store.get(output_id).slug == job.slug
     assert await store.model_3mf(output_id) == model
     assert _holds(pool, output_id) == keys
@@ -897,7 +897,7 @@ async def test_put_thumbnail_puts_blob_then_row(
     monkeypatch.setattr(content, "put", blob_first)
     await store.put_thumbnail(meta.id, b"new png")
     assert seen == [b"thumbnail png"]
-    assert not (store.paths.output_dir(meta.slug, meta.id) / THUMBNAIL_NAME).exists()
+    assert not ((store.paths.root / "outputs" / meta.slug / meta.id) / THUMBNAIL_NAME).exists()
     assert await _read(store, meta.id, "thumbnail") == b"new png"
     key = output_blob_key(meta.id, "thumbnail")
     assert key in _holds(pool, meta.id)
@@ -1031,7 +1031,7 @@ async def test_put_drawn_thumbnail_failed_put_names_no_blob(
     monkeypatch.undo()
     # No file is written: none would be read (#7257). The row names no blob, so a
     # reader finds no thumbnail.
-    assert not (paths.output_dir(meta.slug, meta.id) / THUMBNAIL_NAME).exists()
+    assert not ((paths.root / "outputs" / meta.slug / meta.id) / THUMBNAIL_NAME).exists()
     row = store.rows.get(meta.id)
     assert row is not None and row.blobs.thumbnail is None
     assert await _read(store, meta.id, "thumbnail") is None
@@ -1102,7 +1102,7 @@ async def test_save_commit_failure_after_puts_leaves_no_row(
     output_id = "e" * 32
     with pytest.raises(RuntimeError, match="the insert failed"):
         await store.save(job, name="first", files_dir=files, output_id=output_id)
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert store.rows.get(output_id) is None
     assert _holds(pool, output_id) == set()
     # The failed save removed the objects it uploaded; no index row named them.
@@ -1308,7 +1308,7 @@ async def test_a_save_cancelled_after_a_lost_reuse_leaves_nothing_staged(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert store.rows.get(output_id) is None
-    assert not paths.output_dir(job.slug, output_id).exists()
+    assert not (paths.root / "outputs" / job.slug / output_id).exists()
     assert [p for p in store.bytes.spool.iterdir() if p.is_dir()] == []
 
 

@@ -5,14 +5,9 @@ A missing row is a missing output, found with no glob (#7257)."""
 from __future__ import annotations
 
 import errno
-import json
-import logging
 import shutil
-import threading
-import time
 import zipfile
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -26,16 +21,10 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.output_query import params_text
 from scadbuddy.library.output_rows import (
-    OUTPUT_HOLDER,
-    OutputBlobs,
-    OutputFileBlob,
     OutputRow,
     OutputRows,
-    output_blob_key,
-    output_file_key,
 )
 from scadbuddy.library.outputs import (
-    META_NAME,
     BackfillState,
     OutputMeta,
     OutputNotFoundError,
@@ -73,20 +62,7 @@ def rows_of(store: OutputStore) -> OutputRows:
 def _dir(store: OutputStore, meta: OutputMeta) -> Path:
     """The output's folder on the old share, which no save writes since #7257 (task B4)
     and no reader reads."""
-    return store.paths.output_dir(meta.slug, meta.id)
-
-
-def _old_folder(store: OutputStore, meta: OutputMeta) -> Path:
-    """The folder a phase 2 pod wrote for the output: its ``meta.json`` and
-    ``params.json``, for the tests of `OutputStore.restore_rows`, which #7257's task B5
-    removes."""
-    row = rows_of(store).get(meta.id)
-    assert row is not None
-    directory = _dir(store, meta)
-    directory.mkdir(parents=True)
-    (directory / META_NAME).write_text(row.meta.model_dump_json(), encoding="utf-8")
-    (directory / "params.json").write_text(json.dumps(row.params), encoding="utf-8")
-    return directory
+    return store.paths.root / "outputs" / meta.slug / meta.id
 
 
 @pytest.fixture
@@ -165,102 +141,9 @@ async def test_create_fails_and_cleans_up_when_row_insert_fails(
     )
     with pytest.raises(psycopg.errors.UniqueViolation):
         await store.save(job, output_id=taken)
-    assert not store.paths.output_dir(job.slug, taken).exists()
+    assert not (store.paths.root / "outputs" / job.slug / taken).exists()
     # The row that holds the id stays.
     assert rows_of(store).get(taken) is not None
-
-
-class _HeldOpen(list[OutputRow]):
-    """A copy batch's ``new`` rows that hold `write_copy`'s transaction open after its
-    insert ran: the iteration waits on ``release`` before the commit."""
-
-    def __init__(self, row: OutputRow) -> None:
-        super().__init__([row])
-        self.inserted = threading.Event()
-        self.release = threading.Event()
-
-    def __iter__(self) -> Iterator[OutputRow]:
-        yield from list.__iter__(self)
-        self.inserted.set()
-        assert self.release.wait(30)
-
-
-def _waits_on_a_lock(conninfo: str) -> bool:
-    with psycopg.connect(conninfo, autocommit=True) as conn:
-        found = conn.execute(
-            "SELECT count(*) FROM pg_stat_activity"
-            " WHERE wait_event_type = 'Lock' AND datname = current_database()"
-        ).fetchone()
-    return found is not None and found[0] > 0
-
-
-#: A save's blob keys (#7256): the keys alone; no blob is put.
-_SAVE_BLOBS = OutputBlobs(
-    model=output_blob_key("d" * 32, "model"),
-    preview=output_blob_key("d" * 32, "preview"),
-    files=(OutputFileBlob("a.stl", output_file_key("d" * 32, "a.stl"), 5),),
-)
-
-
-def _holds(conninfo: str, output_id: str) -> set[str]:
-    with psycopg.connect(conninfo, autocommit=True) as conn:
-        found = conn.execute(
-            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
-            (OUTPUT_HOLDER, output_id),
-        ).fetchall()
-    return {str(key) for (key,) in found}
-
-
-@pytest.mark.parametrize("blobs", [None, _SAVE_BLOBS], ids=["files", "blobs"])
-async def test_a_save_wins_over_a_copy_batch_that_commits_during_its_insert(
-    saved: tuple[OutputStore, OutputMeta, Job], pg_conninfo: str, blobs: OutputBlobs | None
-) -> None:
-    """The copy read the save's folder and inserted its row, and its batch has not
-    committed when the save writes its row. The save waits for the batch, then takes
-    the copy's row over: it keeps its files and its blob keys, and does not fail
-    (#7360, #7256)."""
-    store, meta, job = saved
-    rows = rows_of(store)
-    output_id = "d" * 32
-    template = rows.get(meta.id)
-    assert template is not None
-    copied = replace(
-        template,
-        output_id=output_id,
-        meta=template.meta.model_copy(update={"id": output_id, "name": "copied"}),
-        files_stamp="stamp",
-    )
-    batch = _HeldOpen(copied)
-    with ThreadPoolExecutor(2) as pool:
-        copy = pool.submit(rows.write_copy, batch, [], rows.clock())
-        assert batch.inserted.wait(30)
-        staging = store.paths.root.parent / "staging"
-        staging.mkdir()
-        save = pool.submit(
-            lambda: store.commit(
-                store.prepare(job, staging, name="saved", output_id=output_id), blobs
-            )
-        )
-        deadline = time.monotonic() + 30
-        while not _waits_on_a_lock(pg_conninfo):
-            assert not save.done(), save.exception()
-            assert time.monotonic() < deadline
-            time.sleep(0.05)
-        batch.release.set()
-        assert copy.result(30) == ({output_id}, set())
-        saved_meta = save.result(30)
-    assert saved_meta.name == "saved"
-    row = rows.get(output_id)
-    assert row is not None
-    assert row.meta.name == "saved" and row.files_stamp is None
-    if blobs is None:
-        assert row.bytes_at is None and row.blobs == OutputBlobs()
-        assert _holds(pg_conninfo, output_id) == set()
-    else:
-        assert row.bytes_at is not None
-        assert (row.blobs.model, row.blobs.preview) == (blobs.model, blobs.preview)
-        assert rows.files(output_id) == list(blobs.files)
-        assert _holds(pg_conninfo, output_id) == set(blobs.keys())
 
 
 async def test_rename_updates_row(saved: tuple[OutputStore, OutputMeta, Job]) -> None:
@@ -331,7 +214,7 @@ async def test_plate_cover_output_from_rows(
     rows = rows_of(store)
     with rows._pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = true WHERE output_id = %s", (meta.id,))
-    shutil.rmtree(store.paths.outputs)
+    assert not (store.paths.root / "outputs").exists()  # #7257: no save makes it
     assert store.plate_cover_output(job.slug) == meta.id
     with rows._pool.connection() as conn:
         conn.execute("UPDATE outputs SET has_plate_cover = false")
@@ -349,34 +232,29 @@ def _refuse(*_: object) -> None:
     raise psycopg.OperationalError("the database went away")
 
 
-async def test_model_delete_fails_whole_when_its_output_rows_stay(
+async def test_model_delete_leaves_output_rows_it_cannot_drop_to_the_sweep(
     saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """#7257: the model's folder moves first, then its output rows go. When they cannot,
+    the delete still stands, logged, and the orphan sweep drops them later."""
     store, meta, job = saved
     catalogue = _catalogue(store)
     monkeypatch.setattr(rows_of(store), "delete_slug", _refuse)
-    with pytest.raises(psycopg.OperationalError):
-        catalogue.delete(job.slug)
-    # The model and its outputs stay whole, for a retry.
-    assert store.paths.model_source(job.slug).is_file()
-    assert rows_of(store).get(meta.id) is not None
+    catalogue.delete(job.slug)
+    assert not store.paths.model_dir(job.slug).exists()
     assert rows_of(store).get(meta.id) is not None
     monkeypatch.undo()
-    catalogue.delete(job.slug)
+    assert catalogue.sweep_orphans(deleted=(job.slug,)) == [f"outputs/{job.slug}"]
     assert rows_of(store).get(meta.id) is None
-    assert not (store.paths.outputs / job.slug).exists()
 
 
-async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
+async def test_a_model_delete_whose_move_fails_keeps_its_output_rows(
     saved: tuple[OutputStore, OutputMeta, Job], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The rows go before the model's folder moves. When the move fails (EIO, not a
-    concurrent delete), the model and its outputs stay, so their rows come back from
-    the files, as the copy writes them."""
+    """#7257: the model's folder moves before its rows go. When the move fails (EIO, not
+    a concurrent delete), the model and its output rows stay as they were."""
     store, meta, job = saved
     second = await store.save(job, name="second")
-    for old in (meta, second):
-        _old_folder(store, old)
     catalogue = _catalogue(store)
     model_dir = store.paths.model_dir(job.slug)
     rename = Path.rename
@@ -394,38 +272,9 @@ async def test_a_model_delete_whose_move_fails_puts_its_output_rows_back(
     for kept in (meta, second):
         row = rows_of(store).get(kept.id)
         assert row is not None and row.slug == job.slug
-        assert row.files_stamp is not None
         assert store.get(kept.id).name == kept.name
     catalogue.delete(job.slug)
     assert rows_of(store).get(meta.id) is None
-
-
-async def test_restore_rows_skips_a_folder_it_cannot_stat(
-    saved: tuple[OutputStore, OutputMeta, Job],
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A stale NFS handle (ESTALE) on one output's folder skips that folder, logged, as
-    the retired copy's walk did; the other outputs get their rows back."""
-    store, meta, job = saved
-    second = await store.save(job, name="second")
-    for old in (meta, second):
-        _old_folder(store, old)
-    rows_of(store).delete_slug(job.slug)
-    stale = _dir(store, meta)
-    is_dir = Path.is_dir
-
-    def stale_handle(self: Path, *args: Any, **kwargs: Any) -> bool:
-        if self == stale:
-            raise OSError(errno.ESTALE, "Stale file handle")
-        return is_dir(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "is_dir", stale_handle)
-    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-        store.restore_rows(job.slug)
-    assert rows_of(store).get(meta.id) is None
-    assert rows_of(store).get(second.id) is not None
-    assert "could not list an outputs folder" in caplog.text
 
 
 async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
@@ -434,9 +283,6 @@ async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
     store, meta, job = saved
     catalogue = _catalogue(store)
     shutil.rmtree(store.paths.model_dir(job.slug))
-    # The sweep still finds a slug by its outputs folder, which a save no longer writes
-    # (#7257 task B4); task B5 finds it by its rows.
-    (store.paths.outputs / job.slug).mkdir(parents=True)
     # A live template besides: a models directory with none sweeps nothing (#7649).
     store.paths.model_dir("kept").mkdir()
     store.paths.model_source("kept").write_text("cube(1);\n", encoding="utf-8")
@@ -446,7 +292,6 @@ async def test_orphan_sweep_keeps_outputs_whose_rows_stay(
     monkeypatch.undo()
     catalogue.sweep_orphans()
     assert rows_of(store).get(meta.id) is None
-    assert not (store.paths.outputs / job.slug).exists()
 
 
 async def test_a_reused_slug_is_refused_while_its_output_rows_stay(
@@ -490,7 +335,7 @@ async def test_a_save_orders_by_the_rows(
     real_glob = Path.glob
 
     def no_meta_glob(self: Path, pattern: str) -> Iterator[Path]:
-        if pattern.endswith(META_NAME):
+        if pattern.endswith("meta.json"):
             raise AssertionError(f"globbed {self} for {pattern}")
         return real_glob(self, pattern)
 

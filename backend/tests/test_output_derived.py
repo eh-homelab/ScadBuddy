@@ -20,7 +20,6 @@ import scadbuddy.library.outputs as outputs_module
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_rows import (
     OUTPUT_HOLDER,
-    ByteWrite,
     OutputRows,
     plate_cover_key,
 )
@@ -35,6 +34,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.index import Pool
 from tests.support.arrange import finished_job
+from tests.support.row_outputs import name_blob, name_blobs
 from tests.support.saved_outputs import rewrite_stored_model
 from tests.support.store import local_content, store_pool
 
@@ -82,7 +82,7 @@ async def _copied(
 
 def _dir(store: OutputStore, meta: OutputMeta) -> Path:
     """The folder an output saved before #7257 had; a save writes none now."""
-    return store.paths.output_dir(meta.slug, meta.id)
+    return store.paths.root / "outputs" / meta.slug / meta.id
 
 
 def _counting(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
@@ -154,7 +154,7 @@ async def test_geometry_without_3mf_is_file_not_found(
     row = store.rows.get(meta.id)
     assert row is not None
     blobs = dataclasses.replace(row.blobs, model=None)
-    store.rows.write_byte_copy([ByteWrite(meta.id, blobs, "stamp", [])])
+    name_blobs(store.rows, meta.id, blobs)
     with pytest.raises(FileNotFoundError):
         await store.geometry(meta.id)
 
@@ -164,7 +164,7 @@ async def test_geometry_of_a_lost_model_blob_raises(
 ) -> None:
     """#7257, plan D9: no file is read in the lost blob's place."""
     store, meta = await _copied(tmp_path, projection, content)
-    store.rows.set_blob(meta.id, "model", "output-gone-model")
+    name_blob(store.rows, meta.id, "model", "output-gone-model")
     with pytest.raises(OutputBytesLostError):
         await store.geometry(meta.id)
 

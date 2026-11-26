@@ -28,7 +28,7 @@ from scadbuddy.api.media import IMMUTABLE_CACHE_CONTROL
 from scadbuddy.api.output_streams import stream_response
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.library.output_bytes import _PREFETCH, OutputBytes, OutputStream
-from scadbuddy.library.output_rows import ByteWrite, output_blob_key, output_file_key
+from scadbuddy.library.output_rows import output_blob_key, output_file_key
 from scadbuddy.library.outputs import (
     FILES_DIR,
     MODEL_NAME,
@@ -42,6 +42,7 @@ from scadbuddy.store.index import Pool
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.support.operations import press
 from tests.support.output_blobs import put_folder_at_keys
+from tests.support.row_outputs import name_blobs
 from tests.support.store import flip_first_byte, local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -135,8 +136,7 @@ def _copied(
         portal = client.portal
         assert portal is not None
         blobs = portal.call(put_folder_at_keys, outputs.bytes, directory, output_id, slug)
-    written, _ = outputs.rows.write_byte_copy([ByteWrite(output_id, blobs, "stamp", [])])
-    assert written == {output_id}
+    assert name_blobs(outputs.rows, output_id, blobs)
     return output_id
 
 
@@ -270,7 +270,7 @@ def test_download_404_when_the_row_names_no_blob(
     client: TestClient, model: str, outputs: OutputStore
 ) -> None:
     output_id = _copied(client, model, outputs)
-    outputs.rows.write_byte_copy([ByteWrite(output_id, _no_model(outputs, output_id), "s", [])])
+    name_blobs(outputs.rows, output_id, _no_model(outputs, output_id))
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
     assert response.status_code == 404
     assert response.json()["detail"] == f"output {output_id!r} has no 3MF"

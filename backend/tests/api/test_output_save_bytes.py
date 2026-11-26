@@ -159,7 +159,7 @@ def test_output_blobs_folder_only_on_local(
     assert paths.output_blobs.is_dir()
     other = DataPaths(root=tmp_path / "other-data")
     other.ensure()
-    assert other.outputs.is_dir()
+    assert not (other.root / "outputs").exists()
     assert not other.output_blobs.exists()
     other.ensure(output_blobs=True)
     assert other.output_blobs.is_dir()
@@ -169,7 +169,6 @@ def test_s3_start_makes_no_output_blobs_folder(s3_client: TestClient) -> None:
     """#7257 A3 review M2: an app on `s3` makes no `data/output-blobs/`."""
     state = _state(s3_client)
     assert state.store.backend == "s3"
-    assert state.paths.outputs.is_dir()
     assert not state.paths.output_blobs.exists()
 
 

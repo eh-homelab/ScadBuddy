@@ -41,6 +41,7 @@ from tests.api.test_storefront_renders import (  # noqa: F401  (fixtures)
     render_until_done,
     sliced,
 )
+from tests.support.row_outputs import name_blob
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -181,7 +182,7 @@ def test_variant_preview_streams_blob(
     assert again.status_code == 304 and again.content == b""
     # No preview at all: no variant.
     assert outputs.rows is not None
-    outputs.rows.set_blob(output_id, "preview", "output-gone-preview")
+    name_blob(outputs.rows, output_id, "preview", "output-gone-preview")
     assert crud.get(f"/variants/{key}/preview.glb").status_code == 404
 
 

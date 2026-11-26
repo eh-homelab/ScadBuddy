@@ -4,7 +4,6 @@ removes nothing."""
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +33,7 @@ async def test_get_of_id_without_row_is_not_found_and_reads_no_file(
         # The share gone, and a plain file where the outputs root was: any read of it
         # would raise something other than `OutputNotFoundError`.
         outputs_root = store.paths.root / "outputs"
-        shutil.rmtree(outputs_root)
+        assert not outputs_root.exists()  # #7257: no save makes it
         outputs_root.write_text("not a folder")
         with pytest.raises(OutputNotFoundError):
             store.get(UNKNOWN)
@@ -52,7 +51,7 @@ async def test_ids_for_reads_rows(tmp_path: Path, pg_conninfo: str) -> None:
     async with blob_output(tmp_path, pg_conninfo) as output:
         store = output.store
         second = await store.save(output.job, name="second")
-        shutil.rmtree(store.paths.root / "outputs")
+        assert not (store.paths.root / "outputs").exists()  # #7257: no save makes it
         assert store.ids_for(output.meta.slug) == [output.meta.id, second.id]
         assert store.ids_for("other") == []
 

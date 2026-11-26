@@ -40,13 +40,12 @@ from scadbuddy.library.assets import (
     referenced_asset_ids,
     sanitise_svg,
 )
-from scadbuddy.library.output_rows import ByteWrite
 from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from tests.conftest import PgPool, open_pg_pool
 from tests.support.output_blobs import blob_output, put_folder_at_keys
-from tests.support.row_outputs import output_store
+from tests.support.row_outputs import name_blobs, output_store
 from tests.support.saved_outputs import rewrite_stored_model
 
 DAY = 86400.0
@@ -365,7 +364,7 @@ async def test_referenced_asset_ids_from_rows_and_blob_3mf(
         blobs = await put_folder_at_keys(
             store.bytes, output.directory, output.meta.id, output.meta.slug
         )
-        rows.write_byte_copy([ByteWrite(output.meta.id, blobs, "stamp", [])])
+        name_blobs(rows, output.meta.id, blobs)
         with output.pool.connection() as conn:
             conn.execute(
                 "UPDATE outputs SET params = '{}', inputs = %s WHERE output_id = %s",
@@ -395,7 +394,7 @@ async def test_referenced_asset_ids_read_each_3mf_once(
         blobs = await put_folder_at_keys(
             store.bytes, output.directory, output.meta.id, output.meta.slug
         )
-        rows.write_byte_copy([ByteWrite(output.meta.id, blobs, "stamp", [])])
+        name_blobs(rows, output.meta.id, blobs)
         with output.pool.connection() as conn:
             conn.execute("UPDATE outputs SET params = '{}' WHERE output_id = %s", (output.meta.id,))
         model.unlink()

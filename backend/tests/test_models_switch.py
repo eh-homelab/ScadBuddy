@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import shutil
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -34,8 +33,8 @@ from scadbuddy.library.models_switch import (
     rollback,
     run,
 )
-from scadbuddy.library.output_rows import OutputRows
-from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.output_rows import OutputRow, OutputRows
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.repo_lock import LOCK_KEY, PgRepoCoordinator
 from scadbuddy.library.template_copy import TemplateCopyResult, copy_templates
 from scadbuddy.library.template_refresh import TemplateRefresh
@@ -98,8 +97,10 @@ class World:
     #: (slug, old id) to new id.
     ids: dict[tuple[str, str], str]
     dump: Path
-    #: The database, the outputs and the repositories as they were.
+    #: The database, the outputs' backup and the repositories as they were.
     before: dict[str, Any] = field(default_factory=dict)
+    #: Each output's meta as it was.
+    before_metas: dict[str, Any] = field(default_factory=dict)
 
     @property
     def paths(self) -> DataPaths:
@@ -114,8 +115,11 @@ class World:
     def rollback(self) -> None:
         rollback(self.paths, self.conninfo, self.dump)
 
-    def meta_path(self, slug: str, number: int) -> Path:
-        return self.paths.output_dir(slug, output_id(number)) / META_NAME
+    @property
+    def backup(self) -> Path:
+        """``data/outputs/``: the owner's backup of the outputs, which nothing reads or
+        writes since #7257."""
+        return self.data / "outputs"
 
     def sql(self, query: str, *args: Any) -> list[tuple[Any, ...]]:
         with psycopg.connect(self.conninfo, autocommit=True) as conn:
@@ -180,7 +184,7 @@ def snapshot(world: World) -> dict[str, Any]:
     there = [name for name in NAMES if (world.data / name).is_dir()]
     return {
         "database": database(world),
-        "outputs": tree(world.paths.outputs),
+        "outputs": tree(world.backup),
         "repositories": {name: tree(world.data / name) for name in there},
     }
 
@@ -230,8 +234,7 @@ def decision(conn: psycopg.Connection[Any], name: str, kind: str, key: str) -> N
     insert(conn, "analyzer_decisions", {**row, "body": Jsonb(body)})
 
 
-def output(paths: DataPaths, slug: str, number: int, version: str | None, inputs: Any) -> None:
-    """An output's files, as a save leaves them."""
+def output_meta(slug: str, number: int, version: str | None) -> OutputMeta:
     body = {
         "id": output_id(number),
         "slug": slug,
@@ -242,13 +245,37 @@ def output(paths: DataPaths, slug: str, number: int, version: str | None, inputs
         "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1.5], "size": [1, 1, 1.5]},
         "colors": ["#ff0000"],
     }
-    meta = OutputMeta.model_validate(body)
-    directory = paths.output_dir(slug, meta.id)
+    return OutputMeta.model_validate(body)
+
+
+def output(world: World, slug: str, number: int, version: str | None, inputs: Any) -> None:
+    """An output's row, as a save leaves it (#7257: the row is its only record)."""
+    meta = output_meta(slug, number, version)
+    row = OutputRow(
+        output_id=meta.id,
+        slug=slug,
+        meta=meta,
+        params=inputs["params"],
+        inputs=inputs,
+        record=None,
+        manifest=None,
+        bom=None,
+        arranged_from=None,
+        backfill=None,
+        has_plate_cover=False,
+        copied_at=AT,
+    )
+    with world.outputs() as (store, _):
+        store.rows.insert(row)
+
+
+def backup(data: Path, slug: str, number: int, version: str | None) -> None:
+    """An output's folder as an older build left it: the owner's backup, which the switch
+    never reads or writes (#7257)."""
+    directory = data / "outputs" / slug / output_id(number)
     directory.mkdir(parents=True)
-    text = json.dumps(meta.model_dump(mode="json"), indent=2) + "\n"
-    (directory / META_NAME).write_text(text, encoding="utf-8")
-    (directory / "params.json").write_text(json.dumps(inputs["params"]), encoding="utf-8")
-    (directory / "inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    text = json.dumps(output_meta(slug, number, version).model_dump(mode="json"), indent=2)
+    (directory / "meta.json").write_text(text + "\n", encoding="utf-8")
 
 
 def seed(world: World) -> None:
@@ -315,6 +342,15 @@ def seed(world: World) -> None:
         insert(conn, "storefront_slice_prices", price)
         media = {"template_id": "a", "id": "m", "position": 1, "file": "m.png", "kind": "image"}
         insert(conn, "template_media", {**media, "source_commit": c["a1"]})
+    output(world, "a", 1, c["a1"], INPUTS)
+    output(world, "p", 2, c["p1"], WHOLE)
+    output(world, "a", 3, c["p1"], INPUTS)
+    output(world, "a", 4, None, INPUTS)
+    output(world, "a", 5, CONTENT_HASH, INPUTS)
+    # A commit that the old repository has lost.
+    output(world, "p", 6, "0" * 39 + "1", INPUTS)
+    output(world, "gone", 7, c["g1"], INPUTS)
+    output(world, "builtin:b", 8, c["b1"], BARE)
 
 
 @dataclass(frozen=True)
@@ -346,17 +382,9 @@ def made(tmp_path_factory: pytest.TempPathFactory) -> Made:
     held = json.loads((dest / ".git" / MAP_NAME).read_text())
     ids = {(entry["slug"], entry["old"]): entry["new"] for entry in held["map"]}
     assert ids["a", c["a1"]] == ids["a", c["p1"]]
-    paths = DataPaths(old.data)
-    paths.ensure()
-    output(paths, "a", 1, c["a1"], INPUTS)
-    output(paths, "p", 2, c["p1"], WHOLE)
-    output(paths, "a", 3, c["p1"], INPUTS)
-    output(paths, "a", 4, None, INPUTS)
-    output(paths, "a", 5, CONTENT_HASH, INPUTS)
-    # A commit that the old repository has lost.
-    output(paths, "p", 6, "0" * 39 + "1", INPUTS)
-    output(paths, "gone", 7, c["g1"], INPUTS)
-    output(paths, "builtin:b", 8, c["b1"], BARE)
+    DataPaths(old.data).ensure()
+    backup(old.data, "a", 1, c["a1"])
+    backup(old.data, "gone", 7, c["g1"])
     return Made(old.data, c, ids)
 
 
@@ -368,9 +396,10 @@ def world(made: Made, tmp_path: Path, pg_conninfo: str) -> World:
     old.data, old.root, old.clock = data, data / "models", 1_800_000_000
     copy = World(data, pg_conninfo, old, made.commits, made.ids, data / "switch-1")
     seed(copy)
-    rows_from_files(copy)
+    copy_run_recorded(copy)
     start_copies(copy)
     copy.before = {**snapshot(copy), "others": others(copy)}
+    copy.before_metas = dict(copy.sql("SELECT output_id, meta FROM outputs"))
     return copy
 
 
@@ -392,16 +421,10 @@ def catalogue(world: World, pool: PgPool) -> tuple[Catalogue, TemplateRows, Temp
     return found, rows, refresh
 
 
-def rows_from_files(world: World) -> None:
-    """Each output's row written from its files, and a finished copy run recorded, as
-    release A's copy of the outputs left the database (#7255). Release B retired that
-    copy (#7257)."""
-    with world.outputs() as (store, _):
-        assert store.rows is not None
-        for slug in sorted(path.name for path in world.paths.outputs.iterdir()):
-            store.restore_rows(slug)
-        run = store.rows.start_run()
-        store.rows.finish_run(run, copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+def copy_run_recorded(world: World) -> None:
+    """A finished copy run, as release A's copy of the outputs left the database (#7255).
+    Release B retired that copy (#7257)."""
+    world.sql("INSERT INTO output_copy_runs (finished_at) VALUES (clock_timestamp())")
 
 
 def start_copies(world: World) -> TemplateCopyResult:
@@ -477,19 +500,13 @@ def assert_outputs(world: World, now: dict[str, Any]) -> None:
         ("builtin:b", 8): world.new("builtin:b", "b1"),
     }
     metas = dict(world.sql("SELECT output_id, meta FROM outputs"))
-    names = set()
-    for (slug, number), version in changed.items():
-        path = world.meta_path(slug, number)
-        names.add(path.relative_to(world.paths.outputs).as_posix())
-        meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
+    for (_, number), version in changed.items():
+        meta = OutputMeta.model_validate(metas[output_id(number)])
         assert (meta.model_version, meta.name) == (version, f"Größe {number}")
-        # As `OutputStore.rename` writes it, and the row has the same.
-        body = meta.model_dump(mode="json")
-        assert path.read_text(encoding="utf-8") == json.dumps(body, indent=2) + "\n"
-        assert metas[output_id(number)] == body
-    was = world.before["outputs"]
-    assert set(now["outputs"]) == set(was)
-    assert {name for name in was if was[name] != now["outputs"][name]} == names
+    for number in (4, 5, 6):
+        assert metas[output_id(number)] == world.before_metas[output_id(number)]
+    # The backup is not read or written (#7257).
+    assert now["outputs"] == world.before["outputs"]
 
 
 def test_each_row_and_file_names_the_new_id(world: World) -> None:
@@ -522,7 +539,6 @@ def test_without_rows_to_change(tmp_path: Path, pg_conninfo: str) -> None:
 
 
 def test_the_dump_holds_what_was(world: World) -> None:
-    metas = {name: entry[0] for name, entry in world.before["outputs"].items()}
     world.run()
     rows = [json.loads(line) for line in (world.dump / "rows.jsonl").read_text().splitlines()]
     was = {(row["table"], row["id"]): row["old"] for row in rows}
@@ -533,9 +549,13 @@ def test_the_dump_holds_what_was(world: World) -> None:
     assert len([row for row in rows if row["table"] == "outputs"]) == 5
     tables = [json.loads(line) for line in (world.dump / "tables.jsonl").read_text().splitlines()]
     assert {row["table"] for row in tables} >= {*REBUILT, "models_repo_head", "git_remote_pushes"}
-    held = tree(world.dump / "files/outputs")
-    assert len(held) == 5
-    assert all(metas[name] == entry[0] for name, entry in held.items())
+    # No file of an output is held (#7257).
+    assert sorted(path.name for path in world.dump.iterdir()) == [
+        "manifest.json",
+        "map.json",
+        "rows.jsonl",
+        "tables.jsonl",
+    ]
 
 
 # ── what the app makes of it ──────────────────────────────────────────────────
@@ -544,10 +564,8 @@ def test_the_dump_holds_what_was(world: World) -> None:
 def test_the_start_copies_leave_what_was_written(world: World) -> None:
     world.run()
     written = world.column("outputs", "output_id", "meta")
-    files = tree(world.paths.outputs)
     templates = start_copies(world)
     assert world.column("outputs", "output_id", "meta") == written
-    assert tree(world.paths.outputs) == files
     assert (templates.added, templates.incomplete) == (3, False)
     with world.pool() as pool:
         assert TemplateRows(pool).copied()
@@ -680,9 +698,6 @@ STOPS: dict[str, Callable[[pytest.MonkeyPatch], None]] = {
     "before the first rename": lambda m: kill_on_call(m, models_switch, "_rename", 2),
     "between the renames": lambda m: kill_on_call(m, models_switch, "_rename", 3),
     "after the renames": lambda m: kill_after(m, "renamed models-next"),
-    "before the first meta.json": lambda m: kill_on_call(m, models_switch, "_put", 1),
-    "before the fourth meta.json": lambda m: kill_on_call(m, models_switch, "_put", 4),
-    "after the meta.json files": lambda m: kill_after(m, "meta.json"),
     "in the transaction": lambda m: kill_on_call(m, models_switch, "_verify", 1),
     "after the transaction": lambda m: kill_after(m, "rows are changed"),
 }
@@ -740,7 +755,7 @@ def test_a_rollback_gives_back_what_was(world: World) -> None:
 
 @pytest.mark.parametrize(
     ("name", "call"),
-    [("_rename", 1), ("_rename", 2), ("_put", 1), ("_put", 3), ("_undo_rows", 1)],
+    [("_rename", 1), ("_rename", 2), ("_undo_rows", 1)],
 )
 def test_a_rollback_after_one_that_stopped(world: World, name: str, call: int) -> None:
     world.run()
@@ -792,19 +807,16 @@ def test_a_rollback_after_an_api_has_started(
 
 
 def test_a_rollback_of_a_row_that_the_start_copy_made_again(world: World) -> None:
-    """A file of an older build has not every key, and the copy wrote each default: a
-    row written again from its files (`restore_rows`, as release A's copy did) still
-    rolls back (`models_switch._same`)."""
-    path = world.meta_path("a", 1)
-    body = json.loads(path.read_text())
-    del body["sent_to_bambuddy"]
-    path.write_text(json.dumps(body, indent=2) + "\n")
+    """A file of an older build has not every key, and release A's copy wrote each
+    default: a row written again so still rolls back (`models_switch._same`)."""
     query = "SELECT meta::text FROM outputs WHERE output_id = %s"
     world.sql("UPDATE outputs SET meta = meta - 'sent_to_bambuddy'")
     was = world.sql(query, output_id(1))
     world.run()
-    with world.outputs() as (store, _):
-        store.restore_rows("a")
+    world.sql(
+        "UPDATE outputs SET meta = meta || '{\"sent_to_bambuddy\": false}' WHERE output_id = %s",
+        output_id(1),
+    )
     assert "sent_to_bambuddy" in world.sql(query, output_id(1))[0][0]
     world.rollback()
     assert world.sql(query, output_id(1)) == was
@@ -838,17 +850,7 @@ def test_a_rollback_reports_a_row_that_is_gone(
     kept = {t for t in COLUMNS if t not in (table, "order_item_revisions")}
     now = database(world)
     assert {t: now[t] for t in kept} == {t: world.before["database"][t] for t in kept}
-    assert tree(world.paths.outputs) == world.before["outputs"]
-
-
-def test_a_rollback_reports_a_file_that_is_gone(
-    world: World, capsys: pytest.CaptureFixture[str]
-) -> None:
-    world.run()
-    shutil.rmtree(world.meta_path("a", 1).parent)
-    world.rollback()
-    assert output_id(1) in capsys.readouterr().out
-    assert not world.meta_path("a", 1).exists()
+    assert tree(world.backup) == world.before["outputs"]
 
 
 OTHER: dict[str, str] = {
@@ -867,16 +869,6 @@ OTHER: dict[str, str] = {
 def test_a_rollback_refuses_a_row_that_is_neither(world: World, name: str) -> None:
     world.run()
     world.sql(OTHER[name])
-    before = snapshot(world)
-    with pytest.raises(SwitchRefusedError, match="neither"):
-        world.rollback()
-    assert snapshot(world) == before
-
-
-def test_a_rollback_refuses_a_file_that_is_neither(world: World) -> None:
-    world.run()
-    path = world.meta_path("a", 1)
-    path.write_text(path.read_text().replace("job1", "job2"))
     before = snapshot(world)
     with pytest.raises(SwitchRefusedError, match="neither"):
         world.rollback()
@@ -954,14 +946,7 @@ def _unmapped_output(world: World) -> None:
     """One that the builder should have kept: the old repository has its version."""
     lost = world.old.save("a", scad="cube(8);\n")
     git(world.old.root, "reset", "-q", "--hard", "HEAD~1")
-    output(world.paths, "a", 9, lost, INPUTS)
-    with world.outputs() as (store, _):
-        store.restore_rows("a")
-
-
-def _row_is_not_file(world: World) -> None:
-    path = world.meta_path("a", 1)
-    path.write_text(path.read_text().replace(world.commits["a1"], world.commits["a2"]))
+    output(world, "a", 9, lost, INPUTS)
 
 
 def _new_video(world: World) -> None:
@@ -1030,7 +1015,6 @@ BAD: dict[str, tuple[Callable[[World], object], str]] = {
         ),
         "d-mapped",
     ),
-    "a row that is not its file": (_row_is_not_file, output_id(1)),
 }
 
 
@@ -1061,14 +1045,14 @@ def test_one_that_starts_in_the_middle_stops_the_rows(
     world: World, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """After the renames, an API came up."""
-    real, opened = models_switch._put_files, []
+    real, opened = models_switch._say, []
 
-    def then_connect(*args: Any) -> Any:
-        done = real(*args)
-        opened.append(psycopg.connect(world.conninfo, application_name="scadbuddy-jobs"))
-        return done
+    def then_connect(line: str) -> None:
+        real(line)
+        if "renamed models-next" in line:
+            opened.append(psycopg.connect(world.conninfo, application_name="scadbuddy-jobs"))
 
-    monkeypatch.setattr(models_switch, "_put_files", then_connect)
+    monkeypatch.setattr(models_switch, "_say", then_connect)
     with pytest.raises(SwitchRefusedError, match="scadbuddy-jobs"):
         world.run()
     for conn in opened:
@@ -1116,7 +1100,6 @@ def test_the_preflight_only_reads_and_says_what_it_would_change(world: World) ->
         "storefront_listings": 2,
         "outputs": 5,
         "analyzer_decisions": 2,
-        "meta.json": 5,
         "templates": 3,
         "template_copy_runs": 1,
         "git_remote_pushes": 1,
@@ -1128,70 +1111,19 @@ def test_the_preflight_only_reads_and_says_what_it_would_change(world: World) ->
     assert output_id(4) not in reported and output_id(5) not in reported
 
 
-def test_an_output_with_no_row_or_no_folder_is_reported(world: World) -> None:
-    world.sql("DELETE FROM outputs WHERE output_id = %s", output_id(1))
-    shutil.rmtree(world.meta_path("p", 2).parent)
-    found = preflight(world.paths, world.conninfo)
-    assert found.refused == []
-    reported = "\n".join(found.reports)
-    assert output_id(1) in reported and output_id(2) in reported
-    world.run()
-    # The file is changed; with no row, the database has nothing to change.
-    body = json.loads(world.meta_path("a", 1).read_text())
-    assert body["model_version"] == world.new("a", "a1")
-    assert world.sql("SELECT meta FROM outputs WHERE output_id = %s", output_id(1)) == []
-
-
-def test_a_meta_json_that_cannot_be_read_is_left_and_reported(world: World) -> None:
-    path = world.meta_path("a", 1)
-    path.write_text("{half")
-    world.sql("DELETE FROM outputs WHERE output_id = %s", output_id(1))
-    found = preflight(world.paths, world.conninfo)
-    assert found.refused == [] and output_id(1) in "\n".join(found.reports)
-    world.run()
-    assert path.read_text() == "{half"
-
-
 def test_a_number_keeps_its_digits_and_an_unknown_key_stays(world: World) -> None:
     world.sql("UPDATE outputs SET meta = meta || '{\"later\": 1.10}' WHERE output_id = %s",
               output_id(1))  # fmt: skip
-    path = world.meta_path("a", 1)
-    body = {**json.loads(path.read_text()), "later": 1.1}
-    path.write_text(json.dumps(body, indent=2) + "\n")
     before = world.sql("SELECT meta::text FROM outputs WHERE output_id = %s", output_id(1))
     world.run()
     now = world.sql("SELECT meta::text FROM outputs WHERE output_id = %s", output_id(1))
     assert '"later": 1.10' in now[0][0]
-    assert json.loads(path.read_text()) == {**body, "model_version": world.new("a", "a1")}
+    assert json.loads(now[0][0])["model_version"] == world.new("a", "a1")
     world.rollback()
     assert world.sql("SELECT meta::text FROM outputs WHERE output_id = %s", output_id(1)) == before
 
 
 # ── the dump directory ────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "path", ["outputs/../../escape/meta.json", "/tmp/escape/meta.json", "models/a/model.json"]
-)
-def test_a_dump_that_names_a_file_outside_the_outputs_is_refused(world: World, path: str) -> None:
-    world.run()
-    files = world.dump / "files.jsonl"
-    lines = files.read_bytes().splitlines(keepends=True)
-    first = json.loads(lines[0])
-    first["path"] = path
-    files.write_bytes(json.dumps(first).encode() + b"\n" + b"".join(lines[1:]))
-    manifest = world.dump / "manifest.json"
-    body = json.loads(b"".join(manifest.read_bytes().splitlines(keepends=True)[:-1]))
-    body["files"]["files.jsonl"] = hashlib.sha256(files.read_bytes()).hexdigest()
-    signed = (json.dumps(body, indent=1) + "\n").encode()
-    manifest.write_bytes(signed + f"{hashlib.sha256(signed).hexdigest()}\n".encode())
-    before = snapshot(world)
-    with pytest.raises(SwitchRefusedError, match="not an output's"):
-        world.rollback()
-    with pytest.raises(SwitchRefusedError, match="not an output's"):
-        world.run()
-    assert snapshot(world) == before
-    assert not (world.paths.root.parent / "escape").exists()
 
 
 def test_a_dump_directory_that_holds_something_else_is_refused(world: World) -> None:
@@ -1219,7 +1151,7 @@ def test_a_dump_directory_in_a_bad_place_is_refused(world: World, name: str) -> 
     assert snapshot(world) == before
 
 
-@pytest.mark.parametrize("name", ["rows.jsonl", "files.jsonl", "manifest.json", "map.json"])
+@pytest.mark.parametrize("name", ["rows.jsonl", "tables.jsonl", "manifest.json", "map.json"])
 def test_a_damaged_dump_is_refused(world: World, name: str) -> None:
     with pytest.MonkeyPatch.context() as patch:
         kill_after(patch, "dumped")
@@ -1299,36 +1231,20 @@ def test_another_new_one_after_the_renames_stops_it(
     with pytest.raises(SwitchFailedError, match=word):
         world.run()
     assert database(world) == world.before["database"]
-    assert tree(world.paths.outputs) == world.before["outputs"]
-
-
-def test_an_output_whose_folder_went_is_not_made_again(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real = models_switch._put_files
-    folder = world.meta_path("a", 1).parent
-
-    def then_put(*args: Any) -> Any:
-        shutil.rmtree(folder)
-        return real(*args)
-
-    monkeypatch.setattr(models_switch, "_put_files", then_put)
-    with pytest.raises(SwitchFailedError, match=output_id(1)):
-        world.run()
-    assert not folder.exists()
+    assert tree(world.backup) == world.before["outputs"]
 
 
 def test_a_row_made_in_the_middle_stops_it(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
-    real = models_switch._put_files
+    real = models_switch._say
 
-    def then_order(*args: Any) -> Any:
-        done = real(*args)
-        with psycopg.connect(world.conninfo, autocommit=True) as conn:
-            commit = {"slug": "a", "commit": world.commits["a1"], "render_key": "k"}
-            item(conn, "late", 9, inputs=Jsonb(INPUTS), **commit)
-        return done
+    def then_order(line: str) -> None:
+        real(line)
+        if "renamed models-next" in line:
+            with psycopg.connect(world.conninfo, autocommit=True) as conn:
+                commit = {"slug": "a", "commit": world.commits["a1"], "render_key": "k"}
+                item(conn, "late", 9, inputs=Jsonb(INPUTS), **commit)
 
-    monkeypatch.setattr(models_switch, "_put_files", then_order)
+    monkeypatch.setattr(models_switch, "_say", then_order)
     with pytest.raises(SwitchFailedError, match="not the rows of the dump: order_items late"):
         world.run()
     now, was = database(world), world.before["database"]
@@ -1450,21 +1366,7 @@ def test_a_stop_says_where_it_stands(
     def full(*_: object) -> None:
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(models_switch, "_put", full)
+    monkeypatch.setattr(models_switch, "_lock_tables", full)
     assert models_switch.main(["run", "--dump", str(world.dump)]) == 2
     err = capsys.readouterr().err
     assert "No space left" in err and "models-old" in err and "run" in err and "rollback" in err
-
-
-def test_a_file_is_whole_or_not_there(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
-    def broken(*_: object) -> None:
-        raise OSError("gone")
-
-    path = world.meta_path("a", 1)
-    was = path.read_bytes()
-    with monkeypatch.context() as patch:
-        patch.setattr(os, "replace", broken)
-        with pytest.raises(OSError, match="gone"):
-            models_switch._put(path, b"new")
-    assert path.read_bytes() == was
-    assert {p.name for p in path.parent.iterdir()} == {META_NAME, "params.json", "inputs.json"}

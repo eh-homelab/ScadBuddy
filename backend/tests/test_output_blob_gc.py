@@ -6,7 +6,6 @@ live output's blobs stay, and the hold reaper never releases a live output's hol
 from __future__ import annotations
 
 import asyncio
-import shutil
 from collections.abc import AsyncGenerator, Iterator
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -35,6 +34,7 @@ from scadbuddy.store.content import ContentStore, sweep_content
 from scadbuddy.store.index import Pool
 from scadbuddy.store.refs import BlobRefs
 from tests.support.arrange import finished_job
+from tests.support.row_outputs import mark_cut_over
 from tests.support.store import local_content, store_pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -254,9 +254,9 @@ async def test_reaper_keeps_holds_of_output_with_row_and_no_meta(
     releases its holds because it has no folder."""
     store, meta = await _saved(tmp_path, projection, content, monkeypatch)
     refs = BlobRefs(pool)
-    outputs_module.hold_parts(refs, meta.id, [], meta.slug)
+    outputs_module.hold_parts(refs, meta.id, [])
     held = _holds(pool, meta.id)
-    assert not store.paths.output_dir(meta.slug, meta.id).exists()
+    assert not (store.paths.root / "outputs" / meta.slug / meta.id).exists()
     _age_holds(pool, meta.id)
     assert reap_orphan_holds(refs, store, grace=timedelta(0)) == 0
     assert _holds(pool, meta.id) == held
@@ -273,7 +273,7 @@ async def test_reaper_still_releases_holds_of_output_with_no_row(
     that stopped before its commit) loses its holds past the grace."""
     store, meta = await _saved(tmp_path, projection, content, monkeypatch)
     refs = BlobRefs(pool)
-    outputs_module.hold_parts(refs, meta.id, [], meta.slug)
+    outputs_module.hold_parts(refs, meta.id, [])
     refs.add("piece-part", OUTPUT_HOLDER, meta.id)
     with projection.pool.connection() as conn:
         conn.execute("DELETE FROM outputs WHERE output_id = %s", (meta.id,))
@@ -284,10 +284,7 @@ async def test_reaper_still_releases_holds_of_output_with_no_row(
 
 def _mark(pool: Pool, rows: OutputRows) -> None:
     """The cut-over mark (#7257), over a row copy run and a byte run that finished."""
-    with pool.connection() as conn:
-        conn.execute("INSERT INTO output_copy_runs (finished_at) VALUES (clock_timestamp())")
-        conn.execute("INSERT INTO output_byte_runs (finished_at) VALUES (clock_timestamp())")
-    assert rows.try_cut_over() is True
+    mark_cut_over(rows)
 
 
 async def test_reaper_after_cut_over_reads_rows_only(
@@ -314,8 +311,8 @@ async def test_reaper_after_cut_over_reads_rows_only(
     for output_id in (live.id, gone.id, claimed):
         _age_holds(pool, output_id)
     # Any scan of the share raises: the outputs folder is a plain file.
-    shutil.rmtree(store.paths.outputs)
-    store.paths.outputs.write_text("not a folder")
+    assert not (store.paths.root / "outputs").exists()  # #7257: no save makes it
+    (store.paths.root / "outputs").write_text("not a folder")
     assert reap_orphan_holds(refs, store, grace=timedelta(hours=1)) == 1
     assert _holds(pool, gone.id) == set()
     assert _holds(pool, live.id) == live_holds

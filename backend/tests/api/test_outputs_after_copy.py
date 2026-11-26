@@ -12,9 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.library.outputs import META_NAME, OutputStore
+from scadbuddy.library.outputs import OutputStore
 from tests.api.conftest import wait_for_job
 from tests.support.operations import press
+from tests.support.row_outputs import record_copy_run
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -46,11 +47,11 @@ def first(client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch) -> It
     store = _store(client)
     assert store.rows is not None
     rows = store.rows
-    rows.finish_run(rows.start_run(), copied=1, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    record_copy_run(rows, copied=1)
     real_glob = Path.glob
 
     def no_meta_glob(self: Path, pattern: str, **kwargs: object) -> Iterator[Path]:
-        if pattern.endswith(META_NAME):
+        if pattern.endswith("meta.json"):
             raise AssertionError(f"globbed {self} for {pattern}")
         return real_glob(self, pattern, **kwargs)  # type: ignore[arg-type]
 

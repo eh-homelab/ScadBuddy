@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import dataclasses
 import functools
 import hashlib
-import json
 import logging
 import re
 import shutil
@@ -32,7 +30,6 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from botocore.exceptions import ClientError
 from fastapi import status
 from psycopg import Error as PsycopgError
-from psycopg.errors import UndefinedTable
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from scadbuddy.bambuddy.models import ProcessValue
@@ -90,9 +87,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-META_NAME = "meta.json"
-PARAMS_NAME = "params.json"
-INPUTS_NAME = "inputs.json"
 #: The ``output_derived`` kinds of `OutputStore.geometry` and `OutputStore.attributed`.
 GEOMETRY_KIND = "geometry"
 ATTRIBUTED_KIND = "attributed"
@@ -103,14 +97,6 @@ PLATE_COVER_KIND = "plate_cover"
 PLATE_COVER_VERSION = "1"
 PLATE_NAMES_KIND = "plate_names"
 PLATE_NAMES_VERSION = "1"
-#: A pipeline output's bill of materials, what reproduces it (§8.4), and its extra files.
-BOM_NAME = "bom.json"
-RECORD_NAME = "record.json"
-MANIFEST_NAME = "manifest.json"
-ARRANGED_NAME = "arranged_from.json"
-#: #902: the re-render that will give an output saved before manifests its own. Removed
-#: once attached; kept with an ``error`` when the re-render did not finish.
-BACKFILL_NAME = "backfill.json"
 _ID_LIST = TypeAdapter(list[str])
 _PLATE_NAMES = TypeAdapter(dict[int, str])
 #: How many outputs whose thumbnail draw came to nothing a process remembers (#4775).
@@ -290,16 +276,6 @@ class BackfillState(BaseModel):
     error: str | None = None
 
 
-def tolerate_dropped(action: Callable[[], None], what: str) -> None:
-    """Run ``action``, a write to ``output_hold_slugs`` (release A also wrote
-    ``output_index`` through it). Release B's migration drops both tables (#7257, plan
-    D1): a missing table is logged and skipped. Any other error raises."""
-    try:
-        action()
-    except UndefinedTable:
-        logger.warning("%s skipped: its table is gone (#7257)", what)
-
-
 def _replace_bytes(path: Path, data: bytes) -> None:
     """Write ``path`` whole or not at all: a reader never sees half a file."""
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
@@ -461,85 +437,6 @@ class OutputFiles(Protocol):
     async def model_3mf(self, output_id: str) -> bytes | None:
         """The output's stored ``model.3mf``; ``None`` when it has none (or is gone)."""
         ...
-
-
-def _object(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("not an object")
-    return value
-
-
-def _list_of(check: Callable[[Any], object]) -> Callable[[Any], list[Any]]:
-    def checked(value: Any) -> list[Any]:
-        if not isinstance(value, list):
-            raise ValueError("not a list")
-        for item in value:
-            check(item)
-        return value
-
-    return checked
-
-
-def _record_object(value: Any) -> dict[str, Any]:
-    OutputRecord.model_validate(value)
-    return _object(value)
-
-
-def _backfill_object(value: Any) -> dict[str, Any]:
-    BackfillState.model_validate(value)
-    return _object(value)
-
-
-def _id_list(value: Any) -> list[Any]:
-    ids: list[Any] = _ID_LIST.validate_python(value)
-    return ids
-
-
-#: Each side file a row holds and the check its JSON must pass, as the readers read it.
-_SIDE_FILES: dict[str, Callable[[Any], Any]] = {
-    PARAMS_NAME: _object,
-    INPUTS_NAME: _object,
-    RECORD_NAME: _record_object,
-    MANIFEST_NAME: _list_of(ManifestObject.model_validate),
-    BOM_NAME: _list_of(BomEntry.model_validate),
-    ARRANGED_NAME: _id_list,
-    BACKFILL_NAME: _backfill_object,
-}
-
-
-def _row_from_folder(directory: Path, slug: str) -> OutputRow | None:
-    """The output's row from its folder alone, for `OutputStore.restore_rows` only, which
-    #7257's task B5 removes with this. ``None`` for a folder whose ``meta.json`` is
-    missing, unreadable or names another output. A side file that cannot be read is left
-    out of the row. Blocking."""
-    from scadbuddy.library.output_rows import OutputRow
-
-    try:
-        meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if meta.id != directory.name or meta.slug != slug:
-        return None
-    values: dict[str, Any] = {}
-    for name, check in _SIDE_FILES.items():
-        values[name] = None
-        # Missing, undecodable, a directory, an I/O error, or JSON the readers refuse.
-        with contextlib.suppress(OSError, ValueError):
-            values[name] = check(json.loads((directory / name).read_text(encoding="utf-8")))
-    return OutputRow(
-        output_id=meta.id,
-        slug=slug,
-        meta=meta,
-        params=values[PARAMS_NAME] or {},
-        inputs=values[INPUTS_NAME],
-        record=values[RECORD_NAME],
-        manifest=values[MANIFEST_NAME],
-        bom=values[BOM_NAME],
-        arranged_from=values[ARRANGED_NAME],
-        backfill=values[BACKFILL_NAME],
-        has_plate_cover=_holds_plate_cover(directory / MODEL_NAME),
-        copied_at=meta.created_at,
-    )
 
 
 @dataclass
@@ -1329,42 +1226,6 @@ class OutputStore:
         """The model's outputs, oldest first: one query of the rows (#7255)."""
         return [row.meta for row in reversed(self.rows.for_slug(slug))]
 
-    def restore_rows(self, slug: str) -> None:
-        """Write the rows of ``slug``'s outputs again from their files (#7255), in one
-        transaction guarded by a mark taken first: a model delete that dropped them and
-        then failed keeps its outputs, so they get their rows back. Each row takes a
-        ``files_stamp``, as the retired copy's did (#7257), so a later save of its id
-        may write over it. A folder that cannot be listed or stat'ed (ESTALE, EIO, EACCES)
-        is skipped and logged, as the retired copy's walk did. The one reader of the
-        folders left, until #7257's task B5 removes it with the model delete's restore."""
-        mark = self.rows.clock()
-        read: list[OutputRow] = []
-        try:
-            entries = sorted((self.paths.outputs / slug).iterdir())
-        except OSError:
-            entries = []
-        for directory in entries:
-            if not re.fullmatch(OUTPUT_ID_PATTERN, directory.name):
-                continue
-            try:
-                if not directory.is_dir():
-                    continue
-            except OSError as error:
-                logger.warning(
-                    "could not list an outputs folder",
-                    extra={"path": str(directory), "error": type(error).__name__},
-                )
-                continue
-            row = _row_from_folder(directory, slug)
-            if row is not None:
-                read.append(dataclasses.replace(row, files_stamp="restored"))
-        known = self.rows.existing(row.output_id for row in read)
-        self.rows.write_copy(
-            [row for row in read if row.output_id not in known],
-            [row for row in read if row.output_id in known],
-            mark,
-        )
-
     def forget_indexed(self, slug: str) -> None:
         """Drop the rows of ``slug``'s outputs with their model, before their directory
         goes (spec §6.2). Their output rows are the record (#7255), so a failure to drop
@@ -1708,37 +1569,15 @@ def require_output(store: OutputStore, output_id: str) -> OutputMeta:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no output with id {output_id!r}") from None
 
 
-def hold_parts(
-    refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject], slug: str
-) -> None:
+def hold_parts(refs: BlobRefs, output_id: str, manifest: Iterable[ManifestObject]) -> None:
     """The output's Parts outlive the job that rendered them: Arrange reads them (§7).
-    The hold reaper releases them once the output has no row (#7257). The slug write
-    into ``output_hold_slugs`` is a no-op on a dropped table; nothing reads it now."""
-    _record_slug(refs, output_id, slug)
+    The hold reaper releases them once the output has no row (#7257)."""
     for obj in manifest:
         refs.add(obj.part, OUTPUT_HOLDER, output_id)
 
 
 def release_parts(refs: BlobRefs, output_id: str) -> None:
     refs.drop_holder(OUTPUT_HOLDER, output_id)
-
-    def forget() -> None:
-        with refs.pool.connection() as conn:
-            conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
-
-    tolerate_dropped(forget, "an output's hold slug delete")
-
-
-def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
-    def record() -> None:
-        with refs.pool.connection() as conn:
-            conn.execute(
-                "INSERT INTO output_hold_slugs (output_id, slug) VALUES (%s, %s)"
-                " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug",
-                (output_id, slug),
-            )
-
-    tolerate_dropped(record, "an output's hold slug")
 
 
 #: How old an `output` hold must be before the reaper may call it orphaned: a save holds
@@ -1758,13 +1597,11 @@ def reap_orphan_holds(
     thumbnail's), or the holds of a deleted model's outputs, which nothing else ever
     drops. Returns how many outputs' holds it released.
 
-    The rows are the record (#7257, plan A5): the reaper lists no folder and removes
-    none. With rows, it first deletes the ``output_claims`` rows older than ``grace``
-    (`OutputRows.prune_claims`): a save that died between its claim and its row. Then in
-    one statement it releases every `output` hold past ``grace`` whose output has no
-    ``outputs`` row and no claim younger than ``grace`` (`_reap_rows_only`). Release B's
-    migration dropped ``output_hold_slugs``, which the folder pass read, so this pass no
-    longer waits for the cut-over mark."""
+    The rows are the record (#7257): the reaper reads rows only. It first deletes the
+    ``output_claims`` rows older than ``grace`` (`OutputRows.prune_claims`): a save that
+    died between its claim and its row. Then in one statement it releases every `output`
+    hold past ``grace`` whose output has no ``outputs`` row and no claim younger than
+    ``grace`` (`_reap_rows_only`)."""
     with span("outputs.reap_orphan_holds") as current:
         if store.rows is not None:
             current.set_attribute("scadbuddy.claims_pruned", store.rows.prune_claims(grace))

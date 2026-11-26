@@ -20,6 +20,7 @@ from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
 from tests.support.operations import press
+from tests.support.row_outputs import app_outputs, insert_row, output_meta
 from tests.support.template_rows import sync_template_rows
 
 pytestmark = pytest.mark.requires_git
@@ -149,7 +150,7 @@ def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
         assert output["model_version"] == _versions(client, model_id)[0]["commit"]
         listed = client.get(f"/api/v1/models/{model_id}/outputs").json()
         assert [row["id"] for row in listed] == [output["id"]]
-        assert not (paths.outputs / model_id / output["id"]).exists()  # #7257: no folder
+        assert not (paths.root / "outputs" / model_id / output["id"]).exists()  # #7257: no folder
     assert outputs[BUILTIN]["model_version"] != outputs[mine]["model_version"]
     assert [entry["message"] for entry in _versions(client, BUILTIN)] == [
         "Sync built-in templates from the image"
@@ -256,10 +257,11 @@ def test_a_built_ins_derived_files_live_while_it_does(
     with TestClient(app) as client:
         _finished_job(client, BUILTIN)
         client.get(f"/api/v1/models/{BUILTIN}/schema")
-        (paths.outputs / BUILTIN / "deadbeef").mkdir(parents=True)
+        insert_row(app_outputs(client), output_meta("d" * 32, BUILTIN))
         paths.model_revision_dir(BUILTIN, "0" * 40).mkdir(parents=True)
         catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
         assert catalogue.sweep_orphans() == []
+        assert BUILTIN in app_outputs(client).rows.slugs()
         assert paths.model_schema_cache(BUILTIN).is_file()
 
     # Dropped from the image: the next boot removes it, and its leftovers with it.
@@ -268,7 +270,7 @@ def test_a_built_ins_derived_files_live_while_it_does(
     bundled.rmdir()
     with TestClient(create_app(settings)) as client:
         assert client.get(f"/api/v1/models/{BUILTIN}").status_code == 404
-        assert not (paths.outputs / BUILTIN).exists()
+        assert BUILTIN not in app_outputs(client).rows.slugs()
         assert not (paths.model_revisions / BUILTIN).exists()
         assert not paths.model_schema_cache(BUILTIN).exists()
 

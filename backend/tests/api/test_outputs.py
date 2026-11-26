@@ -26,7 +26,7 @@ from scadbuddy.api.jobs import draw_view
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
-from scadbuddy.library.output_rows import ByteWrite, OutputRows
+from scadbuddy.library.output_rows import OutputRows
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
@@ -42,7 +42,7 @@ from scadbuddy.store.content_models import StoreFullError
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.conftest import wait_for_span
 from tests.support.operations import press
-from tests.support.row_outputs import app_outputs, update_row
+from tests.support.row_outputs import app_outputs, name_blobs, update_row
 from tests.support.saved_outputs import rewrite_model, stored_bytes
 from tests.test_geometry import carrot
 
@@ -78,7 +78,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["queue_item_id"] is None
 
     # The row and the blobs are the output; the share gets no folder (#7257).
-    assert not paths.output_dir(model, body["id"]).exists()
+    assert not (paths.root / "outputs" / model / body["id"]).exists()
     row = _rows(client).get(body["id"])
     assert row is not None and row.params == {"width": 12, "label": "hi"}
     # Its objects (phase 5, spec 2026-09-27 §7): what Arrange lays out again.
@@ -846,7 +846,7 @@ def test_the_geometry_of_an_output_without_a_3mf_is_404(
     rows = client.app.state.scadbuddy.outputs.rows  # type: ignore[attr-defined]
     row = rows.get(created["id"])
     blobs = dataclasses.replace(row.blobs, model=None)
-    rows.write_byte_copy([ByteWrite(created["id"], blobs, "stamp", [])])
+    name_blobs(rows, created["id"], blobs)
 
     response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
     assert response.status_code == 404
@@ -1035,8 +1035,7 @@ def test_an_output_refuses_inputs_the_job_did_not_render(
     )
     assert refused.status_code == 422, refused.text
     assert refused.json()["detail"] == f"inputs.params are not the parameters job {job_id} rendered"
-    output_dir = paths.outputs / model
-    assert not output_dir.exists() or not any(output_dir.iterdir())
+    assert client.get(f"/api/v1/models/{model}/outputs").json() == []
 
 
 @pytest.mark.parametrize(
@@ -1062,8 +1061,7 @@ def test_an_output_refuses_inputs_that_are_not_inputs(
     )
     assert refused.status_code == 422, refused.text
     assert detail in refused.json()["detail"]
-    output_dir = paths.outputs / model
-    assert not output_dir.exists() or not any(output_dir.iterdir())
+    assert client.get(f"/api/v1/models/{model}/outputs").json() == []
 
 
 def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
@@ -1074,8 +1072,7 @@ def test_the_store_leaves_nothing_behind_for_inputs_it_refuses(
     job = state.render.store.read(job_id)
     with pytest.raises(InputsError):
         state.outputs.prepare(job, paths.root / "staged", inputs={"params": {"width": "12"}})
-    output_dir = paths.outputs / model
-    assert not output_dir.exists() or not any(output_dir.iterdir())
+    assert client.get(f"/api/v1/models/{model}/outputs").json() == []
 
 
 def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, model: str) -> None:
@@ -1147,7 +1144,7 @@ def test_saving_a_job_whose_result_is_gone_is_a_404(
     assert response.headers["content-type"] == "application/problem+json"
     assert "is gone" in response.json()["detail"]
     assert str(paths.root) not in response.text
-    outputs = paths.output_dir(model, "x").parent
+    outputs = (paths.root / "outputs" / model / "x").parent
     assert not outputs.exists() or not any(outputs.iterdir())
 
 
@@ -1177,7 +1174,7 @@ def test_a_result_swept_while_it_is_copied_is_a_404(
     assert response.status_code == 404
     assert "is gone" in response.json()["detail"]
     assert str(paths.root) not in response.text
-    outputs = paths.output_dir(model, "x").parent
+    outputs = (paths.root / "outputs" / model / "x").parent
     assert not outputs.exists() or not any(outputs.iterdir())
 
 
@@ -1201,7 +1198,7 @@ def test_a_copy_that_fails_otherwise_is_the_same_404_without_a_path(
     assert response.status_code == 404, response.text
     assert response.json()["detail"] == f"the result of job {job_id!r} is gone"
     assert str(paths.root) not in response.text
-    outputs = paths.output_dir(model, "x").parent
+    outputs = (paths.root / "outputs" / model / "x").parent
     assert not outputs.exists() or not any(outputs.iterdir())
 
 

@@ -45,7 +45,6 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import (
-    META_NAME,
     LanPlateSend,
     OutputMeta,
     OutputNotFoundError,
@@ -75,7 +74,7 @@ def write_output(paths: DataPaths, output_id: str = OUTPUT, **extra: Any) -> Out
     )
     directory = paths.root / "outputs" / "demo" / output_id
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / META_NAME).write_text(json.dumps(meta.model_dump(mode="json")), encoding="utf-8")
+    (directory / "meta.json").write_text(json.dumps(meta.model_dump(mode="json")), encoding="utf-8")
     return meta
 
 
@@ -114,7 +113,7 @@ class FileOutputs(OutputStore):
 
     def get(self, output_id: str) -> OutputMeta:
         try:
-            text = (self.paths.root / "outputs" / "demo" / output_id / META_NAME).read_text()
+            text = (self.paths.root / "outputs" / "demo" / output_id / "meta.json").read_text()
         except FileNotFoundError:
             raise OutputNotFoundError(output_id) from None
         return OutputMeta.model_validate_json(text)

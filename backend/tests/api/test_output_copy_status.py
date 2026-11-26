@@ -6,15 +6,20 @@ and each test writes the runs it reads."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.outputs import DAMAGED_SAMPLE
-from scadbuddy.library.output_rows import ByteWrite, OutputBlobs, OutputRow, OutputRows
+from scadbuddy.library.output_rows import OutputBlobs, OutputRow, OutputRows
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.glb import BoundingBox
+from tests.support.row_outputs import (
+    mark_cut_over,
+    name_blobs,
+    record_byte_run,
+    record_copy_run,
+)
 
 
 def _rows(client: TestClient) -> OutputRows:
@@ -25,10 +30,9 @@ def _rows(client: TestClient) -> OutputRows:
 
 def test_copy_status_reports_last_run(client: TestClient) -> None:
     rows = _rows(client)
-    first = rows.start_run()
     damaged = [{"output_id": "a" * 32, "slug": "box", "file": "bom.json", "error": "OSError"}]
-    rows.finish_run(
-        first, copied=3, refreshed=2, dropped=1, not_copied=["box/" + "b" * 32], damaged=damaged
+    record_copy_run(
+        rows, copied=3, refreshed=2, dropped=1, not_copied=["box/" + "b" * 32], damaged=damaged
     )
 
     response = client.get("/api/v1/outputs/copy-status")
@@ -42,7 +46,7 @@ def test_copy_status_reports_last_run(client: TestClient) -> None:
     assert "id" not in body
 
     # A run that has not finished is the last run: it has no end and counts nothing yet.
-    rows.start_run()
+    record_copy_run(rows, finished_at=None)
     later = client.get("/api/v1/outputs/copy-status").json()
     assert later["finished_at"] is None
     assert (later["copied"], later["refreshed"], later["dropped"]) == (0, 0, 0)
@@ -53,8 +57,7 @@ def test_copy_status_reports_last_run(client: TestClient) -> None:
 def test_copy_status_shows_an_incomplete_run(client: TestClient) -> None:
     """A walk that failed part-way records its counts and ``incomplete``, and no end."""
     rows = _rows(client)
-    run = rows.start_run()
-    rows.end_incomplete_run(run, copied=4, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    record_copy_run(rows, finished_at=None, incomplete=True, copied=4)
     body = client.get("/api/v1/outputs/copy-status").json()
     assert body["incomplete"] is True
     assert body["finished_at"] is None
@@ -96,18 +99,14 @@ def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
     """#7256: the last byte copy run, and how many rows the files still hold the bytes
     of now."""
     rows = _rows(client)
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    record_copy_run(rows)
     for output_id in ("a" * 32, "b" * 32):
         rows.insert(_row(output_id))
-    rows.write_byte_copy([ByteWrite("a" * 32, OutputBlobs(), "stamp", [])])
+    name_blobs(rows, "a" * 32, OutputBlobs())
     failed = [{"output_id": "b" * 32, "role": "model", "error": "OSError"}]
     damaged = [{"output_id": "c" * 32, "role": "preview", "error": "missing"}]
-    run = rows.start_byte_run()
-    rows.end_byte_run(
-        run,
-        finished=True,
-        incomplete=False,
-        refused=None,
+    record_byte_run(
+        rows,
         copied=5,
         verified=4,
         skipped=3,
@@ -130,19 +129,8 @@ def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
     assert "id" not in byte_run
 
     # A refused run is the last run: no end, the reason, and nothing copied.
-    refused = rows.start_byte_run()
-    rows.end_byte_run(
-        refused,
-        finished=False,
-        incomplete=False,
-        refused="the store is full",
-        copied=0,
-        verified=0,
-        skipped=0,
-        needed_bytes=2048,
-        needed_count=1,
-        failed=[],
-        damaged=[],
+    record_byte_run(
+        rows, finished_at=None, refused="the store is full", needed_bytes=2048, needed_count=1
     )
     later = client.get("/api/v1/outputs/copy-status").json()["bytes"]
     assert later["finished_at"] is None
@@ -152,42 +140,25 @@ def test_copy_status_reports_byte_run_and_pending(client: TestClient) -> None:
 
 def test_copy_status_bytes_null_before_any_byte_run(client: TestClient) -> None:
     rows = _rows(client)
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    record_copy_run(rows)
     rows.insert(_row("a" * 32))
     body = client.get("/api/v1/outputs/copy-status").json()
     assert body["bytes"] is None
-
-
-def _end_byte_run(rows: OutputRows, damaged: list[dict[str, Any]]) -> None:
-    rows.end_byte_run(
-        rows.start_byte_run(),
-        finished=True,
-        incomplete=False,
-        refused=None,
-        copied=0,
-        verified=0,
-        skipped=0,
-        needed_bytes=0,
-        needed_count=0,
-        failed=[],
-        damaged=damaged,
-    )
 
 
 def test_copy_status_reports_the_rows_damage(client: TestClient) -> None:
     """#7256: the rows' damage, not only the last run's: a later run skips an output an
     earlier run marked damaged, so its ``damaged`` no longer names it."""
     rows = _rows(client)
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    record_copy_run(rows)
     preview = [{"role": "preview", "error": "no preview.glb"}]
     model = [{"role": "model", "error": "no model.3mf"}]
     writes = {"c" * 32: preview, "a" * 32: model, "b" * 32: []}
     for output_id in writes:
         rows.insert(_row(output_id))
-    rows.write_byte_copy(
-        [ByteWrite(output_id, OutputBlobs(), "stamp", found) for output_id, found in writes.items()]
-    )
-    _end_byte_run(rows, [])
+    for output_id, found in writes.items():
+        name_blobs(rows, output_id, OutputBlobs(), damaged=found)
+    record_byte_run(rows)
 
     byte_run = client.get("/api/v1/outputs/copy-status").json()["bytes"]
     assert byte_run["damaged"] == []
@@ -200,13 +171,14 @@ def test_copy_status_reports_the_rows_damage(client: TestClient) -> None:
 
 def test_copy_status_damage_sample_is_bounded(client: TestClient) -> None:
     rows = _rows(client)
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
+    record_copy_run(rows)
     damaged = [{"role": "preview", "error": "no preview.glb"}]
     ids = [f"{n:032x}" for n in range(DAMAGED_SAMPLE + 1)]
     for output_id in ids:
         rows.insert(_row(output_id))
-    rows.write_byte_copy([ByteWrite(output_id, OutputBlobs(), "s", damaged) for output_id in ids])
-    _end_byte_run(rows, [])
+    for output_id in ids:
+        name_blobs(rows, output_id, OutputBlobs(), damaged=damaged)
+    record_byte_run(rows)
     byte_run = client.get("/api/v1/outputs/copy-status").json()["bytes"]
     assert byte_run["damaged_rows"] == DAMAGED_SAMPLE + 1
     assert [item["output_id"] for item in byte_run["damaged_sample"]] == ids[:DAMAGED_SAMPLE]
@@ -215,10 +187,10 @@ def test_copy_status_damage_sample_is_bounded(client: TestClient) -> None:
 def test_copy_status_reports_cut_over_at(client: TestClient) -> None:
     """#7257: when the cut-over mark was written; ``None`` before it."""
     rows = _rows(client)
-    rows.finish_run(rows.start_run(), copied=0, refreshed=0, dropped=0, not_copied=[], damaged=[])
-    _end_byte_run(rows, [])
+    record_copy_run(rows)
+    record_byte_run(rows)
     assert client.get("/api/v1/outputs/copy-status").json()["cut_over_at"] is None
-    assert rows.try_cut_over() is True
+    mark_cut_over(rows)
     at = rows.cut_over_at()
     assert at is not None
     body = client.get("/api/v1/outputs/copy-status").json()

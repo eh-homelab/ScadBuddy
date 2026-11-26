@@ -209,7 +209,7 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         # The staged files stay until the filing below has read the 3MF.
         stack = AsyncExitStack()
         try:
-            await asyncio.to_thread(hold_parts, state.refs, output_id, manifest, job.slug)
+            await asyncio.to_thread(hold_parts, state.refs, output_id, manifest)
             with span("output.write", attributes={"scadbuddy.job_id": job.id}):
                 # #7256, #7257: staged on the spool, then the bytes in the blob store, then
                 # the row.

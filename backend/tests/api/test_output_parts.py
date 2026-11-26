@@ -465,7 +465,7 @@ def test_failed_save_releases_claim(
     with pytest.raises(RuntimeError, match="the save stopped"):
         client.portal.call(kind.run, body, {})
     assert claims(pool) == set()
-    assert not state.outputs.paths.output_dir("demo", shared).exists()
+    assert not (state.outputs.paths.root / "outputs" / "demo" / shared).exists()
 
     saved = client.portal.call(kind.run, body, {})
     assert saved["id"] == shared
