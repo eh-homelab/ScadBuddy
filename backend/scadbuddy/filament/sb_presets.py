@@ -371,6 +371,11 @@ class FilamentPresetStore:
         return [FilamentPreset.model_validate(row) for row in rows]
 
     async def rows(self) -> list[OwnRow]:
+        """The native slicer's view of every preset. A row gives ``bb_preset_id`` only when
+        the preset is of the Bambuddy the filament sync's links name (`bambuddy_refs_on`'s
+        rule), or of an unrecorded one: an id of another Bambuddy names another preset
+        (#7223)."""
+        instance = await asyncio.to_thread(self._links_instance)
         return [
             OwnRow(
                 id=p.id,
@@ -379,10 +384,19 @@ class FilamentPresetStore:
                 filament_type=p.filament_type,
                 filament_colour=p.filament_colour,
                 compatible_printers=list(p.compatible_printers),
-                bb_preset_id=p.bb_preset_id,
+                bb_preset_id=(
+                    p.bb_preset_id
+                    if p.bb_instance is None or instance is None or p.bb_instance == instance
+                    else None
+                ),
             )
             for p in await asyncio.to_thread(self.all)
         ]
+
+    def _links_instance(self) -> str | None:
+        with self._pool.connection() as conn:
+            row = conn.execute("SELECT instance FROM filament_bb_sync_state LIMIT 1").fetchone()
+        return None if row is None else row["instance"]
 
     async def documents(self, ids: Collection[int]) -> dict[int, dict[str, Any]]:
         if not ids:
@@ -429,10 +443,19 @@ def _bound_bb_ids(conn: Conn) -> set[int]:
     return ids
 
 
-def _fetched_key(conn: Conn, bb_preset_id: int) -> dict[str, Any] | None:
+def _fetched_key(
+    conn: Conn, bb_preset_id: int, instance: str | None = None
+) -> dict[str, Any] | None:
     """The type binding that a profile fetch of that type bound to ``bb_preset_id`` at
     the binding's own key, with the run, when the key has no ``3dfp`` preset yet: what
-    makes an adopted preset ``3dfp`` (Decision 6)."""
+    makes an adopted preset ``3dfp`` (Decision 6). A run's ``preset_id`` names the Bambuddy
+    of its time: with the links' recorded Bambuddy (`filament_bb_sync_state`) set and
+    another than ``instance``, the id is not that run's preset, so nothing matches
+    (#7223)."""
+    if instance is not None:
+        state = conn.execute("SELECT instance FROM filament_bb_sync_state LIMIT 1").fetchone()
+        if state is not None and state["instance"] not in (None, instance):
+            return None
     return conn.execute(
         "SELECT b.type_id, b.printer_model, b.nozzle_diameter, f.id AS run_id, f.tdfp_id"
         " FROM filament_spool_type_presets b"
@@ -467,7 +490,7 @@ def _adopt_one(
             # Blob ``key`` stays unheld on purpose: the blob sweep reclaims it once its
             # grace ends (`keep_document`).
             return False
-        fetched = _fetched_key(conn, detail.id)
+        fetched = _fetched_key(conn, detail.id, instance)
         preset_id = create_on(
             conn,
             name=detail.name,

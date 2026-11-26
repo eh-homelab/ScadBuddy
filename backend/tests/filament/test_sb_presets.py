@@ -396,3 +396,68 @@ async def test_a_scadbuddy_owned_preset_is_never_read_back(pg_pool: PgPool, tmp_
     assert await refresh_bambuddy(pg_pool, blobs, held) == 0
     store = FilamentPresetStore(pg_pool, lambda: blobs)
     assert json.dumps((await store.documents([made]))[made]) == json.dumps(doc)
+
+
+async def test_own_rows_give_a_bambuddy_id_only_of_the_links_bambuddy(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """#7223: two presets hold id 7, one per Bambuddy. The native catalogue maps a
+    Bambuddy id to a preset, so a row gives the id only when it is of the links' Bambuddy
+    (or of an unrecorded one)."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    store = FilamentPresetStore(pg_pool, lambda: blobs)
+    made: dict[str, int] = {}
+    for name, instance in (("Old", "0ld0ld0ld0ld"), ("New", "n3wn3wn3wn3w"), ("Bare", None)):
+        doc = _doc(name)
+        key, sha256 = await keep_document(blobs, document_bytes(doc))
+        with pg_pool.connection() as conn, conn.transaction():
+            made[name] = create_on(
+                conn,
+                name=name,
+                source="bambuddy",
+                key=key,
+                sha256=sha256,
+                doc=doc,
+                made_by="t",
+                bb_preset_id=7,
+                bb_instance=instance,
+            )
+
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = 'n3wn3wn3wn3w'")
+    assert {r.name: r.bb_preset_id for r in await store.rows()} == {
+        "Old": None,
+        "New": 7,
+        "Bare": 7,
+    }
+    with pg_pool.connection() as conn:
+        conn.execute("UPDATE filament_bb_sync_state SET instance = NULL")
+    assert {r.bb_preset_id for r in await store.rows()} == {7}
+
+
+async def test_a_fetch_run_of_another_bambuddy_never_types_an_adopted_preset(
+    pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """#7223: an old profile-fetch run's ``preset_id`` names the Bambuddy of its time. When
+    the links' recorded Bambuddy is another than the configured one, id 141 is not that
+    run's preset, so the adopted preset stays a ``bambuddy`` one."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    held = MemoryPresets()
+    kind = _type(pg_pool, "PLA-F")
+    await held.keep(_held(141, "SUNLU Silk @H2C", "2026-11-23T01:00:00"))
+    _bind(pg_pool, kind, "141")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_profile_fetches (type_id, tdfp_id, files, status)"
+            " VALUES (%s, 30173, %s, 'imported')",
+            (
+                kind,
+                Jsonb(
+                    {"H2C": {"0.4": {"key": "k", "name": "n", "sha256": "s", "preset_id": "141"}}}
+                ),
+            ),
+        )
+        conn.execute("UPDATE filament_bb_sync_state SET instance = '0ld0ld0ld0ld'")
+    assert await adopt_held(pg_pool, blobs, held, "n3wn3wn3wn3w") == 1
+    (made,) = FilamentPresetStore(pg_pool, lambda: blobs).all()
+    assert (made.source, made.type_id) == ("bambuddy", None)

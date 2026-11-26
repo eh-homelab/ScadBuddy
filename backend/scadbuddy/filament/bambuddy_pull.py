@@ -455,7 +455,7 @@ def pull(
         report.conflicts += conflicts
         report.claimed += claimed
     check(cancel)
-    run = _Run(store, now, actor, pulls, defer_archived, *_context(store, pulls))
+    run = _Run(store, now, actor, pulls, defer_archived, *_context(store, pulls), instance=instance)
     try:
         quiet = _quiet(store, run, spools, cancel)
     except (CancelledError, errors.QueryCanceled):
@@ -538,6 +538,9 @@ class _Run:
     refs: BbRefs
     claims: list[_Claim]
     moved: int = 0
+    #: The Bambuddy this pull reads (`pull`'s ``instance``): a preset id maps only to a
+    #: preset of it (`sb_presets.by_bb_id_on`).
+    instance: str | None = None
 
     def claimed(self, bb: BbSpool) -> bool:
         """Decision 10: an open spool create intent can adopt ``bb``."""
@@ -925,7 +928,7 @@ def _one(
         # BB may not move ``updated_at`` for a weighing: its events are booked anyway,
         # once each.
         booked = _book(conn, spool_id, bb, actor, pulls.weights)
-        presets = pulls.presets and _bb_presets(conn, spool_id, bb, actor)
+        presets = pulls.presets and _bb_presets(conn, spool_id, bb, actor, run.instance)
         k_values = pulls.presets and _bb_k_values(conn, run, spool_id, bb)
         _write_seen(conn, run, spool_id, bb, taken)
         if link["archived"] or changed or booked or presets or k_values or moved or archived:
@@ -944,7 +947,7 @@ def _one(
         typeless = _link(conn, store, bb, held_id, after, now, actor, pulls)
         _book(conn, held_id, bb, actor, pulls.weights)
         if pulls.presets:
-            _bb_presets(conn, held_id, bb, actor)
+            _bb_presets(conn, held_id, bb, actor, run.instance)
             _bb_k_values(conn, run, held_id, bb)
         _write_seen(conn, run, held_id, bb, set())
         return "linked", held_id, typeless
@@ -981,7 +984,7 @@ def _one(
     made, typeless = _create(conn, store, bb, after, now, actor, skipped)
     _book(conn, made, bb, actor, pulls.weights)
     if pulls.presets:
-        _bb_presets(conn, made, bb, actor)
+        _bb_presets(conn, made, bb, actor, run.instance)
         _bb_k_values(conn, run, made, bb)
     if pulls.locations:
         _follow_location(conn, run, made, bb, set(), new=True)
@@ -1001,7 +1004,9 @@ def _preset_sent(bb: BbSpool) -> tuple[str | None, str | None]:
 BB_PRESET_NOZZLES = ("0.2", "0.4", "0.6", "0.8")
 
 
-def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
+def _bb_presets(
+    conn: Conn, spool_id: UUID, bb: BbSpool, actor: str, instance: str | None = None
+) -> bool:
     """A linked BB spool's ``slicer_filament`` (and its name) as the SB spool's own H2C
     preset at every nozzle size, a ``migrated`` row (#6262 Task 7 ruling R1), so a plan
     on Bambuddy's path finds the preset Bambuddy's spool named. True when a row changed.
@@ -1059,7 +1064,9 @@ def _bb_presets(conn: Conn, spool_id: UUID, bb: BbSpool, actor: str) -> bool:
     # A Bambuddy local preset ScadBuddy holds is named by its ScadBuddy ref (#7176): a row
     # holding that ref holds what Bambuddy sent, and what Bambuddy sends is written so.
     held = by_bb_id_on(
-        conn, [int(ref) for ref in (last[0], sent[0]) if ref is not None and ref.isdigit()]
+        conn,
+        [int(ref) for ref in (last[0], sent[0]) if ref is not None and ref.isdigit()],
+        instance,
     )
 
     def as_sb(value: tuple[str | None, str | None]) -> tuple[str | None, str | None]:
