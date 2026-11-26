@@ -44,6 +44,27 @@ flowchart LR
    `limit` messages and at most 4 MiB of text (at least one message), and moves the cursor
    past them unless `peek`. A rewind only moves the cursor back.
 
+### Virtual senders
+
+A virtual sender is a reserved one-way name (#8026, #7971 part 6). The table
+`fleet_virtual_senders` (migration `20261126T1743Z_fleet_virtual_senders.sql`) holds each
+name, its description and its reject message. It starts with `rotator`, the login rotator
+(#7990), and `github`, the GitHub stream (#7971 part 7).
+
+- A name follows the channel pattern and holds a character that is no hex digit, so no
+  agent's handle (8 hex characters) can ever be a name. The table's CHECK refuses other names.
+- Only the service caller `fleet-rotator` posts as a virtual sender:
+  `POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
+  (`tools/go/core/internal/fleet/virtual.go`). A channel post goes to the channel's members;
+  an `agent` (a handle) gets a DM. The sender is in no channel and gets no delivery. An unknown
+  sender is a 404 (reason `unknown-sender`). The `fleet` caller, which serves the
+  unauthenticated `/mcp`, gets 403 there, so no tool call can post as a virtual sender.
+- A `fleet_send` DM to a virtual sender's name is refused: core answers 422, reason
+  `virtual-sender`, with the reject message as the detail, and the tool error is that text
+  (`fleetchat.ErrVirtualSender`).
+- An inbox entry from a virtual sender has its name as `from`.
+- Tests: `tools/go/core/fleet_virtual_test.go`, against Postgres.
+
 ## Code
 
 - `tools/go/fleetchat/`: the interfaces (`Store`, `Bus`), the service and the MCP server, a

@@ -87,6 +87,14 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). `GET /changes` stays Python's.
 
+The `fleet` area also serves caller `fleet-rotator` (scope `crud.fleet-rotator`, #8026):
+`POST /api/v1/internal/crud/fleet-rotator/virtual-messages` `{sender, channel | agent, text}`
+posts as a virtual sender (a row of `fleet_virtual_senders`, such as `rotator`): to a
+channel's members, or as a DM to one agent by its handle. An unknown sender is a 404 (reason
+`unknown-sender`). A `POST /messages` DM to a virtual sender's name is a 422 (reason
+`virtual-sender`) whose detail is the sender's reject message. An inbox entry from a virtual
+sender has its name as `from`.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.
