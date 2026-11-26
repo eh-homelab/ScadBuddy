@@ -73,7 +73,9 @@ describe('CrudCredentials and the fleet’s rows (#7983)', () => {
     leased_to: null, leased_at: null, lease_epoch: 0, ...over,
   })
 
-  it('opens no claude_login for the agent, and reads the scope and the account', async () => {
+  // The API never answers the agent a fleet row (core's and the backend's tests); this is the
+  // agent's second, defensive check.
+  it('runs no claude_login an answer holds, and reads the scope and the account', async () => {
     const rows = [
       { stored: wire({ id: 'l1', kind: 'claude_login', scope: 'fleet', email: 'ops@example.com', subscription_type: 'max' }),
         credential: { kind: 'claude_login', base_url: null, secret: LOGIN } },

@@ -18,6 +18,7 @@ import {
   type StoredCredential,
   type CredentialKind,
   type CredentialScope,
+  agentUses,
 } from '../../src/credentials.js'
 import { type Envelope, type Kek, last4, openSecret, SEAL_V1, SealError, sealedVersion, sealSecret } from '../../src/secrets.js'
 
@@ -88,15 +89,17 @@ export function planPut(
 
 /**
  * A row's scope after `update` (#7983), as the API sets it: the one asked, else the stored one,
- * else `agent`; a `claude_login` takes `fleet` for `agent` and refuses `agent`.
+ * else `agent`. A `claude_login` is the fleet's only: its scope is `fleet`, and the API refuses
+ * any other (422; 400 here, as `CredentialError` has no 422).
  */
 export function scopeOf(update: CredentialUpdate, current: Pick<StoredCredential, 'scope'> | undefined): CredentialScope {
-  let scope = update.scope ?? current?.scope ?? 'agent'
-  if (update.scope === undefined && update.kind === 'claude_login' && scope === 'agent') scope = 'fleet'
-  if (update.kind === 'claude_login' && scope === 'agent') {
-    throw new CredentialError('kind "claude_login" is the fleet\'s: scope must be "fleet" or "both"', 400)
+  if (update.kind === 'claude_login') {
+    if (update.scope !== undefined && update.scope !== 'fleet') {
+      throw new CredentialError('kind "claude_login" is the fleet\'s only: its scope must be "fleet"', 400)
+    }
+    return 'fleet'
   }
-  return scope
+  return update.scope ?? current?.scope ?? 'agent'
 }
 
 type Sealed = { id: string; kind: CredentialKind; base_url: string | null; envelope: Envelope }
@@ -213,8 +216,13 @@ export class MemoryCredentials implements CredentialRepo {
     return row ? this.view(row, this.rows.indexOf(row)) : undefined
   }
 
+  /** The rows the agent's reveal reads, as the API's: never a fleet row (#7983). */
+  private get agentsOwn(): MemoryRow[] {
+    return this.rows.filter(agentUses)
+  }
+
   reveal(id?: string): Promise<Credential | undefined> {
-    const row = this.find(id)
+    const row = id === undefined ? this.agentsOwn[0] : this.agentsOwn.find((r) => r.id === id)
     if (!row) return Promise.resolve(undefined)
     try {
       if (!this.kek) throw new SealError('no key-encryption key is mounted to open the credential')
@@ -227,14 +235,14 @@ export class MemoryCredentials implements CredentialRepo {
   async revealAll(): Promise<{ stored: StoredCredential; credential: Credential | undefined }[]> {
     await this.read()
     const kek = this.kek
-    return this.rows.map((row, i) => {
+    return this.agentsOwn.map((row) => {
       let credential: Credential | undefined
       try {
         credential = kek ? openCredential(kek, row) : undefined
       } catch {
         credential = undefined
       }
-      return { stored: this.view(row, i), credential }
+      return { stored: this.view(row, this.rows.indexOf(row)), credential }
     })
   }
 

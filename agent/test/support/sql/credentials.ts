@@ -149,7 +149,8 @@ export class SqlCredentials implements CredentialRepo {
     const kek = this.kek
     const [row] = await this.sql<Row[]>`
       SELECT id, kind, base_url, secret_sealed, dek_sealed, kek_id FROM ai_credentials
-      ${id === undefined ? this.sql`` : this.sql`WHERE id = ${id}`}
+      WHERE scope IN ('agent', 'both') AND kind <> 'claude_login'
+      ${id === undefined ? this.sql`` : this.sql`AND id = ${id}`}
       ORDER BY priority LIMIT 1`
     if (!row) return undefined
     if (!kek) throw new SealError('no key-encryption key is mounted to open the credential')
@@ -170,7 +171,7 @@ export class SqlCredentials implements CredentialRepo {
              CASE WHEN status = 'cooling_down' AND cooldown_until > now() THEN cooldown_until END AS cooldown_until,
              last_error, last_error_at, last_used_at, epoch, scope, account_uuid, organization_uuid,
              subscription_type, rate_limit_tier, email, leased_to, leased_at, lease_epoch
-      FROM ai_credentials ORDER BY priority`
+      FROM ai_credentials WHERE scope IN ('agent', 'both') AND kind <> 'claude_login' ORDER BY priority`
     return rows.map((row) => {
       const view = stored(row)
       return { stored: view, credential: kek && opensWith(view, { ok: true, kek }) ? tryOpen(kek, row) : undefined }

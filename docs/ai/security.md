@@ -405,7 +405,9 @@ The agent reads no KEK (#5299 step 12).
   credentials with the KEK (areas `credentials` and `payload-keys`,
   [`backend/scadbuddy/api/crud_agent_secrets.py`](../../backend/scadbuddy/api/crud_agent_secrets.py)),
   and the agent never opens one. A turn's credentials come from `POST …/crud/agent/credentials/reveal` (purpose
-  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test), a
+  `turn`; `redact` for the scrubbing of tool output, `test` for a connection test; only the
+  rows whose `scope` is `agent` or `both`, filtered in the reveal's SQL, so a fleet row and every
+  `claude_login` stay closed to the agent and a fleet row's id reads as unknown, #7983), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
   same transaction (principal `service:agent`, never the secret), and is `no-store`. A

@@ -40,7 +40,15 @@ from scadbuddy.auth.service_credentials import (
 )
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.problems import install_problem_handlers
-from scadbuddy.core.secrets import Kek, kek_from_base64, open_bytes, seal_bytes, seal_secret
+from scadbuddy.core.secrets import (
+    Envelope,
+    Kek,
+    kek_from_base64,
+    open_bytes,
+    open_secret,
+    seal_bytes,
+    seal_secret,
+)
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.render.agent_migrations import migrate_agent
 from scadbuddy.workflows.payload_codec import payload_key_context, payload_key_lock
@@ -387,10 +395,12 @@ def test_the_agents_own_rows_open_here(tables: PgPool, tmp_path: Path) -> None:
     app = _app(tables, tmp_path, kek=vectors["kek_b64"])
     with tables.connection() as conn:
         for v in vectors["credentials"]:
+            # A claude_login is the fleet's (#7983): its scope is fleet, and the agent's
+            # reveal skips it.
             conn.execute(
                 "INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed,"
-                " dek_sealed, kek_id, last4)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, '')",
+                " dek_sealed, kek_id, last4, scope)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, '', %s)",
                 (
                     v["id"],
                     v["priority"],
@@ -399,6 +409,7 @@ def test_the_agents_own_rows_open_here(tables: PgPool, tmp_path: Path) -> None:
                     base64.b64decode(v["secret_sealed_b64"]),
                     base64.b64decode(v["dek_sealed_b64"]),
                     v["kek_id"],
+                    "fleet" if v["kind"] == "claude_login" else "agent",
                 ),
             )
     with TestClient(app) as client:
@@ -408,6 +419,9 @@ def test_the_agents_own_rows_open_here(tables: PgPool, tmp_path: Path) -> None:
         ]
     by_id = {r["stored"]["id"]: r for r in rows}
     for v in vectors["credentials"]:
+        if v["kind"] == "claude_login":
+            assert v["id"] not in by_id, v["name"]
+            continue
         opened = by_id[v["id"]]["credential"]
         if v["opens"]:
             assert opened is not None and opened["secret"] == v["plaintext"], v["name"]
@@ -866,7 +880,7 @@ def _created(agent: Agent, body: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent) -> None:
+def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent, tables: PgPool) -> None:
     created = agent.post(
         "/credentials", {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"}
     )
@@ -900,12 +914,42 @@ def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent) -> Non
     for raw in (created.text, listed.text, one.text):
         assert ACCESS not in raw and REFRESH not in raw
     assert listed.json()["credentials"][0]["scope"] == "fleet"
+    # The agent's reveal never opens a fleet row: as for an unknown id.
     opened = agent.post("/credentials/reveal", {"id": row["id"], "purpose": "test"})
-    assert opened.json()["credential"] == {
-        "kind": "claude_login",
-        "base_url": None,
-        "secret": LOGIN,
-    }
+    assert opened.json() == {"credential": None, "credentials": None}
+    with tables.connection() as conn:
+        sealed = store.sealed_rows(conn, None)
+        raw = conn.execute(
+            "SELECT secret_sealed, dek_sealed, kek_id FROM ai_credentials WHERE id = %s",
+            (row["id"],),
+        ).fetchone()
+    assert sealed == []
+    assert raw is not None
+    envelope = Envelope(
+        secret_sealed=bytes(raw["secret_sealed"]),
+        dek_sealed=bytes(raw["dek_sealed"]),
+        kek_id=raw["kek_id"],
+    )
+    aad = store.credential_aad(row["id"], "claude_login", None)
+    assert open_secret(KEK, envelope, aad) == LOGIN
+
+
+def test_the_agents_reveal_never_opens_a_fleet_row(agent: Agent) -> None:
+    login = _created(agent, {"kind": "claude_login", "secret": LOGIN})
+    fleet = _created(
+        agent, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"}
+    )
+    own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
+    both = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
+    every = agent.post("/credentials/reveal", {"all": True, "purpose": "turn"})
+    assert [r["stored"]["id"] for r in every.json()["credentials"]] == [own["id"], both["id"]]
+    assert REFRESH not in every.text and API_KEY + "f" not in every.text
+    for row in (login, fleet):
+        one = agent.post("/credentials/reveal", {"id": row["id"], "purpose": "test"})
+        assert (one.status_code, one.json()) == (200, {"credential": None, "credentials": None})
+    first = agent.post("/credentials/reveal", {"purpose": "test"}).json()["credential"]
+    assert first["secret"] == API_KEY
+    assert len(agent.get("/credentials").json()["credentials"]) == 4
 
 
 @pytest.mark.parametrize(
@@ -922,7 +966,6 @@ def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent) -> Non
             "kind": "claude_login",
             "secret": '{"accessToken": "x", "refreshToken": "y", "expiresAt": 1, "accountUuid": 7}',
         },
-        {"kind": "claude_login", "secret": LOGIN, "scope": "agent"},
         {"kind": "claude_login", "secret": LOGIN, "base_url": "https://gw.example.com"},
         {"kind": "anthropic_api_key", "secret": API_KEY, "email": "ops@example.com"},
         {"kind": "claude_login", "secret": LOGIN, "email": "two words@example.com"},
@@ -936,8 +979,11 @@ def test_a_claude_login_keeps_the_kinds_rules(agent: Agent, body: dict[str, Any]
 def test_a_scope_outside_the_three_is_invalid(agent: Agent) -> None:
     r = agent.post("/credentials", {"kind": "anthropic_api_key", "secret": API_KEY, "scope": "x"})
     assert r.status_code == 422
-    both = _created(agent, {"kind": "claude_login", "secret": LOGIN, "scope": "both"})
-    assert (both["scope"], both["email"]) == ("both", None)
+    for scope in ("agent", "both"):
+        r = agent.post("/credentials", {"kind": "claude_login", "secret": LOGIN, "scope": scope})
+        assert (r.status_code, r.json()["reason"]) == (422, "credential-refused"), r.text
+    fleet = _created(agent, {"kind": "claude_login", "secret": LOGIN, "scope": "fleet"})
+    assert (fleet["scope"], fleet["email"]) == ("fleet", None)
 
 
 def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent) -> None:
@@ -961,7 +1007,7 @@ def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent) -> No
         key["id"], {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"}
     )
     assert (as_login["scope"], as_login["subscription_type"], as_login["email"]) == (
-        "both",
+        "fleet",
         "max",
         "ops@example.com",
     )
@@ -979,6 +1025,8 @@ def test_only_a_login_holds_a_lease_or_an_account(agent: Agent, tables: PgPool) 
     held = _created(agent, {"kind": "claude_login", "secret": LOGIN})
     # Two machines may each hold a login to one account.
     _created(agent, {"kind": "claude_login", "secret": LOGIN})
+    with pytest.raises(psycopg.errors.CheckViolation), tables.connection() as conn:
+        conn.execute("UPDATE ai_credentials SET scope = 'both' WHERE id = %s", (held["id"],))
     for sql in (
         "UPDATE ai_credentials SET leased_to = 'm1', leased_at = now() WHERE id = %s",
         "UPDATE ai_credentials SET email = 'ops@example.com' WHERE id = %s",

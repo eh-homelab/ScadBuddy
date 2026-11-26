@@ -23,8 +23,10 @@ import { SealError } from './secrets.js'
 // #7983: the pool is shared with the fleet's login rotator (design
 // 2026-11-26-fleet-session-registry-and-rotator-design.md §6.1). A `claude_login` row holds a
 // whole Claude Code login (`claudeAiOauth`), which the agent cannot run; `scope` says who may use
-// a row: `agent`, `fleet` or `both`. The agent uses only a row `agentUses` accepts. Settings
-// lists every row, with its scope.
+// a row: `agent`, `fleet` or `both`; a `claude_login` is `fleet` only. The API's reveal answers
+// the agent its own rows only (scope `agent` or `both`), in its SQL: that is the boundary. The
+// agent's own `agentUses` filter is a second, defensive check. Settings lists every row, with
+// its scope.
 
 export const CREDENTIAL_KINDS = ['anthropic_api_key', 'claude_login', 'claude_oauth_token', 'gateway'] as const
 export type CredentialKind = (typeof CREDENTIAL_KINDS)[number]
@@ -471,7 +473,11 @@ function fromWire(row: WireStored): StoredCredential {
   return { ...BEFORE_SCOPES, ...rest, kekId: kek_id, legacyFormat: legacy_format }
 }
 
-/** The credential as the agent runs it; undefined for a `claude_login`, which only the fleet uses. */
+/**
+ * The credential as the agent runs it. The API's reveal never answers the agent a fleet row
+ * (#7983: `scope` `agent` or `both` only, in its SQL), so a `claude_login` never reaches here;
+ * should one, it is undefined, never run.
+ */
 function credentialFromWire(c: WireCredential): Credential | undefined {
   if (c.kind === 'claude_login') return undefined
   if (c.kind === 'gateway') {

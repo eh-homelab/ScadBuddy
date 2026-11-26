@@ -89,7 +89,7 @@ NO_KEK_MESSAGE = (
 class CredentialRefusedError(Exception):
     """A request the store refuses; ``status`` is what the route answers with."""
 
-    def __init__(self, message: str, status: Literal[400, 404, 409, 503]) -> None:
+    def __init__(self, message: str, status: Literal[400, 404, 409, 422, 503]) -> None:
         super().__init__(message)
         self.status = status
 
@@ -177,12 +177,19 @@ def _dict(row: Any, names: list[str]) -> dict[str, Any]:
     return dict(row) if isinstance(row, dict) else dict(zip(names, row, strict=True))
 
 
+#: The agent's rows only (#7983): never a fleet row. The reveal is the agent's, so every read
+#: of sealed bytes takes it, in the SQL: a fleet row reads as no row.
+AGENTS_OWN = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
+
+
 def _rows(
     conn: Connection[Any], row_id: str | None = None, *, sealed: bool = False
 ) -> list[dict[str, Any]]:
-    """Rows as of the database's clock: an expired cooldown reads as ``active``."""
+    """Rows as of the database's clock: an expired cooldown reads as ``active``. With
+    ``sealed``, the sealed bytes too, of the agent's own rows only."""
     columns = _COLUMNS + (", secret_sealed, dek_sealed" if sealed else "")
-    where = "" if row_id is None else " WHERE id = %s"
+    clauses = ([AGENTS_OWN] if sealed else []) + ([] if row_id is None else ["id = %s"])
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     cur = conn.execute(
         f"SELECT {columns} FROM ai_credentials{where} ORDER BY priority",
         () if row_id is None else (row_id,),
@@ -256,17 +263,17 @@ def _evict(conn: Connection[Any]) -> None:
 
 def _scope(update: Update, current: dict[str, Any] | None) -> str:
     """The row's scope after ``update``: the one asked, else the stored one, else agent. A
-    claude_login is the fleet's: it takes fleet for agent unless a scope is asked, and
-    refuses agent."""
+    claude_login is the fleet's only: its scope is fleet, and any other scope asked is a
+    422."""
+    if update.kind == CLAUDE_LOGIN:
+        if update.scope not in (None, "fleet"):
+            raise CredentialRefusedError(
+                'kind "claude_login" is the fleet\'s only: its scope must be "fleet"', 422
+            )
+        return "fleet"
     scope: str = "agent" if current is None else current["scope"]
     if update.scope is not None:
         scope = update.scope
-    elif update.kind == CLAUDE_LOGIN and scope == "agent":
-        scope = "fleet"
-    if update.kind == CLAUDE_LOGIN and scope == "agent":
-        raise CredentialRefusedError(
-            'kind "claude_login" is the fleet\'s: scope must be "fleet" or "both"', 400
-        )
     return scope
 
 
@@ -661,7 +668,8 @@ def open_row(kek: Kek, row: dict[str, Any]) -> dict[str, Any]:
 
 
 def sealed_rows(conn: Connection[Any], row_id: str | None) -> list[dict[str, Any]]:
-    """Every row with its sealed bytes (one for ``row_id``), in priority order."""
+    """Every row of the agent's with its sealed bytes (one for ``row_id``), in priority
+    order: never a fleet row (#7983)."""
     return _rows(conn, row_id, sealed=True)
 
 

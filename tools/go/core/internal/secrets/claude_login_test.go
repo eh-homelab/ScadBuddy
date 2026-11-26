@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 )
 
 // #7983: the pool's claude_login kind, its scope and its machine lease.
@@ -38,8 +40,39 @@ func TestAClaudeLoginIsSealedWithItsAccountInClear(t *testing.T) {
 		}
 	}
 	expect(t, listed.body["credentials"].([]any)[0].(obj)["scope"], "fleet")
-	opened := a.post("/credentials/reveal", obj{"id": row["id"], "purpose": "test"}).body["credential"].(obj)
-	expect(t, []any{opened["kind"], opened["secret"]}, []any{"claude_login", login})
+	// The agent's reveal never opens a fleet row: as for an unknown id.
+	expect(t, a.post("/credentials/reveal", obj{"id": row["id"], "purpose": "test"}).body, obj{"credential": nil, "credentials": nil})
+	sealed := a.rows(`SELECT secret_sealed, dek_sealed, kek_id FROM ai_credentials WHERE id = $1`, row["id"])[0]
+	secret, err := seal.OpenSecret(kek, seal.Envelope{SecretSealed: sealed["secret_sealed"].([]byte),
+		DEKSealed: sealed["dek_sealed"].([]byte), KEKID: sealed["kek_id"].(string)},
+		credentialAAD(row["id"].(string), "claude_login", nil))
+	expect(t, []any{secret, err}, []any{login, nil})
+}
+
+func TestTheAgentsRevealNeverOpensAFleetRow(t *testing.T) {
+	a := newAPI(t, keysOf(kek))
+	login := a.post("/credentials", obj{"kind": "claude_login", "secret": login}).body["credential"].(obj)
+	fleet := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "f", "scope": "fleet"}).body["credential"].(obj)
+	own := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
+	both := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "b", "scope": "both"}).body["credential"].(obj)
+	all := a.post("/credentials/reveal", obj{"all": true, "purpose": "turn"})
+	var ids []any
+	for _, r := range all.body["credentials"].([]any) {
+		ids = append(ids, r.(obj)["stored"].(obj)["id"])
+	}
+	expect(t, ids, []any{own["id"], both["id"]})
+	if strings.Contains(all.raw, loginRefresh) || strings.Contains(all.raw, apiKey+"f") {
+		t.Fatal("a fleet secret reached the agent")
+	}
+	for _, id := range []any{login["id"], fleet["id"]} {
+		one := a.post("/credentials/reveal", obj{"id": id, "purpose": "test"})
+		expect(t, []any{one.status, one.body}, []any{200, obj{"credential": nil, "credentials": nil}})
+	}
+	// With no id, the first of the agent's rows, past the fleet's.
+	first := a.post("/credentials/reveal", obj{"purpose": "test"}).body["credential"].(obj)
+	expect(t, first["secret"], apiKey)
+	// The list still names every row, with its scope.
+	expect(t, len(a.get("/credentials").body["credentials"].([]any)), 4)
 }
 
 func TestAClaudeLoginKeepsTheKindsRules(t *testing.T) {
@@ -55,9 +88,11 @@ func TestAClaudeLoginKeepsTheKindsRules(t *testing.T) {
 		code, _ := refused(obj{"kind": "claude_login", "secret": secret})
 		expect(t, code, 400)
 	}
-	code, _ := refused(obj{"kind": "claude_login", "secret": login, "scope": "agent"})
-	expect(t, code, 400)
-	code, _ = refused(obj{"kind": "claude_login", "secret": login, "base_url": "https://gw.example.com"})
+	for _, scope := range []string{"agent", "both"} {
+		code, _ := refused(obj{"kind": "claude_login", "secret": login, "scope": scope})
+		expect(t, code, 422)
+	}
+	code, _ := refused(obj{"kind": "claude_login", "secret": login, "base_url": "https://gw.example.com"})
 	expect(t, code, 400)
 	code, _ = refused(obj{"kind": "anthropic_api_key", "secret": apiKey, "email": "ops@example.com"})
 	expect(t, code, 400)
@@ -65,9 +100,9 @@ func TestAClaudeLoginKeepsTheKindsRules(t *testing.T) {
 	expect(t, code, 400)
 	code, _ = refused(obj{"kind": "anthropic_api_key", "secret": apiKey, "scope": "everyone"})
 	expect(t, code, 422)
-	both := a.post("/credentials", obj{"kind": "claude_login", "secret": login, "scope": "both"})
-	expect(t, []any{both.status, both.body["credential"].(obj)["scope"], both.body["credential"].(obj)["email"]},
-		[]any{201, "both", nil})
+	fleet := a.post("/credentials", obj{"kind": "claude_login", "secret": login, "scope": "fleet"})
+	expect(t, []any{fleet.status, fleet.body["credential"].(obj)["scope"], fleet.body["credential"].(obj)["email"]},
+		[]any{201, "fleet", nil})
 }
 
 func TestTheScopeDefaultsToTheAgentAndASaveMovesIt(t *testing.T) {
@@ -86,7 +121,7 @@ func TestTheScopeDefaultsToTheAgentAndASaveMovesIt(t *testing.T) {
 	// A key that becomes a login moves to the fleet; a login that becomes a key loses its account.
 	asLogin := a.post("/credentials/save", obj{"id": key["id"], "update": obj{"kind": "claude_login", "secret": login,
 		"email": "ops@example.com"}}).body["credential"].(obj)
-	expect(t, []any{asLogin["scope"], asLogin["subscription_type"], asLogin["email"]}, []any{"both", "max", "ops@example.com"})
+	expect(t, []any{asLogin["scope"], asLogin["subscription_type"], asLogin["email"]}, []any{"fleet", "max", "ops@example.com"})
 	back := a.post("/credentials/save", obj{"id": key["id"], "update": obj{"kind": "anthropic_api_key", "secret": apiKey}})
 	expect(t, []any{back.body["credential"].(obj)["account_uuid"], back.body["credential"].(obj)["email"]}, []any{nil, nil})
 	agentKey := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey + "z"}).body["credential"].(obj)
@@ -102,6 +137,9 @@ func TestOnlyALoginHoldsALeaseOrAnAccount(t *testing.T) {
 	a := newAPI(t, keysOf(kek))
 	key := a.post("/credentials", obj{"kind": "anthropic_api_key", "secret": apiKey}).body["credential"].(obj)
 	held := a.post("/credentials", obj{"kind": "claude_login", "secret": login}).body["credential"].(obj)
+	if _, err := a.pool.Exec(context.Background(), `UPDATE ai_credentials SET scope = 'both' WHERE id = $1`, held["id"]); err == nil {
+		t.Fatal("a claude_login took scope both")
+	}
 	for _, q := range []string{
 		`UPDATE ai_credentials SET leased_to = 'm1', leased_at = now() WHERE id = $1`,
 		`UPDATE ai_credentials SET email = 'ops@example.com' WHERE id = $1`,

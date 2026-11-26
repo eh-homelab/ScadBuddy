@@ -182,18 +182,28 @@ type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+// agentsOwn is the agent's rows only (#7983): never a fleet row. The reveal is the agent's, so
+// every read of sealed bytes takes it, in the SQL: a fleet row reads as no row.
+const agentsOwn = "scope IN ('agent', 'both') AND kind <> 'claude_login'"
+
 // rows are the credentials as of the database's clock: an expired cooldown reads as active.
+// With sealed, the sealed bytes too, of the agent's own rows only.
 func rows(ctx context.Context, q querier, id *string, sealed bool) ([]row, error) {
-	cols, where, args := columns, "", []any{}
+	cols, where, args := columns, []string{}, []any{}
 	if sealed {
 		cols += ", secret_sealed, dek_sealed"
+		where = append(where, agentsOwn)
 	} else {
 		cols += ", NULL::bytea, NULL::bytea"
 	}
 	if id != nil {
-		where, args = " WHERE id = $1", []any{*id}
+		where, args = append(where, "id = $1"), []any{*id}
 	}
-	found, err := q.Query(ctx, "SELECT "+cols+" FROM ai_credentials"+where+" ORDER BY priority", args...)
+	filter := ""
+	if len(where) > 0 {
+		filter = " WHERE " + strings.Join(where, " AND ")
+	}
+	found, err := q.Query(ctx, "SELECT "+cols+" FROM ai_credentials"+filter+" ORDER BY priority", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -396,20 +406,20 @@ func (p *plan) changes(current *row) bool {
 }
 
 // planScope is the row's scope after u: the one asked, else the stored one, else agent. A
-// claude_login is the fleet's: it takes fleet for agent unless a scope is asked, and refuses agent.
+// claude_login is the fleet's only: its scope is fleet, and any other scope asked is a 422.
 func planScope(u update, current *row) (string, error) {
+	if u.kind == claudeLogin {
+		if u.scope != nil && *u.scope != "fleet" {
+			return "", refused(422, `kind "claude_login" is the fleet's only: its scope must be "fleet"`)
+		}
+		return "fleet", nil
+	}
 	scope := "agent"
 	if current != nil {
 		scope = current.Scope
 	}
-	switch {
-	case u.scope != nil:
+	if u.scope != nil {
 		scope = *u.scope
-	case u.kind == claudeLogin && scope == "agent":
-		scope = "fleet"
-	}
-	if u.kind == claudeLogin && scope == "agent" {
-		return "", refused(400, `kind "claude_login" is the fleet's: scope must be "fleet" or "both"`)
 	}
 	return scope, nil
 }

@@ -6,7 +6,8 @@
 --                        never uses one.
 --   scope                who may use the row: 'agent' (ScadBuddy's agent), 'fleet' (the
 --                        machines' login rotator) or 'both'. Every existing row is 'agent',
---                        so no row changes meaning.
+--                        so no row changes meaning. A 'claude_login' is 'fleet' only. The
+--                        agent's reveal opens only 'agent' and 'both' rows.
 --   account_uuid, organization_uuid, subscription_type, rate_limit_tier, email
 --                        the login's account, in clear, so a person and the fleet can name it
 --                        without a reveal. Not secret. Set only on a 'claude_login' row.
@@ -21,6 +22,7 @@ ALTER TABLE ai_credentials
     CHECK (kind IN ('anthropic_api_key', 'claude_login', 'claude_oauth_token', 'gateway')),
   ADD COLUMN scope text NOT NULL DEFAULT 'agent',
   ADD CONSTRAINT ai_credentials_scope_check CHECK (scope IN ('agent', 'fleet', 'both')),
+  ADD CONSTRAINT ai_credentials_login_scope_check CHECK (kind <> 'claude_login' OR scope = 'fleet'),
   ADD COLUMN account_uuid      text,
   ADD COLUMN organization_uuid text,
   ADD COLUMN subscription_type text,

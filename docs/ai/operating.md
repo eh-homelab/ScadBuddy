@@ -515,7 +515,8 @@ There can be several credentials, one row each in `ai_credentials`, in priority 
 The pool also holds the fleet's rows (#7983): kind `claude_login` (a whole Claude Code
 `claudeAiOauth` login, which only the fleet's login rotator uses) and any row whose `scope`
 is `fleet`. The assistant never uses or tests those rows; Settings lists them with their
-scope. A row's `scope` is `agent` by default, `fleet` for a `claude_login`.
+scope. A row's `scope` is `agent` by default; a `claude_login` is always `fleet`. The API's
+reveal answers the assistant only the rows whose scope is `agent` or `both`.
 
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
 Its sources are the [LLM gateway docs](https://code.claude.com/docs/en/llm-gateway-connect)

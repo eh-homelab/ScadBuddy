@@ -203,8 +203,9 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
   opens them, and the agent reads them through area `credentials` (`CrudCredentials`).
   The pool is shared with the fleet's login rotator (#7983): kind `claude_login` (a whole
   Claude Code `claudeAiOauth` login, its account in clear columns, with a machine lease) and
-  column `scope` (`agent`, `fleet` or `both`). The agent uses only a row that `agentUses`
-  accepts: never a `claude_login`, and never scope `fleet`.
+  column `scope` (`agent`, `fleet` or `both`; a `claude_login` is `fleet` only). The API's
+  reveal answers the agent only rows of scope `agent` or `both`, in its SQL; the agent's own
+  `agentUses` check is a second, defensive one.
 
 ## Tests and evals
 
