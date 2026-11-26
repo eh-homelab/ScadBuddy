@@ -127,6 +127,7 @@ from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
+from scadbuddy.filament.unknown_resolve import resolve_unknown_tray_activity
 from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
@@ -2398,6 +2399,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
             LanCommands(lambda: client, settings.temporal_task_queue_bambuddy),
             lambda: state.components.get(SLICING).profiles,
         ),
+        # An unknown AMS tray linked to a spool by the Go route (#7143, G5).
+        *_unknown_tray_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -2441,6 +2444,15 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         schedules.cancel()
         boot_nudge.cancel()
         await stop_triggers()
+
+
+def _unknown_tray_activities(state: AppState) -> list[Callable[..., Any]]:
+    """The resolve of an unknown tray (#7143, G5): the API alone holds the database secret."""
+    return [
+        resolve_unknown_tray_activity(
+            lambda: state.components.get(FILAMENT), lambda: state.settings_store.pool
+        )
+    ]
 
 
 def _flow_triggers(
