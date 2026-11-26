@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Prints true when any changed path on stdin is Go's (spec 2026-10-13 §7), or
 # is the `go` job's own wiring (ci.yml, this script, changed-paths.sh), as select-models.sh does.
+# It also matches `docs/inventory-model/` and the migrations: the Go proof tests read them.
 set -euo pipefail
 if grep -qE '^(go\.work(\.sum)?$|vendor/|tools/go/|backend/scadbuddy/migrations(_agent)?/|docs/inventory-model/|scripts/generate-go-client\.(sh|jq)$|\.github/scripts/generate-go-client-jq\.test\.sh$|\.github/workflows/(ci|go-module-ci)\.yml$|\.github/scripts/select-go(\.test)?\.sh$|\.github/scripts/changed-paths\.sh$)'; then
   echo true
