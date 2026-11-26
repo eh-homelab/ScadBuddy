@@ -1,0 +1,734 @@
+{
+  "kinds": [
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "ams_part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "AMS part",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "assembly",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Assembly",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": true,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "belt",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Belt",
+      "nature": null,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 3000,
+            "source": "container_run_hours"
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {
+          "thread": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": false,
+      "counting": null,
+      "id": "bolt",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Bolt",
+      "nature": null,
+      "parent_id": "fastener",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "build_plate",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Build plate",
+      "nature": null,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.uses",
+          "params": {
+            "uses": 1000,
+            "warn_pct": 90
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "consumable",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Consumable",
+      "nature": "physical",
+      "parent_id": null,
+      "role": "consumable",
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "desiccant",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Desiccant",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "g"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "dry_bin",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "months",
+      "name": "Dry bin",
+      "nature": null,
+      "parent_id": "equipment",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "unit",
+      "id": "durable",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Durable",
+      "nature": "physical",
+      "parent_id": null,
+      "role": "durable",
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "equipment",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "months",
+      "name": "Equipment",
+      "nature": null,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.months",
+          "params": {
+            "months": 60
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {
+          "mpn": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": false,
+      "counting": "lot",
+      "id": "fastener",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Fastener",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "unit",
+      "id": "filament",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Filament",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": "filament_spool",
+      "steps": {},
+      "tracking": "filament",
+      "uom": "g"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "flat",
+      "builtin": true,
+      "counting": null,
+      "id": "flat_service",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Flat-rate service",
+      "nature": null,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "general_consumable",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "General consumable",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "hardware",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Hardware",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "hotend",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Hotend",
+      "nature": null,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 2000,
+            "source": "container_run_hours"
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "hourly",
+      "builtin": true,
+      "counting": null,
+      "id": "labour",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Labour",
+      "nature": null,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "lubricant",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Lubricant",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "ml"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "nozzle",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Nozzle",
+      "nature": null,
+      "parent_id": "part",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 1000,
+            "source": "container_run_hours",
+            "warn_pct": 90
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "packaging",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Packaging",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Part",
+      "nature": null,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": "lot",
+      "id": "printed_part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Printed part",
+      "nature": null,
+      "parent_id": "consumable",
+      "role": null,
+      "saleable": true,
+      "special_type": null,
+      "steps": {},
+      "tracking": "lot",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "printer",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "hours",
+      "name": "Printer",
+      "nature": null,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "handler": "life.hours",
+          "params": {
+            "hours": 10000,
+            "source": "own_run_hours"
+          }
+        }
+      },
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "service",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Service",
+      "nature": "service",
+      "parent_id": null,
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "term",
+      "builtin": true,
+      "counting": null,
+      "id": "service_plan",
+      "incomplete_steps": [
+        "receive"
+      ],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Service plan",
+      "nature": null,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "params": {
+            "warn_days": 30
+          }
+        }
+      },
+      "tracking": "none",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {
+          "empty_weight_g": {
+            "description": "Weight of the empty part in grams",
+            "exclusiveMinimum": 0,
+            "type": "integer"
+          },
+          "role": {
+            "description": "A reusable shell, or an addon such as an AMS adaptor",
+            "enum": [
+              "shell",
+              "addon"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "spool_part",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Spool insert",
+      "nature": null,
+      "parent_id": "durable",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": null,
+      "builtin": true,
+      "counting": null,
+      "id": "tool",
+      "incomplete_steps": [],
+      "item_count": 0,
+      "life_basis": "months",
+      "name": "Tool",
+      "nature": null,
+      "parent_id": "equipment",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {},
+      "tracking": "unit",
+      "uom": "each"
+    },
+    {
+      "archived_at": null,
+      "attribute_schema": {
+        "properties": {},
+        "type": "object"
+      },
+      "billing": "term",
+      "builtin": true,
+      "counting": null,
+      "id": "warranty",
+      "incomplete_steps": [
+        "receive"
+      ],
+      "item_count": 0,
+      "life_basis": "none",
+      "name": "Warranty",
+      "nature": null,
+      "parent_id": "service",
+      "role": null,
+      "saleable": false,
+      "special_type": null,
+      "steps": {
+        "life": {
+          "params": {
+            "warn_days": 30
+          }
+        }
+      },
+      "tracking": "none",
+      "uom": "each"
+    }
+  ]
+}

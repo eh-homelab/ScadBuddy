@@ -275,8 +275,9 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "camera": ["printers", "changes"],
     "camera-relay": ["printers", "changes"],
     "fleet": ["changes", "fleet"],
-    # #6949 K1: the areas arrive with the inventory routes (layer 4).
-    "inventory": [],
+    # #6949 K1: scadbuddy-core answers the area `inventory`, the inventory's reads; its
+    # writes are Temporal activities, not routes (tools/go/core/README.md).
+    "inventory": ["inventory"],
 }
 
 

@@ -43,9 +43,19 @@ func key() string {
 }
 
 // run is fn in a store.Write of its own: a refusal rolls back what fn wrote and is given
-// back; any other error fails the test.
+// back; any other error fails the test. Only the test's own goroutine may call it.
 func run[T any](t *testing.T, pool *pgxpool.Pool, fn func(context.Context, pgx.Tx) (T, error)) (T, *store.Refused) {
 	t.Helper()
+	out, refused, err := tryRun(pool, fn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out, refused
+}
+
+// tryRun is run that gives back the error, for a call in another goroutine, which must not
+// call t.Fatal.
+func tryRun[T any](pool *pgxpool.Pool, fn func(context.Context, pgx.Tx) (T, error)) (T, *store.Refused, error) {
 	var out T
 	var refused *store.Refused
 	_, err := store.Write(bg, pool, store.WriteReq{Caller: "test", Key: key(), Route: "test", Input: []byte(`{}`), Actor: store.Actor(by)},
@@ -60,10 +70,7 @@ func run[T any](t *testing.T, pool *pgxpool.Pool, fn func(context.Context, pgx.T
 			out = v
 			return 200, map[string]any{}, nil
 		})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return out, refused
+	return out, refused, err
 }
 
 // out is a call's two results, so a test can take them as one: out(take(...)).ok(t).
@@ -795,8 +802,9 @@ func TestEstimateMatchesTake(t *testing.T) {
 
 // whileHeld runs first in an open transaction (no event-log lock, so only its row locks
 // hold), then second in a goroutine, which must wait on it (pg_blocking_pids) and finish
-// once it commits. It gives second's result.
-func whileHeld[T any](t *testing.T, pool *pgxpool.Pool, first func(context.Context, pgx.Tx) error, second func() T) T {
+// once it commits. It gives second's result. second runs outside the test's goroutine, so
+// it gives back its error, and whileHeld fails the test with it here.
+func whileHeld[T any](t *testing.T, pool *pgxpool.Pool, first func(context.Context, pgx.Tx) error, second func() (T, error)) T {
 	t.Helper()
 	holder, err := pool.Begin(bg)
 	if err != nil {
@@ -810,8 +818,15 @@ func whileHeld[T any](t *testing.T, pool *pgxpool.Pool, first func(context.Conte
 	if err := holder.QueryRow(bg, `SELECT pg_backend_pid()`).Scan(&pid); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan T, 1)
-	go func() { done <- second() }()
+	type result struct {
+		v   T
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, err := second()
+		done <- result{v, err}
+	}()
 	waited := false
 	for range 200 {
 		var n int
@@ -833,14 +848,26 @@ func whileHeld[T any](t *testing.T, pool *pgxpool.Pool, first func(context.Conte
 	}
 	select {
 	case out := <-done:
+		if out.err != nil {
+			t.Fatal(out.err)
+		}
 		if !waited {
 			t.Fatal("the second call never waited on the first's locks")
 		}
-		return out
+		return out.v
 	case <-time.After(30 * time.Second):
 		t.Fatal("the second call never finished")
 	}
 	panic("unreachable")
+}
+
+// tryTake is a take of qty in a store.Write of its own, for a call outside the test's
+// goroutine.
+func tryTake(f *Flow, item, qty string) (outcome[[]wire.Move], error) {
+	ms, refused, err := tryRun(f.Pool, func(ctx context.Context, tx pgx.Tx) ([]wire.Move, error) {
+		return f.Consume(ctx, tx, item, handlers.ConsumeIn{Use: wire.UseInput{Qty: wire.Decimal(qty)}, By: store.Actor(by)})
+	})
+	return outcome[[]wire.Move]{ms, refused}, err
 }
 
 // consumeIn is a take of qty in tx, as an activity's would be.
@@ -871,10 +898,7 @@ func TestAWaitOnTheLotsTakesWhatTheFirstTakeLeft(t *testing.T) {
 
 	second := whileHeld(t, pool,
 		func(ctx context.Context, tx pgx.Tx) error { return f.consumeIn(ctx, tx, item, "8") },
-		func() outcome[[]wire.Move] {
-			ms, refused := take(f, t, item, "5", wire.UseInput{})
-			return outcome[[]wire.Move]{ms, refused}
-		})
+		func() (outcome[[]wire.Move], error) { return tryTake(f, item, "5") })
 
 	ms := second.ok(t)
 	eq(t, []any{ms[0].Qty, ms[0].NeedsReview, ms[1].Qty, ms[1].NeedsReview}, []any{"-2", false, "-3", true})
@@ -888,10 +912,7 @@ func TestTwoTakesOnAnItemWithNoLotOpenOneLot(t *testing.T) {
 
 	second := whileHeld(t, pool,
 		func(ctx context.Context, tx pgx.Tx) error { return f.consumeIn(ctx, tx, item, "2") },
-		func() outcome[[]wire.Move] {
-			ms, refused := take(f, t, item, "3", wire.UseInput{})
-			return outcome[[]wire.Move]{ms, refused}
-		})
+		func() (outcome[[]wire.Move], error) { return tryTake(f, item, "3") })
 
 	second.ok(t)
 	ls := lots(t, pool, item)
@@ -912,10 +933,11 @@ func TestTwoGiveBacksReturnEachUseOnce(t *testing.T) {
 			_, err := f.GiveBack(ctx, tx, item, "oi1", store.Actor(by))
 			return err
 		},
-		func() outcome[[]wire.Move] {
-			return out(run(t, pool, func(ctx context.Context, tx pgx.Tx) ([]wire.Move, error) {
+		func() (outcome[[]wire.Move], error) {
+			ms, refused, err := tryRun(pool, func(ctx context.Context, tx pgx.Tx) ([]wire.Move, error) {
 				return f.GiveBack(ctx, tx, item, "oi1", store.Actor(by))
-			}))
+			})
+			return outcome[[]wire.Move]{ms, refused}, err
 		})
 
 	eq(t, second.ok(t), []wire.Move{})
@@ -992,12 +1014,12 @@ func TestRecostAndGiveBackWaitForEachOther(t *testing.T) {
 				_, err := f.Recost(ctx, tx, second, []string{"o1"})
 				return err
 			}
-			alone := func(fn func(context.Context, pgx.Tx) error) func() *store.Refused {
-				return func() *store.Refused {
-					_, refused := run(t, pool, func(ctx context.Context, tx pgx.Tx) (struct{}, error) {
+			alone := func(fn func(context.Context, pgx.Tx) error) func() (*store.Refused, error) {
+				return func() (*store.Refused, error) {
+					_, refused, err := tryRun(pool, func(ctx context.Context, tx pgx.Tx) (struct{}, error) {
 						return struct{}{}, fn(ctx, tx)
 					})
-					return refused
+					return refused, err
 				}
 			}
 			var refused *store.Refused

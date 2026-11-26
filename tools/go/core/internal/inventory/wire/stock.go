@@ -135,3 +135,34 @@ type RecostResult struct {
 	Moves                int            `json:"moves"`
 	Orders               []RecostedItem `json:"orders"`
 }
+
+// PrintRunError is bambuddy/runs.py PrintRunError: the problem an operation failed with,
+// its members other than type, status, title and detail in extensions.
+type PrintRunError struct {
+	Type       string         `json:"type"`
+	Status     int            `json:"status"`
+	Title      string         `json:"title"`
+	Detail     string         `json:"detail"`
+	Extensions map[string]any `json:"extensions"`
+}
+
+// Operation is operations/store.py Operation: an inventory activity as its record
+// (inventory_operations) reads. Result is the activity's answer body once it succeeded and
+// while crud_requests keeps it; Error is its problem once it failed.
+type Operation struct {
+	ID         string          `json:"id"`
+	Kind       string          `json:"kind"`
+	Subject    string          `json:"subject"`
+	Status     string          `json:"status"`
+	Result     json.RawMessage `json:"result"`
+	Error      *PrintRunError  `json:"error"`
+	CreatedAt  time.Time       `json:"created_at"`
+	FinishedAt *time.Time      `json:"finished_at"`
+}
+
+// Estimate is what a take of a quantity would charge per unit now, in minor units of the
+// shop currency, and whether any of it is of unknown cost (phase 2 estimate_unit_cost).
+type Estimate struct {
+	UnitCostMinor string `json:"unit_cost_minor"`
+	CostUnknown   bool   `json:"cost_unknown"`
+}

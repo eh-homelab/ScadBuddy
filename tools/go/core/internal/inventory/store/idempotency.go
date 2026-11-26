@@ -17,6 +17,9 @@ import (
 )
 
 const (
+	// Caller is the activities' caller in crud_requests (R-K1-2): the service caller
+	// inventory, whose read routes are /api/v1/internal/crud/inventory/.
+	Caller = "inventory"
 	// lockClass is crud/idempotency.py LOCK_CLASS ("SCRQ"), the advisory lock class of a
 	// (caller, key).
 	lockClass = int32(0x5343_5251)
@@ -71,33 +74,47 @@ func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) 
 			lockClass, w.Caller+"\x1f"+w.Key); err != nil {
 			return err
 		}
-		var route, sum string
-		err := tx.QueryRow(ctx, requestSelectSQL, w.Caller, w.Key).Scan(&route, &sum, &answer.Status, &answer.Body)
-		if err == nil {
-			if route != w.Route || sum != digest {
-				answer, err = reused()
-			}
+		if err := answerOnce(ctx, tx, w, digest, do, &answer); err != nil {
 			return err
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return err
+		// The operation's end, when an activity's record runs this write (Record): in this
+		// transaction, after do or after a replay, so it commits with the write or not at all.
+		if id, ok := OperationFrom(ctx); ok {
+			return FinishOperation(ctx, tx, id, answer)
 		}
-		status, body, err := run(ctx, tx, do)
-		if err != nil {
-			return err
-		}
-		text, err := httpx.Marshal(body)
-		if err != nil {
-			return err
-		}
-		answer.Status = status
-		return tx.QueryRow(ctx, requestInsertSQL, w.Caller, w.Key, w.Route, digest, status, json.RawMessage(text)).
-			Scan(&answer.Body)
+		return nil
 	})
 	if err != nil {
 		return Answer{}, err
 	}
 	return answer, nil
+}
+
+// answerOnce is the stored answer of (w.Caller, w.Key), or the 422 of a key used for another
+// request, or do's answer, recorded.
+func answerOnce(ctx context.Context, tx pgx.Tx, w WriteReq, digest string, do func(pgx.Tx) (int, any, error), answer *Answer) error {
+	var route, sum string
+	err := tx.QueryRow(ctx, requestSelectSQL, w.Caller, w.Key).Scan(&route, &sum, &answer.Status, &answer.Body)
+	if err == nil {
+		if route != w.Route || sum != digest {
+			*answer, err = reused()
+		}
+		return err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	status, body, err := run(ctx, tx, do)
+	if err != nil {
+		return err
+	}
+	text, err := httpx.Marshal(body)
+	if err != nil {
+		return err
+	}
+	answer.Status = status
+	return tx.QueryRow(ctx, requestInsertSQL, w.Caller, w.Key, w.Route, digest, status, json.RawMessage(text)).
+		Scan(&answer.Body)
 }
 
 // run is do in a savepoint, so a refusal (a *Refused, or a status of 400 or more) rolls back

@@ -1,0 +1,23 @@
+{
+  "keys_in_use": [],
+  "kind_id": "bolt",
+  "own_schema": {
+    "properties": {
+      "thread": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "schema": {
+    "properties": {
+      "mpn": {
+        "type": "string"
+      },
+      "thread": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

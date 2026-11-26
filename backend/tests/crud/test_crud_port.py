@@ -66,6 +66,7 @@ class _Credentials:
         return {
             "sbsvc_render": Service("render", frozenset({"crud.render"})),
             "sbsvc_print": Service("print", frozenset({"crud.print"})),
+            "sbsvc_inventory": Service("inventory", frozenset({"crud.inventory"})),
         }.get(token)
 
 
@@ -124,6 +125,10 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
     assert areas == CRUD_AREAS["print"]
     assert areas[: len(_PRINT_AREAS_THROUGH_FILAMENT_PULL)] == _PRINT_AREAS_THROUGH_FILAMENT_PULL
     assert client.get("/api/v1/internal/crud/render/areas", headers=printing).status_code == 403
+    inventory = {"authorization": "Bearer sbsvc_inventory"}
+    assert client.get("/api/v1/internal/crud/inventory/areas", headers=inventory).json() == {
+        "areas": ["inventory"]
+    }
 
 
 async def test_a_taken_port_fails_the_start() -> None:

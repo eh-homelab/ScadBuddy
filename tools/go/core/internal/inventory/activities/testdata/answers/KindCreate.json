@@ -1,0 +1,27 @@
+{
+  "archived_at": null,
+  "attribute_schema": {
+    "properties": {
+      "mpn": {
+        "type": "string"
+      }
+    },
+    "type": "object"
+  },
+  "billing": null,
+  "builtin": false,
+  "counting": "lot",
+  "id": "fastener",
+  "incomplete_steps": [],
+  "item_count": 0,
+  "life_basis": "none",
+  "name": "Fastener",
+  "nature": null,
+  "parent_id": "consumable",
+  "role": null,
+  "saleable": false,
+  "special_type": null,
+  "steps": {},
+  "tracking": "lot",
+  "uom": "each"
+}

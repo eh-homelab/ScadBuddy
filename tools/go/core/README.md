@@ -15,6 +15,10 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `SCADBUDDY_AUTH_MODE` | `off` | Only `enforce` changes a refusal's words |
 | `SCADBUDDY_SECRET_KEY_FILE` | none | The KEK, read as Python reads it. A sealed area (†) does not start without it; a file that is set and cannot be read stops the start |
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | none | The KEK before it, during a rotation: what it sealed still opens |
+| `SCADBUDDY_TEMPORAL_ADDRESS` | required with area `inventory` | Temporal's frontend (`host:port`, no TLS, as the Python client). Without it, a start that names `inventory` stops. With only `inventory:read`, it is optional: the operation read then asks Temporal about a stale row |
+| `SCADBUDDY_TEMPORAL_NAMESPACE` | `scadbuddy` | As `core/config.py` `DEFAULT_TEMPORAL_NAMESPACE` |
+| `SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` | `inventory` | The task queue the inventory worker polls |
+| `SCADBUDDY_ORDERS_CURRENCY` | `USD` | The shop's currency when the setting `orders_currency` has no row (a lot's cost is in it) |
 
 | Area | Routes under `/api/v1/internal/crud/agent` |
 |---|---|
@@ -86,6 +90,47 @@ would pass 4 MiB, always holds at least one, and then says `more`; the cursor mo
 the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). `GET /changes` stays Python's.
+
+Areas `inventory` and `inventory:read` (`internal/inventory`, #6949 K1) are caller `inventory`'s
+(scope `crud.inventory`, minted in process by the API), under `/api/v1/internal/crud/inventory`.
+Both have the same routes, all reads: `GET /operations/one?id=` (the id is a query value, since a
+key holds `:`), `/kinds` (`?archived=`), `/kinds/{kind_id}`, `/kinds/{kind_id}/schema`, `/items`
+(`?kind=&descendants=&q=&low=&archived=&compatible=&limit=`), `/items/{item_id}`, `…/lots`,
+`…/units` (`?status=`), `…/estimate?qty=`, `/lots/{lot_id}`, `/units/{unit_id}`, `/moves`
+(`?item_id=&lot_id=&unit_id=&order_item_id=&limit=`). Each answers the public route's JSON. There
+is no write route. Area `inventory` also runs the inventory worker.
+
+### The inventory worker
+
+With area `inventory`, core runs a Temporal worker on the task queue
+`SCADBUDDY_TEMPORAL_TASK_QUEUE_INVENTORY` beside its HTTP servers, and stops it with them
+(`internal/inventory/activities`). Its client is lazy: Temporal out of reach does not stop core,
+and the worker tries to start again every 5 s. Each write of the inventory is one activity,
+registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive`, `…KindRestore`,
+`…ItemCreate`, `…ItemUpdate`, `…ItemArchive`, `…ItemRestore`, `…ReceiveLot`, `…ReceiveUnits`,
+`…LotUpdate` (cost, place, note), `…LotAdjust`, `…Take` (a use, and an order's take), `…Count`,
+`…UnitUpdate` (name, serial, place), `…UnitStatus`, `…GiveBack`, `…Recost`, `…Repoint`.
+
+- The input is `{key, actor, params, body}`: the idempotency key, the Actor object, the public
+  route's path parameters, and its public body. The code reads `key`, never the activity id.
+- The answer is `{status, body}`: the public route's status and JSON, or its problem. A refusal is
+  an answer, so Temporal does not retry it. Only an infrastructure error (the database out of
+  reach) fails the activity, and Temporal retries it. A bad actor fails it, not retried.
+- Each activity is one `store.Write` under the caller `inventory` with `key`: an activity that runs
+  twice writes once, and the same key with another input is 422 `idempotency-key-reused`.
+- The record (`inventory_operations`, R-K1-22): before each attempt the worker's interceptor
+  writes the row as `running` and sends `inventory_operation.changed` on `scadbuddy_events`
+  (`publish.Notify`, a notice with no log row, as the agent's `ai_operation.changed`). The write
+  ends the row (`succeeded`, or `failed` with the problem) in its own transaction, so the end
+  commits with the stock write or not at all. An attempt that fails keeps the row `running` with
+  `last_error`. A record write that fails is logged and counted
+  (`scadbuddy_inventory_record_failures`); it never fails the activity.
+- `GET /operations/one` reads a `running` row older than 60 s with Temporal (the activity's
+  Describe, or the workflow's): one that Temporal closed without a result answers `failed` with
+  the problem `inventory_activity_failed`. The read writes nothing.
+- The SDK is `go.temporal.io/sdk` v1.52.0 (Standalone Activities on the client side,
+  [`internal/internal_activity_client.go`](https://github.com/temporalio/sdk-go/blob/v1.52.0/internal/internal_activity_client.go)),
+  with its OpenTelemetry tracing interceptor (`contrib/opentelemetry` v0.9.0) when traces are on.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
@@ -198,6 +243,14 @@ At a stop, the servers drain and the three signals flush within the 20 s shutdow
 - `POST /sessions`: a scope's size counts each number as it was sent; Python counted its own
   spelling of it (`1e3` as `1000.0`).
 - `POST /workspace-blob-refs` answers 204 with no `Content-Type`.
+- Inventory: a service's `use` is 409 `handler_not_built` (its consume is `consume.service`,
+  which K1 does not build, R-K1-7); phase 2 answered `item_not_counted`. The other new codes
+  replace phase 2's as R-K1-23 says. A problem's extensions are written `code` first, then by
+  name.
+- Inventory: the shop's currency is the `orders_currency` row when it holds a code, else
+  `SCADBUDDY_ORDERS_CURRENCY`, else `USD`. A row that holds JSON `null` reads as no row.
+- Inventory: `GET /items/{id}/estimate` is new (Python's `estimate_unit_cost` had no route): it
+  answers `{unit_cost_minor, cost_unknown}`, or the refusal a take of `qty` would give.
 
 ## Tests
 
