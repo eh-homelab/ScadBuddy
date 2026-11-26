@@ -234,6 +234,7 @@ var areaPackages = []areaRoutes{
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
+	"remote-plugins": true,
 }
 
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
