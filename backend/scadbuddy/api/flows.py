@@ -346,7 +346,8 @@ def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantV
 
 class AnswerBy(BaseModel):
     """Who answered a run's question: `browser` for a person, `session:<id>` or
-    `token:<id>` for an agent, and what admitted the agent (`setting`)."""
+    `token:<id>` for an agent, and what admitted the agent (`setting`, or the id of the
+    run's grant)."""
 
     call_id: str
     answered_by: str
@@ -1269,7 +1270,8 @@ def browser_only(
     # Spec §6.6, plan 6 Ruling 6: a flow's approvals and grants are decided on the
     # Workflows page, never by an agent, whatever grant it holds; nor by a service
     # credential or the agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
-    # Its questions go by the setting `flow_answerers` (#7471, `answerer`, `admit`).
+    # Its questions go by the setting `flow_answerers` or the run's grant (#7471, `answerer`,
+    # `admit`).
     if not by_a_person():
         raise ApiError(status.HTTP_403_FORBIDDEN, detail, type_=type_)
 
@@ -1283,20 +1285,31 @@ def answerer(caller: Caller) -> Answerer:
     return found
 
 
-def agent_answer(found: Answerer) -> dict[str, Any]:
+def agent_answer(found: Answerer, admitted_by: str) -> dict[str, Any]:
     """The request fields of an agent's answer, which its operation kind records."""
-    return {"responder": found.responder, "admitted_by": BY_SETTING, "principal": found.principal}
+    return {"responder": found.responder, "admitted_by": admitted_by, "principal": found.principal}
+
+
+async def admission(
+    found: Answerer, settings: SettingsStore, flows: Flows, run_id: str, call_id: str
+) -> tuple[str, Exception | None]:
+    """`admit`, read once before the operation: what admits the agent, and the refusal a
+    new request gets (`before_start` raises it). A repeat gets its first answer, also when
+    the reads failed (a database error is the new request's refusal too)."""
+    try:
+        return await admit(found, settings, flows, run_id, call_id), None
+    except Exception as error:
+        return BY_SETTING, error
 
 
 async def admit(
     found: Answerer, settings: SettingsStore, flows: Flows, run_id: str, call_id: str
-) -> None:
-    """403 unless the setting `flow_answerers` lets the agent `found` answer the question
-    `call_id` of run `run_id` now, and the question is not for people only (spec §4.2,
-    §4.4). A route's refusal before the operation starts: a repeat gets its first answer."""
+) -> str:
+    """What lets the agent `found` answer the question `call_id` of run `run_id` now:
+    `setting` when `flow_answerers` names it, else the id of the run's grant when its
+    `answers` does and it is in force with its chain (spec §4.2, §4.3). 403 when neither
+    does, or the question is for people only (§4.4)."""
     rules = (await asyncio.to_thread(settings.load)).flow_answerers or []
-    if not rules:
-        raise not_allowed()
     if found.kind == "session" and found.id is not None and found.principal is not None:
         found.owner = await flows.store.answer_session(found.id, found.principal)
         if found.owner is None:
@@ -1306,13 +1319,29 @@ async def admit(
     run = await flows.store.get_run(run_id)
     if run is None:
         # The operation's check answers it.
-        return
-    if not admitted(found, rules, run.started_by):
+        return BY_SETTING
+    by = (
+        BY_SETTING if admitted(found, rules, run.started_by) else await _by_grant(found, flows, run)
+    )
+    if by is None:
         raise not_allowed()
     entry = next((w for w in run.waiting_on if w.call_id == call_id and w.kind == "answer"), None)
     # No parked entry: the operation's check refuses it (it is not waiting, or answered).
     if entry is not None and entry.people_only is not False:
         raise people_only()
+    return by
+
+
+async def _by_grant(found: Answerer, flows: Flows, run: Run) -> str | None:
+    """The id of `run`'s grant when it lets `found` answer: approved, holding `answers`
+    that admit it, and in force with its chain. The decision's transaction checks the
+    chain again (`FlowStore.record_decision`)."""
+    grant = await flows.store.get_grant(run.id)
+    if grant is None or grant.spec.answers is None:
+        return None
+    if not admitted(found, grant.spec.answers.who, run.started_by):
+        return None
+    return grant.id if await flows.store.grant_in_force(grant) else None
 
 
 def _grant_browser_only() -> None:
@@ -1347,7 +1376,8 @@ async def answer_flow_run(
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
     """A person answers; an assistant session or MCP token only when the setting
-    `flow_answerers` names it and the question is not for people only (#7471)."""
+    `flow_answerers` or the run's approved grant names it and the question is not for
+    people only (#7471)."""
     found = answerer(caller)
     if await _asks_a_task(tasks, body.call_id):
         # Its answer is checked against the task's schema there, and never reaches the run
@@ -1370,16 +1400,22 @@ async def answer_flow_run(
         raise unavailable() from None
     request: dict[str, Any] = {"run_id": run_id, "call_id": body.call_id, "answer_sealed": sealed}
     person = found.kind == "person"
+    admitted_by, refusal = (
+        (BY_SETTING, None)
+        if person
+        else await admission(found, settings, flows, run_id, body.call_id)
+    )
 
     async def refuse() -> None:
-        await admit(found, settings, flows, run_id, body.call_id)
+        if refusal is not None:
+            raise refusal
 
     result = await run_operation(
         ops,
         response,
         kind=ops.kinds[FLOW_ANSWER if person else AGENT_ANSWER],
         subject=f"flow:{run_id}",
-        request=request if person else {**request, **agent_answer(found)},
+        request=request if person else {**request, **agent_answer(found, admitted_by)},
         idempotency_key=idempotency_key,
         before_start=None if person else refuse,
     )

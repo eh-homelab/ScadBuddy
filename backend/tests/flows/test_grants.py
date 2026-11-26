@@ -232,7 +232,7 @@ def test_narrowed_to_an_order() -> None:
     assert admits(narrowed.rules[1], facts(order_id="o2"), RuleUse()) is not None
 
 
-# -- answers (#7471, B1): known, left out when empty, refused until B2 -----------------
+# -- answers (#7471): left out when empty; who else may answer the run's questions ------
 
 ANSWERS = {"who": ["starter", "token:70ce0000-0000-4000-8000-00000000000c"]}
 
@@ -250,9 +250,8 @@ def test_a_spec_without_answers_dumps_without_the_key() -> None:
     assert '"answers"' not in plain.model_dump_json()
 
 
-def test_a_spec_with_answers_is_refused_until_b2() -> None:
-    problems = validate_spec(_plain(answers=ANSWERS), tool_tiers=TIERS, now=NOW)
-    assert problems == ["answers is not taken yet: the setting flow_answerers says who answers"]
+def test_a_spec_with_answers_is_valid_and_its_rules_are_the_settings() -> None:
+    assert validate_spec(_plain(answers=ANSWERS), tool_tiers=TIERS, now=NOW) == []
     with pytest.raises(ValidationError):
         _plain(answers={"who": []})
     with pytest.raises(ValidationError):
