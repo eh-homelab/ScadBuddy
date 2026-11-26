@@ -2887,6 +2887,12 @@ worker's exists), and copying `deploy/grafana/` at that revision over
 
 ### Tracing (#988)
 
+The Go services (scadbuddy-core and bambuddy-fs, through the shared `tools/go/telemetry`)
+and the Rust slicer worker export traces, metrics and logs natively over OTLP/HTTP, with
+`OTEL_EXPORTER_OTLP_ENDPOINT` as the base of `/v1/traces`, `/v1/metrics` and `/v1/logs`, and
+the same `OTEL_*` rules as below; see `tools/go/core/README.md` ("Telemetry"). A request that
+core forwards is one trace: core's span is the parent of the API's.
+
 The API, the render worker and the agent sidecar export OpenTelemetry traces over
 OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the
 cluster, the `alloy-receiver`; see eh-homelab/clusters#1596). Without one, nothing is

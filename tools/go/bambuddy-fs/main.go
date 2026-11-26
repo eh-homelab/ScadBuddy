@@ -86,8 +86,8 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 	cfg.CacheMax = 2 << 30
 	set.Var(&cfg.CacheMax, "cache-max", "at most this much downloaded contents is kept, least recently used removed first, like 500M or 2G (0: no bound)")
 	stateDirFlag(set, cfg)
-	set.StringVar(&cfg.Telemetry.Endpoint, "otel-endpoint", "", "OTLP/HTTP collector base URL for traces and metrics (default $OTEL_EXPORTER_OTLP_ENDPOINT, else "+telemetry.DefaultEndpoint+")")
-	set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces or metrics (by default they go to eh-homelab's collector, with the host's name)")
+	set.StringVar(&cfg.Telemetry.Endpoint, "otel-endpoint", "", "OTLP/HTTP collector base URL for traces, metrics and logs (default $OTEL_EXPORTER_OTLP_ENDPOINT, else "+telemetry.DefaultEndpoint+")")
+	set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces, metrics or logs (by default they go to eh-homelab's collector, with the host's name)")
 	set.BoolVar(&cfg.Telemetry.Disabled, "no-tracing", false, "the same as --no-telemetry")
 	return set
 }

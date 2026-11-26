@@ -149,4 +149,6 @@ Outside `ci.yml`:
   `lint` job.
 - Traces: the API, the Python workers, the agent and the slicer export OTLP when the
   standard `OTEL_*` variables are set; browser spans are relayed through the API.
+  scadbuddy-core, bambuddy-fs and the slicer also export metrics and logs over OTLP
+  (`tools/go/telemetry`, `workers/rust/crates/sb-temporal`).
   See [README "Tracing"](../../README.md#tracing-988).

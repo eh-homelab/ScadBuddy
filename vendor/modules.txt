@@ -7,6 +7,8 @@ github.com/cenkalti/backoff/v5
 github.com/cespare/xxhash/v2
 # github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client v0.0.0-00010101000000-000000000000 => ./tools/go/scadbuddy-client
 ## explicit; go 1.26.0
+# github.com/eh-homelab/ScadBuddy/tools/go/telemetry v0.0.0-00010101000000-000000000000 => ./tools/go/telemetry
+## explicit; go 1.26.0
 # github.com/go-logr/logr v1.4.4
 ## explicit; go 1.18
 github.com/go-logr/logr
@@ -98,6 +100,14 @@ github.com/std-uritemplate/std-uritemplate/go/v2
 ## explicit; go 1.24.0
 go.opentelemetry.io/auto/sdk
 go.opentelemetry.io/auto/sdk/internal/telemetry
+# go.opentelemetry.io/contrib/bridges/otelslog v0.21.0
+## explicit; go 1.26.0
+go.opentelemetry.io/contrib/bridges/otelslog
+# go.opentelemetry.io/contrib/instrumentation/runtime v0.72.0
+## explicit; go 1.26.0
+go.opentelemetry.io/contrib/instrumentation/runtime
+go.opentelemetry.io/contrib/instrumentation/runtime/internal/deprecatedruntime
+go.opentelemetry.io/contrib/instrumentation/runtime/internal/x
 # go.opentelemetry.io/otel v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel
@@ -114,7 +124,16 @@ go.opentelemetry.io/otel/propagation/internal/hextable
 go.opentelemetry.io/otel/semconv/internal/metricpool
 go.opentelemetry.io/otel/semconv/v1.37.0
 go.opentelemetry.io/otel/semconv/v1.43.0
+go.opentelemetry.io/otel/semconv/v1.43.0/goconv
 go.opentelemetry.io/otel/semconv/v1.43.0/otelconv
+# go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
+## explicit; go 1.26.0
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/observ
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/retry
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/transform
+go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp/internal/x
 # go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp
@@ -145,6 +164,7 @@ go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp/internal/x
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/log
 go.opentelemetry.io/otel/log/embedded
+go.opentelemetry.io/otel/log/noop
 # go.opentelemetry.io/otel/metric v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/metric
@@ -161,6 +181,13 @@ go.opentelemetry.io/otel/sdk/trace
 go.opentelemetry.io/otel/sdk/trace/internal/env
 go.opentelemetry.io/otel/sdk/trace/internal/observ
 go.opentelemetry.io/otel/sdk/trace/tracetest
+# go.opentelemetry.io/otel/sdk/log v1.47.0
+## explicit; go 1.26.0
+go.opentelemetry.io/otel/sdk/log
+go.opentelemetry.io/otel/sdk/log/internal/attrnorm
+go.opentelemetry.io/otel/sdk/log/internal/counter
+go.opentelemetry.io/otel/sdk/log/internal/observ
+go.opentelemetry.io/otel/sdk/log/internal/x
 # go.opentelemetry.io/otel/sdk/metric v1.47.0
 ## explicit; go 1.26.0
 go.opentelemetry.io/otel/sdk/metric
@@ -180,9 +207,11 @@ go.opentelemetry.io/otel/trace/internal/telemetry
 go.opentelemetry.io/otel/trace/noop
 # go.opentelemetry.io/proto/otlp v1.11.0
 ## explicit; go 1.25.0
+go.opentelemetry.io/proto/otlp/collector/logs/v1
 go.opentelemetry.io/proto/otlp/collector/metrics/v1
 go.opentelemetry.io/proto/otlp/collector/trace/v1
 go.opentelemetry.io/proto/otlp/common/v1
+go.opentelemetry.io/proto/otlp/logs/v1
 go.opentelemetry.io/proto/otlp/metrics/v1
 go.opentelemetry.io/proto/otlp/resource/v1
 go.opentelemetry.io/proto/otlp/trace/v1
@@ -196,18 +225,14 @@ golang.org/x/net/internal/httpcommon
 golang.org/x/net/internal/httpsfv
 golang.org/x/net/internal/timeseries
 golang.org/x/net/trace
-# golang.org/x/sync v0.22.0
-## explicit; go 1.26.0
 # golang.org/x/sync v0.23.0
-## go 1.26.0
+## explicit; go 1.26.0
 golang.org/x/sync/semaphore
 # golang.org/x/sys v0.48.0
 ## explicit; go 1.26.0
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
-# golang.org/x/text v0.41.0
-## explicit; go 1.26.0
 # golang.org/x/text v0.42.0
 ## explicit; go 1.26.0
 golang.org/x/text/cases

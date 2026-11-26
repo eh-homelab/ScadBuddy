@@ -19,6 +19,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry/pgxtrace"
+
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/access"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentreads"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/agentstart"
@@ -57,6 +60,16 @@ const (
 	// tests/test_pg_pools.py counts the rest).
 	poolMax         = 4
 	shutdownTimeout = 20 * time.Second
+	// serviceName is the resource's service.name (OTEL_SERVICE_NAME overrides it).
+	serviceName = "scadbuddy-core"
+)
+
+var (
+	// dialWait is how long a forward waits for the Python API to listen: at a pod's start,
+	// core is up some 25 s before Python is.
+	dialWait = 30 * time.Second
+	// untraced are the paths the API never traces either (main.py EXCLUDED_URLS).
+	untraced = []string{"/healthz", "/metrics", "/telemetry/v1/traces"}
 )
 
 func main() {
@@ -65,20 +78,32 @@ func main() {
 		return
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+	tel, err := telemetry.Start(telemetry.Options{ServiceName: serviceName, DropParentlessClients: true})
+	if err != nil {
+		slog.Error("scadbuddy-core stopped", "error", "telemetry: "+err.Error())
+		os.Exit(1)
+	}
+	// The JSON on stderr stays, for kubectl logs; with logs on, each record also goes over
+	// OTLP, and a record logged inside a request carries its trace_id and span_id.
+	slog.SetDefault(slog.New(tel.LogHandler(slog.NewJSONHandler(os.Stderr, nil), serviceName, nil)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Getenv); err != nil {
+	if err := run(ctx, os.Getenv, tel); err != nil {
 		slog.Error("scadbuddy-core stopped", "error", err.Error())
+		flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		tel.Shutdown(flush)
+		cancel()
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, env func(string) string) error {
+// run serves until ctx ends. tel is the process's telemetry, nil for none; serve flushes it.
+func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry) error {
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
 	if err != nil {
 		return fmt.Errorf("SCADBUDDY_CORE_TRUSTED_PROXIES: %w", err)
 	}
-	upstream, err := newUpstream(env("SCADBUDDY_CORE_UPSTREAM"), trusted)
+	upstream, err := newUpstream(env("SCADBUDDY_CORE_UPSTREAM"), trusted, tel)
 	if err != nil {
 		return err
 	}
@@ -95,11 +120,17 @@ func run(ctx context.Context, env func(string) string) error {
 	config.MaxConnIdleTime = time.Minute
 	config.ConnConfig.ConnectTimeout = 5 * time.Second
 	config.ConnConfig.RuntimeParams["application_name"] = "scadbuddy-core"
+	if tel.Tracer() != nil || tel.Meter() != nil {
+		config.ConnConfig.Tracer = pgxtrace.New(tel.Tracer(), tel.Meter())
+	}
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+	if err := pgxtrace.ObservePool(tel.Meter(), pool, serviceName); err != nil {
+		return err
+	}
 
 	keys, err := seal.LoadKeys(env)
 	if err != nil {
@@ -110,7 +141,7 @@ func run(ctx context.Context, env func(string) string) error {
 		return err
 	}
 	address := or(env("SCADBUDDY_CORE_LISTEN"), ":8080")
-	servers := map[string]http.Handler{address: router}
+	servers := map[string]http.Handler{address: tel.Server(router, untraced...)}
 	// The CRUD port, which pods that may reach nothing else are admitted to (crud/listener.py).
 	if crudAddress := env("SCADBUDDY_CORE_CRUD_LISTEN"); crudAddress != "" {
 		if crudAddress == address {
@@ -118,7 +149,7 @@ func run(ctx context.Context, env func(string) string) error {
 		}
 		// What Go does not answer goes to Python's own CRUD listener, never to the full API, so
 		// Python's path filter still stands behind Go's.
-		crudUpstream, err := newUpstream(env("SCADBUDDY_CORE_CRUD_UPSTREAM"), trusted)
+		crudUpstream, err := newUpstream(env("SCADBUDDY_CORE_CRUD_UPSTREAM"), trusted, tel)
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
@@ -126,9 +157,9 @@ func run(ctx context.Context, env func(string) string) error {
 		if err != nil {
 			return err
 		}
-		servers[crudAddress] = front.CRUDOnly(crudRouter)
+		servers[crudAddress] = tel.Server(front.CRUDOnly(crudRouter), untraced...)
 	}
-	return serve(ctx, servers)
+	return serve(ctx, servers, tel.Shutdown)
 }
 
 func or(value, fallback string) string {
@@ -138,8 +169,9 @@ func or(value, fallback string) string {
 	return value
 }
 
-// serve serves each address's handler until ctx ends or one server fails.
-func serve(ctx context.Context, handlers map[string]http.Handler) error {
+// serve serves each address's handler until ctx ends or one server fails. Then it drains
+// the servers and flushes the telemetry, both within shutdownTimeout.
+func serve(ctx context.Context, handlers map[string]http.Handler, flush func(context.Context)) error {
 	// Every address is bound before any is served, so a failed bind leaves nothing running.
 	listeners := map[net.Listener]http.Handler{}
 	for address, handler := range handlers {
@@ -170,6 +202,7 @@ func serve(ctx context.Context, handlers map[string]http.Handler) error {
 	for _, server := range servers {
 		err = errors.Join(err, ignoreClosed(server.Shutdown(drain)))
 	}
+	flush(drain)
 	return ignoreClosed(err)
 }
 
@@ -241,8 +274,9 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The
 // request's client, as the trusted proxies name it, is the one X-Forwarded-For value Python
-// reads; Python trusts the front alone.
-func newUpstream(raw string, trusted front.Networks) (http.Handler, error) {
+// reads; Python trusts the front alone. Each forward is a client span whose traceparent
+// Python continues. A dial that Python refuses is tried again (waitForUpstream).
+func newUpstream(raw string, trusted front.Networks, tel *telemetry.Telemetry) (http.Handler, error) {
 	target, err := url.Parse(raw)
 	if err != nil || raw == "" {
 		return nil, errors.New("SCADBUDDY_CORE_UPSTREAM is an http:// URL or a unix:// path")
@@ -251,19 +285,21 @@ func newUpstream(raw string, trusted front.Networks) (http.Handler, error) {
 	transport.Proxy = nil
 	transport.DisableCompression = true
 	transport.MaxIdleConnsPerHost = 64
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	switch target.Scheme {
 	case "http":
+		transport.DialContext = waitForUpstream(dialer.DialContext)
 	case "unix":
 		path := target.Path
-		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", path)
-		}
+		transport.DialContext = waitForUpstream(func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "unix", path)
+		})
 		target = &url.URL{Scheme: "http", Host: "scadbuddy"}
 	default:
 		return nil, errors.New("SCADBUDDY_CORE_UPSTREAM is an http:// URL or a unix:// path")
 	}
 	return &httputil.ReverseProxy{
-		Transport:     transport,
+		Transport:     tel.Transport(transport, target.Hostname()),
 		FlushInterval: -1, // SSE and progress answers reach the client as they are written.
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.Out.URL.Scheme, p.Out.URL.Host = target.Scheme, target.Host
@@ -284,4 +320,31 @@ func newUpstream(raw string, trusted front.Networks) (http.Handler, error) {
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}, nil
+}
+
+// waitForUpstream dials again, every 250 ms, while the upstream refuses the connection (or
+// its socket file is not there yet), until the request's context ends or dialWait has
+// passed. Only a dial is tried again: no byte of the request has been sent, so no request
+// is ever sent twice. Then the last error stands, and the forward answers 502.
+func waitForUpstream(dial func(ctx context.Context, network, address string) (net.Conn, error)) func(ctx context.Context, network, address string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		deadline := time.Now().Add(dialWait)
+		for {
+			conn, err := dial(ctx, network, address)
+			if err == nil || !refused(err) || !time.Now().Before(deadline) {
+				return conn, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, err
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}
+}
+
+// refused is a dial that found nothing listening: a refused TCP connection, or a Unix
+// socket that is not there yet.
+func refused(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
 }

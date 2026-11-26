@@ -21,6 +21,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 // Prefix is the CRUD routes' path up to the caller.
@@ -65,13 +66,20 @@ type mounted struct {
 	Route
 	caller   string
 	segments []string
+	// template is the route as Starlette writes it ({name...} is {name:path}): its spans'
+	// and metrics' http.route, as the Python route's.
+	template string
 }
+
+// rest is a trailing {name...} segment.
+var rest = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_]*)\.\.\.\}`)
 
 // Add serves an area's routes for one caller.
 func (rt *Router) Add(caller string, routes ...Route) {
 	for _, r := range routes {
 		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+caller+r.Path, "/")
-		rt.routes = append(rt.routes, mounted{r, caller, segments})
+		template := rest.ReplaceAllString(Prefix+caller+r.Path, "{$1:path}")
+		rt.routes = append(rt.routes, mounted{r, caller, segments, template})
 	}
 }
 
@@ -81,6 +89,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rt.Next.ServeHTTP(w, r)
 		return
 	}
+	telemetry.SetRoute(r.Context(), route.template)
 	// The body gate stands outside the routes, so its refusal has no CRUD headers.
 	if route.MaxBody > 0 && r.ContentLength > route.MaxBody {
 		httpx.WriteProblem(w, r, &httpx.Problem{
