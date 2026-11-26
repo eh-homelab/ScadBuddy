@@ -662,11 +662,19 @@ never did (`questions/service.ts:34-38`).
   - The new activity resumes from `ai_session_entries`. Eager flush means entries are
     there up to the kill (E4).
   - Claude Code marks any call that was in flight as *unknown* and never re-runs it (E4).
+  - First, each call of the transcript's last reply with no result gets one, in one user
+    entry under the turn's fence (#7874, `sessions/restartedCalls.ts`): a ToolCall's own
+    result (waited for up to 10 minutes; one still running is said to run on, to be read
+    with `tool_call_result`), else a result that says the service restarted while the call
+    ran. A shutdown's cut drops the conversation entries Claude Code writes after its
+    interrupt (`warm.ts` `seal`), which would say the user refused the call, and leaves the
+    call's ToolCall running.
   - The activity sends one user message: *"The agent service restarted during this turn.
-    Calls that were in flight are marked as interrupted; check before repeating any of
-    them. New files in the working directory since the last wait for an answer may be
-    missing; check before relying on them. Continue the task."* (the files sentence since
-    #5140: a new file reaches the workspace only at a park or at the turn's end).
+    Each call that was in flight has a result that says how it ended; one that did not
+    finish may have run in part, so check before you call it again. New files in the
+    working directory since the last wait for an answer may be missing; check before
+    relying on them. Continue the task."* (the files sentence since #5140: a new file
+    reaches the workspace only at a park or at the turn's end; the calls sentence since #7874).
   - Only when the turn's prompt is in the transcript. The first placement records the main
     transcript's last entry (`ai_sessions.turn_mark`); a later one sends the restart message
     when a user entry landed after that mark, and otherwise sends the turn's own message.
@@ -674,7 +682,7 @@ never did (`questions/service.ts:34-38`).
     message and die before Claude Code writes it.
 - **Retries are bounded** by the recovery loop's 3 cycles. After that the turn ends `failed`,
   with the reason, as classic's `interrupted` does today.
-- **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 12 s
+- **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 5 minutes (12 s before #7874)
   (`TurnHost.stop` `graceMs`, beside `stopTurns`), and is then closed with `q.close()`, which
   gives E3's graceful synthetic result. Only such a cut turn fails with `ShuttingDown`,
   which is retryable, and the new pods resume it as above. A turn that ends on its own in

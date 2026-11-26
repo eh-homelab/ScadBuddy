@@ -539,6 +539,15 @@ describe('the 3DFP id and fetch (#6625)', () => {
       expect((await getType(T.JADE)).note).toBe('x')
     })
 
+    // #7951: the type opens when only its properties cannot be read.
+    it('opens the type and says so when its properties cannot be read (#7951)', async () => {
+      server.use(http.get(`*/api/v1/entities/${encodeURIComponent(`spool_type:${T.JADE}`)}/properties`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+      render(`/filament/types/${T.JADE}`)
+      expect(await screen.findByLabelText('Note')).toBeVisible()
+      expect(await screen.findByText(/The type's properties could not be loaded/)).toBeVisible()
+      expect(screen.queryByText(/The type could not be loaded/)).toBeNull()
+    })
+
     // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.
     it('is clean after saving a list with a blank trailing item', async () => {
       const { user } = render(`/filament/types/${T.JADE}`)

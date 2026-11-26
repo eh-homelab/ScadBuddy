@@ -205,6 +205,23 @@ def _repoint_run_activity(conn: Connection[DictRow], merged: str, into: str, by:
     )
 
 
+def _repoint_keyed(table: str, keys: tuple[str, ...]) -> RepointHook:
+    """#7276: a printer's notes or slot presets move to the kept printer, except a row
+    whose ``keys`` the kept printer already has: the kept printer's stands."""
+    same = " AND ".join(f"kept.{key} = gone.{key}" for key in keys)
+
+    def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
+        conn.execute(
+            f"DELETE FROM {table} AS gone WHERE gone.printer_id = %(merged)s::uuid"
+            f" AND EXISTS (SELECT 1 FROM {table} AS kept"
+            f" WHERE kept.printer_id = %(into)s::uuid AND {same})",
+            {"merged": merged, "into": into},
+        )
+        conn.execute(f"UPDATE {table} SET printer_id = %s WHERE printer_id = %s", (into, merged))
+
+    return repoint
+
+
 def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     conn.execute(
         "UPDATE activity SET facets = facets - 'printer'"
@@ -411,6 +428,17 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     ),
     # #6264: the slots of override tags (dropped; the kept printer's reconcile redoes them).
     PrinterReference("filament_override_slots", "printer_id", repoint=_drop_override_slots),
+    # #7276: ScadBuddy's K-profile notes and slot presets (``into``'s wins a key both have).
+    PrinterReference(
+        "printer_kprofile_notes",
+        "printer_id",
+        repoint=_repoint_keyed("printer_kprofile_notes", ("note_key",)),
+    ),
+    PrinterReference(
+        "printer_slot_presets",
+        "printer_id",
+        repoint=_repoint_keyed("printer_slot_presets", ("ams_id", "tray_id")),
+    ),
     _repoint_run_activity,
     # #4971: the default printer and the registry-keyed settings map entries; #4699: the
     # registry ids in the print watcher's skip list.

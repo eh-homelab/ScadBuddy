@@ -86,7 +86,7 @@ _TASK_WRITE = timedelta(seconds=60)
 
 class HumanAnswer(BaseModel):
     """The answer to a `wait_for_human`: a person's, or an assistant's that the setting
-    `flow_answerers` admitted (#7471)."""
+    `flow_answerers` or the run's grant admitted (#7471)."""
 
     answer: str
 
@@ -130,7 +130,7 @@ async def wait_for_human(
     """Ask a person `question` and wait for the answer, with no limit unless `timeout_s`
     (at least 10 seconds) sets one. Raises TimeoutError if nobody answers in that time.
     With `people_only`, only a person may answer; otherwise the setting `flow_answerers`
-    may also let an assistant answer."""
+    or the run's grant may also let an assistant answer."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
@@ -228,8 +228,8 @@ async def prompt(
     and a refusal names the limit. Raises ValueError for a schema, title, context, place,
     ui or timeout_s it does not take, and for an answer that fits the schema and not the
     field's type (a huge number). Raises TimeoutError if nobody answers in time. With
-    `people_only`, only a person may answer; otherwise the setting `flow_answerers` may
-    also let an assistant answer."""
+    `people_only`, only a person may answer; otherwise the setting `flow_answerers` or
+    the run's grant may also let an assistant answer."""
     people_only = _people_only(people_only)
     timeout_s = _wait_s(timeout_s)
     owner: StepOwner = workflow.instance()
@@ -430,7 +430,9 @@ FLOW_BEATLESS_CALL_PATCH = "flow-beatless-call-4281"
 #: attempt missed its beats, is asked once more under the same activity id (#6345): the same
 #: approval, and the same Idempotency-Key (the agent keys a flow call's commands on its gate
 #: request id, the same on every attempt), so the backend answers it from the first
-#: attempt's operation (`op-<kind>-<key>`, api/operations.py) and nothing runs twice. Before,
+#: attempt's operation (`op-<kind>-<key>`, api/operations.py), or a printer command from its
+#: first run under that key (printers/native.py `command_response`, #7276 P53), and nothing
+#: runs twice. Before,
 #: it failed as "may have run" even where a second send was provably the same operation.
 #: An agent that does not say `keyed` (any build before #6350) gets no second try.
 FLOW_KEYED_RETRY_PATCH = "flow-keyed-retry-6345"

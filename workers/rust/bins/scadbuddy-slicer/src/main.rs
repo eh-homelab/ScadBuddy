@@ -76,7 +76,7 @@ fn serve() -> ExitCode {
         }
     };
     runtime.block_on(async {
-        let tracer = match sb_temporal::init_tracing() {
+        let telemetry = match sb_temporal::init_telemetry() {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("scadbuddy-slicer: cannot start logging: {e:#}");
@@ -90,10 +90,9 @@ fn serve() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
-        if let Some(provider) = tracer
-            && let Err(e) = provider.shutdown()
-        {
-            tracing::warn!(error = %e, "could not flush the trace exporter");
+        // After the worker's own drain (its shutdown grace), within FLUSH_TIMEOUT.
+        for signal in telemetry.shutdown(sb_temporal::FLUSH_TIMEOUT) {
+            tracing::warn!(signal, "could not flush the telemetry exporter");
         }
         code
     })

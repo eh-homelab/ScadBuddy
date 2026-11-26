@@ -590,6 +590,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     [
       'GET /api/v1/farm/library/{file_id}/thumbnail',
       'GET /api/v1/farm/archives/{archive_id}/thumbnail',
+      'GET /api/v1/farm/library/{file_id}/plates/{plate}/thumbnail',
+      'GET /api/v1/farm/archives/{archive_id}/plates/{plate}/thumbnail',
       'GET /api/v1/farm/printers/{printer_id}/cover',
     ] as const
   ).map((operation) => ({
@@ -731,22 +733,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "The camera dialog's live view (#7330): a WebRTC (WHEP) exchange and an LL-HLS stream that never ends, " +
       "proxied to the live edge for the browser's player. An agent reads the camera a frame at a time through " +
       'get_printer_camera.',
-  })),
-  ...(
-    [
-      'GET /api/v1/printers/{printer_id}/kprofiles',
-      'POST /api/v1/printers/{printer_id}/kprofiles',
-      'POST /api/v1/printers/{printer_id}/kprofiles/batch',
-      'POST /api/v1/printers/{printer_id}/kprofiles/delete',
-      'GET /api/v1/printers/{printer_id}/kprofiles/notes',
-      'PUT /api/v1/printers/{printer_id}/kprofiles/notes',
-      'DELETE /api/v1/printers/{printer_id}/kprofiles/notes/{setting_id}',
-    ] as const
-  ).map((operation) => ({
-    operation,
-    reason:
-      "A printer's K-profiles through Bambuddy (#7154), on Settings > Printers. The tools follow in #7162 " +
-      '(plan 2026-11-23-printer-kprofiles R-7154-10).',
   })),
   {
     operation: 'PUT /api/v1/printers/{printer_id}/lan',

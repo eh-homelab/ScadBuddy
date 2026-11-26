@@ -214,6 +214,7 @@ function GrantDialog({
           </section>
         )}
         <GrantEditor
+          personStarts
           submitLabel="Start run"
           busy={busy}
           onSubmit={(grant) => {

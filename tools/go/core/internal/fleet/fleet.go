@@ -74,6 +74,22 @@ func unknownAgent() error {
 	return httpx.WithReason(http.StatusNotFound, "no fleet agent has that session id or handle", "unknown-agent")
 }
 
+func unknownChannel(channel string) error {
+	return httpx.WithReason(http.StatusNotFound,
+		fmt.Sprintf(`no channel is named "%s"; joining creates it`, channel), "unknown-channel")
+}
+
+// channelExists is unknownChannel when no channel has the name. Channels are never deleted, so
+// the answer holds for the rest of the transaction.
+func channelExists(ctx context.Context, tx pgx.Tx, channel string) error {
+	var one int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM fleet_channels WHERE name = $1`, channel).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return unknownChannel(channel)
+	}
+	return err
+}
+
 func notMember(channel string) error {
 	return httpx.WithReason(http.StatusForbidden,
 		fmt.Sprintf(`the agent is not a member of channel "%s"`, channel), "not-member")
@@ -197,7 +213,9 @@ func (f *Fleet) leave(r *http.Request, p crud.Params) (any, error) {
 		tag, err := tx.Exec(r.Context(),
 			`DELETE FROM fleet_members WHERE channel = $1 AND session_id = $2`, channel, session)
 		if err == nil && tag.RowsAffected() == 0 {
-			err = notMember(channel)
+			if err = channelExists(r.Context(), tx, channel); err == nil {
+				err = notMember(channel)
+			}
 		}
 		return err
 	})
@@ -308,6 +326,9 @@ func (f *Fleet) send(r *http.Request, _ crud.Params) (any, error) {
 				return err
 			}
 		} else {
+			if err := channelExists(ctx, tx, *channel); err != nil {
+				return err
+			}
 			// The sender's member row is locked FOR SHARE, so a leave cannot slip between this
 			// check and the deliveries below.
 			var one int
@@ -479,7 +500,8 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 		if peek || len(out) == 0 {
 			return nil
 		}
-		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2 WHERE session_id = $1`,
+		// updated_at is when the cursor last moved: every write of cursor sets it (#7968).
+		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2, updated_at = now() WHERE session_id = $1`,
 			session, out[len(out)-1].Seq)
 		return err
 	})
@@ -518,7 +540,8 @@ func (f *Fleet) rewind(r *http.Request, p crud.Params) (any, error) {
 				fmt.Sprintf("seq %d is past the agent's cursor (%d): a rewind only moves it back", seq, cursor),
 				"seq-ahead")
 		}
-		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2 WHERE session_id = $1`, session, seq)
+		// updated_at is when the cursor last moved: every write of cursor sets it (#7968).
+		_, err = tx.Exec(ctx, `UPDATE fleet_agents SET cursor = $2, updated_at = now() WHERE session_id = $1`, session, seq)
 		return err
 	})
 	if err != nil {

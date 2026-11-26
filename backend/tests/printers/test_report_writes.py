@@ -18,11 +18,12 @@ import psycopg
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.bambuddy.trays import tray_at
 from scadbuddy.camera.models import rtsp_url
 from scadbuddy.core.tracing import COMMIT_SPAN, span, traced_transaction
 from scadbuddy.filament.capture import tray_projection
-from scadbuddy.filament.rfid_slots import _tray_temps, installed_nozzle
 from scadbuddy.printers import run_hours
+from scadbuddy.printers.ams_slots import nozzle_of
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterRow
 from scadbuddy.printers.reports import (
@@ -101,6 +102,26 @@ def test_the_read_view_leaves_out_what_no_reader_reads() -> None:
     # The camera relay reads the stored ``ipcam`` (#7328).
     camera_a = _report(ipcam={"rtsp_url": "rtsps://10.0.0.9:322/a"})
     assert read_view(camera_a) != read_view(_report(ipcam={"rtsp_url": "rtsps://10.0.0.8:322/a"}))
+    # #7276: the AMS slot guard reads ``ams_status``, and load and unload each
+    # extruder's ``snow``.
+    assert read_view(_report(ams_status=0)) != read_view(_report(ams_status=0x100))
+    loaded = _report()
+    loaded["device"] = {
+        **loaded["device"],
+        "extruder": {
+            "state": 32770,
+            "info": [{"id": 0, "snow": 0x0001}, {"id": 1, "snow": 0xFFFF}],
+        },
+    }
+    empty = _report()
+    empty["device"] = {
+        **empty["device"],
+        "extruder": {
+            "state": 32770,
+            "info": [{"id": 0, "snow": 0xFFFF}, {"id": 1, "snow": 0xFFFF}],
+        },
+    }
+    assert read_view(loaded) != read_view(empty)
 
 
 H2C = Path(__file__).parent / "fixtures" / "lan-report-h2c.json"
@@ -138,16 +159,21 @@ def test_two_reports_with_one_view_read_alike() -> None:
     assert rtsp_url(first) == rtsp_url(second)
     # #7564: the filament readers of a stored report too. `capture`'s tray projection,
     # the AMS units its sensors read, and for each tray the temperatures and the
-    # installed nozzle `rfid_slots` reads.
+    # nozzle `rfid_slots` reads, from the status since #7276.
     assert tray_projection(first) == tray_projection(second)
     units = ams_units(first)
     assert units and units == ams_units(second)
     trays = [(unit.id, tray.id) for unit in units for tray in unit.tray]
     assert trays
     for ams_id, tray_id in trays:
-        assert _tray_temps(first, ams_id, tray_id) == _tray_temps(second, ams_id, tray_id)
-        assert installed_nozzle(status(first), first, ams_id, tray_id) == installed_nozzle(
-            status(second), second, ams_id, tray_id
+        one, two = tray_at(status(first), ams_id, tray_id), tray_at(status(second), ams_id, tray_id)
+        assert one is not None and two is not None
+        assert (one.nozzle_temp_min, one.nozzle_temp_max) == (
+            two.nozzle_temp_min,
+            two.nozzle_temp_max,
+        )
+        assert nozzle_of(status(first), ams_id, tray_id) == nozzle_of(
+            status(second), ams_id, tray_id
         )
 
 

@@ -480,8 +480,6 @@ export class ChatConnection {
           // The turn is the browser's child when the frame names its span,
           // else a root (spec 2026-10-01 §4); a malformed one is ignored.
           const parent = contextFrom(message.traceparent)
-          // `mode` is taken and ignored: every session is an AgentSession (#7323).
-          if (message.mode !== undefined) this.log('chat: a user.message named a session mode, which is ignored (#7323)')
           if (!message.sessionId) {
             const { session } = await otelContext.with(parent, () =>
               this.sessions.start(this.principal, {

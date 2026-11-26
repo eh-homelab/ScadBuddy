@@ -14,17 +14,18 @@ import logging
 from datetime import date
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import Operation, client_for
 from scadbuddy.bambuddy.farm import ArchiveOutcome
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
 from scadbuddy.bambuddy.pictures import queue_item_picture
 from scadbuddy.bambuddy.print_links import JobMatches, PrintLinkStore, ScadBuddyJob
-from scadbuddy.core.problems import DATABASE_ERRORS
+from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
+from scadbuddy.library.settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,8 @@ class FarmQueueItem(QueueItem):
     scadbuddy: ScadBuddyJob | None = None
     #: The item's picture (#3742), a URL on ScadBuddy's own origin: ScadBuddy's for its
     #: own item (`scadbuddy`), else Bambuddy's thumbnail of the item's library file or
-    #: archive through this router (`bambuddy/pictures.py`). ``None`` when there is none.
+    #: archive through this router (`bambuddy/pictures.py`), or for plate 2 or later
+    #: that plate's image (#7458). ``None`` when there is none.
     picture: str | None = None
 
 
@@ -140,6 +142,89 @@ async def get_archive_thumbnail(
         operation="media.thumbnail",
         what="show the thumbnail",
         cache_control=PICTURE_CACHE_CONTROL,
+    )
+
+
+PlateIndex = Annotated[int, Path(ge=1)]
+
+
+async def _plate_or_cover(
+    store: SettingsStore,
+    request: Request,
+    plate_path: str,
+    cover_path: str,
+    *,
+    plate_operation: Operation,
+    cover_operation: Operation,
+    cover_what: str,
+) -> Response:
+    """Bambuddy's image of one plate, else its cover when Bambuddy has no image of that
+    plate (#7458): a queue item for plate 2 or later shows its own plate."""
+    try:
+        return await _proxy(
+            store,
+            request,
+            plate_path,
+            operation=plate_operation,
+            what="show the plate image",
+            cache_control=PICTURE_CACHE_CONTROL,
+        )
+    except ApiError as error:
+        if error.status != status.HTTP_404_NOT_FOUND:
+            raise
+    return await _proxy(
+        store,
+        request,
+        cover_path,
+        operation=cover_operation,
+        what=cover_what,
+        cache_control=PICTURE_CACHE_CONTROL,
+    )
+
+
+@router.get(
+    "/library/{file_id}/plates/{plate}/thumbnail",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="One plate's image of a Bambuddy library file",
+)
+async def get_library_plate_thumbnail(
+    file_id: PictureId, plate: PlateIndex, request: Request, store: SettingsStoreDep
+) -> Response:
+    """Bambuddy's image of one plate of a file in its own library, for a queue item not
+    ScadBuddy's that prints that plate (#7458); the file's thumbnail when Bambuddy has
+    no image of the plate."""
+    return await _plate_or_cover(
+        store,
+        request,
+        f"/library/files/{file_id}/plate-thumbnail/{plate}",
+        f"/library/files/{file_id}/thumbnail",
+        plate_operation="library.plate_thumbnail",
+        cover_operation="library.thumbnail",
+        cover_what="show the file's thumbnail",
+    )
+
+
+@router.get(
+    "/archives/{archive_id}/plates/{plate}/thumbnail",
+    response_class=StreamingResponse,
+    responses=MEDIA_RESPONSES,
+    summary="One plate's image of a Bambuddy archive",
+)
+async def get_archive_plate_thumbnail(
+    archive_id: PictureId, plate: PlateIndex, request: Request, store: SettingsStoreDep
+) -> Response:
+    """Bambuddy's image of one plate of any of its archives, for a queue item not
+    ScadBuddy's that prints that plate (#7458); the archive's thumbnail when Bambuddy has
+    no image of the plate."""
+    return await _plate_or_cover(
+        store,
+        request,
+        f"/archives/{archive_id}/plate-thumbnail/{plate}",
+        f"/archives/{archive_id}/thumbnail",
+        plate_operation="media.plate_thumbnail",
+        cover_operation="media.thumbnail",
+        cover_what="show the thumbnail",
     )
 
 

@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field
 
 from scadbuddy.printers.address import valid_host
 
@@ -114,6 +114,22 @@ class PrinterRow(BaseModel):
     camera_recording: bool = True
     created_at: datetime
     updated_at: datetime
+
+    @computed_field(  # type: ignore[prop-decorator]
+        description=(
+            "Whether ScadBuddy can reach this printer over the LAN: a physical printer with"
+            " its host, pinned certificate and access code. K profiles, AMS slot control and"
+            " the RFID override need it (#7276)."
+        )
+    )
+    @property
+    def lan_linked(self) -> bool:
+        return bool(
+            self.kind == "physical"
+            and self.lan_host
+            and self.lan_cert_sha256
+            and self.has_access_code
+        )
 
 
 class PrinterCreate(BaseModel):

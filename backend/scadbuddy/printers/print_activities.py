@@ -37,6 +37,7 @@ any it missed.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import secrets
@@ -45,7 +46,7 @@ import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import IO, Any, Protocol
 
 import aiomqtt
@@ -73,6 +74,8 @@ from scadbuddy.printers.lan import (
     file_url,
     project_file_command,
 )
+from scadbuddy.printers.lan_command_models import LanCommandInput, LanCommandReply, tries
+from scadbuddy.printers.lan_commands import refusal
 from scadbuddy.printers.lan_models import LanReport, LanStarted, ProjectFile, busy_with
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.nozzle_mapping import choose_nozzles, read_rack_plan
@@ -95,9 +98,13 @@ from scadbuddy.slicing.slice_info import plate_uses
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
+    LAN_CERT_CHANGED,
     LAN_CHECK_ACTIVITY,
+    LAN_COMMAND_ACTIVITY,
+    LAN_NO_ANSWER,
     LAN_PRINT_ACTIVITY,
     LAN_PROBE_TIMEOUT,
+    LAN_READ_PAUSE,
     LAN_REFUSED,
     LAN_START_WAIT,
     LAN_UNSURE,
@@ -234,12 +241,17 @@ class LanActivities:
     def __init__(self, deps: LanDeps) -> None:
         self.d = deps
 
-    async def _printer(self, printer_id: str) -> tuple[PrinterRow, LanPrinter]:
+    async def _printer(
+        self, printer_id: str, *, then: str = ", then print again"
+    ) -> tuple[PrinterRow, LanPrinter]:
+        """The row and its LAN printer. ``then`` ends the unlinked refusal's detail: a
+        print's says to print again, a command's (`lan_command`, #7276 P5) says nothing
+        more."""
         row = await asyncio.to_thread(self.d.printers.get, printer_id)
         if row is None or row.lan_host is None or row.lan_cert_sha256 is None:
             raise _failed(
                 "This printer is no longer linked over the LAN. Link it again in Settings >"
-                " Printers, then print again.",
+                f" Printers{then}.",
                 status_code=status.HTTP_409_CONFLICT,
             )
         try:
@@ -652,5 +664,61 @@ class LanActivities:
     def _print_error(self, row: PrinterRow, code: int) -> ApplicationError:
         return _failed(f"{row.name} reported print error {print_error_text(code)}.")
 
+    @activity.defn(name=LAN_COMMAND_ACTIVITY)
+    async def lan_command(self, input: LanCommandInput) -> LanCommandReply:
+        """Send one command over the printer's LAN link and wait for its reply (#7276,
+        plan 2026-11-25 Task 2). Each try gets a fresh ``sequence_id`` (R-7276-10) and a
+        connection of its own (`LanPrinter.request`), and only a reply with the same
+        ``command`` and ``sequence_id`` counts. A refusal (``result: fail``) is
+        ``LAN_REFUSED`` with the printer's reason. No reply, or a connection dropped after
+        the publish (P30): a write answers ``confirmed: false`` (sent, not acknowledged:
+        older firmware may not answer, R-7276-9), and is never sent twice; a read is tried
+        `LAN_READ_TRIES` times, as Bambuddy's ``get_kprofiles``, then is
+        ``LAN_NO_ANSWER``. A printer that cannot be reached before the publish is
+        ``LAN_UNSURE``, and another certificate ``LAN_CERT_CHANGED``. The reply wait and
+        the close both end before the start-to-close (the close by a second before it,
+        keeping `lan.CLOSE_RESERVE` for itself), so the activity answers rather than being
+        timed out (P30). The reply is returned only: no report is written."""
+        # The deadline counts from the activity's start: the row and code reads too.
+        loop = asyncio.get_running_loop()
+        timeout = activity.info().start_to_close_timeout
+        until = None if timeout is None else loop.time() + timeout.total_seconds() - 1.0
+        row, lan = await self._printer(input.printer_id, then="")
+        for attempt in range(tries(input)):
+            if attempt:
+                if until is not None and loop.time() + LAN_READ_PAUSE >= until:
+                    break
+                await asyncio.sleep(LAN_READ_PAUSE)
+            seq = str(secrets.randbelow(10**9))
+            payload = copy.deepcopy(input.payload)
+            payload["print"]["sequence_id"] = seq
+            try:
+                reply = await lan.request(
+                    payload, name=input.name, seq=seq, wait=input.wait_s, until=until
+                )
+            except CertificateMismatchError as error:
+                raise ApplicationError(
+                    str(error), type=LAN_CERT_CHANGED, non_retryable=True
+                ) from None
+            except (OSError, aiomqtt.MqttError, TimeoutError, ConnectionError):
+                raise _unsure(f"{row.name} could not be reached over the LAN.") from None
+            if reply is None:
+                continue
+            reason = refusal(reply)
+            if reason is not None:
+                raise ApplicationError(
+                    f"{row.name} refused {input.name}: {reason}.",
+                    type=LAN_REFUSED,
+                    non_retryable=True,
+                )
+            return LanCommandReply(confirmed=True, reply=reply, received_at=datetime.now(UTC))
+        if input.kind == "write":
+            return LanCommandReply(confirmed=False)
+        raise ApplicationError(
+            f"{row.name} did not answer {input.name} over the LAN.",
+            type=LAN_NO_ANSWER,
+            non_retryable=True,
+        )
+
     def all(self) -> list[Callable[..., Any]]:
-        return [self.lan_upload, self.lan_check, self.lan_print, self.lan_wait]
+        return [self.lan_upload, self.lan_check, self.lan_print, self.lan_wait, self.lan_command]

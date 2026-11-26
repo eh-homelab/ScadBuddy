@@ -67,7 +67,8 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   process exits. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
-  A worker's running turns get 12 s to finish (`TURN_DRAIN_MS`), and any still running is
+  A worker's running turns get 5 minutes to finish (`TURN_DRAIN_MS`, inside the agent worker
+  pod's 330 s `terminationGracePeriodSeconds`; #7874), and any still running is
   then cut and goes on on another replica (§1.2, "Restarts"). A parked call is released, not
   lost: its entry stays open, and the turn goes on once it is decided, wherever a worker
   runs then.
@@ -257,8 +258,8 @@ main on 2026-11-01:
   There is no session mode: plan Phase 10 dropped the `ai_sessions.mode` column and the
   `session_mode` setting (migrations `20261101T2300Z_drop_session_mode.sql` and
   `20261101T2000Z_drop_durable_settings.sql`), the panel has no mode picker, and
-  nothing answers a mode. `POST /api/v1/ai/sessions` and the chat socket still take one from an
-  earlier client and ignore it, with a log line for each (#7323). The Python `DurableSession` retired in
+  nothing answers a mode. `POST /api/v1/ai/sessions` and the chat socket drop a `mode` key that an
+  earlier client still sends, as they drop any key they do not name (#7323). The Python `DurableSession` retired in
   Phase 8, and its open sessions moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
   none open, as #2726's checklist records). `agent-durable` runs no turn and stays at zero
   replicas.
@@ -343,7 +344,13 @@ main on 2026-11-01:
   heartbeat) is placed again with a `restarted` continuation, on another replica when one
   is live. Once its message is in the transcript it resumes with "The agent service
   restarted during this turn…" (`RESTARTED_PROMPT`), naming the calls that had finished
-  as ToolCalls, so the model need not repeat them (spec §5.5).
+  as ToolCalls, so the model need not repeat them (spec §5.5). Before that, each call the
+  lost placement left with no result gets one in the transcript (#7874,
+  [`agent/src/sessions/restartedCalls.ts`](../../agent/src/sessions/restartedCalls.ts)): a
+  ToolCall's own result (the restarted placement waits up to 10 minutes for one that still
+  runs), else a result that says the service restarted while the call ran. A shutdown's cut
+  drops what Claude Code writes after its interrupt, "The user doesn't want to proceed with
+  this tool use…", so no call reads as refused by the user, and its ToolCalls are not cancelled.
 - **Working directory.** A turn's Claude Code runs in the session's directory on its
   worker, `<SCADBUDDY_SESSION_DIR>/<id>/`, a copy of the workspace that each placement
   fills (§13).
@@ -1057,8 +1064,8 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
   (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
   Before each load, every file is hashed and compared with the pin. A missing, partial
-  or altered copy is deleted and fetched again at the pinned commit. If the new files do
-  not hash to the pin, the package is not loaded (`materialise()` in
+  or altered copy is deleted and read again from the pin's mirror (below); a load never
+  fetches git. If the new files do not hash to the pin, the package is not loaded (`materialise()` in
   [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
   The cache can be the same `emptyDir` as the rest of the state directory.
 - **A bytes pin loads from its mirror.** The file of an archive or npm package is kept in
@@ -1069,6 +1076,46 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
   copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
   (its data routes answer 503) until the API lists it.
+- **A commit pin loads from its mirror, never from git** (#7907; the owner's
+  [decision of 2026-11-26](https://github.com/eh-homelab/ScadBuddy/issues/7907): no git
+  fetch on the turn path). A depth-1 fetch of a large repository took 132 s on a 2-CPU
+  worker pod (measured on prod for #7907), and the cache is empty after every restart. So
+  the agent keeps a deterministic zip of a commit pin's files in `package-mirrors` and
+  records its SHA-256 on the row (`POST …/plugin-packages/{name}/mirror`; `mirror_sha256`,
+  or `pending_mirror_sha256` for a re-pin, which its approval moves to `mirror_sha256`).
+  The API records it only for the commit and content hash the row names, and only while
+  the package holds the zip. A load (a turn, the warm-up, a file read, the header secrets)
+  unpacks the recorded zip on a cache miss and uses it only when its files hash to the pin.
+  With no mirror recorded, or one that is missing, unreadable or hashes to other files, the
+  package is not loaded: the problem reads `plugin package <name> was not loaded: its
+  mirror is not ready yet` (or `its mirror failed its check (…)` for a mirror that does not
+  unpack or hash to the pin, or `its mirror could not be read (…)` for a transport error),
+  and the load starts the
+  mirror job.
+- **The mirror job** (`agent/src/plugins/packages/mirrorJob.ts`) is the only place a commit
+  is fetched after install. On Temporal it is the `PackageMirror` workflow on `agent-tools`
+  (`agent/src/temporal/packageMirror.ts`), one per pin across the cluster: workflow id
+  `package-mirror-<name>-<commit>-<first 16 hex digits of the content hash>`, started with
+  the conflict policy `USE_EXISTING` (a start while a run is open joins it) and the reuse
+  policy `ALLOW_DUPLICATE` (a start after a finished run begins a new one, so a mirror lost
+  or spoiled after a good run is made again). Its activity reads the pin from the row
+  (`not-pinned` when the row no longer names that commit and hash), ends at once when the
+  recorded mirror reads back and hashes to the pin, and else fetches the commit with git
+  (a 10-minute limit, `MIRROR_FETCH_TIMEOUT_MS`, against install's 120 s), checks the
+  content hash, and writes and records the zip again over a bad record. It is tried again
+  with back-off (30 s doubling to 10 min, 6 tries); files that do not hash to the pin, or
+  whose zip is past the API's 24 MiB cap (`MAX_MIRROR_BYTES`), fail it for good
+  (`PackageMirrorRefused`). The zip is unpacked with the content hash's caps (2,000 files,
+  5 MiB each, 20 MiB in all), not an archive download's (500 files, 2 MiB each), so every
+  package that can be pinned can load. A stored zip adds 76 bytes and twice the path to
+  each file, so the largest package (2,000 files, 20 MiB) fits the cap while its paths
+  average up to 1,010 bytes. Install and
+  re-pin still put and record the zip they fetched, inline, and start the job only when
+  that failed; approving a commit pin with no recorded mirror starts it too. A pin made
+  before #7907 has no mirror: its first load after this deploy leaves it out and starts the
+  job, and the next load after the job reads it. Without Temporal (no
+  `SCADBUDDY_TEMPORAL_ADDRESS`) the same job runs in the agent's own process, one per pin
+  at a time, never awaited by the load; a load still never fetches git.
 - **A hosted plugin loads from its version** (#6934, spec 2026-11-21 §6.5). A `hosted`
   source is a plugin published under Settings → Tools & plugins → Hosted plugins. It is
   always installed at its latest published version, read with its zip through the API's
@@ -1110,7 +1157,7 @@ other Settings writes
 |---|---|
 | `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }`, `{ "kind": "marketplace", "url", "ref"?, "entry" }`, `{ "kind": "marketplace-url", "url", "entry" }`, `{ "kind": "archive", "url", "sha256"? }` `{ "kind": "npm", "package", "version"?, "registry"? }` or `{ "kind": "hosted", "name" }` | Fetches, pins the commit (or the file's SHA-256, which it mirrors first, or a hosted plugin's latest version), vets, and stores the package **unapproved and disabled** (201), with what the rules refuse in `review.refused`. A `hosted` source *offers* the latest version: when the hosted package is installed, it is re-pinned into a pending pin instead (still answered 201). A hosted package's view has `not_offered`, the latest version when neither its pin nor its pending pin is that version. A marketplace entry may be a `github`, `url`, `git-subdir`, `archive` or `npm` source (a `command` source is refused; a relative path only from a marketplace repository). An npm `package` is a registry name (with `@version` or `version`: an exact version or a dist-tag; `latest` by default) or an https tarball link. A package no approval can allow (its name, a path outside it, a symlink, an endpoint the egress check refuses) gets 422 with every problem. |
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
-| `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
+| `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (read again from its mirror when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
 | `POST /:name/approve` with `{ "commit_sha", "bytes_sha256" or "version", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
 | `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
 | `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin (for an npm package, `ref` is a version or dist-tag; an archive, a tarball link or a bare marketplace URL takes none and is fetched again; a hosted plugin takes none and is re-pinned to its latest version; an archive installed with its `sha256` is refused 409 `repin-fixed-sha256`, since it could only find the same file). The current pin keeps loading until the pending one is approved. |
@@ -2053,11 +2100,11 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   load (vetting, the egress check of its endpoints, or the listing budget refuses it)
   stays in the list, and the package's load check in Settings shows why it is not loaded
   (`routes/pluginPackages.ts`, `packageLoadCheck`). When no verified copy is cached, the
-  read fetches the pin again without vetting it. When that fetch fails too (the git host
-  is down, the pinned commit is gone, or the files do not hash to the pin), the read
-  fails, and so do `workspace_read` and every upload until a fetch succeeds. For 30 s after
+  read reads the pin's mirror again without vetting it, never git. When that fails too (no
+  mirror is recorded yet, the API does not answer, or the files do not hash to the pin), the
+  read fails, and so do `workspace_read` and every upload until a read succeeds. For 30 s after
   a failure (`PACKAGE_SECRETS_FAILURE_MS`) that pin is refused again at once, with no new
-  fetch, so the calls do not each wait for a fetch to time out. It is still a refusal,
+  read, so the calls do not each wait for a read to time out. It is still a refusal,
   never an empty list (#5488), and it covers the UI's pick too. A copy that hashes to the
   pin ends it at once: a turn's load that fetches the package, or a copy already in the
   cache, is read first (#5490). The operator fixes the fetch, or disables or
