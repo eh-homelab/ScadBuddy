@@ -32,6 +32,8 @@ export type FeedItem =
       parent?: string
       /** #782 — what the call does, as the tool declares it; `toolTitle` names the rest. */
       title?: string
+      /** The id of the feed's last item when the result came (#7911): a later call after it started once this one had ended. */
+      resultAfter?: string
     }
   | {
       kind: 'approval'
@@ -434,11 +436,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       )
 
     case 'tool.result':
-      return patchSession(state, event.sessionId, (s) =>
-        mapItems(s, (i) =>
+      return patchSession(state, event.sessionId, (s) => {
+        const last = s.items.at(-1)?.id
+        return mapItems(s, (i) =>
           i.kind === 'tool' && i.id === event.id
             ? {
                 ...i,
+                ...(last === undefined ? {} : { resultAfter: last }),
                 result: {
                   ok: event.ok,
                   summary: event.summary,
@@ -448,8 +452,8 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
                 },
               }
             : i,
-        ),
-      )
+        )
+      })
 
     case 'approval.required':
       return patchSession(state, event.sessionId, (s) =>

@@ -80,9 +80,13 @@ const STOP_CODES: ReadonlySet<string> = new Set(['interrupted', WORKER_RESTARTED
 export function stoppedBy(call: ToolCall, items: readonly FeedItem[]): string | undefined {
   const at = items.indexOf(call)
   if (at < 0) return undefined
-  for (const item of items.slice(at + 1)) {
+  // A call that started after this one's result came: this one had ended, so its failure is
+  // its own, not the stop's (#7911). Unknown (no `resultAfter`, or it left the feed): as before.
+  const ended = call.resultAfter === undefined ? -1 : items.findIndex((i) => i.id === call.resultAfter)
+  for (const [offset, item] of items.slice(at + 1).entries()) {
     if (item.kind === 'error' && item.code !== undefined && STOP_CODES.has(item.code)) return item.code
     if (item.kind === 'assistant' || item.kind === 'user') return undefined
+    if (item.kind === 'tool' && ended >= 0 && at + 1 + offset > ended) return undefined
   }
   return undefined
 }
