@@ -448,6 +448,25 @@ export const entityTools = [
       withPage(ref, await onEntity(ref, backend.GET('/api/v1/entities/{ref}/properties', { params: { path: { ref } } }), `list the properties of ${ref}`)),
   }),
   defineTool({
+    name: 'entity_property_history',
+    label: "Read an entity's property history",
+    description:
+      "Each set and remove of an entity's properties, newest first: `key`, `op` (`set` or `remove`), `old`, `new`, `source`, `at` " +
+      'and `actor`. Give `key` for one key, and `limit` (1 to 500, 100 when left out) for fewer. The history stays after the entity goes. ' +
+      'A print archive has none (422 `unknown_entity_kind`).',
+    input: z.object({ entity, key: z.string().regex(PROPERTY_KEY).optional(), limit: z.number().int().min(1).max(500).optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/entities/{ref}/properties/history'],
+    handler: async ({ entity: ref, key, limit }, { backend }) =>
+      json(
+        await onEntity(
+          ref,
+          backend.GET('/api/v1/entities/{ref}/properties/history', { params: { path: { ref }, query: { key, limit } } }),
+          `read the property history of ${ref}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'entity_property_set',
     label: "Set an entity's properties",
     description: `Set or remove properties on an entity; keys left out stay. ${PROPERTY_RULES} Answers the entity's properties. Writes ScadBuddy only.`,
@@ -485,6 +504,23 @@ export const entityTools = [
       }
       return json(await ok(backend.GET('/api/v1/entity-kinds/{kind}/property-schema', { params: { path: { kind: kind! } } }), `read the ${kind} property schema`))
     },
+  }),
+  defineTool({
+    name: 'entity_property_schema_history',
+    label: "Read a kind's property schema history",
+    description:
+      "Each write of a kind's property schema, newest first: the schema `old` (null for the first) and `new`, `at` and `actor`. " +
+      '`limit` is 1 to 500, 100 when left out. `kind: "item"` is 409 `schema_owned_by_item_kind`: an item\'s schema is its item kind\'s.',
+    input: z.object({ kind: propertyKind, limit: z.number().int().min(1).max(500).optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/entity-kinds/{kind}/property-schema/history'],
+    handler: async ({ kind, limit }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/entity-kinds/{kind}/property-schema/history', { params: { path: { kind }, query: { limit } } }),
+          `read the ${kind} property schema history`,
+        ),
+      ),
   }),
   defineTool({
     name: 'entity_property_schema_set',

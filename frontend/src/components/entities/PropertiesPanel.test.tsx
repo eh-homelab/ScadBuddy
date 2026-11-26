@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { server } from '../../mocks/server'
 import { resetMockState } from '../../mocks/handlers'
-import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
+import { entityMock, seedEntityProperties, seedPropertyChange } from '../../mocks/features/entities'
 import { seedItem } from '../../mocks/features/inventory'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
@@ -533,5 +533,34 @@ describe('PropertiesPanel (#7026)', () => {
       expect(await screen.findByRole('link', { name: "Edit the kind's keys" })).toHaveAttribute('href', '/inventory/kinds')
       expect(screen.queryByRole('button', { name: "Edit the kind's keys" })).toBeNull()
     })
+  })
+})
+
+describe('PropertiesPanel history (#6949)', () => {
+  beforeEach(() => resetMockState())
+
+  it("shows a key's history newest first", async () => {
+    seedEntityProperties(TYPE, { colour_name: 'Silk Gold', mpn: 'x' })
+    seedPropertyChange(TYPE, { key: 'colour_name', op: 'set', old: null, new: 'Gold', at: '2026-11-20T10:00:00Z', actor: { kind: 'browser', principal: 'elan' } })
+    seedPropertyChange(TYPE, { key: 'colour_name', op: 'set', old: 'Gold', new: 'Silk Gold', at: '2026-11-21T10:00:00Z', actor: { kind: 'agent' } })
+    seedPropertyChange(TYPE, { key: 'mpn', op: 'set', old: null, new: 'x', at: '2026-11-22T10:00:00Z', actor: { kind: 'browser' } })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    const row = await screen.findByRole('row', { name: /colour_name/ })
+    await user.click(within(row).getByRole('button', { name: 'History of colour_name' }))
+    const history = await screen.findByRole('list', { name: 'History of colour_name' })
+    const items = within(history).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent('Gold → Silk Gold')
+    expect(items[0]).toHaveTextContent('agent')
+    expect(items[1]).toHaveTextContent('elan')
+    expect(items[1]).not.toHaveTextContent('mpn')
+  })
+
+  it('shows a remove as removed', async () => {
+    seedEntityProperties(TYPE, { mpn: 'x' })
+    seedPropertyChange(TYPE, { key: 'mpn', op: 'remove', old: 'x', new: null, at: '2026-11-22T10:00:00Z', actor: { kind: 'browser' } })
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(await screen.findByRole('button', { name: 'History of mpn' }))
+    expect(await screen.findByText('x → removed')).toBeInTheDocument()
   })
 })

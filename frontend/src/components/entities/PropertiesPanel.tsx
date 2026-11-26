@@ -1,10 +1,10 @@
 import { memo, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react'
 import { Link } from 'react-router'
-import { PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
+import { HistoryIcon, PencilIcon, PlusIcon, Trash2Icon, XIcon } from 'lucide-react'
 import { inventoryPaths } from '../../lib/inventoryLinks'
 import { failure } from '../../lib/mediaFiles'
 import { useAsync } from '../../lib/useAsync'
-import { entityParts, entityApi, type EntityProperty, type KindPropertySchema, type PropertyValue } from './api'
+import { entityParts, entityApi, type EntityProperty, type KindPropertySchema, type PropertyChange, type PropertyValue } from './api'
 import { KindKeysForm } from './KindKeysForm'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -277,6 +277,7 @@ function EntityProperties({ entity, title = 'Properties' }: { entity: string; ti
                     else setFocusKey(after)
                   }}
                   onPatch={patch}
+                  entity={entity}
                 />
               ))}
             </tbody>
@@ -388,6 +389,7 @@ function PropertyRow({
   onClosed,
   onRemoved,
   onPatch,
+  entity,
 }: {
   property: EntityProperty
   doc: KeyDoc | undefined
@@ -404,9 +406,11 @@ function PropertyRow({
   /** The row's key was removed; the panel moves the focus. */
   onRemoved: () => void
   onPatch: Patch
+  entity: string
 }) {
   const { key } = property
   const [editing, setEditing] = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
   const [newKey, setNewKey] = useState(key)
   const [draft, setDraft] = useState<Draft>(() => draftOf(property.value))
   // An untouched value is sent as stored, so a rename alone never changes it.
@@ -498,6 +502,7 @@ function PropertyRow({
   }
 
   return (
+    <>
     <tr className="align-top">
       <th scope="row" className="w-2/5 px-2.5 py-1.5 text-left font-normal">
         <span className="font-mono text-[12px] break-all">{key}</span>
@@ -508,6 +513,16 @@ function PropertyRow({
         <PatchFeedback patch={patch} locked={locked} />
       </td>
       <td className="w-px py-1 pr-1 whitespace-nowrap">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`History of ${key}`}
+          title="History"
+          aria-expanded={historyOpen}
+          onClick={() => setHistoryOpen((open) => !open)}
+        >
+          <HistoryIcon aria-hidden="true" />
+        </Button>
         <Button
           ref={editButton}
           variant="ghost"
@@ -538,6 +553,52 @@ function PropertyRow({
         </Button>
       </td>
     </tr>
+    {historyOpen && (
+      <tr>
+        <td colSpan={3} className="px-2.5 pb-2">
+          <PropertyHistory entity={entity} property={property} />
+        </td>
+      </tr>
+    )}
+    </>
+  )
+}
+
+/** The text of a change's value: a list joined, a yes or no for a boolean, `removed` for none. */
+function changeText(value: PropertyChange['new']): string {
+  if (value === null) return ''
+  if (Array.isArray(value)) return value.join(', ')
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  return String(value)
+}
+
+/** #6949 — one key's changes, newest first; read again when the key's value changes. */
+function PropertyHistory({ entity, property }: { entity: string; property: EntityProperty }) {
+  const { key } = property
+  const history = useAsync(() => entityApi.propertyHistory(entity, key), [entity, key, JSON.stringify(property.value)])
+  if (history.error) {
+    return (
+      <p role="alert" className="text-xs text-warn">
+        The history could not be loaded: {failure(history.error)}
+      </p>
+    )
+  }
+  if (!history.data) return <p className="text-xs text-muted-foreground">Loading the history…</p>
+  if (history.data.length === 0) return <p className="text-xs text-muted-foreground">No changes recorded.</p>
+  return (
+    <ul aria-label={`History of ${key}`} className="flex flex-col gap-1 text-xs">
+      {history.data.map((change, at) => (
+        <li key={at} className="flex flex-wrap gap-x-3">
+          <time dateTime={change.at} className="text-muted-foreground tabular-nums">
+            {new Date(change.at).toLocaleString()}
+          </time>
+          <span className="break-all whitespace-pre-wrap">
+            {change.op === 'remove' || change.old !== null ? `${changeText(change.old)} → ${change.op === 'remove' ? 'removed' : changeText(change.new)}` : changeText(change.new)}
+          </span>
+          <span className="text-muted-foreground">{change.actor.principal ?? change.actor.kind}</span>
+        </li>
+      ))}
+    </ul>
   )
 }
 
