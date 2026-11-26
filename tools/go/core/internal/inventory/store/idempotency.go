@@ -55,6 +55,9 @@ type Refused struct {
 	Code     string
 	Detail   string
 	Problems any
+	// Type replaces the problem's type, for a code another area owns (bad_property_schema
+	// keeps the entities' type, inventory/problems.py).
+	Type string
 }
 
 func (r *Refused) Error() string { return r.Code + ": " + r.Detail }
@@ -69,6 +72,9 @@ func (r *Refused) body() map[string]any {
 	}
 	if r.Problems != nil {
 		body["problems"] = r.Problems
+	}
+	if r.Type != "" {
+		body["type"] = r.Type
 	}
 	return body
 }

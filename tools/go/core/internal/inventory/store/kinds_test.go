@@ -1,0 +1,417 @@
+package store
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
+	"slices"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/handlers"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/model"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/wire"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
+)
+
+// Kinds and items (#6949, K1 Task 10): ports of phase 2's tests/inventory/test_kinds.py, one
+// test per Python test, and the class and steps a kind save checks.
+
+func ptr[T any](v T) *T { return &v }
+
+// inTx runs fn in one write transaction as the browser (Tx), as every store write runs. An
+// error rolls it back.
+func inTx[T any](t *testing.T, pool *pgxpool.Pool, fn func(context.Context, pgx.Tx) (T, error)) (T, error) {
+	t.Helper()
+	ctx := context.Background()
+	var out T
+	err := Tx(ctx, pool, Actor(browser), func(tx pgx.Tx) error {
+		var err error
+		out, err = fn(ctx, tx)
+		return err
+	})
+	return out, err
+}
+
+// must is v; an error panics, which fails the test (a test helper cannot take t beside a
+// call's two results).
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// refusal is err as a *Refused of status and code.
+func refusal(t *testing.T, err error, status int, code string) *Refused {
+	t.Helper()
+	var r *Refused
+	if !errors.As(err, &r) || r.Status != status || r.Code != code {
+		t.Fatalf("got %v, want %d %s", err, status, code)
+	}
+	return r
+}
+
+func kindStore() *Kinds { return &Kinds{Cat: handlers.Builtin()} }
+
+func schema(props map[string]any) json.RawMessage {
+	if props == nil {
+		props = map[string]any{}
+	}
+	b, _ := json.Marshal(map[string]any{"type": "object", "properties": props})
+	return b
+}
+
+func createKind(t *testing.T, pool *pgxpool.Pool, k *Kinds, in wire.KindInput) (wire.ItemKind, error) {
+	t.Helper()
+	return inTx(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.ItemKind, error) {
+		return k.Create(ctx, tx, in, Actor(browser))
+	})
+}
+
+func updateKind(t *testing.T, pool *pgxpool.Pool, k *Kinds, id string, p wire.KindPatch) (wire.ItemKind, error) {
+	t.Helper()
+	return inTx(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.ItemKind, error) {
+		return k.Update(ctx, tx, id, p, Actor(browser))
+	})
+}
+
+func archiveKind(t *testing.T, pool *pgxpool.Pool, k *Kinds, id string) (wire.ItemKind, error) {
+	t.Helper()
+	return inTx(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.ItemKind, error) {
+		return k.Archive(ctx, tx, id)
+	})
+}
+
+func restoreKind(t *testing.T, pool *pgxpool.Pool, k *Kinds, id string) (wire.ItemKind, error) {
+	t.Helper()
+	return inTx(t, pool, func(ctx context.Context, tx pgx.Tx) (wire.ItemKind, error) {
+		return k.Restore(ctx, tx, id)
+	})
+}
+
+// fastener is Python's _fastener: a kind under part (durable since K1), with its own schema.
+func fastener(t *testing.T, pool *pgxpool.Pool, k *Kinds, props map[string]any) {
+	t.Helper()
+	must(createKind(t, pool, k, wire.KindInput{
+		ID: "fastener", Name: "Fastener", ParentID: ptr("part"), AttributeSchema: schema(props),
+	}))
+}
+
+func merged(t *testing.T, pool *pgxpool.Pool, k *Kinds, id string) map[string]any {
+	t.Helper()
+	m, _, _, err := k.Schema(context.Background(), pool, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(m, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func getKind(t *testing.T, pool *pgxpool.Pool, k *Kinds, id string) wire.ItemKind {
+	t.Helper()
+	return must(k.Get(context.Background(), pool, id))
+}
+
+func TestAChildKindMergesItsParentsSchema(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(updateKind(t, pool, k, "part", wire.KindPatch{AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	fastener(t, pool, k, map[string]any{"thread": map[string]any{"type": "string"}})
+
+	got := merged(t, pool, k, "fastener")
+	want := map[string]any{"type": "object", "properties": map[string]any{
+		"mpn": map[string]any{"type": "string"}, "thread": map[string]any{"type": "string"},
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestAChildsKeyOverridesItsParents(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(updateKind(t, pool, k, "part", wire.KindPatch{AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	fastener(t, pool, k, map[string]any{"mpn": map[string]any{"type": "integer"}})
+
+	if got := merged(t, pool, k, "fastener")["properties"].(map[string]any)["mpn"]; !reflect.DeepEqual(got, map[string]any{"type": "integer"}) {
+		t.Fatalf("fastener's mpn: %v", got)
+	}
+	if got := merged(t, pool, k, "part")["properties"].(map[string]any)["mpn"]; !reflect.DeepEqual(got, map[string]any{"type": "string"}) {
+		t.Fatalf("part's mpn: %v", got)
+	}
+}
+
+func TestAKindUnderItsOwnDescendantIsACycle(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	fastener(t, pool, k, nil)
+	must(createKind(t, pool, k, wire.KindInput{ID: "bolt", Name: "Bolt", ParentID: ptr("fastener")}))
+
+	_, err := updateKind(t, pool, k, "part", wire.KindPatch{ParentID: wire.Some("bolt")})
+	refusal(t, err, 422, "kind_cycle")
+	_, err = updateKind(t, pool, k, "fastener", wire.KindPatch{ParentID: wire.Some("fastener")})
+	refusal(t, err, 422, "kind_cycle")
+	if part := getKind(t, pool, k, "part"); part.ParentID == nil || *part.ParentID != "durable" {
+		t.Fatalf("part's parent: %v", part.ParentID)
+	}
+}
+
+func TestARestrictingSchemaIsRefusedAndTheOldOneStays(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(updateKind(t, pool, k, "part", wire.KindPatch{AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+
+	_, err := updateKind(t, pool, k, "part", wire.KindPatch{AttributeSchema: json.RawMessage(`{"type": "object", "additionalProperties": false}`)})
+	refusal(t, err, 422, "bad_property_schema")
+	_, err = createKind(t, pool, k, wire.KindInput{
+		ID: "bearing", Name: "Bearing", Tracking: ptr("lot"),
+		AttributeSchema: json.RawMessage(`{"type": "object", "required": ["mpn"]}`),
+	})
+	refusal(t, err, 422, "bad_property_schema")
+	var got any
+	if err := json.Unmarshal(getKind(t, pool, k, "part").AttributeSchema, &got); err != nil {
+		t.Fatal(err)
+	}
+	var want any
+	_ = json.Unmarshal(schema(map[string]any{"mpn": map[string]any{"type": "string"}}), &want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("part's schema: %v", got)
+	}
+	_, err = k.Get(context.Background(), pool, "bearing")
+	refusal(t, err, 404, "kind_not_found")
+}
+
+func TestABuiltinKindsTrackingNeverChanges(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	_, err := updateKind(t, pool, k, "nozzle", wire.KindPatch{Tracking: ptr("lot")})
+	refusal(t, err, 409, "kind_in_use")
+	if got := getKind(t, pool, k, "nozzle").Tracking; got != "unit" {
+		t.Fatalf("nozzle's tracking: %s", got)
+	}
+}
+
+func TestAKindWithItemsKeepsItsTracking(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	fastener(t, pool, k, nil)
+	must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "fastener", Name: "M3 bolt"}))
+
+	_, err := updateKind(t, pool, k, "fastener", wire.KindPatch{Tracking: ptr("lot")})
+	refusal(t, err, 409, "kind_in_use")
+	must(updateKind(t, pool, k, "fastener", wire.KindPatch{Name: ptr("Fasteners")}))
+}
+
+func TestAKindWithItemsIsNotArchived(t *testing.T) {
+	pool, k, items := testdb.New(t), kindStore(), itemStore()
+	fastener(t, pool, k, nil)
+	made := must(createItem(t, pool, items, wire.ItemInput{KindID: "fastener", Name: "M3 bolt"}))
+
+	_, err := archiveKind(t, pool, k, "fastener")
+	refusal(t, err, 409, "kind_in_use")
+	must(archiveItem(t, pool, items, made.ID))
+	must(archiveKind(t, pool, k, "fastener"))
+	ids := func(archived bool) []string {
+		var out []string
+		for _, kind := range must(k.List(context.Background(), pool, archived)) {
+			out = append(out, kind.ID)
+		}
+		return out
+	}
+	if slices.Contains(ids(false), "fastener") || !slices.Contains(ids(true), "fastener") {
+		t.Fatal("the archived kind is listed, or not listed with the archived")
+	}
+	must(restoreKind(t, pool, k, "fastener"))
+	if !slices.Contains(ids(false), "fastener") {
+		t.Fatal("the restored kind is not listed")
+	}
+}
+
+func TestCreateRefusesATakenIdAndAnUnknownParent(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	_, err := createKind(t, pool, k, wire.KindInput{ID: "part", Name: "Part", ParentID: ptr("durable")})
+	refusal(t, err, 409, "kind_exists")
+	_, err = createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", ParentID: ptr("nope"), Tracking: ptr("lot")})
+	refusal(t, err, 404, "kind_not_found")
+	_, err = updateKind(t, pool, k, "nope", wire.KindPatch{Name: ptr("Nope")})
+	refusal(t, err, 404, "kind_not_found")
+}
+
+func TestListCountsEachKindsItems(t *testing.T) {
+	pool, k, items := testdb.New(t), kindStore(), itemStore()
+	must(createItem(t, pool, items, wire.ItemInput{KindID: "hardware", Name: "M3 nut"}))
+	must(createItem(t, pool, items, wire.ItemInput{KindID: "hardware", Name: "M3 bolt"}))
+
+	counts := map[string]int{}
+	for _, kind := range must(k.List(context.Background(), pool, false)) {
+		counts[kind.ID] = kind.ItemCount
+	}
+	if counts["hardware"] != 2 || counts["part"] != 0 {
+		t.Fatalf("counts %v", counts)
+	}
+	if hw := getKind(t, pool, k, "hardware"); !hw.Builtin || hw.ItemCount != 2 {
+		t.Fatalf("hardware %+v", hw)
+	}
+}
+
+func TestAnItemsSchemaIsItsKindsMerged(t *testing.T) {
+	pool, k, items := testdb.New(t), kindStore(), itemStore()
+	ctx := context.Background()
+	must(updateKind(t, pool, k, "consumable", wire.KindPatch{AttributeSchema: schema(map[string]any{"mpn": map[string]any{"type": "string"}})}))
+	made := must(createItem(t, pool, items, wire.ItemInput{KindID: "hardware", Name: "M3 nut"}))
+
+	for id, want := range map[string]map[string]any{
+		made.ID:                                {"mpn": map[string]any{"type": "string"}},
+		"not-a-uuid":                           {},
+		"00000000-0000-0000-0000-000000000000": {},
+	} {
+		raw := must(items.Schema(ctx, pool, id))
+		var got map[string]any
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["type"] != "object" || !reflect.DeepEqual(got["properties"], want) {
+			t.Errorf("%s: %v", id, got)
+		}
+	}
+}
+
+func TestANullParentMakesARoot(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	fastener(t, pool, k, nil)
+
+	moved := must(updateKind(t, pool, k, "fastener", wire.KindPatch{ParentID: wire.Null[string]()}))
+	if moved.ParentID != nil {
+		t.Fatalf("parent %v", *moved.ParentID)
+	}
+}
+
+func TestATrackingChangeCountsArchivedItems(t *testing.T) {
+	pool, k, items := testdb.New(t), kindStore(), itemStore()
+	fastener(t, pool, k, nil)
+	made := must(createItem(t, pool, items, wire.ItemInput{KindID: "fastener", Name: "M3 bolt"}))
+	must(archiveItem(t, pool, items, made.ID))
+
+	_, err := updateKind(t, pool, k, "fastener", wire.KindPatch{Tracking: ptr("lot")})
+	refusal(t, err, 409, "kind_in_use")
+}
+
+func TestArchiveAndRestoreNameAnUnknownKind(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	_, err := archiveKind(t, pool, k, "nope")
+	refusal(t, err, 404, "kind_not_found")
+	_, err = restoreKind(t, pool, k, "nope")
+	refusal(t, err, 404, "kind_not_found")
+}
+
+func TestAnUncountedKindTakesAnItem(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "design_fee", Name: "Design fee", Tracking: ptr("none")}))
+
+	made := must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "design_fee", Name: "One hour"}))
+	if made.Tracking != "none" {
+		t.Fatalf("tracking %s", made.Tracking)
+	}
+}
+
+func TestAnArchivedParentIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "widget", Name: "Widget", Tracking: ptr("lot")}))
+	must(archiveKind(t, pool, k, "widget"))
+
+	_, err := createKind(t, pool, k, wire.KindInput{ID: "gizmo", Name: "Gizmo", ParentID: ptr("widget"), Tracking: ptr("lot")})
+	refusal(t, err, 409, "kind_archived")
+	fastener(t, pool, k, nil)
+	_, err = updateKind(t, pool, k, "fastener", wire.KindPatch{ParentID: wire.Some("widget")})
+	refusal(t, err, 409, "kind_archived")
+}
+
+// The class and steps a kind save checks (§3, §4.2, R-K1-6, R-K1-8).
+
+func TestAKindWithLifeHoursAndNoHoursIsIncomplete(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	made := must(createKind(t, pool, k, wire.KindInput{
+		ID: "spindle", Name: "Spindle", ParentID: ptr("durable"),
+		Steps: model.Steps{"life": {Handler: "life.hours", Params: map[string]any{"source": "manual"}}},
+	}))
+	if !reflect.DeepEqual(made.IncompleteSteps, []string{"life"}) {
+		t.Fatalf("incomplete_steps %v", made.IncompleteSteps)
+	}
+	if got := getKind(t, pool, k, "spindle"); !reflect.DeepEqual(got.IncompleteSteps, []string{"life"}) {
+		t.Fatalf("read incomplete_steps %v", got.IncompleteSteps)
+	}
+}
+
+func TestAKindWithAWrongHandlerIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	_, err := createKind(t, pool, k, wire.KindInput{
+		ID: "lathe", Name: "Lathe", ParentID: ptr("durable"),
+		Steps: model.Steps{"count": {Handler: "count.lot"}},
+	})
+	r := refusal(t, err, 422, "steps_invalid")
+	want := []StepProblem{{Step: "count", Handler: "count.lot", Reason: "not_applicable"}}
+	if !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("problems %#v", r.Problems)
+	}
+	if n := count(t, pool, `SELECT count(*) FROM item_kinds WHERE id = 'lathe'`); n != 0 {
+		t.Fatalf("%d rows", n)
+	}
+}
+
+func TestAParentChangeThatChangesAClassIsRefused(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	must(createKind(t, pool, k, wire.KindInput{ID: "glue", Name: "Glue", ParentID: ptr("general_consumable")}))
+	must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "glue", Name: "CA glue"}))
+
+	_, err := updateKind(t, pool, k, "glue", wire.KindPatch{ParentID: wire.Some("durable")})
+	r := refusal(t, err, 422, "class_changed")
+	want := []ClassProblem{{Key: "role", From: ptr("consumable"), To: ptr("durable")}}
+	if !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("problems %#v", r.Problems)
+	}
+	if got := getKind(t, pool, k, "glue"); got.ParentID == nil || *got.ParentID != "general_consumable" {
+		t.Fatalf("the parent moved: %v", got.ParentID)
+	}
+
+	// A kind with no items of its own, whose child has one.
+	must(createKind(t, pool, k, wire.KindInput{ID: "sealant", Name: "Sealant", ParentID: ptr("general_consumable")}))
+	must(createKind(t, pool, k, wire.KindInput{ID: "silicone", Name: "Silicone", ParentID: ptr("sealant")}))
+	must(createItem(t, pool, itemStore(), wire.ItemInput{KindID: "silicone", Name: "Clear silicone"}))
+	_, err = updateKind(t, pool, k, "sealant", wire.KindPatch{ParentID: wire.Some("durable")})
+	if r := refusal(t, err, 422, "class_changed"); !reflect.DeepEqual(r.Problems, want) {
+		t.Fatalf("descendant problems %#v", r.Problems)
+	}
+	// With no items below it, the move is no class change anyone holds.
+	must(createKind(t, pool, k, wire.KindInput{ID: "empty", Name: "Empty", ParentID: ptr("general_consumable")}))
+	must(updateKind(t, pool, k, "empty", wire.KindPatch{ParentID: wire.Some("durable")}))
+}
+
+func TestTrackingIsDerived(t *testing.T) {
+	pool, k := testdb.New(t), kindStore()
+	svc := must(createKind(t, pool, k, wire.KindInput{ID: "consult", Name: "Consulting", Nature: ptr("service"), Billing: ptr("flat")}))
+	if svc.Tracking != "none" {
+		t.Fatalf("a service tracks %s", svc.Tracking)
+	}
+	tool := must(createKind(t, pool, k, wire.KindInput{ID: "vise", Name: "Vise", ParentID: ptr("durable"), Tracking: ptr("unit")}))
+	if tool.Tracking != "unit" || tool.Nature != nil || tool.Role != nil || tool.Counting != nil {
+		t.Fatalf("vise %+v: a tracking sets only the keys its parents leave open", tool)
+	}
+	cls := model.Class{Nature: "physical", Role: "durable", Counting: "unit"}
+	chain := must(loadKinds(context.Background(), pool)).chain("vise")
+	if got, _, err := chain.Class(); err != nil || got != cls {
+		t.Fatalf("vise's class %+v %v", got, err)
+	}
+	lens := must(createKind(t, pool, k, wire.KindInput{
+		ID: "lens", Name: "Lens", ParentID: ptr("part"),
+		Steps: model.Steps{"life": {Handler: "life.hours", Params: map[string]any{"hours": 500, "source": "manual"}}},
+	}))
+	if lens.LifeBasis != "hours" {
+		t.Fatalf("life_basis %s", lens.LifeBasis)
+	}
+	if got := getKind(t, pool, k, "lens"); got.LifeBasis != "hours" || got.Tracking != "unit" {
+		t.Fatalf("read lens %s %s", got.Tracking, got.LifeBasis)
+	}
+	_, err := createKind(t, pool, k, wire.KindInput{ID: "oil", Name: "Oil", ParentID: ptr("durable"), Tracking: ptr("lot")})
+	refusal(t, err, 422, "class_changed")
+}
