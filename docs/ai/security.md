@@ -726,6 +726,13 @@ an npm package is installed or run.
   `http.followRedirects=false`, `core.hooksPath=/dev/null`, `transfer.fsckObjects` and
   `GIT_TERMINAL_PROMPT=0` are set. The fetch is shallow, takes no tags or submodules,
   and has a time limit.
+- A package in one folder of a repository (a `path`) gets a partial fetch with no blobs
+  (`--filter=blob:none`) and a sparse checkout of that folder (#7908). git then fetches
+  that folder's blobs from the same remote URL, in a child git that gets the same config
+  and environment, so `transfer.fsckObjects` checks them too (its `index-pack` runs with
+  `--fsck-objects`, seen with `GIT_TRACE=1` on git 2.39.5 and 2.43.0, 2026-11-26). A
+  server with no partial fetch sends every blob. When the partial fetch fails for a
+  reason other than the time limit, git fetches the whole commit again.
 - Refs and paths are held to an alphabet that cannot start with `-` or contain `..`.
 - A symlink or submodule anywhere in the plugin's directory is refused, from `git
   ls-tree`, before any file is used. `hashTree()` refuses any non-regular file again.
