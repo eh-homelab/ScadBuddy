@@ -396,15 +396,23 @@ func TestTheRealtimeSocketFollowsTopics(t *testing.T) {
 func followFonts(t *testing.T, s *streamAPI, sock *ws) {
 	t.Helper()
 	sock.send(1, `{"type":"subscribe","topics":["fonts"]}`)
-	want := `{"type":"subscribed","topics":["fonts"],"last":"` + lastID(t, s) + `"}`
+	before := lastID(t, s)
+	want := `{"type":"subscribed","topics":["fonts"],"last":"` + before + `"}`
+	late := false
 	if got := sock.text(); got != want {
-		// The listener may not have heard the last event yet; then last is the one before.
+		// The listener may not have heard the last event yet; then last is the one before,
+		// and that event comes to the socket after its subscribe, ahead of the next one.
 		var ack map[string]any
 		_ = json.Unmarshal([]byte(got), &ack)
 		expect(t, ack["type"], "subscribed")
+		late = true
 	}
 	id := s.publish("font.installed", httpx.Field{Key: "family", Value: "y"})
-	expect(t, sock.text(), `{"type":"event","id":"`+id+`","kind":"font.installed","topics":["fonts"],"data":{"family":"y"}}`)
+	got := sock.text()
+	if late && got == `{"type":"event","id":"`+before+`","kind":"font.installed","topics":["fonts"],"data":{"family":"x"}}` {
+		got = sock.text()
+	}
+	expect(t, got, `{"type":"event","id":"`+id+`","kind":"font.installed","topics":["fonts"],"data":{"family":"y"}}`)
 }
 
 func lastID(t *testing.T, s *streamAPI) string {
