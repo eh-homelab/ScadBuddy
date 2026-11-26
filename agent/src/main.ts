@@ -918,6 +918,8 @@ const background = backgroundTasks
       secrets: toolServices.secrets,
       agents: managerAgents(sessions, { access: accessResolver }),
       workspace,
+      // A background command where a sandbox is set up runs in the session's pod; this replica follows it (#5916, #7310).
+      ...(sandboxes ? { sandbox: { sandboxes, limits: () => workspace.limits() } } : {}),
     })
   : undefined
 // The gate's writes go through the API (area `gate`), its events through this replica's event log,
