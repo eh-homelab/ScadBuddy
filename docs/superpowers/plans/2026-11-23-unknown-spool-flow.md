@@ -42,10 +42,10 @@
 
 D1 to D5 are the spec's D1 to D5 ("Decisions made while planning"), with the reasons the code gave. P1 is this plan's own.
 
-- **D1 `seen_at` is a version, not a heartbeat.** Capture runs only when the tray projection changes (`capture.trays_changed`), and a change in any tray of the printer runs it. If every run refreshed `seen_at`, a change in slot 1 would refuse a resolve of slot 2. The upsert moves `seen_at` only when the row's reported fields (`tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct`) change. Still true; the Go resolve compares `seen_at` at microsecond precision (Task 3B).
+- **D1 `seen_at` is a version, not a heartbeat.** Capture runs only when the tray projection changes (`capture.trays_changed`), and a change in any tray of the printer runs it. If every run refreshed `seen_at`, a change in slot 1 would refuse a resolve of slot 2. The upsert moves `seen_at` only when the row's reported fields (`tray_uuid`, `tag_uid`, `material`, `colour_rgba`, `remain_pct`) change. Still true; the resolve activity compares `seen_at` as today's code does (Task 3B).
 - **D2 External holders (ams 255) never get a row.** `vt_tray` has no presence state; `_filled` is true whenever a `tray_type` is configured, so an empty external holder would block the printer for good. An RFID external tray is still auto-created. Decided 2026-11-23 (spec "Decisions made while planning").
 - **D3 `remain_pct` is stored but is NULL in practice.** `trays._remain` gives a remain only for a tray with RFID keys (#6263 preflight C4), and only untagged trays get rows. The prefill code exists; it fires only if `_remain` changes. Decided 2026-11-23 (spec "Decisions made while planning").
-- **D4 The label weight override applies only to a first weight.** The spec's rule makes `label_weight_g` the typed net weight when it differs from the type's. For a half-used spool that sets the label to the grams left and breaks every `remain_pct` reading. The override applies only when the spool has no event other than `created`, `edited`, `moved`, `tag_bound` and `tag_unbound` (no reading, use or load yet). The `weighed` reading is booked either way. Decided 2026-11-23 (spec "Decisions made while planning"). **Changed 2026-11-26: the rule now runs in the Go resolve (Task 3B), with the same SQL as `FilamentSpoolStore.update_on` (G5).**
+- **D4 The label weight override applies only to a first weight.** The spec's rule makes `label_weight_g` the typed net weight when it differs from the type's. For a half-used spool that sets the label to the grams left and breaks every `remain_pct` reading. The override applies only when the spool has no event other than `created`, `edited`, `moved`, `tag_bound` and `tag_unbound` (no reading, use or load yet). The `weighed` reading is booked either way. Decided 2026-11-23 (spec "Decisions made while planning"). **Still Python (2026-11-26): the rule runs in the resolve activity (Task 3B, G5).**
 - **D5 "The owner is told" of an RFID spool** = the list route also returns the spools capture made from tags in the last 24 h (`made_from_tags`), and the frontend toasts each new one once. Decided 2026-11-23 (spec "Decisions made while planning"). **Changed 2026-11-26: the Go list route reads them from `filament_spool_events` (Task 3A).**
 - **P1 The rows' Python SQL lives in its own module** (`filament/unknown_tray_rows.py`) because `inventory.py` must clear a row inside `link_on`. **Changed 2026-11-26: there is no Python `unknown_trays.py` now; the list, resolve and dismiss SQL is Go's (`internal/unknowntrays`). Python keeps only `note_on`, `clear_on`, `rows_on`.**
 
@@ -67,11 +67,11 @@ The owner's policy of epic #7667 (spec `docs/superpowers/specs/2026-11-25-go-ser
 - **G2** Ruling: the worker's block read is a Go CRUD route on caller `print`, `GET /filament/printers/{printer_id}/unknown-trays`, in the same area name — the service auth Go already has (`internal/crud`, `auth.Resolver`) covers it; core serves a CRUD route for any caller its credential check names — cost if wrong: the print worker must reach core's CRUD port (`:8082`), not Python's own listener. Task 9 checks that on prod before the switch.
 - **G3** Ruling: Python still lists `unknown-trays` in `CRUD_AREAS["print"]` and `PRINT_CRUD_AREAS`, and the worker fails open when the route is missing (`CrudUnavailableError` is a warning and no block, in `prepare_run` and in `lan_print`) — Python's `/areas` answers every name (spec §4 "Switch"), so the worker's start gate cannot see whether Go serves the area; a hard failure would stop every print until the switch — cost if wrong: until `SCADBUDDY_CORE_AREAS` names the area, the worker side does not block (the API-side check and the dialog still do, in process). A real outage of the CRUD port is also treated as no block; the other CRUD reads of the run fail first. **This replaces Review Focus 9's "a failed read in `prepare_run` fails the run" for `CrudUnavailableError`; a 403 (`CrudRefusedError`) still fails it.**
 - **G4** Ruling: before the area is switched on, the list route is a 404 (Python has no handler); the frontend takes a 404 as "no unknown trays" (the Needs-you source stays empty, no toast, no callout) and the agent tools show the 404 — a 404 says nothing about the printer — cost if wrong: an unswitched prod hides unknown trays from the owner; the explicit Task 9 step and its prod check close that.
-- **G5** Ruling: the resolve write is reimplemented in Go with the same SQL and the same lock order as `FilamentInventory.link_on`, `tag_on`, `bind_on`, `update_on`, `ledger.record` and `LocationStore.ensure_ams`, and held equal to Python by shared vectors (G13) — core has no Temporal client on main (the K1 branch adds one, for Python-to-Go activities only); a Python activity may not hold SQL (#5295); a Go call into Python needs a new Python route (against the policy) and a credential Go cannot mint; inventory K3 and K4 move spool writes to Go later, so this code is their seed — cost if wrong: Go becomes a second writer of `filament_spools`, bindings, places and events until K4, and a drift between the two `link` paths would show as spools that differ by path. Mitigation: the vectors test runs in both languages on every CI run. If the inventory session lands a Go `link` first, Task 3B swaps its `linkOn` for theirs and keeps its tests.
+- **G5** Ruling (changed 2026-11-26 after eee8e050's answer, fleet chat epic-7667-go-core #264): the Go resolve route does not write spools. It checks the body and the caller, then runs today's Python write as a Temporal activity, `filament_resolve_unknown_tray`, on the `library` queue, which the API process serves (`workflows/housekeeping.py` `library_worker`; the API is the only process with a database secret, #5295). The activity runs `resolve` in Python: `link_on`, the first weight (D4) and the `weighed` event, in one transaction, with today's lock order. Go starts it through core's Temporal client, `internal/temporalx` (inventory K1 layer 4, not on main), as an update-with-start or a workflow it waits on, and maps the activity's typed failures to the problem codes. Never the queue `inventory`, which Go serves — why: inventory K3/K4 move today's spool code to Go unchanged, so a Go copy of `link_on` now would be a third version to reconcile; #7667's direction is Python only as Temporal activities — cost if wrong: resolve waits for K1 layer 4's `temporalx` to merge, and one resolve costs a Temporal round trip (about 100 ms). G9 and G13's `links` vectors no longer apply to Go; Python's own tests hold the lock order.
 - **G6** Ruling: resolve answers `{id, number, code, location_id}`, not the full `Spool` — Go has no `Spool` view (`effective`, low stock, grams) and building one is a port of its own; `id` keeps the agent's `kinds: 'spool'` mapping working — cost if wrong: a caller that wants more reads `GET /filament/spools/{id}` (Python) after the resolve. **This changes Task 3's old answer type, the dialog's `onResolved` argument and the agent tool's answer.**
 - **G7** Ruling: the candidates are read straight from SQL (effective values by `coalesce`, the stored `grams_left` column), and CIEDE2000 is ported to Go with Python's results as vectors — `colour_distance` has no SQL form — cost if wrong: a distance that differs in the last digits changes a tie in the order; the vectors use a 1e-9 tolerance and CI catches a larger drift.
 - **G8** Ruling: resolve and dismiss publish nothing on the event log — the spool events go to `filament_spool_events`, and no trigger on these tables calls `scadbuddy_publish_event`; the frontend polls — cost if wrong: if a later change publishes (a Needs-you push), it must take the event-log lock first (`bus.HoldLog`, which is on the inventory K1 branch, not on main; eee8e050), before the tray lock and any row lock. `TestResolvePublishesNoEvent` pins today's rule.
-- **G9** Ruling: Go's lock order is Python's: the tray's advisory lock (`hashtext('filament_tray:<printer>:<ams>:<tray>')`), then the unknown row `FOR UPDATE`, then the tag, then the spools by id, then the place `FOR SHARE` — #6261 and the `link` docstring — cost if wrong: a deadlock with Python's capture or old link; `TestResolveWaitsForTheTrayLock` and the vectors catch a changed order only in part, so a reviewer reads `link.go` against `inventory.py` `link_on`.
+- **G9** Ruling (changed 2026-11-26, see G5): the lock order stays in Python's resolve activity, today's order (the tray's advisory lock, then the unknown row `FOR UPDATE`, then the tag, then the spools by id, then the place `FOR SHARE`). Go takes no lock for resolve — cost if wrong: none in Go; Python's tests hold the order.
 - **G10** Ruling: Go writes these routes' numbers with `encoding/json`, not `jsonv.Float` — Python serves no copy of them (18fe662e's `1e+06` against `1000000.0` only matters where both serve one route) — cost if wrong: none unless Python later serves the same route; then use `jsonv.Float`.
 - **G11** Ruling: core has no public-route mount on main, so Task 3A adds `crud.Router.Public` (a `*http.ServeMux` tried first) unless a merged PR has one by then — the first public Go route needs one place to mount — cost if wrong: a second PR adds a different mount; check `git grep gate.Wrap origin/main` first.
 - **G12** Ruling: types for Go-served routes are hand-written: `frontend/src/api/unknownTrays.ts` and `agent/src/api/unknownTrays.ts` (a `paths` fragment for a second typed client) — `pnpm gen:api` exports Python's OpenAPI (`scadbuddy.tools.export_openapi`) and Python has no route to export — cost if wrong: types drift from Go; the golden JSON of Task 3A and the frontend mock's own test hold the key sets, and a route that moves to Python later gets generated types back.
@@ -85,7 +85,7 @@ The owner's policy of epic #7667 (spec `docs/superpowers/specs/2026-11-25-go-ser
 
 1. **A stale row blocks a printer after the tray was settled another way.** This covers the old tray link (`PUT /printers/{id}/trays/{ams}/{tray}/spool`), the print dialog's tray question (`api/printing.py` `post_tray_spool`, which calls `link`), and a capture that read "no holder" while a resolve was committing. Expected: no row once the tray has a holder. `link_on` deletes the row in its transaction. Capture writes a row only under `pg_try_advisory_xact_lock` on the tray's key, and it checks the holder again after it takes the lock. Tests in Task 2 and Task 3 (Python `link_on`).
 2. **An external holder with a configured type and no spool** (D2): no row, no block. Test in Task 2.
-3. **Two people resolve one tray at once, or the tray changes during a resolve:** one wins; the other gets 409 `tray_changed`, and nothing of it is written. Tests in Task 3B (`TestTwoResolvesOfOneTrayOneWins`, `TestResolveWaitsForTheTrayLock`).
+3. **Two people resolve one tray at once, or the tray changes during a resolve:** one wins; the other gets 409 `tray_changed`, and nothing of it is written. Tests in Task 3B (`test_two_resolves_of_one_tray_one_wins`, `test_a_stale_seen_at_is_tray_changed`).
 4. **A tray flips unknown → known → unknown between reports:** the second unknown is a new row (new `id`, new `first_seen_at`); a resolve sent with the first id gets 409 `tray_changed`. Tests in Task 2 and Task 3B.
 5. **An RFID spool made by capture, then Bambuddy's pull of the BB spool it auto-added:** the pull links that BB spool to the SB spool (`bambuddy_pull._holder` finds the unlinked spool that holds the tag); it never makes a second one. Test in Task 2.
 6. **Resolving with an archived spool:** 409 `spool_archived`. **With a spool in another tray:** that spool moves; the other tray's place no longer holds it. **With a code that names a place (`L-3`):** 404 `code_unknown`. Tests in Task 3B.
@@ -93,7 +93,7 @@ The owner's policy of epic #7667 (spec `docs/superpowers/specs/2026-11-25-go-ser
 8. **A printer deleted or merged:** deleting it removes its rows (cascade); merging it drops the merged printer's rows (the kept printer's next capture writes its own). Tests in Task 1.
 9. **The CRUD read fails or the route is missing (changed, G3):** at `lan_print` the start goes on (logged). In `prepare_run` a missing route or an outage (`CrudUnavailableError`) is logged and counts as no block; a 403 fails the run. Tests in Task 4.
 10. **The area is not switched on (G4):** the list route is a 404; the frontend shows no Needs-you source and no error; the worker does not block. Tests in Task 3A (`TestAnUnswitchedAreaForwardsToNext`), Task 4 and Task 5. Task 9 switches it on.
-11. **The Go link and Python's `link` disagree (G5, G13):** the same tray and spool give different places, bindings or events by path. The vectors test, in both languages, holds them equal. Tests in Task 3 and Task 3B.
+11. **The resolve activity is not served, or it times out (G5):** the route answers 503 `resolve_pending`, and nothing is half-written, because the activity runs in one transaction. Tests in Task 3B (`TestResolveTimeoutIs503`, `test_the_library_worker_serves_the_activity`).
 12. **A person-auth refusal:** no session → 401, a read-only access token on resolve or dismiss → 403, in `enforce`; `observe` serves and counts. Test in Task 3A (`TestPublicRoutesUseTheGate`).
 
 ---
@@ -280,8 +280,7 @@ Python keeps the writers that capture and the old tray link use. This task makes
 - Consumes: Task 1's `clear_on`.
 - Produces:
   - `FilamentInventory.link_on(conn: Conn, printer_id: UUID, ams_id: int, tray_id: int, spool_id: UUID, seen: SeenTray, place_id: UUID, *, actor: str) -> None` (static). It holds today's transaction body, from `_tray_lock` to `bind_on`, then `clear_on(conn, printer_id, ams_id, tray_id)`. `link` keeps its signature and calls it.
-  - The vectors file, with three lists: `colour_distance` (`{left, right, distance}`: at least 20 pairs, among them a `None` side, equal colours, near reds, and black/white), `labels` (`{ams_id, tray_id, tray_label, place_label_for_printer_H2C}`: AMS 0 to 3, HT 128 and 129, the external holder 255) and `links` (at most 5 scenarios: `{name, before, after}`; G13).
-  - A `links` scenario: `before` lists the printer, spools (number, material, rgba, tag if any, place if any) and what the tray shows (`SeenTray` fields); `after` is the normalised result of `link`: each spool's place name and `tray_fingerprint`, each tag binding's `closed_reason`, and the events in order as `{spool, kind, source}`. Scenarios: an untagged tray with an unplaced spool; a tray whose tag is new; a spool that holds another tag (rebind, `tag_unbound` event); a spool that sits in another tray (it moves; the old place holds none); a tray whose previous holder moves to no place.
+  - The vectors file, with two lists: `colour_distance` (`{left, right, distance}`: at least 20 pairs, among them a `None` side, equal colours, near reds, and black/white), `labels` (`{ams_id, tray_id, tray_label, place_label_for_printer_H2C}`: AMS 0 to 3, HT 128 and 129, the external holder 255). It has no `links` list (G5: the resolve write stays in Python).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -377,64 +376,51 @@ Expected: `backend/tests/fixtures/` is a Go-lane input, as `auth-vectors.json` i
 
 ---
 
-### Task 3B: Go — resolve
+### Task 3B: Go route, Python activity — resolve
+
+Blocked by inventory K1 layer 4 (`tools/go/core/internal/temporalx`, go.temporal.io/sdk v1.52.0). Build Steps 1-3 (Python) before it lands; Steps 4-6 (Go) after.
 
 **Files:**
-- Create: `tools/go/core/internal/unknowntrays/resolve.go` (the route), `link.go` (the write: G5), `places.go` (the tray's place)
-- Modify: `tools/go/core/internal/unknowntrays/unknowntrays.go` (the route), `tools/go/core/README.md`
-- Test: `tools/go/core/internal/unknowntrays/resolve_test.go`, `link_test.go`
+- Create: `backend/scadbuddy/filament/unknown_resolve.py` (the activity and its input/output models), `tools/go/core/internal/unknowntrays/resolve.go` (the route)
+- Modify: the `library` worker's activity list (where `library_worker`'s `activities` are built for the API), `tools/go/core/internal/unknowntrays/unknowntrays.go`, `tools/go/core/README.md`
+- Test: `backend/tests/filament/test_unknown_resolve.py`, `tools/go/core/internal/unknowntrays/resolve_test.go`
 
 **Interfaces:**
-- Consumes: Task 3A's package, `spoolref.Find`, `auth.CallerOf`, the vectors file (Task 3).
+- Consumes: Task 3's `link_on` and `UnknownTrayStore`, `codes.resolve` (spool by code), Task 3A's package, `auth.CallerOf`, `temporalx`.
 - Produces:
-  - Public route `POST /api/v1/filament/unknown-trays/{id}/resolve`, `gate.Wrap(auth.Route{Class: "api", Template: …}, h)`. Body `{spool_id?: uuid, code?: string, net_weight_g: number (> 0, <= 100000), seen_at: RFC 3339 with zone}`; exactly one of `spool_id` and `code`, else 422. Answer 200 `{id, number, code, location_id}` (`id` is the spool's, G6).
-  - `linkOn(ctx context.Context, tx pgx.Tx, in LinkInput) error`: the SQL of `FilamentInventory.link_on` with the same lock order (G9). `LinkInput{PrinterID string; AmsID, TrayID int; SpoolID, PlaceID string; Seen Seen; Actor string}`.
-  - `ensurePlace(ctx, tx, printerID string, printerName string, amsID, trayID int) (placeID string, err error)`: `LocationStore.ensure_ams`: the unarchived place of that tray, else a new one under the printer's AMS unit as Python makes it, named `PlaceLabel`. `ErrNoAmsKind` when no location kind is flagged `ams`.
-  - Problem codes (the strings of Global Constraints, `httpx.Problem` with Python's `code` extension): `tray_changed` 409, `code_unknown` 404, `spool_archived` 409, `no_ams_kind` 409; a missing spool id 404; a tag clash (`TrayTagClashError`, `TagKeysClashError` in Python) 409 with the same message text.
+  - Python activity `filament_resolve_unknown_tray(ResolveInput) -> ResolveOutput` on queue `library`. `ResolveInput{tray_id: UUID, spool_id: UUID | None, code: str | None, net_weight_g: float, seen_at: datetime, actor: str}`; `ResolveOutput{id, number, code, location_id}` (G6). Typed failures (non-retryable `ApplicationError` with `type`): `tray_changed`, `code_unknown`, `spool_archived`, `no_ams_kind`, `spool_missing`, `tag_clash` (message kept).
+  - Public route `POST /api/v1/filament/unknown-trays/{id}/resolve`, `gate.Wrap(auth.Route{Class: "api", Template: …}, h)`. Body `{spool_id?: uuid, code?: string, net_weight_g: number (> 0, <= 100000), seen_at: RFC 3339 with zone}`; exactly one of `spool_id` and `code`, else 422 (checked in Go before the start). It runs the activity with a 30 s timeout, no retry, and maps each failure `type` to its problem: `tray_changed` 409, `code_unknown` 404, `spool_archived` 409, `no_ams_kind` 409, `spool_missing` 404, `tag_clash` 409 with the message. A timeout is 503 `resolve_pending`.
 
-`resolve`, in this order, in one `pgx.BeginFunc` transaction:
-1. Read the row's printer, `ams_id` and `tray_id` (none → `tray_changed`) and the printer's name. Make the place first, in the same transaction (`ensurePlace`). It takes no lock Python takes after the tray's.
-2. `SELECT pg_advisory_xact_lock(hashtext('filament_tray:<printer>:<ams>:<tray>'))` first, before any row lock.
-3. `SELECT … FROM filament_unknown_trays WHERE id = $1 FOR UPDATE`; none, or `seen_at != body.seen_at` (compared at microsecond precision) → `tray_changed`.
-4. `spoolref.Find`; map its errors.
-5. `linkOn` (it also deletes the row).
-6. First weight (D4): when the spool has no `filament_spool_events` row of a kind other than `created`, `edited`, `moved`, `tag_bound` and `tag_unbound`, and `round(net) != effective label weight`, set `filament_spools.label_weight_g = round(net)` and write one `edited` event (`ref_kind='unknown_tray'`, `ref_id=<row id>`), as `FilamentSpoolStore.update_on` does.
-7. One `weighed` event: `source='person'`, `grams_after = net`, `ref_kind='unknown_tray'`, `ref_id`, actor. Use the SQL `ledger.record` runs, so the `grams_left` column moves as Python moves it.
-8. Read nothing else. It publishes no event (G8).
+The activity, in one transaction, in this order (today's code, D4 and D9 unchanged): the tray's advisory lock; the row `FOR UPDATE` and its `seen_at` check; the spool by id or code; `link_on` (it deletes the row); the first weight (D4) through `update_on`; one `weighed` event through `ledger.record` (`source='person'`, `ref_kind='unknown_tray'`). It publishes no event (G8).
 
-The actor is what `api/filament.py` `actor(caller)` gives for the same caller kind.
+- [ ] **Step 1: Write the failing Python tests** (`test_unknown_resolve.py`, calling the activity function directly with the `pg_pool` fixture):
 
-- [ ] **Step 1: Write the failing tests**
-
-```go
-func TestLinkMatchesPythonOnTheVectors(t *testing.T)
-	// each scenario of unknown-tray-vectors.json "links": build `before` with SQL, run linkOn, normalise, compare with `after`
-func TestResolveByCodeLinksBooksAndClears(t *testing.T)
-	// code "s-<n>"; the spool's place is the tray's; tray_fingerprint "PLA|#FF0000FF"; a weighed event source "person" grams_after 980 ref_kind "unknown_tray"; the row is gone
-func TestAFirstWeightThatDiffersSetsTheLabelWeight(t *testing.T)   // type label 1000, spool with only `created`, net 1012 → label_weight_g 1012 and an edited event
-func TestAFirstWeightEqualToTheTypesSetsNothing(t *testing.T)      // net 1000 → label_weight_g NULL
-func TestAUsedSpoolKeepsItsLabelWeight(t *testing.T)               // a weighed event exists; net 480 → unchanged, weighed booked
-func TestAStaleSeenAtIsTrayChanged(t *testing.T)                   // 409 tray_changed; no event, no move
-func TestAFlippedTraysOldIDIsTrayChanged(t *testing.T)
-func TestTwoResolvesOfOneTrayOneWins(t *testing.T)                 // two goroutines, the same body: one 200, one 409; one weighed event in total
-func TestResolveWaitsForTheTrayLock(t *testing.T)                  // another connection holds the tray's advisory lock; resolve blocks until it commits (G9)
-func TestAnArchivedSpoolIsRefused(t *testing.T)                    // 409 spool_archived; the row stays
-func TestAPlaceCodeIsCodeUnknown(t *testing.T)                     // "L-1" → 404 code_unknown
-func TestASpoolFromAnotherTrayMovesHere(t *testing.T)              // the old place holds none; the new place holds it
-func TestNoAmsKindIsRefused(t *testing.T)                          // 409 no_ams_kind; the row stays
-func TestAtaggedRowBindsItsTag(t *testing.T)                       // a row with tag_uid: the spool gets an open binding, event tag_bound
-func TestResolvePublishesNoEvent(t *testing.T)                     // the `events` table is unchanged (G8)
-func TestResolveBodyNeedsExactlyOneOfSpoolAndCode(t *testing.T)    // both, neither, net_weight_g 0 → 422
-func TestResolveAnswersTheSpoolsIdentity(t *testing.T)             // {id, number, code "S-<n>", location_id}
+```python
+async def test_resolve_by_code_links_books_and_clears(): ...      # place is the tray's; weighed grams_after 980 ref_kind "unknown_tray"; row gone
+async def test_a_first_weight_that_differs_sets_the_label_weight(): ...  # label 1000, only `created`, net 1012 -> 1012 and an edited event
+async def test_a_used_spool_keeps_its_label_weight(): ...
+async def test_a_stale_seen_at_is_tray_changed(): ...              # ApplicationError type "tray_changed"; no event
+async def test_two_resolves_of_one_tray_one_wins(): ...            # gather two: one output, one tray_changed; one weighed event
+async def test_an_archived_spool_is_refused(): ...                 # "spool_archived"; the row stays
+async def test_a_place_code_is_code_unknown(): ...                 # "L-1"
+async def test_no_ams_kind_is_refused(): ...
+async def test_the_library_worker_serves_the_activity(): ...       # the API's activity list names it
 ```
 
-- [ ] **Step 2: Build and vet** — `cd tools/go/core && gofmt -l . && go vet ./... && go build ./...`; expected: errors name only the missing symbols. CI's `go` job runs the tests.
+- [ ] **Step 2: Implement the activity** (ruff, mypy; CI runs the tests).
+- [ ] **Step 3: Commit** — `feat(filament): resolve an unknown tray as a library activity (#7143)`
+- [ ] **Step 4: Write the failing Go tests** (`resolve_test.go`, with a fake starter in place of `temporalx`):
 
-- [ ] **Step 3: Implement `ensurePlace`, `linkOn`, the route and the problem mapping.** Read `inventory.py` `link_on`, `spools.py` `tag_on`, `bind_on`, `update_on`, `ledger.py` `record` and `locations.py` `ensure_ams`, `move_on` first; port those statements only, in their order. A statement Python runs in a trigger stays in the trigger.
+```go
+func TestResolveBodyNeedsExactlyOneOfSpoolAndCode(t *testing.T)  // both, neither, net 0 -> 422; nothing started
+func TestResolveStartsTheActivityOnLibrary(t *testing.T)         // queue "library", input carries auth.CallerOf's actor
+func TestResolveMapsEachFailureType(t *testing.T)               // table: type -> status and code
+func TestResolveTimeoutIs503(t *testing.T)
+func TestResolveAnswersTheSpoolsIdentity(t *testing.T)          // {id, number, code, location_id}
+```
 
-- [ ] **Step 4: Format, vet, build** — as Step 2. Then read CI's `go` job and `backend-pytest` on the pushed branch: both must pass, the vectors test included.
-
-- [ ] **Step 5: Commit** — `feat(core): resolve an unknown tray in Go (#7143)`
+- [ ] **Step 5: Implement the route** (gofmt, vet, build; CI runs the tests).
+- [ ] **Step 6: Commit** — `feat(core): resolve an unknown tray through a library activity (#7143)`
 
 ---
 
