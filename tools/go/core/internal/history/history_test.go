@@ -331,7 +331,7 @@ func TestSchemaEventsAreApplied(t *testing.T) {
 // TestTheBackFillApplies applies the real back-fill: the migrations' schema events (with
 // changed_at, item_kind: owners and the migration's actor), on a log that keeps them.
 func TestTheBackFillApplies(t *testing.T) {
-	pool := testdb.Migrated(t)
+	pool, _ := testdb.Migrated(t, "")
 	events := scalar[int](t, pool, `SELECT count(*) FROM events WHERE kind = 'entity_property_schema.changed'
 		AND payload ? 'changed_at'`)
 	itemKinds := scalar[int](t, pool, `SELECT count(*) FROM item_kinds`)
@@ -357,5 +357,70 @@ func TestTheBackFillApplies(t *testing.T) {
 	if n := scalar[int](t, pool, `SELECT count(*) FROM entity_property_schema_history
 		WHERE owner LIKE 'item_kind:%' AND actor = '{"kind": "provider", "principal": "migration"}'`); n != itemKinds {
 		t.Fatalf("%d item kind rows by the migration, want %d", n, itemKinds)
+	}
+}
+
+// applyAll applies until the log's end.
+func applyAll(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	for {
+		n, err := Apply(ctx, pool, Options{Batch: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n < 7 {
+			return
+		}
+	}
+}
+
+// TestTheBackFillOfOldRowsApplies seeds rows an older build wrote, then runs the history
+// migration and applies its back-fill: one set per property, a non-object updated_by
+// credited to the migration, and no row for a JSON null schema.
+func TestTheBackFillOfOldRowsApplies(t *testing.T) {
+	pool, rest := testdb.Migrated(t, "20261126T0308Z_property_history_events")
+	if n := scalar[int](t, pool, `SELECT count(*) FROM information_schema.tables WHERE table_name = 'event_subscribers'`); n != 0 {
+		t.Fatal("the history migration ran before the seed")
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO entities (id, kind, ref) VALUES
+			('00000000-0000-0000-0000-0000000000a1', 'item', 'r1'),
+			('00000000-0000-0000-0000-0000000000a2', 'spool', 's1');
+		INSERT INTO entity_properties (entity_id, key, value, source, updated_at, updated_by) VALUES
+			('00000000-0000-0000-0000-0000000000a1', 'a', '"x"', 'manual', '2026-11-01T00:00:00Z', '{"kind": "browser"}'),
+			('00000000-0000-0000-0000-0000000000a1', 'b', '2', 'import', '2026-11-02T00:00:00Z', '"legacy"'),
+			('00000000-0000-0000-0000-0000000000a2', 'c', 'true', 'manual', '2026-11-03T00:00:00Z', '{"kind": "agent", "principal": "p"}');
+		INSERT INTO entity_property_schemas (kind, schema) VALUES ('nullkind', 'null');
+		INSERT INTO item_kinds (id, name, tracking, attribute_schema) VALUES ('nullkind', 'Null', 'lot', 'null');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	rest()
+	applyAll(t, pool)
+	if c, n := cursor(t, pool), newest(t, pool); c != n {
+		t.Fatalf("cursor %d, want the log's end %d", c, n)
+	}
+	got := scalar[[]string](t, pool, `SELECT array_agg(h.ref || ' ' || h.key || ' ' || h.op || ' ' || h.new::text
+		|| ' ' || h.source || ' ' || h.actor::text ORDER BY h.event_seq)
+		FROM entity_property_history h JOIN entity_properties p ON p.entity_id = h.entity_id AND p.key = h.key
+		WHERE h.old IS NULL AND h.at = p.updated_at`)
+	want := []string{
+		`r1 a set "x" manual {"kind": "browser"}`,
+		`r1 b set 2 import {"kind": "provider", "principal": "migration"}`,
+		`s1 c set true manual {"kind": "agent", "principal": "p"}`,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("history rows\n%v\nwant\n%v", got, want)
+	}
+	if n := rows(t, pool); n != 3 {
+		t.Fatalf("%d property rows, want 3", n)
+	}
+	if n := scalar[int](t, pool, `SELECT count(*) FROM entity_property_schema_history
+		WHERE owner IN ('kind:nullkind', 'item_kind:nullkind')`); n != 0 {
+		t.Fatalf("%d rows for a JSON null schema, want 0", n)
+	}
+	events := scalar[int](t, pool, `SELECT count(*) FROM events WHERE kind = 'entity_property_schema.changed'`)
+	if n := scalar[int](t, pool, `SELECT count(*) FROM entity_property_schema_history`); n != events || n == 0 {
+		t.Fatalf("%d schema rows, want one per schema event (%d)", n, events)
 	}
 }
