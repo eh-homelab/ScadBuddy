@@ -74,12 +74,14 @@ func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) 
 			lockClass, w.Caller+"\x1f"+w.Key); err != nil {
 			return err
 		}
-		if err := answerOnce(ctx, tx, w, digest, do, &answer); err != nil {
+		reused, err := answerOnce(ctx, tx, w, digest, do, &answer)
+		if err != nil {
 			return err
 		}
 		// The operation's end, when an activity's record runs this write (Record): in this
 		// transaction, after do or after a replay, so it commits with the write or not at all.
-		if id, ok := OperationFrom(ctx); ok {
+		// A key used for another request is not this operation's answer: its record stays.
+		if id, ok := OperationFrom(ctx); ok && !reused {
 			return FinishOperation(ctx, tx, id, answer)
 		}
 		return nil
@@ -91,29 +93,30 @@ func Write(ctx context.Context, pool *pgxpool.Pool, w WriteReq, do func(pgx.Tx) 
 }
 
 // answerOnce is the stored answer of (w.Caller, w.Key), or the 422 of a key used for another
-// request, or do's answer, recorded.
-func answerOnce(ctx context.Context, tx pgx.Tx, w WriteReq, digest string, do func(pgx.Tx) (int, any, error), answer *Answer) error {
+// request (reused), or do's answer, recorded.
+func answerOnce(ctx context.Context, tx pgx.Tx, w WriteReq, digest string, do func(pgx.Tx) (int, any, error), answer *Answer) (reusedKey bool, err error) {
 	var route, sum string
-	err := tx.QueryRow(ctx, requestSelectSQL, w.Caller, w.Key).Scan(&route, &sum, &answer.Status, &answer.Body)
+	err = tx.QueryRow(ctx, requestSelectSQL, w.Caller, w.Key).Scan(&route, &sum, &answer.Status, &answer.Body)
 	if err == nil {
 		if route != w.Route || sum != digest {
 			*answer, err = reused()
+			return true, err
 		}
-		return err
+		return false, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
-		return err
+		return false, err
 	}
 	status, body, err := run(ctx, tx, do)
 	if err != nil {
-		return err
+		return false, err
 	}
 	text, err := httpx.Marshal(body)
 	if err != nil {
-		return err
+		return false, err
 	}
 	answer.Status = status
-	return tx.QueryRow(ctx, requestInsertSQL, w.Caller, w.Key, w.Route, digest, status, json.RawMessage(text)).
+	return false, tx.QueryRow(ctx, requestInsertSQL, w.Caller, w.Key, w.Route, digest, status, json.RawMessage(text)).
 		Scan(&answer.Body)
 }
 

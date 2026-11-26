@@ -54,22 +54,24 @@ func OperationFrom(ctx context.Context) (string, bool) {
 }
 
 // StartOperation writes op as running, in a short transaction of its own, and sends the
-// notice. A row of the id that is there already (an earlier attempt, or an earlier run of
-// the key) becomes running again with this attempt; its last_error stays.
+// notice. A running row of the id (an earlier attempt) takes this attempt; its last_error
+// stays. A finished row is never opened again: a replay or a reuse of its key changes
+// nothing and sends nothing.
 func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error {
 	var actor any
 	if len(op.Actor) > 0 {
 		actor = string(op.Actor)
 	}
 	return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO inventory_operations
+		tag, err := tx.Exec(ctx, `INSERT INTO inventory_operations
 			(id, kind, subject, status, workflow_id, attempt, actor)
 			VALUES ($1, $2, $3, 'running', NULLIF($4, ''), $5, $6::jsonb)
 			ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, subject = EXCLUDED.subject,
 				status = 'running', workflow_id = EXCLUDED.workflow_id, attempt = EXCLUDED.attempt,
-				actor = EXCLUDED.actor, problem = NULL, finished_at = NULL,
-				updated_at = clock_timestamp()`,
-			op.ID, op.Kind, op.Subject, op.WorkflowID, op.Attempt, actor); err != nil {
+				actor = EXCLUDED.actor, updated_at = clock_timestamp()
+			WHERE inventory_operations.status = 'running'`,
+			op.ID, op.Kind, op.Subject, op.WorkflowID, op.Attempt, actor)
+		if err != nil || tag.RowsAffected() == 0 {
 			return err
 		}
 		return notifyOperation(ctx, tx, op.ID)
@@ -79,14 +81,16 @@ func StartOperation(ctx context.Context, pool *pgxpool.Pool, op Operation) error
 // FinishOperation ends the operation id with the answer a, in tx, the write's own
 // transaction: succeeded, or failed with the problem when a.Status is 400 or more. So the
 // row's end commits with the stock write, or not at all. The notice goes at the commit. An
-// id with no row (an activity started with no record) changes nothing and sends nothing.
+// id with no running row (an activity started with no record, or a finished one) changes
+// nothing and sends nothing.
 func FinishOperation(ctx context.Context, tx pgx.Tx, id string, a Answer) error {
 	status, problem := "succeeded", []byte(nil)
 	if a.Status >= 400 {
 		status, problem = "failed", a.Body
 	}
 	tag, err := tx.Exec(ctx, `UPDATE inventory_operations SET status = $2, problem = $3::jsonb,
-		finished_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1`,
+		finished_at = clock_timestamp(), updated_at = clock_timestamp()
+		WHERE id = $1 AND status = 'running'`,
 		id, status, nullJSON(problem))
 	if err != nil || tag.RowsAffected() == 0 {
 		return err

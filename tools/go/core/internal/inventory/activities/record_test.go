@@ -203,3 +203,35 @@ func TestAFailedRecordNeverFailsTheActivity(t *testing.T) {
 		t.Fatal(n, err)
 	}
 }
+
+func TestAReusedKeyLeavesTheFirstRecordAsItIs(t *testing.T) {
+	f, listener := recorded(t)
+	key := newKey()
+	if answer, err := f.tryKey("inventory.ItemCreate", key, nil, map[string]any{"kind_id": "hardware", "name": "M3 bolt"}); err != nil || answer.Status != 201 {
+		t.Fatal(answer.Status, err)
+	}
+	notices(t, listener)
+	before := operation(t, f.pool, key)
+
+	// The same key with another activity and input: the ledger's 422, and the first record
+	// keeps its kind, its status and its result.
+	other, err := f.tryKey("inventory.KindCreate", key, nil, map[string]any{"id": "other", "name": "O", "parent_id": "consumable"})
+	if err != nil || other.Status != 422 {
+		t.Fatal(other.Status, err)
+	}
+	// A plain replay (same activity, same input) leaves it as it is too.
+	if again, err := f.tryKey("inventory.ItemCreate", key, nil, map[string]any{"kind_id": "hardware", "name": "M3 bolt"}); err != nil || again.Status != 201 {
+		t.Fatal(again.Status, err)
+	}
+	if got := notices(t, listener); len(got) != 0 {
+		t.Fatalf("notices %v", got)
+	}
+	after := operation(t, f.pool, key)
+	if after.status != "succeeded" || after.kind != "inventory.ItemCreate" || after.subject != before.subject || after.problem != nil {
+		t.Fatalf("%+v", after)
+	}
+	op, _, err := store.ReadOperation(context.Background(), f.pool, key, nil)
+	if err != nil || op.Result == nil {
+		t.Fatalf("%+v %v", op, err)
+	}
+}
