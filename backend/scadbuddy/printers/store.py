@@ -176,6 +176,12 @@ def _drop_override_slots(conn: Connection[DictRow], merged: str, into: str) -> N
     conn.execute("DELETE FROM filament_override_slots WHERE printer_id = %s", (merged,))
 
 
+def _drop_unknown_trays(conn: Connection[DictRow], merged: str, into: str) -> None:
+    """#7143: the merged printer's unknown-tray rows are dropped, not moved. The kept
+    printer's next report records what it shows."""
+    conn.execute("DELETE FROM filament_unknown_trays WHERE printer_id = %s", (merged,))
+
+
 def _repoint_k_values(table: str) -> RepointHook:
     def repoint(conn: Connection[DictRow], merged: str, into: str) -> None:
         from scadbuddy.filament.types import repoint_k_values
@@ -418,6 +424,9 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     ),
     # #6264: the slots of override tags (dropped; the kept printer's reconcile redoes them).
     PrinterReference("filament_override_slots", "printer_id", repoint=_drop_override_slots),
+    # #7143: the unknown trays a printer reported (dropped; the kept printer's report
+    # records them again).
+    PrinterReference("filament_unknown_trays", "printer_id", repoint=_drop_unknown_trays),
     # #7276: ScadBuddy's K-profile notes and slot presets (``into``'s wins a key both have).
     PrinterReference(
         "printer_kprofile_notes",
