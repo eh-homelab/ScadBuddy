@@ -2594,7 +2594,8 @@ jobs:
   # message, and prints 4 in wide once the length is 6 in; another container cannot add
   # a printer or disable a queue without the admin login; the web page's admin asks for
   # the mounted password and pauses a queue with it; a custom size prints at the queue's
-  # width; a waiting job survives a restart on a PVC-like volume.
+  # width; discovery lists each address of CUPS_SNMP_SUBNETS; a waiting job and a
+  # queue added outside CUPS_QUEUES survive a restart on a PVC-like volume.
   # In the `image` lane, and in `CI Summary`'s needs.
   cups-image:
     name: CUPS image build and smoke
@@ -2652,10 +2653,13 @@ jobs:
           queues=$'S-EDCDU03-2x1 w144h72 zebra://fakezebra:9100?length=203&interval=2 2 x 1 in\nS-EDCDU03-4x6 w288h432 zebra://fakezebra:9100?length=1218&interval=2 4 x 6 in'
           adm="$RUNNER_TEMP/cups-admin" && mkdir -p "$adm" && echo 'ci-admin-pw' > "$adm/password" && chmod 0644 "$adm/password"
           docker run -d --name cups --network cupsci -p 18631:8631 -v "$adm:/run/secrets/cups-admin:ro" \
-            -e CUPS_QUEUES="$queues" scadbuddy-cups:ci
+            -e CUPS_SNMP_SUBNETS='192.0.2.0/30 198.51.100.7/32' -e CUPS_QUEUES="$queues" scadbuddy-cups:ci
           for _ in $(seq 30); do docker exec cups lpstat -p S-EDCDU03-4x6 2>/dev/null | grep -q 'is idle' && break; sleep 1; done
           docker exec cups lpstat -p S-EDCDU03-4x6 | grep -q 'is idle' || { docker logs cups; exit 1; }
           test "$(docker exec cups id -u)" = 10001
+          # Discovery asks each host address of CUPS_SNMP_SUBNETS by unicast.
+          test "$(docker exec cups grep -c '^Address ' /var/lib/cups/etc/snmp.conf)" = 3
+          docker exec cups grep -qx 'Address 198.51.100.7' /var/lib/cups/etc/snmp.conf
           docker exec cups lpstat -d | grep -q 'S-EDCDU03-2x1$'
           # Each queue's PPD offers only its own size.
           test "$(docker exec cups grep -c '^\*PageSize ' /var/lib/cups/etc/ppd/S-EDCDU03-4x6.ppd)" = 1
@@ -2714,8 +2718,14 @@ jobs:
           persist
           docker exec cups-state sh -c 'echo held > /tmp/t.txt && lp -d S-EDCDU03-2x1 /tmp/t.txt'
           docker stop -t 10 cups-state && docker rm cups-state
+          # A queue added outside CUPS_QUEUES (as on the admin page) is kept, and the
+          # first CUPS_QUEUES queue stays the default.
+          docker run --rm -v "$state:/var/lib/cups" --entrypoint sh scadbuddy-cups:ci -c \
+            "printf '<DefaultPrinter Other>\nDeviceURI ipp://192.0.2.9/ipp/print\nState Idle\nAccepting Yes\nShared Yes\n</DefaultPrinter>\n' >> /var/lib/cups/etc/printers.conf"
           persist
           docker exec cups-state lpstat -o | grep -q '^S-EDCDU03-2x1-1 ' || { docker logs cups-state; exit 1; }
+          docker exec cups-state lpstat -p Other >/dev/null
+          docker exec cups-state lpstat -d | grep -q 'S-EDCDU03-2x1$'
           echo "CUPS image OK"
 
   # PR-only, and ALWAYS on a PR. A push has no base to diff against and no PR

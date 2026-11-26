@@ -71,14 +71,26 @@ never cancelled for the wrong labels. Only that queue waits; the others print.
   401 without it and 200 with it (the CI smoke checks both, and a pause through the web
   page). This holds inside the pod too: `kubectl exec … cupsdisable` is refused, because
   it cannot log in.
-  Changes made on the web page stay until the next start; with `CUPS_QUEUES` set,
-  `start.sh` then rewrites the queues from env.
+  A queue added on the web page stays; changes made there to a `CUPS_QUEUES` queue stay
+  until the next start, which rewrites that queue from env.
 - TLS ends at the shared Envoy Gateway; cupsd serves plain HTTP. Clients add the printer
   as `ipps://cups.internal.nullreference.io/printers/<queue>`, e.g. `S-EDCDU03-2x1`
   (Windows: "Select a shared printer by name" with the `https://` form and the Microsoft
   PS Class Driver).
 - No mDNS: AirPrint discovery does not cross into the cluster, so a phone or computer adds
   the printer by that URL.
+- Finding printers: the admin page's "Find New Printers" lists what CUPS's `snmp`
+  backend finds. Its default asks the pod's own broadcast address, and mDNS stays on its
+  own segment, so neither reaches a LAN printer from the cluster. With
+  `CUPS_SNMP_SUBNETS` set (CIDRs, /22 or narrower, at most 1024 addresses in all),
+  `start.sh` writes `snmp.conf` listing every host address, and the backend asks each
+  one by unicast SNMP (community `public`), which crosses VLANs. Measured 2026-11-26 from
+  the prod pod over 172.16.0.0/24: it found the Zebra as `socket://172.16.0.53`
+  ("Zebra Technologies ZTC GK420t") in about 2 s. A printer with SNMP off is not found;
+  add it by URI.
+- Queues added on the admin page are kept: with `CUPS_QUEUES` set, `start.sh` rewrites
+  only the queues it declared (listed in `/var/lib/cups/etc/scadbuddy-queues`), removes
+  one dropped from `CUPS_QUEUES`, and keeps the first `CUPS_QUEUES` queue the default.
 
 The printer (measured 2026-11-25 on its web page and with `~HS`/`~HD` on :9100): Zebra
 GK420t, 203 dpi, firmware V61.17.17Z (Zebra's last for this model), direct thermal, gap
