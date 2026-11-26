@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
 import { AttachmentRefsSchema } from '../attachments/store.js'
 import { SessionBrowserInput } from './browserOptions.js'
 import { PROTOCOL_VERSION } from './protocol.js'
@@ -17,20 +16,15 @@ export const MESSAGE_MAX = 32_000
 
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1).max(200)
-/** The id of an approval or a question the client answers. */
+/** The id of a queued message the client removes or edits. */
 const answerId = z.string().min(1).max(200)
 
 /**
  * Whether a refused frame's `sessionId` is one the schema would take, so a
- * refusal echoes only such an id (staleImages here, routes/chat.ts `refusedAnswer`).
+ * refusal echoes only such an id (staleImages here).
  */
 export function isSessionId(value: unknown): value is string {
   return sessionId.safeParse(value).success
-}
-
-/** Whether a refused answer's `id` is one the schema would take (routes/chat.ts `refusedAnswer`). */
-export function isAnswerId(value: unknown): value is string {
-  return answerId.safeParse(value).success
 }
 
 /** frontend protocol.ts `PageContextSchema`; `page` is whatever the mounted page reports. */
@@ -66,15 +60,6 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     images: AttachmentRefsSchema.optional(),
     /** The new session's browser options (#7027); used only when the message starts a session (no `sessionId`). */
     browser: SessionBrowserInput.optional(),
-  }),
-  z.object({ v, type: z.literal('approval.decision'), sessionId, id: answerId, approve: z.boolean() }),
-  // #940: the user's answer to an AskUserQuestion (gate/questions.ts).
-  z.object({
-    v,
-    type: z.literal('question.answer'),
-    sessionId,
-    id: answerId,
-    answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
   // #6386: a message queued while a turn runs, removed or given new words before it starts.

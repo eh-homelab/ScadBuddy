@@ -335,37 +335,35 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
-  it('names the session and question of a refused answer by the schema\'s own bounds (#2175)', async () => {
+  // #7323: the socket's old answer and decision frames are gone; the panel answers through the
+  // pending-input respond route. One still sent is refused as malformed and names no question.
+  it('refuses the old question.answer and approval.decision frames as malformed', async () => {
     const fake = fakeManager()
     const out: ServerEvent[] = []
     const connection = new ChatConnection(fake.manager, (e) => out.push(e), { log: () => {} })
     await connection.open()
-    // Malformed (no answers), but its ids are ones the schema takes: up to 200 characters.
-    const sessionId = 's'.repeat(150)
-    const id = 'q'.repeat(200)
-    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId, id, answers: [] }))
-    expect(out.at(-1)).toEqual(expect.objectContaining({ type: 'error', code: 'invalid', sessionId, questionId: id }))
-    // One the schema would refuse is not echoed.
-    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId: 's'.repeat(201), id, answers: [] }))
+    const sessionId = randomUUID()
+    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId, id: 'q1', answers: ['yes'] }))
     expect(out.at(-1)).toMatchObject({ type: 'error', code: 'invalid' })
-    expect(out.at(-1)).not.toHaveProperty('sessionId')
     expect(out.at(-1)).not.toHaveProperty('questionId')
+    await connection.receive(JSON.stringify({ v: 1, type: 'approval.decision', sessionId, id: 'a1', approve: true }))
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'invalid' })
     connection.close()
   })
 
-  it('answers an answer sent before the API released the input-hash key as unavailable, to send again', async () => {
+  it('answers an action sent before the API released the input-hash key as unavailable, to send again', async () => {
     const fake = fakeManager()
     const starting = {
       ...fake.manager,
-      questions: { answer: () => Promise.reject(new KeyNotReleasedError('the API has not released the input-hash key yet')) },
+      interrupt: () => Promise.reject(new KeyNotReleasedError('the API has not released the input-hash key yet')),
     } as unknown as SessionManager
     const out: ServerEvent[] = []
     const log = vi.fn()
     const connection = new ChatConnection(starting, (e) => out.push(e), { log })
     await connection.open()
     const sessionId = randomUUID()
-    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId, id: 'q1', answers: ['yes'] }))
-    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'unavailable', sessionId, questionId: 'q1', message: expect.stringMatching(/again/) })
+    await connection.receive(JSON.stringify({ v: 1, type: 'session.interrupt', sessionId }))
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'unavailable', sessionId, message: expect.stringMatching(/again/) })
     expect(log).not.toHaveBeenCalled()
     connection.close()
   })
