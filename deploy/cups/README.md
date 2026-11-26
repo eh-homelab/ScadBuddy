@@ -25,7 +25,8 @@ the client.
   at `/var/lib/cups`; `start.sh` creates both subdirectories and copies in each default
   file that is missing, so a PVC whose root belongs to root (with `fsGroup: 10001`) works.
   cupsd must own and chmod those directories, which is why they are not the volume's
-  root. The cache (`/var/cache/cups`) is rebuilt at start and needs no volume.
+  root. Its cache is `/var/lib/cups/cache`, on the same volume for the same reason (an
+  emptyDir's root is root's too); cupsd rebuilds it when it is missing.
 - Configuration: `/etc/cups/cupsd.conf` and `cups-files.conf`, the image's. Mount a file
   over either to replace it. Leave `CUPS_PRINTER_NAME` unset and `start.sh` declares no
   queue: the queues in `/var/lib/cups/etc` (on the volume, or set by `lpadmin` inside

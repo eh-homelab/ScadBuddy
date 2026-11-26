@@ -5,7 +5,8 @@
 # The configuration is /etc/cups/cupsd.conf and cups-files.conf: the image's, or files
 # mounted over them. The state lives under /var/lib/cups, which may be a volume that
 # starts empty: etc/ is cupsd's ServerRoot (queues, PPDs, TLS files), spool/ its
-# RequestRoot (jobs). Both are created here, so cupsd owns them even when the volume's
+# RequestRoot (jobs), cache/ its CacheDir. They are created here, so cupsd owns them
+# (and may chmod them, which it does at every start) even when the volume's
 # root belongs to root; each file of the image's ServerRoot that etc/ lacks is copied
 # in, and none is overwritten.
 #
@@ -20,7 +21,7 @@
 set -eu
 
 state=/var/lib/cups
-mkdir -p "$state/etc/ppd" "$state/spool/tmp"
+mkdir -p "$state/etc/ppd" "$state/spool/tmp" "$state/cache"
 cp -Rn /usr/local/share/scadbuddy-cups/server-root/. "$state/etc/"
 
 run_cupsd() {

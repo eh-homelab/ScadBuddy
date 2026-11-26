@@ -819,9 +819,9 @@ RUN groupadd --gid 10001 cups \
     && mkdir -p /usr/local/share/scadbuddy-cups \
     && cp -a /etc/cups /usr/local/share/scadbuddy-cups/server-root \
     && rm -f /usr/local/share/scadbuddy-cups/server-root/cupsd.conf /usr/local/share/scadbuddy-cups/server-root/cups-files.conf \
-    && printf 'User cups\nGroup cups\nSystemGroup cups\nServerRoot /var/lib/cups/etc\nRequestRoot /var/lib/cups/spool\nErrorLog stderr\nAccessLog stderr\nPageLog stderr\n' > /etc/cups/cups-files.conf \
-    && mkdir -p /run/cups /var/cache/cups /var/log/cups /var/lib/cups \
-    && chown -R 10001:10001 /run/cups /var/cache/cups /var/log/cups /var/lib/cups
+    && printf 'User cups\nGroup cups\nSystemGroup cups\nServerRoot /var/lib/cups/etc\nRequestRoot /var/lib/cups/spool\nCacheDir /var/lib/cups/cache\nErrorLog stderr\nAccessLog stderr\nPageLog stderr\n' > /etc/cups/cups-files.conf \
+    && mkdir -p /run/cups /var/log/cups /var/lib/cups \
+    && chown -R 10001:10001 /run/cups /var/log/cups /var/lib/cups
 # The configuration (cupsd.conf, cups-files.conf) stays in /etc/cups, the image's or
 # mounted over it. The state (queues, PPDs, jobs) lives in subdirectories of
 # /var/lib/cups that start.sh creates, so a volume there (its root owned by root, as a
