@@ -14,6 +14,7 @@ export type EntityLink = Schemas['EntityLink']
 export type EntityLinkInput = Schemas['LinkInput']
 export type EntityLinkPatch = Schemas['LinkPatch']
 export type EntityProperty = Schemas['EntityProperty']
+export type PropertyChange = Schemas['PropertyChange']
 export type PropertyValue = EntityProperty['value']
 export type KindPropertySchema = Schemas['KindPropertySchema']
 
@@ -74,6 +75,11 @@ export const entityApi = {
   kindProperties: (kind: string) =>
     request<{ properties: Record<string, Record<string, PropertyValue>> }>(`/entity-kinds/${encodeURIComponent(kind)}/properties`).then(
       (body) => body.properties,
+    ),
+  /** #6949 — each set and remove of the entity's keys (only `key`'s when given), newest first. */
+  propertyHistory: (entity: string, key?: string) =>
+    request<{ changes: PropertyChange[] }>(`${base(entity)}/properties/history${key === undefined ? '' : `?key=${encodeURIComponent(key)}`}`).then(
+      (body) => body.changes,
     ),
   propertySchema: (kind: string) => request<KindPropertySchema>(`/entity-kinds/${encodeURIComponent(kind)}/property-schema`),
   /** Replaces the kind's whole schema; a bad one is 422 `bad_property_schema`, and `item`'s is its item kinds' (409). */

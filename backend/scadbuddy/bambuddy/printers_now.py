@@ -43,7 +43,7 @@ from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import is_fresh, status_from_report
-from scadbuddy.printers.store import PrinterStore
+from scadbuddy.printers.store import BAMBUDDY_ACTOR, PrinterStore
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +496,7 @@ async def printers_now(
             name=printer.name,
             model=printer.model,
             listed=listed,
+            by=BAMBUDDY_ACTOR,
         )
         for printer in active
     ]

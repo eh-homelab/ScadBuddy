@@ -358,6 +358,7 @@ describe('entity property tools', () => {
   it('tiers the reads as read and the two writes as write, and maps each to its route', () => {
     const expected: Record<string, [string, string]> = {
       entity_property_list: ['read', 'GET /api/v1/entities/{ref}/properties'],
+      entity_property_history: ['read', 'GET /api/v1/entities/{ref}/properties/history'],
       entity_property_set: ['write', 'PATCH /api/v1/entities/{ref}/properties'],
       entity_property_schema_set: ['write', 'PUT /api/v1/entity-kinds/{kind}/property-schema'],
     }
@@ -405,6 +406,31 @@ describe('entity property tools', () => {
     const renamed = firstText(await runTool(tool('entity_property_set'), { entity: TYPE, set: { gtin: null, ean: ['0123'] } }, ctx()))
     expect(renamed).toMatchObject({ properties: [{ key: 'ean' }] })
     expect(bodies).toEqual([{ set: { gtin: null, ean: ['0123'] } }])
+  })
+
+  it("reads a key's history as untrusted data, passing the key and limit on (#6949)", async () => {
+    const ITEM = 'item:x'
+    const changes = [{ key: 'colour_name', op: 'set', old: 'Gold', new: 'Silk Gold', source: 'manual', at: '2026-11-21T10:00:00Z', actor: { kind: 'agent' } }]
+    const seen: string[] = []
+    server.use(
+      http.get(`${base(ITEM)}/properties/history`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ changes })
+      }),
+    )
+    const result = await tool('entity_property_history').execute({ entity: ITEM, key: 'colour_name', limit: 5 }, ctx())
+    expect(firstText(result)).toEqual({ changes })
+    expect(JSON.stringify(await runTool(tool('entity_property_history'), { entity: ITEM }, ctx()))).toContain('untrusted_data')
+    expect(seen[0]).toBe('?key=colour_name&limit=5')
+    expect(seen[1]).toBe('')
+    expect(() => tool('entity_property_history').parse({ entity: ITEM, limit: 501 })).toThrow()
+  })
+
+  it("reads a kind's schema history", async () => {
+    const changes = [{ old: null, new: { type: 'object' }, at: '2026-11-21T10:00:00Z', actor: { kind: 'browser' } }]
+    server.use(http.get(`${BACKEND}/api/v1/entity-kinds/spool_type/property-schema/history`, () => HttpResponse.json({ changes })))
+    expect(firstText(await tool('entity_property_schema_history').execute({ kind: 'spool_type' }, ctx()))).toEqual({ changes })
+    expect(tool('entity_property_schema_history').risk).toBe('read')
   })
 
   it('refuses a bad key or an empty set before it sends anything', () => {

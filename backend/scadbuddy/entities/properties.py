@@ -15,7 +15,7 @@ import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, best_match
@@ -24,6 +24,7 @@ from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from scadbuddy.entities.actor import set_actor
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import KINDS, EntityNotFound, EntityStore, UnknownEntityKind
 from scadbuddy.orders.models import Actor
@@ -115,6 +116,28 @@ class EntityProperty(BaseModel):
     source: str
     updated_at: datetime
     updated_by: Actor
+
+
+class PropertyChange(BaseModel):
+    """One set or remove of a key, as the history subscriber recorded it (#6949). A remove's
+    ``new`` and ``source`` are null; a first set's ``old`` is."""
+
+    key: str
+    op: Literal["set", "remove"]
+    old: PropertyValue | None
+    new: PropertyValue | None
+    source: str | None
+    at: datetime
+    actor: Actor
+
+
+class SchemaChange(BaseModel):
+    """One write of a schema (#6949); ``old`` is null for the first."""
+
+    old: dict[str, Any] | None
+    new: dict[str, Any]
+    at: datetime
+    actor: Actor
 
 
 class PropertyPatch(BaseModel):
@@ -477,9 +500,13 @@ class EntityPropertyStore:
         leave an entity past the limit; it can still remove and change keys), and
         `MissingRequiredProperties` for a patch that removes or empties a required key that
         has a value (spec 6.3b; a key still missing refuses nothing). The entity's
-        properties after it, by key. A patch that only removes keys makes no entity row."""
+        properties after it, by key. A patch that only removes keys makes no entity row.
+        ``by`` is the history's actor (`set_actor`, which takes the event log's lock):
+        call it before the transaction locks any entity row."""
         schema = schema_for(conn, ref)
         _checked(patch, schema)
+        # The event log's lock before the entity row's (`entities/actor.py`).
+        set_actor(conn, by)
         if all(value is None for value in patch.set.values()):
             found = self.entities.find(conn, ref)
             if found is None:
@@ -556,7 +583,8 @@ class EntityPropertyStore:
         if kind == ITEM:
             raise SchemaOwnedByKind(kind)
         check_schema(schema, allow_required=kind in REQUIRED_KINDS)
-        with self.pool.connection() as conn:
+        with self.pool.connection() as conn, conn.transaction():
+            set_actor(conn, by)
             row = conn.execute(
                 "INSERT INTO entity_property_schemas (kind, schema, updated_by)"
                 " VALUES (%s, %s, %s) ON CONFLICT (kind) DO UPDATE"
@@ -566,6 +594,31 @@ class EntityPropertyStore:
             ).fetchone()
         assert row is not None
         return dict(row["schema"])
+
+    def history(self, ref: EntityRef, key: str | None, limit: int) -> builtins.list[PropertyChange]:
+        """Up to `limit` changes of `ref`'s keys (only `key`'s when given), newest first.
+        Read from `entity_property_history`, which the history subscriber fills about
+        its poll (2 s) after a commit. Kept after the entity goes."""
+        where = " AND key = %s" if key is not None else ""
+        args: tuple[Any, ...] = (ref.kind, ref.ref, *(() if key is None else (key,)), limit)
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT key, op, old, new, source, at, actor FROM entity_property_history"
+                f" WHERE kind = %s AND ref = %s{where} ORDER BY event_seq DESC LIMIT %s",
+                args,
+            ).fetchall()
+        return [PropertyChange.model_validate(dict(r)) for r in rows]
+
+    def schema_history(self, owner: str, limit: int) -> builtins.list[SchemaChange]:
+        """Up to `limit` writes of `owner`'s schema (``kind:<kind>`` or
+        ``item_kind:<id>``), newest first, from `entity_property_schema_history`."""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT old, new, at, actor FROM entity_property_schema_history"
+                " WHERE owner = %s ORDER BY event_seq DESC LIMIT %s",
+                (owner, limit),
+            ).fetchall()
+        return [SchemaChange.model_validate(dict(r)) for r in rows]
 
     def keys_in_use(self, kind: str) -> builtins.list[tuple[str, int]]:
         """Each key entities of `kind` have, with how many have it, by key."""

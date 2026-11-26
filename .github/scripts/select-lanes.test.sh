@@ -42,6 +42,8 @@ expect "false false false true false" deploy/cups/start.sh
 expect "false false false true false" scripts/gen-api-request-defaults.mjs
 expect "false false false false false" scripts/generate-go-client.sh
 expect "false false false true false" tools/go/bambuddy-fs/main.go
+expect "true false false true false" tools/go/core/internal/bus/testdata/history/entity_property.changed.json
+expect "false false false true false" tools/go/core/internal/bus/in.go
 expect "false false false true false" go.work
 expect "false false false true false" vendor/modules.txt
 expect "false false false true false" .github/scripts/bambuddy-fs-live.sh

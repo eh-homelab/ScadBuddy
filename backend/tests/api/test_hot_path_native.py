@@ -70,6 +70,7 @@ from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.no_bambuddy import BambuddyCalledError, forbid_bambuddy
 from tests.support.operations import press
+from tests.support.printers import MERGED_BY
 from tests.support.saved_outputs import rewrite_model
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal, *needs_fake_lan]
@@ -195,7 +196,7 @@ def lan_row(
         cert_sha256=lan.cert_sha256,
     )
     if bambuddy_printer_id is not None:
-        printers.store.link_bambuddy(row.id, bambuddy_printer_id)
+        printers.store.link_bambuddy(row.id, bambuddy_printer_id, by=MERGED_BY)
     printers.store.patch(row.id, PrinterPatch(preferred_path=preferred_path))  # type: ignore[arg-type]
     _call(client, printers.watches.ensure, row.id)
     deadline = time.monotonic() + 30
@@ -727,7 +728,7 @@ def test_a_stale_report_runs_the_bambuddy_path(
     printers.store.link_lan(
         row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
     )
-    printers.store.link_bambuddy(row.id, 1)
+    printers.store.link_bambuddy(row.id, 1, by=MERGED_BY)
     printers.reports.put(row.id, {"gcode_state": "IDLE"}, datetime.now(UTC) - timedelta(minutes=2))
     settings = _state(native_app).settings_store.load()
 

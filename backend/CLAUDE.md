@@ -1835,11 +1835,16 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `stock_moves.entity_id` names stays in place, since that foreign key keeps it as the
   move's history, R-P2-4), `properties.py` (#7026,
   `entity_properties` and `entity_property_schemas`; the rules are in
-  `docs/features/spools-and-filament.md` "Properties"), `operations.py` (the
+  `docs/features/spools-and-filament.md` "Properties"; `history` and `schema_history` read the
+  tables the Go history subscriber fills, #6949), `actor.py` (`set_actor`: every writer that
+  removes a property or deletes an entity calls it first in its transaction, before any row
+  lock, since it takes the event log's lock; the triggers refuse a remove without it;
+  `SWEEP_ACTOR`), `operations.py` (the
   `entity_attachment_add` kind on the `library` queue), `activity.py`, `problems.py` and
   `component.py` (`ENTITIES`). Routes `api/entity_attachments.py` and `api/entity_links.py`
   under `/entities/{kind}:{ref}`, and `api/entity_properties.py`
-  (`/entities/{ref}/properties`, `/entity-kinds/{kind}/properties`, `…/property-schema`); the file and thumbnail GETs are scriptless
+  (`/entities/{ref}/properties`, `…/properties/history`, `/entity-kinds/{kind}/properties`,
+  `…/property-schema`, `…/property-schema/history`); the file and thumbnail GETs are scriptless
   (`auth/routes.py` `SCRIPTLESS_GETS`). The migration `20261122T0426Z_entities.sql` keeps
   `order_attachments` as a view, with a trigger that fills `entity_id`, for the previous
   build's replicas during the roll; `20261123T0651Z_drop_order_attachments_view.sql` drops them (#6960).

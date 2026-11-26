@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { EntityAttachment, EntityLink, EntityLinkInput, EntityLinkPatch, EntityAttachmentPatch, EntityProperty, PropertyValue } from '../../components/entities/api'
+import type { EntityAttachment, EntityLink, EntityLinkInput, EntityLinkPatch, EntityAttachmentPatch, EntityProperty, PropertyChange, PropertyValue } from '../../components/entities/api'
 import { ORDER_KINDS, PRINT_ARCHIVE, entityParts } from '../../components/entities/api'
 import { THUMBNAILED } from '../../components/entities/attachmentMedia'
 import { parts, sha256, sniff } from './orders/attachments'
@@ -49,6 +49,8 @@ function fresh() {
     /** Each entity's properties, by key. */
     properties: new Map<string, EntityProperty[]>(),
     /** Each PATCH's `set`, as the route received it. */
+    /** Each entity's property changes, newest first. */
+    history: new Map<string, PropertyChange[]>(),
     propertyPatches: [] as { entity: string; set: Record<string, unknown> }[],
     schemas: seededSchemas(),
   }
@@ -116,6 +118,12 @@ export function seedEntityProperties(entity: string, values: Record<string, Prop
   const list = (entityMock.properties.get(entity) ?? []).filter((p) => !(p.key in values))
   for (const [key, value] of Object.entries(values)) list.push({ key, value, source: 'manual', updated_at: now(), updated_by: BROWSER })
   entityMock.properties.set(entity, list.sort((a, b) => a.key.localeCompare(b.key)))
+}
+
+/** Adds a change as the newest of `entity`'s history; `source` is `manual` for a set. */
+export function seedPropertyChange(entity: string, change: Omit<PropertyChange, 'source' | 'actor'> & Partial<Pick<PropertyChange, 'source' | 'actor'>>): void {
+  const row: PropertyChange = { source: change.op === 'set' ? 'manual' : null, actor: BROWSER, ...change }
+  entityMock.history.set(entity, [row, ...(entityMock.history.get(entity) ?? [])])
 }
 
 const PROPERTY_TYPES: Record<string, (value: unknown) => boolean> = {
@@ -396,8 +404,23 @@ export const handlers = [
     if (kept.length > Math.max(MAX_KEYS, before.length)) {
       return coded(request, 422, 'bad_property_value', `property '*': an entity has at most ${MAX_KEYS} keys`)
     }
+    for (const [key, value] of Object.entries(set)) {
+      const old = before.find((p) => p.key === key)?.value ?? null
+      if (value === null) {
+        if (old !== null) seedPropertyChange(entity, { key, op: 'remove', old, new: null, at: now() })
+      } else seedPropertyChange(entity, { key, op: 'set', old, new: value as PropertyValue, at: now() })
+    }
     entityMock.properties.set(entity, kept.sort((a, b) => a.key.localeCompare(b.key)))
     return HttpResponse.json({ properties: entityMock.properties.get(entity) })
+  }),
+  http.get('/api/v1/entities/:ref/properties/history', ({ request, params }) => {
+    const entity = refOf(params)
+    const url = new URL(request.url)
+    const key = url.searchParams.get('key')
+    const limit = Number(url.searchParams.get('limit') ?? 100)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) return problem(request, 422, 'limit: from 1 to 500')
+    const changes = (entityMock.history.get(entity) ?? []).filter((c) => key === null || c.key === key)
+    return HttpResponse.json({ changes: changes.slice(0, limit) })
   }),
   http.get('/api/v1/entities/:ref/property-schema', ({ request, params }) => {
     const entity = refOf(params)

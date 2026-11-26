@@ -34,6 +34,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/history"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/mcprelay"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/notify"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/ordercosts"
@@ -129,6 +130,8 @@ func run(ctx context.Context, env func(string) string) error {
 		}
 		servers[crudAddress] = front.CRUDOnly(crudRouter)
 	}
+	// The history subscriber (#6949): every replica runs it, and one at a time applies.
+	go history.Run(ctx, pool, history.Options{})
 	return serve(ctx, servers)
 }
 
