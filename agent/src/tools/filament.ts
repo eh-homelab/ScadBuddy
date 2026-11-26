@@ -1366,7 +1366,9 @@ const tools: Tool[] = [
     description:
       "A spool's timeline and metrics: the newest 50 ledger `events` (newest first, with `actor`, `order_id` " +
       'and `archive_id`), its `metrics` (use, waste, cost used, value left, burn rate, empty day, days since ' +
-      'opened and last use, hours outside dry storage, AMS error), `type_ams_error`, `currency` and ' +
+      'opened and last use, hours outside dry storage, AMS error; the metres its lengthed prints extruded, `used_m`, ' +
+      'the density they imply, `implied_density_g_cm3`, against the type\'s `density_g_cm3`, and `density_mismatch` ' +
+      'when they are more than 5% apart, a note to check the type or the label, never a booking), `type_ams_error`, `currency` and ' +
       '`window_days`. `truncated` is true when older events exist. filament_spool_events lists every event, oldest first, so the ' +
       'older events are at the start of its list. ' +
       'The grams-left `series` is left out. 404 for no such spool.',

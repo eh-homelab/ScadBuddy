@@ -254,6 +254,24 @@ change:
   and the label weight is right (a wrong density on the type), or the drift matches
   the empty weight's placeholder (a wrong empty weight), or the drift matches the
   label's shortfall (a wrong label weight). With no fit it names none.
+- As built in #7685: measured on `backend/tests/printers/fixtures/rack-slice-info-h2c.config`
+  (a real H2C slice): each `<filament>` of `slice_info.config` carries `used_m` beside
+  `used_g` (`used_m="2.01" used_g="6.09"` for filament 1). `slicing/slice_info.py`
+  `plate_uses` reads both, the metres moved onto the printed filament as the grams are;
+  `LanUploaded.length_by_slot` and `SlotUse.length_m` carry them, and `print_uses.py` writes
+  `data.length_m` on the `print_started` (absent when the plate gave no length) and
+  `prints.book_end` copies it onto the `print_ended` (`0.0` on a `not_applied` end, as its
+  grams are 0). `metrics.py` `implied_density` is the formula above with the diameter in
+  millimetres (`grams / (metres * 100 * pi * (diameter_mm / 20) ** 2)`), over the plates
+  that carry a length only; `SpoolMetrics` gains `used_m`, `implied_density_g_cm3`,
+  `density_g_cm3` (the spool's effective type density) and `density_mismatch`
+  (`DENSITY_TOLERANCE` 0.05). The page's Density tile says the mismatch ("The prints imply
+  1.31 g/cm³, 6% over the type's 1.24 g/cm³: check the type's density or the label."). The
+  drift's likely cause is the frontend's `driftCause.ts`, checked in this order, the first
+  fit winning, none under a gram of drift: the label weight (the drift is the start gap,
+  within a gram or a tenth), the density (the drift is `used_g × (1 − type / implied)`, the
+  same tolerance, with a mismatch), then a placeholder empty weight. The sentence follows the
+  drift sentence in the Weight section ("Likely cause: …").
 
 ### 5.7 Carriers (slice E, #7278)
 
