@@ -18,6 +18,7 @@ expect true  scripts/generate-go-client.jq
 expect true  .github/scripts/generate-go-client-jq.test.sh
 expect true  .github/workflows/go-module-ci.yml
 expect true  tools/go/bambuddy-fs/Dockerfile
+expect true  tools/go/fleetd/main.go
 expect true  .github/workflows/ci.yml
 expect true  .github/scripts/select-go.sh
 expect true  .github/scripts/select-go.test.sh
