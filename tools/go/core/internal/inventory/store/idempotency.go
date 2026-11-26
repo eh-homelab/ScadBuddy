@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/problem"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
 )
 
@@ -21,8 +22,6 @@ const (
 	lockClass = int32(0x5343_5251)
 	// keyProblem is crud/idempotency.py KEY_PROBLEM.
 	keyProblem = "https://scadbuddy.dev/problems/crud/idempotency-key-reused"
-	// problems is inventory/problems.py PROBLEMS: a refusal's type is it and its code.
-	problems = "https://scadbuddy.dev/problems/inventory/"
 
 	// requestSelectSQL and requestInsertSQL are crud/shared/crud_requests_select.sql and
 	// crud_requests_insert.sql, which crud/idempotency.py runs (#7667 §5.1).
@@ -46,38 +45,8 @@ type Answer struct {
 	Body   json.RawMessage `json:"body"`
 }
 
-// Refused is a write's refusal: an answer, not a failure (ruling C4). Write records it as
-// a problem whose type is inventory/problems.py PROBLEMS plus Code, so a retry gets the
-// same refusal and Temporal never retries a 4xx. What the write did before it refused
-// does not commit.
-type Refused struct {
-	Status   int
-	Code     string
-	Detail   string
-	Problems any
-	// Type replaces the problem's type, for a code another area owns (bad_property_schema
-	// keeps the entities' type, inventory/problems.py).
-	Type string
-}
-
-func (r *Refused) Error() string { return r.Code + ": " + r.Detail }
-
-func (r *Refused) body() map[string]any {
-	body := map[string]any{
-		"type":   problems + r.Code,
-		"title":  httpx.Title(r.Status),
-		"status": r.Status,
-		"detail": r.Detail,
-		"code":   r.Code,
-	}
-	if r.Problems != nil {
-		body["problems"] = r.Problems
-	}
-	if r.Type != "" {
-		body["type"] = r.Type
-	}
-	return body
-}
+// Refused is a write's refusal (problem.Refused): an answer, not a failure (ruling C4).
+type Refused = problem.Refused
 
 // Write runs do once per (w.Caller, w.Key), in one transaction (Tx) with its crud_requests
 // row, as crud/idempotency.py idempotent_write does. It takes the key's lock, so a second
@@ -144,7 +113,7 @@ func run(ctx context.Context, tx pgx.Tx, do func(pgx.Tx) (int, any, error)) (int
 		if err := sp.Rollback(ctx); err != nil {
 			return 0, nil, err
 		}
-		return refused.Status, refused.body(), nil
+		return refused.Status, refused.Body(), nil
 	}
 	if err != nil {
 		return 0, nil, err

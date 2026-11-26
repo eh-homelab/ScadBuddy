@@ -12,7 +12,7 @@ func (e ErrNotBuilt) Error() string {
 }
 
 // Registry maps the catalog's handlers to their implementations. The per-step
-// interfaces an implementation satisfies are declared with the base flow.
+// interfaces an implementation satisfies are in steps.go.
 type Registry struct {
 	Catalog *Catalog
 	impls   map[string]any
@@ -45,4 +45,25 @@ func (r *Registry) For(step Step, id string) (any, error) {
 		return nil, ErrNotBuilt{Handler: id}
 	}
 	return impl, nil
+}
+
+// Default is the full catalog (Builtin) with the handlers K1 builds, writing through st:
+// the defaults of the counted classes and refuse. Every other handler is ErrNotBuilt until
+// its phase builds it (R-K1-7).
+func Default(st Stock) *Registry {
+	r := &Registry{Catalog: Builtin()}
+	for id, impl := range map[string]any{
+		"refuse":           refuse{},
+		"receive.lot":      receiveLot{st},
+		"receive.units":    receiveUnits{st},
+		"consume.lot_fifo": consumeLotFIFO{st},
+		"count.lot":        countLot{st},
+		"move.place":       movePlace{st},
+		"retire.default":   retireDefault{st},
+		"cost.lot_fifo":    costLotFIFO{st},
+		"cost.unit":        costUnit{st},
+	} {
+		r.Implement(id, impl)
+	}
+	return r
 }
