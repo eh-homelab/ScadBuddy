@@ -98,9 +98,9 @@ The stored setting `store_backend` (seeded from the environment, default `local`
 ### Keys and content addressing
 
 `ContentStore` (`scadbuddy/store/content.py`) maps a logical key to a `BlobRef` (sha256,
-kind, backend, backend id, size; `scadbuddy/store/content_models.py:58-63`), indexed in
+kind, backend, backend id, size; `scadbuddy/store/content_models.py` `BlobRef`), indexed in
 `store_blobs`. The kinds are `piece`, `snapshot`, `asset`, `font`, `slice`, `library`,
-`workspace`, `media` and `output` (`content_models.py:12-14`). A blob stays alive while a `blob_refs`
+`workspace`, `media`, `output` and `tag_dump` (`content_models.py` `BlobKind`). A blob stays alive while a `blob_refs`
 row holds it (`scadbuddy/store/refs.py:22-30`); unreferenced blobs of the swept kinds are
 deleted after a grace period.
 
@@ -118,10 +118,17 @@ deleted after a grace period.
 | `quote-<sha256>`, `attachment-<sha256>` | order quotes and attachments | `scadbuddy/orders/quote.py:727`, `scadbuddy/orders/attachments.py:121` |
 | `customer-preview-<sha256>`, `customer-file-<sha256>`, `listing-media-<sha256>` | storefront uploads and listing media | `scadbuddy/orders/storefront/intake.py:74`, `scadbuddy/orders/storefront/order_page.py:163`, `scadbuddy/orders/storefront/listings.py:963` |
 | `workspace-<sha256>` | an agent workspace file | `scadbuddy/api/internal_workspace.py:43` |
+| `tag_dump-<sha256>` | a Bambu tag's raw dump (#7905), uploaded by a service through core's shared CRUD area `blobs` (#7958); swept unless its caller holds it | `tools/go/core/internal/blobstore` `IndexKey` |
 
 Processes without store credentials (the slicer) get short-lived transfer URLs instead:
 a presigned S3 GET, or the API's `/api/v1/internal/blobs/{key}` with an HMAC transfer
 token (`scadbuddy/slicing/transfer.py:52-57`, `scadbuddy/slicing/transfer_token.py`).
+A service that stores bytes asks core's shared CRUD area `blobs` (#7958,
+`tools/go/core/internal/blobstore`; client `internal/blobclient`) for an upload: on `s3` a
+presigned PUT of the blob's own object, its length, type and SHA-256 checksum signed in.
+Core reads the object back at the commit, hashes it and writes the `store_blobs` row as
+`BlobIndex.put` does (`backend/tests/fixtures/blob-upload-vectors.json` pins both). Any
+other backend answers 503 `not_configured`.
 
 On `bambuddy` and `s3`, each process that renders or reads pieces (the API and each render
 worker) keeps a bounded cache of them in front of the store (`scadbuddy/store/cache.py`

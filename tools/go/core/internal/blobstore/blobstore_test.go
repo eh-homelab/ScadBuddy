@@ -1,0 +1,559 @@
+package blobstore
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/testdb"
+)
+
+func TestMain(m *testing.M) { testdb.Main(m) }
+
+// The example of AWS's "Authenticating Requests: Using Query Parameters (AWS Signature
+// Version 4)", https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html.
+func TestThePresignIsAWSsExample(t *testing.T) {
+	s3 := S3{
+		Endpoint: "https://s3.amazonaws.com", Region: "us-east-1", Bucket: "examplebucket",
+		AccessKeyID: "AKIAIOSFODNN7EXAMPLE", SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+	}
+	got, err := s3.presign("GET", "test.txt", nil, 24*time.Hour, time.Date(2013, 5, 24, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+		"&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request" +
+		"&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host" +
+		"&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+	if got != want {
+		t.Fatalf("\n got %s\nwant %s", got, want)
+	}
+}
+
+// What botocore's generate_presigned_url (the client Python's store presigns with,
+// store/s3.py) answered for the same PUT and GET on 2026-11-26, its clock fixed at
+// 2026-11-26T12:00:00Z: the backend's venv, botocore with signature_version s3v4 and path
+// addressing, as its own `presign_put` signs.
+func TestThePresignIsBotocores(t *testing.T) {
+	s3 := S3{Endpoint: "http://127.0.0.1:55480", Region: "us-east-1", Bucket: "sb-test", PathStyle: true,
+		AccessKeyID: "testing", SecretAccessKey: "testing"}
+	at := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	key := "t/tag_dump/" + strings.Repeat("ab", 32)
+	put, err := s3.presign("PUT", key, map[string]string{
+		"content-length":        "18",
+		"Content-Type":          "application/octet-stream",
+		"x-amz-acl":             "private",
+		"x-amz-checksum-sha256": "q83vEjRWeJq83vEjRWeJq83vEjRWeJq83vEjRWeJq80=",
+	}, 15*time.Minute, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://127.0.0.1:55480/sb-test/" + key + "?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+		"&X-Amz-Credential=testing%2F20261126%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20261126T120000Z"
+	if want := base + "&X-Amz-Expires=900" +
+		"&X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bx-amz-acl%3Bx-amz-checksum-sha256" +
+		"&X-Amz-Signature=ff3bddb3ae6669f9889c8d8cae38c077d5dd48bf6a5c5f3036bba1f1efe39201"; put != want {
+		t.Errorf("\n got %s\nwant %s", put, want)
+	}
+	get, err := s3.presign("GET", key, nil, time.Minute, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := base + "&X-Amz-Expires=60&X-Amz-SignedHeaders=host" +
+		"&X-Amz-Signature=b7cdf33f45ee3a565e59b5805d13c5885aa4196002cac5773eab4325e9bc0b89"; get != want {
+		t.Errorf("\n got %s\nwant %s", get, want)
+	}
+}
+
+func TestAPathStyleURLNamesTheBucketInThePath(t *testing.T) {
+	s3 := S3{Endpoint: "http://127.0.0.1:9000/", Region: "us-east-1", Bucket: "b", PathStyle: true,
+		AccessKeyID: "k", SecretAccessKey: "s"}
+	got, err := s3.presign("PUT", "p/tag_dump/ab", map[string]string{"Content-Type": "application/octet-stream"},
+		time.Minute, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(got, "http://127.0.0.1:9000/b/p/tag_dump/ab?") ||
+		!strings.Contains(got, "X-Amz-SignedHeaders=content-type%3Bhost&") {
+		t.Fatal(got)
+	}
+}
+
+type vectorCase struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+	ObjectKey string `json:"object_key"`
+	IndexKey  string `json:"index_key"`
+	Before    *struct {
+		BackendID *string        `json:"backend_id"`
+		Slug      *string        `json:"slug"`
+		Meta      map[string]any `json:"meta"`
+		Verified  bool           `json:"verified"`
+	} `json:"before"`
+	Row map[string]any `json:"row"`
+}
+
+func vectors(t *testing.T) (string, []vectorCase) {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(file), "../../../../../backend/tests/fixtures/blob-upload-vectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Prefix string       `json:"prefix"`
+		Cases  []vectorCase `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v.Prefix, v.Cases
+}
+
+func TestTheKeysArePythons(t *testing.T) {
+	prefix, cases := vectors(t)
+	for _, c := range cases {
+		if got := ObjectKey(prefix, c.Kind, c.SHA256); got != c.ObjectKey {
+			t.Errorf("%s: object key %s", c.Name, got)
+		}
+		if got := IndexKey(c.Kind, c.SHA256); got != c.IndexKey {
+			t.Errorf("%s: index key %s", c.Name, got)
+		}
+	}
+}
+
+// row is a store_blobs row as the vectors write it, read as JSON so its numbers compare.
+func row(t *testing.T, pool *pgxpool.Pool, key string) map[string]any {
+	t.Helper()
+	var raw []byte
+	err := pool.QueryRow(context.Background(), `SELECT json_build_object('key', key, 'sha256', sha256,
+ 'kind', kind, 'backend', backend, 'backend_id', backend_id, 'size', size, 'slug', slug, 'meta', meta,
+ 'verified', verified_at IS NOT NULL) FROM store_blobs WHERE key = $1`, key).Scan(&raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestTheRowIsTheOnePythonWrites(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	_, cases := vectors(t)
+	for _, c := range cases {
+		if b := c.Before; b != nil {
+			backendID := c.ObjectKey
+			if b.BackendID != nil {
+				backendID = *b.BackendID
+			}
+			meta, _ := json.Marshal(b.Meta)
+			_, err := pool.Exec(ctx, `INSERT INTO store_blobs
+ (key, sha256, kind, backend, backend_id, size, slug, meta, verified_at)
+ VALUES ($1, $2, $3, 's3', $4, $5, $6, $7, CASE WHEN $8 THEN now() END)`,
+				c.IndexKey, c.SHA256, c.Kind, backendID, c.Size, b.Slug, meta, b.Verified)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		ref := Ref{SHA256: c.SHA256, Kind: c.Kind, Backend: "s3", BackendID: c.ObjectKey, Size: c.Size}
+		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			_, err := putIn(ctx, tx, c.IndexKey, ref)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := row(t, pool, c.IndexKey); !reflect.DeepEqual(got, c.Row) {
+			t.Errorf("%s:\n got %v\nwant %v", c.Name, got, c.Row)
+		}
+	}
+}
+
+func testKeys(t *testing.T) *seal.Keys {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	return &seal.Keys{Current: seal.NewKEK(key)}
+}
+
+func TestATicketOpensOnlyAsSigned(t *testing.T) {
+	keys := testKeys(t)
+	tk := ticket{Caller: "core", Kind: "tag_dump", SHA256: strings.Repeat("a", 64), Size: 9,
+		MediaType: "application/octet-stream", Expires: time.Unix(1_800_000_000, 0).UTC()}
+	id := tk.sign(keys.Current)
+	got, err := openTicket(keys, id)
+	if err != nil || got != tk {
+		t.Fatalf("%+v %v", got, err)
+	}
+	body, mac, _ := strings.Cut(id, ".")
+	forged := base64.URLEncoding.EncodeToString(bytes.Replace(must(base64.URLEncoding.DecodeString(body)),
+		[]byte("\n9\n"), []byte("\n8\n"), 1)) + "." + mac
+	other := &seal.Keys{Current: seal.NewKEK(make([]byte, 32))}
+	for name, bad := range map[string]string{"forged": forged, "no mac": body, "empty": ""} {
+		if _, err := openTicket(keys, bad); err == nil {
+			t.Errorf("%s opened", name)
+		}
+	}
+	if _, err := openTicket(other, id); err == nil {
+		t.Error("another KEK's ticket opened")
+	}
+	// During a rotation the previous KEK's tickets still open.
+	if _, err := openTicket(&seal.Keys{Current: other.Current, Previous: keys.Current}, id); err != nil {
+		t.Error(err)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+func TestTheSettingsResolveAsPythonsDo(t *testing.T) {
+	pool := testdb.New(t)
+	ctx := context.Background()
+	keys := testKeys(t)
+	sealed := seal.SealSecret(keys.Current, "the secret", "settings:store_s3_secret_access_key")
+	secret, _ := json.Marshal(map[string]any{"sealed": map[string]string{
+		"secret": base64.StdEncoding.EncodeToString(sealed.SecretSealed),
+		"dek":    base64.StdEncoding.EncodeToString(sealed.DEKSealed),
+		"kek_id": sealed.KEKID,
+	}})
+	for name, value := range map[string]string{
+		"store_backend":              `"s3"`,
+		"store_s3_bucket":            `"saved-bucket"`,
+		"store_s3_prefix":            `"/p/"`,
+		"store_s3_access_key_id":     `null`,
+		"store_s3_secret_access_key": string(secret),
+		"store_s3_path_style":        `false`,
+		"store_max_count":            `7`,
+	} {
+		if _, err := pool.Exec(ctx, "INSERT INTO settings (name, value) VALUES ($1, $2::jsonb)", name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env := map[string]string{
+		"SCADBUDDY_STORE_S3_ENDPOINT":      "http://s3.test",
+		"SCADBUDDY_STORE_S3_BUCKET":        "env-bucket",
+		"SCADBUDDY_STORE_S3_ACCESS_KEY_ID": "env-key",
+	}
+	store, err := loadStore(ctx, pool, keys, func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A saved clear beats the environment: no access key, so no S3 store.
+	if store.Backend != "s3" || store.S3 != nil || store.MaxCount != 7 || store.MaxTotalBytes != 50<<30 {
+		t.Fatalf("%+v", store)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM settings WHERE name = 'store_s3_access_key_id'"); err != nil {
+		t.Fatal(err)
+	}
+	store, err = loadStore(ctx, pool, keys, func(name string) string { return env[name] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := S3{Endpoint: "http://s3.test", Region: "us-east-1", Bucket: "saved-bucket", Prefix: "p",
+		AccessKeyID: "env-key", SecretAccessKey: "the secret", PathStyle: false}
+	if store.S3 == nil || *store.S3 != want {
+		t.Fatalf("%+v", store.S3)
+	}
+	// A secret sealed under a KEK this process lacks follows the environment.
+	env["SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY"] = "env-secret"
+	store, err = loadStore(ctx, pool, &seal.Keys{Current: seal.NewKEK(make([]byte, 32))},
+		func(name string) string { return env[name] })
+	if err != nil || store.S3 == nil || store.S3.SecretAccessKey != "env-secret" {
+		t.Fatalf("%+v %v", store.S3, err)
+	}
+}
+
+// fakeS3 keeps the objects PUT to it, as S3 does a presigned PUT: the signed headers must be
+// sent, and a body that is not its checksum is refused (BadDigest).
+type fakeS3 struct {
+	mu      sync.Mutex
+	objects map[string][]byte
+	puts    int
+	// status, when set, is every PUT's answer.
+	status int
+}
+
+func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	q := r.URL.Query()
+	if q.Get("X-Amz-Signature") == "" || q.Get("X-Amz-Algorithm") != "AWS4-HMAC-SHA256" {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		f.puts++
+		if f.status != 0 {
+			w.WriteHeader(f.status)
+			return
+		}
+		for _, name := range strings.Split(q.Get("X-Amz-SignedHeaders"), ";") {
+			if name != "host" && name != "content-length" && r.Header.Get(name) == "" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		}
+		body, _ := io.ReadAll(r.Body)
+		sum := sha256.Sum256(body)
+		if r.Header.Get("x-amz-checksum-sha256") != base64.StdEncoding.EncodeToString(sum[:]) {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.objects[r.URL.Path] = body
+	case http.MethodGet:
+		body, ok := f.objects[r.URL.Path]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(body)
+	}
+}
+
+// resolver takes "Bearer <caller>:<scope>,…" as that caller's credential.
+type resolver struct{}
+
+func (resolver) Resolve(_ context.Context, authorization string) *auth.Service {
+	caller, scopes, ok := strings.Cut(strings.TrimPrefix(authorization, "Bearer "), ":")
+	if !ok {
+		return nil
+	}
+	return &auth.Service{Caller: caller, Scopes: strings.Split(scopes, ",")}
+}
+
+type harness struct {
+	t      *testing.T
+	pool   *pgxpool.Pool
+	s3     *fakeS3
+	api    string
+	blobs  *Blobs
+	now    time.Time
+	bucket string
+}
+
+func newHarness(t *testing.T) *harness {
+	t.Helper()
+	pool := testdb.New(t)
+	s3 := &fakeS3{objects: map[string][]byte{}}
+	store := httptest.NewServer(s3)
+	t.Cleanup(store.Close)
+	h := &harness{t: t, pool: pool, s3: s3, now: time.Now(), bucket: "sb-test"}
+	env := map[string]string{
+		"SCADBUDDY_STORE_BACKEND":              "s3",
+		"SCADBUDDY_STORE_S3_ENDPOINT":          store.URL,
+		"SCADBUDDY_STORE_S3_BUCKET":            h.bucket,
+		"SCADBUDDY_STORE_S3_PREFIX":            "t",
+		"SCADBUDDY_STORE_S3_ACCESS_KEY_ID":     "testing",
+		"SCADBUDDY_STORE_S3_SECRET_ACCESS_KEY": "testing",
+	}
+	h.blobs = &Blobs{Pool: pool, Keys: testKeys(t), Env: func(n string) string { return env[n] },
+		HTTP: store.Client(), Now: func() time.Time { return h.now }}
+	router := &crud.Router{Resolver: resolver{}, Next: http.NotFoundHandler()}
+	router.AddShared(Area, h.blobs.Routes()...)
+	api := httptest.NewServer(router)
+	t.Cleanup(api.Close)
+	h.api = api.URL + crud.Prefix + Area
+	return h
+}
+
+func (h *harness) post(path, credential string, body any) (int, map[string]any) {
+	h.t.Helper()
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, h.api+path, bytes.NewReader(raw))
+	if body == nil {
+		req.Body = http.NoBody
+	}
+	req.Header.Set("Authorization", "Bearer "+credential)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(res.Body).Decode(&out)
+	return res.StatusCode, out
+}
+
+const core = "core:crud.blobs"
+
+func ask(body []byte) map[string]any {
+	sum := sha256.Sum256(body)
+	return map[string]any{"kind": "tag_dump", "size": len(body), "sha256": hex.EncodeToString(sum[:]),
+		"media_type": "application/octet-stream"}
+}
+
+// put PUTs body to an upload's URL with its headers, as a client does.
+func put(t *testing.T, upload map[string]any, body []byte) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPut, upload["url"].(string), bytes.NewReader(body))
+	for name, value := range upload["headers"].(map[string]any) {
+		req.Header.Set(name, value.(string))
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	return res.StatusCode
+}
+
+func TestAnUploadIsPutAndCommittedAsPythonIndexesIt(t *testing.T) {
+	h := newHarness(t)
+	body := []byte("a Bambu tag's dump")
+	status, upload := h.post("/uploads", core, ask(body))
+	if status != http.StatusOK {
+		t.Fatal(status, upload)
+	}
+	if got := put(t, upload, body); got != http.StatusOK {
+		t.Fatal(got)
+	}
+	sum := sha256.Sum256(body)
+	sha := hex.EncodeToString(sum[:])
+	if _, ok := h.s3.objects["/"+h.bucket+"/t/tag_dump/"+sha]; !ok {
+		t.Fatalf("%v", h.s3.objects)
+	}
+	id := upload["upload_id"].(string)
+	for range 2 {
+		// A commit sent again answers the same.
+		status, got := h.post("/uploads/"+id+"/commit", core, nil)
+		want := map[string]any{"key": "tag_dump-" + sha, "sha256": sha, "size": float64(len(body))}
+		if status != http.StatusOK || !reflect.DeepEqual(got, want) {
+			t.Fatal(status, got)
+		}
+	}
+	r := row(t, h.pool, "tag_dump-"+sha)
+	if r["backend_id"] != "t/tag_dump/"+sha || r["backend"] != "s3" || r["kind"] != "tag_dump" {
+		t.Fatal(r)
+	}
+}
+
+func TestARefusedUpload(t *testing.T) {
+	h := newHarness(t)
+	body := []byte("dump")
+	for name, c := range map[string]struct {
+		credential string
+		body       map[string]any
+		status     int
+		reason     string
+	}{
+		"no credential":     {"", ask(body), 401, "no_credential"},
+		"another scope":     {"fleet:crud.fleet", ask(body), 403, "out_of_scope"},
+		"a kind not listed": {core, map[string]any{"kind": "piece", "size": 4, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 422, "kind_not_allowed"},
+		"too large":         {core, map[string]any{"kind": "tag_dump", "size": 64<<10 + 1, "sha256": ask(body)["sha256"], "media_type": "a/b"}, 413, "upload_too_large"},
+	} {
+		status, got := h.post("/uploads", c.credential, c.body)
+		if status != c.status || got["reason"] != c.reason {
+			t.Errorf("%s: %d %v", name, status, got)
+		}
+	}
+	status, got := h.post("/uploads", core, map[string]any{"kind": "tag_dump", "size": -1, "sha256": "x", "media_type": "a/b"})
+	if status != 422 || got["errors"] == nil {
+		t.Errorf("a malformed body: %d %v", status, got)
+	}
+}
+
+func TestTheStoresCapsRefuseAnUpload(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO settings (name, value) VALUES ('store_max_count', '1'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pool.Exec(context.Background(), `INSERT INTO store_blobs
+ (key, sha256, kind, backend, backend_id, size) VALUES ('k', 's', 'piece', 's3', 't/piece/s', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	status, got := h.post("/uploads", core, ask([]byte("x")))
+	if status != http.StatusInsufficientStorage || got["reason"] != "store_full" {
+		t.Fatal(status, got)
+	}
+}
+
+func TestACommitRefusesWhatWasNotUploaded(t *testing.T) {
+	h := newHarness(t)
+	body := []byte("the dump asked for")
+	_, upload := h.post("/uploads", core, ask(body))
+	id := upload["upload_id"].(string)
+	status, got := h.post("/uploads/"+id+"/commit", core, nil)
+	if status != http.StatusConflict || got["reason"] != "upload_not_received" {
+		t.Fatal(status, got)
+	}
+	// Other bytes at the object, as a store that took no checksum would keep them.
+	sum := sha256.Sum256(body)
+	h.s3.objects["/"+h.bucket+"/t/tag_dump/"+hex.EncodeToString(sum[:])] = []byte("other bytes")
+	status, got = h.post("/uploads/"+id+"/commit", core, nil)
+	if status != http.StatusUnprocessableEntity || got["reason"] != "upload_mismatch" {
+		t.Fatal(status, got)
+	}
+	var n int
+	if err := h.pool.QueryRow(context.Background(), "SELECT count(*) FROM store_blobs").Scan(&n); err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+	// Another caller's upload is no upload of this one's.
+	status, got = h.post("/uploads/"+id+"/commit", "fleet:crud.blobs", nil)
+	if status != http.StatusNotFound || got["reason"] != "upload_not_found" {
+		t.Fatal(status, got)
+	}
+	status, got = h.post("/uploads/not.a-ticket/commit", core, nil)
+	if status != http.StatusNotFound || got["reason"] != "upload_not_found" {
+		t.Fatal(status, got)
+	}
+}
+
+func TestAnExpiredUploadIsRefused(t *testing.T) {
+	h := newHarness(t)
+	body := []byte("late")
+	_, upload := h.post("/uploads", core, ask(body))
+	if got := put(t, upload, body); got != http.StatusOK {
+		t.Fatal(got)
+	}
+	h.now = h.now.Add(urlTTL + commitGrace + time.Second)
+	status, got := h.post("/uploads/"+upload["upload_id"].(string)+"/commit", core, nil)
+	if status != http.StatusGone || got["reason"] != "upload_expired" {
+		t.Fatal(status, got)
+	}
+}
+
+func TestOnlyTheS3StoreTakesUploads(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.pool.Exec(context.Background(),
+		`INSERT INTO settings (name, value) VALUES ('store_backend', '"bambuddy"'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	status, got := h.post("/uploads", core, ask([]byte("x")))
+	if status != http.StatusServiceUnavailable || got["reason"] != "not_configured" {
+		t.Fatal(status, got)
+	}
+}

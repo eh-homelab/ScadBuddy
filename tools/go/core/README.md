@@ -87,6 +87,25 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). `GET /changes` stays Python's.
 
+Area `blobs` † (`internal/blobstore`, #7958) is a shared area: any service credential whose scopes
+hold `crud.blobs` may call it, under `/api/v1/internal/crud/blobs`; no caller is granted that scope
+yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media_type}` answers
+`{upload_id, url, headers, expires_at}`: the caller PUTs exactly the bytes to `url` with `headers`,
+then `POST /uploads/{upload_id}/commit` answers `{key, sha256, size}`, the blob indexed in
+`store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each:
+`tag_dump`, 64 KiB. Only `store_backend` `s3` takes uploads: core reads the store's settings as
+Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, else the default; the secret key
+opened with the KEK) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
+and the ACL `private` signed (Signature V4, pinned against botocore's answer in its tests). The
+commit reads the object back, hashes it, and writes the row as Python's `BlobIndex.put` does
+(`backend/tests/fixtures/blob-upload-vectors.json`, which both sides' tests check). Any other
+backend is a 503 `not_configured`. The upload's id is a ticket MACed under the KEK (HKDF label
+`scadbuddy:blobs:upload:v1`), so no row stands for an upload: its URL lasts 15 minutes and its
+commit an hour more, and another caller's commit of it is a 404. Refusals carry a `reason`: 422
+`kind_not_allowed`, 413 `upload_too_large`, 507 `store_full`, 404 `upload_not_found`, 410
+`upload_expired`, 409 `upload_not_received`, 422 `upload_mismatch`, 503 `store_unavailable`.
+`internal/blobclient` is its Go client: `Upload(ctx, kind, mediaType, body)`.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.

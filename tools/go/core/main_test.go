@@ -45,7 +45,7 @@ func newAPI(t *testing.T, areas string) *api {
 		w.Header().Set("X-From", "python")
 		w.WriteHeader(http.StatusTeapot)
 	})
-	router, err := newRouter(pool, next, nil, areas, "")
+	router, err := newRouter(pool, next, nil, areas, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 			t.Errorf("%s %s has the CRUD header", c.method, c.path)
 		}
 	}
-	if _, err := newRouter(a.pool, nil, nil, "session-evnets", ""); err == nil {
+	if _, err := newRouter(a.pool, nil, nil, "session-evnets", "", nil); err == nil {
 		t.Error("an unknown area was taken")
 	}
 }
@@ -489,14 +489,14 @@ func TestWhatIsNotListedGoesToPython(t *testing.T) {
 func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	pool := testdb.New(t)
 	for _, area := range []string{"credentials", "credentials:read", "payload-keys", "keys", "notify",
-		"notify:read", "transcripts", "transcripts:read"} {
-		_, err := newRouter(pool, nil, nil, area, "")
+		"notify:read", "transcripts", "transcripts:read", "blobs"} {
+		_, err := newRouter(pool, nil, nil, area, "", nil)
 		if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_SECRET_KEY_FILE") {
 			t.Errorf("%s: %v", area, err)
 		}
 	}
 	every := "settings, access, plugin-sessions, mcp-relay, session-events, session-turns:read"
-	if _, err := newRouter(pool, nil, nil, every, ""); err != nil {
+	if _, err := newRouter(pool, nil, nil, every, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	key := filepath.Join(t.TempDir(), "kek")
@@ -509,7 +509,7 @@ func TestASealedAreaNeedsTheKEKAndTheOthersDoNot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts", ""); err != nil {
+	if _, err := newRouter(pool, nil, keys, every+", credentials, payload-keys, keys, notify, transcripts, blobs", "", nil); err != nil {
 		t.Fatal(err)
 	}
 }

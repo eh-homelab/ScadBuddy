@@ -1,7 +1,9 @@
 // Package crud guards and answers the routes under /api/v1/internal/crud/<caller>/, as
 // backend/scadbuddy/crud/guard.py does: the caller's own live service credential in every
 // auth mode, the CRUD headers on every answer of a matched route, and a database that is out
-// of reach as a 503 a client can tell from a route's own 500.
+// of reach as a 503 a client can tell from a route's own 500. A shared area's routes, under
+// /api/v1/internal/crud/<area>/ (AddShared, #7958), take any caller whose scopes hold
+// crud.<area>.
 package crud
 
 import (
@@ -64,14 +66,32 @@ type Router struct {
 type mounted struct {
 	Route
 	caller   string
+	shared   bool
 	segments []string
+}
+
+type serviceKey struct{}
+
+// ServiceOf is the service a guarded request's credential names.
+func ServiceOf(r *http.Request) *auth.Service {
+	s, _ := r.Context().Value(serviceKey{}).(*auth.Service)
+	return s
 }
 
 // Add serves an area's routes for one caller.
 func (rt *Router) Add(caller string, routes ...Route) {
 	for _, r := range routes {
 		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+caller+r.Path, "/")
-		rt.routes = append(rt.routes, mounted{r, caller, segments})
+		rt.routes = append(rt.routes, mounted{r, caller, false, segments})
+	}
+}
+
+// AddShared serves a shared area's routes, under /api/v1/internal/crud/<area>: any caller
+// whose credential's scopes hold crud.<area> may call them. An area's name is never a caller's.
+func (rt *Router) AddShared(area string, routes ...Route) {
+	for _, r := range routes {
+		segments := strings.Split(strings.TrimPrefix(Prefix, "/")+area+r.Path, "/")
+		rt.routes = append(rt.routes, mounted{r, area, true, segments})
 	}
 }
 
@@ -105,9 +125,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, error) {
-	if p := rt.refusal(route.caller, r); p != nil {
+	service, p := rt.refusal(route, r)
+	if p != nil {
 		return nil, p
 	}
+	r = r.WithContext(context.WithValue(r.Context(), serviceKey{}, service))
 	if route.MaxBody > 0 {
 		if r.ContentLength < 0 {
 			return nil, &httpx.Problem{
@@ -158,7 +180,8 @@ next:
 	return nil, nil
 }
 
-func (rt *Router) refusal(caller string, r *http.Request) *httpx.Problem {
+func (rt *Router) refusal(route *mounted, r *http.Request) (*auth.Service, *httpx.Problem) {
+	caller := route.caller
 	service := rt.Resolver.Resolve(r.Context(), r.Header.Get("Authorization"))
 	if service == nil {
 		detail := "This route needs a service credential."
@@ -168,11 +191,11 @@ func (rt *Router) refusal(caller string, r *http.Request) *httpx.Problem {
 		p := httpx.WithReason(http.StatusUnauthorized, detail, "no_credential")
 		p.Type = problems + "signed-out"
 		p.Headers = map[string]string{"WWW-Authenticate": `Bearer realm="scadbuddy"`}
-		return p
+		return nil, p
 	}
 	var p *httpx.Problem
 	switch {
-	case service.Caller != caller:
+	case !route.shared && service.Caller != caller:
 		p = httpx.WithReason(http.StatusForbidden,
 			"These routes belong to another service.", "wrong_caller")
 	case !service.Has("crud." + caller):
@@ -182,10 +205,10 @@ func (rt *Router) refusal(caller string, r *http.Request) *httpx.Problem {
 		}
 		p = httpx.WithReason(http.StatusForbidden, detail, "out_of_scope")
 	default:
-		return nil
+		return service, nil
 	}
 	p.Type = problems + "forbidden"
-	return p
+	return nil, p
 }
 
 // problemOf is the answer to a handler's error.
