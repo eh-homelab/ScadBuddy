@@ -202,6 +202,8 @@ class _Feed:
     uploader: asyncio.Task[None] | None = None
     #: The stop (`Recorder._wind_down`) on its way.
     stopping: asyncio.Task[None] | None = None
+    #: The stop has flushed and released, and retries a path delete that failed.
+    removing: bool = False
 
 
 class SourceError(Exception):
@@ -244,6 +246,8 @@ class Recorder:
         self._clock_samples: deque[float] = deque(maxlen=CLOCK_SAMPLES)
         self.clock_offset: float | None = None
         self._call_budget = call_budget
+        self._retry_min = retry_min
+        self._retry_max = retry_max
         self._put_timeout = put_timeout
         self._feeds: dict[str, _Feed] = {}
         #: The conf this recorder last put for each path. MediaMTX lists a source with its
@@ -442,9 +446,15 @@ class Recorder:
             return
         feed = self._feeds.get(printer_id)
         if feed is not None and feed.stopping is not None:
-            # Added again while its stop flushes: the stop ends first.
-            await asyncio.gather(feed.stopping, return_exceptions=True)
-            present = False
+            if feed.removing:
+                # Added again while its stop retries the path delete: the path stays.
+                await _cancel(feed.stopping)
+                feed.stopping = None
+                feed.removing = False
+            else:
+                # Added again while its stop flushes: the stop ends first.
+                await asyncio.gather(feed.stopping, return_exceptions=True)
+                present = False
             feed = self._feeds.get(printer_id)
         if feed is None:
             now = self._clock()
@@ -473,7 +483,8 @@ class Recorder:
     async def _stop(self, printer_id: str, present: bool) -> None:
         """Stop a printer's recording. With a feed, the flush runs in a task of its own
         (`_wind_down`), so a flush of up to `STOP_FLUSH_SECONDS` does not hold `_lock`, and
-        other printers' changes go on meanwhile."""
+        other printers' changes go on meanwhile. A change that adds the same printer again
+        waits, under `_lock`, for its flush to end (`_start`)."""
         feed = self._feeds.get(printer_id)
         if feed is None:
             await self._remove(printer_id, None, present)
@@ -484,25 +495,31 @@ class Recorder:
 
     async def _wind_down(self, printer_id: str, feed: _Feed, present: bool) -> None:
         """Flush (when leading, with the renewals going on, for at most
-        `STOP_FLUSH_SECONDS`), release, delete the path, report ``stopped``."""
-        try:
-            async with feed.lock:
-                if self._leads(feed):
-                    deadline = self._clock() + STOP_FLUSH_SECONDS
-                    await self._flush(printer_id, feed, deadline=deadline)
-            await _cancel(feed.renewer)
-            feed.renewer = None
-            if feed.held:
-                await self._release(printer_id, feed)
-            await self._remove(printer_id, feed, present or printer_id in self._confs)
-        except Exception as error:
-            # The next resync stops the path again.
-            logger.warning(
-                "camera recorder: the stop of %s failed (%s)", printer_id, type(error).__name__
-            )
-            feed.stopping = None
-            await _cancel(feed.renewer)
-            feed.renewer = None
+        `STOP_FLUSH_SECONDS`), release, delete the path, report ``stopped``. A delete that
+        fails is tried again with back-off until it succeeds or the printer is added again
+        (`_start` cancels the stop): no change event comes to retry it."""
+        async with feed.lock:
+            if self._leads(feed):
+                deadline = self._clock() + STOP_FLUSH_SECONDS
+                await self._flush(printer_id, feed, deadline=deadline)
+        await _cancel(feed.renewer)
+        feed.renewer = None
+        if feed.held:
+            await self._release(printer_id, feed)
+        delay = self._retry_min
+        while True:
+            try:
+                await self._remove(printer_id, feed, present or printer_id in self._confs)
+                return
+            except Exception as error:
+                feed.removing = True
+                logger.warning(
+                    "camera recorder: the stop of %s failed (%s); retrying",
+                    printer_id,
+                    type(error).__name__,
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, self._retry_max)
 
     async def _remove(self, printer_id: str, feed: _Feed | None, present: bool) -> None:
         """Delete the path and the feed's files, report ``stopped``."""

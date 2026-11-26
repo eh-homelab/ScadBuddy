@@ -1259,3 +1259,60 @@ async def test_a_stop_that_flushes_does_not_hold_other_printers(
     finally:
         gate.set()
         await rig.recorder.aclose()
+
+
+async def test_a_stop_whose_delete_fails_retries_it(tmp_path: Path, api: FakeCamera) -> None:
+    """A failed ``delete_path`` during a stop is tried again by the stop itself: no other
+    change event or resync is needed to stop the recording."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    real = rig.mtx.handle
+    failed: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" and request.url.path.split("/")[-2] == "delete" and not failed:
+            failed.append(request.url.path)
+            return httpx.Response(500)
+        return real(request)
+
+    rig.mtx.handle = handle  # type: ignore[method-assign]
+    rig.recorder._mtx = rig.mtx.client()
+    api.printers = []
+    await rig.recorder.reconcile(P1)
+    async with asyncio.timeout(10):
+        await rig.recorder.flushed()
+    assert failed
+    assert P1 not in rig.mtx.paths
+    assert P1 not in rig.recorder._feeds
+    assert api.events[-1] == "feed stopped"
+    await rig.recorder.aclose()
+
+
+async def test_a_printer_added_again_ends_a_stop_that_cannot_delete(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """MediaMTX refuses every delete: the stop retries until the printer is added again,
+    which takes the path back."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    real = rig.mtx.handle
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.method != "GET" and request.url.path.split("/")[-2] == "delete":
+            return httpx.Response(500)
+        return real(request)
+
+    rig.mtx.handle = handle  # type: ignore[method-assign]
+    rig.recorder._mtx = rig.mtx.client()
+    api.printers = []
+    await rig.recorder.reconcile(P1)
+    await until(lambda: rig.recorder._feeds[P1].removing)
+    api.printers = [P1]
+    async with asyncio.timeout(10):
+        await rig.recorder.reconcile(P1)
+    feed = rig.recorder._feeds[P1]
+    assert feed.stopping is None
+    assert P1 in rig.mtx.paths
+    await rig.recorder.aclose()
