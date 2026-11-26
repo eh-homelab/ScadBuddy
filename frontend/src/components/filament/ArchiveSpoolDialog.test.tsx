@@ -21,6 +21,16 @@ function recorded() {
 /** A preview that finds no empty weight for the spool, whatever the page believed. */
 const noEmptyWeightPreview = () => HttpResponse.json({ closing: { reason: null, started_g: 1000, started_from: 'reading', ledger_consumed_g: 750, final_filament_g: null, scale_consumed_g: null, drift_g: null }, final_filament_g: null, empty_g: null, notices: [] })
 
+/** The no-empty-weight preview, its first answer (the dialog's request at mount) held for 2 s, the rest at once. */
+function slowFirstPreview() {
+  let calls = 0
+  return async () => {
+    calls += 1
+    if (calls === 1) await delay(2000)
+    return noEmptyWeightPreview()
+  }
+}
+
 /** Spool #10 is on a cardboard spool (180 g empty) with 250 g left; spool #3 has no insert. */
 async function show(number: number, emptyWeightG: number | null) {
   const spool = await getSpool(spoolId(number))
@@ -86,8 +96,11 @@ describe('ArchiveSpoolDialog (#7684)', () => {
   })
 
   it('says so when the preview changes what a typed number means (#7909)', async () => {
-    // The page believes the spool is on a 180 g insert; the preview, answered after the number is typed (the hook's 300 ms debounce plus this delay), finds no empty weight, so the number is the filament left. The wait is longer than that sum with room for a loaded machine (the review of #7931).
-    server.use(http.get('*/api/v1/filament/spools/:id/closing', async () => (await delay(600), noEmptyWeightPreview())))
+    // The page believes the spool is on a 180 g insert; the preview finds no empty weight, so the number is the filament
+    // left. The note needs the number typed before the preview's first answer flips the label: the preview the dialog
+    // asks at mount (300 ms after it opens) is held for 2 s, long enough for the typing on a loaded machine, and the hook
+    // drops that answer anyway once the typed number asks again; later previews answer at once (the review of #7931).
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', slowFirstPreview()))
     const posts = recorded()
     const { dialog, onArchived } = await show(3, 180)
     const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
@@ -98,6 +111,19 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(onArchived).toHaveBeenCalledTimes(1))
     expect(posts).toEqual([{ archived: true, reason: 'damaged', final_grams: 210 }])
+  })
+
+  it('drops the note once the number is replaced under the changed label (#7930)', async () => {
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', slowFirstPreview()))
+    const { dialog } = await show(3, 180)
+    const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
+    await userEvent.type(field, '210')
+    await within(dialog).findByText(/after all/, undefined, { timeout: 3000 })
+    // A select-all and a keystroke replace the number in one change: it is typed under the label the field has now.
+    await userEvent.tripleClick(field)
+    await userEvent.keyboard('5')
+    expect(field).toHaveValue('5')
+    expect(within(dialog).queryByText(/after all/)).toBeNull()
   })
 
   it('says nothing about a number typed once the label had already changed (#7909)', async () => {

@@ -92,8 +92,11 @@ function ArchiveForm({
   const meaningChanged = typedWithEmpty !== null && typedWithEmpty !== withEmpty && trimmed !== ''
   function changeReading(next: string) {
     setReading(next)
-    if (next.trim() === '') setTypedWithEmpty(null)
-    else if (trimmed === '') setTypedWithEmpty(withEmpty)
+    const value = next.trim()
+    // A number is started when the field was empty, or when the new text neither extends nor shortens the
+    // old one (a replace-all, the review of #7931): it was typed under the label the field has now.
+    if (value === '') setTypedWithEmpty(null)
+    else if (trimmed === '' || !(value.startsWith(trimmed) || trimmed.startsWith(value))) setTypedWithEmpty(withEmpty)
   }
 
   async function archive(andContinue: boolean) {
