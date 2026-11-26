@@ -13,6 +13,7 @@ import { Markdown } from '../../agent/chat/Markdown'
 import { api, ApiError } from '../../api/client'
 import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
+import { WORKER_RESTARTED } from '../../agent/chat/toolGroups'
 import { formatBytes } from '../../lib/format'
 import { RiskBadge } from './badges'
 import { SentImages } from './SentImages'
@@ -665,6 +666,14 @@ export function FeedItemView({
         </p>
       )
     case 'error':
+      // #7874: a worker restart is no failure. The turn goes on, so a quiet line says why it paused.
+      if (item.code === WORKER_RESTARTED) {
+        return (
+          <p className="text-[11.5px] text-muted-foreground" data-testid="agent-worker-restarted">
+            {item.message}
+          </p>
+        )
+      }
       return (
         <p role="alert" className="text-xs text-warn">
           {item.message}
