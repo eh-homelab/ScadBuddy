@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,6 +30,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
@@ -76,13 +81,27 @@ type Socket struct {
 	PublicURL      string
 	// slots are the sockets that may be open at once (SCADBUDDY_REALTIME_SOCKETS).
 	slots chan struct{}
+	// wouldRefuse counts, in observe, the sockets enforce would refuse (auth/observe.py).
+	wouldRefuse metric.Int64Counter
+	loggedMu    sync.Mutex
+	logged      map[string]time.Time
 }
 
 // New is the socket over hub and pool, with its settings read from env and the settings
-// table, once: realtime_sockets takes a restart in Python too.
-func New(ctx context.Context, hub *bus.Hub, pool *pgxpool.Pool, next http.Handler, env func(string) string) (*Socket, error) {
+// table, once: realtime_sockets takes a restart in Python too. meter, when not nil, gets
+// the observe mode's count.
+func New(ctx context.Context, hub *bus.Hub, pool *pgxpool.Pool, next http.Handler, env func(string) string,
+	meter metric.MeterProvider) (*Socket, error) {
 	s := &Socket{Hub: hub, Pool: pool, Next: next, Services: &auth.Resolver{Pool: pool},
-		AuthMode: strings.TrimSpace(env("SCADBUDDY_AUTH_MODE")), PublicURL: env("SCADBUDDY_PUBLIC_URL")}
+		AuthMode: strings.TrimSpace(env("SCADBUDDY_AUTH_MODE")), PublicURL: env("SCADBUDDY_PUBLIC_URL"),
+		logged: map[string]time.Time{}}
+	if meter == nil {
+		meter = noop.NewMeterProvider()
+	}
+	// The error is only for an invalid name, fixed here; a failed counter is a no-op.
+	s.wouldRefuse, _ = meter.Meter("github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime").Int64Counter(
+		"scadbuddy.auth.would_refuse",
+		metric.WithDescription("Requests that SCADBUDDY_AUTH_MODE=enforce would refuse, served in observe."))
 	if s.AuthMode == "" {
 		s.AuthMode = "off"
 	}
@@ -134,9 +153,12 @@ func (s *Socket) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	telemetry.SetRoute(r.Context(), Path)
 	who := s.caller(r, scheme, bearer)
-	if s.AuthMode == "enforce" && !who.mayFollow() {
-		refuse(w) // before it is accepted, as auth/check.py closes it (1008)
-		return
+	if reason := who.refusal(); reason != "" && s.AuthMode != "off" {
+		if s.AuthMode == "enforce" {
+			refuse(w) // before it is accepted, as auth/check.py closes it (1008)
+			return
+		}
+		s.noteRefusal(r.Context(), reason)
 	}
 	if !s.originAllowed(r) {
 		refuse(w)
@@ -165,13 +187,36 @@ type caller struct {
 	session, principal string
 }
 
-func (c caller) mayFollow() bool {
+// refusal is auth/routes.py would_refuse for the socket, an "api" route: why enforce would
+// refuse it, or "".
+func (c caller) refusal() string {
 	switch {
-	case c.service != nil:
-		return c.service.Has("api")
-	default:
-		return c.session != ""
+	case c.service != nil && !c.service.Has("api"):
+		return "out_of_scope"
+	case c.service == nil && c.session == "":
+		return "signed_out"
 	}
+	return ""
+}
+
+// logEvery is auth/observe.py LOG_INTERVAL: each reason is logged once a minute at most.
+const logEvery = time.Minute
+
+// noteRefusal is auth/observe.py WouldRefuse.note: counted as
+// scadbuddy_auth_would_refuse_total{class, reason}, and logged.
+func (s *Socket) noteRefusal(ctx context.Context, reason string) {
+	s.wouldRefuse.Add(ctx, 1, metric.WithAttributes(attribute.String("class", "api"), attribute.String("reason", reason)))
+	now := time.Now()
+	s.loggedMu.Lock()
+	last, seen := s.logged[reason]
+	if seen && now.Sub(last) < logEvery {
+		s.loggedMu.Unlock()
+		return
+	}
+	s.logged[reason] = now
+	s.loggedMu.Unlock()
+	slog.WarnContext(ctx, "enforce would refuse an api request ("+reason+"); served, as SCADBUDDY_AUTH_MODE=observe",
+		"route", Path)
 }
 
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
@@ -307,6 +352,9 @@ type session struct {
 	mu     sync.Mutex
 	topics map[string]bool
 	checks chan bus.Value
+	// link is the socket's ended span; tracer starts the spans of its later work.
+	link   trace.Link
+	tracer trace.Tracer
 }
 
 func (s *Socket) serve(ctx context.Context, c *conn, who caller) {
@@ -319,21 +367,28 @@ func (s *Socket) serve(ctx context.Context, c *conn, who caller) {
 		return
 	}
 	defer sub.Close()
-	x := &session{s: s, c: c, who: who, sub: sub, topics: map[string]bool{}, checks: make(chan bus.Value, CheckQueue)}
+	// The socket's span ended when it was accepted. What the socket does later is traced
+	// apart, linked to that span, never as its child.
+	x := &session{s: s, c: c, who: who, sub: sub, topics: map[string]bool{}, checks: make(chan bus.Value, CheckQueue),
+		link:   trace.LinkFromContext(ctx),
+		tracer: trace.SpanFromContext(ctx).TracerProvider().Tracer("github.com/eh-homelab/ScadBuddy/tools/go/core/internal/realtime")}
+	ctx = trace.ContextWithSpan(ctx, nil)
+	limit := &rate{tokens: RateBurst, at: time.Now()}
+	c.take = limit.take
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	ended := make(chan string, 4)
-	run := func(part func(context.Context) string) {
+	parts := []func(context.Context) string{
+		func(ctx context.Context) string { return x.read(ctx, limit) },
+		x.work, x.pump, x.ping,
+		func(ctx context.Context) string { c.keepAlive(ctx.Done()); return "" },
+	}
+	ended := make(chan string, len(parts))
+	for _, part := range parts {
 		go func() {
-			ended <- part(ctx)
+			ended <- guarded(ctx, part)
 			cancel()
 		}()
 	}
-	run(x.read)
-	run(x.work)
-	run(x.pump)
-	run(x.ping)
-	go c.keepAlive(ctx.Done())
 	switch <-ended {
 	case "signed out":
 		c.close(SignedOut, "signed out")
@@ -341,12 +396,32 @@ func (s *Socket) serve(ctx context.Context, c *conn, who caller) {
 		c.close(1000, "")
 	case "rate":
 		c.close(1008, "too many frames")
+	case "panic":
+		c.close(1011, "")
 	default:
 		c.net.Close()
 	}
-	for range 3 {
+	for range len(parts) - 1 {
 		<-ended
 	}
+}
+
+// span starts a span for work the socket does after its own span ended: a root, linked to
+// the socket's span.
+func (x *session) span(ctx context.Context, name string) (context.Context, trace.Span) {
+	return x.tracer.Start(ctx, name, trace.WithNewRoot(), trace.WithLinks(x.link))
+}
+
+// guarded runs one part of a socket. A part runs after the hijack, outside net/http's
+// recovery, so a panic there would end the process: it ends this socket instead ("panic").
+func guarded(ctx context.Context, part func(context.Context) string) (out string) {
+	defer func() {
+		if p := recover(); p != nil {
+			slog.ErrorContext(ctx, "a realtime socket panicked; closing it with 1011", "stack", string(debug.Stack()))
+			out = "panic"
+		}
+	}()
+	return part(ctx)
 }
 
 func (x *session) send(frame string, v bus.Value) error {
@@ -396,7 +471,13 @@ func (x *session) pump(ctx context.Context) string {
 		if revocable && e != nil && e.Kind == "auth.session_revoked" && x.revokes(e) {
 			return "signed out"
 		}
-		if d := x.sub.Dropped(); d != dropped {
+		d := x.sub.Dropped()
+		resync := d != dropped || it.Gap || e != nil && e.Kind == "bus.resync"
+		// Events were lost, a revocation among them maybe: the session is read again.
+		if revocable && resync && !x.live(ctx) {
+			return "signed out"
+		}
+		if d != dropped {
 			dropped = d
 			x.s.Hub.Resynced(via, "overflow")
 			if x.send("resync", bus.Object("type", "resync")) != nil {
@@ -427,6 +508,28 @@ func (x *session) pump(ctx context.Context) string {
 	}
 }
 
+// live says whether the socket's session is still live. A failed read keeps the socket: the
+// next resync reads again.
+func (x *session) live(ctx context.Context) bool {
+	ctx, span := x.span(ctx, "ws session")
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	idHash, err := hex.DecodeString(x.who.session)
+	if err != nil {
+		return false
+	}
+	var live bool
+	err = x.s.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM auth_sessions WHERE id_hash = $1
+		AND revoked_at IS NULL AND idle_expires_at > $2 AND absolute_expires_at > $2)`,
+		idHash, time.Now().UTC()).Scan(&live)
+	if err != nil {
+		slog.WarnContext(ctx, "could not read a realtime socket's session again", "error", err.Error())
+		return true
+	}
+	return live
+}
+
 // revokes is realtime.py revokes: that session, or (no session_id) every one of the
 // principal's.
 func (x *session) revokes(e *bus.Event) bool {
@@ -453,10 +556,14 @@ func (r *rate) take() bool {
 	return true
 }
 
-func (x *session) read(ctx context.Context) string {
-	limit := &rate{tokens: RateBurst, at: time.Now()}
+// read reads the client's messages. limit is the socket's frame rate, which its pings and
+// pongs take from too.
+func (x *session) read(_ context.Context, limit *rate) string {
 	for {
 		m, err := x.c.read()
+		if errors.Is(err, errRate) {
+			return "rate"
+		}
 		if err != nil {
 			return ""
 		}
@@ -591,6 +698,8 @@ func (x *session) work(ctx context.Context) string {
 
 // check answers one check frame (realtime.py _check).
 func (x *session) check(ctx context.Context, frame bus.Value) error {
+	ctx, span := x.span(ctx, "ws check")
+	defer span.End()
 	id, since, requested := frame.Get("id"), frame.Get("since"), frame.Get("topics")
 	valid := isInt(id) && since != nil && since.Kind == 'a' && len(since.Items) >= 1 &&
 		len(since.Items) <= CheckMaxSince && requested != nil && requested.Kind == 'a'

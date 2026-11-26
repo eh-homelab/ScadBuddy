@@ -72,6 +72,13 @@ def kinds() -> dict[str, list[dict[str, Any]]]:
     return dict(sorted(table.items()))
 
 
+def notify_only() -> list[str]:
+    """The typed kinds the bus sends as NOTIFY only: their change frames carry no ``id``."""
+    return sorted(
+        k for model in NOTIFY_ONLY for k in get_args(model.model_fields["kind"].annotation)
+    )
+
+
 def _decode(text: str) -> Any:
     try:
         return decode_event(text)
@@ -130,6 +137,7 @@ def _stored(payload: str) -> str | None:
 
 def _update(doc: dict[str, Any]) -> None:
     doc["kinds"] = kinds()
+    doc["notify_only"] = notify_only()
     for case in doc["changes"]:
         if case.get("channel", PG_CHANNEL) == PG_CHANNEL:
             case["stored"] = _stored(case["payload"])
@@ -150,6 +158,10 @@ if UPDATE:
 
 def test_the_kinds_are_the_models() -> None:
     assert DOC["kinds"] == kinds()
+
+
+def test_the_notify_only_kinds_are_the_hubs() -> None:
+    assert DOC["notify_only"] == notify_only()
 
 
 @pytest.mark.parametrize("case", DOC["changes"], ids=lambda c: c["name"])

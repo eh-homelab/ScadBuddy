@@ -60,6 +60,8 @@ func (s *streamAPI) open(caller, token string, header map[string]string) *sse {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.t.Cleanup(cancel)
 	req, _ := http.NewRequestWithContext(ctx, "GET", s.url+"/api/v1/internal/crud/"+caller+"/changes", nil)
+	// As sbfleet's Bus asks for it.
+	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+token)
 	for k, v := range header {
 		req.Header.Set(k, v)
@@ -252,6 +254,7 @@ func TestAChangeStreamRefusesAWrongCredentialAndOneTooMany(t *testing.T) {
 	s.token = token
 	full := s.do("GET", base+"agent/changes", "")
 	expect(t, full.status, 429)
+	expect(t, full.header.Get("Content-Type"), "application/problem+json")
 	expect(t, full.body["detail"], "this credential has 4 streams open")
 	// Another credential, and the fleet's own budget, still have room.
 	expect(t, s.open("agent", s.credential("agent", "crud.agent"), nil).next(), ready(false, false, "0"))
@@ -278,9 +281,15 @@ func (s *streamAPI) dial(header map[string]string) (*ws, *http.Response) {
 	}
 	s.t.Cleanup(func() { conn.Close() })
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	if k, ok := header["Sec-WebSocket-Key"]; ok {
+		key = k
+	}
 	req := "GET /api/v1/ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
 		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + key + "\r\n"
 	for k, v := range header {
+		if k == "Sec-WebSocket-Key" {
+			continue
+		}
 		req += k + ": " + v + "\r\n"
 	}
 	if _, err := conn.Write([]byte(req + "\r\n")); err != nil {

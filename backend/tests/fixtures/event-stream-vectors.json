@@ -2093,6 +2093,40 @@
       }
     },
     {
+      "name": "an opaque kind sent as NOTIFY only",
+      "payload": "{\"id\":\"88888888888888888888888888888890\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"inventory_operation.changed\",\"operation_id\":\"op\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 88888888888888888888888888888890\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"88888888888888888888888888888890\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"inventory_operation.changed\\\",\\\"operation_id\\\":\\\"op\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 88888888888888888888888888888890\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"at\\\": \\\"2026-11-26T10:00:00Z\\\", \\\"id\\\": \\\"88888888888888888888888888888890\\\", \\\"kind\\\": \\\"inventory_operation.changed\\\", \\\"operation_id\\\": \\\"op\\\"}\"}\n\n",
+        "topics": [],
+        "ws": null
+      },
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"88888888888888888888888888888890\", \"kind\": \"inventory_operation.changed\", \"operation_id\": \"op\"}"
+    },
+    {
+      "name": "an opaque kind named like a session event",
+      "payload": "{\"id\":\"88888888888888888888888888888891\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"session.newer_kind\",\"session_id\":\"s\"}",
+      "want": {
+        "decodes": true,
+        "live": "id: 88888888888888888888888888888891\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"id\\\":\\\"88888888888888888888888888888891\\\",\\\"at\\\":\\\"2026-11-26T10:00:00Z\\\",\\\"kind\\\":\\\"session.newer_kind\\\",\\\"session_id\\\":\\\"s\\\"}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        },
+        "replay": "id: 88888888888888888888888888888891\nevent: change\ndata: {\"c\":\"scadbuddy_events\",\"p\":\"{\\\"at\\\": \\\"2026-11-26T10:00:00Z\\\", \\\"id\\\": \\\"88888888888888888888888888888891\\\", \\\"kind\\\": \\\"session.newer_kind\\\", \\\"session_id\\\": \\\"s\\\"}\"}\n\n",
+        "topics": [],
+        "ws": null
+      },
+      "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"88888888888888888888888888888891\", \"kind\": \"session.newer_kind\", \"session_id\": \"s\"}"
+    },
+    {
       "name": "a revoked session",
       "payload": "{\"id\":\"9999999999999999999999999999999a\",\"at\":\"2026-11-26T10:00:00Z\",\"kind\":\"auth.session_revoked\",\"principal\":\"user:iss#sub\",\"session_id\":\"ab\"}",
       "stored": "{\"at\": \"2026-11-26T10:00:00Z\", \"id\": \"9999999999999999999999999999999a\", \"kind\": \"auth.session_revoked\", \"principal\": \"user:iss#sub\", \"session_id\": \"ab\"}",
@@ -2334,6 +2368,20 @@
           "camera": false
         }
       }
+    },
+    {
+      "name": "a payload with raw newlines",
+      "channel": "scadbuddy_input",
+      "payload": "{\n  \"id\": \"x\"\n}",
+      "want": {
+        "decodes": false,
+        "live": "event: change\ndata: {\"c\":\"scadbuddy_input\",\"p\":\"{\\n  \\\"id\\\": \\\"x\\\"\\n}\"}\n\n",
+        "keep": {
+          "agent": true,
+          "fleet": false,
+          "camera": false
+        }
+      }
     }
   ],
   "topics": [
@@ -2467,5 +2515,13 @@
       "id": "0123456789abcdef0123456789abcdef",
       "bytes": "id: 0123456789abcdef0123456789abcdef\nevent: reconnected\ndata: {\"resync\":false}\n\n"
     }
+  ],
+  "notify_only": [
+    "ai_operation.changed",
+    "session.done",
+    "session.message",
+    "session.owner",
+    "session.started",
+    "session.waiting"
   ]
 }

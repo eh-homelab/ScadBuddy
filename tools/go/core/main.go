@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry/pgxtrace"
@@ -146,7 +147,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 	}
 	// The event stream's one LISTEN connection, which both listeners' streams share.
 	hub := bus.NewHub(pool, tel.Meter())
-	stream := &streams{hub: hub, trusted: trusted, env: env}
+	stream := &streams{hub: hub, meter: tel.Meter(), env: env}
 	go func() {
 		// A stream never ends by itself: end them all first, so the servers can drain.
 		<-ctx.Done()
@@ -251,11 +252,11 @@ var sealed = map[string]bool{
 }
 
 // streams are what the event stream's areas (changes, ws) share: the process's one hub, the
-// trusted proxies (a change stream's peer address) and the settings the socket reads.
+// meter and the settings the socket reads.
 type streams struct {
-	hub     *bus.Hub
-	trusted front.Networks
-	env     func(string) string
+	hub   *bus.Hub
+	meter metric.MeterProvider
+	env   func(string) string
 	// used says whether an area named uses the hub.
 	used bool
 }
@@ -305,7 +306,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
 		case "changes":
 			s := streamOf()
-			for caller, routes := range changes.Routes(s.hub, s.trusted) {
+			for caller, routes := range changes.Routes(s.hub) {
 				router.Add(caller, routes...)
 			}
 		case "ws":
@@ -324,7 +325,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
-		return realtime.New(context.Background(), st.hub, pool, router, st.env)
+		return realtime.New(context.Background(), st.hub, pool, router, st.env, st.meter)
 	}
 	return router, nil
 }

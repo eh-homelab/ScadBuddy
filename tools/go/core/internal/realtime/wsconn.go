@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -27,9 +28,10 @@ const (
 	opPing     = 0x9
 	opPong     = 0xa
 
-	// MessageMax is uvicorn's --ws-max-size in the API image (8 MiB): a bigger message closes
-	// the socket with 1009.
-	MessageMax = 8 << 20
+	// MessageMax is the largest message read: 64 KiB, which holds realtime.py's largest frame
+	// (MaxFrameChars characters of at most 4 bytes each). A bigger message closes the socket
+	// with 1009 before its bytes are held. uvicorn's limit in the API image is 8 MiB.
+	MessageMax = 64 << 10
 	// pingEvery and pongWait are uvicorn's ws_ping_interval and ws_ping_timeout (20 s each).
 	pingEvery = 20 * time.Second
 	pongWait  = 20 * time.Second
@@ -61,6 +63,10 @@ type conn struct {
 	rw   *bufio.ReadWriter
 	wmu  sync.Mutex
 	pong chan struct{}
+	// pinged is set while a keepalive ping waits for its pong: only then is a pong taken.
+	pinged atomic.Bool
+	// take, when set, is the frame rate's: each ping and pong takes one, as a message does.
+	take func() bool
 	// closed is set once a close frame was sent.
 	closed bool
 }
@@ -68,7 +74,9 @@ type conn struct {
 // accept answers the handshake (RFC 6455 §4.2.2) and takes the connection over.
 func accept(w http.ResponseWriter, r *http.Request) (*conn, error) {
 	key := r.Header.Get("Sec-WebSocket-Key")
-	if r.Header.Get("Sec-WebSocket-Version") != "13" || key == "" {
+	// RFC 6455 §4.2.1: the key is 16 bytes in base64.
+	raw, err := base64.StdEncoding.DecodeString(key)
+	if r.Header.Get("Sec-WebSocket-Version") != "13" || err != nil || len(raw) != 16 {
 		w.Header().Set("Sec-WebSocket-Version", "13")
 		http.Error(w, "a WebSocket handshake needs version 13 and a key", http.StatusBadRequest)
 		return nil, errors.New("bad handshake")
@@ -150,6 +158,15 @@ type message struct {
 // errClosed is the client's close, or a broken connection: the socket is over.
 var errClosed = errors.New("the socket closed")
 
+// errRate is a control frame past the frame rate.
+var errRate = errors.New("too many frames")
+
+// closeCode says whether a client may send code in a close frame (RFC 6455 §7.4.1 and the
+// IANA registry): 1004, 1005, 1006 and 1015 are never sent, and 1016 to 2999 are not assigned.
+func closeCode(code int) bool {
+	return code >= 1000 && code <= 1003 || code >= 1007 && code <= 1014 || code >= 3000 && code <= 4999
+}
+
 // read is the next message. Ping, pong and close frames are answered here.
 func (c *conn) read() (message, error) {
 	var buf []byte
@@ -159,24 +176,32 @@ func (c *conn) read() (message, error) {
 		if err != nil {
 			return message{}, err
 		}
+		if (frameOp == opPing || frameOp == opPong) && c.take != nil && !c.take() {
+			return message{}, errRate
+		}
 		switch frameOp {
 		case opPing:
 			_ = c.writeFrame(opPong, payload)
 			continue
 		case opPong:
-			select {
-			case c.pong <- struct{}{}:
-			default:
+			if c.pinged.CompareAndSwap(true, false) {
+				select {
+				case c.pong <- struct{}{}:
+				default:
+				}
 			}
 			continue
 		case opClose:
-			code := 1005
-			if len(payload) >= 2 {
-				code = int(binary.BigEndian.Uint16(payload))
-			}
-			if code == 1005 {
+			switch {
+			case len(payload) == 0:
 				_ = c.writeFrame(opClose, nil)
-			} else {
+			case len(payload) == 1 || !closeCode(int(binary.BigEndian.Uint16(payload))):
+				c.close(1002, "")
+				return message{}, errClosed
+			case !utf8.Valid(payload[2:]):
+				c.close(1007, "")
+				return message{}, errClosed
+			default:
 				_ = c.writeFrame(opClose, payload[:2])
 			}
 			c.net.Close()
@@ -270,6 +295,7 @@ func (c *conn) keepAlive(done <-chan struct{}) {
 			return
 		case <-tick.C:
 		}
+		c.pinged.Store(true)
 		if c.writeFrame(opPing, nil) != nil {
 			return
 		}

@@ -15,7 +15,9 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
@@ -23,7 +25,6 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
-	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
@@ -48,6 +49,10 @@ const (
 
 // Keepalive is hub.py KEEPALIVE_SECONDS.
 var Keepalive = 15 * time.Second
+
+// WriteTimeout bounds one frame's write: a client that stops reading loses its stream, and
+// its slot under the caps is free again.
+var WriteTimeout = 30 * time.Second
 
 // eventID is hub.py EVENT_ID: an id outside it names no place.
 var eventID = regexp.MustCompile(`^[0-9A-Za-z-]{1,64}$`)
@@ -118,13 +123,12 @@ var Streams = map[string]stream{
 	"camera-relay": {keep: KeepCamera, group: "camera", groupMax: CameraStreamsMax},
 }
 
-// Routes are every caller's GET /changes, over hub; trusted names the proxies whose
-// X-Forwarded-For gives a stream's peer address.
-func Routes(hub *bus.Hub, trusted front.Networks) map[string][]crud.Route {
+// Routes are every caller's GET /changes, over hub.
+func Routes(hub *bus.Hub) map[string][]crud.Route {
 	out := map[string][]crud.Route{}
 	for caller, s := range Streams {
 		out[caller] = []crud.Route{{Method: "GET", Path: "/changes", Handle: func(r *http.Request, _ crud.Params) (any, error) {
-			return open(r, hub, trusted, s)
+			return open(r, hub, s)
 		}}}
 	}
 	return out
@@ -132,7 +136,10 @@ func Routes(hub *bus.Hub, trusted front.Networks) map[string][]crud.Route {
 
 // key is crud_agent_changes.py stream_key: the credential and the peer's address. Each agent
 // process connects from its own pod's address, so the pair counts one process's streams.
-func key(r *http.Request, trusted front.Networks) string {
+// The address is the TCP peer, never X-Forwarded-For, as uvicorn --no-proxy-headers gives
+// Python request.client: a service caller never comes through the ingress, and a caller in
+// the trusted proxies' network could send a new X-Forwarded-For per stream to pass its cap.
+func key(r *http.Request) string {
 	credential := "unknown"
 	if s := auth.ServiceOf(r.Context()); s != nil {
 		credential = s.Caller
@@ -140,10 +147,17 @@ func key(r *http.Request, trusted front.Networks) string {
 			credential = s.ID
 		}
 	}
-	return credential + "@" + trusted.Client(r)
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	if ip, err := netip.ParseAddr(peer); err == nil {
+		peer = ip.Unmap().String()
+	}
+	return credential + "@" + peer
 }
 
-func open(r *http.Request, hub *bus.Hub, trusted front.Networks, s stream) (any, error) {
+func open(r *http.Request, hub *bus.Hub, s stream) (any, error) {
 	var lastID *string
 	if values, ok := r.Header["Last-Event-Id"]; ok && len(values) > 0 {
 		v := values[0]
@@ -161,7 +175,7 @@ func open(r *http.Request, hub *bus.Hub, trusted front.Networks, s stream) (any,
 		}
 		start = or(newest, Start)
 	}
-	budget := &bus.Budget{Key: key(r, trusted), Group: s.group, GroupMax: s.groupMax}
+	budget := &bus.Budget{Key: key(r), Group: s.group, GroupMax: s.groupMax}
 	sub, err := hub.Subscribe(bus.Options{Transport: via, Keep: s.keep, Limit: QueueMax,
 		Overflow: bus.GapOnOverflow, Budget: budget})
 	var full *bus.ErrFull
@@ -196,12 +210,15 @@ func serve(ctx context.Context, w http.ResponseWriter, hub *bus.Hub, sub *bus.Su
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream; charset=utf-8")
 	h.Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
 	flush := http.NewResponseController(w)
+	_ = flush.SetWriteDeadline(time.Now().Add(WriteTimeout))
+	w.WriteHeader(http.StatusOK)
 	_ = flush.Flush()
 	// A stream may stay open for hours: its span ends as it starts.
 	telemetry.Streaming(ctx)
 	write := func(frame, text string) bool {
+		// A write that waits past the deadline fails, and the stream ends.
+		_ = flush.SetWriteDeadline(time.Now().Add(WriteTimeout))
 		if _, err := w.Write([]byte(text)); err != nil {
 			return false
 		}

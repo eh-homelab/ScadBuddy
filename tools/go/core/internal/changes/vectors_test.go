@@ -4,9 +4,18 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/bus"
 )
+
+// Peers give up on a stream after 45 s of silence (sbfleet's Bus, camera/follow.py IDLE), so
+// a keepalive comes every 15 s, as hub.py KEEPALIVE_SECONDS sends it.
+func TestAKeepaliveComesEvery15Seconds(t *testing.T) {
+	if Keepalive != 15*time.Second {
+		t.Fatalf("Keepalive is %s", Keepalive)
+	}
+}
 
 // The callers' filters against the shared vectors (backend/tests/fixtures/
 // event-stream-vectors.json), which Python's keep_agent, keep_fleet and keep_camera wrote.

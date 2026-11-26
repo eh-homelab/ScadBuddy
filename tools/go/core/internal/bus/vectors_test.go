@@ -4,14 +4,16 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 // Vectors are backend/tests/fixtures/event-stream-vectors.json, which the backend's
 // tests/test_event_stream_vectors.py writes from Python's own readers.
 type Vectors struct {
-	Kinds   map[string][]map[string]any `json:"kinds"`
-	Changes []struct {
+	Kinds      map[string][]map[string]any `json:"kinds"`
+	NotifyOnly []string                    `json:"notify_only"`
+	Changes    []struct {
 		Name    string  `json:"name"`
 		Channel string  `json:"channel"`
 		Payload string  `json:"payload"`
@@ -54,7 +56,7 @@ func ReadVectors(t *testing.T, path string) Vectors {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Kinds) == 0 || len(v.Changes) == 0 || len(v.Topics) == 0 || len(v.Reprs) == 0 || len(v.Frames) == 0 {
+	if len(v.Kinds) == 0 || len(v.NotifyOnly) == 0 || len(v.Changes) == 0 || len(v.Topics) == 0 || len(v.Reprs) == 0 || len(v.Frames) == 0 {
 		t.Fatalf("%s holds no vectors of some kind", path)
 	}
 	return v
@@ -90,6 +92,63 @@ func TestTheKindsAreThePythonModels(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want[3:]) {
 			t.Errorf("%s:\n got %v\nwant %v", kind, got, want[3:])
+		}
+	}
+}
+
+// A NOTIFY-only kind is never in the events log. Its change frame carries no id, so a
+// reader's resume point stays on a logged event.
+func TestTheNotifyOnlyKindsAreThePythonHubs(t *testing.T) {
+	v := ReadVectors(t, VectorsFile)
+	want := map[string]bool{}
+	for _, k := range v.NotifyOnly {
+		want[k] = true
+		if _, ok := Kinds[k]; !ok {
+			t.Errorf("%s: not a typed kind here", k)
+		}
+	}
+	for k := range Kinds {
+		if got := (&Event{Kind: k}).NotifyOnly(); got != want[k] {
+			t.Errorf("%s: NotifyOnly %v, want %v", k, got, want[k])
+		}
+	}
+}
+
+// Every change frame is lines of at most 1 MiB (sbfleet's lineMax), and one of them is
+// data, so a newline in a payload does not break the frame.
+func TestAChangeFrameIsOneDataLine(t *testing.T) {
+	check := func(name, frame string) {
+		body, ok := strings.CutSuffix(frame, "\n\n")
+		if !ok {
+			t.Errorf("%s: no blank line ends %q", name, frame)
+			return
+		}
+		data := 0
+		for _, line := range strings.Split(body, "\n") {
+			if len(line) > 1<<20 {
+				t.Errorf("%s: a line of %d bytes", name, len(line))
+			}
+			switch {
+			case strings.HasPrefix(line, "data: "):
+				data++
+			case strings.HasPrefix(line, "id: "), strings.HasPrefix(line, "event: "):
+			default:
+				t.Errorf("%s: a stray line %q", name, line)
+			}
+		}
+		if data != 1 {
+			t.Errorf("%s: %d data lines", name, data)
+		}
+	}
+	for _, c := range ReadVectors(t, VectorsFile).Changes {
+		channel := c.Channel
+		if channel == "" {
+			channel = "scadbuddy_events"
+		}
+		check(c.Name, ChangeFrame(channel, c.Payload, ""))
+		check(c.Name+" (Python)", c.Want.Live)
+		if c.Want.Replay != nil {
+			check(c.Name+" (Python replay)", *c.Want.Replay)
 		}
 	}
 }
