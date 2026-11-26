@@ -40,7 +40,7 @@ func New(t *testing.T) *pgxpool.Pool {
 		}
 		t.Skipf("%s is not set", Env)
 	}
-	once.Do(func() { template, buildErr = build(server) })
+	once.Do(func() { template, buildErr = build(server, true) })
 	if buildErr != nil {
 		t.Fatal(buildErr)
 	}
@@ -62,6 +62,38 @@ func New(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
+// Migrated is a pool on a database of its own, migrated from nothing as the API migrates
+// one: its event log keeps what the migrations published, which New's template drops. It
+// is slower than New; it is for a test of what the migrations write.
+func Migrated(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	server := os.Getenv(Env)
+	if server == "" {
+		if os.Getenv(RequiredEnv) != "" {
+			t.Fatalf("%s is not set", Env)
+		}
+		t.Skipf("%s is not set", Env)
+	}
+	ctx := context.Background()
+	name, err := build(server, false)
+	if name != "" {
+		t.Cleanup(func() {
+			if err := admin(ctx, server, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, err := pgxpool.New(ctx, with(server, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 // Main runs a package's tests and drops the template database after them.
 func Main(m *testing.M) {
 	code := m.Run()
@@ -71,8 +103,9 @@ func Main(m *testing.M) {
 	os.Exit(code)
 }
 
-// build migrates a template database: the backend's files, then the agent's.
-func build(server string) (string, error) {
+// build migrates a template database: the backend's files, then the agent's. With
+// emptyLog, the event log is emptied after them.
+func build(server string, emptyLog bool) (string, error) {
 	_, file, _, _ := runtime.Caller(0)
 	backend := filepath.Join(filepath.Dir(file), "../../../../../backend/scadbuddy")
 	name := "core_template_" + random()
@@ -113,6 +146,9 @@ func build(server string) (string, error) {
 				return name, err
 			}
 		}
+	}
+	if !emptyLog {
+		return name, nil
 	}
 	// The migrations publish history events (#6949: the property history's back-fill, the
 	// item kinds' schemas). A test starts with the log as it was before them: empty, from

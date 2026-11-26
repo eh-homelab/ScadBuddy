@@ -265,3 +265,58 @@ def test_a_schema_change_publishes_one_event(pg_pool: PgPool) -> None:
         assert [(e["owner"], e["new"], e["actor"]) for e in events] == [
             ("item_kind:nozzle", schema, PERSON)
         ]
+
+
+@pytest.mark.parametrize("actor", ['"browser"', "null", "[1]", "3"])
+def test_an_actor_that_is_not_an_object_is_refused(pg_pool: PgPool, actor: str) -> None:
+    """The history subscriber stores only an object actor; a write that names another is
+    refused, so the log never holds an event that would stop its cursor."""
+    with pg_pool.connection() as conn:
+        entity_id, _ = _item(conn)
+        _set(conn, entity_id, "a", "1")
+        mark = _newest(conn)
+        writes = [
+            # scadbuddy.actor on a set, a remove, an entity delete and the two schema writes
+            (
+                "INSERT INTO entity_properties (entity_id, key, value, updated_by)"
+                " VALUES (%s, 'b', '2', '{\"kind\": \"browser\"}')",
+                (entity_id,),
+            ),
+            ("DELETE FROM entity_properties WHERE entity_id = %s", (entity_id,)),
+            ("DELETE FROM entities WHERE id = %s", (entity_id,)),
+            ("UPDATE entity_property_schemas SET schema = '{}' WHERE kind = 'spool'", ()),
+            ("UPDATE item_kinds SET attribute_schema = '{}' WHERE id = 'nozzle'", ()),
+        ]
+        for statement, params in writes:
+            with (
+                pytest.raises(psycopg.errors.RaiseException, match="must be a JSON object"),
+                conn.transaction(),
+            ):
+                conn.execute("SELECT set_config('scadbuddy.actor', %s, true)", (actor,))
+                conn.execute(statement, params)
+        # updated_by alone, with no scadbuddy.actor
+        with pytest.raises(psycopg.errors.RaiseException, match="must be a JSON object"):
+            conn.execute(
+                "INSERT INTO entity_properties (entity_id, key, value, updated_by)"
+                " VALUES (%s, 'b', '2', %s::jsonb)",
+                (entity_id, actor),
+            )
+        assert _keys(conn, entity_id) == ["a"]
+        assert events_of(conn, CHANGED, mark) == []
+        assert events_of(conn, SCHEMA_CHANGED, mark) == []
+
+
+def test_a_json_null_schema_is_refused(pg_pool: PgPool) -> None:
+    with pg_pool.connection() as conn:
+        mark = _newest(conn)
+        for statement in (
+            "UPDATE entity_property_schemas SET schema = 'null' WHERE kind = 'spool'",
+            "UPDATE item_kinds SET attribute_schema = 'null' WHERE id = 'nozzle'",
+        ):
+            with (
+                pytest.raises(psycopg.errors.RaiseException, match="JSON null"),
+                conn.transaction(),
+            ):
+                _actor(conn, PERSON)
+                conn.execute(statement)
+        assert events_of(conn, SCHEMA_CHANGED, mark) == []

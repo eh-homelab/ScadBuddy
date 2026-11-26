@@ -15,6 +15,26 @@ LANGUAGE sql STABLE AS $$
   SELECT nullif(current_setting('scadbuddy.actor', true), '')::jsonb
 $$;
 
+-- The actor a history event names: refused unless it is a JSON object, as the history
+-- subscriber stores only an object. A bad actor refuses the write, so it never reaches the
+-- log, where it would stop the subscriber's cursor.
+CREATE FUNCTION scadbuddy_event_actor(actor jsonb) RETURNS jsonb
+LANGUAGE plpgsql IMMUTABLE AS $$
+BEGIN
+  IF jsonb_typeof(actor) IS DISTINCT FROM 'object' THEN
+    RAISE EXCEPTION 'a history event''s actor must be a JSON object, not %', coalesce(actor::text, 'NULL')
+      USING ERRCODE = 'P0001';
+  END IF;
+  RETURN actor;
+END
+$$;
+
+-- The migration's own actor, for rows that name none.
+CREATE FUNCTION scadbuddy_migration_actor() RETURNS jsonb
+LANGUAGE sql IMMUTABLE AS $$
+  SELECT '{"kind": "provider", "principal": "migration"}'::jsonb
+$$;
+
 -- Publish an event as `core/pg_events.py` and Go's `internal/bus` do: the event log's lock
 -- (EVENT_LOG_LOCK, held to the writer's commit, so `seq` order is commit order), the row in
 -- `events`, and the NOTIFY on `scadbuddy_events`, which Postgres sends only on commit.
@@ -101,21 +121,26 @@ BEGIN
   LOOP
     PERFORM scadbuddy_publish_event('entity_property.changed', jsonb_build_object(
       'entity_id', r.entity_id, 'entity_kind', r.kind, 'ref', r.ref, 'key', r.key,
-      'op', 'set', 'old', NULL, 'new', r.value, 'source', r.source, 'actor', r.updated_by,
+      'op', 'set', 'old', NULL, 'new', r.value, 'source', r.source,
+      'actor', CASE WHEN jsonb_typeof(r.updated_by) = 'object' THEN r.updated_by
+        ELSE scadbuddy_migration_actor() END,
       'changed_at', r.updated_at, 'retention_seconds', 0));
   END LOOP;
-  FOR r IN SELECT kind, schema, updated_by, updated_at FROM entity_property_schemas ORDER BY kind
+  FOR r IN SELECT kind, schema, updated_by, updated_at FROM entity_property_schemas
+    WHERE jsonb_typeof(schema) <> 'null' ORDER BY kind
   LOOP
     PERFORM scadbuddy_publish_event('entity_property_schema.changed', jsonb_build_object(
       'owner', 'kind:' || r.kind, 'old', NULL, 'new', r.schema,
-      'actor', coalesce(r.updated_by, '{"kind": "provider", "principal": "migration"}'),
+      'actor', CASE WHEN jsonb_typeof(r.updated_by) = 'object' THEN r.updated_by
+        ELSE scadbuddy_migration_actor() END,
       'changed_at', r.updated_at, 'retention_seconds', 0));
   END LOOP;
-  FOR r IN SELECT id, attribute_schema, updated_at FROM item_kinds ORDER BY id
+  FOR r IN SELECT id, attribute_schema, updated_at FROM item_kinds
+    WHERE jsonb_typeof(attribute_schema) <> 'null' ORDER BY id
   LOOP
     PERFORM scadbuddy_publish_event('entity_property_schema.changed', jsonb_build_object(
       'owner', 'item_kind:' || r.id, 'old', NULL, 'new', r.attribute_schema,
-      'actor', '{"kind": "provider", "principal": "migration"}'::jsonb,
+      'actor', scadbuddy_migration_actor(),
       'changed_at', r.updated_at, 'retention_seconds', 0));
   END LOOP;
 END
@@ -143,7 +168,8 @@ BEGIN
     END IF;
     PERFORM scadbuddy_publish_event('entity_property.changed', jsonb_build_object(
       'entity_id', OLD.entity_id, 'entity_kind', v_kind, 'ref', v_ref, 'key', OLD.key,
-      'op', 'remove', 'old', OLD.value, 'new', NULL, 'source', NULL, 'actor', v_actor,
+      'op', 'remove', 'old', OLD.value, 'new', NULL, 'source', NULL,
+      'actor', scadbuddy_event_actor(v_actor),
       'retention_seconds', 0));
     RETURN NULL;
   END IF;
@@ -160,7 +186,7 @@ BEGIN
   PERFORM scadbuddy_publish_event('entity_property.changed', jsonb_build_object(
     'entity_id', NEW.entity_id, 'entity_kind', v_kind, 'ref', v_ref, 'key', NEW.key,
     'op', 'set', 'old', v_old, 'new', NEW.value, 'source', NEW.source,
-    'actor', coalesce(v_actor, NEW.updated_by), 'retention_seconds', 0));
+    'actor', scadbuddy_event_actor(coalesce(v_actor, NEW.updated_by)), 'retention_seconds', 0));
   RETURN NULL;
 END
 $$;
@@ -184,7 +210,8 @@ BEGIN
     END IF;
     PERFORM scadbuddy_publish_event('entity_property.changed', jsonb_build_object(
       'entity_id', OLD.id, 'entity_kind', OLD.kind, 'ref', OLD.ref, 'key', p.key,
-      'op', 'remove', 'old', p.value, 'new', NULL, 'source', NULL, 'actor', v_actor,
+      'op', 'remove', 'old', p.value, 'new', NULL, 'source', NULL,
+      'actor', scadbuddy_event_actor(v_actor),
       'retention_seconds', 0));
   END LOOP;
   RETURN OLD;
@@ -207,10 +234,13 @@ BEGIN
     END IF;
     v_old := OLD.schema;
   END IF;
+  IF jsonb_typeof(NEW.schema) = 'null' THEN
+    RAISE EXCEPTION 'a property schema must not be JSON null' USING ERRCODE = 'P0001';
+  END IF;
   PERFORM scadbuddy_publish_event('entity_property_schema.changed', jsonb_build_object(
     'owner', 'kind:' || NEW.kind, 'old', v_old, 'new', NEW.schema,
-    'actor', coalesce(scadbuddy_actor(), NEW.updated_by,
-      '{"kind": "provider", "principal": "migration"}'),
+    'actor', scadbuddy_event_actor(
+      coalesce(scadbuddy_actor(), NEW.updated_by, scadbuddy_migration_actor())),
     'retention_seconds', 0));
   RETURN NULL;
 END
@@ -233,9 +263,12 @@ BEGIN
     END IF;
     v_old := OLD.attribute_schema;
   END IF;
+  IF jsonb_typeof(NEW.attribute_schema) = 'null' THEN
+    RAISE EXCEPTION 'an item kind''s attribute_schema must not be JSON null' USING ERRCODE = 'P0001';
+  END IF;
   PERFORM scadbuddy_publish_event('entity_property_schema.changed', jsonb_build_object(
     'owner', 'item_kind:' || NEW.id, 'old', v_old, 'new', NEW.attribute_schema,
-    'actor', coalesce(scadbuddy_actor(), '{"kind": "provider", "principal": "migration"}'),
+    'actor', scadbuddy_event_actor(coalesce(scadbuddy_actor(), scadbuddy_migration_actor())),
     'retention_seconds', 0));
   RETURN NULL;
 END

@@ -327,3 +327,35 @@ func TestSchemaEventsAreApplied(t *testing.T) {
 		t.Fatalf("the last two owners %v, want %v", owners, want)
 	}
 }
+
+// TestTheBackFillApplies applies the real back-fill: the migrations' schema events (with
+// changed_at, item_kind: owners and the migration's actor), on a log that keeps them.
+func TestTheBackFillApplies(t *testing.T) {
+	pool := testdb.Migrated(t)
+	events := scalar[int](t, pool, `SELECT count(*) FROM events WHERE kind = 'entity_property_schema.changed'
+		AND payload ? 'changed_at'`)
+	itemKinds := scalar[int](t, pool, `SELECT count(*) FROM item_kinds`)
+	if events < itemKinds+2 {
+		t.Fatalf("%d back-filled schema events, want one per item kind (%d) and per kind schema", events, itemKinds)
+	}
+	for {
+		n, err := Apply(ctx, pool, Options{Batch: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n < 7 {
+			break
+		}
+	}
+	if c, n := cursor(t, pool), newest(t, pool); c != n {
+		t.Fatalf("cursor %d, want the log's end %d", c, n)
+	}
+	if n := scalar[int](t, pool, `SELECT count(*) FROM entity_property_schema_history h JOIN events e
+		ON e.seq = h.event_seq WHERE h.at = (e.payload->>'changed_at')::timestamptz`); n != events {
+		t.Fatalf("%d schema rows at their changed_at, want %d", n, events)
+	}
+	if n := scalar[int](t, pool, `SELECT count(*) FROM entity_property_schema_history
+		WHERE owner LIKE 'item_kind:%' AND actor = '{"kind": "provider", "principal": "migration"}'`); n != itemKinds {
+		t.Fatalf("%d item kind rows by the migration, want %d", n, itemKinds)
+	}
+}
