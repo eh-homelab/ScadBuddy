@@ -1112,8 +1112,10 @@ from #4090 on needs nothing: its pods make their own build current.
 output's row and blobs are its only record, and no copy runs. Its migration refuses to
 run until the first release wrote the cut-over mark and every row's bytes are blobs: a
 refused pod restarts, and the pods of the first release go on serving. Upgrade from the
-first release only, once `GET /api/v1/outputs/copy-status` names `cut_over_at` and
-`bytes.pending` is 0 ([The cut-over](docs/architecture/data.md#the-cut-over)).
+first release only, once `GET /api/v1/outputs/copy-status` named `cut_over_at` and
+`bytes.pending` was 0 ([The cut-over](docs/architecture/data.md#the-cut-over)). #7887
+removed that route and the mark's table after the second release; a build from it on
+upgrades only an install that already runs the second release.
 
 ### Render worker (#424)
 
