@@ -117,6 +117,7 @@ describe('the designer', () => {
   /** A host whose `set` merges one level deep and tells its subscribers, as the page does. */
   function fakeHost(initial: JsonObject) {
     let inputs = initial
+    let describer: (() => string) | undefined
     const listeners = new Set<(inputs: JsonObject) => void>()
     const set = vi.fn((patch: JsonObject) => {
       const next: JsonObject = { ...inputs }
@@ -141,9 +142,11 @@ describe('the designer', () => {
         },
       },
       schema: async () => schema,
-      describe: () => undefined,
+      describe: (fn: () => string) => {
+        describer = fn
+      },
     } as unknown as Host
-    return { host, set, get: () => inputs }
+    return { host, set, get: () => inputs, described: () => describer?.() }
   }
 
   async function mounted(initial: JsonObject) {
@@ -156,6 +159,12 @@ describe('the designer', () => {
     const button = (entry: string) => root.querySelector(`button[data-entry="${entry}"]`) as HTMLButtonElement
     return { ...fake, root, button }
   }
+
+  it('describes the piece shown by its label, not its key (#7846)', async () => {
+    const { described } = await mounted({ params: { piece: 'wall_window' }, house: { cols: 2, rows: 1, storeys: 1, windows: 2 } })
+    expect(described()).toMatch(/; showing wall with window\.$/)
+    expect(described()).not.toContain('wall_window')
+  })
 
   it('lists the pieces and shows the one picked', async () => {
     const { root, set, button } = await mounted({ params: {} })
