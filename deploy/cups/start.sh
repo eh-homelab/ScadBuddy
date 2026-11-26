@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Prepares CUPS's state, declares the one label printer from env, then runs cupsd in
 # the foreground (deploy/cups/README.md).
 #
@@ -10,14 +10,16 @@
 # root belongs to root; each file of the image's ServerRoot that etc/ lacks is copied
 # in, and none is overwritten.
 #
-# With CUPS_PRINTER_NAME set, the queue is rewritten at every start, so the
-# Deployment's env is the only place it is configured. With it unset, the queues in
-# /var/lib/cups/etc are the deployment's own.
+# With CUPS_QUEUES set, the queues are rewritten at every start, so the Deployment's env
+# is the only place they are configured. With it unset, the queues in /var/lib/cups/etc
+# are the deployment's own.
 #
-#   CUPS_PRINTER_NAME       queue name, e.g. S-EDCDU03
-#   CUPS_PRINTER_URI        device URI, e.g. socket://S-EDCDU03.internal.nullreference.io:9100
-#   CUPS_PRINTER_INFO       description shown to clients (optional)
-#   CUPS_DEFAULT_PAGE_SIZE  a PageSize of the Zebra ZPL PPD, e.g. w144h72 (2 x 1 in)
+#   CUPS_QUEUES  one queue per line: NAME PAGE-SIZE DEVICE-URI [DESCRIPTION...]
+#                PAGE-SIZE is a PageSize of the Zebra ZPL PPD (w144h72 is 2 x 1 in,
+#                w288h432 is 4 x 6 in); the queue's PPD keeps only that size, so a
+#                print dialog offers nothing else. DEVICE-URI is usually
+#                zebra://HOST:9100?length=DOTS, which holds a job until the loaded
+#                labels match (deploy/cups/zebra). The first queue is the default.
 set -eu
 
 state=/var/lib/cups
@@ -28,36 +30,41 @@ run_cupsd() {
   exec /usr/sbin/cupsd -f -c /etc/cups/cupsd.conf -s /etc/cups/cups-files.conf
 }
 
-if [ -z "${CUPS_PRINTER_NAME:-}" ]; then
+if [ -z "${CUPS_QUEUES:-}" ]; then
   run_cupsd
 fi
 
-: "${CUPS_PRINTER_URI:?set CUPS_PRINTER_URI}"
-: "${CUPS_DEFAULT_PAGE_SIZE:=w288h432}"
-: "${CUPS_PRINTER_INFO:=$CUPS_PRINTER_NAME}"
-
-case "$CUPS_PRINTER_NAME" in
-  *[!A-Za-z0-9_-]* | "") echo "CUPS_PRINTER_NAME may hold only letters, digits, - and _" >&2; exit 1 ;;
-esac
-
-ppd="$state/etc/ppd/${CUPS_PRINTER_NAME}.ppd"
-/usr/lib/cups/daemon/cups-driverd cat drv:///sample.drv/zebra.ppd > "$ppd" 2>/dev/null
-if ! grep -q "^\*PageSize ${CUPS_DEFAULT_PAGE_SIZE}/" "$ppd"; then
-  echo "CUPS_DEFAULT_PAGE_SIZE ${CUPS_DEFAULT_PAGE_SIZE} is not a page size of the Zebra ZPL PPD" >&2
-  exit 1
-fi
-sed -i \
-  -e "s/^\*DefaultPageSize: .*/*DefaultPageSize: ${CUPS_DEFAULT_PAGE_SIZE}/" \
-  -e "s/^\*DefaultPageRegion: .*/*DefaultPageRegion: ${CUPS_DEFAULT_PAGE_SIZE}/" \
-  -e "s/^\*DefaultImageableArea: .*/*DefaultImageableArea: ${CUPS_DEFAULT_PAGE_SIZE}/" \
-  -e "s/^\*DefaultPaperDimension: .*/*DefaultPaperDimension: ${CUPS_DEFAULT_PAGE_SIZE}/" \
-  "$ppd"
-
-cat > "$state/etc/printers.conf" <<CONF
-<DefaultPrinter ${CUPS_PRINTER_NAME}>
-Info ${CUPS_PRINTER_INFO}
+conf="$state/etc/printers.conf"
+: > "$conf"
+rm -f "$state"/etc/ppd/*.ppd
+while read -r name size uri info; do
+  [ -z "$name" ] && continue
+  case "$name" in
+    *[!A-Za-z0-9_-]*) echo "queue name $name may hold only letters, digits, - and _" >&2; exit 1 ;;
+  esac
+  if [ -z "$uri" ]; then
+    echo "queue $name needs NAME PAGE-SIZE DEVICE-URI" >&2
+    exit 1
+  fi
+  ppd="$state/etc/ppd/$name.ppd"
+  /usr/lib/cups/daemon/cups-driverd cat drv:///sample.drv/zebra.ppd 2>/dev/null |
+    awk -v size="$size" '
+      /^\*(PageSize|PageRegion|ImageableArea|PaperDimension) / {
+        opt = $2; sub(/\/.*/, "", opt); sub(/:$/, "", opt)
+        if (opt != size) next
+      }
+      /^\*Default(PageSize|PageRegion|ImageableArea|PaperDimension):/ { sub(/: .*/, ": " size) }
+      { print }
+    ' > "$ppd"
+  if ! grep -q "^\*PageSize ${size}/" "$ppd"; then
+    echo "queue $name: $size is not a page size of the Zebra ZPL PPD" >&2
+    exit 1
+  fi
+  cat >> "$conf" <<CONF
+<Printer ${name}>
+Info ${info:-$name}
 MakeModel Zebra ZPL Label Printer
-DeviceURI ${CUPS_PRINTER_URI}
+DeviceURI ${uri}
 State Idle
 Accepting Yes
 Shared Yes
@@ -67,7 +74,15 @@ PageLimit 0
 KLimit 0
 OpPolicy default
 ErrorPolicy retry-job
-</DefaultPrinter>
+</Printer>
 CONF
+done <<<"$CUPS_QUEUES"
+
+if ! [ -s "$conf" ]; then
+  echo "CUPS_QUEUES declares no queue" >&2
+  exit 1
+fi
+# The first queue is the default.
+sed -i '0,/^<Printer /s//<DefaultPrinter /; 0,/^<\/Printer>/s//<\/DefaultPrinter>/' "$conf"
 
 run_cupsd

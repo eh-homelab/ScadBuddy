@@ -828,6 +828,7 @@ RUN groupadd --gid 10001 cups \
 # PVC's is) still gives cupsd directories it owns and may chmod.
 COPY deploy/cups/cupsd.conf /etc/cups/cupsd.conf
 COPY deploy/cups/start.sh /usr/local/bin/cups-start
+COPY --chmod=0755 deploy/cups/zebra /usr/lib/cups/backend/zebra
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev

@@ -1,0 +1,124 @@
+#!/bin/bash
+# CUPS backend for a Zebra ZPL printer on raw TCP (deploy/cups/README.md, "Label sizes").
+#
+#   zebra://HOST[:PORT]?length=DOTS[&tolerance=DOTS][&interval=SECONDS]
+#
+# Before it sends a job, it reads the printer's host status (`~HS`). The job is sent
+# only when the printer is ready (not paused, head closed, labels in) and the label
+# length it measured at its last calibration is within `tolerance` dots of `length`
+# (default 10 % of `length`). Otherwise the job waits, still processing, and the
+# backend asks again every `interval` seconds (30); the queue's state
+# message says what to load meanwhile, and the job prints once the right labels are
+# in and calibrated. (Exiting CUPS_BACKEND_RETRY instead would also keep the job, but
+# cupsd clears the message between tries, measured 2026-11-26.) The printer cannot
+# sense label width, so the length is what tells one queue's labels from another's.
+#
+# `~HS` answers three lines framed by STX/ETX (Zebra's ZPL guide, "~HS Host Status
+# Return"): line 1 field 2 is "paper out", field 3 "pause", field 4 the label length
+# in dots; line 2 field 3 is "head up". Measured on the GK420t (V61.17.17Z,
+# 2026-11-25): `030,0,0,0208,...` with 2 x 1 in labels at 203 dpi.
+set -u
+
+readonly OK=0 FAILED=1 RETRY=6
+
+if [ $# -eq 0 ]; then
+  echo 'network zebra "Unknown" "Zebra ZPL (label size checked)"'
+  exit "$OK"
+fi
+if [ $# -lt 5 ] || [ $# -gt 6 ]; then
+  echo "ERROR: usage: zebra job-id user title copies options [file]" >&2
+  exit "$FAILED"
+fi
+
+uri=${DEVICE_URI:?}
+rest=${uri#zebra://}
+hostport=${rest%%[/?]*}
+query=""
+case "$rest" in *\?*) query=${rest#*\?} ;; esac
+host=${hostport%:*}
+port=9100
+[ "$host" != "$hostport" ] && port=${hostport##*:}
+
+length="" tolerance="" interval=""
+IFS='&' read -r -a pairs <<<"$query"
+for pair in "${pairs[@]}"; do
+  case "$pair" in
+    length=*) length=${pair#length=} ;;
+    tolerance=*) tolerance=${pair#tolerance=} ;;
+    interval=*) interval=${pair#interval=} ;;
+  esac
+done
+if ! [[ "$length" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: $uri names no length=DOTS" >&2
+  exit "$FAILED"
+fi
+[[ "$tolerance" =~ ^[0-9]+$ ]] || tolerance=$((length / 10))
+[[ "$interval" =~ ^[1-9][0-9]*$ ]] || interval=30
+
+want_in=$(awk -v d="$length" 'BEGIN { printf "%.2f", d / 203 }')
+
+# Asks the printer for its host status and says whether this job may go now. On "no"
+# it sets the printer's state reason and message (on stderr, where cupsd reads a
+# backend's messages), which stay on the queue while the
+# job waits, so a print dialog or the web page shows what to do.
+ready() {
+  local status line1 line2 measured have_in diff
+  local -a f1 f2
+  # One connection, read with a deadline so a silent printer is a wait, not a hang.
+  # shellcheck disable=SC2016 # $1 and $2 are the inner script's arguments
+  status=$(timeout 10 bash -c '
+    exec 3<>"/dev/tcp/$1/$2" || exit 1
+    printf "~HS" >&3
+    for _ in 1 2 3; do IFS= read -r -t 5 line <&3 || exit 1; printf "%s\n" "$line"; done
+  ' _ "$host" "$port" 2>/dev/null | tr -d '\002\003\r')
+  line1=$(sed -n 1p <<<"$status")
+  line2=$(sed -n 2p <<<"$status")
+  IFS=',' read -r -a f1 <<<"$line1"
+  IFS=',' read -r -a f2 <<<"$line2"
+  if [ "${#f1[@]}" -lt 4 ] || [ "${#f2[@]}" -lt 3 ]; then
+    echo "STATE: +connecting-to-device" >&2
+    echo "INFO: The label printer $host:$port does not answer. Waiting." >&2
+    return 1
+  fi
+  echo "STATE: -connecting-to-device" >&2
+  if [ "${f2[2]}" = 1 ]; then
+    echo "STATE: +cover-open" >&2
+    echo "INFO: The printer's head is open. Close it. Waiting." >&2
+    return 1
+  fi
+  if [ "${f1[1]}" = 1 ]; then
+    echo "STATE: +media-empty" >&2
+    echo "INFO: The printer is out of labels. Load ${want_in} in labels. Waiting." >&2
+    return 1
+  fi
+  if [ "${f1[2]}" = 1 ]; then
+    echo "STATE: +paused" >&2
+    echo "INFO: The printer is paused. Press Feed or Pause on it. Waiting." >&2
+    return 1
+  fi
+  echo "STATE: -cover-open,media-empty,paused" >&2
+  measured=$((10#${f1[3]}))
+  have_in=$(awk -v d="$measured" 'BEGIN { printf "%.2f", d / 203 }')
+  diff=$((measured - length))
+  if [ "${diff#-}" -gt "$tolerance" ]; then
+    echo "STATE: +media-needed" >&2
+    echo "INFO: ${have_in} in labels are loaded; this queue prints ${want_in} in labels. Load them and calibrate (hold Feed). Waiting." >&2
+    return 1
+  fi
+  echo "STATE: -media-needed" >&2
+  return 0
+}
+
+# The job waits here, "processing", until the printer is ready with this queue's labels.
+# Cancelling it stops this backend (SIGTERM).
+until ready; do sleep "$interval"; done
+
+input=/dev/stdin
+[ $# -eq 6 ] && input=$6
+# shellcheck disable=SC2016 # $1..$3 are the inner script's arguments
+if ! timeout 300 bash -c 'exec 3>"/dev/tcp/$1/$2" || exit 1; cat "$3" >&3' _ "$host" "$port" "$input"; then
+  echo "INFO: Sending to $host:$port failed; the job waits." >&2
+  exit "$RETRY"
+fi
+echo "INFO: Sent to $host:$port." >&2
+exit "$OK"

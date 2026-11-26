@@ -26,10 +26,11 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   MediaMTX's docs and the measurements they rest on; a MediaMTX bump re-measures them (the
   camera spec §2).
 
-- `deploy/cups/` — the label print server's `cupsd.conf` and `start.sh`, copied into the
-  Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). The queue comes from the
-  Deployment's env; its state (queues, jobs) is under `/var/lib/cups`, one volume; remote
-  admin is refused. `README.md` there has the variables and the
+- `deploy/cups/` — the label print server's `cupsd.conf`, `start.sh` and `zebra` backend,
+  copied into the Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). One
+  queue per label size comes from the Deployment's `CUPS_QUEUES`; the backend holds a job
+  until the printer's calibrated label length matches its queue. State (queues, jobs) is
+  under `/var/lib/cups`, one volume; remote admin is refused. `README.md` there has the variables and the
   printer's measured facts. Its pin in eh-homelab/clusters is moved by hand, as the camera
   images' are.
 

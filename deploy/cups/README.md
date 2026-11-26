@@ -10,15 +10,42 @@ the client.
   driver is CUPS's own "Zebra ZPL Label Printer" (`drv:///sample.drv/zebra.ppd`, with the
   `rastertolabel` filter). CUPS marks PPD drivers deprecated
   ([OpenPrinting/cups#103](https://github.com/OpenPrinting/cups/issues/103)); 2.4 still runs them.
-- `start.sh` declares the one queue from env at every start, then runs `cupsd -f` as uid
-  10001 on port 8631:
+- `start.sh` declares the queues from `CUPS_QUEUES` at every start, then runs `cupsd -f`
+  as uid 10001 on port 8631. One queue per line, `NAME PAGE-SIZE DEVICE-URI [DESCRIPTION]`;
+  the first is the default:
 
-  | Variable | Meaning |
-  |---|---|
-  | `CUPS_PRINTER_NAME` | queue name (the printer's host name, `S-EDCDU03`) |
-  | `CUPS_PRINTER_URI` | device URI, `socket://S-EDCDU03.internal.nullreference.io:9100` |
-  | `CUPS_PRINTER_INFO` | description clients show (optional) |
-  | `CUPS_DEFAULT_PAGE_SIZE` | a PageSize of the PPD: `w144h72` is 2 x 1 in, `w288h432` is 4 x 6 in (default) |
+  ```text
+  S-EDCDU03-2x1 w144h72  zebra://S-EDCDU03.internal.nullreference.io:9100?length=203  Zebra GK420t, 2 x 1 in labels
+  S-EDCDU03-4x6 w288h432 zebra://S-EDCDU03.internal.nullreference.io:9100?length=1218 Zebra GK420t, 4 x 6 in labels
+  ```
+
+  PAGE-SIZE is a PageSize of the Zebra ZPL PPD (`w144h72` is 2 x 1 in, `w288h432` is 4 x 6
+  in; the size in points, 72 a inch). Each queue's PPD keeps only its own size, so a
+  print dialog offers nothing else.
+
+## Label sizes
+
+One queue per label size, and a job prints only on its own labels. The `zebra` backend
+(`deploy/cups/zebra`, URI `zebra://HOST[:PORT]?length=DOTS[&tolerance=DOTS][&interval=S]`)
+asks the printer for its host status (`~HS`) before it sends a job. It sends only when the
+head is closed, labels are in, the printer is not paused, and the label length the
+printer measured at its last calibration is within `tolerance` dots (default 10 % of
+`length`) of `length`. Otherwise the job waits, processing, and the backend asks again
+every `interval` seconds (30). Meanwhile the queue shows the state reason
+`media-needed` (or `cover-open`, `media-empty`, `paused`) and a message such as "1.02 in
+labels are loaded; this queue prints 6.00 in labels. Load them and calibrate (hold
+Feed). Waiting." Once the right labels are loaded and calibrated, the job prints; it is
+never cancelled for the wrong labels. Only that queue waits; the others print.
+
+- `length` is the label's length in dots at 203 dpi: 203 for 1 in, 1218 for 6 in. The
+  GK420t reported `0208` with 2 x 1 in labels loaded (`~HS`, 2026-11-25).
+- The printer measures length only, not width, so two sizes of the same length cannot be
+  told apart.
+- After a roll swap, calibrate (hold Feed until the light flashes once): the length the
+  backend reads is the last calibration's.
+- Exiting `CUPS_BACKEND_RETRY` would also keep a job, but cupsd clears the queue's message
+  between tries (measured 2026-11-26), so the backend waits in place instead. A send that
+  fails part way does exit RETRY; `cupsd.conf` retries it every 30 s for a week.
 
 - State: `/var/lib/cups/etc` is cupsd's ServerRoot (queues, PPDs, TLS files) and
   `/var/lib/cups/spool` its RequestRoot (jobs not yet printed). Mount one durable volume
@@ -28,7 +55,7 @@ the client.
   root. Its cache is `/var/lib/cups/cache`, on the same volume for the same reason (an
   emptyDir's root is root's too); cupsd rebuilds it when it is missing.
 - Configuration: `/etc/cups/cupsd.conf` and `cups-files.conf`, the image's. Mount a file
-  over either to replace it. Leave `CUPS_PRINTER_NAME` unset and `start.sh` declares no
+  over either to replace it. Leave `CUPS_QUEUES` unset and `start.sh` declares no
   queue: the queues in `/var/lib/cups/etc` (on the volume, or set by `lpadmin` inside
   the pod) are the deployment's own. This supports any printer the image has a driver
   for: CUPS's sample drivers (Zebra ZPL, EPL, CPCL, Dymo, generic PCL and ESC/P) and
@@ -39,7 +66,9 @@ the client.
   the volume or a mounted config.
   Connections from inside the pod are trusted as local; nothing else runs there.
 - TLS ends at the shared Envoy Gateway; cupsd serves plain HTTP. Clients add the printer
-  as `ipps://cups.internal.nullreference.io/printers/S-EDCDU03`.
+  as `ipps://cups.internal.nullreference.io/printers/<queue>`, e.g. `S-EDCDU03-2x1`
+  (Windows: "Select a shared printer by name" with the `https://` form and the Microsoft
+  PS Class Driver).
 - No mDNS: AirPrint discovery does not cross into the cluster, so a phone or computer adds
   the printer by that URL.
 
