@@ -275,6 +275,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "printer.changed",
         # Camera recording: a printer's feed state changed.
         "camera.feed",
+        # Camera live view: a person asked to restart a printer's camera pull.
+        "camera.reconnect",
         # Orders (#4249, spec 2026-10-18 §7.1).
         "order.changed",
         "order_item.changed",

@@ -1,8 +1,10 @@
-"""The camera relay and two recorders against real MediaMTX processes (phase 1, Task 9).
+"""The camera relay, two recorders and the live edge against real MediaMTX processes (phase 1,
+Task 9; phase 3, the edge).
 
 ffmpeg publishes a test stream to a third MediaMTX that stands in for the printer. The relay
 pulls it over plain RTSP (a test-only `Relay` ``source_for``), and each recorder's MediaMTX
-reads the relay and cuts 4 s fMP4 segments. The CRUD routes are a fake over the real
+reads the relay and cuts 4 s fMP4 segments. The edge's MediaMTX reads the relay on demand
+and serves LL-HLS. The CRUD routes are a fake over the real
 `CameraStore` on the test Postgres; the bucket is moto. Every port is free and every process
 has its own, so the test runs anywhere. Every wait is bounded."""
 
@@ -25,10 +27,12 @@ import pytest
 from pydantic import SecretStr
 
 from scadbuddy.auth.service_credentials import ServiceAuth
+from scadbuddy.camera import edge as edge_module
 from scadbuddy.camera import recorder as recorder_module
 from scadbuddy.camera import relay as relay_module
 from scadbuddy.camera.mediamtx import MediaMtx
 from scadbuddy.camera.models import FeedReport, SegmentIn
+from scadbuddy.camera.settings import EdgeSettings
 from scadbuddy.camera.store import CameraStore, NotLeaderError
 from scadbuddy.camera.uploads import Uploader
 from scadbuddy.core.secrets import Kek
@@ -46,6 +50,8 @@ pytestmark = pytest.mark.requires_postgres
 DEPLOY = Path(__file__).resolve().parents[3] / "deploy" / "camera"
 CRUD = {"X-ScadBuddy-Crud": "1"}
 READ_USER, READ_PASS = "reader", "relay-read-pass"
+#: The edge's read user, which the API sends to the edge's HLS and WHEP ports.
+EDGE_USER, EDGE_PASS = "edge-reader", "edge-read-pass"
 #: Segments to index before the kill, and after it.
 BEFORE, AFTER = 10, 10
 #: The longest hole allowed between one indexed segment's end and the next one's start.
@@ -165,6 +171,97 @@ async def start_mediamtx(
     return proc, mtx
 
 
+async def publishing(
+    tmp_path: Path, spawn: Spawn, media: Media
+) -> tuple[int, subprocess.Popen[bytes]]:
+    """The printer: a MediaMTX that takes ffmpeg's test stream on path ``cam``. Its RTSP port
+    and the publisher."""
+    printer_rtsp = free_port()
+    printer_conf = tmp_path / "printer.yml"
+    printer_conf.write_text(
+        "logLevel: info\napi: no\nmetrics: no\n"
+        f"rtspAddress: 127.0.0.1:{printer_rtsp}\nrtspTransports: [tcp]\n"
+        "rtmp: no\nhls: no\nwebrtc: no\nsrt: no\nmoq: no\npaths:\n  cam: {}\n"
+    )
+    spawn("printer", [str(media.mediamtx), str(printer_conf)], {})
+    await until("the printer's RTSP port", lambda: listening(printer_rtsp), 20)
+    publisher = spawn(
+        "publisher",
+        [
+            str(media.ffmpeg),
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-re",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=320x240:rate=25",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "10",
+            "-f",
+            "rtsp",
+            "-rtsp_transport",
+            "tcp",
+            f"rtsp://127.0.0.1:{printer_rtsp}/cam",
+        ],
+        {},
+    )
+    return printer_rtsp, publisher
+
+
+@dataclass
+class RelayRig:
+    rtsp: int
+    api: str
+    relay: relay_module.Relay
+
+
+@asynccontextmanager
+async def relaying(
+    spawn: Spawn, media: Media, crud: StoreCrud, printer_rtsp: int
+) -> AsyncIterator[RelayRig]:
+    """The relay's MediaMTX with the read user, and its controller, which pulls the printer
+    over plain RTSP (a test-only ``source_for``)."""
+    async with AsyncExitStack() as stack:
+        relay_rtsp, relay_hook, relay_api = free_port(), free_port(), free_port()
+        _, relay_mtx = await start_mediamtx(
+            spawn,
+            media,
+            "relay",
+            DEPLOY / "mediamtx-relay.yml",
+            {
+                "MTX_APIADDRESS": f"127.0.0.1:{relay_api}",
+                "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
+                "MTX_RTSPADDRESS": f"127.0.0.1:{relay_rtsp}",
+                "MTX_AUTHINTERNALUSERS_0_USER": READ_USER,
+                "MTX_AUTHINTERNALUSERS_0_PASS": READ_PASS,
+            },
+        )
+        stack.push_async_callback(relay_mtx.aclose)
+        relay_client = crud.client("camera-relay")
+        stack.push_async_callback(relay_client.aclose)
+        relay = relay_module.Relay(
+            relay_client,
+            relay_mtx,
+            source_for=lambda source: f"rtsp://127.0.0.1:{printer_rtsp}/cam",
+            hook_url=f"http://127.0.0.1:{relay_hook}/hook",
+        )
+        stack.push_async_callback(relay.aclose)
+        relay_hooks = await relay_module.serve_hooks(relay, "127.0.0.1", relay_hook)
+        stack.callback(relay_hooks.close)
+        await relay.reconcile_all()
+        yield RelayRig(relay_rtsp, f"http://127.0.0.1:{relay_api}", relay)
+
+
 @dataclass
 class RecorderRig:
     name: str
@@ -263,76 +360,13 @@ async def test_two_recorders_no_gap_on_leader_kill(
         assert publisher.poll() is None, "the publisher exited; see publisher.log"
         return len(await asyncio.to_thread(indexed)) >= n
 
-    # The printer: a MediaMTX that takes the publisher's stream on path ``cam``.
-    printer_rtsp = free_port()
-    printer_conf = tmp_path / "printer.yml"
-    printer_conf.write_text(
-        "logLevel: info\napi: no\nmetrics: no\n"
-        f"rtspAddress: 127.0.0.1:{printer_rtsp}\nrtspTransports: [tcp]\n"
-        "rtmp: no\nhls: no\nwebrtc: no\nsrt: no\nmoq: no\npaths:\n  cam: {}\n"
-    )
-    spawn("printer", [str(media.mediamtx), str(printer_conf)], {})
-    await until("the printer's RTSP port", lambda: listening(printer_rtsp), 20)
-    publisher = spawn(
-        "publisher",
-        [
-            str(media.ffmpeg),
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-re",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=size=320x240:rate=25",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "ultrafast",
-            "-tune",
-            "zerolatency",
-            "-pix_fmt",
-            "yuv420p",
-            "-g",
-            "10",
-            "-f",
-            "rtsp",
-            "-rtsp_transport",
-            "tcp",
-            f"rtsp://127.0.0.1:{printer_rtsp}/cam",
-        ],
-        {},
-    )
+    printer_rtsp, publisher = await publishing(tmp_path, spawn, media)
 
     async with AsyncExitStack() as stack:
         s3 = stack.enter_context(moto_s3())
-        relay_rtsp, relay_hook = free_port(), free_port()
-        _, relay_mtx = await start_mediamtx(
-            spawn,
-            media,
-            "relay",
-            DEPLOY / "mediamtx-relay.yml",
-            {
-                "MTX_APIADDRESS": f"127.0.0.1:{free_port()}",
-                "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
-                "MTX_RTSPADDRESS": f"127.0.0.1:{relay_rtsp}",
-                "MTX_AUTHINTERNALUSERS_0_USER": READ_USER,
-                "MTX_AUTHINTERNALUSERS_0_PASS": READ_PASS,
-            },
-        )
-        stack.push_async_callback(relay_mtx.aclose)
-        relay_client = crud.client("camera-relay")
-        stack.push_async_callback(relay_client.aclose)
-        relay = relay_module.Relay(
-            relay_client,
-            relay_mtx,
-            source_for=lambda source: f"rtsp://127.0.0.1:{printer_rtsp}/cam",
-            hook_url=f"http://127.0.0.1:{relay_hook}/hook",
-        )
-        stack.push_async_callback(relay.aclose)
-        relay_hooks = await relay_module.serve_hooks(relay, "127.0.0.1", relay_hook)
-        stack.callback(relay_hooks.close)
-        await relay.reconcile_all()
+        relay_rtsp = (
+            await stack.enter_async_context(relaying(spawn, media, crud, printer_rtsp))
+        ).rtsp
 
         rigs = {
             rig.name: rig
@@ -387,3 +421,122 @@ async def test_two_recorders_no_gap_on_leader_kill(
         output = (tmp_path / f"{name}.log").read_text(errors="replace")
         assert output, f"{name} wrote nothing: the check would prove nothing"
         assert READ_PASS not in output, f"{name}.log holds the relay read password"
+
+
+async def runtime(api: str, path: str) -> dict[str, Any] | None:
+    """``path``'s entry in MediaMTX's runtime list, or ``None`` when it is not listed."""
+    async with httpx.AsyncClient(timeout=5) as http:
+        response = await http.get(f"{api}/v3/paths/list", params={"itemsPerPage": 1000})
+    response.raise_for_status()
+    return next((item for item in response.json()["items"] if item["name"] == path), None)
+
+
+async def readers(api: str, path: str) -> int | None:
+    """How many readers MediaMTX's runtime list shows on ``path``."""
+    item = await runtime(api, path)
+    return None if item is None else len(item["readers"])
+
+
+async def path_ready(api: str, path: str) -> bool:
+    item = await runtime(api, path)
+    return item is not None and item["ready"] is True
+
+
+async def test_edge_serves_hls_on_demand_from_the_relay(
+    tmp_path: Path, spawn: Spawn, media: Media, pg_pool: PgPool, printers: PrinterStore
+) -> None:
+    """The edge pulls the relay only while someone watches: a playlist request starts the
+    pull, and the pull closes once requests stop (``sourceOnDemand``)."""
+    printer_id = make_printer(printers, pg_pool)
+    crud = StoreCrud(CameraStore(pg_pool, printers))
+    printer_rtsp, publisher = await publishing(tmp_path, spawn, media)
+
+    async with AsyncExitStack() as stack:
+        relay = await stack.enter_async_context(relaying(spawn, media, crud, printer_rtsp))
+        await until(
+            "the relay's pull of the printer", lambda: path_ready(relay.api, printer_id), 30
+        )
+        hls, whep = free_port(), free_port()
+        _, edge_mtx = await start_mediamtx(
+            spawn,
+            media,
+            "edge",
+            DEPLOY / "mediamtx-edge.yml",
+            {
+                "MTX_APIADDRESS": f"127.0.0.1:{free_port()}",
+                "MTX_METRICSADDRESS": f"127.0.0.1:{free_port()}",
+                "MTX_HLSADDRESS": f"127.0.0.1:{hls}",
+                "MTX_WEBRTCADDRESS": f"127.0.0.1:{whep}",
+                "MTX_WEBRTCLOCALUDPADDRESS": f"127.0.0.1:{free_port()}",
+                "MTX_AUTHINTERNALUSERS_0_USER": EDGE_USER,
+                "MTX_AUTHINTERNALUSERS_0_PASS": EDGE_PASS,
+            },
+        )
+        stack.push_async_callback(edge_mtx.aclose)
+        edge_client = crud.client("camera")
+        stack.push_async_callback(edge_client.aclose)
+        edge = edge_module.Edge(
+            edge_client,
+            edge_mtx,
+            EdgeSettings(
+                api_internal_url="http://api",
+                camera_relay_rtsp_url=f"rtsp://127.0.0.1:{relay.rtsp}",
+                camera_relay_read_user=READ_USER,
+                camera_relay_read_pass=SecretStr(READ_PASS),
+            ),
+        )
+        await edge.reconcile_all()
+        assert edge.wanted() == {printer_id}
+        # On demand: no viewer, no pull from the relay.
+        assert await readers(relay.api, printer_id) == 0
+
+        # The edge fails closed: no read without the edge read user's password.
+        index = f"http://127.0.0.1:{hls}/{printer_id}/index.m3u8?cookieCheck=1"
+        offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
+        sdp = {"Content-Type": "application/sdp"}
+        whep_url = f"http://127.0.0.1:{whep}/{printer_id}/whep"
+        async with httpx.AsyncClient(timeout=10) as http:
+            # ``httpx.Auth()`` sends no credentials.
+            for auth in (httpx.Auth(), httpx.BasicAuth(EDGE_USER, "wrong")):
+                assert (await http.get(index, auth=auth)).status_code == 401
+                answer = await http.post(whep_url, content=offer, headers=sdp, auth=auth)
+                assert answer.status_code == 401
+        assert await readers(relay.api, printer_id) == 0
+
+        last_request = 0.0
+        loop = asyncio.get_running_loop()
+
+        async def playlist() -> bool:
+            nonlocal last_request
+            assert publisher.poll() is None, "the publisher exited; see publisher.log"
+            # MediaMTX v1.21.4 first answers 302 to ``?cookieCheck=1`` with a cookie.
+            auth = (EDGE_USER, EDGE_PASS)
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True, auth=auth) as http:
+                response = await http.get(f"http://127.0.0.1:{hls}/{printer_id}/index.m3u8")
+            last_request = loop.time()
+            return response.status_code == 200 and response.text.startswith("#EXTM3U")
+
+        await until("the edge's HLS playlist", playlist, 15)
+        assert await readers(relay.api, printer_id) == 1
+
+        async def closed() -> bool:
+            return await readers(relay.api, printer_id) == 0
+
+        # The muxer closes 10 s after the last request (``hlsMuxerCloseAfter``), the HLS
+        # session about 30 s later, then the on-demand pull 10 s after that: 48.5 s measured.
+        await until("the relay to lose the edge's pull", closed, 90)
+        waited = loop.time() - last_request
+        assert waited <= 60, f"the edge held the relay pull {waited:.1f} s after the last request"
+
+        # Last, as it starts the on-demand pull: with the password, WHEP gets past the check
+        # and refuses the empty offer.
+        async with httpx.AsyncClient(timeout=20) as http:
+            answer = await http.post(
+                whep_url, content=offer, headers=sdp, auth=(EDGE_USER, EDGE_PASS)
+            )
+        assert answer.status_code == 400, answer.text
+
+    output = (tmp_path / "edge.log").read_text(errors="replace")
+    assert output, "edge wrote nothing: the check would prove nothing"
+    assert READ_PASS not in output, "edge.log holds the relay read password"
+    assert EDGE_PASS not in output, "edge.log holds the edge read password"

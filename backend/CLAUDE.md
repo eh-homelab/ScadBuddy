@@ -1152,13 +1152,21 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `POST /filament/tdfp/filaments` (an `Idempotency-Key`; one workflow per caller, key, type and ask,
   `create_workflow_id`, R-7025-12; the create is never retried, and a failure before Save
   Filament fails its workflow, so the same key runs it again, `workflow.BEFORE_SAVE`, R-7025-11).
-- `backend/scadbuddy/camera/` — printer camera recording, phase 1 (#7328, plan
+- `backend/scadbuddy/camera/` — printer camera recording and live view (phase 1, #7328, plan
   `docs/superpowers/plans/2026-11-23-printer-camera-recording.md`, feature page
-  `docs/features/printer-cameras.md`). Two processes, each beside its own MediaMTX in one pod,
-  neither with a database secret (`settings.py` refuses `FORBIDDEN_ENV` and
+  `docs/features/printer-cameras.md`; phase 3, #7330, plan
+  `docs/superpowers/plans/2026-11-25-printer-camera-live-view.md`). Three processes, each beside
+  its own MediaMTX in one pod, none with a database secret (`settings.py` refuses `FORBIDDEN_ENV` and
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`; the recorder also refuses a `TZ` other than `UTC`):
   `python -m scadbuddy.camera.relay` (`relay.py`, CRUD caller `camera-relay`, the only part that
-  holds access codes; it gives MediaMTX one RTSPS pull per printer through the control API) and
+  holds access codes; it gives MediaMTX one RTSPS pull per printer through the control API;
+  `Relay.restart` replaces one printer's path on a `camera.reconnect` event, `follow.py`
+  `on_reconnect`), `python -m scadbuddy.camera.edge` (`edge.py`, CRUD caller `camera`, the
+  service account `scadbuddy-camera-edge`: one on-demand path per recorded printer from the
+  relay with the relay read secret, WebRTC and LL-HLS for the API's proxy only, behind the edge
+  read user `MTX_AUTHINTERNALUSERS_0_*`; the collector `ViewersCollector` reads MediaMTX's path
+  list at each scrape into `scadbuddy_camera_viewers`, a `GaugeMetricFamily` that
+  `lint-dashboard.sh` reads too; `EdgeSettings`) and
   `python -m scadbuddy.camera.recorder` (`recorder.py`, CRUD caller `camera`, two pods: leases,
   upload before index, handover from the standby's buffer, the disk cap, the clock check
   against the API's `Date` header: uvicorn refreshes it once a second, so a sample is Date + 1 s
@@ -1181,7 +1189,13 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   (`Uploader`, the object key), `mp4.py` the init section parse (`moov/udta` left out of the
   digest). The API side is `store.py` (`CameraStore`: sources, leases, the index, feeds),
   `models.py`, `api/crud_camera.py` and `api/crud_camera_relay.py`. MediaMTX's configs are
-  `deploy/camera/`; the images are the Dockerfile's `camera-relay` and `camera-recorder`.
+  `deploy/camera/`; the images are the Dockerfile's `camera-relay`, `camera-recorder` and
+  `camera-edge`. The browser's side is `api/camera.py` (`GET /printers/{id}/camera`, `POST
+  …/camera/reconnect`, the proxy `/camera/live/{printer_id}/whep` and `/hls/{name}`, which
+  adds the edge read user's Basic auth and forwards no browser header), set by
+  `camera_edge_whep_url`, `camera_edge_hls_url`, `camera_edge_read_user` and
+  `camera_edge_read_pass` (`Settings.camera_edge_ready()`: `PrinterNow.camera_live` is true only
+  with all four); the player is `frontend/src/components/prints/LivePlayer.tsx`.
   Tests: `tests/camera/` (the real-MediaMTX e2e `test_e2e_mediamtx.py` needs MediaMTX and
   ffmpeg, which the `test` stage has; locally it fetches the pinned MediaMTX itself).
 - Agent fleet chat (spec `docs/superpowers/specs/2026-11-25-agent-fleet-messaging-design.md`):

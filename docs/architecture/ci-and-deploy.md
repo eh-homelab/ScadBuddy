@@ -22,7 +22,7 @@ amd64 only:
 | `slicer` (`Dockerfile:555`) | `ghcr.io/eh-homelab/scadbuddy-slicer` | `scadbuddy-slicer` (`Dockerfile:609`) | `slicer` (`build-image.yml:544`) |
 | `profile-fetch` (`Dockerfile:654`) | `ghcr.io/eh-homelab/scadbuddy-profile-fetch` | `tini` then the browser service by default (`Dockerfile:728-729`); the worker's Deployment runs `python -m scadbuddy.profile_fetch` ([processes.md](processes.md#profile-fetch-worker-and-browser)) | `profile-fetch` (`build-image.yml:657`) |
 | `playwright-mcp` (#7027; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-playwright-mcp` | `tini -s -- node /opt/scadbuddy-playwright-mcp/server.mjs`: `@playwright/mcp` with each MCP session's context built from the `X-ScadBuddy-Browser` header (`workers/playwright-mcp/`) | `playwright-mcp` (`build-image.yml:542` after `67d7ff6`) |
-| `camera-relay`, `camera-recorder` (after `67d7ff6`, #7328) | `ghcr.io/eh-homelab/scadbuddy-camera-relay`, `ghcr.io/eh-homelab/scadbuddy-camera-recorder` | `tini` then the controller; each pod runs the image a second time as `mediamtx` ([processes.md](processes.md#camera-relay-and-recorders)) | `camera` (one leg per image) |
+| `camera-relay`, `camera-recorder`, `camera-edge` (after `67d7ff6`, #7328, #7330) | `ghcr.io/eh-homelab/scadbuddy-camera-relay`, `ghcr.io/eh-homelab/scadbuddy-camera-recorder`, `ghcr.io/eh-homelab/scadbuddy-camera-edge` | `tini` then the controller; each pod runs the image a second time as `mediamtx` ([processes.md](processes.md#camera-relay-and-recorders)) | `camera` (one leg per image) |
 | `tools/go/core/Dockerfile` (#7667; after `67d7ff6`) | `ghcr.io/eh-homelab/scadbuddy-core` | `scadbuddy-core`, the API in Go, run as the `core` container in the API's pod | `core` |
 
 `openscad-lsp` (`Dockerfile:767`) and `libraries` (`Dockerfile:829`) are internal stages
@@ -117,7 +117,7 @@ Summary**, which needs every job except `lfs-fixtures` and `dispatch-review`
 | go | `go-select` (`:1941`), `go` (`:1964`, calls `go-module-ci.yml`) | gofmt, vet, build, `test -race`, vendor drift, CLI images | [`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md) |
 | rust | `rust` (`:1976`), `slicer-image` (`:2053`) | the Rust workspace and the `slicer` target | [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md) |
 | profile-fetch | `profile-fetch-image` (`:2112`) | the profile-fetch site tests in the `test` stage | [`backend/CLAUDE.md`](../../backend/CLAUDE.md) |
-| image | `camera-image` (after `67d7ff6`, #7328) | builds the `camera-relay` and `camera-recorder` targets, checks MediaMTX, `curl`, `TZ`, the refusals and the relay's read user | [`docs/features/printer-cameras.md`](../features/printer-cameras.md) |
+| image | `camera-image` (after `67d7ff6`, #7328) | builds the `camera-relay`, `camera-recorder` and `camera-edge` targets, checks MediaMTX, `curl`, `TZ`, the refusals and the relay's and the edge's read users | [`docs/features/printer-cameras.md`](../features/printer-cameras.md) |
 | freshness | `freshness` (`:2255`), `go-client` (`:2642`) | the generated API files ([data.md](data.md#generated-api-files)) and the Go client | root `CLAUDE.md` "Generated API files" |
 | review | `dispatch-review` (`:2837`) | dispatches `claude-code-review.yml`, which posts the `claude-review` status | root `CLAUDE.md` "PR conventions" |
 

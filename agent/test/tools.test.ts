@@ -1994,6 +1994,56 @@ describe('get_printer_camera (#796)', () => {
   })
 })
 
+describe('camera feed state and reconnect (#7330)', () => {
+  const printer = '0f0e0d0c-0b0a-4908-8706-050403020100'
+  const state = {
+    recorded: true,
+    live: false,
+    feeds: [{ part: 'relay', state: 'retrying', detail: 'connection refused', updated_at: '2026-11-25T10:00:00Z' }],
+  }
+
+  it("reads a printer's feed state, marked untrusted, at read", async () => {
+    server.use(http.get(`${BACKEND}/api/v1/printers/${printer}/camera`, () => HttpResponse.json(state)))
+    const t = tool('get_printer_camera_state')
+    expect(t.risk).toBe('read')
+    const result = await runTool(t, { printer_id: printer }, ctx({ principal: { id: 'r', kind: 'bearer', tiers: ['read'] } }))
+    expect(result.isError).toBeFalsy()
+    const text = (result.content[0] as { text: string }).text
+    expect(JSON.parse(text)).toMatchObject({ untrusted_data: { tool: 'get_printer_camera_state' } })
+    expect(text).toContain('connection refused')
+  })
+
+  it('refuses a printer id that is not a registry uuid, before any request', async () => {
+    const result = await runTool(tool('get_printer_camera_state'), { printer_id: '7' }, ctx())
+    expect(result.isError).toBe(true)
+  })
+
+  it('reconnects at write, with no approval, and passes the 409 of a printer not recorded', async () => {
+    let posted = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/printers/${printer}/camera/reconnect`, () => {
+        posted += 1
+        return posted === 1
+          ? HttpResponse.json({ printer_id: printer }, { status: 202 })
+          : HttpResponse.json(
+              { type: 'https://scadbuddy.dev/problems/camera-not-recorded', title: 'Conflict', status: 409, detail: `printer ${printer} is not recorded` },
+              { status: 409, headers: { 'content-type': 'application/problem+json' } },
+            )
+      }),
+    )
+    const t = tool('reconnect_printer_camera')
+    expect(t.risk).toBe('write')
+    const writer = ctx({ principal: { id: 'w', kind: 'bearer', tiers: ['read', 'write'] } })
+    const done = await runTool(t, { printer_id: printer }, writer)
+    expect(done.isError).toBeFalsy()
+    expect((done.content[0] as { text: string }).text).toContain(printer)
+    const refused = await runTool(t, { printer_id: printer }, writer)
+    expect(refused.isError).toBe(true)
+    expect((refused.content[0] as { text: string }).text).toContain('not recorded')
+    expect(posted).toBe(2)
+  })
+})
+
 describe('analyze_geometry', () => {
   it('tells the model about weak joints and the split each suggests', () => {
     const t = tool('analyze_geometry')
