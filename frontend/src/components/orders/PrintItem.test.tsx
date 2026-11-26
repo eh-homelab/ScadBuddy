@@ -257,6 +257,18 @@ describe('PrintItem', () => {
     expect(printed).not.toHaveBeenCalled()
   })
 
+  // Review of #7876: the effect's key keeps each id whole, whatever characters it holds.
+  it('reads each kit output by its whole id', async () => {
+    const odd = 'x,y'
+    const item = state.items.find((i) => i.id === ITEM_APPROVED)!
+    Object.assign(item, { output_id: OUTPUT_REAGAN, kit_outputs: [OUTPUT_REAGAN, odd], kit_count: 2 })
+    const read = vi.spyOn(api, 'getOutput')
+    render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await screen.findByRole('list', { name: 'Outputs to print' })
+    await waitFor(() => expect(read).toHaveBeenCalledWith(odd))
+    expect(read).not.toHaveBeenCalledWith('x')
+  })
+
   // Review of #7790: a kit known only by its render job (another path set the output) is a
   // kit here too, as the backend refuses its own print; the page says to save the others.
   it('names the outputs a kit has not saved', async () => {
