@@ -438,14 +438,17 @@ func (f *Fleet) inbox(r *http.Request, p crud.Params) (any, error) {
 			return err
 		}
 		// page is the next limit+1 deliveries with the running sum of their text's bytes
-		// (octet_length reads a stored text's size without reading the text). Only the rows
-		// that fit read their text.
-		rows, err := tx.Query(ctx, `WITH page AS (
-				SELECT d.seq, row_number() OVER w AS n, sum(octet_length(m.text)) OVER w AS bytes
-				FROM fleet_deliveries d JOIN fleet_messages m USING (seq)
-				WHERE d.session_id = $1 AND d.seq > $2
-				WINDOW w AS (ORDER BY d.seq)
-				ORDER BY d.seq LIMIT $3)
+		// (octet_length reads a stored text's size without reading the text). The window runs
+		// over those rows only, so an agent far behind pays for one page, not its backlog. Only
+		// the rows that fit read their text.
+		rows, err := tx.Query(ctx, `WITH next AS (
+				SELECT seq FROM fleet_deliveries
+				WHERE session_id = $1 AND seq > $2
+				ORDER BY seq LIMIT $3),
+			page AS (
+				SELECT x.seq, row_number() OVER w AS n, sum(octet_length(m.text)) OVER w AS bytes
+				FROM next x JOIN fleet_messages m USING (seq)
+				WINDOW w AS (ORDER BY x.seq))
 			SELECT p.n = 1 OR p.bytes <= $4, m.seq, f.handle, coalesce(m.channel, ''),
 				coalesce(t.handle, ''), CASE WHEN p.n = 1 OR p.bytes <= $4 THEN m.text ELSE '' END,
 				m.sent_at

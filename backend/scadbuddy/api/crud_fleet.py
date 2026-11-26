@@ -22,7 +22,6 @@ from scadbuddy.api.deps import StateDep
 from scadbuddy.core.events import PG_CHANNEL
 from scadbuddy.crud.guard import crud_router
 
-#: The kinds this caller's stream carries start with this.
 #: The streams the fleet caller may hold together: its own budget, never the agent's.
 FLEET_STREAMS_MAX = 8
 

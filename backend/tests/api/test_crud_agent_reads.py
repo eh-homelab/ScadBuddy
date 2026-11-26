@@ -165,6 +165,21 @@ def test_the_gap_reads_newest_first_after_a_seq_up_to_the_limit(client: TestClie
     assert len(every["events"]) == 4
 
 
+def test_the_gap_leaves_out_the_fleets_events(client: TestClient) -> None:
+    # The fleet's kinds name its session ids: they are for the fleet caller alone (#7818).
+    agent = token(client)
+    start = int(client.get(f"{BASE}/events/head", headers=agent).json()["seq"])
+    _event(client, "before")
+    _sql(
+        client,
+        "INSERT INTO events (event_id, kind, at, payload) VALUES (%s, 'fleet.message', now(), %s)",
+        ("fleet-1", json.dumps({"kind": "fleet.message", "recipients": ["s1"]})),
+    )
+    _event(client, "after")
+    body = client.get(f"{BASE}/events", params={"after": start}, headers=agent).json()
+    assert [e["event_id"] for e in body["events"]] == ["after", "before"]
+
+
 def test_the_gap_read_is_bounded(client: TestClient) -> None:
     agent = token(client)
     for params in ({"after": -1}, {"after": 0, "limit": 0}, {"after": 0, "limit": 5002}):
