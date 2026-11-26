@@ -1026,8 +1026,10 @@ async def test_an_answer_that_lands_first_and_ends_the_run_is_on_record(
     if sent_by == "old worker":
         assert (await operate(flows, answer, request))["outcome"] == "answered"
     else:
-        with pytest.raises(RPCError):
+        # The run closed under the send: the call moved on (#7822), not a raw RPC error.
+        with pytest.raises(ApiError) as err:
             await operate(flows, answer, request)
+        assert (err.value.status, err.value.type) == (409, STALE_ENTRY)
     assert await responses(flows, run, call_id) == first.response
 
 
