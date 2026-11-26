@@ -111,9 +111,22 @@ describe('chatReducer', () => {
         name: 'set_parameters',
         input: { a: 1 },
         risk: 'write',
+        resultAfter: 't1',
         result: { ok: true, summary: 'Set a', sources: [{ title: 'why' }], version: { slug: 'k', revision: 'r1' } },
       },
     ])
+  })
+
+  it('records the feed’s last item when a tool result comes (#7911)', () => {
+    const state = run(
+      [
+        server({ type: 'tool.call', sessionId: 's1', id: 't1', name: 'a', input: {}, risk: 'read' }),
+        server({ type: 'tool.call', sessionId: 's1', id: 't2', name: 'b', input: {}, risk: 'read' }),
+        server({ type: 'tool.result', sessionId: 's1', id: 't1', ok: false, summary: 'boom' }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.items[0]).toMatchObject({ id: 't1', resultAfter: 't2' })
   })
 
   it('moves an approval pending → sent → approved, and only the server resolves it', () => {

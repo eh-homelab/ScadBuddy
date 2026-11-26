@@ -49,28 +49,51 @@ export function toolStatus(call: ToolCall, items: readonly FeedItem[], options: 
   }
   if (call.result) {
     if (call.result.ok) return 'done'
-    return stoppedDuring(call, items) ? 'stopped' : 'failed'
+    return stoppedBy(call, items) ? 'stopped' : 'failed'
   }
   for (const item of items) {
     if (item.kind === 'question' && item.tool === call.id && (item.state === 'pending' || item.state === 'sent')) {
       return 'waiting_input'
     }
   }
-  return options.settled ? 'stopped' : 'running'
+  // #7874: a turn placed again goes on without a result for this call. The call stopped with its worker.
+  return options.settled || stoppedBy(call, items) === WORKER_RESTARTED ? 'stopped' : 'running'
 }
 
 /**
- * Whether the turn was stopped (the agent's `interrupted` error) while `call` was still
- * its last step: nothing the assistant or the user said comes between them.
+ * The agent's `error` code when a worker shutdown cut the turn (agent sessions/turnHost.ts
+ * `WORKER_RESTARTED`, #7874). The workflow placed the turn again on another worker.
  */
-function stoppedDuring(call: ToolCall, items: readonly FeedItem[]): boolean {
+export const WORKER_RESTARTED = 'worker_restarted'
+
+/** The panel's words for a `worker_restarted` stop, on the call and in the feed. */
+export const WORKER_RESTARTED_TEXT = 'The worker restarted; the turn continued on another worker.'
+
+/** The error codes that stop a turn while a call runs: a Stop (#2149), or a worker shutdown (#7874). */
+const STOP_CODES: ReadonlySet<string> = new Set(['interrupted', WORKER_RESTARTED])
+
+/**
+ * Why the turn stopped while `call` was still its last step (nothing the assistant or the
+ * user said comes between them): the code of the agent's `interrupted` or `worker_restarted`
+ * error. Undefined when the turn did not stop there.
+ */
+export function stoppedBy(call: ToolCall, items: readonly FeedItem[]): string | undefined {
   const at = items.indexOf(call)
-  if (at < 0) return false
-  for (const item of items.slice(at + 1)) {
-    if (item.kind === 'error' && item.code === 'interrupted') return true
-    if (item.kind === 'assistant' || item.kind === 'user') return false
+  if (at < 0) return undefined
+  // A call that started after this one's result came: this one had ended, so its failure is
+  // its own, not the stop's (#7911). Unknown (no `resultAfter`, or it left the feed): as before.
+  const ended = call.resultAfter === undefined ? -1 : items.findIndex((i) => i.id === call.resultAfter)
+  for (const [offset, item] of items.slice(at + 1).entries()) {
+    if (item.kind === 'error' && item.code !== undefined && STOP_CODES.has(item.code)) return item.code
+    if (item.kind === 'assistant' || item.kind === 'user') return undefined
+    if (item.kind === 'tool' && ended >= 0 && at + 1 + offset > ended) return undefined
   }
-  return false
+  return undefined
+}
+
+/** The reason a stopped call's line shows, from `stoppedBy`'s code. Undefined when "Stopped" says enough (a Stop). */
+export function stopReasonText(code: string | undefined): string | undefined {
+  return code === WORKER_RESTARTED ? WORKER_RESTARTED_TEXT : undefined
 }
 
 /** A group's status: its first live call's; else failed, not run or stopped if any call was; else done. */
