@@ -289,6 +289,45 @@ def test_no_cookie_or_authorization_of_the_browser_reaches_the_edge(
     assert _basic(sent) == EXPECTED_AUTH
 
 
+@pytest.mark.parametrize(
+    ("peer", "trusted", "sent"),
+    [
+        # A trusted proxy names the viewer: its last X-Forwarded-For value.
+        ("10.1.2.3", "10.0.0.0/8", "198.51.100.7"),
+        # Any other peer is the viewer; the browser's header is not believed.
+        ("203.0.113.9", "10.0.0.0/8", "203.0.113.9"),
+    ],
+)
+def test_the_viewer_address_reaches_the_edge(
+    client: TestClient, edge: Edge, printer: str, peer: str, trusted: str, sent: str
+) -> None:
+    """MediaMTX v1.21.4 binds an HLS session to the client's IP. Behind several API pods each
+    request reaches the edge from another pod, so the proxy names the viewer instead."""
+    state = _state(client)
+    state.settings = state.settings.model_copy(update={"trusted_proxies": trusted})
+    viewer = TestClient(client.app, base_url=str(client.base_url), client=(peer, 50000))
+    response = viewer.get(
+        f"/api/v1/camera/live/{printer}/hls/index.m3u8",
+        headers={"X-Forwarded-For": "192.0.2.1, 198.51.100.7"},
+    )
+    assert response.status_code == 200
+    [request] = edge.requests
+    assert request.headers.get_list("x-forwarded-for") == [sent]
+
+
+def test_a_viewer_without_an_ip_address_sends_no_address(
+    client: TestClient, edge: Edge, printer: str
+) -> None:
+    # The test client's peer is "testclient".
+    response = client.get(
+        f"/api/v1/camera/live/{printer}/hls/index.m3u8",
+        headers={"X-Forwarded-For": "198.51.100.7"},
+    )
+    assert response.status_code == 200
+    [request] = edge.requests
+    assert "x-forwarded-for" not in request.headers
+
+
 def test_the_cookie_check_redirect_stays_in_the_proxy(
     client: TestClient, edge: Edge, printer: str
 ) -> None:
@@ -653,5 +692,20 @@ async def test_an_hls_walk_through_the_proxy_to_a_real_edge(
             base + variant[0] + f"&_HLS_msn={int(msn.group(1)) + segments + 1}&_HLS_part=0",
         )
         assert blocking.status_code == 200, blocking.text
+        # The edge binds a session to the address the proxy names, not to the pod that asks
+        # (prod runs several API pods; measured 2026-11-26, a session made through one pod
+        # answered 401 "session not found" through another).
+        edge_base = f"http://127.0.0.1:{hls}/{printer}/"
+        auth = httpx.BasicAuth(EDGE_USER, EDGE_PASS)
+        async with httpx.AsyncClient(auth=auth, timeout=20) as direct:
+            made = await direct.get(
+                edge_base + "index.m3u8?cookieCheck=1", headers={"X-Forwarded-For": "10.9.0.1"}
+            )
+            assert made.status_code == 200, made.text
+            [own] = [line for line in made.text.splitlines() if line and line[0] != "#"]
+            other = await direct.get(edge_base + own, headers={"X-Forwarded-For": "10.9.0.2"})
+            assert other.status_code == 401, other.text
+            same = await direct.get(edge_base + own, headers={"X-Forwarded-For": "10.9.0.1"})
+            assert same.status_code == 200, same.text
     finally:
         await mtx.aclose()

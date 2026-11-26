@@ -174,6 +174,14 @@ Otherwise the dialog keeps the MJPEG view.
   proxy, and sends it back in the query. The edge admits a request that names it without the
   read password, so only the NetworkPolicy (the API's pods only on 8888) keeps it from being
   used outside the proxy.
+- **The session's address.** MediaMTX also binds an HLS session to the client's IP
+  (`internal/servers/hls/server.go` `findNonCDNSession`). Prod runs three API pods, and one
+  browser's requests reach the edge from each of them. A session made through one pod got 401
+  "session not found" through another, so the player kept starting over (measured 2026-11-26
+  on prod, with `httpx` from two API pods). So the proxy sends the viewer's address in
+  `X-Forwarded-For` (`core/proxies.py` `client_address`: a trusted proxy's last value, else
+  the peer; none when it is not an IP), and the edge believes it from private and loopback
+  addresses (`hlsTrustedProxies`). WHEP sessions are not bound to an address.
 - **Lifetime of a pull** (same date and method). With `hlsMuxerCloseAfter: 10s` the muxer is
   gone 10 s after the last HLS request, the session stays a reader until about 40 s, and the
   relay lost the edge's reader 48.5 s after the last request (69.2 s with the default 60 s).
