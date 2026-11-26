@@ -58,6 +58,18 @@ describe('ItemsBulk (#4955)', () => {
     expect(screen.getByRole('button', { name: 'Fulfil…' })).toBeEnabled()
   })
 
+  // #5701 PR 5: a kit prints output by output from its details, never in the item's dialog.
+  it('leaves a kit out of Print', () => {
+    const model = (n: number, kit: string[]) =>
+      ({ ...approved(n), kind: 'model', reference: { slug: 'demo' }, output_id: kit[0] ?? 'o', kit_outputs: kit }) as unknown as OrderItemDetail
+    const props = { order, shipments: [], unfulfilAllowed: true, busy: false, onWriting: () => undefined, onClear: () => undefined, onChanged: () => undefined }
+    const { unmount } = render(<ItemsBulk {...props} selected={[model(1, ['a', 'b'])]} />)
+    expect(screen.getByRole('button', { name: 'Print…' })).toBeDisabled()
+    unmount()
+    render(<ItemsBulk {...props} selected={[model(1, ['a', 'b']), model(2, [])]} />)
+    expect(screen.getByRole('button', { name: 'Print…' })).toBeEnabled()
+  })
+
   it('refuses more than the route takes, and says why', () => {
     bar(MAX_BULK_FULFIL + 1)
     expect(screen.getByRole('button', { name: 'Fulfil…' })).toBeDisabled()

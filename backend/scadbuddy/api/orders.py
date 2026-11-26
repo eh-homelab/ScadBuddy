@@ -60,7 +60,7 @@ from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_source import printable
 from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
-from scadbuddy.library.outputs import require_output
+from scadbuddy.library.outputs import OutputStore, require_output
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
@@ -151,6 +151,7 @@ from scadbuddy.orders.quote import (
     subject_of,
 )
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.rendering import kit_output_id, kit_output_ids
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
     ProfitReport,
@@ -552,11 +553,16 @@ class ItemDetail(OrderItem):
     quotes: list[Quote]
     fulfilments: list[ItemAttempt]
     revisions: list[Revision]
+    #: Every output of the item's render when it made several (a kit, #5701 PR 5), in
+    #: output order, ``output_id`` first (`orders/rendering.py` `kit_output_ids`): the
+    #: order page prints each one. Empty for an item of one output, or of none.
+    kit_outputs: list[str] = Field(default_factory=list)
 
 
-def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
+def item_detail(store: OrderStore, item: OrderItem, outputs: OutputStore) -> ItemDetail:
     quotes = store.quotes(item.id)
     revisions = store.revisions(item.id)
+    kit = _kit_outputs(outputs, item)
     return ItemDetail(
         **item.model_dump(),
         quotes=quotes,
@@ -565,7 +571,18 @@ def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
             for f in store.fulfilments(item.id, purpose=None)
         ],
         revisions=revisions,
+        kit_outputs=kit if len(kit) > 1 else [],
     )
+
+
+def _kit_outputs(outputs: OutputStore, item: OrderItem) -> list[str]:
+    """`kit_output_ids` of a model item's output, after one look for its second output
+    (`OutputStore.existing`), so an item of one output costs one lookup."""
+    if item.reference is None or item.output_id is None:
+        return []
+    if not outputs.existing([kit_output_id(item.output_id, 1)]):
+        return [item.output_id]
+    return kit_output_ids(outputs, item.output_id)
 
 
 class OrderDetail(BaseModel):
@@ -1249,7 +1266,7 @@ async def profit(
 
 
 @router.get("/{order_id}", response_model=OrderDetail, summary="One order, whole")
-async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
+async def get_order(order_id: str, orders: OrdersDep, outputs: OutputsDep) -> OrderDetail:
     check_path(order_id)
     store = orders.store
 
@@ -1257,7 +1274,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
         order = store.order(order_id)
         if order is None:
             return None
-        items = [item_detail(store, item) for item in store.items(order.id)]
+        items = [item_detail(store, item, outputs) for item in store.items(order.id)]
         charges = store.charges(order.id)
         payments = store.payments(order.id)
         with store.transaction() as conn:
@@ -2934,7 +2951,9 @@ async def print_item(
     ``order_not_accepted``, ``order_on_hold``, ``order_closed``/``order_cancelled``,
     ``item_custom``, ``item_not_open``,
     ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
-    quantity: accept them), ``print_in_flight`` (a test print of the item is still
+    quantity: accept them), ``item_kit`` (its render made several outputs, named in
+    ``outputs``: print each one, then record the attempt, #5701),
+    ``print_in_flight`` (a test print of the item is still
     open), ``print_request_conflict`` (the key's print is another item's, or the key's
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced, or a

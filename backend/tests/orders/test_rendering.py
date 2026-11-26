@@ -13,9 +13,13 @@ import pytest
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, storefront_output_id
 from scadbuddy.orders.lifecycle import ManualQuoteInput
+from scadbuddy.orders.quote import ensure_output
 from scadbuddy.orders.rendering import (
     AttachTo,
     RenderedOutput,
+    kit_count,
+    kit_output_id,
+    kit_output_ids,
     output_for_reference,
     outputs_for_reference,
 )
@@ -371,8 +375,10 @@ async def test_a_later_output_of_another_job_is_not_part_of_the_render(shop: Sho
 
 
 async def test_a_back_office_reuse_does_not_ask_for_the_job(shop: Shop) -> None:
-    """Only a caller that reads the job (`needs_job`) checks it: the order's render keeps
-    reusing a matching output whose job is gone, as before."""
+    """Only a caller that reads the job (`needs_job`) checks it: a caller of
+    `output_for_reference` alone keeps reusing a matching output whose job is gone. The
+    order's render and its slice quote take every output (`outputs_for_reference`) and so
+    read the job (#5701 PR 5)."""
     outputs = SavedOutputs()
     outputs.metas["kept"] = OutputMeta.model_construct(
         id="kept", slug="demo", model_version="a" * 40, colors=["#ff0000"], job_id="job-0"
@@ -390,3 +396,116 @@ async def test_a_back_office_reuse_does_not_ask_for_the_job(shop: Shop) -> None:
     )
     assert (found.output_id, found.job_id) == ("kept", "job-0")
     assert renders.submitted == []
+
+
+# -- the order's render of a kit (#5701 PR 5, spec 2026-11-17 §7.4 "The order") ----------
+
+
+async def order_render(shop: Shop, outputs: SavedOutputs, renders: SeveralRenders) -> list[str]:
+    """The item's render as ``order_item_render`` runs it: output 0 set on the item, each
+    later output saved under an id of the first's (`kit_output_id`)."""
+    made = await outputs_for_reference(
+        reference_of(shop),
+        outputs=outputs,
+        renders=renders,
+        create_output=outputs.create,
+        name="ORD 1 Demo",
+        saved_as=lambda index: "op-out",
+        later_as=kit_output_id,
+        follow_every=0.0,
+        item=AttachTo(
+            lifecycle=shop.lifecycle, order=shop.get_order(), item=shop.get_item(), by=BY
+        ),
+    )
+    return [one.output_id for one in made]
+
+
+async def test_an_items_render_attaches_every_output_by_its_job(shop: Shop) -> None:
+    outputs = SavedOutputs()
+    renders = SeveralRenders(3)
+    ids = await order_render(shop, outputs, renders)
+    assert ids == ["op-out", kit_output_id("op-out", 1), kit_output_id("op-out", 2)]
+    assert len(set(ids)) == 3 and outputs.created == ids
+    assert {outputs.get(one).job_id for one in ids} == {"job-1"}
+    # The item holds the first; the rest are found from it, by its job.
+    assert shop.get_item().output_id == "op-out"
+    assert kit_output_ids(outputs, "op-out") == ids
+    # The render again reuses each one: no new render, no new save.
+    assert await order_render(shop, outputs, renders) == ids
+    assert outputs.created == ids and len(renders.submitted) == 1
+
+
+async def test_a_later_output_is_found_from_the_items_own_output(shop: Shop) -> None:
+    """An item that holds an output already (an earlier operation's) keeps it, and the
+    later outputs go under ids of that output, where the reader finds them."""
+    outputs = SavedOutputs()
+    outputs.metas["own"] = OutputMeta.model_construct(
+        id="own", slug="demo", model_version="a" * 40, colors=["#ff0000"], job_id="job-1"
+    )
+    shop.lifecycle.update_item(shop.order.id, shop.item.id, BY, output_id="own")
+    ids = await order_render(shop, outputs, SeveralRenders(2))
+    assert ids == ["own", kit_output_id("own", 1)]
+    assert kit_output_ids(outputs, "own") == ids
+
+
+@pytest.mark.parametrize("count", [0, 1])
+async def test_an_output_of_one_render_is_no_kit(shop: Shop, count: int) -> None:
+    outputs = SavedOutputs()
+    assert await order_render(shop, outputs, SeveralRenders(count)) == ["op-out"]
+    assert kit_output_ids(outputs, "op-out") == ["op-out"]
+
+
+async def test_an_output_of_another_job_is_not_part_of_the_kit(shop: Shop) -> None:
+    outputs = SavedOutputs()
+    ids = await order_render(shop, outputs, SeveralRenders(3))
+    later = outputs.metas[ids[1]]
+    outputs.metas[ids[1]] = later.model_copy(update={"job_id": "job-2"})
+    assert kit_output_ids(outputs, "op-out") == ["op-out"]
+    assert kit_output_ids(outputs, "gone") == ["gone"]
+
+
+async def test_an_items_render_after_the_prune_saves_every_output_again(shop: Shop) -> None:
+    """The item's own output is reused only while its job can be read: once the prune took
+    it, the item gets the new job's first output and every later one under its ids."""
+    outputs = SavedOutputs()
+    renders = SeveralRenders(2)
+    before = await order_render(shop, outputs, renders)
+    renders.prune()
+    after = await order_render(shop, outputs, renders)
+    assert after[0] != before[0] and after[1] == kit_output_id(after[0], 1)
+    assert shop.get_item().output_id == after[0]
+    assert {outputs.get(one).job_id for one in after} == {"job-2"}
+    assert kit_output_ids(outputs, after[0]) == after
+
+
+async def test_a_slice_quotes_render_saves_every_output_too(shop: Shop) -> None:
+    """Review of #7790: the slice quote (`ensure_output`) renders an item with no output as
+    the item's render does, so the order knows a kit whichever of the two rendered it."""
+    outputs = SavedOutputs()
+    first = await ensure_output(
+        lifecycle=shop.lifecycle,
+        outputs=outputs,
+        renders=SeveralRenders(2),
+        create_output=outputs.create,
+        order=shop.get_order(),
+        item=shop.get_item(),
+        filaments={},
+        by=BY,
+        follow_every=0.0,
+        saved_as="quote-out",
+    )
+    assert first == "quote-out" == shop.get_item().output_id
+    assert kit_output_ids(outputs, first) == ["quote-out", kit_output_id("quote-out", 1)]
+
+
+def test_a_kit_is_counted_from_its_job_when_its_outputs_are_not_saved() -> None:
+    """An output set on the item by another path saves none of the others: its job still
+    lists them, until the prune takes it."""
+    outputs = SavedOutputs()
+    outputs.metas["picked"] = OutputMeta.model_construct(id="picked", slug="demo", job_id="job-1")
+    renders = SeveralRenders(3)
+    assert kit_count(outputs, renders, "picked", 1) == 3
+    assert kit_count(outputs, None, "picked", 1) == 1
+    renders.gone.add("job-1")
+    assert kit_count(outputs, renders, "picked", 1) == 1
+    assert kit_count(outputs, renders, "gone", 1) == 1
