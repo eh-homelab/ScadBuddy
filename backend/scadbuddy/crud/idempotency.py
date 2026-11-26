@@ -8,10 +8,10 @@ another route or body (422), or runs the write and records its reply. The ledger
 only ever inserted whole, with the reply, and commits with the write or not at all: a
 rolled-back write leaves no reply to replay. Two requests with one key are serialised by a
 transaction-scoped advisory lock on the key, so the second waits and replays the first.
-Rows are kept `RETENTION` (`prune`, in the auth sweep). `idempotent` and `record` are the
-two halves, for a route whose write cannot be one callable. `stored` reads a reply with no
-lock, for a route that answers a retry before it does any other work; `has_reply` says
-whether a key holds one before the body is read.
+Rows are kept `RETENTION`, or `RETENTION_BY_CALLER` (`prune`, in the auth sweep).
+`idempotent` and `record` are the two halves, for a route whose write cannot be one
+callable. `stored` reads a reply with no lock, for a route that answers a retry before
+it does any other work; `has_reply` says whether a key holds one before the body is read.
 
 Every write that keeps a ledger row (`idempotent_write`, the report PUT
 `api/crud_print.py` `put_report`, the profile-fetch import's `finish`) commits in
@@ -47,6 +47,9 @@ LedgerCaller = CrudCaller | Literal["filament"]
 
 #: How long a reply is kept for a retry (D5).
 RETENTION: Final = timedelta(hours=24)
+#: A caller whose replies are kept longer than ``RETENTION`` (R-K1-2): an inventory
+#: write's reply stays 7 days.
+RETENTION_BY_CALLER: Final = {"inventory": timedelta(days=7)}
 #: The advisory lock class of a ``(caller, key)`` ("SCRQ").
 LOCK_CLASS: Final = 0x5343_5251
 KEY_PROBLEM: Final = "https://scadbuddy.dev/problems/crud/idempotency-key-reused"
@@ -180,6 +183,11 @@ def forget(conn: Connection[DictRow], caller: LedgerCaller, key: str, route: str
 
 
 def prune(conn: Connection[DictRow], older_than: timedelta = RETENTION) -> int:
-    """Drop the replies older than ``older_than``; how many there were."""
-    cursor = conn.execute("DELETE FROM crud_requests WHERE created_at < now() - %s", (older_than,))
+    """Drop the replies older than their caller's retention (``RETENTION_BY_CALLER``),
+    else ``older_than``; how many there were."""
+    cursor = conn.execute(
+        "DELETE FROM crud_requests WHERE created_at < now() - COALESCE("
+        "(SELECT (r.value #>> '{}')::interval FROM jsonb_each(%s) r WHERE r.key = caller), %s)",
+        (Jsonb({c: str(d) for c, d in RETENTION_BY_CALLER.items()}), older_than),
+    )
     return cursor.rowcount

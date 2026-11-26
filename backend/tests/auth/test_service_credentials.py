@@ -18,6 +18,7 @@ from scadbuddy.auth.service_credentials import (
     REREAD_MIN_SECONDS,
     ROTATE_BEFORE,
     SCOPES,
+    InProcessProvider,
     ServiceCredentialStore,
     TokenReader,
     _insert,
@@ -191,3 +192,10 @@ def test_a_retired_callers_sealed_credential_is_revoked_and_never_minted(
     assert store.resolve(issued.token) == Service(
         "projects", SCOPES["projects"], credential_id=issued.credential_id
     )
+
+
+def test_the_api_mints_an_inventory_credential_in_process(store: ServiceCredentialStore) -> None:
+    token = InProcessProvider("inventory", lambda: store).token()
+    assert token is not None
+    service = store.resolve(token)
+    assert service == Service("inventory", frozenset({"crud.inventory"}))

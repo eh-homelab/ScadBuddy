@@ -83,6 +83,7 @@ def test_every_route_has_a_class() -> None:
             "crud.profile-fetch",
             "crud.camera",
             "crud.camera-relay",
+            "crud.inventory",
             "flow.host",
         )
 

@@ -17,6 +17,7 @@ CrudCaller = Literal[
     "profile-fetch",
     "camera",
     "camera-relay",
+    "inventory",
 ]
 CRUD_HEADER = "X-ScadBuddy-Crud"
 CRUD_HEADERS = {CRUD_HEADER: "1", "Cache-Control": "no-store"}

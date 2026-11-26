@@ -103,6 +103,7 @@ def test_each_caller_reads_its_own_areas(monkeypatch: pytest.MonkeyPatch) -> Non
         "profile-fetch",
         "camera",
         "camera-relay",
+        "inventory",
     }
     monkeypatch.setitem(CRUD_AREAS, "render", ["blob-index"])
     app = FastAPI(dependencies=[Depends(auth_check)])
