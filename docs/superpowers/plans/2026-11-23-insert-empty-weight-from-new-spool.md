@@ -91,8 +91,9 @@ and R-7280-6 where they differ):
   locked first. When the insert's basis is `derived`, its `empty_weight_g` becomes the mean of the
   rows left; `derived_count` is a count of the rows, so it follows. Neither the issue nor this plan
   says what an insert with no readings left weighs, so: the last weight stays, the basis stays
-  `derived`, and nothing new is set (`derived_count` reads 0). The spool page then says the
-  weight is "from new spools since deleted". Another basis is never changed.
+  `derived`, and nothing new is set (`derived_count` reads 0). An accept that moves a spool's
+  row to its new insert leaves the old insert the same way. The spool page then says the weight
+  is "from new-spool readings no longer counted", which is true in both cases. Another basis is never changed.
 - **R-7450-2** `InsertWeightAccept` takes an optional `new_empty_weight_g`. When it is given and
   the mean under the locks differs, the accept writes nothing and answers 409
   `insert_weight_changed` with the `new_empty_weight_g` now. The UI sends the offer's value, and on

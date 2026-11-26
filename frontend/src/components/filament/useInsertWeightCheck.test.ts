@@ -35,6 +35,21 @@ describe('useInsertWeightCheck (#7452)', () => {
     expect(result.current).toMatchObject({ check: NO_OFFER, pending: false, unanswered: false })
   })
 
+  it('drops an answer from a round that a recheck replaced', async () => {
+    const answers: ((check: InsertWeightCheck) => void)[] = []
+    vi.mocked(insertWeightOffer).mockImplementation(() => new Promise((resolve) => answers.push(resolve)))
+    const { result } = renderHook(() => useInsertWeightCheck('spool', 1200))
+    await act(async () => vi.advanceTimersByTimeAsync(300))
+    act(() => result.current.recheck())
+    await act(async () => vi.advanceTimersByTimeAsync(300))
+    expect(answers).toHaveLength(2)
+    await act(async () => answers[0]?.(NO_OFFER))
+    expect(result.current).toMatchObject({ check: null, pending: true })
+    const fresh = { ...NO_OFFER, filament_g: 1000 }
+    await act(async () => answers[1]?.(fresh))
+    expect(result.current).toMatchObject({ check: fresh, pending: false })
+  })
+
   it('keeps an answer that comes in time', async () => {
     vi.mocked(insertWeightOffer).mockResolvedValue(NO_OFFER)
     const { result } = renderHook(() => useInsertWeightCheck('spool', 1200))

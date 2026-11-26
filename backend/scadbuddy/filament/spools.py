@@ -1460,6 +1460,8 @@ class FilamentSpoolStore:
                 (spool_id,),
             )
             # Its insert-weight row goes with it, and a derived weight is the mean again.
+            # Lock order: this spool's row (above), then its insert's row, as `accept_on`
+            # locks them, so a delete and another spool's accept on the insert never deadlock.
             forget_spool_on(conn, spool_id)
             conn.execute("DELETE FROM filament_spools WHERE id = %s", (spool_id,))
         return True
