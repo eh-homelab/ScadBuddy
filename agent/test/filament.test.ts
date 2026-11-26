@@ -546,6 +546,7 @@ describe('filament spool tools', () => {
     ['filament_spool_set_presets', 'write'],
     ['filament_spool_set_k_values', 'write'],
     ['filament_spool_archive', 'write'],
+    ['filament_spool_closing', 'read'],
     ['filament_spool_delete', 'write'],
     ['filament_spool_bind_tag', 'write'],
     ['filament_tag_unbind', 'write'],
@@ -723,6 +724,21 @@ describe('filament spool tools', () => {
       { archived: true, reason: 'damaged', final_grams: 12 },
     ])
     expect(() => tool('filament_spool_archive').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
+  })
+
+  it("previews a spool's closing with the query it was given (#7684)", async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${SPOOL}/closing`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+      }),
+    )
+    const out = await runTool(tool('filament_spool_closing'), { spool_id: ROW, reason: 'finished', final_reading_g: 230 }, ctx())
+    expect(firstText(out)).toEqual({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+    await runTool(tool('filament_spool_closing'), { spool_id: ROW }, ctx())
+    expect(seen).toEqual(['?reason=finished&final_reading_g=230', ''])
+    expect(() => tool('filament_spool_closing').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
   })
 
   it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {

@@ -1114,6 +1114,44 @@ const tools: Tool[] = [
   }),
 
   defineTool({
+    name: 'filament_spool_closing',
+    label: "Preview a spool's closing before it is archived",
+    description:
+      "Reads only (#7684). What filament_spool_archive would record as the `archived` event's `closing` with these " +
+      'inputs: `reason`, and the final weighing as `final_reading_g` (the scale reading with the spool; `final_filament_g` ' +
+      'is null with no empty weight known or a reading under it, which the archive refuses) or `final_grams` (the filament ' +
+      "left; with both, the net). With neither the closing is on the ledger's grams left and has no scale side. " +
+      '`notices` says what disagrees with the reason: `filament_left` for a finished spool with more than the setting ' +
+      '`filament_weighing_finished_left_g` on it, `not_finished_but_empty` for another reason at or under it; tell the ' +
+      'user before archiving. 404 for no such spool.',
+    input: z.object({
+      spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list"),
+      reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it would be archived'),
+      final_reading_g: z.number().min(0).max(1_000_000).optional().describe('The scale reading with the spool, at the end'),
+      final_grams: z.number().min(0).max(1_000_000).optional().describe('The filament left at the end'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/closing'],
+    handler: async ({ spool_id, reason, final_reading_g, final_grams }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/spools/{spool_id}/closing', {
+            params: {
+              path: { spool_id },
+              query: {
+                ...(reason !== undefined ? { reason } : {}),
+                ...(final_reading_g !== undefined ? { final_reading_g } : {}),
+                ...(final_grams !== undefined ? { final_grams } : {}),
+              },
+            },
+          }),
+          `preview the closing of spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'filament_spool_delete',
     label: 'Delete a spool',
     description:

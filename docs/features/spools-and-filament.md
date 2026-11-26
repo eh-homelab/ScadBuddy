@@ -249,8 +249,8 @@ filament as the new spool's grams and "Added full: No", and the save sends `cont
 with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and the
 request makes one spool. The new spool's `created` event keeps `continued_from`, the source's
 newest `archived` event gets `continued_as`, and the timeline links the two ends. The agent's
-`filament_spool_archive` takes the reason and the final reading, and `filament_spool_upsert`
-takes `continued_from`. Design: the same spec, §5.4 and §5.5.
+`filament_spool_archive` takes the reason and the final reading, `filament_spool_closing` (a
+read) previews the closing and its notices, and `filament_spool_upsert` takes `continued_from`. Design: the same spec, §5.4 and §5.5.
 
 ### The phone page, the hand-held Scan mode (#7273)
 
