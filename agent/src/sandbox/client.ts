@@ -501,7 +501,8 @@ export type Kept = Map<string, string | undefined>
  * changed in the pod since the last sync, and `overwritten`, the paths that changed in both
  * places, where the session's copy replaced the pod's.
  */
-export type SyncedIn = { files: Map<string, string>; unsynced: Set<string>; notSent: string[]; pulled?: SyncBack; overwritten?: string[] }
+/** `truncated`: the pod's manifest was, so `files` may lack some of the pod's files. */
+export type SyncedIn = { files: Map<string, string>; truncated: boolean; unsynced: Set<string>; notSent: string[]; pulled?: SyncBack; overwritten?: string[] }
 
 /**
  * What Kept records for a session file it could not hash (it went away, or could not be opened),
@@ -664,7 +665,7 @@ export async function syncIn(
       there.delete(rel)
     }
   }
-  return { files: there, unsynced: new Set(remote.unsynced), notSent, ...(pull ? { pulled: pull.back, overwritten: pull.overwritten } : {}) }
+  return { files: there, truncated: remote.truncated, unsynced: new Set(remote.unsynced), notSent, ...(pull ? { pulled: pull.back, overwritten: pull.overwritten } : {}) }
 }
 
 /**
@@ -853,9 +854,11 @@ export type SlotRun = { slot: SlotStarted; notSent: string[]; pulled?: SyncBack;
  */
 export function startInSandbox(options: SandboxCall, shell: Shell, command: string, timeoutMs: number): Promise<SlotRun> {
   return serial(options.sessionId, () =>
-    withSyncedPod(options, async (client, kept, _base, before) => {
+    withSyncedPod(options, async (client, kept, base, before) => {
       await client.setKept(kept)
-      await client.setBase(before.files)
+      // A truncated manifest may lack files the earlier base names: that base stays, as after a
+      // command (runInSandbox), so a slot's write there is still told apart from the session's.
+      if (!before.truncated || base === null) await client.setBase(before.files)
       const slot = await client.startSlot(shell, command, timeoutMs)
       return {
         slot,

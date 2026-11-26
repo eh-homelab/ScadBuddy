@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SandboxClient, SandboxError } from '../src/sandbox/client.js'
 import { STREAM_MAX_BYTES, syncPath } from '../src/sandbox/protocol.js'
 import { commandEnv } from '../src/sandbox/server.js'
@@ -27,6 +27,20 @@ describe('the sandbox exec server', () => {
     expect(result.timed_out).toBe(false)
     expect(result.stdout).toBe(`${box.work}\nout\n`)
     expect(result.stderr).toBe('err\n')
+  })
+
+  it("times a command on a monotonic clock: a wall clock stepped back never makes its duration negative", async () => {
+    const { client } = await start()
+    // A wall clock stepped back a minute while the command ran (WSL's clock does this).
+    const real = Date.now.bind(Date)
+    let calls = 0
+    const spy = vi.spyOn(Date, 'now').mockImplementation(() => real() - (++calls > 1 ? 60_000 : 0))
+    try {
+      const result = await client.exec('bash', 'sleep 0.2', 10_000)
+      expect(result.duration_ms).toBeGreaterThanOrEqual(150)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it("gives the command none of the server's environment", async () => {

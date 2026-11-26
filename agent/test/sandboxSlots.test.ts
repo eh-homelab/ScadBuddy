@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BG_FINISH, type BackgroundActivityDeps, backgroundActivities } from '../src/background/activities.js'
 import { followSlot, NOTICE_PATHS_MAX, shellNotice } from '../src/background/sandboxSource.js'
 import { type BackgroundTask, NOTICE_MAX_CHARS } from '../src/background/store.js'
 import type { BackgroundContext } from '../src/builtins/background.js'
@@ -402,6 +403,20 @@ describe("a slot's files come back to the session", () => {
     expect(await readFile(path.join(dir, 'late.txt'), 'utf8')).toBe('slot\n')
   }, 60_000)
 
+  it("keeps the base past a slot's start whose manifest is truncated", async () => {
+    const client = new SandboxClient(await sandboxes.acquire(SESSION), signal())
+    // A base from an earlier slot, naming a file the truncated manifest below does not reach.
+    const earlier = new Map([['far/away.txt', 'e'.repeat(64)]])
+    await client.setBase(earlier)
+    await runInSandbox(call(), 'bash', `mkdir many && cd many && seq 1 ${MANIFEST_MAX_ENTRIES + 1} | sed 's/^/./' | xargs touch`, 60_000)
+    expect(await client.base()).toEqual(earlier)
+    const { slot } = await startInSandbox(call(), 'bash', 'true', 10_000)
+    await drain(client, slot.id)
+    // Taken from the truncated manifest, the base would lose that entry, and a slot's write
+    // there would be taken for the session's to overwrite.
+    expect(await client.base()).toEqual(earlier)
+  }, 60_000)
+
   it('under the same caps as a foreground command', async () => {
     const { slot } = await startInSandbox({ ...call(), limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 } }, 'bash', 'head -c 100 /dev/zero > big.bin', 10_000)
     await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
@@ -516,6 +531,26 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       pod.closeAllConnections()
       await new Promise((r) => pod.close(r))
     }
+  })
+
+  it('stops the slot of a task that ends failed or cancelled (bg_finish), not one that ended by itself', async () => {
+    const tasks = new Map<string, BackgroundTask>()
+    const finished: string[] = []
+    const store = {
+      finish: async (id: string, state: string) => (finished.push(`${id}:${state}`), true),
+      get: async (id: string) => tasks.get(id),
+    }
+    const finish = backgroundActivities({ store, sandbox: deps() } as unknown as BackgroundActivityDeps)[BG_FINISH]
+    const client = new SandboxClient(await sandboxes.acquire(SESSION), AbortSignal.timeout(30_000))
+    for (const state of ['failed', 'cancelled', 'done'] as const) {
+      const { slot } = await startInSandbox(call(), 'bash', 'sleep 60', 60_000)
+      const t = { ...task({ sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } }), id: `t-${state}` }
+      tasks.set(t.id, t)
+      await finish({ taskId: t.id, state })
+      expect((await client.slotStatus(slot.id))?.running ?? false, state).toBe(state === 'done')
+      if (state === 'done') await client.stopSlot(slot.id)
+    }
+    expect(finished).toEqual(['t-failed:failed', 't-cancelled:cancelled', 't-done:done'])
   })
 
   it("ends with a clear reason when the session's pod is gone", async () => {
