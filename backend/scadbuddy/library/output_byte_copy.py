@@ -346,14 +346,19 @@ async def copy_output_bytes(
             # A dropped connection's unlock fails; the server freed the lock with the
             # session, and the run's own outcome must come through.
             try:
-                await lock.execute(
+                unlocked = await lock.execute(
                     "SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (BYTES_LOCK,)
                 )
+                freed = await unlocked.fetchone()
             except psycopg.Error as e:
                 logger.warning(
                     "the byte copy's lock could not be released; its closed session frees it",
                     extra={"error": type(e).__name__},
                 )
+            else:
+                # False, not an error, when this session did not hold it (#7823).
+                if freed is None or freed[0] is not True:
+                    logger.warning("the byte copy's unlock found its lock not held")
 
 
 class _FailedError(Exception):

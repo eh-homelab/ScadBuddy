@@ -47,6 +47,7 @@ from scadbuddy.api.deps import (
     HistoryDep,
     OutputsDep,
     PathsDep,
+    RenderDep,
     SettingsStoreDep,
     StateDep,
 )
@@ -60,7 +61,7 @@ from scadbuddy.api.printing import asked_by_api
 from scadbuddy.api.runtime import apply_runtime
 from scadbuddy.bambuddy.print_source import printable
 from scadbuddy.core.problems import DATABASE_ERRORS, ApiError
-from scadbuddy.library.outputs import require_output
+from scadbuddy.library.outputs import OutputStore, require_output
 from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
@@ -151,6 +152,7 @@ from scadbuddy.orders.quote import (
     subject_of,
 )
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.rendering import JobReads, kit_count, kit_output_id, kit_output_ids
 from scadbuddy.orders.report import (
     DEFAULT_DAYS,
     ProfitReport,
@@ -552,11 +554,22 @@ class ItemDetail(OrderItem):
     quotes: list[Quote]
     fulfilments: list[ItemAttempt]
     revisions: list[Revision]
+    #: The saved outputs of the item's render when it made several (a kit, #5701 PR 5),
+    #: in output order, ``output_id`` first (`orders/rendering.py` `kit_output_ids`): the
+    #: order page prints each one. Empty for an item of one output, or of none.
+    kit_outputs: list[str] = Field(default_factory=list)
+    #: How many outputs the item's render made when it made several, else 0: the count
+    #: `print_check` refuses ``item_kit`` by (`kit_count`). It is more than
+    #: ``len(kit_outputs)`` when another path set the output and its job lists more.
+    kit_count: int = 0
 
 
-def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
+def item_detail(
+    store: OrderStore, item: OrderItem, outputs: OutputStore, jobs: JobReads | None = None
+) -> ItemDetail:
     quotes = store.quotes(item.id)
     revisions = store.revisions(item.id)
+    kit, count = _kit_outputs(outputs, jobs, item)
     return ItemDetail(
         **item.model_dump(),
         quotes=quotes,
@@ -565,7 +578,30 @@ def item_detail(store: OrderStore, item: OrderItem) -> ItemDetail:
             for f in store.fulfilments(item.id, purpose=None)
         ],
         revisions=revisions,
+        kit_outputs=kit if count > 1 else [],
+        kit_count=count if count > 1 else 0,
     )
+
+
+def _kit_outputs(
+    outputs: OutputStore, jobs: JobReads | None, item: OrderItem
+) -> tuple[list[str], int]:
+    """The saved outputs of a model item's kit (`kit_output_ids`, after one look for its
+    second output, so an item of one output costs one lookup) and how many its render
+    made (`kit_count`, as `print_check` counts them). A store that fails here leaves the
+    item without a kit, logged, and never fails the order's read."""
+    if item.reference is None or item.output_id is None:
+        return [], 0
+    first = item.output_id
+    try:
+        if outputs.existing([kit_output_id(first, 1)]):
+            kit = kit_output_ids(outputs, first)
+        else:
+            kit = [first]
+        return kit, kit_count(outputs, jobs, first, len(kit))
+    except Exception:
+        logger.warning("order item %s: its kit could not be read", item.id, exc_info=True)
+        return [], 0
 
 
 class OrderDetail(BaseModel):
@@ -1249,7 +1285,9 @@ async def profit(
 
 
 @router.get("/{order_id}", response_model=OrderDetail, summary="One order, whole")
-async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
+async def get_order(
+    order_id: str, orders: OrdersDep, outputs: OutputsDep, render: RenderDep
+) -> OrderDetail:
     check_path(order_id)
     store = orders.store
 
@@ -1257,7 +1295,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
         order = store.order(order_id)
         if order is None:
             return None
-        items = [item_detail(store, item) for item in store.items(order.id)]
+        items = [item_detail(store, item, outputs, render.store) for item in store.items(order.id)]
         charges = store.charges(order.id)
         payments = store.payments(order.id)
         with store.transaction() as conn:
@@ -2934,7 +2972,9 @@ async def print_item(
     ``order_not_accepted``, ``order_on_hold``, ``order_closed``/``order_cancelled``,
     ``item_custom``, ``item_not_open``,
     ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
-    quantity: accept them), ``print_in_flight`` (a test print of the item is still
+    quantity: accept them), ``item_kit`` (its render made several outputs, named in
+    ``outputs``: print each one, then record the attempt, #5701),
+    ``print_in_flight`` (a test print of the item is still
     open), ``print_request_conflict`` (the key's print is another item's, or the key's
     test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced, or a

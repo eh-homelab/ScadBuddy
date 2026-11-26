@@ -911,8 +911,18 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `SpoolTypeStore.add_k_values`, so a person's K value stands),
   `spools.py`
   (instances and tag bindings; every writer locks the tag before the spool; archive closes
-  the open binding; `detail()` is the spool page's read: tags, last tag and its holder, the
-  grams `basis`, `in_use`; `ledger()` pages every spool's events by an opaque `(at, seq)`
+  the open binding, and since #7684 takes a `reason` (`finished`, `respooled`, `damaged`,
+  `other`; optional on the API, the sync's archives record `other`) and a final weighing
+  (`final_reading_g` or `final_grams`, booked as a `weighed` event just before the
+  `archived` one by `add_event`'s rules), and the `archived` event's `data` keeps the
+  closing, `ledger.closing`: `started_g` and `started_from`, `ledger_consumed_g`,
+  `final_filament_g`, `scale_consumed_g` and `drift_g`; `GET /spools/{id}/closing` is the
+  archive dialog's preview with its notices against the setting
+  `filament_weighing_finished_left_g`; a `SpoolDraft.continued_from` (a respooled spool,
+  archived) links the new spool's `created` event and the source's `archived` event,
+  `continued_from` and `continued_as`, 422 `continued_from_not_archived` otherwise;
+  `detail()` is the spool page's read: tags, last tag and its holder, the
+  grams `basis`, `in_use`, an archived spool's `closing`; `ledger()` pages every spool's events by an opaque `(at, seq)`
   cursor; `low_stock` is computed per spool against its effective `low_stock_pct`, else the setting `filament_low_stock_pct` (20 by default, read once per call, before the store takes a pool connection, by its `defaults` reader (`FilamentDefaults`); the summary's `value_left` uses `filament_default_cost_per_kg` for a spool with no cost; Settings → Printing → Filament), `presets.py` (a spool's own presets and K values over its type's, by key; `preset_for` is exact, never a near nozzle; no key is `*`: the 0706Z migration made each `*` row one `migrated` row per model and nozzle, `drop_migrated` deletes them when a spool gets its first type; a ScadBuddy preset's row carries its mirror's Bambuddy id, `EffectivePreset.bambuddy_id`, and every path that hands a preset to Bambuddy sends `for_bambuddy()`), `sb_presets.py` (ScadBuddy's own filament presets, #7176, plan `docs/superpowers/plans/2026-11-23-scadbuddy-filament-presets.md`: `filament_presets`, each document a blob held by `filament_preset` per version, a changed document a new version of the same id; a binding names one by `sb-<id>` in `slicer_filament`, a foreign key through the generated `preset_id` column, refs in `slicing/own_presets.py`; Bambuddy's presets come in only by `import_presets` (`refresh_bambuddy` versions a `bambuddy` preset whose Bambuddy `updated_at` moved, `adopt_held` moves every binding that names a Bambuddy local preset to a ScadBuddy one, each from a `PresetSource`, `LivePresets` reading `GET /local-presets` itself; #7244, the owner's decisions of 2026-11-23: ScadBuddy owns the presets, Bambuddy is at most a mirror target or an import's source, and no copy is kept): in the spool refresh's `filament_bambuddy_pull` activity after the pull while `filament_sync.presets` is `bb_to_sb` or `two_way` (`spools/activities.py`, within the activity's deadline), by hand whatever the direction (`POST /filament/presets/bambuddy-import`, 409 `not_configured` or `instance_changed`, agent `filament_bambuddy_presets_import`), at the API's start for the bindings that still name a Bambuddy local id (`adopt_at_start`, from `slicing/component.py`, retried every `ADOPT_RETRY_S`, on one replica at a time (the session try-lock `ADOPT_LOCK`); nothing bound, or links recorded for another Bambuddy (`links_elsewhere_on`), no call); a 3DFP fetch writes ScadBuddy presets itself and adopts nothing (#7201); the native slicer reads them through `Profiles.own`, on the print worker over `…/print/own-presets`, area `own-presets`, `RemoteFilamentPresets`), `ledger.py` (`filament_spool_events`, the one source of grams left:
   the newest absolute reading, then the deltas after it (`basis()` returns that anchor and those
   deltas, and `grams_left()` is built on it); events carry their physical time,
@@ -1171,6 +1181,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `deploy/camera/`; the images are the Dockerfile's `camera-relay` and `camera-recorder`.
   Tests: `tests/camera/` (the real-MediaMTX e2e `test_e2e_mediamtx.py` needs MediaMTX and
   ffmpeg, which the `test` stage has; locally it fetches the pinned MediaMTX itself).
+- Agent fleet chat (spec `docs/superpowers/specs/2026-11-25-agent-fleet-messaging-design.md`):
+  the `fleet` CRUD caller (ServiceAccount `scadbuddy-fleet`, scope `crud.fleet`, areas `changes`
+  and `fleet`) and the migration `*_fleet.sql` (`fleet_agents`, `fleet_channels`,
+  `fleet_members`, `fleet_messages`, `fleet_deliveries`; it also adds `fleet` to the two caller
+  CHECKs, which every new caller needs). Python serves only `api/crud_fleet.py`, `GET
+  …/changes`, the stream of events whose kind starts with `fleet.` (an `OpaqueEvent`, its frame
+  data the stored payload) with a budget of its own (`FLEET_STREAMS_MAX`); the `fleet` area's
+  routes are core's (Go). Test: `tests/api/test_crud_fleet_changes.py`.
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).
@@ -1895,7 +1913,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `QUOTE_TIMEOUT`), its steps `quote.py`: the check writes nothing; the run writes the
   body's filaments onto the item (`update_item`'s `filaments`, a repin only when a slot
   changes), renders and saves an output through `output_create`'s run when the item has
-  none matching (`ensure_output` over `rendering.py` `output_for_reference`, #6324: a
+  none matching (`ensure_output` over `rendering.py` `outputs_for_reference`, its first output, #5701 PR 5; #6324: a
   `Reference` to its output, no item needed; given one, `AttachTo` sets it on the item with
   no new revision and no quote dropped), slices every plate through `bambuddy/preview.py` `start_preview_plates`
   (the dialog's background slice, either slicer), keeps each plate's sliced file as the
@@ -1941,7 +1959,8 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `order_item_render` kind of `operations.py` on the `library` queue (`POST
   /orders/{id}/items/{item}/render`, subject `order_item:<id>`, check `render_check`, the
   quote's refusals; the output saved under `render_output_id`, one per operation), which
-  renders the item's reference and sets the output on it. "Slice…" on an item with a design
+  renders the item's reference and sets the output on it, and saves every later output of a
+  pipeline's render under `kit_output_id` (#5701 PR 5, `outputs_for_reference`). "Slice…" on an item with a design
   and no output starts it, then opens the print dialog on the new output (`useSliceQuotes`
   `render`, the run's `stage` `rendering`); the agent's `order_item_quote` needs none.
   Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
@@ -2588,10 +2607,14 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   render of several outputs is one variant (spec 2026-11-17 §7.4): `kit_colours` (one colour,
   one slot across the outputs), `kit_digest` (every output's 3MF), each output saved under
   `storefront_output_id(render_key, index)` and sliced whole with its own slots' presets, and
-  one `price_plates` over every plate (`slice_and_price`'s `place`). No visitor gets that
-  price until #5701's PR 5, whose order makes every output: `renders.py` `one_output` refuses
-  it on every path. A pipeline's cart line needs its row's `every_output`. A file listing has
-  no `inputs`.
+  one `price_plates` over every plate (`slice_and_price`'s `place`). Every path gives that
+  price, since the order makes every output (#5701 PR 5): the item's render
+  (`order_item_render`) and its slice quote (`ensure_output`) save each later output under
+  `orders/rendering.py` `kit_output_id(<the item's output>, index)`, `kit_output_ids` finds
+  them by that id and the job (`ItemDetail.kit_outputs`), and the item's print refuses a kit
+  (409 `item_kit`; also by the output's render job while it lasts, `kit_count`, which the
+  order read gives as `ItemDetail.kit_count`), whose outputs the order page prints one by one. A pipeline's cart line needs its row's
+  `every_output`. A file listing has no `inputs`.
   A file listing (#6710 PR 3, `orders/storefront/file_listings.py`) is published from a held
   copy, `listing-file-<sha256>`, held under (`storefront_listing_kept`, listing id) and named by
   the listing's pin. It is on the public site (#6710 PR 6): `public_card` and `public_listing`

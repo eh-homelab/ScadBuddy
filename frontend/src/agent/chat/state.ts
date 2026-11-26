@@ -13,6 +13,7 @@ import type {
   ToolImage,
   VersionLink,
 } from './protocol'
+import { WORKER_RESTARTED, WORKER_RESTARTED_TEXT } from './toolGroups'
 
 /** One entry in a session's transcript and action feed, in arrival order. */
 export type FeedItem =
@@ -31,6 +32,8 @@ export type FeedItem =
       parent?: string
       /** #782 — what the call does, as the tool declares it; `toolTitle` names the rest. */
       title?: string
+      /** The id of the feed's last item when the result came (#7911): a later call after it started once this one had ended. */
+      resultAfter?: string
     }
   | {
       kind: 'approval'
@@ -433,11 +436,13 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       )
 
     case 'tool.result':
-      return patchSession(state, event.sessionId, (s) =>
-        mapItems(s, (i) =>
+      return patchSession(state, event.sessionId, (s) => {
+        const last = s.items.at(-1)?.id
+        return mapItems(s, (i) =>
           i.kind === 'tool' && i.id === event.id
             ? {
                 ...i,
+                ...(last === undefined ? {} : { resultAfter: last }),
                 result: {
                   ok: event.ok,
                   summary: event.summary,
@@ -447,8 +452,8 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
                 },
               }
             : i,
-        ),
-      )
+        )
+      })
 
     case 'approval.required':
       return patchSession(state, event.sessionId, (s) =>
@@ -654,6 +659,8 @@ function errorMessage(code: string | undefined, message: string): string {
       return 'The assistant is still working through the messages already sent, so this one was not taken. Wait a moment, then send it again.'
     case 'rate_limited':
       return 'Too many new chats started in a short time, so this one was not started. Wait a minute, then send it again.'
+    case WORKER_RESTARTED:
+      return WORKER_RESTARTED_TEXT
     default:
       return message
   }

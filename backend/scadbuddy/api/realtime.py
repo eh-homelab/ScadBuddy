@@ -120,10 +120,10 @@ from scadbuddy.core.events import (
     ActivityEvent,
     AgentOperationEvent,
     AnalyzerDecisionEvent,
+    AnyEvent,
     AuthSessionRevoked,
     BusResync,
     CameraFeedEvent,
-    Event,
     FlowChanged,
     FlowRunEvent,
     FontInstalled,
@@ -132,6 +132,7 @@ from scadbuddy.core.events import (
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
+    OpaqueEvent,
     OperationEvent,
     OrderBankDepositsChanged,
     OrderChanged,
@@ -248,9 +249,12 @@ def valid_topic(topic: object) -> bool:
     return not topic.startswith("model:") or len(topic) - 6 <= MAX_MODEL_ID_LENGTH
 
 
-def topics_of(event: Event) -> list[str]:
+def topics_of(event: AnyEvent) -> list[str]:
     """Every topic ``event`` is news for."""
     match event:
+        case OpaqueEvent():
+            # An unknown kind is not browser news (#7768).
+            return []
         case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
@@ -309,7 +313,7 @@ def topics_of(event: Event) -> list[str]:
             assert_never(event)
 
 
-def event_frame(event: Event, topics: list[str]) -> dict[str, Any]:
+def event_frame(event: AnyEvent, topics: list[str]) -> dict[str, Any]:
     # An order event's `cart` (#5282) is for the flow triggers only: the frame keeps
     # spec 2026-10-18 §7.1's fields, plus `deleted: true` for a cart the draft sweep took.
     data = event.model_dump(mode="json", exclude={"id", "at", "kind", "cart"})

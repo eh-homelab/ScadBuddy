@@ -120,6 +120,7 @@ export function App() {
         <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="m/:slug/prints" element={<TemplatePrintsPage />} />
         <Route path="prints" element={<PrintsPage />} />
+        <Route path="scan" element={<ScanPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
         <Route path="prints/queue/:itemId" element={<QueueItemPage />} />
@@ -127,7 +128,8 @@ export function App() {
         <Route path="filament" element={<Navigate to={FILAMENT_HOME} replace />} />
         <Route path="filament/spools/:id" element={<SpoolPage />} />
         <Route path="filament/labels" element={<LabelsPage />} />
-        <Route path="filament/scan" element={<ScanPage />} />
+        {/* The hand-held Scan mode (#7273) moved to the top level; the old address redirects. */}
+        <Route path="filament/scan" element={<Navigate to="/scan" replace />} />
         <Route path="filament/locations/:id" element={<LocationPage />} />
         <Route path="filament/types/:id" element={<TypePage />} />
         <Route path="filament/suppliers/:id" element={<SupplierPage />} />

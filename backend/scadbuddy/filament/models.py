@@ -30,6 +30,7 @@ from pydantic import (
     model_validator,
 )
 
+from scadbuddy.codes.resolve import Resolved
 from scadbuddy.filament.colour import Rgba
 from scadbuddy.filament.label_output import Dpi, OutputFormat
 from scadbuddy.filament.label_output import Fields as LabelFields
@@ -1256,6 +1257,10 @@ class SpoolDraft(_In):
     presets: list[SpoolPresetCreate] = Field(default_factory=list)
     k_values: list[SpoolKValueCreate] = Field(default_factory=list)
     copy_of: UUID | None = None
+    #: The archived spool whose filament this one continues (respooled, #7684): the new
+    #: spool's ``created`` event keeps it as ``continued_from``, and the source's newest
+    #: ``archived`` event gets ``continued_as``. The source must be archived.
+    continued_from: UUID | None = None
 
 
 #: The most spools one bulk create makes (R-7150-1).
@@ -1263,9 +1268,16 @@ BULK_MAX: Final = 100
 
 
 class SpoolBulkCreate(SpoolDraft):
-    """``quantity`` identical spools, each with its own number (#7150, R-7150-1)."""
+    """``quantity`` identical spools, each with its own number (#7150, R-7150-1). A
+    continued spool (``continued_from``) is one spool."""
 
     quantity: Annotated[int, Field(ge=1, le=BULK_MAX)] = 1
+
+    @model_validator(mode="after")
+    def _one_continues(self) -> SpoolBulkCreate:
+        if self.continued_from is not None and self.quantity != 1:
+            raise ValueError("only one spool continues a respooled one")
+        return self
 
 
 class SpoolPatch(_Patch):
@@ -1858,9 +1870,71 @@ class SpoolsArchived(BaseModel):
     not_found: list[UUID]
 
 
+#: Why a spool was archived (#7684, spec §5.4).
+ArchiveReason = Literal["finished", "respooled", "damaged", "other"]
+
+
+class Closing(BaseModel):
+    """An ``archived`` event's reconciliation (#7684): what the spool started with and
+    where that came from, what the ledger consumed, the final filament, what the scale
+    says was consumed and the drift between the two (`ledger.closing`)."""
+
+    reason: ArchiveReason | None = None
+    started_g: float | None = None
+    started_from: Literal["reading", "label"] | None = None
+    ledger_consumed_g: float | None = None
+    final_filament_g: float | None = None
+    scale_consumed_g: float | None = None
+    drift_g: float | None = None
+
+
+class ClosingNotice(BaseModel):
+    """What the archive dialog says when the numbers disagree with the reason."""
+
+    code: Literal[
+        "filament_left", "not_finished_but_empty", "no_empty_weight", "reading_below_empty"
+    ]
+    text: str
+
+
+class ClosingPreview(BaseModel):
+    """What archiving a spool with these inputs would record (#7684): the closing, the
+    final filament the reading means (``None`` when it cannot be worked out: no empty
+    weight known, or a reading under it), the empty weight taken off and the notices."""
+
+    closing: Closing
+    final_filament_g: float | None
+    empty_g: int | None
+    notices: list[ClosingNotice]
+
+
 class SpoolArchive(_In):
+    """An archive or a restore (#7684, spec §5.4). An archive names its ``reason`` (the UI
+    requires one; the API keeps it optional) and may send the final weighing, read as
+    `SpoolEventAdd`'s is: ``final_reading_g`` is the scale's reading with the spool,
+    ``final_grams`` the filament, both together the net. A restore takes neither."""
+
     #: ``True`` takes the spool off the lists, ``False`` puts it back.
     archived: bool = True
+    reason: ArchiveReason | None = None
+    final_reading_g: Grams | None = None
+    final_grams: Grams | None = None
+
+    @model_validator(mode="after")
+    def _fits(self) -> SpoolArchive:
+        if not self.archived and (
+            self.reason is not None
+            or self.final_reading_g is not None
+            or self.final_grams is not None
+        ):
+            raise ValueError("a restore takes no reason or reading")
+        if (
+            self.final_reading_g is not None
+            and self.final_grams is not None
+            and self.final_reading_g < self.final_grams
+        ):
+            raise ValueError("final_reading_g is below final_grams")
+        return self
 
 
 class TagBind(_In):
@@ -1984,6 +2058,9 @@ class SpoolDetail(Spool):
     type_suppliers: list[SpoolTypeSupplier] = Field(default_factory=list)
     #: The newest ``weighed`` event; its ``data`` holds the breakdown when it has one (#7682).
     last_weighing: SpoolEvent | None = None
+    #: An archived spool's closing: the newest ``archived`` event's reconciliation (#7684);
+    #: None while the spool is not archived.
+    closing: Closing | None = None
 
 
 class TagRow(Tag):
@@ -2252,7 +2329,11 @@ class TagReadResult(BaseModel):
     spool: Spool | None
     decoded: DecodedSpool | None
     draft: SpoolCreate | None
-    next: Literal["open_spool", "bind_or_create", "none"]
+    #: What the records name when no spool holds the tag (#6955): a typed code in a `url`
+    #: record's `/x/<code>` path or a `text` record, or a `scadbuddy:spool:<id>` text. The
+    #: `/codes/{code}` shape; set only with `next` of `open_code`.
+    resolved: Resolved | None = None
+    next: Literal["open_spool", "open_code", "bind_or_create", "none"]
 
 
 class LedgerRow(SpoolEvent):

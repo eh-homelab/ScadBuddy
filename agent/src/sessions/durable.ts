@@ -705,6 +705,8 @@ export class DurableTurns {
     } finally {
       controller.abort()
     }
+    // Only the codes named here change the outcome. `worker_restarted` (turnHost.ts, #7874) may be
+    // the last error of a turn whose next placement then ended well: it is ignored on purpose (#7911).
     if (error?.code === 'interrupted') return { kind: 'interrupted' }
     if (error?.code === 'turn_failed' || status === 'failed') {
       return { kind: 'failed', message: error?.message ?? 'the turn failed' }

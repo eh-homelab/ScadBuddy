@@ -17,6 +17,7 @@ import {
   PackageIcon,
   PrinterIcon,
   ReceiptIcon,
+  ScanLineIcon,
   SettingsIcon,
   SparklesIcon,
   SpoolIcon,
@@ -110,6 +111,8 @@ const NAV = [
   { to: '/prints', label: 'Prints', end: false, icon: PrinterIcon },
   { to: '/library', label: 'Library', end: false, icon: LibraryBigIcon },
   { to: '/filament', label: 'Filament', end: false, icon: SpoolIcon },
+  // #7273 — the hand-held Scan mode: a tag or a label opens what it names.
+  { to: '/scan', label: 'Scan', end: true, icon: ScanLineIcon },
   { to: '/inventory', label: 'Inventory', end: false, icon: PackageIcon },
   { to: '/orders', label: 'Orders', end: false, icon: ReceiptIcon },
   { to: '/storefront', label: 'Storefront', end: false, icon: StoreIcon },

@@ -282,5 +282,32 @@ def test_a_client_never_marks_a_row_migrated(client: TestClient, pg_conninfo: st
     assert _own_after_first_type(client, made["id"]) == ["P1", "P6"]
 
 
+def test_a_respooled_spool_continues_as_a_new_one(client: TestClient) -> None:
+    """#7684: `continued_from` links the new spool's `created` event and the source's
+    `archived` event; an unarchived source is a 422 that makes no spool."""
+    source = _spool(client, label_weight_g=1000, grams_left=1000, added_full=True)
+    body = {
+        "spool": {"material_id": _material_id(client), "grams_left": 480, "added_full": False},
+        "copy_of": source["id"],
+        "continued_from": source["id"],
+    }
+    refused = _bulk(client, body)
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "continued_from_not_archived"
+    assert len(client.get(SPOOLS, params={"include_archived": True}).json()) == 1
+    archived = client.post(f"{SPOOLS}/{source['id']}/archive", json={"reason": "respooled"})
+    assert archived.status_code == 200, archived.text
+    made = _bulk(client, body, key="k-2")
+    assert made.status_code == 201, made.text
+    [spool] = made.json()
+    assert spool["grams_left"] == 480 and spool["added_full"] is False
+    created = client.get(f"{SPOOLS}/{spool['id']}/events").json()[0]
+    assert created["kind"] == "created" and created["data"]["continued_from"] == source["id"]
+    closing = client.get(f"{SPOOLS}/{source['id']}/events").json()[-1]
+    assert closing["kind"] == "archived" and closing["data"]["continued_as"] == spool["id"]
+    gone = _bulk(client, body | {"continued_from": MISSING, "copy_of": MISSING}, key="k-3")
+    assert gone.status_code == 422, gone.text
+
+
 def test_a_copy_of_no_spool_is_404(client: TestClient) -> None:
     assert client.get(f"{SPOOLS}/{MISSING}/copy").status_code == 404

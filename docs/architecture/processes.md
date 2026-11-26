@@ -30,6 +30,7 @@ backend is listed by `python -m scadbuddy.tools.settings_reference`. Paths under
 | [Session sandbox and egress proxy](#session-sandbox-and-egress-proxy) | `scadbuddy-sandbox` (`sandbox`) | `node dist/sandbox/main.js` | 8090, 3128 | no |
 | [agent-durable](#agent-durable) | `scadbuddy-agent-durable` (`agent-durable`) | `python -m scadbuddy_durable` | 8082 (health) | yes, mounted (today's manifests) |
 | [Slicer worker](#slicer-worker) | `scadbuddy-slicer` (`slicer`) | `scadbuddy-slicer` | 9090 | no |
+| [Fleet chat server](#fleet-chat-server) | `ghcr.io/eh-homelab/scadbuddy-fleet` (`tools/go/fleet/Dockerfile`) | `scadbuddy-fleet` | 8080 | no |
 | [bambuddy-fs](#bambuddy-fs) | `scadbuddy-bambuddy-fs` (`tools/go/bambuddy-fs/Dockerfile`) | `bambuddy-fs mount` | none | no |
 | [Frontend](#frontend) | built into `scadbuddy` (`frontend` stage) | served by the API and the edge | | |
 
@@ -59,6 +60,8 @@ flowchart LR
     AS -->|crud.agent, api| API
     AW --> SBX[session sandbox pods] --> EG[egress proxy]
     SL[slicer] -->|transfer URLs| API
+    FL[fleet chat server :8080] -->|crud.fleet| API
+    CC[Claude Code sessions] -->|/mcp| FL
     API --> PG[(Postgres)]
     AS --> PG
     AW --> PG
@@ -224,6 +227,31 @@ Bambu Studio CLI (`workers/rust/crates/sb-slicer/src/activity.rs:22-23`,
 concurrency settings and `OTEL_*` (`workers/rust/crates/sb-temporal/src/lib.rs:22-60`; traces, metrics and logs over OTLP, `workers/rust/crates/sb-temporal/src/telemetry.rs`) and
 holds no credential: its inputs carry transfer URLs. See
 [`workers/rust/CLAUDE.md`](../../workers/rust/CLAUDE.md).
+
+## Fleet chat server
+
+The agent fleet chat (spec
+[`2026-11-25-agent-fleet-messaging-design.md`](../superpowers/specs/2026-11-25-agent-fleet-messaging-design.md),
+feature page [agent-fleet-chat.md](../features/agent-fleet-chat.md)): an MCP server that
+lets Claude Code sessions send direct messages and channel posts to each other. The Go
+binary `scadbuddy-fleet` (`tools/go/fleet/main.go`, uid 10003) serves `/mcp` and
+`GET /healthz` on 8080. It holds no database secret and no KEK. It reaches the fleet's
+tables only through core's CRUD routes under `/api/v1/internal/crud/fleet/`
+(`tools/go/core/internal/fleet`; core serves them when `SCADBUDDY_CORE_AREAS` names
+`fleet`) with the `crud.fleet` credential of caller `fleet`. It exchanges its proof for that
+credential at `POST /api/v1/auth/service-token` (a projected token of the ServiceAccount
+`scadbuddy-fleet`, `FLEETCHAT_SERVICE_TOKEN_FILE`, or a bootstrap secret,
+`FLEETCHAT_SERVICE_BOOTSTRAP_FILE`) and renews it in process at half-life and after a 401
+(`tools/go/fleet/sbfleet/credential.go`). It follows the change stream
+`GET /api/v1/internal/crud/fleet/changes` (the Python API's `api/crud_fleet.py`, which core
+forwards: the `fleet.*` events of the event log, with `Last-Event-ID` replay) to tell
+subscribed inboxes of new messages. Its other settings are `FLEETCHAT_LISTEN`,
+`FLEETCHAT_CORE_URL`, `FLEETCHAT_MAX_TEXT`, `FLEETCHAT_PAGE_SIZE`,
+`FLEETCHAT_MAX_PAGE_SIZE` and `FLEETCHAT_SESSION_TIMEOUT`
+([`tools/go/fleet/README.md`](../../tools/go/fleet/README.md)). The server has no auth of
+its own: anything on the LAN may call it, directly or through ScadBuddy's `/mcp`
+(the owner's decision of 2026-11-26), and a NetworkPolicy is to admit only ScadBuddy's pods and the LAN's
+Gateway. Neither the server nor that policy is deployed yet.
 
 ## bambuddy-fs
 

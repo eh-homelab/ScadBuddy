@@ -96,7 +96,12 @@ from scadbuddy.orders.quote import (
     support_check,
 )
 from scadbuddy.orders.quote_preview import start_library_quote_preview, start_quote_preview
-from scadbuddy.orders.rendering import AttachTo, RenderedOutput, output_for_reference
+from scadbuddy.orders.rendering import (
+    AttachTo,
+    RenderedOutput,
+    kit_output_id,
+    outputs_for_reference,
+)
 from scadbuddy.orders.served_library import ServedLibrary, served_shelf
 from scadbuddy.orders.spools import item_plan
 from scadbuddy.orders.storefront.slice_price import (
@@ -732,13 +737,17 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         if order is None:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
         reference = reference_of(item)
-        await output_for_reference(
+        saved_as = render_output_id(OPERATION_RUN.get())
+        # Every output of a pipeline's render (#5701 PR 5): the item holds the first, and
+        # the order finds the others from it (`kit_output_ids`).
+        await outputs_for_reference(
             reference,
             outputs=core.outputs,
             renders=_Renders(core),
             create_output=create_output,
             name=f"{order.label} {item.title}",
-            saved_as=render_output_id(OPERATION_RUN.get()),
+            saved_as=lambda _index: saved_as,
+            later_as=kit_output_id,
             schema=await reference_schema(core, reference),
             item=AttachTo(
                 lifecycle=lifecycle,
@@ -792,6 +801,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 part_settings=dumped(asked.part_settings),
                 setup=setup,
                 content=core.store.content,
+                jobs=core.render.store,
             )
         # The request as it prints: what it left out is the quote's (`_same_setup` passed).
         body = PrintRunRequest.model_validate(filled(sent, checked.get("setup")))

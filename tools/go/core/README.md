@@ -76,6 +76,17 @@ unchanged, to the Python API: WebSockets, SSE and large bodies included. On prod
 | `escalations` | `/escalations/*`: a flow run's calls passed up, denied, moved, delivered, and a run's entries |
 | `audit` | `POST` `/audit/record`, `…/list`, `…/prune` |
 
+Area `fleet` (`internal/fleet`) is caller `fleet`'s (scope `crud.fleet`), under
+`/api/v1/internal/crud/fleet`: `POST /agents/{session_id}/touch`, `GET /agents`, `PUT` and
+`DELETE /channels/{name}/members/{session_id}`, `GET /agents/{session_id}/channels`, `POST
+/messages`, `GET /agents/{session_id}/inbox`, `PUT /agents/{session_id}/cursor`. A send publishes
+`fleet.message` after its commit. An inbox page holds up to `limit` messages (50 by
+default, at most 200) and at most 4 MiB of message text: it stops before the message that
+would pass 4 MiB, always holds at least one, and then says `more`; the cursor moves only past
+the messages returned. A text over 16 MiB is a 422 whose detail names the limit (reason
+`text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
+(reason `seq-ahead`). `GET /changes` stays Python's.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.
