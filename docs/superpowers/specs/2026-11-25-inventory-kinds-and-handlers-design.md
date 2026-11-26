@@ -368,7 +368,7 @@ Go owns stock; Python calls it.
   write takes an `Idempotency-Key`. The ledger is the existing `crud_requests`
   (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
-  The caller starts its workflow first, and the workflow's first activity writes the
+  The caller starts its workflow first, and the fulfil workflow's first activity writes the
   caller's row (§6.1a "Nothing manual, no sweeps"); Go is called with a key derived from
   that row (the workflow `order_item:<id>:parts:<n>`, each `inventory.Take`
   `order_item:<id>:parts:<n>:<item>`), and Temporal retries a failed call. A refusal in
@@ -414,7 +414,10 @@ gives us the visibility into the Activities tab in SB".
   answers the stored result. So repeated tries cause no extra work.
 - **Nothing manual, no sweeps** (owner, 2026-11-25: "nothing manual here should happen
   for sweeps"). A change that crosses a boundary starts its workflow *before* it commits
-  anything, and the workflow's own first activity commits the local change. So a failed
+  anything, and only the workflow's own activities commit. `FulfilOrderItem`'s first
+  activity commits the order change, then Go's `Take` runs; `RecostLot` reads the orders,
+  then Go's `Recost` runs, then an activity records the cost; `MergePrinter` runs Go's
+  `Repoint`, then the merge commits. So a failed
   start leaves nothing half done (the person gets an error, and nothing was written), and
   no state ever needs a sweep, a backstop, a repair loop or a person to settle it.
 - **Orders.** Fulfilling an order item starts the workflow `FulfilOrderItem` with the
