@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -514,4 +515,41 @@ func TestThePruneDeletesOnlyPastTheRetention(t *testing.T) {
 	expect(t, a.ok("POST", "/audit/prune", `{"days":30}`).raw, `{"deleted":1}`)
 	expect(t, a.text(`SELECT string_agg(action, ',') FROM ai_audit`), "new")
 	expect(t, a.ok("POST", "/audit/prune", `{"days":-5}`).raw, `{"deleted":0}`)
+}
+
+// TestAGrantApprovesOnlyWhileItsWholeChainIsInForce: the grant it inherits from, and the
+// standing grant that seeded that one, are checked as the API's own check of the call does
+// (flows/store.py chain_in_force, #5685).
+func TestAGrantApprovesOnlyWhileItsWholeChainIsInForce(t *testing.T) {
+	for broken, granted := range map[string]bool{"none": true, "parent revoked": false,
+		"standing revoked": false, "standing expired": false} {
+		t.Run(broken, func(t *testing.T) {
+			a := gateAPI(t)
+			s := a.gateSession("running")
+			id := rid(s, "run-1", "toolu_1")
+			a.sql(`INSERT INTO workflow_definitions (id, name, version, created_by) VALUES ('def-1', 'gate', 1, '{}')
+				ON CONFLICT DO NOTHING`)
+			a.sql(`INSERT INTO flow_triggers (id, name, definition_id, kind, event, created_by)
+				VALUES ('trig-1', 'gate', 'def-1', 'event', '{}', '{}')`)
+			a.sql(`INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,
+				revoked_at, expires_at, approval_id) VALUES ('standing', 'trig-1', 'approved', '{}', '{}',
+				CASE WHEN $1 THEN now() END,
+				now() + CASE WHEN $2 THEN interval '-1 second' ELSE interval '1 hour' END, 'a1')`,
+				broken == "standing revoked", broken == "standing expired")
+			a.sql(`INSERT INTO flow_grants (id, run_id, status, spec, requested_by, revoked_at,
+				expires_at, standing_grant_id, standing_approval_id) VALUES ('parent', 'run-parent',
+				'approved', '{}', '{}', CASE WHEN $1 THEN now() END, now() + interval '1 hour',
+				'standing', 'a1')`, broken == "parent revoked")
+			a.grantRow("g1")
+			a.sql(`UPDATE flow_grants SET parent_grant_id = 'parent' WHERE id = 'g1'`)
+			a.use("g1", id, s)
+			expect(t, a.ok("POST", "/gate/grant", js(grantBody(s, id, "g1", hash64))).raw,
+				fmt.Sprintf(`{"granted":%t}`, granted))
+			want := 0
+			if granted {
+				want = 1
+			}
+			expect(t, a.count(`SELECT count(*) FROM ai_input_responses`), want)
+		})
+	}
 }

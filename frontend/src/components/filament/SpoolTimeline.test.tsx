@@ -137,6 +137,26 @@ describe('the spool timeline', () => {
     expect(items()[2]).toHaveTextContent('Weighed, 700 g, scale, reading 900 g, spool 200 g, label corrected')
   })
 
+  it('says why a spool was archived and links the two ends of a respooled one (#7684)', () => {
+    renderPage(
+      <SpoolTimeline
+        rows={[
+          row({ at: '2026-11-12T10:00:00Z', kind: 'archived', data: { reason: 'respooled', started_g: 1000, continued_as: 's-new' } }),
+          row({ at: '2026-11-11T10:00:00Z', kind: 'archived', data: { reason: 'finished', started_g: 1000 } }),
+          row({ at: '2026-11-01T10:00:00Z', kind: 'created', source: 'person', grams_after: 480, data: { continued_from: 's-old' } }),
+        ]}
+        catalogs={catalogs}
+        types={types}
+      />,
+    )
+    expect(items()[0]).toHaveTextContent('Archived, respooled, continues as a new spool')
+    expect(within(items()[0]!).getByRole('link', { name: 'a new spool' })).toHaveAttribute('href', '/filament/spools/s-new')
+    expect(items()[1]).toHaveTextContent('Archived, finished')
+    expect(items()[1]).not.toHaveTextContent('continues')
+    expect(items()[2]).toHaveTextContent('Added, with 480 g, continues an earlier spool')
+    expect(within(items()[2]!).getByRole('link', { name: 'an earlier spool' })).toHaveAttribute('href', '/filament/spools/s-old')
+  })
+
   it("says how a reading differs from the last value, in words", () => {
     renderPage(<SpoolTimeline rows={[row({ kind: 'weighed', source: 'scale', grams_after: 820, delta_g: -20 })]} catalogs={catalogs} types={types} />)
     expect(items()[0]).toHaveTextContent('Weighed, 820 g, scale, 20 g less than the last value')

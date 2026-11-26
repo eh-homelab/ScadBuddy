@@ -245,7 +245,7 @@ describe('PrintItem', () => {
   it('prints each output of a kit on its own', async () => {
     const kit = [OUTPUT_REAGAN, 'b'.repeat(32)]
     const item = state.items.find((i) => i.id === ITEM_APPROVED)!
-    Object.assign(item, { output_id: OUTPUT_REAGAN, kit_outputs: kit })
+    Object.assign(item, { output_id: OUTPUT_REAGAN, kit_outputs: kit, kit_count: 2 })
     const printed = vi.spyOn(api, 'printItem')
     const { user } = render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
     const parts = await screen.findByRole('list', { name: 'Outputs to print' })
@@ -255,6 +255,18 @@ describe('PrintItem', () => {
     await user.click(within(parts).getByRole('button', { name: 'Print output 2 of 2' }))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
     expect(printed).not.toHaveBeenCalled()
+  })
+
+  // Review of #7790: a kit known only by its render job (another path set the output) is a
+  // kit here too, as the backend refuses its own print; the page says to save the others.
+  it('names the outputs a kit has not saved', async () => {
+    const item = state.items.find((i) => i.id === ITEM_APPROVED)!
+    Object.assign(item, { output_id: OUTPUT_REAGAN, kit_outputs: [OUTPUT_REAGAN], kit_count: 3 })
+    render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    const parts = await screen.findByRole('list', { name: 'Outputs to print' })
+    expect(screen.queryByTestId('print-item')).toBeNull()
+    expect(within(parts).getByRole('button', { name: 'Print output 1 of 3' })).toBeInTheDocument()
+    expect(screen.getByRole('note')).toHaveTextContent('The order holds 1 of them. Save the others')
   })
 
   it('is not offered before the order is accepted', async () => {

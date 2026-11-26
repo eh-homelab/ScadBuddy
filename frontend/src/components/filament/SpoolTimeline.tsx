@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import type { SpoolEvent, TimelineRow } from '../../api/filament'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { actorText, changeEntries, eventNames, fromTypeText, KIND_TEXT, valueText, type EventNames } from './eventText'
 import { EntityLink } from './EntityLink'
@@ -79,6 +80,17 @@ function detail(event: SpoolEvent, names: EventNames): string {
   return parts.filter(Boolean).join(', ')
 }
 
+/**
+ * #7684 — a respooled spool's two ends: the `archived` event names the spool its filament went
+ * on as, the new spool's `created` event the spool it came from. The ids are spool ids.
+ */
+function continuation(event: SpoolEvent): { text: string; label: string; id: string } | null {
+  const data = event.data as { continued_as?: string | null; continued_from?: string | null }
+  if (event.kind === 'archived' && data.continued_as) return { text: 'continues as', label: 'a new spool', id: data.continued_as }
+  if (event.kind === 'created' && data.continued_from) return { text: 'continues', label: 'an earlier spool', id: data.continued_from }
+  return null
+}
+
 /** An id's name, as a link to its page when `hrefs` has one (#6869); any other value as text. */
 function Ref({ field, value, names, hrefs }: { field: string; value: unknown; names: EventNames; hrefs: ReadonlyMap<string, string> }) {
   const text = valueText(field, value, names)
@@ -147,6 +159,7 @@ export function SpoolTimeline({ rows, catalogs, types, hrefs = NO_HREFS }: Props
             const lines = event.kind === 'edited' ? changeEntries((event.data as { changes?: unknown }).changes) : []
             const move = event.kind === 'moved' ? moveText(event, names, hrefs) : null
             const text = detail(event, names)
+            const linked = continuation(event)
             return (
               <li key={event.id} className="relative grid grid-cols-1 gap-x-4 gap-y-0.5 py-2 pl-4 sm:grid-cols-[11rem_minmax(0,1fr)_auto]">
                 <span aria-hidden="true" className={`absolute top-[0.85rem] -left-[4.5px] size-2 rounded-full ring-2 ring-background ${dot(event.kind)}`} />
@@ -158,6 +171,11 @@ export function SpoolTimeline({ rows, catalogs, types, hrefs = NO_HREFS }: Props
                     <span className="font-medium">{KIND_TEXT[event.kind] ?? event.kind.replace(/_/g, ' ')}</span>
                     {move && <span className="text-muted-foreground">, {move}</span>}
                     {text && <span className="text-muted-foreground tabular-nums">{`, ${text}`}</span>}
+                    {linked && (
+                      <span className="text-muted-foreground">
+                        , {linked.text} <EntityLink to={filamentLinks.spool(linked.id)}>{linked.label}</EntityLink>
+                      </span>
+                    )}
                   </p>
                   {lines.length > 0 && (
                     <ul aria-label="Changes" className="flex flex-col text-[12px]">

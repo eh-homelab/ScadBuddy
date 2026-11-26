@@ -69,7 +69,7 @@ from typing import Final, Protocol
 from scadbuddy.core.events import (
     PG_CHANNEL,
     AgentOperationEvent,
-    Event,
+    AnyEvent,
     SessionBusEvent,
     encode_event,
 )
@@ -259,7 +259,7 @@ class ChangeHub:
         for stream in list(self._streams):
             stream.offer(END)
 
-    def _heard_event(self, payload: str, event: Event | None) -> None:
+    def _heard_event(self, payload: str, event: AnyEvent | None) -> None:
         logged = None if event is None or isinstance(event, NOTIFY_ONLY) else event.id
         self.publish(Change(PG_CHANNEL, payload, logged))
 
@@ -282,7 +282,7 @@ class _Listener(Protocol):
 
 
 class _Bus(Protocol):
-    taps: list[Callable[[str, Event | None], None]]
+    taps: list[Callable[[str, AnyEvent | None], None]]
 
 
 class Log(Protocol):
@@ -329,8 +329,9 @@ async def _replay(
         try:
             page = await log.replay(after, limit=MAX_REPLAY_LIMIT)
         except ValueError:
-            # A kind this build does not know (a newer pod's, during a roll): replaying past it
-            # would fail the same way at every reconnect, so the agent re-reads instead.
+            # Only a row whose envelope is broken raises (a routable unknown kind replays as an
+            # `OpaqueEvent`): replaying past it would fail the same way at every reconnect, so
+            # the agent re-reads instead.
             logger.warning("the event log holds an event this build cannot decode; resyncing")
             return [], _Place(await log.newest() or START, set()), True
         if page.gap or len(place.replayed) + len(page.events) > REPLAY_MAX:

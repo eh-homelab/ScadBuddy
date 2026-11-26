@@ -764,8 +764,10 @@ of that id and `k` (`later_as`). The item's own output is reused while it matche
 job can be read, and its later outputs go under ids of it; once the prune took the job,
 the reference renders again and the item takes the new job's outputs. `kit_output_ids`
 finds every output of the item from its `output_id`: each later id while it holds an output
-that records the same `job_id`. The order read carries them as `ItemDetail.kit_outputs`
-(empty for an item of one output).
+that records the same `job_id`. The order read carries them as `ItemDetail.kit_outputs`,
+and how many outputs the render made as `ItemDetail.kit_count` (both empty or 0 for an
+item of one output). `kit_count` is the count the item's print refuses by (below), so the
+page and the print agree.
 
 The customer's firm price covers the whole kit, and the price row's plates (renumbered,
 each filament by kit slot) go to the item's quote, so job cost reads every plate and every
@@ -777,8 +779,13 @@ and the shop records the item's attempt by hand under Fulfilment. The item's own
 an attempt records one print run and counts the item's quantity made, so an attempt of one
 output would count the whole kit made. It knows a kit by its saved outputs, or, for an
 output another path set on the item (a person's pick, an add with an `output_id`), by its
-render job while the job can be read (`kit_count`); such an output whose job the prune took
-is not known as part of a kit (#7780). The items card's bulk Print leaves a kit out. A test
+render job while the job can be read (`kit_count`, extension `count`); such an output whose
+job the prune took is not known as part of a kit (#7780). When the order holds fewer
+outputs than the job made, the refusal and the order page say to save the others from the
+model's recent renders first. A store that fails while the order read looks for a kit
+leaves the item without one, logged; the order still reads. The order page names each
+output by its name and shows its colours when the output store answers. The items card's
+bulk Print leaves a kit out. A test
 print of a kit's revision prints output 0 alone, as before: it counts for nothing. An
 attempt per output, and a back-office slice quote of every output, are #7780: until then a
 back-office slice quote of a kit slices output 0 alone and is refused for a slot that only
@@ -821,7 +828,8 @@ A listing pins a commit (fact 11). Here that means:
   pipeline template, it takes the output's `inputs` less `params` and `v` as `inputs`,
   and `inputs.v` as `inputs_v`, and runs the smart defaults over `inputs.params`. With
   `{slug, values}` it sets no inputs; the answer then says that the design needs setting
-  up in the editor, with the editor link. `storefront_listing_publish` is unchanged: its
+  up in the editor, with the editor link. It says the same for an output whose own inputs
+  are empty. `storefront_listing_publish` is unchanged: its
   refusals carry the new codes.
 - `storefrontDraft.ts` (the agent's copy of `defaultsFor`) and `listingDraft.ts` both
   gain the split of a source's inputs into `inputs`, `inputs_v` and the values. The rule

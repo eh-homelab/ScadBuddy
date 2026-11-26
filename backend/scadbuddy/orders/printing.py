@@ -266,9 +266,11 @@ async def print_check(
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
     `failed` (one already printing among them), ``print_in_flight`` while a test print of
     it is open, ``item_kit`` for an item whose render made several outputs (#5701 PR 5,
-    naming the saved ones in ``outputs``, or, with ``jobs``, one whose render job still
-    lists several: one attempt would print one output and count the whole kit made, so
-    the order page prints each output and the shop records the attempt),
+    naming the saved ones in ``outputs`` and how many it made in ``count``, as the order's
+    read `ItemDetail.kit_count` does; with ``jobs``, an item whose render job still lists
+    several though fewer are saved, and the detail then says to save the others: one
+    attempt would print one output and count the whole kit made, so the order page prints
+    each output and the shop records the attempt),
     ``item_made`` when its attempts made its quantity already, and
     ``requote_needed`` when the accepted quote no longer stands
     for what would print: no accepted quote, the item's output gone or no longer its
@@ -310,12 +312,19 @@ async def print_check(
         count = await asyncio.to_thread(kit_count, outputs, jobs, output_id, len(kit))
         if count > 1:
             # One attempt prints one output and would count the whole kit made.
+            unsaved = (
+                f"; the order holds {len(kit)} of them: save the others from the"
+                " model's recent renders first"
+                if len(kit) < count
+                else ""
+            )
             raise _refused(
                 "item_kit",
-                f"item {item.id} is a kit of {count} outputs: print each output from"
-                " the order page, then record the attempt",
+                f"item {item.id} is a kit of {count} outputs{unsaved}: print each output"
+                " from the order page, then record the attempt",
                 items=[item.id],
                 outputs=kit,
+                count=count,
             )
     attempts = await asyncio.to_thread(store.fulfilments, item.id)
     copies = item.quantity - made(attempts)

@@ -266,6 +266,7 @@ CRUD_AREAS: dict[CrudCaller, list[str]] = {
     "profile-fetch": ["runs"],
     "camera": ["printers", "changes"],
     "camera-relay": ["printers", "changes"],
+    "fleet": ["changes", "fleet"],
 }
 
 

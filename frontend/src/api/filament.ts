@@ -76,6 +76,10 @@ export type GramsPoint = Schemas['GramsPoint']
 export type SpoolMetrics = Schemas['SpoolMetrics']
 export type AmsError = Schemas['AmsError']
 export type InsertWeightCheck = Schemas['InsertWeightCheck']
+export type SpoolArchive = Schemas['SpoolArchive']
+export type ArchiveReason = NonNullable<SpoolArchive['reason']>
+export type Closing = Schemas['Closing']
+export type ClosingPreview = Schemas['ClosingPreview']
 export type InsertWeightOffer = Schemas['InsertWeightOffer']
 export type InsertWeightAccepted = Schemas['InsertWeightAccepted']
 export type Forecast = Schemas['Forecast']
@@ -187,9 +191,23 @@ export const copySpool = (id: string) => request<SpoolDraft>(`${BASE}/spools/${s
 /** Only the fields sent change; `null` clears an override. */
 export const patchSpool = (id: string, body: SpoolPatch) => request<Spool>(`${BASE}/spools/${seg(id)}`, json('PATCH', body))
 
-/** `archived: false` restores it. */
-export const archiveSpool = (id: string, archived = true) =>
-  request<Spool>(`${BASE}/spools/${seg(id)}/archive`, json('POST', { archived }))
+/**
+ * `archived: false` restores it. An archive (#7684) names its `reason` and may send the final
+ * weighing (`final_reading_g` with the spool, or `final_grams` of filament), booked just before
+ * the `archived` event, whose `data` keeps the closing.
+ */
+export const archiveSpool = (id: string, body: SpoolArchive = { archived: true }) =>
+  request<Spool>(`${BASE}/spools/${seg(id)}/archive`, json('POST', body))
+
+/** #7684 — what archiving with these inputs would record, and what disagrees with the reason. Reads only. */
+export const closingPreview = (id: string, reason: ArchiveReason | null, finalReadingG: number | null, finalGrams: number | null) => {
+  const query = new URLSearchParams()
+  if (reason) query.set('reason', reason)
+  if (finalReadingG != null) query.set('final_reading_g', String(finalReadingG))
+  if (finalGrams != null) query.set('final_grams', String(finalGrams))
+  const text = query.toString()
+  return request<ClosingPreview>(`${BASE}/spools/${seg(id)}/closing${text ? `?${text}` : ''}`)
+}
 
 /**
  * #7151 — the same patch on several spools, all or none: a spool that refuses it refuses

@@ -67,7 +67,7 @@ export interface FlowRunReads {
   starter(runId: string, execution: string): Promise<RunStarter | undefined>
   /** What the run's decisions say of the call `requestId` approved with `inputHash`. */
   decisions(requestId: string, inputHash: string): Promise<DecisionChecks>
-  /** Whether run grant `grantId` is approved, not revoked and not expired. */
+  /** Whether run grant `grantId` is in force with its whole chain: every grant it inherits from and the standing grant it was seeded from (#5685). */
   grantInForce(grantId: string): Promise<boolean>
   /** Run `runId` and its grant while it is requested; undefined for no such run (or no flows here). */
   queue(runId: string): Promise<(QueueRun & { requested_grant: { id: string; created_at: Date } | null }) | undefined>

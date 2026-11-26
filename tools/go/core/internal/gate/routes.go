@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/flowgrants"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/jsonv"
 )
 
@@ -336,6 +337,11 @@ func (g *Gate) grant(r *http.Request, _ crud.Params) (any, error) {
 			return nil
 		}
 		if err != nil {
+			return err
+		}
+		// Inherited, or seeded from a standing grant: only while its whole chain is in
+		// force, as the API's check of the call requires (#5685).
+		if held, err := flowgrants.ChainInForce(ctx, tx, grant); err != nil || !held {
 			return err
 		}
 		tag, err := tx.Exec(ctx, `INSERT INTO ai_input_responses (request_id, session_id, kind,

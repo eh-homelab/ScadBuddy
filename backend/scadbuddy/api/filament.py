@@ -183,6 +183,8 @@ from scadbuddy.filament.rfid_slots import reconcile_slots_now
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
+    ContinuedFromNotArchivedError,
+    ContinuedFromTakenError,
     NoBelowLabelError,
     NoEmptyWeightError,
     OverrideKindError,
@@ -239,6 +241,7 @@ from scadbuddy.workflows.commands import (
 #: (`read_tag` sets `SKIP_NUDGE` otherwise); a checked write binds, so it nudges.
 NOT_NUDGED = frozenset(
     {
+        "closing_preview",
         "sync_ams_weights",
         "run_filament_sync",
         "reset_filament_sync_links",
@@ -1287,8 +1290,13 @@ BULK_ROUTE = "POST /filament/spools/bulk"
         "another body is a 422. 422 for a bad field, a row it names that does not exist, an "
         "effective minimum temperature above its maximum, two preset or K rows of one key, "
         "a place that does not exist, is archived, is an AMS unit's or is a printer's tray "
-        "(a tray takes one spool, through its own link), or a `copy_of` that names no "
-        "spool. Nothing is written on a refusal."
+        "(a tray takes one spool, through its own link), or a `copy_of` or `continued_from` "
+        "that names no spool. `continued_from` (#7684) is the archived spool whose filament "
+        "the new one continues (respooled): the new spool's `created` event keeps it, the "
+        "source's newest `archived` event gets `continued_as`, `quantity` must be 1, and a "
+        "source not archived is a 422 with `code` `continued_from_not_archived`, a source "
+        "another spool already continues (its `continued_as` names a spool that exists) one "
+        "with `continued_from_taken` (#7909). Nothing is written on a refusal."
     ),
 )
 async def bulk_create_spools(
@@ -1328,6 +1336,14 @@ async def bulk_create_spools(
 
     try:
         done = await asyncio.to_thread(write)
+    except ContinuedFromNotArchivedError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="continued_from_not_archived"
+        ) from None
+    except ContinuedFromTakenError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="continued_from_taken"
+        ) from None
     except (
         *_SPOOL_REFUSED,
         SpoolTrayPlaceError,
@@ -1563,21 +1579,82 @@ async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get(
+    "/spools/{spool_id}/closing",
+    response_model=m.ClosingPreview,
+    summary="Preview a spool's closing numbers before it is archived",
+    description=(
+        "Reads only (#7684). What `POST …/archive` would record as the `archived` event's "
+        "`closing` with these inputs: `reason`, and the final weighing as `final_reading_g` "
+        "(the scale's reading with the spool, from which the spool's effective empty weight "
+        "is taken; `final_filament_g` is `null` with no empty weight known or a reading "
+        "under it, which the archive refuses) and `final_grams` (the filament itself; with "
+        "both, the net). With neither the closing is on the ledger's grams left and has no "
+        "scale side. `notices` says what disagrees with the reason: `filament_left` for a "
+        "finished spool with more than the setting `filament_weighing_finished_left_g` on "
+        "it, `not_finished_but_empty` for any other reason at or under it; and what the "
+        "archive would refuse: `no_empty_weight` for a reading with no empty weight known, "
+        "`reading_below_empty` for a reading under it, `reading_below_grams` for a reading "
+        "under the `final_grams` sent with it (#7909). Nothing is "
+        "refused by a notice. 404 for no such spool, 422 for a reason that is not "
+        "`finished`, `respooled`, `damaged` or `other`."
+    ),
+)
+async def closing_preview(
+    filament: FilamentDep,
+    spool_id: UUID,
+    reason: m.ArchiveReason | None = None,
+    final_reading_g: Annotated[float | None, Query(ge=0, le=1_000_000)] = None,
+    final_grams: Annotated[float | None, Query(ge=0, le=1_000_000)] = None,
+) -> m.ClosingPreview:
+    preview = await asyncio.to_thread(
+        filament.spools.closing_preview, spool_id, reason, final_reading_g, final_grams
+    )
+    if preview is None:
+        raise _no_spool(spool_id)
+    return preview
+
+
 @router.post(
     "/spools/{spool_id}/archive",
     response_model=m.Spool,
     summary="Archive or restore a spool",
     description=(
         "`archived: true` takes the spool off the lists, `false` puts it back; each writes "
-        "an `archived` or `restored` ledger event. 404 for no such spool."
+        "an `archived` or `restored` ledger event. An archive takes a `reason` (`finished`, "
+        "`respooled`, `damaged` or `other`; optional here, the page requires one) and the "
+        "final weighing (#7684): `final_reading_g` (the scale's reading with the spool, from "
+        "which the spool's effective empty weight is taken, as `POST …/events` takes it) or "
+        "`final_grams` (the filament), or both (the net). The weighing is booked as a "
+        "`weighed` event just before the `archived` one, whose `data` keeps the closing: "
+        "`reason`, `started_g` and `started_from`, `ledger_consumed_g`, `final_filament_g`, "
+        "`scale_consumed_g` and `drift_g` (`GET …/closing` previews them). A reading on a "
+        "spool with no empty weight known is a 422 with `code` `no_empty_weight`, one under "
+        "it `reading_below_empty`; nothing is archived then. A restore with a reason or a "
+        "reading is a 422. A spool already archived takes nothing. 404 for no such spool."
     ),
 )
 async def archive_spool(
     filament: FilamentDep, caller: CallerDep, spool_id: UUID, body: m.SpoolArchive
 ) -> m.Spool:
-    changed = await asyncio.to_thread(
-        filament.spools.archive, spool_id, body.archived, actor=actor(caller)
-    )
+    try:
+        changed = await asyncio.to_thread(
+            filament.spools.archive,
+            spool_id,
+            body.archived,
+            actor=actor(caller),
+            reason=body.reason,
+            final_reading_g=body.final_reading_g,
+            final_grams=body.final_grams,
+        )
+    except NoEmptyWeightError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="no_empty_weight"
+        ) from None
+    except ReadingBelowEmptyError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="reading_below_empty"
+        ) from None
     if changed is None:
         raise _no_spool(spool_id)
     return changed
@@ -2036,8 +2113,12 @@ async def get_tag(filament: FilamentDep, tag_id: UUID) -> m.TagDetail:
         "A phone's reading of a tag (`source` is `phone`): its `uid` and NDEF `records`. "
         "The tag is found or made by its UID and marked seen. With `bind_spool_id` the tag "
         "is also bound to that spool, as `POST /spools/{id}/tags` does. `next` says what the "
-        "page does: `open_spool` when a spool holds the tag, `bind_or_create` for a tag no "
-        "spool holds, `none` for a reading with no UID. 404 for an unknown `bind_spool_id`, "
+        "page does: `open_spool` when a spool holds the tag; `open_code`, with `resolved` in "
+        "the `/codes/{code}` shape, when no spool holds it and its records carry a typed code "
+        "(a `url` record whose path ends `/x/<code>`, or a `text` record such as `L-12`) or a "
+        "`scadbuddy:spool:<id>` text that names a row (a tag a spool holds opens the spool "
+        "first); `bind_or_create` for a tag no spool holds, `none` for a reading with no UID. "
+        "404 for an unknown `bind_spool_id`, "
         "422 `no_uid` for a bind with no UID, 409 when the two keys name two tags (a phone "
         "sends only a UID, so this route never answers it)."
     ),
@@ -2263,7 +2344,7 @@ def _no_job(job_id: UUID) -> ApiError:
     status_code=status.HTTP_201_CREATED,
     summary="Ask the phone page to read or write a tag",
     description=(
-        "Queues a tag read or write for the /filament/scan page (#7273 G4). `kind` is `read` "
+        "Queues a tag read or write for the /scan page (#7273 G4). `kind` is `read` "
         "(no `records`) or `write` (the NDEF `records` to write, 888 bytes at most). The job "
         "waits `ttl_s` seconds (default and most 600) for a person to arm it, then it is "
         "`expired`. Arming gives the run 60 seconds (`expires_at` moves). A write whose backup "

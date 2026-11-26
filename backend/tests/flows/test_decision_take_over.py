@@ -674,8 +674,10 @@ async def test_a_replaced_decision_that_lands_first_and_ends_the_run(
         assert (await operate(outward, decide, asking(run, call_id, two)))["outcome"] == "denied"
         stands = row_of(run, call_id, two)
     else:
-        with pytest.raises(RPCError):
+        # The run closed under the send: the call moved on (#7822), not a raw RPC error.
+        with pytest.raises(ApiError) as err:
             await operate(outward, decide, asking(run, call_id, two))
+        assert (err.value.status, err.value.type) == (409, STALE_ENTRY)
         stands = first
     assert await on_record(outward, run, call_id) == as_record(stands)
     assert api.sent == []

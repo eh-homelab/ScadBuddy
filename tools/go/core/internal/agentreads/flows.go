@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/flowgrants"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 )
 
@@ -27,14 +28,6 @@ const (
 	waitingRunsMax     = 200
 	stillWaitingBodyMx = 8 * 1024 * 1024 // api/limits.py MAX_TEXT_BODY_BYTES
 )
-
-// grantInForce: a run grant's approval holds only while the grant is in force.
-const grantInForce = "EXISTS (SELECT 1 FROM flow_grants g WHERE 'grant:' || g.id = d.responder" +
-	" AND g.status = 'approved' AND g.revoked_at IS NULL AND now() < g.expires_at)"
-
-// approved is one approval of the call with this hash.
-const approved = "FROM workflow_run_decisions d WHERE d.request_id = $1" +
-	" AND d.kind = 'approval' AND d.outcome = 'approved' AND d.input_hash = $2"
 
 // parentApprovalLive is a parked approval at hop parent whose hop has not timed out by
 // Postgres's clock; a malformed hop_until is that call skipped.
@@ -167,21 +160,46 @@ func (a *Reads) decisionChecks(r *http.Request, _ crud.Params) (any, error) {
 		ByPerson           bool `json:"by_person"`
 		Lapsed             bool `json:"lapsed"`
 	}
-	err = a.Pool.QueryRow(r.Context(), `SELECT EXISTS (SELECT 1 `+approved+`
-		AND (d.responder NOT LIKE 'grant:%' OR `+grantInForce+`)) AS approved,
-		EXISTS (SELECT 1 `+approved+`
-		AND (d.responder LIKE 'grant:%' OR d.response ? 'narrowed_by')
-		AND (d.responder NOT LIKE 'grant:%' OR `+grantInForce+`)) AS approved_unresolved,
-		EXISTS (SELECT 1 `+approved+` AND d.responder = 'browser') AS by_person,
-		EXISTS (SELECT 1 FROM workflow_run_decisions d
-		JOIN flow_grants g ON 'grant:' || g.id = d.responder
-		WHERE d.request_id = $1 AND d.kind = 'approval'
-		AND d.outcome = 'approved' AND d.input_hash = $2
-		AND (g.status <> 'approved' OR g.revoked_at IS NOT NULL OR g.expires_at IS NULL
-		OR now() >= g.expires_at)) AS lapsed`, *request, *hash).
-		Scan(&out.Approved, &out.ApprovedUnresolved, &out.ByPerson, &out.Lapsed)
+	rows, err := a.Pool.Query(r.Context(), `SELECT d.responder, d.response ? 'narrowed_by', g.id
+		FROM workflow_run_decisions d LEFT JOIN flow_grants g ON 'grant:' || g.id = d.responder
+		WHERE d.request_id = $1 AND d.kind = 'approval' AND d.outcome = 'approved'
+		AND d.input_hash = $2`, *request, *hash)
 	if err != nil {
 		return nil, err
+	}
+	type decision struct {
+		responder string
+		narrowed  bool
+		grant     *string
+	}
+	decisions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (decision, error) {
+		var d decision
+		err := row.Scan(&d.responder, &d.narrowed, &d.grant)
+		return d, err
+	})
+	if err != nil {
+		return nil, err
+	}
+	// A run grant's approval holds only while the grant's whole chain is in force
+	// (flowgrants.ChainInForce, #5685); each grant's chain is read once (#7890).
+	chains := map[string]bool{}
+	for _, d := range decisions {
+		byGrant := strings.HasPrefix(d.responder, "grant:")
+		if d.grant != nil {
+			if _, read := chains[*d.grant]; !read {
+				held, err := flowgrants.ChainInForce(r.Context(), a.Pool, *d.grant)
+				if err != nil {
+					return nil, err
+				}
+				chains[*d.grant] = held
+			}
+		}
+		holds := !byGrant || (d.grant != nil && chains[*d.grant])
+		out.Approved = out.Approved || holds
+		out.ApprovedUnresolved = out.ApprovedUnresolved || (holds && (byGrant || d.narrowed))
+		out.ByPerson = out.ByPerson || d.responder == "browser"
+		// A grant that is gone is neither in force nor lapsed.
+		out.Lapsed = out.Lapsed || (byGrant && d.grant != nil && !holds)
 	}
 	return out, nil
 }
@@ -191,15 +209,13 @@ func (a *Reads) grantInForce(r *http.Request, _ crud.Params) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var one int
-	err = a.Pool.QueryRow(r.Context(), `SELECT 1 FROM flow_grants WHERE id = $1 AND status = 'approved'
-		AND revoked_at IS NULL AND now() < expires_at`, *grant).Scan(&one)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	held, err := flowgrants.ChainInForce(r.Context(), a.Pool, *grant)
+	if err != nil {
 		return nil, err
 	}
 	return struct {
 		InForce bool `json:"in_force"`
-	}{err == nil}, nil
+	}{held}, nil
 }
 
 type hopOut struct {

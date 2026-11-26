@@ -68,6 +68,21 @@ The owner wants to read and write spool tags now, from an Android phone, with no
   - the Bambuddy client's tag-scan and tag-write calls;
   - `filament_ntag_writes`, dropped by a new migration.
 
+### As built, 2026-11-25: the hand-held Scan mode
+
+The owner asked for "a hand-held scan mode that is always scanning" that loads "anything, even
+a prefixed tag" (2026-11-25). Plan `docs/superpowers/plans/2026-11-25-scan-mode.md`:
+
+- The page moved to the top level, `/scan`, with a nav entry "Scan"; `/filament/scan` redirects.
+- `POST /tags/reads` reads a typed code (#6955) or a `scadbuddy:spool:<id>` text out of the
+  records when no spool holds the tag (`filament/tag_codes.py`): a `url` record whose path ends
+  `/x/<code>`, or a `text` record that is a code. It answers `next` `open_code` and `resolved`
+  in the `GET /codes/{code}` shape. A bound tag still opens its spool; a code that names no row
+  is a new tag. The agent's read jobs answer the same result.
+- The page shows a code's card (`CodeCard`, "Place L-4" / "Spool S-142", Open) and the switch
+  "Open what I scan at once" (localStorage `scadbuddy.scan.openAtOnce`): on, each read that opens
+  something navigates there, and the page starts the scan by itself when it opens.
+
 ## Left to the builder
 
 - How the AMS capture calls `read` without slowing its once-a-second path. It may skip a tag whose holder has not changed.

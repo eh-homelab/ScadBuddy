@@ -444,6 +444,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " expected, either way, is a notice on the spool and in the list. 0 notices every"
             " weighing.",
         ),
+        "filament_weighing_finished_left_g": SettingDoc(
+            "Finished spool has at most, grams",
+            "Archiving a spool as finished with more filament than this on it says so first;"
+            " archiving one for any other reason with this much or less asks whether it is"
+            " finished. Nothing is refused.",
+        ),
         "filament_default_cost_per_kg": SettingDoc(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"
@@ -543,11 +549,20 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
         ),
         "event_log_retention_seconds": SettingDoc(
             "Keep live-update events for",
-            "For replay after a short disconnect. 0 is no limit.",
+            "How long to keep events for replay after a disconnect. 0 is no limit, the"
+            " default: no event is lost.",
         ),
         "event_log_retention_rows": SettingDoc(
             "Keep at most this many live-update events",
-            "Older events are pruned past this count. 0 is no limit.",
+            "Older events are pruned past this count. 0 is no limit, the default. The count"
+            " covers only events that no other rule keeps or ages out.",
+        ),
+        "event_log_retention_kinds": SettingDoc(
+            "Keep events of a kind for",
+            "Seconds to keep each kind of event, by kind prefix, such as job: 3600. A"
+            " prefix covers its sub-kinds, and the longest matching prefix wins. 0 keeps"
+            " that kind forever. An event's own retention beats this, and the first two"
+            " settings apply to the kinds left over.",
         ),
         "realtime_sockets": SettingDoc(
             "Live-update connections",

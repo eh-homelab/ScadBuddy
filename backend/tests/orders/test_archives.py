@@ -1499,3 +1499,26 @@ async def test_the_read_answers_a_medium_refused_as_too_large(shop: Shop, step: 
     )
     [offer] = read.archives
     assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, False)
+
+
+def test_a_naive_bambuddy_completion_time_reads_as_utc() -> None:
+    """#7826: Bambuddy writes naive UTC times. Compared with the aware `now` of an
+    attempt's media step, one raised TypeError, so no medium of that attempt was copied."""
+    from scadbuddy.bambuddy.models import ArchiveDetail
+    from scadbuddy.orders.bambuddy import archive_facts
+
+    completed = datetime.now(UTC) - timedelta(days=2)
+    archive = ArchiveDetail.model_validate(
+        {
+            "id": 7,
+            "status": "completed",
+            "started_at": "2026-11-20T10:00:00",
+            "completed_at": completed.replace(tzinfo=None).isoformat(),
+        }
+    )
+    facts = archive_facts(archive)
+
+    assert facts.started_at == datetime(2026, 11, 20, 10, tzinfo=UTC)
+    assert facts.completed_at == completed
+    # Past FRESH, offering neither medium: nothing is missing.
+    assert archives_module._missing([facts], set(), datetime.now(UTC)) is False

@@ -442,10 +442,13 @@ func TestWorkspaceHoldsAreHeldListedAndReleased(t *testing.T) {
 func TestTheEventLogHeadAndGap(t *testing.T) {
 	a := agentAPI(t)
 	a.sql(`INSERT INTO events (event_id, kind, at, payload) VALUES ('e1', 'x', now(), '{"kind":"x"}'),
-		('e2', 'y', now(), '{"kind":"y"}')`)
+		('e2', 'y', now(), '{"kind":"y"}'),
+		('e3', 'fleet.message', now(), '{"kind":"fleet.message","recipients":["s1"]}')`)
 	head := a.ok("GET", "/events/head", "")
-	expect(t, head.body["seq"], "2")
+	expect(t, head.body["seq"], "3")
+	// The fleet's kinds name its session ids: they are for the fleet caller alone (#7818).
 	gap := a.ok("GET", "/events?after=0", "").body["events"].([]any)
+	expect(t, len(gap), 2)
 	expect(t, gap[0].(map[string]any)["event_id"], "e2")
 	expect(t, gap[1].(map[string]any)["payload"], map[string]any{"kind": "x"})
 	expect(t, a.do("GET", base+"/events", "").status, 422)
@@ -487,4 +490,51 @@ func TestTheFlowReadsLeaveOutMalformedEntries(t *testing.T) {
 	expect(t, a.ok("GET", "/flow-grants/in-force?grant_id=g", "").raw, `{"in_force":false}`)
 	checks := a.ok("GET", "/flow-decisions?request_id=r&input_hash=h", "")
 	expect(t, checks.raw, `{"approved":false,"approved_unresolved":false,"by_person":false,"lapsed":false}`)
+}
+
+// TestAGrantHoldsOnlyWhileItsWholeChainIsInForce: both flow reads check the chain as the
+// API does (flows/store.py chain_in_force, #5685): the grants a run grant inherits from,
+// and the standing grant it was seeded from.
+func TestAGrantHoldsOnlyWhileItsWholeChainIsInForce(t *testing.T) {
+	a := agentAPI(t)
+	run := uuid()
+	a.sql(`INSERT INTO workflow_definitions (id, name, version, created_by) VALUES ('def-1', 'reads', 1, '{}')`)
+	a.sql(`INSERT INTO workflow_runs (id, definition_id, version, name, status, waiting_on, steps,
+		workflow_id, workflow_run_id, started_by, superseded_run_ids)
+		VALUES ($1, 'def-1', 1, 'n', 'waiting', '[]', '[]', 'flow-' || $1, 'e1', '{}', '{}')`, run)
+	grant := func(id string, revoked bool, parent, standing *string) {
+		a.sql(`INSERT INTO flow_grants (id, run_id, status, spec, requested_by, revoked_at,
+			expires_at, parent_grant_id, standing_grant_id, standing_approval_id)
+			VALUES ($1, 'r-' || $1, 'approved', '{}', '{}', CASE WHEN $2 THEN now() END,
+			now() + interval '1 hour', $3, $4, CASE WHEN $4::text IS NOT NULL THEN 'a1' END)`,
+			id, revoked, parent, standing)
+	}
+	standing := func(id string, revoked bool, expiresIn, approval string) {
+		a.sql(`INSERT INTO flow_triggers (id, name, definition_id, kind, event, created_by)
+			VALUES ('trig-' || $1, $1, 'def-1', 'event', '{}', '{}')`, id)
+		a.sql(`INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,
+			revoked_at, expires_at, approval_id) VALUES ($1, 'trig-' || $1, 'approved', '{}', '{}',
+			CASE WHEN $2 THEN now() END, now() + $3::interval, $4)`, id, revoked, expiresIn, approval)
+	}
+	ref := func(s string) *string { return &s }
+	grant("parent", false, nil, nil)
+	grant("child", false, ref("parent"), nil)
+	grant("parent-off", true, nil, nil)
+	grant("child-off", false, ref("parent-off"), nil)
+	standing("t-on", false, "1 hour", "a1")
+	standing("t-revoked", true, "1 hour", "a1")
+	standing("t-expired", false, "-1 second", "a1")
+	standing("t-reapproved", false, "1 hour", "a2")
+	for _, name := range []string{"t-on", "t-revoked", "t-expired", "t-reapproved"} {
+		grant("seeded-"+name, false, nil, ref(name))
+	}
+	for id, held := range map[string]bool{"child": true, "seeded-t-on": true, "child-off": false,
+		"seeded-t-revoked": false, "seeded-t-expired": false, "seeded-t-reapproved": false} {
+		a.sql(`INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id,
+			kind, outcome, response, responder, input_hash)
+			VALUES ('flow:' || $1, $2, 'e1', 'c1', 'approval', 'approved', '{}', 'grant:' || $1, 'h1')`, id, run)
+		expect(t, a.ok("GET", "/flow-grants/in-force?grant_id="+id, "").raw, fmt.Sprintf(`{"in_force":%t}`, held))
+		expect(t, a.ok("GET", "/flow-decisions?request_id=flow:"+id+"&input_hash=h1", "").raw,
+			fmt.Sprintf(`{"approved":%t,"approved_unresolved":%t,"by_person":false,"lapsed":%t}`, held, held, !held))
+	}
 }

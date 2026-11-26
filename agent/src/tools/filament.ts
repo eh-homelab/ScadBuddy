@@ -891,7 +891,10 @@ const tools: Tool[] = [
       'When adding, `quantity` (1 to 100) makes that many identical spools in one request, each with its own number, ' +
       "and `copy_of` (a spool's `id`) starts from that spool: its type, own overrides, note, own presets and K " +
       'values and its place unless that is a tray, never its number, tag, tray, weight, weight lock or `added_full`; `fields` ' +
-      'then change the copy. Either answers the list of spools made, and a resend of the same call makes none twice; ' +
+      'then change the copy. `continued_from` (#7684, with `copy_of` the same archived, respooled spool and `grams_left` its final filament) links the two: the new ' +
+      "spool's `created` event keeps `continued_from` and the source's `archived` event `continued_as`; 422 `continued_from_not_archived` otherwise, " +
+      '`continued_from_taken` for a source a spool already continues (#7909). ' +
+      'Either answers the list of spools made, and a resend of the same call makes none twice; ' +
       'a resend of a copy reads the source again, and when the source changed in between it makes a new set from it. ' +
       '422 when an effective minimum temperature is above its maximum or the spool would have neither type nor ' +
       'material. `properties` (#7026) are set on the spool, or on each spool made, after it is saved, and the answer carries them; if they ' +
@@ -903,6 +906,7 @@ const tools: Tool[] = [
       fields: z.record(z.string(), z.unknown()).default({}).describe('The spool fields to set'),
       quantity: z.number().int().min(1).max(100).optional().describe('When adding: how many identical spools to make'),
       copy_of: z.string().uuid().optional().describe("When adding: the `id` of a spool to copy"),
+      continued_from: z.string().uuid().optional().describe('When adding one spool: the `id` of the archived (respooled) spool whose filament it continues'),
       properties: propertySet.optional().describe("The spool's properties to set after the spool is saved; `null` removes a key"),
     }),
     risk: 'write',
@@ -920,10 +924,10 @@ const tools: Tool[] = [
         ? `Edit spool ${spool_id}`
         : `Add ${quantity && quantity > 1 ? `${quantity} spools` : 'a spool'}${copy_of ? ` copied from ${copy_of}` : ''}`) +
       propertyChanges(properties),
-    handler: async ({ spool_id, fields, quantity, copy_of, properties }, ctx) => {
+    handler: async ({ spool_id, fields, quantity, copy_of, continued_from, properties }, ctx) => {
       const { backend } = ctx
-      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined)) {
-        throw new ToolError('`quantity` and `copy_of` are for adding a spool; leave out `spool_id`')
+      if (spool_id !== undefined && (quantity !== undefined || copy_of !== undefined || continued_from !== undefined)) {
+        throw new ToolError('`quantity`, `copy_of` and `continued_from` are for adding a spool; leave out `spool_id`')
       }
       if (spool_id !== undefined && properties !== undefined && Object.keys(fields).length === 0) {
         // Properties only: no row PATCH, as for a type (an empty one could still move the row's sync time).
@@ -935,7 +939,7 @@ const tools: Tool[] = [
         properties === undefined
           ? row
           : { ...row, properties: await setPropertiesAfter(backend, `spool:${row.id}`, properties, `spool ${row.id}`) }
-      if (spool_id === undefined && quantity === undefined && copy_of === undefined) {
+      if (spool_id === undefined && quantity === undefined && copy_of === undefined && continued_from === undefined) {
         return json(await withProperties(await ok(backend.POST('/api/v1/filament/spools', { body: fields as SpoolCreate }), 'add a spool')))
       }
       if (spool_id === undefined) {
@@ -949,7 +953,7 @@ const tools: Tool[] = [
         // resend reads the copy again, so its key names that draft too (R-7150-8): a changed
         // source is a new request, never a 422 for a key sent with another body.
         // The draft carries `copy_of` (the copy route answers it), so a copied migrated preset row stays so (R-7150-13).
-        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1 } as SpoolBulkCreate
+        const body = { ...draft, spool: { ...draft.spool, ...fields }, quantity: quantity ?? 1, ...(continued_from ? { continued_from } : {}) } as SpoolBulkCreate
         const key = copy_of
           ? createHash('sha256').update(`${idempotencyKey(ctx)}\x1f${JSON.stringify(draft)}`).digest('hex')
           : idempotencyKey(ctx)
@@ -1073,21 +1077,79 @@ const tools: Tool[] = [
     label: 'Archive or restore a spool',
     description:
       '`archived: true` takes a spool off the lists (an empty or retired reel); `false` puts it back. A spool ' +
-      'that has printed cannot be deleted, only archived. Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
-      'the archived spool\'s tag is then cleared in Bambuddy.',
-    input: z.object({ spool_id: z.string().uuid(), archived: z.boolean().default(true) }),
+      'that has printed cannot be deleted, only archived. An archive takes `reason` (`finished`, `respooled`, ' +
+      '`damaged` or `other`; ask when the user did not say) and the final weighing (#7684): `final_reading_g`, the ' +
+      'scale reading with the spool, from which its empty weight is taken as filament_spool_add_event takes it, or ' +
+      '`final_grams`, the filament left, or both. The weighing is booked just before the `archived` event, whose ' +
+      '`data` keeps the closing: `reason`, `started_g`, `started_from`, `ledger_consumed_g`, `final_filament_g`, ' +
+      '`scale_consumed_g` and `drift_g` (negative: the scale found less than the ledger expected). 422 ' +
+      '`no_empty_weight` or `reading_below_empty` archives nothing; a restore takes no reason or reading. ' +
+      'Only what the user says. Writes ScadBuddy; with tag sync on (filament_sync.tags), ' +
+      "the archived spool's tag is then cleared in Bambuddy.",
+    input: z.object({
+      spool_id: z.string().uuid(),
+      archived: z.boolean().default(true),
+      reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it is archived'),
+      final_reading_g: z.number().min(0).max(1_000_000).optional().describe('The scale reading with the spool, at the end'),
+      final_grams: z.number().min(0).max(1_000_000).optional().describe('The filament left at the end'),
+    }),
     risk: 'write',
     source: SOURCE,
     routes: ['POST /api/v1/filament/spools/{spool_id}/archive'],
-    summarize: ({ spool_id, archived }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}`,
-    handler: async ({ spool_id, archived }, { backend }) =>
+    summarize: ({ spool_id, archived, reason }) => `${archived ? 'Archive' : 'Restore'} spool ${spool_id}${reason ? ` (${reason})` : ''}`,
+    handler: async ({ spool_id, archived, reason, final_reading_g, final_grams }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/filament/spools/{spool_id}/archive', {
             params: { path: { spool_id } },
-            body: { archived },
+            body: {
+              archived,
+              ...(reason !== undefined ? { reason } : {}),
+              ...(final_reading_g !== undefined ? { final_reading_g } : {}),
+              ...(final_grams !== undefined ? { final_grams } : {}),
+            },
           }),
           `archive spool ${spool_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'filament_spool_closing',
+    label: "Preview a spool's closing before it is archived",
+    description:
+      "Reads only (#7684). What filament_spool_archive would record as the `archived` event's `closing` with these " +
+      'inputs: `reason`, and the final weighing as `final_reading_g` (the scale reading with the spool; `final_filament_g` ' +
+      'is null with no empty weight known or a reading under it, which the archive refuses) or `final_grams` (the filament ' +
+      "left; with both, the net). With neither the closing is on the ledger's grams left and has no scale side. " +
+      '`notices` says what disagrees with the reason: `filament_left` for a finished spool with more than the setting ' +
+      '`filament_weighing_finished_left_g` on it, `not_finished_but_empty` for another reason at or under it, and what ' +
+      'filament_spool_archive would refuse: `no_empty_weight` for a reading with no empty weight known (send `final_grams` ' +
+      'instead), `reading_below_empty` for a reading under it, `reading_below_grams` for a reading under the `final_grams` ' +
+      'sent with it (#7909); tell the user before archiving. 404 for no such spool.',
+    input: z.object({
+      spool_id: z.string().uuid().describe("A spool's `id` from filament_spool_list"),
+      reason: z.enum(['finished', 'respooled', 'damaged', 'other']).optional().describe('Why it would be archived'),
+      final_reading_g: z.number().min(0).max(1_000_000).optional().describe('The scale reading with the spool, at the end'),
+      final_grams: z.number().min(0).max(1_000_000).optional().describe('The filament left at the end'),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    routes: ['GET /api/v1/filament/spools/{spool_id}/closing'],
+    handler: async ({ spool_id, reason, final_reading_g, final_grams }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/filament/spools/{spool_id}/closing', {
+            params: {
+              path: { spool_id },
+              query: {
+                ...(reason !== undefined ? { reason } : {}),
+                ...(final_reading_g !== undefined ? { final_reading_g } : {}),
+                ...(final_grams !== undefined ? { final_grams } : {}),
+              },
+            },
+          }),
+          `preview the closing of spool ${spool_id}`,
         ),
       ),
   }),
