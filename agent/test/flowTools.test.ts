@@ -155,9 +155,22 @@ describe("a flow's tool tiers (#2704)", () => {
   })
 
   it('flags exactly the tools whose only write is one keyed command (#6345)', () => {
-    // Each handler is a single command() to a run_operation route; a handler that writes any other
-    // way must not be flagged, or a flow's retry of it could do it twice.
-    expect(ALL_TOOLS.filter((t) => t.keyed).map((t) => t.name).sort()).toEqual(['create_print_project', 'filament_colour_sync', 'import_makerworld_model'])
+    // Each handler is a single command() to a run_operation route, or a single printer command
+    // under the call's key (printerCommand, #7276 P53); a handler that writes any other way must
+    // not be flagged, or a flow's retry of it could do it twice.
+    expect(ALL_TOOLS.filter((t) => t.keyed).map((t) => t.name).sort()).toEqual([
+      'create_print_project',
+      'filament_colour_sync',
+      'import_makerworld_model',
+      'printer_kprofile_batch_set',
+      'printer_kprofile_delete',
+      'printer_kprofile_set',
+      'printer_slot_configure',
+      'printer_slot_load',
+      'printer_slot_refresh',
+      'printer_slot_reset',
+      'printer_slot_unload',
+    ])
   })
 
   it('refuses a tool the agent does not have, one a flow cannot call, and any other caller', async () => {

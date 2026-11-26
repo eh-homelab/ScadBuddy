@@ -470,6 +470,83 @@ def test_a_templates_settings_are_in_its_key_only_when_it_has_some() -> None:
     assert len(keys) == 4
 
 
+def test_a_refused_model_json_is_its_own_key() -> None:
+    """#7800 review: a model.json that refused its settings when the key was made is in
+    the key. Its failed row never lands on the key of a template with no settings, and
+    the key moves once the model.json is fixed."""
+    request = SliceQuoteRequest(
+        printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
+    )
+    refused = key_setup(request, TemplateSettings(refusal="print_settings.x: not a value"))
+    assert refused == {**NO_SETUP, "template_refused": True}
+    assert price_key(**{**PINNED, "setup": refused}) != price_key(**PINNED)
+
+
+async def test_the_template_settings_are_read_again_only_after_a_while(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7800 review: a page reads its price every few seconds, so the template's settings
+    are kept `TEMPLATE_TTL` per catalogue and template, as the live rate is kept."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
+
+    reads: list[str] = []
+
+    def read(_catalogue: object, slug: str) -> TemplateSettings:
+        reads.append(slug)
+        return SUPPORTED
+
+    monkeypatch.setattr(slice_price, "read_template_settings", read)
+    clock = [100.0]
+    monkeypatch.setattr("scadbuddy.orders.storefront.slice_price.time.monotonic", lambda: clock[0])
+
+    class Catalogue:
+        """A catalogue as the key of the kept reads (a weak key)."""
+
+    catalogue = Catalogue()
+    assert await slice_price.live_template_settings(catalogue, "demo") == SUPPORTED
+    assert await slice_price.live_template_settings(catalogue, "demo") == SUPPORTED
+    assert await slice_price.live_template_settings(catalogue, "other") == SUPPORTED
+    assert reads == ["demo", "other"]
+    clock[0] += slice_price.TEMPLATE_TTL
+    await slice_price.live_template_settings(catalogue, "demo")
+    assert reads == ["demo", "other", "demo"]
+    # #7842 review: a read drops the entries past `TEMPLATE_TTL`, so a deleted
+    # template's entry does not stay for the process's life.
+    assert set(slice_price._template_settings[catalogue]) == {"demo"}
+
+
+async def test_a_fixed_model_json_gives_a_new_key_after_the_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#7842 review: a refused read is kept `TEMPLATE_TTL` like any other. Once the
+    model.json is fixed, the next read after it gives the settings, and so a new key."""
+    import scadbuddy.orders.storefront.slice_price as slice_price
+
+    answers = [TemplateSettings(refusal="print_settings.x: not a value"), SUPPORTED]
+
+    def read(_catalogue: object, _slug: str) -> TemplateSettings:
+        return answers[0]
+
+    monkeypatch.setattr(slice_price, "read_template_settings", read)
+    clock = [100.0]
+    monkeypatch.setattr("scadbuddy.orders.storefront.slice_price.time.monotonic", lambda: clock[0])
+
+    class Catalogue:
+        """A catalogue as the key of the kept reads (a weak key)."""
+
+    catalogue = Catalogue()
+    request = SliceQuoteRequest(
+        printer="p-1", filament_plan=FilamentPlan(ids="sb"), choices=CHOICES
+    )
+    refused = await slice_price.live_template_settings(catalogue, "demo")
+    answers.pop(0)
+    assert await slice_price.live_template_settings(catalogue, "demo") == refused
+    clock[0] += slice_price.TEMPLATE_TTL
+    fixed = await slice_price.live_template_settings(catalogue, "demo")
+    assert fixed == SUPPORTED
+    assert key_setup(request, fixed) != key_setup(request, refused)
+
+
 def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
     shop: Shop,
 ) -> None:
@@ -505,6 +582,39 @@ def test_the_plan_carries_the_templates_settings_in_its_key_and_its_request(
             library_file=priced_file(),
             template_settings=SUPPORTED,
         )
+
+
+def test_a_refusal_goes_in_the_plan_and_only_a_refused_body_names_it(shop: Shop) -> None:
+    """#7842 review: the plan carries a model.json's refusal to the slice, and the
+    operation body names `refusal` only when there is one. A worker of a build before the
+    field (`extra="forbid"`) then refuses only a refused variant, not every one."""
+    item = shop.get_item()
+    assert item.reference is not None
+    pla = shop.rows.filament(shop.pla)
+    petg = shop.rows.filament(shop.petg)
+    assert pla is not None and petg is not None
+    asked: dict[str, Any] = {
+        "settings": StoredSettings(storefront_slice_profile=PROFILE),
+        "reference": item.reference,
+        "model_sha256": SHA,
+        "filaments": [pla, petg],
+        "currency": "USD",
+        "policy": POLICY,
+        "machine_rate": None,
+        "printer": OPENING,
+        "type_presets": TYPE_PRESETS,
+    }
+    why = TemplateSettings(refusal="print_settings.x: not a value")
+    plain = plan_variant(**asked)
+    refused = plan_variant(**asked, template_settings=why)
+    supported = plan_variant(**asked, template_settings=SUPPORTED)
+    assert plain is not None and refused is not None and supported is not None
+    assert refused.key != plain.key
+    assert refused.variant.template_settings == why
+    assert "refusal" not in supported.variant.model_dump(mode="json")["template_settings"]
+    body = refused.variant.model_dump(mode="json")
+    assert body["template_settings"]["refusal"] == "print_settings.x: not a value"
+    assert type(refused.variant).model_validate(body) == refused.variant
 
 
 async def test_the_slice_takes_the_settings_its_key_holds(shop: Shop, prices: SlicePrices) -> None:

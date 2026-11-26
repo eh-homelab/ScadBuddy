@@ -75,6 +75,12 @@ class TemplateSettings(BaseModel):
 
     print_settings: dict[str, ProcessValue] = Field(default_factory=dict)
     part_settings: dict[str, PartSettings] = Field(default_factory=dict)
+    #: The model.json's refusal of its settings at that read, with both settings empty:
+    #: the slice refuses with it, though the model.json is fixed when it runs. A dump
+    #: leaves it out when it is None, so an operation body names it only for a refused
+    #: variant. A worker of a build before this field refuses that body (``extra="forbid"``),
+    #: so during a roll only a refused variant's slice fails, and it is refused anyway.
+    refusal: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class OutputReader(OutputFiles, Protocol):
@@ -116,12 +122,14 @@ class LocalOutputs:
     ) -> OutputNaming:
         """With ``template_settings`` (a storefront slice, #7633), those settings in place
         of the template's as they are now. A model.json that refuses its settings now
-        still refuses."""
+        still refuses, and so does a refusal they carry (#7800 review)."""
         stem = await output_stem(meta, self.outputs, self.catalogue)
         title = await asyncio.to_thread(
             template_title, self.catalogue.paths.model_source(meta.slug).parent, meta.slug
         )
         settings, declared, refusal = await self._settings(meta)
+        if refusal is None and template_settings is not None:
+            refusal = template_settings.refusal
         if refusal is not None:
             return OutputNaming(stem=stem, invalid_meta=refusal, title=title)
         if template_settings is not None:
@@ -172,17 +180,17 @@ class LocalOutputs:
         return by_colour(declared, values, meta.colors)
 
 
-def read_template_settings(catalogue: Catalogue, slug: str) -> TemplateSettings | None:
+def read_template_settings(catalogue: Catalogue, slug: str) -> TemplateSettings:
     """The template's settings as its model.json has them now (#7633), read as
-    :meth:`LocalOutputs.naming` reads them; None when the model.json refuses them, so the
-    slice reads them itself and refuses. Blocking: call it in a thread."""
+    :meth:`LocalOutputs.naming` reads them, or its refusal of them (``refusal``, #7800
+    review), which the slice then refuses with. Blocking: call it in a thread."""
     try:
         return TemplateSettings(
             print_settings=catalogue.print_settings(slug),
             part_settings=catalogue.part_print_settings(slug),
         )
-    except InvalidModelMetaError:
-        return None
+    except InvalidModelMetaError as error:
+        return TemplateSettings(refusal=str(error))
 
 
 def _problem(response: httpx.Response) -> ApiError:

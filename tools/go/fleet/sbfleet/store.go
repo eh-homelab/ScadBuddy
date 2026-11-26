@@ -34,6 +34,7 @@ var ErrHandleTaken = errors.New("another session has this session's handle")
 var reasons = map[string]error{
 	"unknown-agent":   fleetchat.ErrUnknownAgent,
 	"not-member":      fleetchat.ErrNotMember,
+	"unknown-channel": fleetchat.ErrUnknownChannel,
 	"handle-taken":    ErrHandleTaken,
 	"seq-ahead":       fleetchat.ErrBadSeq,
 	"text-too-long":   fleetchat.ErrTooLong,

@@ -14,7 +14,9 @@ no binary and no storage of its own: **the host supplies the `Store` and the
 - `Store`: `Touch`, `Agents`, `Join`, `Leave`, `Channels`, `Send` (returns the
   message's `seq` and the recipients' session ids), `Inbox` (a page above the
   agent's cursor; moves the cursor unless `peek`) and `Rewind`. It returns
-  `ErrUnknownAgent` and `ErrNotMember`; every argument it gets is validated.
+  `ErrUnknownAgent`, `ErrUnknownChannel` (a post to or a leave of a channel nobody
+  has joined; `fleet_join` creates channels) and `ErrNotMember`; every argument it
+  gets is validated.
 - `Bus`: `Publish(sessionIDs)` after a send, and `Subscribe(ctx, func(Event))`,
   which runs until `ctx` ends. An `Event` names the recipients, or says `Resync`
   (events may have been lost) so that every watched inbox is notified.

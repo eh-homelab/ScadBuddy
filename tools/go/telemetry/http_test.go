@@ -139,3 +139,43 @@ func TestAClientThatGetsNoAnswerIsAnError(t *testing.T) {
 		t.Fatalf("status %v attributes %v", s.Status, s.Attributes)
 	}
 }
+
+func TestAnAbortedHandlerIsAClientCancelNotAnError(t *testing.T) {
+	tel, exp := recording(t)
+	h := tel.Server(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		SetRoute(r.Context(), "/api/v1/progress")
+		w.WriteHeader(http.StatusOK)
+		panic(http.ErrAbortHandler)
+	}))
+	var p any
+	func() {
+		defer func() { p = recover() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/v1/progress", nil))
+	}()
+	if p != http.ErrAbortHandler {
+		t.Fatalf("recovered %v, want http.ErrAbortHandler again, so net/http aborts the connection", p)
+	}
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("%d spans", len(spans))
+	}
+	if spans[0].Status.Code == codes.Error {
+		t.Errorf("status %v", spans[0].Status)
+	}
+	if got := attr(spans[0], "error.type"); got.Type() != attribute.INVALID {
+		t.Errorf("error.type = %v", got.Emit())
+	}
+}
+
+func TestAnyOtherPanicIsAnError(t *testing.T) {
+	tel, exp := recording(t)
+	h := tel.Server(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") }))
+	func() {
+		defer func() { _ = recover() }()
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	}()
+	s := exp.GetSpans()[0]
+	if s.Status.Code != codes.Error || attr(s, "error.type").AsString() != "panic" {
+		t.Fatalf("status %v error.type %q", s.Status, attr(s, "error.type").AsString())
+	}
+}

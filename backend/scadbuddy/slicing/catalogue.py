@@ -222,10 +222,11 @@ async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | Non
 
 #: Whether each of ScadBuddy's presets flattens over a tree, by the tree's root and
 #: version and the preset's ``sb-`` ref (#7176): what it was answered for (the document's
-#: digest, and the row's name and kind, which `flatten_over` reads beside it), and the
-#: answer. Only the latest is kept per preset, so an edit replaces its entry rather than
-#: adding one.
-_flattens: dict[tuple[Path, str, str], tuple[tuple[str, str, str], bool]] = {}
+#: digest, and the row's name and kind, which `flatten_over` reads beside it), the
+#: answer, and the flattened ``filament_id`` (a slot's ``tray_info_idx``, #7276
+#: R-7276-15). Only the latest is kept per preset, so an edit replaces its entry rather
+#: than adding one.
+_flattens: dict[tuple[Path, str, str], tuple[tuple[str, str, str], bool, str | None]] = {}
 
 
 async def with_own(image: Catalogue, profiles: Profiles) -> Catalogue:
@@ -270,33 +271,44 @@ async def _own_choices(
         docs = await profiles.own.documents([row.id for row in unknown])
         for row in unknown:
             doc = docs.get(row.id)
-            ok = bool(doc) and await asyncio.to_thread(
-                _own_flattens_over, profiles, row.name, doc or {}
+            ok, filament_id = (
+                await asyncio.to_thread(_own_flattens_over, profiles, row.name, doc)
+                if doc
+                else (False, None)
             )
-            _flattens[(root, version, sb_ref(row.id))] = (_own_answered_for(row), ok)
-    return [
-        PresetChoice(
-            ref=PresetRef(source="local", id=sb_ref(row.id)),
-            name=row.name,
-            filament_type=row.filament_type,
-            filament_colour=row.filament_colour,
-            compatible_printers=list(row.compatible_printers),
+            _flattens[(root, version, sb_ref(row.id))] = (_own_answered_for(row), ok, filament_id)
+    offered: list[PresetChoice] = []
+    for row in rows:
+        found = _flattens.get((root, version, sb_ref(row.id)))
+        if found is None or found[:2] != (_own_answered_for(row), True):
+            continue
+        if is_slot_preset(row.name):
+            continue
+        offered.append(
+            PresetChoice(
+                ref=PresetRef(source="local", id=sb_ref(row.id)),
+                name=row.name,
+                filament_type=row.filament_type,
+                filament_colour=row.filament_colour,
+                compatible_printers=list(row.compatible_printers),
+                filament_id=found[2],
+            )
         )
-        for row in rows
-        if _flattens.get((root, version, sb_ref(row.id))) == (_own_answered_for(row), True)
-        and not is_slot_preset(row.name)
-    ]
+    return offered
 
 
 def _own_answered_for(row: OwnRow) -> tuple[str, str, str]:
     return (row.sha256, row.name, "filament")
 
 
-def _own_flattens_over(profiles: Profiles, name: str, doc: dict[str, Any]) -> bool:
+def _own_flattens_over(
+    profiles: Profiles, name: str, doc: dict[str, Any]
+) -> tuple[bool, str | None]:
+    """Whether ``doc`` flattens over the tree, and its flattened ``filament_id``."""
     try:
-        profiles.flatten_over("filament", name, doc)
+        flat = profiles.flatten_over("filament", name, doc)
     except ProfileImageError:
         raise
     except ProfileError:
-        return False
-    return True
+        return False, None
+    return True, _first(flat.get("filament_id"))

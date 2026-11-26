@@ -230,9 +230,10 @@ function PrinterItem({
 
           {!row.lan_host && !virtual && <LanForm row={row} onLinked={onChanged} />}
 
-          {/* #7154: the printer's K-profiles, through the Bambuddy printer it links. */}
-          {!virtual && bambuddy != null && <PrinterKProfiles row={row} />}
-          {!virtual && bambuddy != null && <PrinterAmsSlots row={row} />}
+          {/* #7154, #7153, #7276: the K-profiles and AMS slots over ScadBuddy's LAN link, on the
+              backend's own rule (`lan_linked`, P14), whatever the Bambuddy link is. */}
+          {row.lan_linked && <PrinterKProfiles row={row} />}
+          {row.lan_linked && <PrinterAmsSlots row={row} />}
 
           <div className="flex items-center gap-2">
             <Button
