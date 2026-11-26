@@ -26,7 +26,6 @@ var settingNames = []string{
 	"store_s3_prefix",
 	"store_s3_access_key_id",
 	"store_s3_secret_access_key",
-	"store_s3_path_style",
 	"store_max_total_bytes",
 	"store_max_count",
 }
@@ -42,7 +41,6 @@ var defaults = map[string]string{
 	"store_backend":         "local",
 	"store_s3_region":       "us-east-1",
 	"store_s3_prefix":       "scadbuddy",
-	"store_s3_path_style":   "true",
 	"store_max_total_bytes": strconv.FormatInt(50<<30, 10),
 	"store_max_count":       "200000",
 }
@@ -60,8 +58,12 @@ type Store struct {
 	MaxCount      int64
 }
 
-// loadStore reads the store's settings.
-func loadStore(ctx context.Context, pool *pgxpool.Pool, keys *seal.Keys, env func(string) string) (*Store, error) {
+// loadStore reads the store's settings. lookupEnv is os.LookupEnv's shape: a variable set
+// to "" is set, as pydantic-settings reads it (env_ignore_empty is off in core/settings.py):
+// an empty SCADBUDDY_STORE_S3_PREFIX is a blank prefix, which leaves the store not
+// configured, never the default.
+func loadStore(ctx context.Context, pool *pgxpool.Pool, keys *seal.Keys,
+	lookupEnv func(string) (string, bool)) (*Store, error) {
 	rows, err := pool.Query(ctx, "SELECT name, value FROM settings WHERE name = ANY($1)", settingNames)
 	if err != nil {
 		return nil, err
@@ -85,8 +87,8 @@ func loadStore(ctx context.Context, pool *pgxpool.Pool, keys *seal.Keys, env fun
 				return v
 			}
 		}
-		if env != nil {
-			if v, ok := lookupEnv(env, "SCADBUDDY_"+strings.ToUpper(name)); ok {
+		if lookupEnv != nil {
+			if v, ok := lookupEnv("SCADBUDDY_" + strings.ToUpper(name)); ok {
 				return v
 			}
 		}
@@ -104,19 +106,12 @@ func loadStore(ctx context.Context, pool *pgxpool.Pool, keys *seal.Keys, env fun
 		Prefix:          strings.Trim(value("store_s3_prefix"), "/"),
 		AccessKeyID:     value("store_s3_access_key_id"),
 		SecretAccessKey: value(secretField),
-		PathStyle:       pyBool(value("store_s3_path_style")),
 	}
 	if store.Backend == "s3" && s3.Endpoint != "" && s3.Bucket != "" && s3.Prefix != "" &&
 		s3.AccessKeyID != "" && s3.SecretAccessKey != "" {
 		store.S3 = &s3
 	}
 	return store, nil
-}
-
-// lookupEnv is env's value of name; an empty one counts as set, as pydantic-settings reads it.
-func lookupEnv(env func(string) string, name string) (string, bool) {
-	v := env(name)
-	return v, v != ""
 }
 
 // savedValue is a saved row's value as text, ok false when it falls back to the environment.
@@ -171,15 +166,6 @@ func openSecret(name, secret, dek, kekID string, keys *seal.Keys) (string, bool)
 		return "", false
 	}
 	return plain, true
-}
-
-// pyBool reads a boolean as pydantic does.
-func pyBool(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "true", "t", "yes", "y", "on":
-		return true
-	}
-	return false
 }
 
 // atoiOr is s as a number, else fallback's.

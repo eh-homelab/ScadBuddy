@@ -69,13 +69,19 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Getenv); err != nil {
+	if err := run(ctx, os.LookupEnv); err != nil {
 		slog.Error("scadbuddy-core stopped", "error", err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, env func(string) string) error {
+// run serves core over the process's environment, os.LookupEnv's shape: the blobs area
+// tells a variable set to "" from one not set, as Python's settings do.
+func run(ctx context.Context, lookupEnv func(string) (string, bool)) error {
+	env := func(name string) string {
+		v, _ := lookupEnv(name)
+		return v
+	}
 	trusted, err := front.ParseNetworks(env("SCADBUDDY_CORE_TRUSTED_PROXIES"))
 	if err != nil {
 		return fmt.Errorf("SCADBUDDY_CORE_TRUSTED_PROXIES: %w", err)
@@ -107,7 +113,7 @@ func run(ctx context.Context, env func(string) string) error {
 	if err != nil {
 		return err
 	}
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), env)
+	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), lookupEnv)
 	if err != nil {
 		return err
 	}
@@ -124,7 +130,7 @@ func run(ctx context.Context, env func(string) string) error {
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), env)
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), lookupEnv)
 		if err != nil {
 			return err
 		}
@@ -201,9 +207,9 @@ var sealed = map[string]bool{
 }
 
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
-// env is the process's environment, which the blobs area reads the store's settings from.
+// lookupEnv is the process's environment, which the blobs area reads the store's settings from.
 func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string,
-	env func(string) string) (*crud.Router, error) {
+	lookupEnv func(string) (string, bool)) (*crud.Router, error) {
 	router := &crud.Router{
 		Resolver: &auth.Resolver{Pool: pool},
 		Enforce:  authMode == "enforce",
@@ -236,7 +242,7 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			if keys == nil {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
-			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, env)...)
+			router.AddShared(blobstore.Area, blobstore.Routes(pool, keys, lookupEnv)...)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)

@@ -125,10 +125,14 @@ a presigned S3 GET, or the API's `/api/v1/internal/blobs/{key}` with an HMAC tra
 token (`scadbuddy/slicing/transfer.py:52-57`, `scadbuddy/slicing/transfer_token.py`).
 A service that stores bytes asks core's shared CRUD area `blobs` (#7958,
 `tools/go/core/internal/blobstore`; client `internal/blobclient`) for an upload: on `s3` a
-presigned PUT of the blob's own object, its length, type and SHA-256 checksum signed in.
-Core reads the object back at the commit, hashes it and writes the `store_blobs` row as
-`BlobIndex.put` does (`backend/tests/fixtures/blob-upload-vectors.json` pins both). Any
-other backend answers 503 `not_configured`.
+presigned PUT of a random staging object (`<prefix>/staging/<32 hex>`, the storefront's
+staging form), its length, type and SHA-256 checksum signed in; the content key is never
+presigned. At the commit core reads the staging object, checks its size and SHA-256, PUTs those
+verified bytes to the content key unless that object is there already (never overwritten, as
+`store/s3.py` `upload`), writes the `store_blobs` row as `BlobIndex.put` does with
+`verified_at` set (`backend/tests/fixtures/blob-upload-vectors.json` pins both), and deletes
+the staging object; one left behind goes with `sweep_staged` after a day. Any other backend
+answers 503 `not_configured`.
 
 On `bambuddy` and `s3`, each process that renders or reads pieces (the API and each render
 worker) keeps a bounded cache of them in front of the store (`scadbuddy/store/cache.py`

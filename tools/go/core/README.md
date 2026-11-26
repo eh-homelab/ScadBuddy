@@ -94,16 +94,27 @@ yet. Python has no such routes. `POST /uploads` with `{kind, size, sha256, media
 then `POST /uploads/{upload_id}/commit` answers `{key, sha256, size}`, the blob indexed in
 `store_blobs` under its kind (again, the same answer). The kinds are an allowlist with a size each:
 `tag_dump`, 64 KiB. Only `store_backend` `s3` takes uploads: core reads the store's settings as
-Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, else the default; the secret key
-opened with the KEK) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
-and the ACL `private` signed (Signature V4, pinned against botocore's answer in its tests). The
-commit reads the object back, hashes it, and writes the row as Python's `BlobIndex.put` does
-(`backend/tests/fixtures/blob-upload-vectors.json`, which both sides' tests check). Any other
-backend is a 503 `not_configured`. The upload's id is a ticket MACed under the KEK (HKDF label
-`scadbuddy:blobs:upload:v1`), so no row stands for an upload: its URL lasts 15 minutes and its
-commit an hour more, and another caller's commit of it is a 404. Refusals carry a `reason`: 422
-`kind_not_allowed`, 413 `upload_too_large`, 507 `store_full`, 404 `upload_not_found`, 410
-`upload_expired`, 409 `upload_not_received`, 422 `upload_mismatch`, 503 `store_unavailable`.
+Python resolves them (the `settings` row, else `SCADBUDDY_STORE_*`, set even when empty, else the
+default; the secret key opened with the KEK; path-style URLs, as botocore makes them for either
+`store_s3_path_style`) and presigns the PUT itself, with the length, the type, the SHA-256 checksum
+and the ACL `private` signed (Signature V4, pinned against botocore's answer in its tests). The PUT
+goes to the upload's own staging object, `<prefix>/staging/<32 random hex>` (the storefront's
+staging form, `store/s3.py` `staging_key`), never to the content key. The commit holds the
+object's stage lock shared (`blob-object:s3:<sha256>`, a session lock on a connection of its own
+outside the pool, at most 3 at once; 6 tries of 5 s, then 503 `store_busy`, as `StageHold`). It
+reads the content object: one that is there is never written, as `store/s3.py` `upload` does not.
+Otherwise it reads the staging object (at most the kind's limit), checks its size and SHA-256, and
+PUTs those verified bytes to the content key, so a later PUT to the staging key changes nothing
+indexed. Then it writes the row as Python's `BlobIndex.put` does, with `verified_at` when it read
+the key's own bytes, as `mark_verified_in` sets it (`backend/tests/fixtures/blob-upload-vectors.json`,
+which both sides' tests check), and deletes the staging object. One left behind (no commit, or a PUT
+sent again after it) goes with the storefront's backstop, `sweep_staged`, a day old; Python's
+unrecorded sweep takes content keys only. Any other backend is a 503 `not_configured`. The
+upload's id is a ticket MACed under the KEK (HKDF label `scadbuddy:blobs:upload:v1`), so no row
+stands for an upload: its URL lasts 15 minutes and its commit an hour more, and another caller's
+commit of it is a 404. Refusals carry a `reason`: 422 `kind_not_allowed`, 413 `upload_too_large`,
+507 `store_full`, 404 `upload_not_found`, 410 `upload_expired`, 409 `upload_not_received`, 422
+`upload_mismatch`, 503 `store_unavailable` or `store_busy`.
 `internal/blobclient` is its Go client: `Upload(ctx, kind, mediaType, body)`.
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and

@@ -21,24 +21,23 @@ type S3 struct {
 	Prefix          string
 	AccessKeyID     string
 	SecretAccessKey string
-	PathStyle       bool
 }
 
 func (s S3) String() string { return "S3(" + s.Endpoint + "/" + s.Bucket + ")" }
 
-// objectURL is the object's URL: the bucket in the path (path style, as Python's store
-// defaults to), or in the host.
+// objectURL is the object's URL, the bucket in the path. Python's store asks botocore for
+// path addressing when store_s3_path_style is true and for "auto" when it is false
+// (store/s3.py), and "auto" with an endpoint_url (always set here) is path addressing too,
+// whatever the bucket: botocore 1.43.117, the backend's lock, presigned and sent HEAD to
+// path-style URLs for the buckets "bucket" and "my.bucket" at a DO Spaces, an AWS and a
+// MinIO endpoint (measured 2026-11-26 in the backend's venv). So both values are path style,
+// and store_s3_path_style is not read.
 func (s S3) objectURL(key string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimRight(s.Endpoint, "/"))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 		return nil, fmt.Errorf("store_s3_endpoint is not an http(s) URL")
 	}
-	if s.PathStyle {
-		u.Path = u.Path + "/" + s.Bucket + "/" + key
-	} else {
-		u.Host = s.Bucket + "." + u.Host
-		u.Path = u.Path + "/" + key
-	}
+	u.Path = u.Path + "/" + s.Bucket + "/" + key
 	return u, nil
 }
 
@@ -52,6 +51,11 @@ func (s S3) presign(method, key string, headers map[string]string, expires time.
 	if err != nil {
 		return "", err
 	}
+	return s.presignURL(method, u, headers, expires, now), nil
+}
+
+// presignURL is presign of the object at u.
+func (s S3) presignURL(method string, u *url.URL, headers map[string]string, expires time.Duration, now time.Time) string {
 	now = now.UTC()
 	date := now.Format("20060102")
 	stamp := now.Format("20060102T150405Z")
@@ -93,7 +97,7 @@ func (s S3) presign(method, key string, headers map[string]string, expires time.
 	signature := hex.EncodeToString(mac(signingKey, toSign))
 	u.RawPath = canonicalURI
 	u.RawQuery = canonicalQuery + "&X-Amz-Signature=" + signature
-	return u.String(), nil
+	return u.String()
 }
 
 func mac(key []byte, data string) []byte {

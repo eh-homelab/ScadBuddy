@@ -14,6 +14,17 @@ const backendS3 = "s3"
 // ObjectKey is the S3 object of kind's blob of sha256 (store/s3.py `object_key`).
 func ObjectKey(prefix, kind, sha256 string) string { return prefix + "/" + kind + "/" + sha256 }
 
+// StagingKey is an upload's staging object, the only key its presigned PUT may write: the
+// storefront's staging area's form (store/s3.py `staging_key`, `prefix/staging/<32 hex>`),
+// named by the ticket's random nonce. No store_blobs row names it, and Python's
+// `sweep_unrecorded` takes content keys only, so no sweep removes it while the upload is
+// live; the commit deletes it, and one left behind (an upload never committed, or a PUT
+// sent again after the commit) goes with the storefront's backstop
+// (orders/storefront/staged_files.py `sweep_staged`), once it is `ORPHAN_AGE` (a day)
+// old and no storefront_uploads row names it: past the URL's 15 minutes and the
+// commit's hour.
+func StagingKey(prefix, nonce string) string { return prefix + "/staging/" + nonce }
+
 // IndexKey is the content index's key of kind's blob of sha256
 // (store/content_models.py `content_index_key`).
 func IndexKey(kind, sha256 string) string { return kind + "-" + sha256 }
@@ -77,6 +88,20 @@ func putIn(ctx context.Context, tx pgx.Tx, key string, ref Ref) (*Ref, error) {
 		}
 		// Another put made the key meanwhile: lock its row and update it.
 	}
+}
+
+// index writes key's row in tx as the commit does: putIn, then, when verified (the commit
+// read the object and found its size and SHA-256), the mark store/index.py
+// `BlobIndex.mark_verified_in` sets.
+func index(ctx context.Context, tx pgx.Tx, key string, ref Ref, verified bool) (*Ref, error) {
+	before, err := putIn(ctx, tx, key, ref)
+	if err != nil || !verified {
+		return before, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE store_blobs SET verified_at = now() WHERE key = $1 AND sha256 = $2
+ AND kind = $3 AND backend = $4 AND backend_id = $5 AND size = $6`,
+		key, ref.SHA256, ref.Kind, ref.Backend, ref.BackendID, ref.Size)
+	return before, err
 }
 
 // usage is the distinct objects on backend and their bytes (store/index.py `usage`).

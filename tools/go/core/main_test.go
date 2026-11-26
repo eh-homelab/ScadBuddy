@@ -651,7 +651,7 @@ func TestTheCRUDPortMayNotBeTheMainAddress(t *testing.T) {
 		"SCADBUDDY_CORE_CRUD_LISTEN":   "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_UPSTREAM": "http://127.0.0.1:2",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] })
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
 	if err == nil || !strings.Contains(err.Error(), "needs its own") {
 		t.Fatalf("got %v", err)
 	}
@@ -689,7 +689,7 @@ func TestTheCRUDPortNeedsPythonsCRUDListener(t *testing.T) {
 		"SCADBUDDY_CORE_LISTEN":      "127.0.0.1:0",
 		"SCADBUDDY_CORE_CRUD_LISTEN": "127.0.0.1:1",
 	}
-	err := run(context.Background(), func(k string) string { return env[k] })
+	err := run(context.Background(), func(k string) (string, bool) { v, ok := env[k]; return v, ok })
 	if err == nil || !strings.Contains(err.Error(), "SCADBUDDY_CORE_CRUD_UPSTREAM") {
 		t.Fatalf("got %v", err)
 	}

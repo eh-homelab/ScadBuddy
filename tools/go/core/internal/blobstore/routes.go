@@ -2,22 +2,28 @@
 // blob store by URL, under /api/v1/internal/crud/blobs, with any credential whose scopes
 // hold crud.blobs. It asks for an upload, PUTs the bytes to the URL it gets, and commits
 // the upload, which indexes the blob. The caller holds no store credential and writes no
-// key of the store's layout; no byte passes through core on the way in.
+// key of the store's layout.
 //
 // The store is Python's (backend/scadbuddy/store/): the object key and the content index's
 // row are the ones its ContentStore writes (ObjectKey, IndexKey, putIn), so Python reads
 // what core indexed; backend/tests/fixtures/blob-upload-vectors.json pins both sides. Only
-// store_backend s3 takes uploads: the URL is S3's presigned PUT, its length, type, SHA-256
-// checksum and canned ACL signed in, and the commit reads the object back and hashes it.
-// Any other backend is a 503 not_configured.
+// store_backend s3 takes uploads: the URL is S3's presigned PUT of the upload's own staging
+// object (StagingKey), a random key no row names, its length, type, SHA-256 checksum and
+// canned ACL signed in. The content key is never presigned. The commit reads the content
+// object; when there is none, it reads the staging object, checks its size and SHA-256, and
+// PUTs those verified bytes to the content key itself, so a PUT to the staging key after
+// the check changes nothing indexed. It never overwrites a content key, as store/s3.py
+// `upload` does not. Any other backend is a 503 not_configured.
 //
 // A committed blob of a swept kind (store/content_models.py SWEPT_KINDS) is collected unless
-// its caller holds it in blob_refs within the sweep's grace; an object PUT and never
-// committed is an object no row names, which the unrecorded sweep removes.
+// its caller holds it in blob_refs within the sweep's grace. The commit deletes the staging
+// object; one left behind goes with the storefront's staging backstop (StagingKey).
 package blobstore
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -28,9 +34,11 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
@@ -52,11 +60,16 @@ const (
 	// commitGrace is how long after its URL's expiry an upload may still be committed: a
 	// PUT that started in time may end after it.
 	commitGrace = time.Hour
-	// readTTL bounds the commit's own read of the object.
+	// readTTL bounds each of the commit's own requests to the store.
 	readTTL = time.Minute
-	// stageLockTimeout is how long a commit waits for an object a removal holds
-	// (store/index.py STAGE_LOCK_TIMEOUT_MS waits per try).
-	stageLockTimeout = "5000ms"
+	// stageLockTimeout and stageLockTries are how long a commit waits for an object a
+	// removal holds, a try, and how many tries (store/index.py STAGE_LOCK_TIMEOUT_MS,
+	// STAGE_LOCK_TRIES); then 503 store_busy, as Python's StageLockBusyError.
+	stageLockTimeout = 5 * time.Second
+	stageLockTries   = 6
+	// stageSlots is how many commits may hold a lock connection at once, each its own
+	// connection outside the pool (store/index.py STAGE_LOCK_SLOTS).
+	stageSlots = 3
 	// bodyMax bounds a request's JSON.
 	bodyMax = 4 << 10
 	// The canned ACL every object is written with (store/s3.py STAGED_ACL).
@@ -68,22 +81,30 @@ var (
 	sha256Pattern    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	mediaTypePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$`)
 	uploadIDPattern  = regexp.MustCompile(`^[A-Za-z0-9_=.-]+$`)
+	noncePattern     = regexp.MustCompile(`^[0-9a-f]{32}$`)
 )
 
 // Blobs serves the area.
 type Blobs struct {
 	Pool *pgxpool.Pool
 	Keys *seal.Keys
-	Env  func(string) string
-	// HTTP reads an object back at the commit.
+	// LookupEnv is the process's environment, os.LookupEnv's shape.
+	LookupEnv func(string) (string, bool)
+	// HTTP sends the commit's requests to the store.
 	// TODO(#7851): wrap its transport in tools/go/telemetry tel.Transport once that is on main.
 	HTTP *http.Client
 	Now  func() time.Time
+	// LockTimeout and LockTries, when set, replace stageLockTimeout and stageLockTries.
+	LockTimeout time.Duration
+	LockTries   int
+
+	slotsOnce sync.Once
+	slots     chan struct{}
 }
 
 // Routes are the area's routes. keys may not be nil: an upload's id is MACed under the KEK.
-func Routes(pool *pgxpool.Pool, keys *seal.Keys, env func(string) string) []crud.Route {
-	b := &Blobs{Pool: pool, Keys: keys, Env: env, HTTP: &http.Client{Timeout: readTTL}, Now: time.Now}
+func Routes(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool)) []crud.Route {
+	b := &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: &http.Client{Timeout: readTTL}, Now: time.Now}
 	return b.Routes()
 }
 
@@ -118,9 +139,13 @@ func notConfigured(detail string) error {
 	return refused(http.StatusServiceUnavailable, "not_configured", detail)
 }
 
+func unavailable(detail string) error {
+	return refused(http.StatusServiceUnavailable, "store_unavailable", detail)
+}
+
 // s3Store is the S3 store, or the 503 of a store that takes no upload.
 func (b *Blobs) s3Store(ctx context.Context) (*Store, error) {
-	store, err := loadStore(ctx, b.Pool, b.Keys, b.Env)
+	store, err := loadStore(ctx, b.Pool, b.Keys, b.LookupEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +156,27 @@ func (b *Blobs) s3Store(ctx context.Context) (*Store, error) {
 		return nil, notConfigured("the S3 store needs an endpoint, a bucket, a prefix and both keys")
 	}
 	return store, nil
+}
+
+// putHeaders are the headers a PUT of t's bytes carries, each signed.
+func putHeaders(t ticket) map[string]string {
+	digest, _ := hex.DecodeString(t.SHA256)
+	return map[string]string{
+		"Content-Type":          t.MediaType,
+		"x-amz-acl":             acl,
+		"x-amz-checksum-sha256": base64.StdEncoding.EncodeToString(digest),
+	}
+}
+
+// presignPut is the URL that PUTs exactly t's bytes to key.
+func (b *Blobs) presignPut(s3 *S3, key string, t ticket, expires time.Duration) (string, map[string]string, error) {
+	headers := putHeaders(t)
+	signed := map[string]string{"content-length": strconv.FormatInt(t.Size, 10)}
+	for name, value := range headers {
+		signed[name] = value
+	}
+	url, err := s3.presign("PUT", key, signed, expires, b.Now())
+	return url, headers, err
 }
 
 func (b *Blobs) begin(r *http.Request, _ crud.Params) (any, error) {
@@ -161,22 +207,13 @@ func (b *Blobs) begin(r *http.Request, _ crud.Params) (any, error) {
 	if err := b.room(r.Context(), store, size); err != nil {
 		return nil, err
 	}
-	now := b.Now()
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
 	t := ticket{
 		Caller: crud.ServiceOf(r).Caller, Kind: kind, SHA256: sum, Size: size, MediaType: mediaType,
-		Expires: now.Add(urlTTL).Truncate(time.Second).UTC(),
+		Expires: b.Now().Add(urlTTL).Truncate(time.Second).UTC(), Nonce: hex.EncodeToString(nonce),
 	}
-	digest, _ := hex.DecodeString(sum)
-	headers := map[string]string{
-		"Content-Type":          mediaType,
-		"x-amz-acl":             acl,
-		"x-amz-checksum-sha256": base64.StdEncoding.EncodeToString(digest),
-	}
-	signed := map[string]string{"content-length": strconv.FormatInt(size, 10)}
-	for name, value := range headers {
-		signed[name] = value
-	}
-	url, err := store.S3.presign("PUT", ObjectKey(store.S3.Prefix, kind, sum), signed, urlTTL, now)
+	url, headers, err := b.presignPut(store.S3, StagingKey(store.S3.Prefix, t.Nonce), t, urlTTL)
 	if err != nil {
 		return nil, notConfigured(err.Error())
 	}
@@ -206,6 +243,7 @@ func unknownUpload() error {
 }
 
 func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
+	ctx := r.Context()
 	id := p["upload_id"]
 	if len(id) > 1024 || !uploadIDPattern.MatchString(id) {
 		return nil, unknownUpload()
@@ -221,83 +259,219 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 	if !b.Now().Before(t.Expires.Add(commitGrace)) {
 		return nil, refused(http.StatusGone, "upload_expired", "the upload expired; ask for another")
 	}
-	store, err := b.s3Store(r.Context())
+	store, err := b.s3Store(ctx)
 	if err != nil {
 		return nil, err
 	}
 	objectKey := ObjectKey(store.S3.Prefix, t.Kind, t.SHA256)
+	staging := StagingKey(store.S3.Prefix, t.Nonce)
 	ref := Ref{SHA256: t.SHA256, Kind: t.Kind, Backend: backendS3, BackendID: objectKey, Size: t.Size}
 	key := IndexKey(t.Kind, t.SHA256)
-	err = pgx.BeginFunc(r.Context(), b.Pool, func(tx pgx.Tx) error {
-		// The object's stage lock, shared, until the row commits: no removal takes the object
-		// between its check and its row.
-		if _, err := tx.Exec(r.Context(), "SELECT set_config('lock_timeout', $1, true)", stageLockTimeout); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(r.Context(), "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
-			objectLock(backendS3, t.SHA256)); err != nil {
-			return err
-		}
-		if err := b.check(r.Context(), store.S3, objectKey, t, limit); err != nil {
-			return err
-		}
-		before, err := putIn(r.Context(), tx, key, ref)
+	// The object's stage lock, shared, from before the content object is written until its
+	// row commits: no removal takes the object between them. A session lock on a connection
+	// of its own, so no transaction stays open across the store's requests.
+	release, err := b.hold(ctx, t.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	verified, err := b.place(ctx, store.S3, objectKey, staging, t, limit)
+	if err != nil {
+		return nil, err
+	}
+	err = pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
+		before, err := index(ctx, tx, key, ref, verified)
 		if err != nil {
 			return err
 		}
 		if before != nil && (before.Backend != ref.Backend || before.BackendID != ref.BackendID) {
 			// No row names it now: the unrecorded sweep removes it on S3; another backend's
 			// stays, as Python's release_replaced leaves it.
-			slog.WarnContext(r.Context(), "a blob's key moved to another object", "key", key, "backend", before.Backend)
+			slog.WarnContext(ctx, "a blob's key moved to another object", "key", key, "backend", before.Backend)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	release()
+	b.remove(ctx, store.S3, staging)
 	return committed{Key: key, SHA256: t.SHA256, Size: t.Size}, nil
 }
 
-// check reads the object back, at most limit bytes, and refuses one that is not the size
-// and SHA-256 the upload named.
-func (b *Blobs) check(ctx context.Context, s3 *S3, objectKey string, t ticket, limit int64) error {
-	url, err := s3.presign("GET", objectKey, nil, readTTL, b.Now())
-	if err != nil {
-		return notConfigured(err.Error())
+// hold takes the stage lock of the objects of sha256 shared (store/index.py `StageHold`,
+// `_lock_shared`), on a connection of its own outside the pool, once one of stageSlots is
+// free. Each try is a transaction whose `set_config(…, true)` ends with it, so the lock
+// timeout does not outlive the try; the session lock outlives the commit. A removal that
+// holds the lock through every try is a 503 store_busy. release closes the connection,
+// which drops the lock; it may be called more than once.
+func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err error) {
+	b.slotsOnce.Do(func() { b.slots = make(chan struct{}, stageSlots) })
+	select {
+	case b.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	conn, err := pgx.ConnectConfig(ctx, b.Pool.Config().ConnConfig.Copy())
 	if err != nil {
-		return err
+		<-b.slots
+		return nil, err
+	}
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			closing, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = conn.Close(closing)
+			<-b.slots
+		})
+	}
+	timeout, tries := b.LockTimeout, b.LockTries
+	if timeout <= 0 {
+		timeout = stageLockTimeout
+	}
+	if tries <= 0 {
+		tries = stageLockTries
+	}
+	name := objectLock(backendS3, sha256)
+	for range tries {
+		err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, "SELECT set_config('lock_timeout', $1, true)",
+				strconv.FormatInt(timeout.Milliseconds(), 10)+"ms"); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, "SELECT pg_advisory_lock_shared(hashtextextended($1, 0))", name)
+			return err
+		})
+		if err == nil {
+			return release, nil
+		}
+		var pg *pgconn.PgError
+		if !errors.As(err, &pg) || pg.Code != "55P03" {
+			release()
+			return nil, err
+		}
+		slog.InfoContext(ctx, "an object's stage lock is claimed by a removal; trying again")
+	}
+	release()
+	return nil, refused(http.StatusServiceUnavailable, "store_busy",
+		"a removal held the blob's object for every try; commit the upload again")
+}
+
+// matches says whether body is t's bytes.
+func matches(body []byte, t ticket) bool {
+	sum := sha256.Sum256(body)
+	return int64(len(body)) == t.Size && hex.EncodeToString(sum[:]) == t.SHA256
+}
+
+// place makes the content object hold t's bytes, and says whether the commit read them
+// there (the row's verified_at). A content object that is there already is never written
+// (store/s3.py `upload`); otherwise the staging object is read, checked, and its verified
+// bytes, not the staging object, are PUT to the content key.
+func (b *Blobs) place(ctx context.Context, s3 *S3, objectKey, staging string, t ticket, limit int64) (bool, error) {
+	body, found, err := b.read(ctx, s3, objectKey, limit)
+	if err != nil {
+		return false, err
+	}
+	if found {
+		ok := matches(body, t)
+		if !ok {
+			slog.WarnContext(ctx, "the store's object is not the bytes its key names; it is left as it is",
+				"kind", t.Kind, "sha256", t.SHA256)
+		}
+		return ok, nil
+	}
+	body, found, err = b.read(ctx, s3, staging, limit)
+	switch {
+	case err != nil:
+		return false, err
+	case !found:
+		return false, refused(http.StatusConflict, "upload_not_received", "nothing was uploaded for this upload")
+	case !matches(body, t):
+		// S3 should have refused bytes that are not the signed checksum. The staging
+		// object stays for a commit after a PUT of the right bytes, or the staging sweep.
+		return false, refused(http.StatusUnprocessableEntity, "upload_mismatch",
+			"what was uploaded is not the size and sha256 asked for")
+	}
+	url, headers, err := b.presignPut(s3, objectKey, t, readTTL)
+	if err != nil {
+		return false, notConfigured(err.Error())
+	}
+	res, err := b.send(ctx, http.MethodPut, url, body, headers)
+	if err != nil {
+		return false, err
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false, unavailable(fmt.Sprintf("the S3 store answered %d to the blob's PUT", res.StatusCode))
+	}
+	return true, nil
+}
+
+// send is one request to the store. Its error never names the URL, which carries a signature.
+func (b *Blobs) send(ctx context.Context, method, url string, body []byte, headers map[string]string) (*http.Response, error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	if err != nil {
+		return nil, unavailable("the S3 store's URL is not a URL")
+	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
 	}
 	res, err := b.HTTP.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
-		// The error names the URL, which carries a signature: say only that it failed.
-		return refused(http.StatusServiceUnavailable, "store_unavailable", "the S3 store did not answer")
+		return nil, unavailable("the S3 store did not answer")
+	}
+	return res, nil
+}
+
+// read is the object at key, at most limit+1 bytes of it; found is false when there is none.
+func (b *Blobs) read(ctx context.Context, s3 *S3, key string, limit int64) (body []byte, found bool, err error) {
+	url, err := s3.presign("GET", key, nil, readTTL, b.Now())
+	if err != nil {
+		return nil, false, notConfigured(err.Error())
+	}
+	res, err := b.send(ctx, http.MethodGet, url, nil, nil)
+	if err != nil {
+		return nil, false, err
 	}
 	defer res.Body.Close()
 	switch {
 	case res.StatusCode == http.StatusNotFound:
-		return refused(http.StatusConflict, "upload_not_received", "nothing was uploaded for this upload")
+		return nil, false, nil
 	case res.StatusCode != http.StatusOK:
-		return refused(http.StatusServiceUnavailable, "store_unavailable",
-			fmt.Sprintf("the S3 store answered %d", res.StatusCode))
+		return nil, false, unavailable(fmt.Sprintf("the S3 store answered %d", res.StatusCode))
 	}
-	digest := sha256.New()
-	n, err := io.Copy(digest, io.LimitReader(res.Body, limit+1))
+	body, err = io.ReadAll(io.LimitReader(res.Body, limit+1))
 	if err != nil {
-		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-			return ctx.Err()
+		if ctx.Err() != nil {
+			return nil, false, ctx.Err()
 		}
-		return refused(http.StatusServiceUnavailable, "store_unavailable", "the S3 store's answer broke off")
+		return nil, false, unavailable("the S3 store's answer broke off")
 	}
-	if n != t.Size || hex.EncodeToString(digest.Sum(nil)) != t.SHA256 {
-		// S3 should have refused bytes that are not the signed checksum. No row names them;
-		// the unrecorded sweep removes them.
-		return refused(http.StatusUnprocessableEntity, "upload_mismatch",
-			"what was uploaded is not the size and sha256 asked for")
+	return body, true, nil
+}
+
+// remove deletes the upload's staging object. One it cannot delete is logged and left to
+// the staging sweep (StagingKey): the blob is indexed already.
+func (b *Blobs) remove(ctx context.Context, s3 *S3, staging string) {
+	url, err := s3.presign("DELETE", staging, nil, readTTL, b.Now())
+	if err == nil {
+		var res *http.Response
+		if res, err = b.send(ctx, http.MethodDelete, url, nil, nil); err == nil {
+			res.Body.Close()
+			if res.StatusCode/100 != 2 && res.StatusCode != http.StatusNotFound {
+				err = fmt.Errorf("the S3 store answered %d", res.StatusCode)
+			}
+		}
 	}
-	return nil
+	if err != nil {
+		slog.WarnContext(ctx, "could not delete an upload's staging object; the staging sweep removes it", "err", err)
+	}
 }

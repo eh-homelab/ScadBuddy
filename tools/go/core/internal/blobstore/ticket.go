@@ -15,9 +15,10 @@ import (
 
 // An upload's id is a ticket, so no row stands for an upload not yet committed. Its format:
 // urlsafe_b64(body) "." urlsafe_b64(HMAC-SHA256(body)), body being
-// "v1\n<caller>\n<kind>\n<sha256>\n<size>\n<media type>\n<expiry, Unix seconds>", MACed
+// "v1\n<caller>\n<kind>\n<sha256>\n<size>\n<media type>\n<expiry, Unix seconds>\n<nonce>", MACed
 // under HKDF-SHA256 of the KEK with no salt and ticketInfo. It names the caller that asked:
-// another caller's commit of it is a 404.
+// another caller's commit of it is a 404. Its nonce names the upload's staging object
+// (StagingKey), the only key its URL may write.
 const (
 	ticketInfo    = "scadbuddy:blobs:upload:v1"
 	ticketVersion = "v1"
@@ -32,6 +33,8 @@ type ticket struct {
 	MediaType string
 	// Expires is when the upload's URL stops being taken, whole seconds.
 	Expires time.Time
+	// Nonce is 32 random lower-case hex characters: the upload's staging object.
+	Nonce string
 }
 
 var errTicket = errors.New("not an upload's id")
@@ -53,7 +56,7 @@ func ticketMAC(key []byte, body string) []byte {
 func (t ticket) body() string {
 	return strings.Join([]string{
 		ticketVersion, t.Caller, t.Kind, t.SHA256, strconv.FormatInt(t.Size, 10), t.MediaType,
-		strconv.FormatInt(t.Expires.Unix(), 10),
+		strconv.FormatInt(t.Expires.Unix(), 10), t.Nonce,
 	}, "\n")
 }
 
@@ -89,7 +92,7 @@ func openTicket(keys *seal.Keys, id string) (ticket, error) {
 		return ticket{}, errTicket
 	}
 	fields := strings.Split(string(body), "\n")
-	if len(fields) != 7 || fields[0] != ticketVersion {
+	if len(fields) != 8 || fields[0] != ticketVersion || !noncePattern.MatchString(fields[7]) {
 		return ticket{}, errTicket
 	}
 	size, err1 := strconv.ParseInt(fields[4], 10, 64)
@@ -99,6 +102,6 @@ func openTicket(keys *seal.Keys, id string) (ticket, error) {
 	}
 	return ticket{
 		Caller: fields[1], Kind: fields[2], SHA256: fields[3], Size: size, MediaType: fields[5],
-		Expires: time.Unix(expiry, 0).UTC(),
+		Expires: time.Unix(expiry, 0).UTC(), Nonce: fields[7],
 	}, nil
 }
