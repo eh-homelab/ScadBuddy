@@ -269,7 +269,8 @@ class Metrics:
         # (`api/metrics.py` `refresh_subscriber_metrics`).
         self.event_subscriber_lag_events = Gauge(
             "scadbuddy_event_subscriber_lag_events",
-            "Events in the log past the subscriber's cursor: the newest seq less the cursor.",
+            "Events of every kind in the log past the subscriber's cursor, not only the"
+            " kinds it reads: the newest seq less the cursor.",
             ["subscriber"],
             registry=r,
         )
