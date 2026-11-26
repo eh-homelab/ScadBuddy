@@ -593,6 +593,31 @@ describe('PropertiesPanel history (#6949)', () => {
     expect(items[1]).not.toHaveTextContent('mpn')
   })
 
+  it('reads the history again until an edit made while it is open is recorded', async () => {
+    seedEntityProperties(TYPE, { mpn: 'A' })
+    seedPropertyChange(TYPE, { key: 'mpn', op: 'set', old: null, new: 'A', at: '2026-11-22T10:00:00Z', actor: { kind: 'browser' } })
+    // The subscriber writes a change after its commit: the first reads after the edit miss it.
+    let lagging = 0
+    server.use(
+      http.get('/api/v1/entities/:ref/properties/history', () => {
+        if (lagging === 0) return undefined
+        lagging -= 1
+        return HttpResponse.json({ changes: entityMock.history.get(TYPE)?.slice(1) ?? [] })
+      }),
+    )
+    const { user } = renderPage(<PropertiesPanel entity={TYPE} />)
+    await user.click(await screen.findByRole('button', { name: 'History of mpn' }))
+    await screen.findByRole('list', { name: 'History of mpn' })
+    lagging = 2
+    await user.click(screen.getByRole('button', { name: 'Edit mpn' }))
+    const value = screen.getByLabelText('Value of mpn')
+    await user.clear(value)
+    await user.type(value, 'B')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText('A → B', {}, { timeout: 3000 })).toBeInTheDocument()
+    expect(lagging).toBe(0)
+  })
+
   it('shows a remove as removed', async () => {
     seedEntityProperties(TYPE, { mpn: 'x' })
     seedPropertyChange(TYPE, { key: 'mpn', op: 'remove', old: 'x', new: null, at: '2026-11-22T10:00:00Z', actor: { kind: 'browser' } })
