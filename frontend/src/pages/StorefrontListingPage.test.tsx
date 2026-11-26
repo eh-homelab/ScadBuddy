@@ -511,11 +511,30 @@ describe('StorefrontListingPage (#5282, #6157)', () => {
       const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
       const block = await design()
       await user.click(screen.getByRole('button', { name: 'Publish' }))
-      // Another code names the parameter, and says it has no row, not that a note is under it (#7778).
-      await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change, but this editor shows no row for it'))
+      // Another code names the parameter, and says the design sets it, not that a note is under it (#7778, #7862).
+      await waitFor(() => expect(screen.getAllByRole('alert')[0]).toHaveTextContent('needs a change, but the design sets it itself, so this editor shows no row for it'))
       expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('See the note under it below')
       expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('Design')
       expect(within(block).queryByRole('alert')).toBeNull()
+    })
+
+    it('says a refused parameter this version does not have has no row (#7778)', async () => {
+      server.use(
+        http.post('/api/v1/storefront/listings/:id/publish', () =>
+          HttpResponse.json(
+            { type: 'https://scadbuddy.dev/problems/storefront/listing_default_invalid', title: 'Unprocessable Content', status: 422, detail: 'no', name: 'gone_param' },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          ),
+        ),
+      )
+      const listing = await seedHouse(HOUSE)
+      const { user } = renderStorefront(`/storefront/listings/${listing.id}`)
+      await design()
+      await user.click(screen.getByRole('button', { name: 'Publish' }))
+      await waitFor(() =>
+        expect(screen.getAllByRole('alert')[0]).toHaveTextContent('“gone_param” needs a change, but this editor shows no row for it: it is a hidden parameter of this design, or one this version does not have.'),
+      )
+      expect(screen.getAllByRole('alert')[0]).not.toHaveTextContent('the design sets it')
     })
 
     it('drops them with the template, and keeps them at another version of it', async () => {
