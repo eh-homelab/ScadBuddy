@@ -5,9 +5,10 @@ import { ok } from './call.js'
 import { command } from './command.js'
 import { filamentPaths } from './filamentLinks.js'
 import { inventoryPaths } from './inventoryLinks.js'
-import { defineTool, image, json, ToolError } from './registry.js'
+import { imageOrRef } from './imageResult.js'
+import { defineTool, json, ToolError } from './registry.js'
 import { WorkspaceError, workspaceOf } from '../workspace/store.js'
-import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
+import { IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Files and links on any entity (#6950, phase 1): the generic `/entities/{ref}` routes
@@ -223,9 +224,11 @@ export const entityTools = [
     name: 'entity_attachment_get',
     label: "See an entity's file",
     description:
-      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
-      'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
-      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; an SVG, and any other file (a PDF ' +
+      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo up to the " +
+      'inline limit (Settings → Assistant → Images, 512 KB by default) as an image you can see; a larger one kept in ' +
+      'your workspace and answered as `workspace_file`, which workspace_read shows (one over 5 MB as base64 cannot be ' +
+      'viewed: ask for the thumbnail); any other image type (HEIC, AVIF, TIFF, ...) only as a note that you cannot ' +
+      'view it; an SVG, and any other file (a PDF ' +
       'manual, a receipt) kept in your workspace and answered as `workspace_file`: workspace_read reads a text ' +
       'file, and a binary one (a PDF) can be attached or uploaded from there but not read. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
       'it for a photo too large to view, or when a glance is enough.',
@@ -267,16 +270,9 @@ export const entityTools = [
       }
       const bytes = read.bytes
       if ((IMAGE_MEDIA_TYPES as readonly string[]).includes(mimeType)) {
-        // The model refuses an image over IMAGE_DATA_MAX as base64, as workspace_read guards.
-        if (bytes.byteLength <= IMAGE_BYTES_MAX) return image(bytes, mimeType)
-        return json({
-          viewable: false,
-          media_type: mimeType,
-          size_bytes: bytes.byteLength,
-          note:
-            'A photo too large for you to view (over 5 MB as base64).' +
-            (mimeType === 'image/gif' ? '' : ' Call again with `thumbnail: true` for a small copy.'),
-        })
+        // Inline up to the configurable limit, else a workspace pointer (#7745, tools/imageResult.ts).
+        const route = `/api/v1/entities/${ref}/attachments/${attachment_id}/${thumbnail ? 'thumbnail' : 'content'}`
+        return imageOrRef(new Uint8Array(bytes), mimeType, ctx, { name: `${attachment_id}-${record.filename}`, path: route })
       }
       // Any other image type (HEIC, AVIF, TIFF, ...) is kept as an image, but an image block of it is refused.
       if (mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') {

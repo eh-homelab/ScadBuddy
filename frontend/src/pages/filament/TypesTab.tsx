@@ -13,6 +13,8 @@ import { FilamentsEditor } from '../../components/orders/FilamentsEditor'
 import { readKindPropertyTexts } from '../../components/entities/api'
 import { addSku, matchesSearch, parseSearch, typeSearchDoc } from '../../lib/filamentSearch'
 import { Button } from '@/components/ui/button'
+import { IncompleteMark } from '../../components/entities/IncompleteMark'
+import { isIncomplete } from '../../components/entities/definedProperties'
 import { Checkbox } from '@/components/ui/checkbox'
 
 interface Loaded {
@@ -167,7 +169,8 @@ export function TypesTab() {
 
   // Every type is loaded: a price book row linked to an archived type still names it.
   const tokens = parseSearch(search)
-  const kept = data?.types.filter((type) => archived || !type.archived_at) ?? []
+  const incomplete = params.get('incomplete') === 'true'
+  const kept = data?.types.filter((type) => (archived || !type.archived_at) && (!incomplete || isIncomplete(type))) ?? []
   const shown = tokens.length && data ? kept.filter((type) => matchesSearch(typeSearchDoc(type, data.names, skus.get(type.id), { properties: propertyTexts.get(type.id) }), tokens)) : kept
   const setParam = (key: string, value: string | null) => {
     const next = new URLSearchParams(params)
@@ -190,6 +193,10 @@ export function TypesTab() {
             <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
               <Checkbox checked={archived} aria-label="Show archived types" onCheckedChange={(on) => setParam('archived', on === true ? 'true' : null)} />
               Show archived
+            </label>
+            <label className="flex items-center gap-2 text-[13px] text-muted-foreground">
+              <Checkbox checked={incomplete} aria-label="Only incomplete" onCheckedChange={(on) => setParam('incomplete', on === true ? 'true' : null)} />
+              Incomplete
             </label>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -246,6 +253,9 @@ export function TypesTab() {
                         {type.code}
                       </Link>
                       {type.archived_at && <span className="ml-2 text-[12px] text-muted-foreground">Archived</span>}
+                      <span className="ml-2">
+                        <IncompleteMark row={type} />
+                      </span>
                     </td>
                     <td className="px-2 py-1.5">{product(type, data.names)}</td>
                     <td className="px-2 py-1.5">{type.colour_name}</td>
@@ -277,8 +287,8 @@ export function TypesTab() {
                 {shown.length === 0 && (
                   <tr className="border-t">
                     <td colSpan={9} className="px-2 py-3 text-muted-foreground">
-                      {/* With no search, the archived filter is the only one that hides a type; a new filter needs its own text here. */}
-                      {!data?.types.length ? 'No types yet. Add one, or make one from a price book row below.' : tokens.length ? `No type matches “${search}”.` : 'No types shown. Tick Show archived types.'}
+                      {/* With no search, the archived and incomplete filters are the ones that hide a type; a new filter needs its own text here. */}
+                      {!data?.types.length ? 'No types yet. Add one, or make one from a price book row below.' : tokens.length ? `No type matches “${search}”.` : incomplete ? 'No type is incomplete.' : 'No types shown. Tick Show archived types.'}
                     </td>
                   </tr>
                 )}

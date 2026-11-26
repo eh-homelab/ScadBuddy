@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { cp, mkdir, stat } from 'node:fs/promises'
+import { cp, mkdir, rm, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { COMMIT_RE } from './source.js'
@@ -34,13 +34,32 @@ const run = promisify(execFile)
 //     any file is used.
 //   - a shallow fetch (`--depth 1`) of exactly the ref, no tags, no submodules,
 //     under a time limit.
+//
+// A package in one folder of a repository (`subpath`, #7908) gets a partial
+// fetch: the commit and its trees with no blobs (`--filter=blob:none`), then a
+// sparse checkout of that folder only, so git fetches only that folder's blobs,
+// in one batch, when it checks them out. The partial fetch needs a named remote
+// (`origin`, the same URL; git refuses `--filter` for a bare URL), marked as
+// the promisor. The lazy fetch is a child git that gets every `-c` above (git
+// passes them in GIT_CONFIG_PARAMETERS) and this environment, so it uses the
+// same URL and allowed protocols, no redirects, and `transfer.fsckObjects`
+// (its `index-pack` runs with `--fsck-objects`). Seen with GIT_TRACE=1 on
+// git 2.39.5 (the agent image's, Debian bookworm) and 2.43.0, fetching
+// https://github.com/vectorize-io/hindsight, 2026-11-26.
+// A server that does not know `--filter` sends every blob with a warning, and
+// the checkout works as before. When the partial fetch or its checkout fails
+// for a reason other than the time limit, the checkout starts again in an
+// empty directory with the full fetch.
 
 export type Checkout = { commit: string; dir: string }
 
 /** The network half of fetching, so tests can point it at a local repository. */
 export interface RepoFetcher {
-  /** Fetches `ref` of `url` into the empty directory `into`; resolves to the commit. `signal` kills git. */
-  checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout>
+  /**
+   * Fetches `ref` of `url` into the empty directory `into`; resolves to the commit. `signal` kills git.
+   * With `subpath`, the checkout must hold that folder's files; other files may be missing.
+   */
+  checkout(url: string, ref: string, into: string, signal?: AbortSignal, subpath?: string): Promise<Checkout>
   /** Paths under `subpath` that are symlinks or submodules in the checked-out commit. */
   specialPaths(checkout: Checkout, subpath: string): Promise<string[]>
 }
@@ -56,7 +75,16 @@ export function withoutUserinfo(text: string): string {
 
 export class FetchError extends Error {
   override name = 'FetchError'
+  /** git ran past the time limit. */
+  readonly timedOut: boolean
+  constructor(message: string, timedOut = false) {
+    super(message)
+    this.timedOut = timedOut
+  }
 }
+
+/** A folder git may read as a literal sparse-checkout pattern: source.ts `normaliseRepoPath`'s alphabet. */
+const SPARSE_PATH_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]*(\/[A-Za-z0-9_][A-Za-z0-9._-]*)*$/
 
 const PASSTHROUGH_ENV = [
   'HTTPS_PROXY',
@@ -126,23 +154,58 @@ export class GitFetcher implements RepoFetcher {
       if ((err as Error).name === 'AbortError') throw err
       const e = err as { stderr?: string; killed?: boolean; code?: unknown; message: string }
       if (e.code === 'ENOENT') throw new FetchError('git is not installed in the agent image')
-      if (e.killed) throw new FetchError(`git ${args[0]} timed out after ${this.timeoutMs} ms`)
+      if (e.killed) throw new FetchError(`git ${args[0]} timed out after ${this.timeoutMs} ms`, true)
       const detail = withoutUserinfo((e.stderr ?? e.message).trim().split('\n').slice(-3).join(' ')).slice(0, 500)
       throw new FetchError(`git ${args[0]} failed: ${detail}`)
     }
   }
 
-  async checkout(url: string, ref: string, into: string, signal?: AbortSignal): Promise<Checkout> {
+  async checkout(url: string, ref: string, into: string, signal?: AbortSignal, subpath = ''): Promise<Checkout> {
+    if (subpath && SPARSE_PATH_RE.test(subpath)) {
+      try {
+        return await this.sparseCheckout(url, ref, into, subpath, signal)
+      } catch (err) {
+        if (!(err instanceof FetchError) || err.timedOut) throw err
+        await rm(into, { recursive: true, force: true })
+      }
+    }
     await mkdir(into, { recursive: true })
     await this.git_(into, ['init', '-q'], signal)
     await this.git_(into, ['fetch', '-q', '--depth', '1', '--no-tags', '--no-recurse-submodules', url, ref], signal)
+    const commit = await this.fetchedCommit(into, ref, signal)
+    await this.git_(into, ['checkout', '-q', '--detach', commit], signal)
+    return { commit, dir: into }
+  }
+
+  /** The commit and its trees, and the blobs under `subpath` only (the header comment). */
+  private async sparseCheckout(url: string, ref: string, into: string, subpath: string, signal?: AbortSignal): Promise<Checkout> {
+    await mkdir(into, { recursive: true })
+    await this.git_(into, ['init', '-q'], signal)
+    await this.git_(into, ['remote', 'add', 'origin', url], signal)
+    await this.git_(into, ['config', 'remote.origin.promisor', 'true'], signal)
+    await this.git_(into, ['config', 'remote.origin.partialclonefilter', 'blob:none'], signal)
+    await this.git_(
+      into,
+      ['fetch', '-q', '--depth', '1', '--no-tags', '--no-recurse-submodules', '--filter=blob:none', 'origin', ref],
+      signal,
+    )
+    const commit = await this.fetchedCommit(into, ref, signal)
+    // No-cone mode: `/<subpath>/` is exactly that folder and everything under it.
+    await this.git_(into, ['config', 'core.sparseCheckout', 'true'], signal)
+    await this.git_(into, ['config', 'core.sparseCheckoutCone', 'false'], signal)
+    await mkdir(path.join(into, '.git', 'info'), { recursive: true })
+    await writeFile(path.join(into, '.git', 'info', 'sparse-checkout'), `/${subpath}/\n`)
+    await this.git_(into, ['checkout', '-q', '--detach', commit], signal)
+    return { commit, dir: into }
+  }
+
+  private async fetchedCommit(into: string, ref: string, signal?: AbortSignal): Promise<string> {
     const commit = (await this.git_(into, ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'], signal)).trim()
     if (!COMMIT_RE.test(commit)) throw new FetchError(`git returned "${commit.slice(0, 80)}" as the commit`)
     if (COMMIT_RE.test(ref) && ref !== commit) {
       throw new FetchError(`asked for commit ${ref}, the remote returned ${commit}`)
     }
-    await this.git_(into, ['checkout', '-q', '--detach', commit], signal)
-    return { commit, dir: into }
+    return commit
   }
 
   async specialPaths(checkout: Checkout, subpath: string): Promise<string[]> {

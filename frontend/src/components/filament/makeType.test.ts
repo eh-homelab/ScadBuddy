@@ -151,10 +151,11 @@ describe('linksBookRow (#7159): the server links a book row by names, RGB and al
 })
 
 describe('linkTypeToBook (#7159 R-7159-4)', () => {
-  it('sends only the row cost per kg', async () => {
+  it('sends only the row cost per kg, on the cost route (#7703)', async () => {
     const bodies: Promise<unknown>[] = []
     server.events.on('request:start', ({ request }) => {
-      if (request.method === 'PATCH') bodies.push(request.clone().json())
+      if (request.method === 'PUT' && new URL(request.url).pathname === `/api/v1/filament/types/${T.GOLD}/cost-per-kg`) bodies.push(request.clone().json())
+      if (request.method === 'PATCH') bodies.push(Promise.resolve('a PATCH: the checked save'))
     })
     try {
       const linked = await linkTypeToBook(typeOf({ id: T.GOLD, code: 'EL-PLA-SILK-GOLD' }), { cost_per_kg: '22.5000' })

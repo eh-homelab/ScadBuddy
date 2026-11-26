@@ -1,8 +1,8 @@
 import { z } from 'zod'
-import { binary } from './binary.js'
+import { binaryImage } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraOf, cameraQuery, slug, VIEW, withQuery } from './common.js'
-import { defineTool, image, json, ToolError, type Tool } from './registry.js'
+import { defineTool, json, ToolError, type Tool } from './registry.js'
 
 // Looking at a model while authoring it (issue #252): the language server's
 // parse errors as data, and one picture per colour of a render. Routes:
@@ -91,7 +91,7 @@ export const inspectTools: Tool[] = [
         view,
         ...(cameraOf(camera) ? { camera: cameraOf(camera) } : {}),
       }
-      const drawn = await binary(
+      const drawn = await binaryImage(
         Promise.resolve(answered),
         `draw colours of ${job_id}`,
         ctx,
@@ -100,10 +100,9 @@ export const inspectTools: Tool[] = [
           name: `${job_id}-colours.png`,
           fallbackType: 'image/png',
         },
-        (bytes, mimeType) => image(bytes, mimeType),
       )
       // The legend is the only way to read the grid, so it comes first whether the
-      // image is inline or, too large for that, a link (#750 review).
+      // image is inline or, too large for that, a workspace file (#750 review, #7745).
       return { ...drawn, content: [...json(legend).content, ...drawn.content] }
     },
   }),

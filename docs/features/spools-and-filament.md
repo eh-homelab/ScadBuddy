@@ -350,7 +350,16 @@ matches `[a-z][a-z0-9_]{0,63}`. Limits: 200 keys per entity, 2000 characters per
   `missing_properties` and `invalid_properties` (keys only); an archived row is never
   marked. `PATCH /entities/{ref}/properties` refuses removing or emptying a required key
   that has a value (`backend/scadbuddy/entities/required.py`). Items and item kinds follow
-  once the base-kind design settles; the UI follows in its own change.
+  once the base-kind design settles.
+- In the UI, a kind's key table has a Required column for those kinds. Ticking it shows how
+  many live rows lack the key. The spool, type and catalog forms show the defined keys as
+  fields, required ones first and marked. A refused save marks each missing or ill-fitting
+  field and says "Fill the required properties first". The Spools, Types and catalog lists
+  mark an incomplete row and filter to them ("Incomplete"). "Create type from this spool",
+  the price book's "Make a type" and a new tag's "Create a spool from this tag" ask for the
+  required keys before they make the row. "Reset to type", the bulk bar's type and linking
+  a type to a price book row use the unchecked routes, so they work on an incomplete row
+  (`frontend/src/components/entities/DefinedFields.tsx`, `RequiredKeysDialog.tsx`).
 - `item` is the exception (#7067). An item's properties follow its item kind's
   `attribute_schema`, merged down the kind tree (a child kind's key wins;
   `backend/scadbuddy/inventory/kinds.py` `item_schema`). An item kind's schema is set on the

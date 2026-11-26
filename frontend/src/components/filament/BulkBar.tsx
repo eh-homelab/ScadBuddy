@@ -2,7 +2,7 @@ import { ChevronDownIcon } from 'lucide-react'
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ApiError } from '../../api/client'
-import { bulkArchiveSpools, deleteSpool, getSpool, moveSpool, patchSpool, type Spool, type SpoolType } from '../../api/filament'
+import { bulkArchiveSpools, bulkUpdateSpools, deleteSpool, getSpool, moveSpool, type Spool, type SpoolType } from '../../api/filament'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -142,7 +142,7 @@ export function BulkBar({ selected, places, types, onDone, onClear }: Props) {
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="max-h-72 overflow-y-auto">
           {types.map((type) => (
-            <DropdownMenuItem key={type.id} onSelect={() => void run((n) => `Set ${type.code} on ${n}`, (s) => patchSpool(s.id, { type_id: type.id }).then(() => {}))}>
+            <DropdownMenuItem key={type.id} onSelect={() => void run((n) => `Set ${type.code} on ${n}`, (s) => bulkUpdateSpools([s.id], { type_id: type.id }).then(() => {}))}>
               {type.code}
               {type.colour_name && <span className="text-muted-foreground">{type.colour_name}</span>}
             </DropdownMenuItem>

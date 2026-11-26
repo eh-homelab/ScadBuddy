@@ -561,7 +561,7 @@ def test_the_answer_route_refuses_a_service_caller(
     for headers in ({"Authorization": f"Bearer {issued.token}"}, AGENT):
         response = post(client, task, GOOD, **headers)
         assert response.status_code == 403, response.text
-        assert response.json()["type"].endswith("/flow-entry-browser-only")
+        assert response.json()["type"].endswith("/flow-answer-not-allowed")
         # Who asks is checked before the size.
         assert post(client, task, {"note": "x" * 17 * 1024}, **headers).status_code == 403
     assert rows.task(task)[0] == "open"
