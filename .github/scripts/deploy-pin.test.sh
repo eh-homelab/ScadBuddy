@@ -573,23 +573,24 @@ else
 fi
 fl_manifest=
 
-# 8a''''. The camera relay, recorder and live edge (#7997), each in its own
-#       file under applications/scadbuddy-camera/ with two containers on one
-#       image: both lines move, and the comment that names the API build moves
-#       with them. Optional until clusters has the files; a build with no
-#       camera image keeps that file's pins (the `camera` job is
-#       continue-on-error), and the final check reads that directory too.
+# 8a''''. The camera recorders and live edge (#7997), each in its own file
+#       under applications/scadbuddy-camera/ with two containers on one image:
+#       both lines move, and the comment that names the API build moves with
+#       them. Optional until clusters has the files; a build with no image for a
+#       part keeps that file's pins (the `camera` job is continue-on-error). The
+#       relay is never moved: its pin moves by hand (camera spec §6.1), so any
+#       relay pin passes in camera-relay.yaml and fails anywhere else.
+#       CAMERA_RELAY_DIGEST stays set, so a relay that moved would show here.
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
-  grep -q '^camera_relay=none$' "$work/out" || fail "no camera files: relay output is not none"
+  grep -q '^camera_recorder=none$' "$work/out" || fail "no camera files: recorder output is not none"
   grep -q '^camera_edge=none$' "$work/out" || fail "no camera files: edge output is not none"
 else
   fail "no camera files: step failed: $(grep '::error' "$work/log")"
 fi
 cameras=1
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
-  for part in relay recorder edge; do
+  for part in recorder edge; do
     case "$part" in
-      relay) want="$CAMERA_RELAY_IMAGE:$VERSION@$CAMERA_RELAY_DIGEST" ;;
       recorder) want="$CAMERA_RECORDER_IMAGE:$VERSION@$CAMERA_RECORDER_DIGEST" ;;
       edge) want="$CAMERA_EDGE_IMAGE:$VERSION@$CAMERA_EDGE_DIGEST" ;;
     esac
@@ -601,24 +602,39 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
     grep -q "^camera_$part=pinned$" "$work/out" || fail "cameras: $part output is not pinned"
     grep -q "^files=.*$file" "$work/out" || fail "cameras: $part not among the changed files"
   done
+  (cd "$work/repo" && git diff --quiet HEAD -- "$MANIFEST_CAMERA_RELAY") \
+    || fail "cameras: the relay's file was rewritten: $(cd "$work/repo" && git diff HEAD -- "$MANIFEST_CAMERA_RELAY")"
+  grep -q "$MANIFEST_CAMERA_RELAY" "$work/out" && fail "cameras: the relay's file is listed as changed"
+  grep -q '^camera_relay=' "$work/out" && fail "cameras: the step reports a relay state"
   rerun || fail "cameras: rerun failed: $(grep '::error' "$work/log")"
   grep -qx 'unchanged=true' "$work/out" || fail "cameras: rerun expected unchanged=true"
 else
   fail "cameras: step failed: $(grep '::error' "$work/log")"
 fi
-# No relay image for this build: the relay keeps both its pins and its
-# comment, and warns; the other two still move.
-if CAMERA_RELAY_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
-  n=$(grep -cF "image: $CAMERA_RELAY_IMAGE:$cam_old" "$work/repo/$MANIFEST_CAMERA_RELAY" || true)
-  [ "$n" -eq 2 ] || fail "camera relay, no image: $n old pins kept, expected 2"
-  grep -qF "the build of the API's sha-1111111." "$work/repo/$MANIFEST_CAMERA_RELAY" \
-    || fail "camera relay, no image: comment moved without the pins"
-  grep -q '^camera_relay=kept$' "$work/out" || fail "camera relay, no image: output is not kept"
-  grep -q '::warning.*keeping the camera-relay pins' "$work/log" || fail "camera relay, no image: no warning: $(cat "$work/log")"
-  grep -q "$MANIFEST_CAMERA_RELAY" "$work/out" && fail "camera relay, no image: kept file listed as changed"
-  grep -q '^camera_edge=pinned$' "$work/out" || fail "camera relay, no image: edge output is not pinned"
+# A relay pin by hand, with any tag, passes in the relay's own file.
+extra_path=$MANIFEST_CAMERA_RELAY
+extra_content=$(deployment scadbuddy-camera-relay "$CAMERA_RELAY_IMAGE:by-hand" "$CAMERA_RELAY_IMAGE:sha-9999999@sha256:$(printf '9a%.0s' {1..32})")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  (cd "$work/repo" && git diff --quiet HEAD -- "$MANIFEST_CAMERA_RELAY") \
+    || fail "relay pin by hand: the relay's file was rewritten"
 else
-  fail "camera relay, no image: step failed: $(grep '::error' "$work/log")"
+  fail "relay pin by hand: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path=
+extra_content=
+# No edge image for this build: the edge keeps both its pins and its comment,
+# and warns; the recorder still moves.
+if CAMERA_EDGE_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  n=$(grep -cF "image: $CAMERA_EDGE_IMAGE:$cam_old" "$work/repo/$MANIFEST_CAMERA_EDGE" || true)
+  [ "$n" -eq 2 ] || fail "camera edge, no image: $n old pins kept, expected 2"
+  grep -qF "the build of the API's sha-1111111." "$work/repo/$MANIFEST_CAMERA_EDGE" \
+    || fail "camera edge, no image: comment moved without the pins"
+  grep -q '^camera_edge=kept$' "$work/out" || fail "camera edge, no image: output is not kept"
+  grep -q '::warning.*keeping the camera-edge pins' "$work/log" || fail "camera edge, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_CAMERA_EDGE" "$work/out" && fail "camera edge, no image: kept file listed as changed"
+  grep -q '^camera_recorder=pinned$' "$work/out" || fail "camera edge, no image: recorder output is not pinned"
+else
+  fail "camera edge, no image: step failed: $(grep '::error' "$work/log")"
 fi
 # The two containers must run one image: one line alone, or two that differ, fail.
 cam_edge_line="ghcr.io/eh-homelab/temporal-server:1.32.1"
@@ -636,14 +652,15 @@ else
     || fail "two different camera-edge lines: wrong error: $(grep '::error' "$work/log")"
 fi
 cam_edge_line=
-# A kept relay pin is allowed in the relay's file only.
+# A relay pin is allowed in the relay's file only: in another file of the
+# camera directory it fails.
 extra_path=$CAMERA_DIR/camera-other.yaml
 extra_content=$(deployment scadbuddy-camera-other "$CAMERA_RELAY_IMAGE:$cam_old")
-if CAMERA_RELAY_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
-  fail "kept relay pin in another file: step passed, expected an error"
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "relay pin in another file: step passed, expected an error"
 else
   grep -qF "file=$extra_path::names $CAMERA_RELAY_IMAGE:$cam_old, which this deploy does not move" "$work/log" \
-    || fail "kept relay pin in another file: wrong error: $(grep '::error' "$work/log")"
+    || fail "relay pin in another file: wrong error: $(grep '::error' "$work/log")"
 fi
 extra_path=
 extra_content=
