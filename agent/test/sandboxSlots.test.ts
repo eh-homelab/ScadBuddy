@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BG_FINISH, type BackgroundActivityDeps, backgroundActivities } from '../src/background/activities.js'
 import { followSlot, NOTICE_PATHS_MAX, shellNotice } from '../src/background/sandboxSource.js'
 import { type BackgroundTask, NOTICE_MAX_CHARS } from '../src/background/store.js'
 import type { BackgroundContext } from '../src/builtins/background.js'
@@ -540,6 +541,26 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       pod.closeAllConnections()
       await new Promise((r) => pod.close(r))
     }
+  })
+
+  it("reads a task back at its finish only for a monitor, and stops a monitor's slot", async () => {
+    const { slot } = await startInSandbox(call(), 'bash', 'sleep 60', 60_000)
+    const t = task({ sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } })
+    let gets = 0
+    const store = {
+      finish: async () => true,
+      get: async () => (gets++, t),
+    }
+    const finish = backgroundActivities({ store, sandbox: deps() } as unknown as BackgroundActivityDeps)[BG_FINISH]
+    // Another kind's end (a cron, a wakeup, a Workflow) holds no slot: nothing is read back.
+    await finish({ taskId: t.id, state: 'done', monitor: false })
+    expect(gets).toBe(0)
+    const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, AbortSignal.timeout(10_000))
+    expect(await client.slotStatus(slot.id)).toMatchObject({ running: true })
+    // A monitor's end, and one from a workflow started before `monitor` was sent: read back, its slot stopped.
+    await finish({ taskId: t.id, state: 'done' })
+    expect(gets).toBe(1)
+    expect(await client.slotStatus(slot.id)).toBeUndefined()
   })
 
   it("ends with a clear reason when the session's pod is gone", async () => {
