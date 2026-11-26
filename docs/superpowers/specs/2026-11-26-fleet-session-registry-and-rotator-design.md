@@ -235,13 +235,26 @@ Where the accounts live:
   each pid is alive with the same `procStart`, and sends the registry rows.
 - On a rate limit of the config dir's current credential:
   1. Send the event (§6.2). Ask for a lease on the next usable credential.
-  2. Before it writes, read the current `claudeAiOauth` back and write it to the old row,
-     then release the old lease.
-  3. Take Claude Code's locks (`.oauth_refresh.lock`, the legacy lock, `.storage-write`, with the
-     proper-lockfile convention), write the new `claudeAiOauth` to a 0600 temp file in the dir,
-     rename it over `.credentials.json`, and update `oauthAccount` in `~/.claude.json` the same
-     way (temp file and rename, other keys kept).
-  4. Record the rotation, then send continue (§6.7).
+  2. Take Claude Code's locks: `.oauth_refresh.lock`, the legacy `<dir>.lock` and
+     `.storage-write`, with the proper-lockfile convention. While they are held, no session can
+     refresh or write the login (§3).
+  3. Inside the locks, read the current `claudeAiOauth` back. It holds the live refresh token.
+     Write it to the old row (`PUT /leases/{credential}`). If that write fails, release the locks
+     and stop: the file is not changed, and the old lease is kept.
+  4. Still inside the locks, write the new `claudeAiOauth` to a 0600 temp file in the dir and
+     rename it over `.credentials.json`.
+  5. Release the locks. Only then release the old lease (`DELETE /leases/{credential}`), so no
+     other machine can take that login while this machine's sessions can still use or refresh
+     it.
+  6. Update `oauthAccount` in `~/.claude.json`, best effort (below).
+  7. Record the rotation, then send continue (§6.7).
+- `~/.claude.json` has no lock that the service can share. No lock around its writes was found
+  in Claude Code 2.1.332's code (read 2026-11-26), and Claude Code rewrites the file often. The
+  service reads the file, changes only `oauthAccount` (other keys kept), writes a temp file and
+  renames it. Then it reads the file again, and tries again (at most 3 times) if `oauthAccount`
+  is not the new one. If it still loses the race, it logs that and goes on: sessions switch on
+  the `.credentials.json` mtime alone, as #7982 measured, and the `oauthAccount` change only
+  starts the faster sibling-login check (§3).
 - While it holds a lease it writes the login back after each refresh (a change of
   `.credentials.json`'s mtime that it did not cause), so the pool keeps the live refresh token.
 - When no credential is usable, it records that, waits until the soonest `recovers_at`, and
@@ -265,9 +278,18 @@ Where the accounts live:
 
 ### 6.8 The fleet's API and tools
 
-- The fleet server (`tools/go/fleet`) adds HTTP routes beside `/mcp`, with the same auth as `/mcp`
-  (#7971 part 8): `GET /api/sessions` (the registry, with credential names), `GET /api/rotations`,
-  and `POST /api/continue` (all, one machine or one session).
+- The fleet server (`tools/go/fleet`) adds HTTP routes beside `/mcp`: `GET /api/sessions` (the
+  registry, with credential names), `GET /api/rotations`, and `POST /api/continue` (all, one
+  machine or one session).
+- Their auth is that of `/mcp`, which is none: the server is open to the LAN and the cluster
+  only, never the internet, by the owner's decision of 2026-11-26 (`tools/go/fleet/README.md`,
+  "Binary"). So these routes are held to what is safe to show on the LAN:
+  - Reads give the session's machine, paths, git facts, and the credential's id, name, kind and
+    last four characters. Never a secret, a token or an email.
+  - `POST /api/continue` takes only a target (all, a machine id, or a session id). The text is
+    the fixed continue message from `rotator` (§6.7); a caller cannot supply text. It is rate
+    limited to once a minute per target **(call)**.
+  - When sender authentication lands (#7927), these routes take it too.
 - MCP tool `fleet_sessions`: the same registry, so a session can see who runs where and on which
   account.
 - No route of the fleet server reveals or accepts a secret.
