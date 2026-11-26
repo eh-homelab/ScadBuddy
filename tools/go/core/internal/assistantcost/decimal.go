@@ -28,6 +28,8 @@ var (
 	specialValue = regexp.MustCompile(`(?i)^[+-]?(inf|infinity|s?nan\d*)$`)
 )
 
+const maxExponent = 1_000_000_000
+
 func pow10(n int) *big.Int { return new(big.Int).Exp(ten, big.NewInt(int64(n)), nil) }
 
 func digits(n *big.Int) int { return len(n.String()) }
@@ -53,7 +55,9 @@ func ParseDecimal(text string) (d Decimal, special, ok bool) {
 		if err != nil {
 			return Decimal{}, false, false
 		}
-		exp += e
+		// Clamped so no sum of exponents and digit counts overflows; past
+		// ±10**9 every bound answers the same.
+		exp += max(-maxExponent, min(e, maxExponent))
 	}
 	return Decimal{neg: m[1] == "-", coef: coef, exp: exp}, false, true
 }

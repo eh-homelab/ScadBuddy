@@ -12,6 +12,8 @@ func TestAHugeExponentIsRefusedWithoutBeingExpanded(t *testing.T) {
 		{`"1e999999999"`, "Input should be less than or equal to 1000000"},
 		{`"-1e999999999"`, "Input should be greater than or equal to 0"},
 		{`"0e999999999"`, ""},
+		{`"1e9223372036854775807"`, "Input should be less than or equal to 1000000"},
+		{`"0.1e-9223372036854775808"`, "Decimal input should have no more than 8 decimal places"},
 		{`"1e6"`, ""},
 		{`"1.000001e6"`, "Input should be less than or equal to 1000000"},
 		{`"100000000.123456789"`, "Decimal input should have no more than 8 decimal places"},
