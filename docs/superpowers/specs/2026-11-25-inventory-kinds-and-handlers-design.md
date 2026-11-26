@@ -438,8 +438,11 @@ gives us the visibility into the Activities tab in SB".
   fail. So the printer merge locks the gone printer's row `FOR UPDATE`, then checks
   whether a stock row names it; if one does, it rolls back, and the workflow executes
   `inventory.Repoint` again (with a new key per round) and runs the merge again. There is
-  no cap: only a stock write racing the merge repeats it, and the workflow ends only once
-  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). A round repeats only
+  no cap: only a stock write racing the merge repeats it. The workflow ends when the merge
+  commits, or when the merge step refuses (one of the caller's checks fails): then it
+  executes `inventory.Repoint` back, for exactly the rows it moved, and the run fails with
+  that problem, so the same id can start again (owner, 2026-11-25; plan K1, R-K1-29,
+  R-K1-32). A round repeats only
   after a new stock write named the gone printer, and the workflow waits between rounds
   (`workflow.sleep`, doubling from 1 s to 60 s), so a busy stock writer cannot spin it. The callers that need the
   kept row (`link_bambuddy`, `ensure_bambuddy_written`) wait on the workflow's result.
