@@ -50,11 +50,11 @@ PIPELINE_TIMEOUT_FACTOR = 4
 
 #: Library clones at once, in the API and the render worker alike.
 INSTALL_CONCURRENCY = 2
-# The event log (Postgres only) is for Last-Event-ID replay after a short disconnect,
-# not an audit trail: a day of events, and never more than this many rows. 0 is no
-# limit on that dimension.
-DEFAULT_EVENT_LOG_RETENTION_SECONDS = 86400.0
-DEFAULT_EVENT_LOG_RETENTION_ROWS = 100_000
+# The event log (Postgres only) keeps every event by default: no age limit and no row
+# cap. 0 is no limit on that dimension. A per-kind rule and an event's own
+# `retention_seconds` can still age rows out (`pg_events.py` `prune_log`).
+DEFAULT_EVENT_LOG_RETENTION_SECONDS = 0.0
+DEFAULT_EVENT_LOG_RETENTION_ROWS = 0
 # The editor's parse check does not go through the render queue, so it carries its own
 # budget rather than borrowing the render one: the pod's worst case is the two added
 # together, and that is a number worth declaring rather than discovering. One is

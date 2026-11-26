@@ -68,8 +68,10 @@ func (a *Reads) gap(r *http.Request, _ crud.Params) (any, error) {
 	events := []loggedEvent{}
 	var clock time.Time
 	err = pgx.BeginFunc(ctx, a.Pool, func(tx pgx.Tx) error {
+		// The fleet's kinds name its session ids, its only identity: they are for the fleet
+		// caller alone (#7818), as in the agent's change stream (crud_agent_changes.py).
 		rows, err := tx.Query(ctx, `SELECT seq::text, event_id, payload, logged_at FROM events
-			WHERE seq > $1 ORDER BY seq DESC LIMIT $2`, after, limit)
+			WHERE seq > $1 AND left(kind, 6) <> 'fleet.' ORDER BY seq DESC LIMIT $2`, after, limit)
 		if err != nil {
 			return err
 		}

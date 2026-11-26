@@ -30,8 +30,9 @@ copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gate
 workflow: every other job is `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
-a `main.go` (`build-go-image.yml:46`, `:133`): today `scadbuddy-bambuddy-fs` only. Nothing
-deploys it ([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
+a `main.go`, except core (`build-go-image.yml:46`, `:133`), as
+`ghcr.io/eh-homelab/scadbuddy-<module>`. Nothing in this repo deploys them
+([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
 `tools/go/core`: `build-image.yml`'s `core` job publishes `scadbuddy-core` with every
 build, and the deploy pins it (#7667).
 
