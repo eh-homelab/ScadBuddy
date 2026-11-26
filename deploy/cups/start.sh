@@ -22,14 +22,6 @@
 #                no custom size, so a print dialog offers nothing else. DEVICE-URI is usually
 #                zebra://HOST:9100?length=DOTS, which holds a job until the loaded
 #                labels match (deploy/cups/zebra). The first queue is the default.
-#   CUPS_SNMP_SUBNETS
-#                CIDRs whose printers "Find New Printers" finds, space-separated
-#                (172.16.0.0/24 172.16.5.0/24). CUPS's snmp backend asks only the
-#                addresses in snmp.conf, and its default, the pod's own broadcast
-#                address, reaches no LAN, nor does mDNS; so snmp.conf lists every
-#                host address of these subnets, which it asks by unicast (community
-#                public). At most 1024 addresses in all. Unset, snmp.conf is left as
-#                it is.
 #   CUPS_ADMIN_PASSWORD_FILE
 #                a file holding the password of the web page's and IPP's `admin`
 #                user (default /run/secrets/cups-admin/password, a mounted Secret).
@@ -39,6 +31,11 @@ set -eu
 state=/var/lib/cups
 mkdir -p "$state/etc/ppd" "$state/spool/tmp" "$state/cache"
 cp -Rn /usr/local/share/scadbuddy-cups/server-root/. "$state/etc/"
+# snmp.conf is configuration, not state: /etc/cups/snmp.conf (the image's, or a file
+# mounted over it, deploy/cups/README.md "Finding printers") replaces the ServerRoot
+# copy at every start. A mount inside the state volume would make its parent directory
+# root's on a new volume, and then etc/ppd could not be created.
+cp /etc/cups/snmp.conf "$state/etc/snmp.conf"
 
 # pam_pwdfile's file (the image's /etc/pam.d/cups): `admin:` and the password's crypt.
 admin_file=${CUPS_ADMIN_PASSWORD_FILE:-/run/secrets/cups-admin/password}
@@ -47,45 +44,6 @@ if [ -s "$admin_file" ]; then
   (umask 077 && printf 'admin:%s\n' "$(head -n1 "$admin_file" | tr -d '\r\n' | openssl passwd -6 -stdin)" > "$state/etc/admin.passwd")
 else
   echo "no admin password at $admin_file: admin logins are refused" >&2
-fi
-
-# snmp.conf from CUPS_SNMP_SUBNETS: one Address line per host address.
-if [ -n "${CUPS_SNMP_SUBNETS:-}" ]; then
-  addresses=()
-  for cidr in $CUPS_SNMP_SUBNETS; do
-    if ! [[ "$cidr" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]]; then
-      echo "CUPS_SNMP_SUBNETS: $cidr is not an IPv4 CIDR" >&2
-      exit 1
-    fi
-    bits=${BASH_REMATCH[5]}
-    ip=0
-    for i in 1 2 3 4; do
-      octet=$((10#${BASH_REMATCH[$i]}))
-      if [ "$octet" -gt 255 ]; then echo "CUPS_SNMP_SUBNETS: $cidr is not an IPv4 CIDR" >&2; exit 1; fi
-      ip=$(((ip << 8) | octet))
-    done
-    if [ "$bits" -lt 22 ] || [ "$bits" -gt 32 ]; then
-      echo "CUPS_SNMP_SUBNETS: $cidr is wider than /22 or not a prefix" >&2
-      exit 1
-    fi
-    size=$((1 << (32 - bits)))
-    first=$((ip & ~(size - 1) & 0xFFFFFFFF))
-    last=$((first + size - 1))
-    # A /31 or /32 has no network or broadcast address to leave out.
-    if [ "$bits" -lt 31 ]; then first=$((first + 1)); last=$((last - 1)); fi
-    for ((a = first; a <= last; a++)); do
-      addresses+=("$((a >> 24 & 255)).$((a >> 16 & 255)).$((a >> 8 & 255)).$((a & 255))")
-    done
-  done
-  if [ "${#addresses[@]}" -gt 1024 ]; then
-    echo "CUPS_SNMP_SUBNETS names ${#addresses[@]} addresses; at most 1024" >&2
-    exit 1
-  fi
-  {
-    echo "# Written by start.sh from CUPS_SNMP_SUBNETS ($CUPS_SNMP_SUBNETS) at every start."
-    echo "Community public"
-    printf 'Address %s\n' "${addresses[@]}"
-  } > "$state/etc/snmp.conf"
 fi
 
 run_cupsd() {

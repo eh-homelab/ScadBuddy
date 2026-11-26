@@ -80,14 +80,15 @@ never cancelled for the wrong labels. Only that queue waits; the others print.
 - No mDNS: AirPrint discovery does not cross into the cluster, so a phone or computer adds
   the printer by that URL.
 - Finding printers: the admin page's "Find New Printers" lists what CUPS's `snmp`
-  backend finds. Its default asks the pod's own broadcast address, and mDNS stays on its
-  own segment, so neither reaches a LAN printer from the cluster. With
-  `CUPS_SNMP_SUBNETS` set (CIDRs, /22 or narrower, at most 1024 addresses in all),
-  `start.sh` writes `snmp.conf` listing every host address, and the backend asks each
-  one by unicast SNMP (community `public`), which crosses VLANs. Measured 2026-11-26 from
-  the prod pod over 172.16.0.0/24: it found the Zebra as `socket://172.16.0.53`
-  ("Zebra Technologies ZTC GK420t") in about 2 s. A printer with SNMP off is not found;
-  add it by URI.
+  backend finds. Its default asks only the pod's own broadcast address, and mDNS stays on
+  its own segment, so neither reaches a LAN printer from the cluster. Mount an
+  `snmp.conf` over `/etc/cups/snmp.conf` (a ConfigMap, `subPath`) with one `Address`
+  line per printer-subnet host; `start.sh` copies it into `/var/lib/cups/etc` at every
+  start, and the backend asks each address by unicast SNMP (community `public`), which
+  crosses VLANs. Without a mount, the image's default (`Address @LOCAL`) applies. Measured
+  2026-11-26 from the prod pod over 172.16.0.0/24: it found the Zebra as
+  `socket://172.16.0.53` ("Zebra Technologies ZTC GK420t") in about 2 s. A printer with
+  SNMP off is not found; add it by URI.
 - Queues added on the admin page are kept: with `CUPS_QUEUES` set, `start.sh` rewrites
   only the queues it declared (listed in `/var/lib/cups/etc/scadbuddy-queues`), removes
   one dropped from `CUPS_QUEUES`, and keeps the first `CUPS_QUEUES` queue the default.
