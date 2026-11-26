@@ -1505,6 +1505,32 @@ async def test_one_tick_reads_the_ready_paths_once(tmp_path: Path, api: FakeCame
     await rig.recorder.aclose()
 
 
+async def test_concurrent_renewals_share_one_ready_paths_read(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """Each printer renews in its own loop: two stall checks whose reads overlap share the
+    one in flight (#7998)."""
+    api.printers = [P1, "p2"]
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    for name in (P1, "p2"):
+        await rig.recorder.tick(name)
+    rig.mtx.ready.update({P1: True, "p2": True})
+    real = rig.recorder._mtx.ready
+    calls: list[int] = []
+
+    async def ready() -> dict[str, bool]:
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        return await real()
+
+    rig.recorder._mtx.ready = ready  # type: ignore[method-assign]
+    rig.clock.now += 5
+    await asyncio.gather(rig.recorder.renew(P1), rig.recorder.renew("p2"))
+    assert len(calls) == 1
+    await rig.recorder.aclose()
+
+
 async def test_a_stall_release_is_counted(tmp_path: Path, api: FakeCamera) -> None:
     """Each stall release adds one to ``scadbuddy_camera_stall_releases_total``, so two
     recorders that both cannot index and hand the lease back and forth show it (#7998)."""

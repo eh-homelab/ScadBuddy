@@ -271,7 +271,7 @@ class Recorder:
         #: A full reconcile has put the API's paths in MediaMTX (`ready`).
         self._synced = False
         #: The last ``ready`` listing and when it was read (`_ready_paths`).
-        self._ready_cache: tuple[float, dict[str, bool]] | None = None
+        self._ready_cache: tuple[float, asyncio.Future[dict[str, bool]]] | None = None
 
     def __repr__(self) -> str:
         return f"Recorder(name={self._name!r}, printers={sorted(self._feeds)!r})"
@@ -832,6 +832,7 @@ class Recorder:
         # A stale answer names an end this recorder's own index calls left (`own_ends`);
         # any other end is another recorder's: the handover (D14).
         mine = {before, feed.own_end, feed.indexing, *feed.own_ends}
+        # An unsure end can only be this recorder's own commit, so it wins over the rest.
         if answer.indexed_until in feed.unsure_ends:
             self._confirm(feed, answer.indexed_until)
         elif answer.indexed_until not in mine:
@@ -870,18 +871,24 @@ class Recorder:
         await self._release(printer_id, feed)
 
     async def _ready_paths(self) -> dict[str, bool]:
-        """MediaMTX's ``ready`` flags, read at most once per half tick: the stall checks of
-        every printer in one tick share one listing (#7998)."""
+        """MediaMTX's ``ready`` flags, read at most once per half tick: stall checks within
+        it share that read, and one that comes while it is in flight waits for it (#7998).
+        A failed read is not kept."""
         now = self._clock()
-        if (
-            self._ready_cache is not None
-            and now - self._ready_cache[0] < (self._tick_seconds or TICK_SECONDS) / 2
-        ):
-            return self._ready_cache[1]
+        cached = self._ready_cache
+        if cached is None or now - cached[0] >= (self._tick_seconds or TICK_SECONDS) / 2:
+            cached = (now, asyncio.ensure_future(self._read_ready()))
+            self._ready_cache = cached
+        try:
+            return await asyncio.shield(cached[1])
+        except BaseException:
+            if self._ready_cache is cached and cached[1].done():
+                self._ready_cache = None
+            raise
+
+    async def _read_ready(self) -> dict[str, bool]:
         async with asyncio.timeout(CHECK_BUDGET):
-            ready = await self._mtx.ready()
-        self._ready_cache = (now, ready)
-        return ready
+            return await self._mtx.ready()
 
     async def upload(self, printer_id: str) -> None:
         """One upload pass: adopt unnamed files, then, while leading, upload and index the
