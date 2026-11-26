@@ -221,6 +221,51 @@ func TestABytesPinNeedsItsMirrorAndAHostedNameIsTaken(t *testing.T) {
 	expect(t, a.ok("GET", "/hosted-plugins/nope", "").raw, `{"plugin":null}`)
 }
 
+func TestACommitPinsMirrorIsRecordedMovedAndKeepsItsHold(t *testing.T) {
+	a := newAPI(t, packageAreas)
+	z1, z2 := strings.Repeat("d", 64), strings.Repeat("e", 64)
+	hold := func(sum string) {
+		a.sql(`INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ($1, 'plugin_package_mirror', $2)`,
+			"plugin-mirror-"+sum, "greeter/"+sum)
+	}
+	record := func(commit, hash, sum string) string {
+		return object("commit_sha", commit, "content_hash", hash, "bytes_sha256", sum)
+	}
+	a.do("POST", base+"/plugin-packages", install("greeter"))
+	expect(t, a.do("POST", base+"/plugin-packages/greeter/mirror", record(c1, h1, z1)).body["reason"], "mirror-missing")
+	hold(z1)
+	expect(t, a.do("POST", base+"/plugin-packages/greeter/mirror", record(c2, h1, z1)).body["reason"], "pin-mismatch")
+	expect(t, a.do("POST", base+"/plugin-packages/greeter/mirror", record(c1, h2, z1)).body["reason"], "pin-mismatch")
+	expect(t, a.do("POST", base+"/plugin-packages/nope/mirror", record(c1, h1, z1)).body["reason"], "package-not-found")
+	expect(t, a.do("POST", base+"/plugin-packages/greeter/mirror", record(c1, h1, "x")).status, 422)
+	recorded := a.ok("POST", "/plugin-packages/greeter/mirror", record(c1, h1, z1)).body
+	expect(t, recorded["mirror_sha256"], z1)
+	expect(t, recorded["pending_mirror_sha256"], nil)
+	expect(t, recorded["approved_at"], nil)
+	expect(t, a.count(`SELECT count(*) FROM events WHERE kind = 'plugin_packages.changed'`), 1)
+
+	a.ok("POST", "/plugin-packages/greeter/pending", pendingPin("greeter"))
+	hold(z2)
+	staged := a.ok("POST", "/plugin-packages/greeter/mirror", record(c2, h2, z2)).body
+	expect(t, staged["mirror_sha256"], z1)
+	expect(t, staged["pending_mirror_sha256"], z2)
+	discarded := a.ok("POST", "/plugin-packages/greeter/discard-pending", "").body
+	expect(t, discarded["pending_mirror_sha256"], nil)
+	a.ok("POST", "/plugin-packages/greeter/pending", pendingPin("greeter"))
+	expect(t, a.ok("GET", "/plugin-packages/greeter", "").body["package"].(map[string]any)["pending_mirror_sha256"], nil)
+	a.ok("POST", "/plugin-packages/greeter/mirror", record(c2, h2, z2))
+
+	// Past their grace, the holds a row names stay: the pin's and the re-pin's.
+	a.sql(`UPDATE blob_refs SET created_at = now() - interval '2 days'`)
+	a.do("POST", base+"/plugin-packages", install("other"))
+	expect(t, a.count(`SELECT count(*) FROM blob_refs WHERE holder_kind = 'plugin_package_mirror'`), 2)
+	approved := a.ok("POST", "/plugin-packages/greeter/approve", object("commit_sha", c2, "content_hash", h2)).body
+	expect(t, approved["mirror_sha256"], z2)
+	expect(t, approved["pending_mirror_sha256"], nil)
+	expect(t, a.text(`SELECT string_agg(holder_id, ',') FROM blob_refs WHERE holder_kind = 'plugin_package_mirror'`),
+		"greeter/"+z2)
+}
+
 func TestAFeedListsItsPackagesAtTheirPins(t *testing.T) {
 	a := newAPI(t, packageAreas)
 	a.do("POST", base+"/plugin-packages", install("one"))

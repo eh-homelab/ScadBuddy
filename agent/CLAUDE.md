@@ -613,8 +613,15 @@ opens every one and seals it again byte for byte).
     `src/routes/pluginPackages.ts`). Postgres holds the pin (a commit, or for an archive
     or npm package the file's sha256, `pin_kind` `bytes`, plus the content hash);
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
-    re-fetched from the pin: a commit from git, a bytes pin from its mirror in the
-    API's area `package-mirrors` (`mirror.ts`), never upstream. Downloads go through
+    re-fetched from the pin: a bytes pin from its mirror in the API's area
+    `package-mirrors` (`mirror.ts`), never upstream; a commit from its mirror there too
+    when the row records one (#7907: `mirror_sha256`, or `pending_mirror_sha256` for a
+    re-pin, a deterministic zip of the files, `zip.ts`, used only when its files hash to
+    the pin), else from git. Install and re-pin send that zip and record it once the pin
+    is stored (`recordPreparedMirror`), and a load that had to fetch git sends and records
+    it after the fetch, without waiting (`mirrorsSent` in tests); a mirror that cannot be
+    read falls back to git, and one that cannot be sent is only logged. A package past the
+    unpack caps is not mirrored. Downloads go through
     the egress check at every hop (`download.ts`), archives are unpacked by
     `unpack.ts` (no links, devices or paths out). Install stores the pin unapproved;
     approving needs the exact commit (or `bytes_sha256`, or `version`) and hash. `vet.ts` adds rules

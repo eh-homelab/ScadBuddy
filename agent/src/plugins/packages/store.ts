@@ -8,8 +8,9 @@ import type { PackageReview } from './vet.js'
 // `ai_plugin_packages` (backend/scadbuddy/migrations_agent/20260928T0750Z_plugin_packages.sql,
 // 20261122T0323Z_plugin_package_pins.sql): the one authoritative record of an installed
 // plugin package. What is on disk (install.ts) is rebuilt from the pin, and used only when
-// it hashes to `content_hash`: a commit pin (`pin_kind` `commit`) from `fetch_url`,
-// `fetch_path` and `commit_sha`; a bytes pin (`bytes`, #6935: an archive or npm package)
+// it hashes to `content_hash`: a commit pin (`pin_kind` `commit`) from its recorded mirror
+// (`mirror_sha256`, #7907: a zip of its files in the API's area `package-mirrors`), else
+// from `fetch_url`, `fetch_path` and `commit_sha`; a bytes pin (`bytes`, #6935: an archive or npm package)
 // from the mirrored file `bytes_sha256` (mirror.ts) and `fetch_path` inside it, never
 // from upstream; a version pin (`version`, #6934: a hosted plugin) from that published
 // version's zip, read over the API's CRUD area `hosted-plugins` (hosted.ts).
@@ -40,6 +41,8 @@ export type PreparedPackage = {
   bytesSha256?: string
   /** A hosted plugin's published version (pin kind `version`); absent for the other kinds. */
   version?: number
+  /** A commit pin's mirror (#7907): the sha256 of the zip of its files the API keeps; recorded once the pin is stored. */
+  mirrorSha256?: string
   contentHash: string
   files: FileList
   review: PackageReview
@@ -55,6 +58,8 @@ export type PackagePin = {
   bytesSha256?: string
   /** A hosted plugin's version: the pin loads from that version's zip (hosted.ts). */
   version?: number
+  /** A commit pin's recorded mirror (#7907): a cold cache loads it from there before it fetches git. */
+  mirrorSha256?: string
   contentHash: string
   /** Approved with `allow_refused`: loaded despite what the rules refuse (vet.ts). */
   allowRefused?: boolean
@@ -136,6 +141,9 @@ export type PackageRow = {
   pending_content_hash: string | null
   pending_files: FileList | null
   pending_review: PackageReview | null
+  /** A commit pin's mirror (#7907), and its re-pin's: the sha256 of a zip of the files. */
+  mirror_sha256: string | null
+  pending_mirror_sha256: string | null
   created_at: Date
   updated_at: Date
   /** A hosted package's hosted plugin's latest version (the API's, #6934); null otherwise. */
@@ -221,6 +229,7 @@ export function pin(row: PackageRow): PackagePin {
     commit: row.commit_sha ?? '',
     ...(row.bytes_sha256 !== null ? { bytesSha256: row.bytes_sha256 } : {}),
     ...(row.version !== null ? { version: row.version } : {}),
+    ...(row.mirror_sha256 ? { mirrorSha256: row.mirror_sha256 } : {}),
     contentHash: row.content_hash,
     allowRefused: row.allow_refused,
   }
@@ -247,7 +256,16 @@ export type PackageRepo = {
   enabledPins(): Promise<PackagePin[]>
   /** The pin (or its pending re-pin) with its file list, for reading its files (#1029). */
   filesOf(name: string, pending: boolean): Promise<{ pin: PackagePin; files: FileList } | undefined>
+  /**
+   * Records `mirror.sha256` as the mirror of the commit pin (or re-pin) that is `mirror.commit`
+   * with `mirror.contentHash` (#7907). The package must hold that mirror. No pin, approval or
+   * switch changes.
+   */
+  recordMirror(name: string, mirror: MirrorRecord): Promise<void>
 }
+
+/** A commit pin's mirror, as `recordMirror` takes it. */
+export type MirrorRecord = { commit: string; contentHash: string; sha256: string }
 
 /** Where a row's package was fetched from. */
 export function sourceOf(row: PackageRow): PackageSource {
@@ -278,19 +296,27 @@ export const PACKAGE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
 
 /**
  * A row as the API answers it: every column, its times as ISO text. An API of the build
- * before #6934 answers no `hosted_latest_version` (read as none: nothing shows as not offered).
+ * before #6934 answers no `hosted_latest_version` (read as none: nothing shows as not offered),
+ * and one before #7907 no mirror columns (read as none: a cold cache fetches the commit).
  */
-type WireRow = Omit<PackageRow, 'approved_at' | 'created_at' | 'updated_at' | 'hosted_latest_version'> & {
+type WireRow = Omit<
+  PackageRow,
+  'approved_at' | 'created_at' | 'updated_at' | 'hosted_latest_version' | 'mirror_sha256' | 'pending_mirror_sha256'
+> & {
   approved_at: string | null
   created_at: string
   updated_at: string
   hosted_latest_version?: number | null
+  mirror_sha256?: string | null
+  pending_mirror_sha256?: string | null
 }
 
 function fromWire(row: WireRow): PackageRow {
   return {
     ...row,
     hosted_latest_version: row.hosted_latest_version ?? null,
+    mirror_sha256: row.mirror_sha256 ?? null,
+    pending_mirror_sha256: row.pending_mirror_sha256 ?? null,
     approved_at: row.approved_at === null ? null : new Date(row.approved_at),
     created_at: new Date(row.created_at),
     updated_at: new Date(row.updated_at),
@@ -408,6 +434,11 @@ export class CrudPackageStore implements PackageRepo {
     const row = await this.#rowOf(name)
     return row ? filesOfRow(row, pending) : undefined
   }
+
+  async recordMirror(name: string, mirror: MirrorRecord): Promise<void> {
+    const body = { commit_sha: mirror.commit, content_hash: mirror.contentHash, bytes_sha256: mirror.sha256 }
+    await this.#row("a plugin package's mirror recorded", this.#path(name, 'mirror'), { body })
+  }
 }
 
 export function filesOfRow(row: PackageRow, pending: boolean): { pin: PackagePin; files: FileList } | undefined {
@@ -422,6 +453,7 @@ export function filesOfRow(row: PackageRow, pending: boolean): { pin: PackagePin
       commit: row.pending_commit_sha ?? '',
       ...(row.pending_bytes_sha256 !== null ? { bytesSha256: row.pending_bytes_sha256 } : {}),
       ...(row.pending_version !== null ? { version: row.pending_version } : {}),
+      ...(row.pending_mirror_sha256 ? { mirrorSha256: row.pending_mirror_sha256 } : {}),
       contentHash: row.pending_content_hash,
     },
     files: row.pending_files,

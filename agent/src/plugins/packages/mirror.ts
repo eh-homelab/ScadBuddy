@@ -13,6 +13,10 @@ import { PACKAGE_NAME_RE } from './store.js'
 // served only while that package's pin or pending re-pin names the sha256) from here,
 // never from the upstream URL, so an approved pin still loads after upstream deletes or
 // changes the file.
+//
+// A commit pin's files go here too (#7907), as a zip (zip.ts `storedZip`), and the
+// package's row records its sha256 (`mirror_sha256`, store.ts `recordMirror`): a pod with a
+// cold cache unpacks that zip and does not fetch the repository again (install.ts).
 
 export interface PackageMirror {
   /** Keeps `bytes` (whose sha256 is `sha256`) for the package `name`. */

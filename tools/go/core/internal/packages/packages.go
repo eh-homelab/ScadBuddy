@@ -2,8 +2,10 @@
 // crud_agent_packages.py, statement for statement (areas plugin-packages, plugin-feeds and
 // the read of hosted-plugins). Each write takes the package row's FOR UPDATE, prunes what
 // the current review no longer has (agent_data/packages.py prune_stale_rows), releases the
-// mirror holds no pin names and sends the warm-evict NOTIFY, in one transaction; once it
-// commits, plugin_packages.changed goes out on the event bus.
+// mirror holds no row names and sends the warm-evict NOTIFY, in one transaction; once it
+// commits, plugin_packages.changed goes out on the event bus. The record of a commit pin's
+// mirror (#7907, POST /plugin-packages/{name}/mirror) changes no pin: it only releases the
+// holds no row names.
 //
 // Still Python's: area package-mirrors and a hosted version's zip (the blob store).
 package packages
@@ -119,6 +121,7 @@ func (s *Packages) Writes() []crud.Route {
 		{Method: "POST", Path: "/plugin-packages/{name}/approve", Handle: s.approve, MaxBody: bodyBytesMax},
 		{Method: "POST", Path: "/plugin-packages/{name}/enabled", Handle: s.enabled, MaxBody: bodyBytesMax},
 		{Method: "POST", Path: "/plugin-packages/{name}/delete", Handle: s.delete},
+		{Method: "POST", Path: "/plugin-packages/{name}/mirror", Handle: s.mirror, MaxBody: bodyBytesMax},
 	}
 }
 
@@ -145,7 +148,7 @@ const columns = `name, source_kind, source_url, source_ref, marketplace_entry, f
 	pin_kind, commit_sha, bytes_sha256, version, content_hash, files, review, approved_at,
 	allow_refused, enabled, pending_ref, pending_fetch_url, pending_fetch_path, pending_pin_kind,
 	pending_commit_sha, pending_bytes_sha256, pending_version, pending_content_hash, pending_files,
-	pending_review, created_at, updated_at`
+	pending_review, mirror_sha256, pending_mirror_sha256, created_at, updated_at`
 
 // row is one ai_plugin_packages row, every column, as every route answers it.
 type row struct {
@@ -176,8 +179,11 @@ type row struct {
 	PendingContentHash *string         `json:"pending_content_hash"`
 	PendingFiles       json.RawMessage `json:"pending_files"`
 	PendingReview      json.RawMessage `json:"pending_review"`
-	CreatedAt          wire.Time       `json:"created_at"`
-	UpdatedAt          wire.Time       `json:"updated_at"`
+	// MirrorSHA256 is a commit pin's mirror (#7907): the sha256 of a zip of its files.
+	MirrorSHA256        *string   `json:"mirror_sha256"`
+	PendingMirrorSHA256 *string   `json:"pending_mirror_sha256"`
+	CreatedAt           wire.Time `json:"created_at"`
+	UpdatedAt           wire.Time `json:"updated_at"`
 	// HostedLatestVersion is a hosted package's plugin's latest_version: a version neither
 	// the pin nor the re-pin names is "not offered".
 	HostedLatestVersion *int64 `json:"hosted_latest_version"`
@@ -189,7 +195,8 @@ func (r *row) scan(rows pgx.CollectableRow) error {
 		&r.ContentHash, (*[]byte)(&r.Files), (*[]byte)(&r.Review), &r.ApprovedAt, &r.AllowRefused,
 		&r.Enabled, &r.PendingRef, &r.PendingFetchURL, &r.PendingFetchPath, &r.PendingPinKind,
 		&r.PendingCommitSHA, &r.PendingBytesSHA256, &r.PendingVersion, &r.PendingContentHash,
-		(*[]byte)(&r.PendingFiles), (*[]byte)(&r.PendingReview), &r.CreatedAt, &r.UpdatedAt)
+		(*[]byte)(&r.PendingFiles), (*[]byte)(&r.PendingReview), &r.MirrorSHA256, &r.PendingMirrorSHA256,
+		&r.CreatedAt, &r.UpdatedAt)
 }
 
 // query is the rows a statement gives, each with its hosted plugin's latest version.
@@ -412,25 +419,43 @@ func mirrorHeld(ctx context.Context, tx pgx.Tx, name string, p *pin) error {
 	if p.bytes == nil {
 		return nil
 	}
+	return heldFor(ctx, tx, name, *p.bytes)
+}
+
+// heldFor is agent_data/package_mirrors.py held: the package name holds the mirror sha256,
+// else 409 mirror-missing.
+func heldFor(ctx context.Context, tx pgx.Tx, name, sha256 string) error {
 	var one int
 	err := tx.QueryRow(ctx, `SELECT 1 FROM blob_refs WHERE key = $1 AND holder_kind = $2 AND holder_id = $3`,
-		"plugin-mirror-"+*p.bytes, mirrorHolder, name+"/"+*p.bytes).Scan(&one)
+		"plugin-mirror-"+sha256, mirrorHolder, name+"/"+sha256).Scan(&one)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return httpx.WithReason(http.StatusConflict,
-			fmt.Sprintf("no mirror of the bytes %s is kept; send them first", *p.bytes), mirrorMissing)
+			fmt.Sprintf("no mirror of the bytes %s is kept; send them first", sha256), mirrorMissing)
 	}
 	return err
 }
 
-// written is what every package write ends with: the release of the mirrors no pin names
-// any more, and the warm-evict NOTIFY.
-func written(ctx context.Context, tx pgx.Tx) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM blob_refs WHERE holder_kind = $1
+// releaseUnnamed is agent_data/package_mirrors.py release_unnamed: it drops each mirror hold
+// older than its grace that no row names, by its bytes pin or a commit pin's mirror (#7907),
+// for the pin or for its re-pin.
+func releaseUnnamed(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `DELETE FROM blob_refs WHERE holder_kind = $1
 		AND created_at < now() - interval '`+unnamedGrace+`'
 		AND holder_id NOT IN (
 		  SELECT name || '/' || bytes_sha256 FROM ai_plugin_packages WHERE bytes_sha256 IS NOT NULL
 		  UNION SELECT name || '/' || pending_bytes_sha256 FROM ai_plugin_packages
-		  WHERE pending_bytes_sha256 IS NOT NULL)`, mirrorHolder); err != nil {
+		  WHERE pending_bytes_sha256 IS NOT NULL
+		  UNION SELECT name || '/' || mirror_sha256 FROM ai_plugin_packages
+		  WHERE mirror_sha256 IS NOT NULL
+		  UNION SELECT name || '/' || pending_mirror_sha256 FROM ai_plugin_packages
+		  WHERE pending_mirror_sha256 IS NOT NULL)`, mirrorHolder)
+	return err
+}
+
+// written is what every package write ends with: the release of the mirrors no row names
+// any more, and the warm-evict NOTIFY.
+func written(ctx context.Context, tx pgx.Tx) error {
+	if err := releaseUnnamed(ctx, tx); err != nil {
 		return err
 	}
 	return wire.NotifyWarmEvict(ctx, tx)
@@ -595,7 +620,8 @@ func (s *Packages) pending(r *http.Request, params crud.Params) (any, error) {
 		out, err = queryOne(ctx, tx, `UPDATE ai_plugin_packages SET pending_ref = $1, pending_fetch_url = $2,
 			pending_fetch_path = $3, pending_pin_kind = $4, pending_commit_sha = $5,
 			pending_bytes_sha256 = $6, pending_version = $7, pending_content_hash = $8,
-			pending_files = $9::jsonb, pending_review = $10::jsonb, updated_at = now()
+			pending_files = $9::jsonb, pending_review = $10::jsonb, pending_mirror_sha256 = NULL,
+			updated_at = now()
 			WHERE name = $11 RETURNING `+columns,
 			ref, p.fetchURL, p.fetchPath, p.kind, p.commit, p.bytes, p.version, p.contentHash,
 			string(p.files), string(p.review), name)
@@ -625,7 +651,8 @@ func (s *Packages) discard(r *http.Request, params crud.Params) (any, error) {
 		out, err = queryOne(ctx, tx, `UPDATE ai_plugin_packages SET pending_ref = NULL,
 			pending_fetch_url = NULL, pending_fetch_path = NULL, pending_pin_kind = NULL,
 			pending_commit_sha = NULL, pending_bytes_sha256 = NULL, pending_version = NULL,
-			pending_content_hash = NULL, pending_files = NULL, pending_review = NULL, updated_at = now()
+			pending_content_hash = NULL, pending_files = NULL, pending_review = NULL,
+			pending_mirror_sha256 = NULL, updated_at = now()
 			WHERE name = $1 RETURNING `+columns, name)
 		if err != nil {
 			return err
@@ -725,11 +752,12 @@ func (s *Packages) approve(r *http.Request, params crud.Params) (any, error) {
 				commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,
 				version = pending_version,
 				content_hash = pending_content_hash, files = pending_files,
-				review = pending_review, approved_at = now(), allow_refused = $3,
+				review = pending_review, mirror_sha256 = pending_mirror_sha256,
+				approved_at = now(), allow_refused = $3,
 				pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
 				pending_pin_kind = NULL, pending_commit_sha = NULL,
 				pending_bytes_sha256 = NULL, pending_version = NULL,
-				pending_content_hash = NULL,
+				pending_content_hash = NULL, pending_mirror_sha256 = NULL,
 				pending_files = NULL, pending_review = NULL, updated_at = now()
 				WHERE name = $4 RETURNING `+columns, moved, *current.PendingPinKind, allow, name)
 			if err != nil {
@@ -833,6 +861,59 @@ func (s *Packages) delete(r *http.Request, params crud.Params) (any, error) {
 	return struct {
 		Done bool `json:"done"`
 	}{gone}, nil
+}
+
+// mirror records a commit pin's mirror (#7907): the sha256 of a zip of its files that the
+// package holds, as mirror_sha256 when the commit and content hash are the pin's and as
+// pending_mirror_sha256 when they are the re-pin's (both when both are). No pin, approval
+// or switch changes, so nothing is announced and no warm Claude Code is evicted.
+func (s *Packages) mirror(r *http.Request, params crud.Params) (any, error) {
+	name, err := params.Match("name", namePattern)
+	if err != nil {
+		return nil, err
+	}
+	body, err := crud.ReadBody(r, "commit_sha", "content_hash", "bytes_sha256")
+	if err != nil {
+		return nil, err
+	}
+	commit := body.Match("commit_sha", 0, 1<<30, commitPattern)
+	contentHash := body.Match("content_hash", 0, 1<<30, hashPattern)
+	sha256 := body.Match("bytes_sha256", 0, 1<<30, sha256Pattern)
+	if err := body.Err(); err != nil {
+		return nil, err
+	}
+	ctx := r.Context()
+	var out *row
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		current, err := locked(ctx, tx, name)
+		if err != nil {
+			return err
+		}
+		if err := heldFor(ctx, tx, name, sha256); err != nil {
+			return err
+		}
+		isCurrent := current.PinKind == "commit" && current.CommitSHA != nil && *current.CommitSHA == commit &&
+			current.ContentHash == contentHash
+		isPending := current.PendingPinKind != nil && *current.PendingPinKind == "commit" &&
+			current.PendingCommitSHA != nil && *current.PendingCommitSHA == commit &&
+			current.PendingContentHash != nil && *current.PendingContentHash == contentHash
+		if !isCurrent && !isPending {
+			return httpx.WithReason(http.StatusConflict, fmt.Sprintf(`"%s" is not pinned to %s with that content hash,`+
+				" and its re-pin is not either", name, commit), pinMismatch)
+		}
+		out, err = queryOne(ctx, tx, `UPDATE ai_plugin_packages SET
+			mirror_sha256 = CASE WHEN $1 THEN $2 ELSE mirror_sha256 END,
+			pending_mirror_sha256 = CASE WHEN $3 THEN $2 ELSE pending_mirror_sha256 END
+			WHERE name = $4 RETURNING `+columns, isCurrent, sha256, isPending, name)
+		if err != nil {
+			return err
+		}
+		return releaseUnnamed(ctx, tx)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // -- hosted plugins (area hosted-plugins) ---------------------------------------------------

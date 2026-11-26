@@ -461,6 +461,8 @@ const packageInstaller = new PackageInstaller({
   cacheRoot: pluginCacheDir(paths),
   mirror: () => packageMirror,
   hosted: () => hostedPlugins,
+  // A commit pin's files are mirrored too, and recorded on its row (#7907).
+  recordMirror: (name, mirror) => pluginPackages.recordMirror(name, mirror),
 })
 // Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
 // (read only), once per content hash; and what a turn would make of the enabled packages.

@@ -1053,7 +1053,8 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
   (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
   Before each load, every file is hashed and compared with the pin. A missing, partial
-  or altered copy is deleted and fetched again at the pinned commit. If the new files do
+  or altered copy is deleted and read again: from the commit pin's mirror when the row
+  records one (below), else fetched again at the pinned commit. If the new files do
   not hash to the pin, the package is not loaded (`materialise()` in
   [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
   The cache can be the same `emptyDir` as the rest of the state directory.
@@ -1065,6 +1066,17 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   `<name>/b<first 40 of the sha256>-<hash prefix>`, and a cache miss unpacks the mirrored
   copy, never the upstream URL. The area is one of `STORE_AREAS`, so the agent is not ready
   (its data routes answer 503) until the API lists it.
+- **A commit pin loads from its mirror once one is recorded** (#7907). A git fetch can
+  take minutes, and the cache is empty after every restart. So the agent also sends a
+  deterministic zip of a commit pin's files to `package-mirrors` and records its SHA-256
+  on the row (`POST …/plugin-packages/{name}/mirror`; `mirror_sha256`, or
+  `pending_mirror_sha256` for a re-pin, which its approval moves to `mirror_sha256`). The
+  API records it only for the commit and content hash the row names, and only while the
+  package holds the zip. Install and re-pin send it; a load that had to fetch git sends it
+  after the files hash to the pin, so a pin made before #7907 is mirrored at its next load.
+  A cache miss with a recorded mirror unpacks the zip and uses it only when its files hash
+  to the pin; any failure there fetches git. A mirror that cannot be sent is logged, and
+  the install or load goes on.
 - **A hosted plugin loads from its version** (#6934, spec 2026-11-21 §6.5). A `hosted`
   source is a plugin published under Settings → Tools & plugins → Hosted plugins. It is
   always installed at its latest published version, read with its zip through the API's
@@ -2046,7 +2058,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   load (vetting, the egress check of its endpoints, or the listing budget refuses it)
   stays in the list, and the package's load check in Settings shows why it is not loaded
   (`routes/pluginPackages.ts`, `packageLoadCheck`). When no verified copy is cached, the
-  read fetches the pin again without vetting it. When that fetch fails too (the git host
+  read reads the pin again (its mirror, or else git) without vetting it. When that fails too (the git host
   is down, the pinned commit is gone, or the files do not hash to the pin), the read
   fails, and so do `workspace_read` and every upload until a fetch succeeds. For 30 s after
   a failure (`PACKAGE_SECRETS_FAILURE_MS`) that pin is refused again at once, with no new

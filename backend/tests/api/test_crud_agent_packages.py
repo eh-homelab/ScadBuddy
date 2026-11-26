@@ -619,6 +619,98 @@ def test_a_mirror_is_held_for_the_package_it_was_sent_for(
     assert client.post(BASE, json=_archive(), headers=agent).status_code == 201
 
 
+# A commit pin's mirror (#7907): a zip of its files, recorded on the row.
+
+
+def _record(sha: str, commit: str = C1, content: str = H1) -> dict[str, str]:
+    return {"commit_sha": commit, "content_hash": content, "bytes_sha256": sha}
+
+
+def test_a_commit_pins_mirror_is_recorded_only_for_its_pin(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    client.post(BASE, json=_install(), headers=agent)
+    # Not held for the package yet.
+    unheld = client.post(f"{BASE}/greeter/mirror", json=_record(ZIP_SHA), headers=agent)
+    assert (unheld.status_code, unheld.json()["reason"]) == (409, "mirror-missing")
+    _mirror(client, agent, ZIP)
+    for wrong in (_record(ZIP_SHA, commit=C2), _record(ZIP_SHA, content=H2)):
+        refused = client.post(f"{BASE}/greeter/mirror", json=wrong, headers=agent)
+        assert (refused.status_code, refused.json()["reason"]) == (409, "pin-mismatch")
+    gone = client.post(f"{BASE}/nope/mirror", json=_record(ZIP_SHA), headers=agent)
+    assert (gone.status_code, gone.json()["reason"]) == (404, "package-not-found")
+    bad = client.post(f"{BASE}/greeter/mirror", json=_record("x"), headers=agent)
+    assert bad.status_code == 422
+    recorded = client.post(f"{BASE}/greeter/mirror", json=_record(ZIP_SHA), headers=agent)
+    assert recorded.status_code == 200, recorded.text
+    row = recorded.json()
+    assert (row["mirror_sha256"], row["pending_mirror_sha256"]) == (ZIP_SHA, None)
+    # The record changes no approval, switch or pin.
+    assert (row["approved_at"], row["enabled"], row["commit_sha"]) == (None, False, C1)
+    got = client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent)
+    assert (got.status_code, got.content) == (200, ZIP)
+    for caller in ("print", "projects"):
+        other = token(client, caller)
+        sent = client.post(f"{BASE}/greeter/mirror", json=_record(ZIP_SHA), headers=other)
+        assert sent.status_code == 403
+
+
+def test_a_repins_mirror_moves_to_the_pin_when_it_is_approved(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    client.post(BASE, json=_install(), headers=agent)
+    _mirror(client, agent, ZIP)
+    client.post(f"{BASE}/greeter/mirror", json=_record(ZIP_SHA), headers=agent)
+    client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent)
+    _mirror(client, agent, OTHER)
+    staged = client.post(f"{BASE}/greeter/mirror", json=_record(OTHER_SHA, C2, H2), headers=agent)
+    assert staged.status_code == 200, staged.text
+    assert (staged.json()["mirror_sha256"], staged.json()["pending_mirror_sha256"]) == (
+        ZIP_SHA,
+        OTHER_SHA,
+    )
+    for sha, data in ((ZIP_SHA, ZIP), (OTHER_SHA, OTHER)):
+        got = client.get(f"{MIRRORS}/greeter/{sha}", headers=agent)
+        assert (got.status_code, got.content) == (200, data)
+    approved = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C2, "content_hash": H2}, headers=agent
+    )
+    assert approved.status_code == 200, approved.text
+    assert (approved.json()["mirror_sha256"], approved.json()["pending_mirror_sha256"]) == (
+        OTHER_SHA,
+        None,
+    )
+    assert client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent).status_code == 404
+
+
+def test_a_new_or_discarded_repin_drops_the_old_repins_mirror(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    client.post(BASE, json=_install(), headers=agent)
+    client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent)
+    _mirror(client, agent, OTHER)
+    client.post(f"{BASE}/greeter/mirror", json=_record(OTHER_SHA, C2, H2), headers=agent)
+    another = _pending(commit_sha="c" * 40)
+    restaged = client.post(f"{BASE}/greeter/pending", json=another, headers=agent)
+    assert restaged.json()["pending_mirror_sha256"] is None
+    client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent)
+    client.post(f"{BASE}/greeter/mirror", json=_record(OTHER_SHA, C2, H2), headers=agent)
+    dropped = client.post(f"{BASE}/greeter/discard-pending", headers=agent)
+    assert dropped.json()["pending_mirror_sha256"] is None
+
+
+def test_a_recorded_commit_mirror_keeps_its_hold(
+    client: TestClient, agent: dict[str, str], db: Any
+) -> None:
+    client.post(BASE, json=_install(), headers=agent)
+    _mirror(client, agent, ZIP)
+    _mirror(client, agent, OTHER)
+    client.post(f"{BASE}/greeter/mirror", json=_record(ZIP_SHA), headers=agent)
+    _age_holds(db)
+    client.post(BASE, json=_install("other"), headers=agent)
+    assert _held(db) == [f"greeter/{ZIP_SHA}"]
+
+
 # #7191: the strict pending CHECKs of 20261123T1756Z_plugin_package_pending_kind_strict.sql,
 # and its backfill of the rows that the looser CHECKs of 20261122T0323Z let in.
 STRICT = "20261123T1756Z_plugin_package_pending_kind_strict"

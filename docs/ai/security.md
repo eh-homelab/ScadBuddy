@@ -660,11 +660,22 @@ same UI guard as credential writes, with the same limitation (Known limitations,
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
 and file SHA-256 (`hashTree()`, `hash.ts`). The cached copy is hashed again before every
-load. If it does not match, it is deleted and fetched again at the pinned commit, and the
+load. If it does not match, it is deleted and read again (from the commit pin's mirror,
+below, or else fetched again at the pinned commit), and the
 package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
 package is also vetted again at every load, so rules that have tightened since approval
 still apply. A process that writes the cache between the check and Claude Code's read is
 not caught; such a process already controls the pod.
+
+**Commit pin mirrors (#7907).** A commit pin's files are also kept in the blob store as a
+zip, through the same area `package-mirrors` and hold rules as a bytes pin (below). The
+row records the zip's SHA-256 (`mirror_sha256`, or `pending_mirror_sha256` for a re-pin)
+through `POST …/plugin-packages/{name}/mirror`, which the API accepts only for the commit
+and content hash that the row names, only while that package holds the zip, and which
+changes no pin, approval or switch. A cache miss with a recorded mirror unpacks the zip
+with the unpacking rules below and uses it only when its files hash to `content_hash`;
+then it is vetted as a git copy is. So the mirror can only give back the files that the
+admin approved; anything else fetches the pinned commit from git, as before.
 
 **Bytes pins (#6935, spec 2026-11-21 §6.6).** An archive or npm package has no commit,
 so it is pinned to the SHA-256 of the file fetched at install (`pin_kind` `bytes`,
