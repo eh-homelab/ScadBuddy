@@ -1,4 +1,5 @@
 import type { SpoolDetail, SpoolEvent } from '../../api/filament'
+import { startGapG } from './driftCause'
 
 type Basis = SpoolDetail['basis']
 
@@ -18,13 +19,12 @@ function anchorText(event: SpoolEvent): string {
  * #7682 — an added-full spool whose starting amount (its `created` event) came from
  * something else than a reading (a Bambuddy pull's grams) started at its label weight; the
  * gap to that amount is unexplained. A later anchor (a sync, an AMS reading) follows prints,
- * so it shows no gap. Nothing under 0.05 g.
+ * so it shows no gap. Nothing under 0.05 g. The number is `driftCause.ts` `startGapG` (the
+ * drift's likely cause reads it too, #7685); this is its sentence.
  */
 function startGap(anchor: SpoolEvent | null, addedFull: boolean | null, labelWeight: number | null): string | null {
-  if (addedFull !== true || labelWeight == null || !anchor || anchor.grams_after == null) return null
-  if (anchor.kind !== 'created' || anchor.source === 'scale' || anchor.source === 'person') return null
-  const gap = labelWeight - anchor.grams_after
-  if (Math.abs(gap) < 0.05) return null
+  const gap = startGapG(anchor, addedFull, labelWeight)
+  if (gap == null || labelWeight == null || anchor?.grams_after == null) return null
   const source = anchor.source ? (SOURCE[anchor.source] ?? anchor.source) : 'The spool'
   return `Started at the label weight ${grams(labelWeight)}. ${source.charAt(0).toUpperCase()}${source.slice(1)} reported ${grams(anchor.grams_after)}; ${grams(gap)} unexplained.`
 }

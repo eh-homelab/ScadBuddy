@@ -1153,6 +1153,8 @@ export const settingsDefaults = {
   filament_default_cost_per_kg: null,
   // #7682 — the drift notice threshold.
   filament_weighing_drift_notice_g: 10,
+  // #7684 — what counts as empty for the archive dialog's notices.
+  filament_weighing_finished_left_g: 5,
   // #7156 — the drying defaults; null offers none.
   filament_drying_temp_c: null,
   filament_drying_hours: null,

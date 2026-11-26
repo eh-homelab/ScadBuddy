@@ -19,17 +19,19 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
   service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
   time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
 
-- `deploy/camera/` — MediaMTX's configs for the printer camera relay and recorders (#7328):
-  `mediamtx-relay.yml` and `mediamtx-recorder.yml`, copied into the `camera-relay` and
-  `camera-recorder` images at `/etc/mediamtx/mediamtx.yml`. The real-MediaMTX e2e
+- `deploy/camera/` — MediaMTX's configs for the printer camera relay, recorders and live edge (#7328):
+  `mediamtx-relay.yml`, `mediamtx-recorder.yml` and `mediamtx-edge.yml` (#7330), copied into the
+  `camera-relay`, `camera-recorder` and `camera-edge` images at `/etc/mediamtx/mediamtx.yml`. The real-MediaMTX e2e
   (`backend/tests/camera/test_e2e_mediamtx.py`) runs them too. Their comments cite
   MediaMTX's docs and the measurements they rest on; a MediaMTX bump re-measures them (the
   camera spec §2).
 
-- `deploy/cups/` — the label print server's `cupsd.conf` and `start.sh`, copied into the
-  Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). The queue comes from the
-  Deployment's env; its state (queues, jobs) is under `/var/lib/cups`, one volume; remote
-  admin is refused. `README.md` there has the variables and the
+- `deploy/cups/` — the label print server's `cupsd.conf`, `start.sh` and `zebra` backend,
+  copied into the Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). One
+  queue per label size comes from the Deployment's `CUPS_QUEUES`; the backend holds a job
+  until the printer's calibrated label length matches its queue. State (queues, jobs) is
+  under `/var/lib/cups`, one volume; admin needs the user `admin` and the password mounted
+  at `CUPS_ADMIN_PASSWORD_FILE`. `README.md` there has the variables and the
   printer's measured facts. Its pin in eh-homelab/clusters is moved by hand, as the camera
   images' are.
 

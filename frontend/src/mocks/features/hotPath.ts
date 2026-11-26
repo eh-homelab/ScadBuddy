@@ -401,6 +401,7 @@ function printerNow(): PrinterNow {
     bambuddy_url: null,
     bambuddy_archive_page: false,
     error: null,
+    camera_live: false,
   }
   const job = state.printing
   if (!job) return idle

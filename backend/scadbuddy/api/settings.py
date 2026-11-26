@@ -321,6 +321,7 @@ class SettingsView(BaseModel):
     filament_low_stock_pct: int = 20
     filament_default_cost_per_kg: Decimal | None = None
     filament_weighing_drift_notice_g: int = 10
+    filament_weighing_finished_left_g: int = 5
     filament_drying_temp_c: int | None = None
     filament_drying_hours: Decimal | None = None
     filament_label_base_url: str | None = None
@@ -498,6 +499,8 @@ def _bootstrap(settings: Settings) -> list[BootstrapValue]:
         value = resolved[name] if name in resolved else getattr(settings, name)
         if name == "database_url":
             value = _redacted_database_url(settings.database_url)
+        elif name == "camera_edge_read_pass" and value is not None:
+            value = "set"
         values.append(
             BootstrapValue(
                 name=name,

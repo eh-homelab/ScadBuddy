@@ -79,7 +79,10 @@ export const PROPERTY_RULES =
   'old key `null` and the new key its value. Suggested keys, which the kind\'s schema documents and checks: on a ' +
   'spool type `mpn`, `gtin` and `asin` (the last two lists), `manufacturer_url`, `empty_spool_weight_g`, `td`; on a spool ' +
   "`lot_number`; on an inventory item the keys its kind's schema types (entity_property_schema_get lists them). " +
-  'Any other key is kept as given.'
+  "Any other key is kept as given. A kind's schema can mark keys required: a checked save of a row that leaves " +
+  'one empty or ill-fitting is refused whole and writes nothing (422 `missing_required_properties` names each ' +
+  'key). A write of properties alone is not checked for completeness; it refuses only emptying a required key ' +
+  'that has a value.'
 
 const code = (k: string) => `\`${k}\``
 /** The keywords the backend allows (entities/properties.py TOP_KEYWORDS, KEY_KEYWORDS): `type` is described apart. */
@@ -93,9 +96,9 @@ export const SCHEMA_KEY_KEYWORDS = [
 const propertyKind = z.string().regex(/^[a-z_]{1,32}$/).describe('An entity kind: `spool_type`, `spool`, `printer`, `supplier`, `insert_type`, ...')
 
 /**
- * Sets `set` on `ref` and answers its properties. With `saved` (the type or spool whose own write
- * succeeded first), a refusal says it was saved and the properties were not, with the backend's
- * reason, and points at entity_property_set so a retry does not repeat that write.
+ * Set properties through the property patch: the path for an edit that sends only `properties`
+ * (#7026), which is not a completeness check (#7703). Answers the entity's properties; with
+ * `saved`, a failure says that row was saved and its properties were not.
  */
 export async function setPropertiesAfter(backend: BackendClient, ref: string, set: PropertySet, saved?: string) {
   try {
@@ -107,7 +110,20 @@ export async function setPropertiesAfter(backend: BackendClient, ref: string, se
   }
 }
 
-/** A failed property write after its row was saved, led by what was saved and what is left to set. */
+/**
+ * The properties a row was just saved with (#7703): the row routes write them in the row's own
+ * request but answer the row alone, so they are read back. A failed read says what was saved.
+ */
+export async function savedProperties(backend: BackendClient, ref: string, lead: string) {
+  try {
+    const { properties } = await ok(backend.GET('/api/v1/entities/{ref}/properties', { params: { path: { ref } } }), `read the properties of ${ref}`)
+    return properties
+  } catch (e) {
+    throw propertiesNotSet(`${lead} was saved with its properties, but reading them back failed (entity_property_list on ${ref} shows them)`, e)
+  }
+}
+
+/** A failed property write or read after its row was saved, led by what was saved. */
 export function propertiesNotSet(lead: string, e: unknown): ToolError {
   if (e instanceof ToolError) return new ToolError(`${lead}: ${e.summary}`, e.status, e.untrusted, e.problem)
   return new ToolError(`${lead}: ${e instanceof Error ? e.message : String(e)}`)
@@ -135,6 +151,12 @@ const CATALOG_OF: ReadonlyMap<string, string> = new Map([
   ['colour', 'colours'],
   ['location_kind', 'location-kinds'],
 ])
+
+/** The entity ref of a filament catalog row: `brand:<id>` for a `brands` row. */
+export function catalogRowRef(catalog: string, id: string): string {
+  for (const [kind, of] of CATALOG_OF) if (of === catalog) return `${kind}:${id}`
+  throw new ToolError(`${catalog} rows have no properties`)
+}
 
 /** The page of an entity that has one (the filament and inventory kinds; a catalog row's is its catalog); others have none. */
 function uiPath(ref: string): string | undefined {

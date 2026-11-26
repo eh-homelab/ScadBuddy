@@ -444,6 +444,12 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             " expected, either way, is a notice on the spool and in the list. 0 notices every"
             " weighing.",
         ),
+        "filament_weighing_finished_left_g": SettingDoc(
+            "Finished spool has at most, grams",
+            "Archiving a spool as finished with more filament than this on it says so first;"
+            " archiving one for any other reason with this much or less asks whether it is"
+            " finished. Nothing is refused.",
+        ),
         "filament_default_cost_per_kg": SettingDoc(
             "Default cost per kg",
             "What a kilogram of filament costs when its spool and type name no cost, in the"
@@ -918,6 +924,26 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Agent sidecar URL",
             "Where the API reaches the agent sidecar in its own pod. The flow routes read the"
             " agent's tools from it, and refuse when it does not answer.",
+        ),
+        "camera_edge_whep_url": SettingDoc(
+            "Camera edge WHEP URL",
+            "Where the API reaches the live camera edge's WebRTC (WHEP) port inside the"
+            " cluster. Unset, the camera dialog offers no live view.",
+        ),
+        "camera_edge_hls_url": SettingDoc(
+            "Camera edge HLS URL",
+            "Where the API reaches the live camera edge's LL-HLS port inside the cluster."
+            " Unset, the camera dialog offers no live view.",
+        ),
+        "camera_edge_read_user": SettingDoc(
+            "Camera edge read user",
+            "The user the API reads the live camera edge as. Unset, the camera dialog offers"
+            " no live view.",
+        ),
+        "camera_edge_read_pass": SettingDoc(
+            "Camera edge read password",
+            "The password of the camera edge read user. It is never shown. Unset, the camera"
+            " dialog offers no live view.",
         ),
         "api_internal_url": SettingDoc(
             "API internal URL",

@@ -181,7 +181,7 @@ and its backend module:
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;
-  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed and /mcp are reached on the LAN host and on the public URL, where the ingress does no sign-in for them (clusters#4017, 2026-11-25). #6936: a commit pin of any source
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); /mcp and the feed's three bearer-checked reads (marketplace.json, versions, archives) are reached on the LAN host and on the public URL, where the ingress does no sign-in for them (clusters#4017, #4368); Settings' feed routes take no token and stay behind the ingress's sign-in. #6936: a commit pin of any source
   (a bare `marketplace.json` URL's git entry too) is listed with its `sha`; a bytes pin (archive,
   npm) as an `archive` at `…/plugins/{name}/archives/{sha256}.zip` (the served zip's sha256),
   served from its mirror (`package-mirrors`): a zip pin as its exact bytes, a tarball as a
@@ -604,7 +604,8 @@ opens every one and seals it again byte for byte).
     inputs and their version go with the draft, `soldDesign`, which the vectors' `source` cases
     pin, a parameter the pipeline sets is neither offered nor locked, and a draft from a model
     sets no inputs and says in `notes` to set up the design in the editor, as a draft from an
-    output that holds none of them does) and
+    output that holds none of them does; a version whose pipeline declares no inputs says it
+    cannot be listed instead, #7879) and
     `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry, or,
     #6935, a bare `marketplace.json` URL's entry, an archive or an npm package) live

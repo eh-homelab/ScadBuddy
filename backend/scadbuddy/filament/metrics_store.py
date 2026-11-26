@@ -167,6 +167,8 @@ class MetricsStore:
                 label_weight_g=label,
                 window_days=settings.window_days,
                 now=now,
+                diameter_mm=_or_none(spool.effective.diameter_mm) or metrics.DEFAULT_DIAMETER_MM,
+                density_g_cm3=_or_none(spool.effective.density_g_cm3),
             ),
             type_ams_error=type_error,
             currency=settings.currency,
@@ -576,6 +578,10 @@ def _run_of(event: m.SpoolEvent) -> str | None:
     if event.ref_kind != ledger.PRINT_RUN or not event.ref_id:
         return None
     return event.ref_id.split("/", 1)[0]
+
+
+def _or_none(value: Decimal | None) -> float | None:
+    return None if value is None else float(value)
 
 
 def _orders(conn: Conn, events: Iterable[m.SpoolEvent]) -> dict[str, str]:

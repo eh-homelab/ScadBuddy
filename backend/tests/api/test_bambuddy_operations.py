@@ -5,6 +5,7 @@ refused (#1143); a refusal writes no record."""
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -217,7 +218,12 @@ def test_a_slow_settings_read_in_the_check_neither_blocks_the_loop_nor_blames_ba
 ) -> None:
     """The settings are a Postgres read: the check makes it off the event loop, so the
     budget still answers, and before ``waiting_on_bambuddy``, so a slow read is not
-    Bambuddy's 504 (review #1063 fifth review 1a)."""
+    Bambuddy's 504 (review #1063 fifth review 1a).
+
+    Every read during the request is slow, not only the first: the app's background
+    loops read the settings too, and one that read first took the only slow read, so
+    the check read fast and queued the reprint (#7816). The reads wait until the
+    response is in, so no thread sleeps past the test."""
     configure(client)
     link(client, make_output(client, model), 35)
     mock_archive(35, printer_id=3, plate_id=2)
@@ -225,6 +231,7 @@ def test_a_slow_settings_read_in_the_check_neither_blocks_the_loop_nor_blames_ba
     store = getattr(app.state, STATE_ATTR).settings_store
     real_load = store.load
     on_loop: list[bool] = []
+    answered = threading.Event()
 
     def slow_load() -> Any:
         try:
@@ -232,16 +239,18 @@ def test_a_slow_settings_read_in_the_check_neither_blocks_the_loop_nor_blames_ba
             on_loop.append(True)
         except RuntimeError:
             on_loop.append(False)
-        if len(on_loop) == 1:
-            time.sleep(9)
+        answered.wait(9)
         return real_load()
 
     monkeypatch.setattr(store, "load", slow_load)
 
     began = time.monotonic()
-    response = client.post(
-        "/api/v1/prints/35/reprint", headers={"Idempotency-Key": uuid.uuid4().hex}
-    )
+    try:
+        response = client.post(
+            "/api/v1/prints/35/reprint", headers={"Idempotency-Key": uuid.uuid4().hex}
+        )
+    finally:
+        answered.set()
 
     assert response.status_code == 504, response.text
     problem = response.json()

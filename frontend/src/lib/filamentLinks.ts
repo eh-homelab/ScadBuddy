@@ -37,6 +37,8 @@ export const filamentLinks = {
   scan: '/scan',
   /** #7150 — a new spool filled from an existing one. */
   copySpool: (id: string) => query(`${spools}/new`, { copy: id }),
+  /** #7684 — a respooled spool continued as a new one, with its final filament as the new spool's grams. */
+  continueSpool: (id: string, grams: number) => query(`${spools}/new`, { copy: id, continue: '1', grams: String(grams) }),
   spool: (id: string) => at(spools, id),
   types,
   newType: `${types}/new`,
