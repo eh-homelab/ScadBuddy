@@ -394,14 +394,10 @@ func text(b []byte) string {
 }
 
 func productionTime(s string) *string {
-	var y, mo, d, h, mi int
-	var rest string
-	n, _ := fmt.Sscanf(s, "%d_%d_%d_%d_%d%s", &y, &mo, &d, &h, &mi, &rest)
-	if n != 5 {
-		return nil
-	}
-	at := time.Date(y, time.Month(mo), d, h, mi, 0, 0, time.UTC)
-	if at.Year() != y || int(at.Month()) != mo || at.Day() != d || at.Hour() != h || at.Minute() != mi {
+	// time.Parse takes only the digits the layout names: no sign, no padding, no extra text,
+	// and no day the calendar lacks.
+	at, err := time.Parse("2006_01_02_15_04", s)
+	if err != nil {
 		return nil
 	}
 	return ptr(at.Format("2006-01-02T15:04:05"))
