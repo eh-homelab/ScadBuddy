@@ -67,7 +67,8 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   process exits. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
-  A worker's running turns get 12 s to finish (`TURN_DRAIN_MS`), and any still running is
+  A worker's running turns get 5 minutes to finish (`TURN_DRAIN_MS`, inside the agent worker
+  pod's 330 s `terminationGracePeriodSeconds`; #7874), and any still running is
   then cut and goes on on another replica (§1.2, "Restarts"). A parked call is released, not
   lost: its entry stays open, and the turn goes on once it is decided, wherever a worker
   runs then.
