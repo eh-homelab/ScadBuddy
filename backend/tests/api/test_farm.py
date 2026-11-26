@@ -78,6 +78,7 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         "run_id": "run-3741",
         "archive_id": None,
         "matched_by": "queue_item",
+        "plate": 1,
     }
     assert items[199]["scadbuddy"] == {
         "subject": "library:1630",
@@ -87,6 +88,7 @@ def test_the_queue_marks_what_scadbuddy_queued(client: TestClient) -> None:
         "run_id": None,
         "archive_id": 130,
         "matched_by": "queue_item",
+        "plate": None,
     }
     assert items[257]["scadbuddy"] is None
     assert items[205]["scadbuddy"] is None
