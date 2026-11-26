@@ -156,10 +156,16 @@ func (t *Telemetry) Server(next http.Handler, skip ...string) http.Handler {
 			}
 			if p := recover(); p != nil {
 				// net/http answers a panic by closing the connection; the client sees no status.
-				span.SetStatus(codes.Error, "panic")
-				span.SetAttributes(errorTypeKey.String("panic"))
+				// http.ErrAbortHandler is a deliberate abort: ReverseProxy panics with it when
+				// the client leaves mid-stream (an SSE or progress answer). That is a client
+				// cancel, not an error.
+				if p != http.ErrAbortHandler {
+					span.SetStatus(codes.Error, "panic")
+					span.SetAttributes(errorTypeKey.String("panic"))
+					attrs = append(attrs, errorTypeKey.String("panic"))
+				}
 				span.End()
-				measure.record(start, max(r.ContentLength, sent.Load()), rec.written, append(attrs, errorTypeKey.String("panic")))
+				measure.record(start, max(r.ContentLength, sent.Load()), rec.written, attrs)
 				panic(p)
 			}
 			if status == 0 {

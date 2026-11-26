@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -237,5 +238,37 @@ func TestTheOTLPCopyKeepsOnlyWhatKeepKeeps(t *testing.T) {
 	}
 	if !bytes.Contains(stderr.Bytes(), []byte("secret.3mf")) {
 		t.Fatalf("stderr lost an attribute: %s", stderr.String())
+	}
+}
+
+func TestTheLogPackageStaysOffOTLP(t *testing.T) {
+	prev, out, flags := slog.Default(), log.Writer(), log.Flags()
+	t.Cleanup(func() { slog.SetDefault(prev); log.SetOutput(out); log.SetFlags(flags) })
+	exp := &logs{}
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
+	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
+	var stderr bytes.Buffer
+
+	(&Telemetry{Logs: lp}).SetDefaultLogger(slog.NewJSONHandler(&stderr, nil), "test", nil)
+	// What net/http's ErrorLog and httputil.ReverseProxy write.
+	log.Print("http: proxy error: dial tcp 10.0.0.7:8000: connection refused")
+	slog.Info("hello")
+
+	exp.mu.Lock()
+	defer exp.mu.Unlock()
+	if len(exp.records) != 1 || exp.records[0].Body().AsString() != "hello" {
+		var bodies []string
+		for _, r := range exp.records {
+			bodies = append(bodies, r.Body().AsString())
+		}
+		t.Fatalf("OTLP records %q, want only the slog one", bodies)
+	}
+	var line map[string]any
+	first, _, _ := bytes.Cut(stderr.Bytes(), []byte("\n"))
+	if err := json.Unmarshal(first, &line); err != nil {
+		t.Fatalf("stderr %q: %v", stderr.String(), err)
+	}
+	if msg, _ := line["msg"].(string); !strings.Contains(msg, "10.0.0.7:8000") {
+		t.Fatalf("stderr lost the log package's line: %q", stderr.String())
 	}
 }
