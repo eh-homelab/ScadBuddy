@@ -902,6 +902,10 @@ classes named below are the agent's `Crud…` clients:
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `tool_image_inline_max_bytes`, the largest image a tool shows the model at once (default
+  512 KiB, 16 KiB to the largest image block, 3.75 MiB; larger ones go to the session's
+  workspace, #7745), which the same route writes
+  ([`agent/src/tools/imageLimits.ts`](../../agent/src/tools/imageLimits.ts));
   `memory_recall_max_query_chars`, the longest automatic Hindsight recall query in
   characters (default 800, 0 for no cut, at most 100000), which Settings → Assistant →
   Hindsight memory writes through `PUT /api/v1/ai/settings/memory`

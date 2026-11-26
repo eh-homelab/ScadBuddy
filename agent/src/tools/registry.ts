@@ -102,6 +102,12 @@ export type ToolServices = {
   toolDeadlineMs?: number
   /** Binary results above this are returned as a link, not inline (binary.ts; 8 MiB by default). */
   maxInlineBytes?: number
+  /**
+   * The inline limit for an image a tool shows the model (#7745), read at each call
+   * (Settings → Assistant → Images); over it the image goes to the workspace
+   * (tools/imageResult.ts). Undefined: the default.
+   */
+  toolImageInlineMaxBytes?: (() => Promise<number>) | undefined
   /** SCADBUDDY_PUBLIC_URL, so a link to a backend route can be absolute. */
   publicBaseUrl?: string | undefined
   /** Bounds the renders each principal starts (renderLimits.ts, #252); the process default when unset. */

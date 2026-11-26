@@ -1,4 +1,5 @@
 import { pendingInput } from './routes/pendingInput.js'
+import { SETTING_TOOL_IMAGE_INLINE_MAX, toolImageInlineMax } from './tools/imageLimits.js'
 import { pendingNotices, NotificationDispatcher, WAITING_POLL_MS } from './notify/dispatcher.js'
 import { crudGrantRequests, crudPollLease, pairingRequests, waitingNotices } from './notify/waiting.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
@@ -352,6 +353,8 @@ const toolServices: ToolServices = {
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
+  // The inline limit for a tool's image (#7745), read at each call (Settings → Assistant → Images).
+  toolImageInlineMaxBytes: async () => toolImageInlineMax(await settings.get<unknown>(SETTING_TOOL_IMAGE_INLINE_MAX)),
   // The render limits in Settings, read live (tools/renderLimits.ts).
   renderLimiter: new RenderLimiter(settingsRenderLimits(settings)),
   // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
