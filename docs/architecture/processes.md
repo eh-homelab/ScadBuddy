@@ -68,7 +68,6 @@ flowchart LR
     API & RW & PW & PJ & IW & PF & AW & AS & SL --> T[Temporal]
     API & RW --> S3[(Blob store)]
     API & PW --> BB[Bambuddy]
-    RW -->|render key| BB
     PW -->|MQTT 8883, FTPS 990| PR[Printers]
     FS[bambuddy-fs] -->|/api/v1/print/library| API
 ```
@@ -102,8 +101,8 @@ flowchart LR
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; without one it
   refuses to start (`scadbuddy/auth/service_auth.py:235-256`). It ignores
   `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1097-1100`) and refuses the `local` store
-  (`scadbuddy/worker.py:222-257`). The S3 keys and the Bambuddy render key come from its
-  CRUD settings route (`scadbuddy/api/crud_render.py:215-229`).
+  (`scadbuddy/worker.py:222-257`). The S3 keys come from its
+  CRUD settings route, which answers no Bambuddy key (#7882) (`scadbuddy/api/crud_render.py:199-220`).
 - **Zone.** Runs template Python and openscad; holds a 15-minute `crud.render` credential
   and the store keys. See trust-boundaries, "Where untrusted code runs".
 

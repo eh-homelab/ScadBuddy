@@ -340,13 +340,13 @@ on shutdown.
     0 turns it off. It is the interval of the Temporal Schedule
     `scadbuddy-housekeeping-library`, on the API's own `library` queue
     (`SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY`); 0 deletes the Schedule. Every start
-    also triggers the Schedule once, a full sweep: on the Bambuddy blob store it
+    also triggers the Schedule once, a full sweep: on a remote store it
     converges the uploads with the store (reconcile and backfill), so expect that
-    Bambuddy traffic right after a deploy. A run still open from before the start
+    store traffic right after a deploy. A run still open from before the start
     goes first, and that sweep follows it. A Schedule paused in the Temporal UI stays
     paused across restarts, and a start does not trigger it: while it is paused nothing
     sweeps the uploads or reconciles them with the store, and a start only backfills
-    them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
+    them to the store. Settled render jobs are pruned every 300 s by a second
     Schedule, `scadbuddy-prune-library`, which 0 leaves alone; it also sweeps request
     claims, the activity record and the files of print runs' lost slice starts. The
     print dialog's background slices are removed from Bambuddy's library (6 hours after
@@ -1147,13 +1147,9 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
 - **No database (#5298).** The worker opens no database connection. It reads the
-  store's settings (backend, Bambuddy URL, library folder, render key, S3 keys) from the
-  API's CRUD route `/api/v1/internal/crud/render/settings`, which never answers the full
-  Bambuddy key: while no render key is saved in Settings (the fallback `/healthz` reports
-  as `render_key_fallback`), it answers no Bambuddy key at all and logs that it withheld
-  it, and a worker on the Bambuddy store fails its renders with an error that names
-  `bambuddy_render_api_key`. Save a render key before you run a standalone render worker
-  on the Bambuddy store. The API writes a job's row, its events and its activity row for it,
+  store's settings (backend, S3 keys) from the API's CRUD route
+  `/api/v1/internal/crud/render/settings`, which answers no Bambuddy key, neither the
+  render key nor the full one (#7882): the worker runs on the `s3` store only. The API writes a job's row, its events and its activity row for it,
   through the routes under `/api/v1/internal/crud/render/jobs`, holds a done job's blobs
   and records a piece's geometry for it, through `/api/v1/internal/crud/render/blob-refs`
   and `…/render/geometry`, reads and writes the blob index for it, through
@@ -1163,11 +1159,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   API's: the API drops or forgets a copy the worker cannot read, through
   `…/render/assets/{id}/drop-copy` and `…/render/blob-index/{key}/forget-copy`, and
   forgets a library piece only when its own read, bounded to a minute and made at most
-  once a piece in ten minutes, finds the object gone or altered and the row still names it),
-  and finds a template's Bambuddy folder for it, through
-  `…/render/store-folders`: the API calls Bambuddy itself, on the URL, library folder and
-  render key in Settings, under the folder's lock, and refuses a worker whose URL or
-  library folder is not that one yet (it tries again). The API reads, marks used and
+  once a piece in ten minutes, finds the object gone or altered and the row still names it).
+  The API reads, marks used and
   records, for the worker, the uploads it fetched, through `…/render/assets`; their files stay on the
   worker's volume, and the API writes a fetched upload's row from its own copy's metadata
   in the store. It takes, renews and releases the worker's library leases, pin holds
@@ -1183,7 +1176,7 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   22); with no such role, it does nothing.
 - **The worker never migrates.** It waits at start, logging what it waits for,
   until the API serves its CRUD areas (`settings`, `jobs`, `refs`, `blob-index`,
-  `store-folders`, `assets`, `libraries`) and answers its first read of the store
+  `assets`, `libraries`) and answers its first read of the store
   settings; it serves `/healthz` only after that. In a rollout where the worker comes up
   first, it starts once the API has.
 - **Versioning:** workflows are pinned to the build that started them. At start
@@ -1611,10 +1604,13 @@ workers restart.
 - **`local`** (the default): this server's volume. Renders then run only in-process
   (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`): a render worker Deployment holds no database
   and refuses to start on `local` (#5298 plan D11; "Render worker (#424)" above).
-- **`bambuddy`**: can no longer be chosen. The API refuses to start on it since #7257;
-  see "Recovering an unready blob store" below.
-
-  On a multi-worker store (`s3`), the workers need no shared volume:
+- **`bambuddy`**: Bambuddy's library, retired (#7257, #7882). The API refuses to start
+  on it, and Settings and a store migration refuse to choose it. It stays only as a store
+  migration's source, read on the API with the **Render worker API key** (else the full
+  key), so an install that recovered onto `local` can still copy its blobs to `s3`
+  ("Switching a store that already holds blobs" below; "Recovering an unready blob
+  store").
+- **Render workers on `s3`** need no shared volume:
   - Give each one an `emptyDir` at `/data`. It holds the worker's piece cache (`blobs/`)
     and the snapshots, fonts, uploads and library checkouts it fetched.
   - Previews (the catalogue's default renders) render on the workers too, from the
@@ -1694,13 +1690,7 @@ workers restart.
 
   `/healthz` on the API and on each worker (port 9090) carries a `store` object:
   - `multi_worker: true` says more than one replica is safe;
-  - `backend` differs from `configured_backend` until the restart;
-  - `render_key_fallback: true` (on the API) means no render key is stored but the full
-    Bambuddy key is. The API withholds the full key from standalone render workers, so
-    their renders on the `bambuddy` store fail with an error that names
-    `bambuddy_render_api_key`; a render worker inside the API process
-    (`SCADBUDDY_TEMPORAL_WORKER_INPROCESS`) uses the full key, and its template code can
-    print. The Settings page shows the same warning.
+  - `backend` differs from `configured_backend` until the restart.
 
   The API refuses to start on the `bambuddy` store since #7257. If it is stored, or an
   `s3` store cannot start (no endpoint, bucket or keys), see "Recovering an unready blob
@@ -1708,8 +1698,8 @@ workers restart.
 
 - **`s3`**: an S3-compatible object store, the second multi-worker backend (design:
   `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §4). The
-  workers need no shared volume, as described above (an `emptyDir` at
-  `/data`, the same cache and sweep settings). Settings → **Blob store** takes seven
+  workers need no shared volume ("Render workers on `s3`" above: an `emptyDir` at
+  `/data`, the cache and sweep settings). Settings → **Blob store** takes seven
   values, each seeded by the `SCADBUDDY_<FIELD>` variable of the same name and applied
   at restart:
 
@@ -1797,7 +1787,7 @@ each. **GET `/api/v1/store/usage`** and **Blob store usage** in Settings →
 
 **Metrics:**
 - `scadbuddy_store_*`: `operations_total{op,outcome}`, `blobs`, `bytes{kind}`,
-  `max_blobs`, `max_bytes` and `render_key_fallback`;
+  `max_blobs` and `max_bytes`;
 - `scadbuddy_worker_cache_*`: `total{result}` (hit or miss) and `bytes`, per process.
 
 ### Recovering an unready blob store
@@ -2311,11 +2301,9 @@ checked per run from the settings as they are then (`printers/hot_path.py`
    which seals the printer's access code and opens it for the print worker (#5298) and
    signs a LAN print's blob reads (#5298 Task 32). The print worker holds no KEK; while
    the API has none, it takes Bambuddy's path for an `auto` printer and refuses a
-   `native` one (#5298 Task 33). Both count as native
-   (`printers/hot_path.py` `NATIVE_STORES`). On `bambuddy` the blobs, the native library's
-   copy among them, live in Bambuddy's library: those reads are the store's calls, outside
-   the print path, but a print still needs Bambuddy up. Only `s3` takes Bambuddy out of
-   the print entirely, so the real-stack check below runs on it.
+   `native` one (#5298 Task 33). Only `s3` counts as native
+   (`printers/hot_path.py` `NATIVE_STORES`): the API no longer starts on `bambuddy`
+   (#7257). The real-stack check below runs on it.
 2. **`library_backend` `native`** (Settings → *Projects & files*, restart; "Choosing
    ScadBuddy's own print library" above). A native run files its laid-out copy in the
    native library; a project is a Bambuddy path's, so a native run refuses a

@@ -62,7 +62,6 @@ flowchart TB
     SL -->|transfer URLs| API
     API --> BB
     PW --> BB
-    RW -->|render key| BB
     BB --> PR
     PW --> PR
     AW --> ANT

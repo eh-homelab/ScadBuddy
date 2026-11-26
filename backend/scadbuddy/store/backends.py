@@ -9,7 +9,7 @@ from typing import Protocol, runtime_checkable
 
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
-from scadbuddy.store.bambuddy import BambuddyContentBackend, KeepsFolders, StoreSettingsSource
+from scadbuddy.store.bambuddy import BambuddyContentBackend, StoreSettingsSource
 from scadbuddy.store.content import ContentBackend
 from scadbuddy.store.index import IndexesBlobs, Pool
 from scadbuddy.store.s3 import S3ContentBackend
@@ -42,27 +42,27 @@ def build_backend(
     source: StoreSettingsSource,
     pool: Pool | None,
     index: IndexesBlobs | None = None,
-    folders: KeepsFolders | None = None,
 ) -> RemoteBackend:
     """``backend`` by name, not ``current.store_backend``: a migration builds its target
-    while the stored backend still names the old one. ``index`` and ``folders``: the
-    Bambuddy backend's (`BambuddyContentBackend`)."""
+    while the stored backend still names the old one. ``index``: the Bambuddy backend's
+    (`BambuddyContentBackend`), which only the API builds, as a migration's source or
+    for its start to refuse (#7257, #7882)."""
     if backend == "local":
         raise ValueError("the local store has no content backend")
     if backend == "bambuddy":
-        # From any source, the environment's seed included: a Bambuddy store without a
-        # URL or an inbox could store nothing, so the process does not start on it.
-        if not current.bambuddy_url or current.library_folder_id is None:
+        # From any source, the environment's seed included: no process runs on the
+        # Bambuddy store (#7257), and one without a URL or an inbox could not even be read.
+        if not current.bambuddy_url or current.library_folder_id is None or pool is None:
             raise StoreNotReadyError(
-                "store_backend is bambuddy, but the Bambuddy store needs a Bambuddy URL and a"
-                " library folder (its inbox). To start on the local store, run"
-                f" {RECOVER_LOCAL_SQL} in the API's database, in the schema the"
-                " API's SCADBUDDY_DATABASE_URL uses (or, when no store_backend is"
-                " stored, set SCADBUDDY_STORE_BACKEND=local), then set both in Settings."
-                " A render worker refuses the local store (#5298 plan D11): keep its"
-                ' Deployments down. See README, "Recovering an unready blob store".'
+                "store_backend is bambuddy, which ScadBuddy no longer starts on (#7257). To"
+                f" start on the local store, run {RECOVER_LOCAL_SQL} in the API's database,"
+                " in the schema the API's SCADBUDDY_DATABASE_URL uses (or, when no"
+                " store_backend is stored, set SCADBUDDY_STORE_BACKEND=local), then choose"
+                " the s3 store in Settings. A render worker refuses the local store (#5298"
+                ' plan D11): keep its Deployments down. See README, "Recovering an unready'
+                ' blob store".'
             )
-        return BambuddyContentBackend(source.target, pool, index=index, folders=folders)
+        return BambuddyContentBackend(source.target, pool, index=index)
     if current.s3 is None or not current.s3.prefix:
         raise StoreNotReadyError(
             "store_backend is s3, but the S3 store needs an endpoint, a bucket, a prefix,"

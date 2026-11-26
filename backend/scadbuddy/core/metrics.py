@@ -130,7 +130,6 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
         "worker_cache",
         "worker_cache_bytes",
         "render_data_bytes",
-        "store_render_key_fallback",
         "crud_client_seconds",
         "asset_prune_failures",
     },
@@ -470,12 +469,6 @@ class Metrics:
         self.store_max_bytes = Gauge(
             "scadbuddy_store_max_bytes",
             "SCADBUDDY_STORE_MAX_TOTAL_BYTES; 0 is no limit.",
-            registry=r,
-        )
-        self.store_render_key_fallback = Gauge(
-            "scadbuddy_store_render_key_fallback",
-            "1 while this process's store holds the full Bambuddy key because no render key"
-            " is saved (spec 2026-09-27 §9); a standalone render worker never gets it.",
             registry=r,
         )
         self.worker_cache_bytes = Gauge(
