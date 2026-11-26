@@ -63,6 +63,7 @@ function defaults(): Task[] {
       state: 'open',
       answer: null,
       answered_by: null,
+      admitted_by: null,
       created_at: at(2),
       updated_at: at(2),
     },

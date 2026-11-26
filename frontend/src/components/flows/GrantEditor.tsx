@@ -20,6 +20,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '../ui/spinner'
+import { AnswerersPicker } from './AnswerersPicker'
 
 /** A checkbox and its label, side by side. */
 function Check({
@@ -194,6 +195,8 @@ interface Props {
   onCancel?: () => void
   /** #2484 — a trigger's standing grant: up to 30 days, 7 by default, and no starting session to ask. */
   standing?: boolean
+  /** #7471 — a run a person starts here: it has no starting session to let answer. */
+  personStarts?: boolean
 }
 
 /**
@@ -230,6 +233,7 @@ function Form({
   onSubmit,
   onCancel,
   standing = false,
+  personStarts = false,
   outwardTools,
 }: Props & { outwardTools: string[] }) {
   const maxMs = standing ? MAX_STANDING_GRANT_MS : MAX_GRANT_MS
@@ -241,6 +245,8 @@ function Form({
   )
   const [sessions, setSessions] = useState(initial?.sessions ?? false)
   const [askStarter, setAskStarter] = useState(standing ? false : (initial?.ask_starter_session ?? true))
+  // #7471: a standing grant may not let anyone answer (each fire's run would be unseen).
+  const [answerers, setAnswerers] = useState<string[]>(standing ? [] : (initial?.answers?.who ?? []))
   // The picker's range, from when the form opened; the check below is against now.
   const [openedAt] = useState(() => Date.now())
 
@@ -250,12 +256,14 @@ function Form({
     sessions,
     ask_starter_session: askStarter,
     rules: rows.filter((r) => r.on).map(ruleOf),
+    ...(answerers.length > 0 ? { answers: { who: answerers } } : {}),
   }
   const outward = useMemo(() => new Set(outwardTools), [outwardTools])
   const typing = typingProblems(rows)
   const problems = [...typing, ...(typing.length > 0 ? [] : grantProblems(spec, new Date(), outward, maxMs))]
 
   const expiresId = useId()
+  const answerersId = useId()
   const update = (key: string, change: Partial<RowDraft>) =>
     setRows((current) => current.map((r) => (r.key === key ? { ...r, ...change } : r)))
 
@@ -303,6 +311,22 @@ function Form({
         <Check checked={askStarter} onChange={setAskStarter}>
           Ask the starting session first
         </Check>
+      )}
+      {!standing && (
+        <div className="flex flex-col gap-1.5">
+          {/* The fieldset carries the name; a label's `htmlFor` names no fieldset. */}
+          <span aria-hidden className="text-sm leading-none font-medium">
+            Who else may answer its questions
+          </span>
+          <AnswerersPicker
+            id={answerersId}
+            rules={answerers}
+            onChange={setAnswerers}
+            label="Who else may answer its questions"
+            empty="People only, unless the setting says otherwise."
+            starter={!personStarts}
+          />
+        </div>
       )}
       {problems.length > 0 && (
         <ul role="alert" className="list-disc pl-5 text-destructive">

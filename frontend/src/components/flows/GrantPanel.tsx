@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { FlowGrantRule, FlowGrantSpec, FlowGrantView } from '../../api/types'
 import { USER_ONLY } from '../../agent/dom'
-import { actorText } from '../../lib/flows'
+import { actorText, answerersText } from '../../lib/flows'
 import { grantStatus, isUnbounded, unboundedText } from '../../lib/grants'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -113,6 +113,12 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
             ? 'Calls outside it ask the starting session first.'
             : 'Calls outside it come to you.'}
         </p>
+        {grant.spec.answers && (
+          <p className="text-[12.5px] text-muted-foreground">
+            Besides you, {answerersText(grant.spec.answers.who)} may answer its questions, except those it asks
+            of people only.
+          </p>
+        )}
         {rules.length === 0 ? (
           <p className="text-[12.5px] text-muted-foreground">No rules: every outward call asks.</p>
         ) : (
