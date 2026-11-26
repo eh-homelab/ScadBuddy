@@ -115,6 +115,42 @@ until Python has taken one connection: after that, Python is up, and a refusal (
 is a 502 at once. Only the
 dial is tried again, so no request reaches Python twice.
 
+## Public routes
+
+A public area (a route outside `/internal/crud/`, which a browser, an access token or a
+service calls) checks its caller with `internal/auth` (#8038), never with a check of its
+own. The check is Python's (`backend/scadbuddy/auth/`: `gate.py`, `check.py`, `routes.py`):
+
+```go
+gate := auth.NewGate(&auth.Resolver{Pool: pool}, mode, tel.Meter())
+mux.Handle("GET /api/v1/filament/presets", gate.Wrap(auth.Route{
+	Class: "api", Template: "/api/v1/filament/presets",
+}, handler))
+```
+
+- `auth.ParseMode(value, set)` reads `SCADBUDDY_AUTH_MODE` as Python does: unset is `off`,
+  and a value other than `off`, `observe` or `enforce` stops the start. Never `enforce` on
+  prod (the owner's decision of 2026-11-17).
+- `Wrap` resolves the caller in every mode, as `AuthGate` does: a bearer `sbsvc_…` (a service
+  credential) or `sbpat_…` (a person's access token), else the cookie
+  `__Host-scadbuddy_session` (a person's session; its idle deadline slides once a minute).
+  A revoked, expired or malformed credential, and a lookup that fails, is anonymous.
+- In `observe`, a request that `enforce` would refuse is served, counted as
+  `scadbuddy_auth_would_refuse_total{class, reason}` and logged once a minute per class and
+  reason with the route's template. In `enforce`, it is refused with Python's problem
+  (401 `…/auth/signed-out`, 403 `…/auth/forbidden`), or a WebSocket handshake with a 403.
+- `Class` is the route's class in `auth/routes.py`: `api` for most routes, `person` for
+  what only a person signed in themselves may do. `Scriptless` marks a GET that a browser
+  makes with no script, which carries no `X-ScadBuddy-Request: 1`.
+- A handler reads `auth.CallerOf(ctx)` (the kind, the principal, the session kind, a token's
+  id and scope, a service's caller and scopes) and `auth.HasScope(ctx, scope)`. A caller
+  holds no credential: never log a token, a cookie value or a hash.
+
+`auth.WouldRefuse` and `auth.Refusal` are Python's `would_refuse` and `refusal`. The shared
+vectors `backend/tests/fixtures/auth-vectors.json` hold the two ports equal: the backend's
+`tests/auth/test_auth_vectors.py` writes them from Python's own functions
+(`UPDATE_AUTH_VECTORS=1`), and `internal/auth/vectors_test.go` checks Go against them.
+
 ## Telemetry
 
 Core sends OpenTelemetry traces, metrics and logs over OTLP/HTTP, set up by the shared
