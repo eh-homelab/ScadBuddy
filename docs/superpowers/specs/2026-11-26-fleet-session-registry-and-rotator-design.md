@@ -67,7 +67,9 @@ notes, not here). "Code" means read in the code, not run.
   `organizationUuid`, `rateLimitTier`, `scopes`, `subscriptionType` and
   `subscriptionTypeSource` (key names read on disk, values not read).
 - Every write of that file takes a proper-lockfile lock on `<config dir>/.storage-write` and
-  re-reads the file inside the lock. A token refresh also takes
+  re-reads the file inside the lock. proper-lockfile adds `.lock`, so the lock on disk is the
+  directory `<config dir>/.storage-write.lock`, stale after 15 s (Claude Code 2.1.332's code,
+  read with `strings` in #8047; [proper-lockfile](https://github.com/moxystudio/node-proper-lockfile#lockfile-options)). A token refresh also takes
   `<config dir>/.oauth_refresh.lock` and the legacy `<realpath(config dir)>.lock` (code).
 - A running session checks the file's mtime before each model request, and on a change drops
   its cached tokens and reads the file again. It also re-reads the file after a 401 and adopts a
@@ -168,12 +170,18 @@ Where the accounts live:
 
 - A new service caller `fleet-rotator`, separate from `fleet` **(call)**. The `fleet` caller
   runs the unauthenticated chat server and must never reveal a secret.
-- Proof: one bootstrap secret per machine, in the API's `SCADBUDDY_SERVICE_BOOTSTRAP_DIR` as
-  `fleet-rotator.<machine>` **(call)**, so one machine can be revoked alone. The machine's
-  copy lives in 1Password and in a 0600 file on the machine. The credential lasts 15 minutes and
-  is renewed like the other callers' (`tools/go/fleet/sbfleet` `NewExchange`).
+- Proof on a machine: a personal access token of the scope `fleet`, read from `--token-file`
+  and sent as `Authorization: Bearer`, as `bambuddy-fs` does (owner, 2026-11-26; #8041). One
+  token is one machine: the machine row records the token's id, and a person revokes a machine
+  by revoking its token in Settings. A `fleet` token can call only these routes. #8003's
+  per-machine bootstrap proofs (`fleet-rotator.<machine>`) are retired for machines by #8041.
+- Proof in the cluster: the `github` mode (#8012) keeps a `fleet-rotator` service credential from
+  a Kubernetes ServiceAccount proof, renewed like the other callers'
+  (`tools/go/fleet/sbfleet` `NewExchange`).
 - Routes under `/api/v1/internal/crud/fleet-rotator/`, all requiring the caller:
   - `PUT /machines/{id}`: register or refresh the machine (hostname, OS, user, service version).
+  - `PUT /machines/{machine_id}/sessions/{session_id}`: write this machine's row for a session
+    (§6.3).
   - `POST /leases`: lease the best usable `claude_login` row with scope `fleet` for this machine
     (priority order, no cooldown, not disabled, not leased elsewhere), and reveal it. Only
     `claude_login` rows are leased: `fleetd` writes only a `claudeAiOauth` login (§4, §6.6).
@@ -241,11 +249,14 @@ Where the accounts live:
 - On a rate limit of the config dir's current credential:
   1. Send the event (§6.2). Ask for a lease on the next usable credential.
   2. Take Claude Code's locks: `.oauth_refresh.lock`, the legacy `<dir>.lock` and
-     `.storage-write`, with the proper-lockfile convention. While they are held, no session can
+     `.storage-write.lock`, with the proper-lockfile convention, and refresh their mtimes every
+     5 s while they are held. While they are held, no session can
      refresh or write the login (§3).
   3. Inside the locks, read the current `claudeAiOauth` back. It holds the live refresh token.
-     Write it to the old row (`PUT /leases/{credential}`). If that write fails, release the locks
-     and stop: the file is not changed, and the old lease is kept.
+     Write it to the old row (`PUT /leases/{credential}`), with a 10 s timeout, below the 15 s
+     stale time of `.storage-write.lock`. If that write fails, release the locks, release the
+     new lease (`DELETE /leases/{new}`) and stop: the file is not changed, the old lease is
+     kept, and the new row is free for other machines. The next attempt asks for a lease again.
   4. Still inside the locks, write the new `claudeAiOauth` to a 0600 temp file in the dir and
      rename it over `.credentials.json`.
   5. Release the locks. Only then release the old lease (`DELETE /leases/{credential}`), so no
@@ -304,8 +315,8 @@ Where the accounts live:
 - The `fleet-rotator` routes must be reachable from the machines, on ScadBuddy's LAN host, with
   the service credential required; the exchange route too. The ingress change is in
   eh-homelab/clusters, dry-run on the server before merge.
-- Each machine gets a 1Password item with its bootstrap proof; the API's bootstrap dir gets its
-  hash.
+- Each machine gets a `fleet` token (§6.2), made in Settings → System → Access tokens and
+  written to a 0600 file on the machine.
 - `fleetd` is published as a binary for linux/amd64 on a release tag, beside its image (every Go
   CLI has a Dockerfile, root `CLAUDE.md`). The project-ops plugin documents the systemd user unit.
 
