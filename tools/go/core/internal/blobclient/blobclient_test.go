@@ -12,6 +12,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 // fake is the area's API on one server and the presigned URL on another.
@@ -31,6 +36,8 @@ type fake struct {
 	api   *httptest.Server
 	s3    *httptest.Server
 	asked map[string]any
+	// apiTraced and storeTraced say whether a request to each carried a traceparent.
+	apiTraced, storeTraced bool
 }
 
 func newFake(t *testing.T) *fake {
@@ -54,6 +61,7 @@ func (f *fake) store(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.puts++
+	f.storeTraced = f.storeTraced || r.Header.Get("traceparent") != ""
 	if r.Method != http.MethodPut || r.Header.Get("x-amz-checksum-sha256") != "c2lnbmVk" ||
 		r.Header.Get("Content-Type") != "application/octet-stream" || r.URL.Query().Get("X-Amz-Signature") != "s" {
 		w.WriteHeader(http.StatusForbidden)
@@ -69,6 +77,7 @@ func (f *fake) store(w http.ResponseWriter, r *http.Request) {
 func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.apiTraced = f.apiTraced || r.Header.Get("traceparent") != ""
 	if r.Header.Get("Authorization") != "Bearer sbsvc_test" {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -100,7 +109,7 @@ func (f *fake) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fake) client() *Client {
-	return New(f.api.URL, func() (string, error) { return "sbsvc_test", nil })
+	return New(f.api.URL, func() (string, error) { return "sbsvc_test", nil }, nil)
 }
 
 func TestAnUploadStoresTheBytesAsBytes(t *testing.T) {
@@ -163,5 +172,37 @@ func TestACancelledUploadStops(t *testing.T) {
 	}
 	if f.commits != 0 {
 		t.Fatal("committed after a cancel")
+	}
+}
+
+// With telemetry on, each request is a CLIENT span: the calls to core carry the trace
+// context and the PUT to the store carries none, and no span records the presigned URL.
+func TestAnUploadIsTracedWithoutItsURL(t *testing.T) {
+	f := newFake(t)
+	spans := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(spans))
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	c := New(f.api.URL, func() (string, error) { return "sbsvc_test", nil }, &telemetry.Telemetry{Traces: tp})
+	ctx, parent := tp.Tracer("test").Start(context.Background(), "upload")
+	if _, err := c.Upload(ctx, "tag_dump", "application/octet-stream", []byte("dump")); err != nil {
+		t.Fatal(err)
+	}
+	parent.End()
+	if !f.apiTraced || f.storeTraced {
+		t.Fatalf("trace context to core %v, to the store %v", f.apiTraced, f.storeTraced)
+	}
+	var put bool
+	for _, s := range spans.GetSpans() {
+		for _, kv := range s.Attributes {
+			if strings.Contains(kv.Value.Emit(), "X-Amz") || strings.Contains(kv.Value.Emit(), "/b/t/") {
+				t.Errorf("%s records %s=%s", s.Name, kv.Key, kv.Value.Emit())
+			}
+			if string(kv.Key) == "server.address" && kv.Value.AsString() == "s3" && s.Name == "PUT" {
+				put = true
+			}
+		}
+	}
+	if !put {
+		t.Fatalf("no PUT span to s3: %v", spans.GetSpans())
 	}
 }

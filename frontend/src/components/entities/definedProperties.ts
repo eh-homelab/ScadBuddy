@@ -25,6 +25,7 @@ export function refusalText(errors: FieldErrors): string {
 
 export const propertiesOf = (schema: Record<string, unknown>): Record<string, Sub> =>
   schema.properties && typeof schema.properties === 'object' ? (schema.properties as Record<string, Sub>) : {}
+/** The keys a schema requires (#7703); the one copy (#7954). */
 export const requiredOf = (schema: Record<string, unknown>): string[] => (Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === 'string') : [])
 export const typeOf = (sub: Sub): string => ([] as unknown[]).concat(sub.type ?? 'string').find((t) => t !== 'null') as string
 

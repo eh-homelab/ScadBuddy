@@ -2241,6 +2241,20 @@ sha256 (`BAMBU_STUDIO_VERSION` in the image), and runs as a Deployment of its ow
   URL (`SCADBUDDY_API_INTERNAL_URL`, the API's Service) and, when `store_backend` is
   `s3`, the bucket's endpoint.
 - It serves `/healthz` and `/metrics` on `9090`.
+- It exports OpenTelemetry traces, metrics and logs over OTLP
+  (`workers/rust/crates/sb-temporal/src/telemetry.rs`, #7667). Each signal is on when
+  its endpoint is set (`OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT`, or else
+  `OTEL_EXPORTER_OTLP_ENDPOINT` plus `/v1/traces`, `/v1/metrics` or `/v1/logs`), and off
+  with `OTEL_SDK_DISABLED=true` or when its `OTEL_<SIGNAL>_EXPORTER` names no `otlp`. The
+  protocol is `http/protobuf` unless `OTEL_EXPORTER_OTLP_PROTOCOL` (or the signal's own
+  variable) says `grpc`. The metrics are cumulative and include the process's own:
+  `process.cpu.time`, `process.memory.usage`, `process.unix.file_descriptor.count` and
+  `process.uptime`. Every `tracing` event at `info` or above is also a log record, except
+  an event with a field the spans drop (`error`, a URL, a path), which stays on stdout
+  only; a record or a stdout JSON line logged inside a span carries its `trace_id` and
+  `span_id`. On exit it flushes the three providers within 5 s, after the shutdown grace
+  below. A log record that goes out carries the same fields as the stdout line; spans
+  pass the scrub.
 - It serves one activity, `slice_plate`. A failed slice is an `ApplicationError` of one
   of four types: `SlicerError` (the CLI failed, or exited 0 without the sliced 3MF; its
   details are always one `{"exit_code", "stderr_tail", "errors"}` object, `errors`
@@ -2944,6 +2958,16 @@ worker's exists), and copying `deploy/grafana/` at that revision over
 `kubectl rollout restart` — the pin is what makes the running image knowable.
 
 ### Tracing (#988)
+
+The Go services (scadbuddy-core, scadbuddy-fleet and bambuddy-fs, through the shared `tools/go/telemetry`)
+and the Rust slicer worker export traces, metrics and logs natively over OTLP/HTTP, with
+`OTEL_EXPORTER_OTLP_ENDPOINT` as the base of `/v1/traces`, `/v1/metrics` and `/v1/logs`. They
+share these rules with the services below: the endpoint and per-signal endpoint variables,
+`OTEL_<SIGNAL>_EXPORTER` and `OTEL_SDK_DISABLED`. Two differ: bambuddy-fs, with no endpoint, sends
+to eh-homelab's collector (`--no-telemetry` turns that off; `tools/go/bambuddy-fs/README.md`
+"Telemetry"), and only core samples with the rule that drops parentless client spans. See
+`tools/go/core/README.md` ("Telemetry"). A request that
+core forwards is one trace: core's span is the parent of the API's.
 
 The API, the render worker and the agent sidecar export OpenTelemetry traces over
 OTLP/HTTP when `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set (in the

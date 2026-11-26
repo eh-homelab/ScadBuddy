@@ -16,6 +16,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 // Path is the area's routes under core's URL.
@@ -59,17 +62,27 @@ type Client struct {
 	BaseURL string
 	// Token is the service credential for each call.
 	Token func() (string, error)
-	// HTTP sends every request, the PUT included.
-	// TODO(#7851): wrap its transport in tools/go/telemetry tel.Transport once that is on main.
+	// HTTP sends the calls to core.
 	HTTP *http.Client
+	// Store sends the PUT to the upload's URL, which is the blob store's, outside ScadBuddy.
+	Store *http.Client
 }
 
-// New is a Client of the area at baseURL, with a 30 s bound on each request.
-func New(baseURL string, token func() (string, error)) *Client {
+// New is a Client of the area at baseURL, with a 30 s bound on each request. tel is the
+// process's telemetry (nil for none): each request is a CLIENT span, which records the
+// method, the status and the peer, never a URL, so the presigned query stays out. The calls
+// to core carry the trace context; the PUT to the store carries none (httpx.Outside).
+func New(baseURL string, token func() (string, error), tel *telemetry.Telemetry) *Client {
+	base := strings.TrimRight(baseURL, "/")
+	peer := ""
+	if u, err := url.Parse(base); err == nil {
+		peer = u.Hostname()
+	}
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
+		BaseURL: base,
 		Token:   token,
-		HTTP:    &http.Client{Timeout: 30 * time.Second},
+		HTTP:    &http.Client{Timeout: 30 * time.Second, Transport: tel.Transport(http.DefaultTransport, peer)},
+		Store:   &http.Client{Timeout: 30 * time.Second, Transport: tel.Transport(httpx.Outside(nil), "s3")},
 	}
 }
 
@@ -115,7 +128,7 @@ func (c *Client) put(ctx context.Context, s slot, body []byte) error {
 	for name, value := range s.Headers {
 		req.Header.Set(name, value)
 	}
-	res, err := c.HTTP.Do(req)
+	res, err := c.Store.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

@@ -67,7 +67,8 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   process exits. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
-  A worker's running turns get 12 s to finish (`TURN_DRAIN_MS`), and any still running is
+  A worker's running turns get 5 minutes to finish (`TURN_DRAIN_MS`, inside the agent worker
+  pod's 330 s `terminationGracePeriodSeconds`; #7874), and any still running is
   then cut and goes on on another replica (§1.2, "Restarts"). A parked call is released, not
   lost: its entry stays open, and the turn goes on once it is decided, wherever a worker
   runs then.
@@ -343,7 +344,13 @@ main on 2026-11-01:
   heartbeat) is placed again with a `restarted` continuation, on another replica when one
   is live. Once its message is in the transcript it resumes with "The agent service
   restarted during this turn…" (`RESTARTED_PROMPT`), naming the calls that had finished
-  as ToolCalls, so the model need not repeat them (spec §5.5).
+  as ToolCalls, so the model need not repeat them (spec §5.5). Before that, each call the
+  lost placement left with no result gets one in the transcript (#7874,
+  [`agent/src/sessions/restartedCalls.ts`](../../agent/src/sessions/restartedCalls.ts)): a
+  ToolCall's own result (the restarted placement waits up to 10 minutes for one that still
+  runs), else a result that says the service restarted while the call ran. A shutdown's cut
+  drops what Claude Code writes after its interrupt, "The user doesn't want to proceed with
+  this tool use…", so no call reads as refused by the user, and its ToolCalls are not cancelled.
 - **Working directory.** A turn's Claude Code runs in the session's directory on its
   worker, `<SCADBUDDY_SESSION_DIR>/<id>/`, a copy of the workspace that each placement
   fills (§13).

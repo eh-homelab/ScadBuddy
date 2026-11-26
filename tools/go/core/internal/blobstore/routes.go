@@ -44,6 +44,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/crud"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/httpx"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/seal"
+	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 )
 
 // Area is the shared area's name: its routes are under /api/v1/internal/crud/blobs, its
@@ -90,8 +91,9 @@ type Blobs struct {
 	Keys *seal.Keys
 	// LookupEnv is the process's environment, os.LookupEnv's shape.
 	LookupEnv func(string) (string, bool)
-	// HTTP sends the commit's requests to the store.
-	// TODO(#7851): wrap its transport in tools/go/telemetry tel.Transport once that is on main.
+	// HTTP sends the commit's requests to the store. Routes traces it with no trace context
+	// sent (httpx.Outside); its spans carry the method, the status and the peer "s3", never
+	// the URL, whose query is the presigned signature.
 	HTTP *http.Client
 	Now  func() time.Time
 	// LockTimeout and LockTries, when set, replace stageLockTimeout and stageLockTries.
@@ -102,9 +104,16 @@ type Blobs struct {
 	slots     chan struct{}
 }
 
+// storePeer is the server.address of the store's spans: the endpoint is a setting read at
+// each request, and the transport is made once.
+const storePeer = "s3"
+
 // Routes are the area's routes. keys may not be nil: an upload's id is MACed under the KEK.
-func Routes(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool)) []crud.Route {
-	b := &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: &http.Client{Timeout: readTTL}, Now: time.Now}
+// tel is the process's telemetry, nil for none.
+func Routes(pool *pgxpool.Pool, keys *seal.Keys, lookupEnv func(string) (string, bool),
+	tel *telemetry.Telemetry) []crud.Route {
+	client := &http.Client{Timeout: readTTL, Transport: tel.Transport(httpx.Outside(nil), storePeer)}
+	b := &Blobs{Pool: pool, Keys: keys, LookupEnv: lookupEnv, HTTP: client, Now: time.Now}
 	return b.Routes()
 }
 

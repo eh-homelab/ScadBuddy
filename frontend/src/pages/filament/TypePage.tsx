@@ -331,6 +331,7 @@ export function TypePage() {
   const schema = keys.data?.schema ?? {}
   const [defined, setDefined] = useState<Record<string, PropertyValue | undefined>>({})
   const [definedBefore, setDefinedBefore] = useState<Record<string, PropertyValue | undefined>>({})
+  const [propertiesError, setPropertiesError] = useState<string | null>(null)
   const [fieldErrors, setFieldErrors] = useState<FieldErrors | undefined>()
 
   useEffect(() => {
@@ -339,9 +340,24 @@ export function TypePage() {
     setSaved(null)
     setDraft(BLANK)
     setMadeId(null)
+    setDefined({})
+    setDefinedBefore({})
+    setFieldErrors(undefined)
+    setPropertiesError(null)
+    // Apart from the type, so a failed read leaves the type open (#7951).
+    if (id !== 'new')
+      entityApi.properties(`spool_type:${id}`).then(
+        (own) => {
+          if (!live) return
+          const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
+          // A key typed before the read answered keeps what was typed.
+          setDefined((typed) => ({ ...values, ...typed }))
+          setDefinedBefore(values)
+        },
+        (cause: unknown) => live && setPropertiesError(`The type's properties could not be loaded: ${message(cause)}`),
+      )
     Promise.all([
       id === 'new' ? Promise.resolve(null) : getType(id),
-      id === 'new' ? Promise.resolve([]) : entityApi.properties(`spool_type:${id}`),
       listCatalog('materials'),
       listCatalog('subtypes'),
       listCatalog('brands'),
@@ -351,17 +367,13 @@ export function TypePage() {
       api.listPrinters(),
       listSpools({ includeArchived: true }),
     ])
-      .then(([type, own, materials, subtypes, brands, categories, effects, insertTypes, printers, spools]) => {
+      .then(([type, materials, subtypes, brands, categories, effects, insertTypes, printers, spools]) => {
         if (!live) return
         setLists({ materials, subtypes, brands, categories, effects, insertTypes, printers: printers.map((p) => ({ id: p.id, name: p.name, model: p.model ?? null })), spools })
         if (type) {
           setSaved(type)
           setDraft(draftOf(type))
         }
-        const values = Object.fromEntries(own.map((p) => [p.key, p.value]))
-        setDefined(values)
-        setDefinedBefore(values)
-        setFieldErrors(undefined)
       })
       .catch((cause: unknown) => {
         if (live) setLoadError(cause instanceof ApiError && cause.status === 404 ? 'That type is gone. Pick another from the Types tab.' : `The type could not be loaded: ${message(cause)}`)
@@ -644,6 +656,11 @@ export function TypePage() {
           <Field label="Note" htmlFor="type-note">
             <Textarea id="type-note" rows={3} value={draft.note} onChange={(e) => set('note', e.target.value)} />
           </Field>
+          {propertiesError && (
+            <p role="alert" className="text-[13px] text-warn">
+              {propertiesError}
+            </p>
+          )}
           <DefinedFields
             schema={schema}
             values={defined}

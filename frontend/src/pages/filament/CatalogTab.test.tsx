@@ -259,6 +259,24 @@ describe('the Catalog tab', () => {
     })
   })
 
+  // #7953: until the kind's schema answers, a name-only add could be refused for a required key.
+  it('offers the name-only add only once the schema says no key is required (#7953)', async () => {
+    let answer: () => void = () => {}
+    const held = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.get('/api/v1/entity-kinds/brand/property-schema', async () => {
+        await held
+        return HttpResponse.json({ kind: 'brand', schema: { type: 'object' }, keys_in_use: [] })
+      }),
+    )
+    renderPage(<CatalogTab />, { route: '/filament/catalog?kind=brands' })
+    await within(await list('Brands')).findByText('Sunlu')
+    expect(screen.queryByLabelText('New name')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Add' })).toBeVisible()
+    answer()
+    expect(await screen.findByLabelText('New name')).toBeVisible()
+  })
+
   it('marks a row its required keys leave incomplete, and filters to those (#7703)', async () => {
     entityMock.schemas.brand = { type: 'object', properties: { site: { type: 'string' } }, required: ['site'] }
     const sunlu = (await listCatalog('brands')).find((row) => row.name === 'Sunlu')!

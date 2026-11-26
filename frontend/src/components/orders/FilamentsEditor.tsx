@@ -11,7 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { LinkTypeDialog } from '../filament/LinkTypeDialog'
 import { entityApi, type PropertyValue } from '../entities/api'
-import { requiredOf } from '../entities/definedProperties'
+import { fieldErrorsOf, requiredOf } from '../entities/definedProperties'
 import { RequiredKeysDialog } from '../entities/RequiredKeysDialog'
 import { bookRowIds, linkTypeToBook, MakeTypeError, makeTypeFromBook, rankCandidates, type BookRowIds, type TypeCandidate } from '../filament/makeType'
 import { DataTable, type Column } from '../records/DataTable'
@@ -531,8 +531,13 @@ export function FilamentsEditor({
           try {
             await makeTypeFromBook(askFor!, properties)
           } catch (err) {
-            // The dialog marks the fields from the server's refusal, which MakeTypeError wraps.
-            throw err instanceof MakeTypeError ? err.cause : err
+            // The dialog marks the fields from the server's refusal, which MakeTypeError wraps,
+            // and adds the names the catalog keeps (#7952).
+            if (!(err instanceof MakeTypeError)) throw err
+            if (err.added.length === 0) throw err.cause
+            const kept = `${err.added.join(', ')} stays in the catalog.`
+            // Another refusal has no fields to mark; its text then leads.
+            throw fieldErrorsOf(err.cause) ? new Error(kept, { cause: err.cause }) : new Error(`${refusalText(err.cause)} ${kept}`)
           }
           setAskFor(null)
           onTypesChanged?.()
