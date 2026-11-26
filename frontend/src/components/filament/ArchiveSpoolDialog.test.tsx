@@ -86,13 +86,13 @@ describe('ArchiveSpoolDialog (#7684)', () => {
   })
 
   it('says so when the preview changes what a typed number means (#7909)', async () => {
-    // The page believes the spool is on a 180 g insert; the preview, answered after the number is typed, finds no empty weight, so the number is the filament left.
+    // The page believes the spool is on a 180 g insert; the preview, answered after the number is typed (the hook's 300 ms debounce plus this delay), finds no empty weight, so the number is the filament left. The wait is longer than that sum with room for a loaded machine (the review of #7931).
     server.use(http.get('*/api/v1/filament/spools/:id/closing', async () => (await delay(600), noEmptyWeightPreview())))
     const posts = recorded()
     const { dialog, onArchived } = await show(3, 180)
     const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
     await userEvent.type(field, '210')
-    expect(await within(dialog).findByText('No empty weight is known for this spool after all: the number is read as the filament left, not as a scale reading.')).toBeInTheDocument()
+    expect(await within(dialog).findByText('No empty weight is known for this spool after all: the number is read as the filament left, not as a scale reading.', undefined, { timeout: 3000 })).toBeInTheDocument()
     expect(within(dialog).getByLabelText('Filament left (g)')).toBe(field)
     await userEvent.click(within(dialog).getByRole('radio', { name: 'Damaged' }))
     await userEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
