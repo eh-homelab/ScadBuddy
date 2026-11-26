@@ -915,6 +915,17 @@ def _tray_lock(conn: Conn, printer_id: UUID, ams_id: int, tray_id: int) -> None:
     )
 
 
+def try_tray_lock(conn: Conn, printer_id: UUID, ams_id: int, tray_id: int) -> bool:
+    """`_tray_lock`'s lock, taken only when it is free. False when a link or an unlink
+    holds it (#7143): the caller leaves the tray to the next report."""
+    row = conn.execute(
+        "SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS got",
+        (f"filament_tray:{printer_id}:{ams_id}:{tray_id}",),
+    ).fetchone()
+    assert row is not None
+    return bool(row["got"])
+
+
 async def route_trays(
     inventory: FilamentInventory | None, row: PrinterRow | None, status: PrinterStatus | None
 ) -> TrayView | None:

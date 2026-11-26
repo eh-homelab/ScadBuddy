@@ -719,6 +719,31 @@ class SpoolTypeStore:
             return None
         return _by_ids(conn, material_id, subtype_id, brand_id, rgba, label_weight_g)
 
+    @staticmethod
+    def match_tray(
+        conn: Conn, material: str, rgba: str | None, tray_info_idx: str | None
+    ) -> m.SpoolType | None:
+        """The unarchived type of a tray's material and colour (#7143): the material is a
+        catalog name, resolved by key; ``rgba`` is compared with its alpha. Brand, subtype
+        and label weight are not compared, as a tray reports none of them. A type with a
+        preset for the tray's ``tray_info_idx`` comes first, then the oldest. ``None`` for
+        no ``rgba`` and for a material with no key or no row. On ``conn``, in the caller's
+        transaction."""
+        if rgba is None:
+            return None
+        material_id = _by_key(conn, "materials", material)
+        if not material_id:
+            return None
+        row = conn.execute(
+            f"SELECT {_TYPE_COLUMNS} FROM filament_spool_types t"
+            " WHERE t.archived_at IS NULL AND t.material_id = %(m)s AND t.rgba = %(c)s"
+            " ORDER BY (%(i)s::text IS NOT NULL AND EXISTS (SELECT 1"
+            " FROM filament_spool_type_presets p WHERE p.type_id = t.id"
+            " AND p.slicer_filament = %(i)s::text)) DESC, t.created_at, t.id LIMIT 1",
+            {"m": material_id, "c": normalise_rgba(rgba), "i": tray_info_idx},
+        ).fetchone()
+        return None if row is None else m.SpoolType.model_validate(row)
+
     # -- internals --------------------------------------------------------------------
 
     @staticmethod
