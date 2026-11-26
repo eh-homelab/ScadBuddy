@@ -199,6 +199,14 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		Android.Util.Log.Info("ScadBuddyNfc",
 			$"read {Convert.ToHexString(uid)} techs={string.Join(',', techs.Select(t => t.Split('.').Last()))} records={records.Count} " +
 			(mifare is null ? "mifare=none" : $"blocks={mifare["blocks"]!.AsArray().Count} refused={mifare["refusedSectors"]!.ToJsonString()} error={mifare["error"]?.ToString() ?? "none"}"));
+		if (mifare is not null)
+		{
+			var count = mifare["blocks"]!.AsArray().Count;
+			Android.Util.Log.Info("ScadBuddyNfc", "blocks " + string.Join(' ', mifare["blocks"]!.AsArray().Select(b => $"{b!["index"]}:{b["dataHex"]}")));
+			Toast(mifare["error"] is null
+				? $"Tag read: {count} blocks."
+				: $"Read {count} blocks. Hold the tag still and tap again to finish.");
+		}
 		var reading = new JsonObject { ["type"] = "reading", ["serialNumber"] = serial, ["records"] = records };
 		if (mifare is not null) reading["mifare"] = mifare;
 		return reading;
@@ -210,9 +218,15 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		try { classic = MifareClassic.Get(tag); } catch (Exception) { return null; }
 		if (classic is null) return null;
 		var keys = HKDF.DeriveKey(HashAlgorithmName.SHA256, uid, 16 * 6, Salt, Info);
-		var blocks = new JsonArray();
+		var hex = Convert.ToHexString(uid);
+		// A failed transfer halts the card until Android discovers it again, so a read that
+		// stops partway keeps its sectors and the next tap of the same tag reads only the rest.
+		Dictionary<int, JsonArray> sectors;
+		lock (PartialGate)
+			sectors = partial is { } p && p.Uid == hex && DateTime.UtcNow - p.At < PartialFor ? p.Sectors : [];
 		var refused = new JsonArray();
 		var at = -1;
+		string? failure = null;
 		using (classic)
 		{
 			try
@@ -222,33 +236,29 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 				for (var sector = 0; sector < classic.SectorCount; sector++)
 				{
 					at = sector;
+					if (sectors.ContainsKey(sector)) continue;
 					var key = sector < 16 ? keys.AsSpan(sector * 6, 6).ToArray() : null;
-					if (key is null) { refused.Add(sector); continue; }
-					// A failed transfer halts the card: reconnect and try the sector once more.
-					JsonArray? read = null;
-					for (var attempt = 0; attempt < 2 && read is null; attempt++)
-					{
-						try
-						{
-							if (attempt > 0) { classic.Close(); classic.Connect(); }
-							read = ReadSector(classic, sector, key);
-						}
-						catch (Java.IO.IOException error) when (attempt == 0)
-						{
-							Android.Util.Log.Info("ScadBuddyNfc", $"sector {sector} failed, retrying: {error.Message}");
-						}
-					}
-					if (read is null) { refused.Add(sector); continue; }
-					foreach (var block in read) blocks.Add(block!.DeepClone());
+					var read = key is null ? null : ReadSector(classic, sector, key);
+					if (read is null) refused.Add(sector); else sectors[sector] = read;
 				}
 			}
 			catch (Exception error)
 			{
-				return new JsonObject { ["uid"] = Convert.ToHexString(uid), ["blocks"] = blocks, ["refusedSectors"] = refused, ["error"] = $"sector {at}: {error.GetType().Name}: {error.Message}" };
+				failure = $"sector {at}: {error.GetType().Name}: {error.Message}";
 			}
 		}
-		return new JsonObject { ["uid"] = Convert.ToHexString(uid), ["blocks"] = blocks, ["refusedSectors"] = refused };
+		lock (PartialGate) partial = failure is null ? null : (hex, sectors, DateTime.UtcNow);
+		var blocks = new JsonArray();
+		foreach (var sector in sectors.Keys.Order())
+			foreach (var block in sectors[sector]) blocks.Add(block!.DeepClone());
+		var result = new JsonObject { ["uid"] = hex, ["blocks"] = blocks, ["refusedSectors"] = refused };
+		if (failure is not null) result["error"] = failure;
+		return result;
 	}
+
+	static readonly object PartialGate = new();
+	static readonly TimeSpan PartialFor = TimeSpan.FromMinutes(2);
+	static (string Uid, Dictionary<int, JsonArray> Sectors, DateTime At)? partial;
 
 	/// <summary>A sector's data blocks, or null when the key is refused. The last block of a sector is its key trailer: never read.</summary>
 	static JsonArray? ReadSector(MifareClassic classic, int sector, byte[] key)
@@ -264,6 +274,10 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		}
 		return read;
 	}
+
+	static void Toast(string text) =>
+		MainThread.BeginInvokeOnMainThread(() =>
+			Android.Widget.Toast.MakeText(Android.App.Application.Context, text, Android.Widget.ToastLength.Short)!.Show());
 
 	void Emit(JsonObject message) => Send(message.ToJsonString());
 
