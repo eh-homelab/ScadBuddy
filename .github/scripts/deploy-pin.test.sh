@@ -40,6 +40,9 @@ export PROFILE_FETCH_IMAGE=ghcr.io/eh-homelab/scadbuddy-profile-fetch
 export PLAYWRIGHT_MCP_IMAGE=ghcr.io/eh-homelab/scadbuddy-playwright-mcp
 export FLEET_IMAGE=ghcr.io/eh-homelab/scadbuddy-fleet
 export CORE_IMAGE=ghcr.io/eh-homelab/scadbuddy-core
+export CAMERA_RELAY_IMAGE=ghcr.io/eh-homelab/scadbuddy-camera-relay
+export CAMERA_RECORDER_IMAGE=ghcr.io/eh-homelab/scadbuddy-camera-recorder
+export CAMERA_EDGE_IMAGE=ghcr.io/eh-homelab/scadbuddy-camera-edge
 export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
@@ -51,6 +54,10 @@ export MANIFEST_INTAKE=applications/scadbuddy/scadbuddy-intake.yaml
 export MANIFEST_PROFILE_FETCH=applications/scadbuddy/scadbuddy-profile-fetch.yaml
 export MANIFEST_PLAYWRIGHT_MCP=applications/scadbuddy/playwright-mcp.yaml
 export MANIFEST_FLEET=applications/scadbuddy/scadbuddy-fleet.yaml
+export CAMERA_DIR=applications/scadbuddy-camera
+export MANIFEST_CAMERA_RELAY=applications/scadbuddy-camera/camera-relay.yaml
+export MANIFEST_CAMERA_RECORDER=applications/scadbuddy-camera/camera-recorder.yaml
+export MANIFEST_CAMERA_EDGE=applications/scadbuddy-camera/camera-edge.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_DIR=clusters/prod/scadbuddy/grafana
 # What the step before it found: deploy/grafana exists at REVISION (its files
@@ -67,7 +74,11 @@ PROFILE_FETCH_DIGEST="sha256:$(printf 'b%.0s' {1..64})"
 PLAYWRIGHT_MCP_DIGEST="sha256:$(printf 'd%.0s' {1..64})"
 FLEET_DIGEST="sha256:$(printf 'cd%.0s' {1..32})"
 CORE_DIGEST="sha256:$(printf 'f%.0s' {1..64})"
+CAMERA_RELAY_DIGEST="sha256:$(printf 'a1%.0s' {1..32})"
+CAMERA_RECORDER_DIGEST="sha256:$(printf 'b1%.0s' {1..32})"
+CAMERA_EDGE_DIGEST="sha256:$(printf 'c1%.0s' {1..32})"
 export DIGEST REVISION AGENT_DIGEST AGENT_DURABLE_DIGEST SLICER_DIGEST SANDBOX_DIGEST PROFILE_FETCH_DIGEST PLAYWRIGHT_MCP_DIGEST FLEET_DIGEST CORE_DIGEST
+export CAMERA_RELAY_DIGEST CAMERA_RECORDER_DIGEST CAMERA_EDGE_DIGEST
 export SOURCE_URL="https://github.com/eh-homelab/ScadBuddy/commit/$REVISION"
 old="sha-1111111@sha256:$(printf '1%.0s' {1..64})"
 agent="$AGENT_IMAGE:sha-3333333@sha256:$(printf '3%.0s' {1..64})"
@@ -87,6 +98,7 @@ fl_old="$FLEET_IMAGE:sha-3333333@sha256:$(printf 'ce%.0s' {1..32})"
 fl_pinned="$FLEET_IMAGE:$VERSION@$FLEET_DIGEST"
 core_old="$CORE_IMAGE:sha-3333333@sha256:$(printf '0%.0s' {1..64})"
 core_pinned="$CORE_IMAGE:$VERSION@$CORE_DIGEST"
+cam_old="sha-3333333@sha256:$(printf 'a0%.0s' {1..32})"
 failures=0
 
 fail() {
@@ -142,10 +154,29 @@ overlay_ns() {
 overlay=$(overlay)
 old_ref="$(printf '1%.0s' {1..40})"
 
+# `camera_file <part>` prints clusters' camera-<part>.yaml as in
+# eh-homelab/clusters applications/scadbuddy-camera/: a comment that names the
+# API build, then one Deployment whose two containers (mediamtx, controller)
+# run one image. $cam_edge_line, when set, replaces the edge's second image line.
+camera_file() {
+  local part=$1 image second
+  case "$part" in
+    relay) image=$CAMERA_RELAY_IMAGE ;;
+    recorder) image=$CAMERA_RECORDER_IMAGE ;;
+    edge) image=$CAMERA_EDGE_IMAGE ;;
+  esac
+  second=$image:$cam_old
+  [ "$part" != edge ] || second=${cam_edge_line:-$second}
+  printf '%s\n' "# Pinned by digest, the build of the API's sha-1111111. Both containers" \
+    "# use this line's value; keep the two the same."
+  deployment "scadbuddy-camera-$part" "$image:$cam_old" "$second"
+}
+
 # `run <api-manifest> [worker-manifest] [print-manifest] [projects-manifest]`: a fresh repo, then the
 # step. Output lands in $work/log, and the manifests stay in $work/repo for the checks.
 # With $durable_manifest set, it is written as agent-durable's own Deployment.
 # With $extra_path set, $extra_content is written there (relative to the repo).
+# With $cameras set, the three camera files are written (camera_file).
 # With $vendored set, clusters' copy of the dashboards is written (vendor_dir).
 run() {
   rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
@@ -158,7 +189,13 @@ run() {
   [ -z "${pf_manifest:-}" ] || printf '%s\n' "$pf_manifest" > "$work/repo/$MANIFEST_PROFILE_FETCH"
   [ -z "${pm_manifest:-}" ] || printf '%s\n' "$pm_manifest" > "$work/repo/$MANIFEST_PLAYWRIGHT_MCP"
   [ -z "${fl_manifest:-}" ] || printf '%s\n' "$fl_manifest" > "$work/repo/$MANIFEST_FLEET"
-  [ -z "${extra_path:-}" ] || printf '%s\n' "$extra_content" > "$work/repo/$extra_path"
+  if [ -n "${cameras:-}" ]; then
+    mkdir -p "$work/repo/$CAMERA_DIR"
+    camera_file relay > "$work/repo/$MANIFEST_CAMERA_RELAY"
+    camera_file recorder > "$work/repo/$MANIFEST_CAMERA_RECORDER"
+    camera_file edge > "$work/repo/$MANIFEST_CAMERA_EDGE"
+  fi
+  [ -z "${extra_path:-}" ] || { mkdir -p "$work/repo/$(dirname "$extra_path")"; printf '%s\n' "$extra_content" > "$work/repo/$extra_path"; }
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   [ -z "${vendored:-}" ] || vendor_dir
   (cd "$work/repo" && git init -q)
@@ -536,6 +573,99 @@ else
 fi
 fl_manifest=
 
+# 8a''''. The camera recorders and live edge (#7997), each in its own file
+#       under applications/scadbuddy-camera/ with two containers on one image:
+#       both lines move, and the comment that names the API build moves with
+#       them. Optional until clusters has the files; a build with no image for a
+#       part keeps that file's pins (the `camera` job is continue-on-error). The
+#       relay is never moved: its pin moves by hand (camera spec §6.1), so any
+#       relay pin passes in camera-relay.yaml and fails anywhere else.
+#       CAMERA_RELAY_DIGEST stays set, so a relay that moved would show here.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  grep -q '^camera_recorder=none$' "$work/out" || fail "no camera files: recorder output is not none"
+  grep -q '^camera_edge=none$' "$work/out" || fail "no camera files: edge output is not none"
+else
+  fail "no camera files: step failed: $(grep '::error' "$work/log")"
+fi
+cameras=1
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  for part in recorder edge; do
+    case "$part" in
+      recorder) want="$CAMERA_RECORDER_IMAGE:$VERSION@$CAMERA_RECORDER_DIGEST" ;;
+      edge) want="$CAMERA_EDGE_IMAGE:$VERSION@$CAMERA_EDGE_DIGEST" ;;
+    esac
+    file="$CAMERA_DIR/camera-$part.yaml"
+    n=$(grep -cF "image: $want" "$work/repo/$file" || true)
+    [ "$n" -eq 2 ] || fail "cameras: $part has $n pinned image lines, expected 2"
+    grep -qF "the build of the API's $VERSION. Both" "$work/repo/$file" \
+      || fail "cameras: $part comment does not name $VERSION: $(grep 'build of' "$work/repo/$file")"
+    grep -q "^camera_$part=pinned$" "$work/out" || fail "cameras: $part output is not pinned"
+    grep -q "^files=.*$file" "$work/out" || fail "cameras: $part not among the changed files"
+  done
+  (cd "$work/repo" && git diff --quiet HEAD -- "$MANIFEST_CAMERA_RELAY") \
+    || fail "cameras: the relay's file was rewritten: $(cd "$work/repo" && git diff HEAD -- "$MANIFEST_CAMERA_RELAY")"
+  grep -q "$MANIFEST_CAMERA_RELAY" "$work/out" && fail "cameras: the relay's file is listed as changed"
+  grep -q '^camera_relay=' "$work/out" && fail "cameras: the step reports a relay state"
+  rerun || fail "cameras: rerun failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=true' "$work/out" || fail "cameras: rerun expected unchanged=true"
+else
+  fail "cameras: step failed: $(grep '::error' "$work/log")"
+fi
+# A relay pin by hand, with any tag, passes in the relay's own file.
+extra_path=$MANIFEST_CAMERA_RELAY
+extra_content=$(deployment scadbuddy-camera-relay "$CAMERA_RELAY_IMAGE:by-hand" "$CAMERA_RELAY_IMAGE:sha-9999999@sha256:$(printf '9a%.0s' {1..32})")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  (cd "$work/repo" && git diff --quiet HEAD -- "$MANIFEST_CAMERA_RELAY") \
+    || fail "relay pin by hand: the relay's file was rewritten"
+else
+  fail "relay pin by hand: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path=
+extra_content=
+# No edge image for this build: the edge keeps both its pins and its comment,
+# and warns; the recorder still moves.
+if CAMERA_EDGE_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  n=$(grep -cF "image: $CAMERA_EDGE_IMAGE:$cam_old" "$work/repo/$MANIFEST_CAMERA_EDGE" || true)
+  [ "$n" -eq 2 ] || fail "camera edge, no image: $n old pins kept, expected 2"
+  grep -qF "the build of the API's sha-1111111." "$work/repo/$MANIFEST_CAMERA_EDGE" \
+    || fail "camera edge, no image: comment moved without the pins"
+  grep -q '^camera_edge=kept$' "$work/out" || fail "camera edge, no image: output is not kept"
+  grep -q '::warning.*keeping the camera-edge pins' "$work/log" || fail "camera edge, no image: no warning: $(cat "$work/log")"
+  grep -q "$MANIFEST_CAMERA_EDGE" "$work/out" && fail "camera edge, no image: kept file listed as changed"
+  grep -q '^camera_recorder=pinned$' "$work/out" || fail "camera edge, no image: recorder output is not pinned"
+else
+  fail "camera edge, no image: step failed: $(grep '::error' "$work/log")"
+fi
+# The two containers must run one image: one line alone, or two that differ, fail.
+cam_edge_line="ghcr.io/eh-homelab/temporal-server:1.32.1"
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "one camera-edge line: step passed, expected an error"
+else
+  grep -q 'expected exactly two camera-edge image lines (mediamtx and controller), found 1' "$work/log" \
+    || fail "one camera-edge line: wrong error: $(grep '::error' "$work/log")"
+fi
+cam_edge_line="$CAMERA_EDGE_IMAGE:sha-4444444@sha256:$(printf 'a0%.0s' {1..32})"
+if CAMERA_EDGE_DIGEST="" run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "two different camera-edge lines: step passed, expected an error"
+else
+  grep -q 'its two camera-edge image lines differ' "$work/log" \
+    || fail "two different camera-edge lines: wrong error: $(grep '::error' "$work/log")"
+fi
+cam_edge_line=
+# A relay pin is allowed in the relay's file only: in another file of the
+# camera directory it fails.
+extra_path=$CAMERA_DIR/camera-other.yaml
+extra_content=$(deployment scadbuddy-camera-other "$CAMERA_RELAY_IMAGE:$cam_old")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "relay pin in another file: step passed, expected an error"
+else
+  grep -qF "file=$extra_path::names $CAMERA_RELAY_IMAGE:$cam_old, which this deploy does not move" "$work/log" \
+    || fail "relay pin in another file: wrong error: $(grep '::error' "$work/log")"
+fi
+extra_path=
+extra_content=
+cameras=
+
 # 8a''. The API in Go (#7667), the `core` container in the API's pod, pinned as
 #       the slicer is: optional until the API's manifest names it, then exactly
 #       one line; a build with no image keeps the pin and warns.
@@ -654,6 +784,13 @@ stale_fails "playwright-mcp outside its file" applications/scadbuddy/scadbuddy-e
   "$(deployment scadbuddy-extra "$pm_old")" "names $pm_old, $not_moved"
 stale_fails "fleet outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
   "$(deployment scadbuddy-extra "$fl_old")" "names $fl_old, $not_moved"
+stale_fails "camera relay outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$CAMERA_RELAY_IMAGE:$cam_old")" "names $CAMERA_RELAY_IMAGE:$cam_old, $not_moved"
+# The camera directory is read too (#7997): a file there that the step does
+# not pin fails it, as one under applications/scadbuddy/ does.
+stale_fails "unknown file in the camera directory" applications/scadbuddy-camera/camera-new.yaml \
+  "$(deployment scadbuddy-camera-new "$CAMERA_EDGE_IMAGE:$cam_old")" \
+  "file=applications/scadbuddy-camera/camera-new.yaml::names $CAMERA_EDGE_IMAGE:$cam_old, $not_moved"
 stale_fails "an overlay images: entry" clusters/prod/scadbuddy/images.yaml \
   "$(printf '%s\n' 'images:' "  - name: $IMAGE" "    newName: $IMAGE:sha-1111111")" "names $IMAGE:sha-1111111, $not_moved"
 stale_fails "an alias of an old pin" applications/scadbuddy/scadbuddy-alias.yaml \

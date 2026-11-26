@@ -10,7 +10,7 @@ use temporalio_client::{Client, ClientOptions, ConnectionOptions, Url};
 
 pub use health::serve_health;
 pub use metrics::{RENDER_BUCKETS, Stages};
-pub use telemetry::init_tracing;
+pub use telemetry::{FLUSH_TIMEOUT, ProcessMetrics, Telemetry, init_telemetry};
 
 /// The port `/healthz` and `/metrics` are served on, as the Python render worker's.
 pub const METRICS_PORT: u16 = 9090;
@@ -75,8 +75,8 @@ fn default_concurrency() -> usize {
 
 /// Connects over plain gRPC to `address` (`host:port`, as the Python workers take it
 /// in-cluster) and makes a client for `namespace`. With trace export on (see
-/// [`init_tracing`]) it installs the SDK's OpenTelemetry plugin, which uses the global
-/// tracer provider `init_tracing` set, so an activity's span is a child of the workflow's.
+/// [`init_telemetry`]) it installs the SDK's OpenTelemetry plugin, which uses the global
+/// tracer provider `init_telemetry` set, so an activity's span is a child of the workflow's.
 ///
 /// `runtime` is taken so a client is only ever made once the worker's runtime exists;
 /// temporalio-sdk 1.1.2 exposes no metric meter on `Runtime` (`Runtime::core` is

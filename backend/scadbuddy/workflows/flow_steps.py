@@ -143,12 +143,14 @@ async def step(
     hop: Hop | None = None,
     hop_until: datetime | None = None,
     reason: str | None = None,
+    people_only: bool | None = None,
 ) -> AsyncIterator[StepHandle]:
     """Record a host call around its body: `running` on enter (and parked, with
     `waiting`; or let through by the run grant `grant_id`), `succeeded` or `failed` on
     exit. A failure records only the exception's type, never its message, and is
     re-raised. An approval parked outside the run's grant waits at `hop` (#2482): the
-    starter session until `hop_until`, or the person; `reason` says why it is outside."""
+    starter session until `hop_until`, or the person; `reason` says why it is outside.
+    A question says whether it is for `people_only` (#7471)."""
     owner: StepOwner = workflow.instance()
     info = workflow.info()
     started = FlowStep(
@@ -173,6 +175,7 @@ async def step(
             hop=hop,
             hop_until=hop_until,
             reason=reason,
+            people_only=people_only,
             hops=(
                 [HopRecord(hop=hop, action="parked", actor="flow", at=workflow.now())]
                 if hop is not None

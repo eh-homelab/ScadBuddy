@@ -8,6 +8,7 @@ export type SectionId =
   | 'connection'
   | 'printing'
   | 'print-watcher'
+  | 'flow-answerers'
   | 'orders'
   | 'filament'
   | 'projects'

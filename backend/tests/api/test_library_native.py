@@ -315,6 +315,20 @@ def test_a_missing_thumbnail_is_404(
     assert native_client.get(f"/api/v1/print/library/{plain.id}/thumbnail").status_code == 404
 
 
+def test_a_missing_plate_image_shows_the_files_thumbnail_when_asked(
+    native_client: TestClient, uploaded: NativeFile
+) -> None:
+    """#7939: a queue item's picture asks with ``cover_if_missing``; a plate the file has
+    no image of then answers as the file's thumbnail does."""
+    own = native_client.get(f"/api/v1/print/library/{uploaded.id}/thumbnail")
+    fallback = native_client.get(
+        f"/api/v1/print/library/{uploaded.id}/plates/9/thumbnail",
+        params={"cover_if_missing": "true"},
+    )
+    assert own.status_code == 200
+    assert (fallback.status_code, fallback.content) == (200, own.content)
+
+
 def test_an_entry_names_its_live_output(
     native_client: TestClient, uploaded_with_output: NativeFile
 ) -> None:

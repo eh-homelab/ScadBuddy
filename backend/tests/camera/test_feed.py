@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from typing import Any
 
 import httpx
 
 from scadbuddy.auth.service_credentials import ServiceAuth
 from scadbuddy.camera.feed import FeedSender
 from scadbuddy.crud.client import CrudClient
-from tests.camera.test_follow import Token
+from tests.camera.support import Token
 
 CRUD = {"X-ScadBuddy-Crud": "1"}
 
@@ -66,4 +68,69 @@ async def test_flushed_returns_while_a_forgotten_sender_is_cancelled() -> None:
     feed.forget("p1")
     release.set()
     await asyncio.wait_for(waiting, 1)
+    await feed.aclose()
+
+
+def _crud(handle: Any) -> CrudClient:
+    return CrudClient(
+        "http://api",
+        "camera",
+        ServiceAuth(Token()),
+        transport=httpx.MockTransport(handle),
+        unavailable_budget=0.0,
+    )
+
+
+async def test_a_429_is_retried() -> None:
+    """Too many requests passes with time: the sender tries again with back-off."""
+    states: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        states.append(json.loads(request.content)["state"])
+        if len(states) == 1:
+            problem = {"detail": "slow down", "reason": "rate_limited"}
+            return httpx.Response(429, headers={**CRUD, "Retry-After": "0"}, json=problem)
+        return httpx.Response(204, headers=CRUD)
+
+    feed = FeedSender(_crud(handle), "/c", "recorder", recorder="rec-a", retry_min=0.01)
+    feed.want("p1", "pulling")
+    await asyncio.wait_for(feed.flushed(), 2)
+    assert states == ["pulling", "pulling"]
+    await feed.aclose()
+
+
+async def test_a_refusal_posts_the_state_wanted_meanwhile() -> None:
+    """A state wanted while a refused post was on its way is posted after the refusal."""
+    started, release = asyncio.Event(), asyncio.Event()
+    states: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        states.append(json.loads(request.content)["state"])
+        if len(states) == 1:
+            started.set()
+            await release.wait()
+            return httpx.Response(400, headers=CRUD, json={"detail": "no", "reason": "bad"})
+        return httpx.Response(204, headers=CRUD)
+
+    feed = FeedSender(_crud(handle), "/c", "recorder", recorder="rec-a", retry_min=0.01)
+    feed.want("p1", "pulling")
+    await asyncio.wait_for(started.wait(), 1)
+    feed.want("p1", "stalled")
+    release.set()
+    await asyncio.wait_for(feed.flushed(), 2)
+    assert states == ["pulling", "stalled"]
+    await feed.aclose()
+
+
+async def test_a_refusal_of_the_newest_state_is_not_retried() -> None:
+    states: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        states.append(json.loads(request.content)["state"])
+        return httpx.Response(400, headers=CRUD, json={"detail": "no", "reason": "bad"})
+
+    feed = FeedSender(_crud(handle), "/c", "recorder", recorder="rec-a", retry_min=0.01)
+    feed.want("p1", "pulling")
+    await asyncio.wait_for(feed.flushed(), 2)
+    assert states == ["pulling"]
     await feed.aclose()

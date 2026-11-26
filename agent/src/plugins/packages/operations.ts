@@ -1,9 +1,9 @@
 import { EgressError } from '../../http/egress.js'
 import { type OperationKind, OperationRefusal, refusal } from '../../operations/kinds.js'
 import { PluginError } from '../registry.js'
-import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from './install.js'
+import { BuiltInPluginError, PackageRefusedError, type PackageInstaller, recordPreparedMirror } from './install.js'
 import { type PackageSource, REPIN_FIXED, RepinFixedError, validateSource, withRepinRef } from './source.js'
-import type { PackageRepo, PackageView } from './store.js'
+import type { PackageRepo, PackageView, PreparedPackage } from './store.js'
 
 /**
  * A hosted plugin's latest version offered to the package model: installed when no package
@@ -46,7 +46,8 @@ export const REPIN_KIND = 'plugin_package_repin'
 
 export type PackageKindDeps = {
   packages: PackageRepo
-  installer: Pick<PackageInstaller, 'prepare'>
+  /** `wantMirror` starts a commit pin's mirror job when the install's own mirror was not recorded (#7907). */
+  installer: Pick<PackageInstaller, 'prepare'> & Partial<Pick<PackageInstaller, 'wantMirror'>>
   /** Fetches at once across all packages; more are refused with 429. */
   maxConcurrentFetches?: number
 }
@@ -130,6 +131,13 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
     }
   }
 
+  /** `prepared` stored by `store`, then its commit mirror recorded on the row, or its mirror job started (#7907). */
+  async function stored(prepared: PreparedPackage, store: (prepared: PreparedPackage) => Promise<PackageView>): Promise<PackageView> {
+    const view = await store(prepared)
+    await recordPreparedMirror(deps.packages, deps.installer, prepared, { name: view.name })
+    return view
+  }
+
   const installKey = (source: PackageSource) => {
     // A hosted package's install and re-pin share the package's name: one fetch at a time.
     if (source.kind === 'hosted') return source.name
@@ -157,7 +165,7 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
         return withFetch(installKey(source), signal, async () =>
           source.kind === 'hosted'
             ? offerHosted(deps.packages, deps.installer, source.name, signal)
-            : deps.packages.create(await deps.installer.prepare(source, signal)),
+            : stored(await deps.installer.prepare(source, signal), (prepared) => deps.packages.create(prepared)),
         )
       }),
     runAttempts: 1,
@@ -182,7 +190,7 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
         const name = String(request.name)
         const { source } = checked as { source: PackageSource }
         return withFetch(name, signal, async () =>
-          deps.packages.setPending(name, await deps.installer.prepare(source, signal)),
+          stored(await deps.installer.prepare(source, signal), (prepared) => deps.packages.setPending(name, prepared)),
         )
       }),
     runAttempts: 1,

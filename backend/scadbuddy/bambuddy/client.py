@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
 from typing import IO, Any, Literal, Self
-from urllib.parse import quote
 
 import httpx
 from fastapi import status
@@ -68,8 +67,6 @@ from scadbuddy.bambuddy.models import (
     HaEntity,
     InventoryRemain,
     KProfile,
-    KProfileNotes,
-    KProfileWriteResult,
     LibraryFile,
     LibraryListRow,
     LibraryPlates,
@@ -93,9 +90,6 @@ from scadbuddy.bambuddy.models import (
     SliceJob,
     SliceJobAccepted,
     SliceRequest,
-    SlotConfigure,
-    SlotControlAnswer,
-    SlotPreset,
     Spool,
     SpoolAssignment,
     SpoolCatalogEntry,
@@ -134,15 +128,6 @@ DEFAULT_SLICE_TIMEOUT = 600.0
 #: A MakerWorld import (#6119): Bambuddy downloads the 3MF from MakerWorld inside the one
 #: request, which ran past 120 s on prod on 2026-11-13 (the session #6119 cites).
 MAKERWORLD_IMPORT_TIMEOUT = 600.0
-#: A K-profile write (#7154): Bambuddy waits up to 6 s for the printer's acknowledgement,
-#: and an edit on a single-nozzle printer waits for two and reads the table back (5 s, three
-#: tries), about 28 s at worst (``bambu_mqtt.py`` lines 7542 and 7636, maziggy/bambuddy
-#: v1.3.1), so the default 30 s is too close.
-KPROFILE_WRITE_TIMEOUT = 60.0
-#: A slot reset, refresh, load or unload (#7153): the refresh waits for the printer's
-#: answer to ``ams_get_rfid`` and may send the ``M620 R`` fallback after a refusal
-#: (``bambu_mqtt.py`` line 8567, maziggy/bambuddy v1.3.1), so more than the default.
-SLOT_CONTROL_TIMEOUT = 45.0
 #: Read by `BambuddyClient._parsed`, not mapped by `_send`: a link or id Bambuddy refuses.
 _REFUSED_LINK = frozenset({400})
 DEFAULT_SLICE_POLL = 2.0
@@ -234,11 +219,6 @@ Operation = Literal[
     "makerworld.import",
     "makerworld.resolve",
     "makerworld.status",
-    "printers.ams_labels",
-    "printers.ams_labels.delete",
-    "printers.ams_labels.set",
-    "printers.ams_load",
-    "printers.ams_unload",
     "printers.available_filaments",
     "printers.camera.snapshot",
     "printers.camera.stream",
@@ -248,20 +228,8 @@ Operation = Literal[
     "printers.files.download",
     "printers.inventory_remain",
     "printers.kprofiles",
-    "printers.kprofiles.batch",
-    "printers.kprofiles.delete",
-    "printers.kprofiles.notes",
-    "printers.kprofiles.notes.delete",
-    "printers.kprofiles.notes.set",
-    "printers.kprofiles.set",
     "printers.list",
     "printers.read",
-    "printers.slot_configure",
-    "printers.slot_presets",
-    "printers.slot_presets.delete",
-    "printers.slot_presets.set",
-    "printers.slot_refresh",
-    "printers.slot_reset",
     "printers.status",
     "projects.add_archives",
     "projects.add_queue",
@@ -916,99 +884,6 @@ class BambuddyClient:
                 type_=BAD_BODY_PROBLEM,
             )
         return rows
-
-    async def _k_write(
-        self,
-        method: str,
-        path: str,
-        *,
-        operation: Operation,
-        what: str,
-        json: Any,
-    ) -> KProfileWriteResult:
-        """One K-profile write (#7154). Bambuddy denies ``KPROFILES_CREATE``, ``_UPDATE``
-        and ``_DELETE`` to every API key, so a 403 is the admin-only scope problem
-        (`Scope.ADMIN_KPROFILES`, R-7154-3). Sent once, never retried here (R-7154-5)."""
-        response = await self._send(
-            method,
-            path,
-            scope=Scope.ADMIN_KPROFILES,
-            operation=operation,
-            what=what,
-            json=json,
-            timeout=KPROFILE_WRITE_TIMEOUT,
-        )
-        return KProfileWriteResult.model_validate(response.json())
-
-    async def set_k_profile(self, printer_id: int, row: dict[str, Any]) -> KProfileWriteResult:
-        """``POST /api/v1/printers/{id}/kprofiles/`` with a ``KProfileCreate``: a
-        ``slot_id`` of 0 adds a profile, above 0 edits that one (``routes/kprofiles.py``
-        line 85, v1.3.1)."""
-        return await self._k_write(
-            "POST",
-            f"/printers/{printer_id}/kprofiles/",
-            operation="printers.kprofiles.set",
-            what=f"set a K-profile on printer {printer_id}",
-            json=row,
-        )
-
-    async def set_k_profiles_batch(
-        self, printer_id: int, rows: list[dict[str, Any]]
-    ) -> KProfileWriteResult:
-        """``POST /api/v1/printers/{id}/kprofiles/batch``: the rows in one command, each at
-        the first row's ``nozzle_diameter`` (``routes/kprofiles.py`` line 242, v1.3.1)."""
-        return await self._k_write(
-            "POST",
-            f"/printers/{printer_id}/kprofiles/batch",
-            operation="printers.kprofiles.batch",
-            what=f"set {len(rows)} K-profiles on printer {printer_id}",
-            json=rows,
-        )
-
-    async def delete_k_profile(self, printer_id: int, row: dict[str, Any]) -> KProfileWriteResult:
-        """``DELETE /api/v1/printers/{id}/kprofiles/`` with a ``KProfileDelete`` body
-        (``routes/kprofiles.py`` line 309, v1.3.1)."""
-        return await self._k_write(
-            "DELETE",
-            f"/printers/{printer_id}/kprofiles/",
-            operation="printers.kprofiles.delete",
-            what=f"delete a K-profile on printer {printer_id}",
-            json=row,
-        )
-
-    async def k_profile_notes(self, printer_id: int) -> KProfileNotes:
-        """``GET /api/v1/printers/{id}/kprofiles/notes`` (``KPROFILES_READ``: Read Status;
-        ``routes/kprofiles.py`` line 360, v1.3.1)."""
-        response = await self._send(
-            "GET",
-            f"/printers/{printer_id}/kprofiles/notes",
-            scope=Scope.READ_STATUS,
-            operation="printers.kprofiles.notes",
-            what=f"read printer {printer_id}'s K-profile notes",
-        )
-        return KProfileNotes.model_validate(response.json())
-
-    async def set_k_profile_note(self, printer_id: int, key: str, note: str) -> KProfileWriteResult:
-        """``PUT /api/v1/printers/{id}/kprofiles/notes`` with ``{setting_id, note}``; a
-        blank note deletes it (``routes/kprofiles.py`` line 387, v1.3.1)."""
-        return await self._k_write(
-            "PUT",
-            f"/printers/{printer_id}/kprofiles/notes",
-            operation="printers.kprofiles.notes.set",
-            what=f"set a K-profile note on printer {printer_id}",
-            json={"setting_id": key, "note": note},
-        )
-
-    async def delete_k_profile_note(self, printer_id: int, key: str) -> KProfileWriteResult:
-        """``DELETE /api/v1/printers/{id}/kprofiles/notes/{setting_id}``; a note that is not
-        there is deleted all the same (``routes/kprofiles.py`` line 436, v1.3.1)."""
-        return await self._k_write(
-            "DELETE",
-            f"/printers/{printer_id}/kprofiles/notes/{quote(key, safe='')}",
-            operation="printers.kprofiles.notes.delete",
-            what=f"delete a K-profile note on printer {printer_id}",
-            json=None,
-        )
 
     # --- inventory -----------------------------------------------------------
 
@@ -2522,188 +2397,6 @@ class BambuddyClient:
             operation="settings.update",
             what="change Bambuddy's auto_add_unknown_rfid setting",
             json={"auto_add_unknown_rfid": value},
-        )
-
-    async def configure_slot(
-        self, printer_id: int, ams_id: int, tray_id: int, params: SlotConfigure
-    ) -> None:
-        """``POST /api/v1/printers/{id}/slots/{ams}/{tray}/configure`` with the values in
-        the query (``PRINTERS_CONTROL``: Control Printer; ``routes/printers.py`` line
-        2963, v1.3.1)."""
-        await self._send(
-            "POST",
-            f"/printers/{printer_id}/slots/{ams_id}/{tray_id}/configure",
-            scope=Scope.CONTROL_PRINTER,
-            operation="printers.slot_configure",
-            what=f"configure slot {ams_id}/{tray_id} of printer {printer_id}",
-            params=params.query(),
-        )
-
-    # --- AMS slots (#7153, plan 2026-11-23-ams-slot-control) -----------------
-
-    async def slot_presets(self, printer_id: int) -> list[SlotPreset]:
-        """``GET /api/v1/printers/{id}/slot-presets`` (Read Status; ``routes/printers.py``
-        line 2678, v1.3.1): ``{global_tray_id: row}``, read as its rows."""
-        response = await self._send(
-            "GET",
-            f"/printers/{printer_id}/slot-presets",
-            scope=Scope.READ_STATUS,
-            operation="printers.slot_presets",
-            what=f"read the slot presets of printer {printer_id}",
-        )
-        body = response.json()
-        rows = body.values() if isinstance(body, dict) else []
-        return [SlotPreset.model_validate(row) for row in rows if isinstance(row, dict)]
-
-    async def set_slot_preset(
-        self,
-        printer_id: int,
-        ams_id: int,
-        tray_id: int,
-        *,
-        preset_id: str,
-        preset_name: str,
-        preset_source: str = "cloud",
-        tray_info_idx: str | None = None,
-    ) -> SlotPreset:
-        """``PUT /api/v1/printers/{id}/slot-presets/{ams}/{tray}`` with the values in the
-        query, an upsert (``PRINTERS_UPDATE``, which no API key can hold; line 2733,
-        v1.3.1)."""
-        params = {
-            "preset_id": preset_id,
-            "preset_name": preset_name,
-            "preset_source": preset_source,
-        }
-        if tray_info_idx:
-            params["tray_info_idx"] = tray_info_idx
-        response = await self._send(
-            "PUT",
-            f"/printers/{printer_id}/slot-presets/{ams_id}/{tray_id}",
-            scope=Scope.ADMIN_PRINTERS,
-            operation="printers.slot_presets.set",
-            what=f"save the preset of slot {ams_id}/{tray_id} of printer {printer_id}",
-            params=params,
-        )
-        return SlotPreset.model_validate(response.json())
-
-    async def delete_slot_preset(self, printer_id: int, ams_id: int, tray_id: int) -> None:
-        """``DELETE /api/v1/printers/{id}/slot-presets/{ams}/{tray}``; one that is not there
-        is deleted all the same (``PRINTERS_UPDATE``; line 2802, v1.3.1)."""
-        await self._send(
-            "DELETE",
-            f"/printers/{printer_id}/slot-presets/{ams_id}/{tray_id}",
-            scope=Scope.ADMIN_PRINTERS,
-            operation="printers.slot_presets.delete",
-            what=f"clear the preset of slot {ams_id}/{tray_id} of printer {printer_id}",
-        )
-
-    async def _slot_control(
-        self, path: str, *, operation: Operation, what: str, params: dict[str, int] | None = None
-    ) -> SlotControlAnswer:
-        """One printer command on a slot: Control Printer (``PRINTERS_CONTROL`` and
-        ``PRINTERS_AMS_RFID`` map to ``can_control_printer``, ``core/auth.py`` lines 150 and
-        152, v1.3.1). Sent once, never retried here."""
-        response = await self._send(
-            "POST",
-            path,
-            scope=Scope.CONTROL_PRINTER,
-            operation=operation,
-            what=what,
-            params=params,
-            timeout=SLOT_CONTROL_TIMEOUT,
-        )
-        try:
-            body = response.json()
-        except ValueError:
-            body = None
-        return SlotControlAnswer.model_validate(body if isinstance(body, dict) else {})
-
-    async def reset_slot(self, printer_id: int, ams_id: int, tray_id: int) -> SlotControlAnswer:
-        """``POST /api/v1/printers/{id}/ams/{ams}/tray/{tray}/reset``: the slot empty and
-        unconfigured, its slot preset deleted (line 3491, v1.3.1)."""
-        return await self._slot_control(
-            f"/printers/{printer_id}/ams/{ams_id}/tray/{tray_id}/reset",
-            operation="printers.slot_reset",
-            what=f"reset slot {ams_id}/{tray_id} of printer {printer_id}",
-        )
-
-    async def refresh_slot(self, printer_id: int, ams_id: int, slot_id: int) -> SlotControlAnswer:
-        """``POST /api/v1/printers/{id}/ams/{ams}/slot/{slot}/refresh``: the slot's RFID read
-        again (line 4480, v1.3.1)."""
-        return await self._slot_control(
-            f"/printers/{printer_id}/ams/{ams_id}/slot/{slot_id}/refresh",
-            operation="printers.slot_refresh",
-            what=f"refresh slot {ams_id}/{slot_id} of printer {printer_id}",
-        )
-
-    async def load_filament(
-        self, printer_id: int, tray_id: int, *, extruder_id: int | None = None
-    ) -> SlotControlAnswer:
-        """``POST /api/v1/printers/{id}/ams/load?tray_id=&extruder_id=``: ``tray_id`` is the
-        global tray (``ams * 4 + slot``, an AMS-HT's unit id, 254 or 255 for the external
-        holders); ``extruder_id`` only with the Filament Track Switch (line 4762, v1.3.1)."""
-        params = {"tray_id": tray_id}
-        if extruder_id is not None:
-            params["extruder_id"] = extruder_id
-        return await self._slot_control(
-            f"/printers/{printer_id}/ams/load",
-            operation="printers.ams_load",
-            what=f"load filament on printer {printer_id}",
-            params=params,
-        )
-
-    async def unload_filament(self, printer_id: int, tray_id: int) -> SlotControlAnswer:
-        """``POST /api/v1/printers/{id}/ams/unload?tray_id=``: the hotend fed from that
-        slot; Bambuddy's 409 when none is (line 4836, v1.3.1)."""
-        return await self._slot_control(
-            f"/printers/{printer_id}/ams/unload",
-            operation="printers.ams_unload",
-            what=f"unload filament on printer {printer_id}",
-            params={"tray_id": tray_id},
-        )
-
-    async def ams_labels(self, printer_id: int) -> dict[int, str]:
-        """``GET /api/v1/printers/{id}/ams-labels``: ``{ams_id: label}`` (Read Status;
-        line 3539, v1.3.1)."""
-        response = await self._send(
-            "GET",
-            f"/printers/{printer_id}/ams-labels",
-            scope=Scope.READ_STATUS,
-            operation="printers.ams_labels",
-            what=f"read the AMS labels of printer {printer_id}",
-        )
-        body = response.json()
-        labels: dict[int, str] = {}
-        for key, label in body.items() if isinstance(body, dict) else []:
-            try:
-                labels[int(key)] = str(label)
-            except ValueError:
-                continue
-        return labels
-
-    async def set_ams_label(self, printer_id: int, ams_id: int, label: str, *, serial: str) -> None:
-        """``PUT /api/v1/printers/{id}/ams-labels/{ams}`` with ``{label, ams_serial}``;
-        Bambuddy keys it by the serial, else by the printer and unit (``PRINTERS_UPDATE``;
-        line 3597, v1.3.1)."""
-        await self._send(
-            "PUT",
-            f"/printers/{printer_id}/ams-labels/{ams_id}",
-            scope=Scope.ADMIN_PRINTERS,
-            operation="printers.ams_labels.set",
-            what=f"label AMS {ams_id} of printer {printer_id}",
-            json={"label": label, "ams_serial": serial},
-        )
-
-    async def delete_ams_label(self, printer_id: int, ams_id: int, *, serial: str) -> None:
-        """``DELETE /api/v1/printers/{id}/ams-labels/{ams}?ams_serial=``: both keys
-        (``PRINTERS_UPDATE``; line 3639, v1.3.1)."""
-        await self._send(
-            "DELETE",
-            f"/printers/{printer_id}/ams-labels/{ams_id}",
-            scope=Scope.ADMIN_PRINTERS,
-            operation="printers.ams_labels.delete",
-            what=f"clear the label of AMS {ams_id} of printer {printer_id}",
-            params={"ams_serial": serial},
         )
 
     # --- projects ------------------------------------------------------------

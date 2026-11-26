@@ -29,16 +29,24 @@ CI sets `SCADBUDDY_TEST_POSTGRES_REQUIRED`). The Go toolchain is pinned in these
   Kiota-generated client (`client/`, committed, plus its own `vendor/` for module-mode
   consumers); `bambuddy-fs/` is the FUSE mount of Bambuddy's library over it
   (`internal/api` the client wrapper, `internal/fsys` the tree, cache, writes and the
-  unsent queue, `internal/telemetry` OTel; README there). Its unsent writes are the
-  only copy of a save, under the state directory, never the cache. `core/` is the
-  API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to Python
-  (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there). `fleetchat/` is the
-  agent fleet chat library (MCP tools over a host's `Store` and `Bus`, imports nothing else
-  from this repo; README there). `fleet/` is ScadBuddy's host of it, the image
-  `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` over core's
+  unsent queue, `internal/telemetry` its spans and metrics; README there). Its unsent
+  writes are the only copy of a save, under the state directory, never the cache. `core/`
+  is the API in Go (#7667): the areas it has, over Postgres, and a forward of the rest to
+  Python (`internal/crud` the CRUD guard, `internal/<area>` the routes; README there).
+  `fleetchat/` is the agent fleet chat library (MCP tools over a host's `Store` and `Bus`,
+  imports nothing else from this repo; README there). `fleet/` is ScadBuddy's host of it,
+  the image `ghcr.io/eh-homelab/scadbuddy-fleet`: `sbfleet` (a `Store` over core's
   `…/crud/fleet/` routes and a `Bus` over the API's fleet change stream, with the `fleet`
   credential; it imports nothing from `core/`) and the server binary (`/mcp`, `/healthz`,
   `FLEETCHAT_*` settings; README there).
+  `claudecreds/` is a library for Claude Code logins (#7981): `ResetFromText`, the reset a
+  usage-limit text names, in UTC or an IANA zone, held to the agent's
+  `rate-limit-reset-vectors.json` with the TypeScript and Python ports (#7986; README there).
+  `telemetry/` is the OpenTelemetry setup every module uses (#7667): traces, metrics and
+  logs over OTLP from the `OTEL_*` variables (off, at no cost, with no endpoint), the
+  server and client HTTP wrappers, the slog bridge, the runtime and process metrics, and
+  `pgxtrace` for pgx. A new Go service starts it with `telemetry.Start` and flushes it
+  with `Shutdown`.
 
 ## See also
 

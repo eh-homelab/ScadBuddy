@@ -147,14 +147,14 @@ def test_the_projects_worker_needs_the_run_s_token(
 def test_a_service_never_answers_for_a_person(
     client: TestClient, app: FastAPI, settings: Settings, caller: str
 ) -> None:
-    """`browser_only`: a service's credential is refused even with no author header."""
+    """`answerer`: a service's credential with no author header answers for no one (#7471)."""
     response = client.post(
         "/api/v1/workflow-runs/some-run/answer",
         json={"call_id": "c", "answer": "yes"},
         headers=_bearer(app, settings, caller),
     )
     assert response.status_code == 403
-    assert response.json()["type"] == "https://scadbuddy.dev/problems/flow-entry-browser-only"
+    assert response.json()["type"] == "https://scadbuddy.dev/problems/flow-answer-not-allowed"
 
 
 def test_a_person_still_answers(client: TestClient, app: FastAPI) -> None:

@@ -12,7 +12,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { hopActor, hopUntilText, proposalDiff, waitingText } from '../../lib/flows'
 import { useAsync } from '../../lib/useAsync'
 import { usePassed } from '../../lib/usePassed'
-import { INSET, StepLine, WAITING, type CardProps } from './pendingParts'
+import { INSET, PeopleOnly, StepLine, WAITING, type CardProps } from './pendingParts'
 import { TaskCard } from './TaskCard'
 
 // A run's parked calls and their decide controls, on the run's page and the order's
@@ -48,6 +48,7 @@ function CallCard({ entry, runId, step, respond }: CardProps) {
         {step && <StepLine step={step} />}
         {/* #4445: what the call does, read from ScadBuddy's own records (a print's printer). */}
         {entry.summary && <p className="mb-2 text-[12.5px]">{entry.summary}</p>}
+        {entry.kind === 'answer' && entry.people_only && <PeopleOnly />}
         {entry.kind === 'answer' ? (
           <form
             onSubmit={(event) => {

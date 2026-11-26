@@ -211,16 +211,18 @@ type hopOut struct {
 }
 
 type waitingCall struct {
-	CallID   string   `json:"call_id"`
-	Kind     string   `json:"kind"`
-	Fn       string   `json:"fn"`
-	Prompt   *string  `json:"prompt"`
-	Since    *string  `json:"since"`
-	Hop      *string  `json:"hop"`
-	HopUntil *string  `json:"hop_until"`
-	Reason   *string  `json:"reason"`
-	Proposed bool     `json:"proposed"`
-	Hops     []hopOut `json:"hops"`
+	CallID   string  `json:"call_id"`
+	Kind     string  `json:"kind"`
+	Fn       string  `json:"fn"`
+	Prompt   *string `json:"prompt"`
+	Since    *string `json:"since"`
+	Hop      *string `json:"hop"`
+	HopUntil *string `json:"hop_until"`
+	Reason   *string `json:"reason"`
+	Proposed bool    `json:"proposed"`
+	// False only when the script lets another answerer answer it (#7471).
+	PeopleOnly bool     `json:"people_only"`
+	Hops       []hopOut `json:"hops"`
 }
 
 type runStep struct {
@@ -266,6 +268,7 @@ func waitingOf(m map[string]any) (waitingCall, bool) {
 	}
 	check(w.Hop == nil || *w.Hop == "parent" || *w.Hop == "person")
 	w.Proposed = m["proposed"] == true
+	w.PeopleOnly = m["people_only"] != false
 	w.Hops = []hopOut{}
 	for _, h := range objects(m["hops"]) {
 		var out hopOut

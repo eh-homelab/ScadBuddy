@@ -89,6 +89,17 @@ class FakeLan:
             body: dict[str, Any] = json.loads(answer.read())
         return body
 
+    def post(self, path: str, body: dict[str, Any] | None = None) -> None:
+        """A control ``POST`` (``/__reset``, ``/__refuse``, ``/__silent``)."""
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.control_port}{path}",
+            data=json.dumps(body or {}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5):
+            pass
+
     def project_files(self) -> list[dict[str, Any]]:
         return [
             entry["print"]

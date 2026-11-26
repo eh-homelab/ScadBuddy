@@ -28,7 +28,8 @@ These notes cover `deploy/`; paths are repo-relative; the root `CLAUDE.md` has t
 
 - `deploy/cups/` — the label print server's `cupsd.conf`, `start.sh` and `zebra` backend,
   copied into the Dockerfile's `cups` image (`ghcr.io/eh-homelab/scadbuddy-cups`). One
-  queue per label size comes from the Deployment's `CUPS_QUEUES`; the backend holds a job
+  queue per label size comes from the Deployment's `CUPS_QUEUES` (queues added on the admin
+  page are kept); a mounted `snmp.conf` lets "Find New Printers" reach LAN printers; the backend holds a job
   until the printer's calibrated label length matches its queue. State (queues, jobs) is
   under `/var/lib/cups`, one volume; admin needs the user `admin` and the password mounted
   at `CUPS_ADMIN_PASSWORD_FILE`. `README.md` there has the variables and the

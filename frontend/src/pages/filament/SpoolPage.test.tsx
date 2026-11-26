@@ -9,7 +9,7 @@ import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasing
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
-import { entityMock } from '../../mocks/features/entities'
+import { entityMock, seedEntityProperties } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -883,6 +883,28 @@ describe("the spool page's Advanced toggle", () => {
       await user.click(screen.getByRole('button', { name: 'Save spool' }))
       await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'lot_number')?.value).toBe('L-9'))
       expect(patches).toEqual([{ properties: { lot_number: 'L-9' } }])
+    })
+
+    // #7951: a late read of the spool's properties keeps what the user typed meanwhile.
+    it('keeps a value typed before the properties read answers (#7951)', async () => {
+      seedEntityProperties(`spool:${spoolId(1)}`, { lot_number: 'OLD' })
+      let answer: () => void = () => {}
+      const held = new Promise<void>((resolve) => (answer = resolve))
+      // Holds the read; a resolver that returns nothing falls through to the mock.
+      server.use(http.get(`*/api/v1/entities/${encodeURIComponent(`spool:${spoolId(1)}`)}/properties`, async () => { await held }))
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('lot_number'), 'L-9')
+      answer()
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save spool' })).toBeEnabled())
+      expect(screen.getByLabelText('lot_number')).toHaveValue('L-9')
+    })
+
+    // #7951: a failed read says so, instead of showing every defined field empty.
+    it('says when the spool properties could not be read (#7951)', async () => {
+      server.use(http.get(`*/api/v1/entities/${encodeURIComponent(`spool:${spoolId(1)}`)}/properties`, () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+      open(1)
+      await heading(1)
+      expect(await screen.findByText(/The spool's properties could not be loaded/)).toBeVisible()
     })
 
     // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.

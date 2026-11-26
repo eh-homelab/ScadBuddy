@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BG_FINISH, type BackgroundActivityDeps, backgroundActivities } from '../src/background/activities.js'
 import { followSlot, NOTICE_PATHS_MAX, shellNotice } from '../src/background/sandboxSource.js'
 import { type BackgroundTask, NOTICE_MAX_CHARS } from '../src/background/store.js'
 import type { BackgroundContext } from '../src/builtins/background.js'
@@ -402,6 +403,30 @@ describe("a slot's files come back to the session", () => {
     expect(await readFile(path.join(dir, 'late.txt'), 'utf8')).toBe('slot\n')
   }, 60_000)
 
+  it("keeps the base past a slot's start whose manifest is truncated", async () => {
+    const client = new SandboxClient(await sandboxes.acquire(SESSION), signal())
+    // A base from an earlier slot, naming a file the truncated manifest below does not reach.
+    const earlier = new Map([['far/away.txt', 'e'.repeat(64)]])
+    await client.setBase(earlier)
+    await runInSandbox(call(), 'bash', `mkdir many && cd many && seq 1 ${MANIFEST_MAX_ENTRIES + 1} | sed 's/^/./' | xargs touch`, 60_000)
+    expect(await client.base()).toEqual(earlier)
+    const { slot } = await startInSandbox(call(), 'bash', 'true', 10_000)
+    await drain(client, slot.id)
+    // Taken from the truncated manifest, the base would lose that entry, and a slot's write
+    // there would be taken for the session's to overwrite.
+    expect(await client.base()).toEqual(earlier)
+  }, 60_000)
+
+  it("sets the base from a truncated manifest at a slot's start when the pod has none yet", async () => {
+    const client = new SandboxClient(await sandboxes.acquire(SESSION), signal())
+    await runInSandbox(call(), 'bash', `mkdir many && cd many && seq 1 ${MANIFEST_MAX_ENTRIES + 1} | sed 's/^/./' | xargs touch; echo s > seen.txt`, 60_000)
+    expect(await client.base()).toBeNull()
+    const { slot } = await startInSandbox(call(), 'bash', 'true', 10_000)
+    await drain(client, slot.id)
+    // No earlier base to keep: the truncated manifest's is the best there is, and a slot's writes need one.
+    expect(await client.base()).not.toBeNull()
+  }, 60_000)
+
   it('under the same caps as a foreground command', async () => {
     const { slot } = await startInSandbox({ ...call(), limits: { fileMaxBytes: 10, workspaceMaxBytes: 1000 } }, 'bash', 'head -c 100 /dev/zero > big.bin', 10_000)
     await drain(new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, signal()), slot.id)
@@ -516,6 +541,34 @@ describe("following a slot from the worker (background/sandboxSource.ts)", () =>
       pod.closeAllConnections()
       await new Promise((r) => pod.close(r))
     }
+  })
+
+  it("reads a task back at its finish only for a monitor, and stops a monitor's slot", async () => {
+    const started = async () => {
+      const { slot } = await startInSandbox(call(), 'bash', 'sleep 60', 60_000)
+      return { slot, t: task({ sandbox: { slot: slot.id, shell: 'bash', outputFile: slot.output_file } }) }
+    }
+    let { slot, t } = await started()
+    let gets = 0
+    const store = {
+      finish: async () => true,
+      get: async () => (gets++, t),
+    }
+    const finish = backgroundActivities({ store, sandbox: deps() } as unknown as BackgroundActivityDeps)[BG_FINISH]
+    // Another kind's end (a cron, a wakeup, a Workflow) holds no slot: nothing is read back.
+    await finish({ taskId: t.id, state: 'done', monitor: false })
+    expect(gets).toBe(0)
+    const client = new SandboxClient(sandboxes.started.get(SESSION)!.endpoint, AbortSignal.timeout(10_000))
+    expect(await client.slotStatus(slot.id)).toMatchObject({ running: true })
+    // A monitor's end: read back, its slot stopped.
+    await finish({ taskId: t.id, state: 'done', monitor: true })
+    expect(gets).toBe(1)
+    expect(await client.slotStatus(slot.id)).toBeUndefined()
+    // One from a workflow started before `monitor` was sent: read back too, its slot stopped.
+    ;({ slot, t } = await started())
+    await finish({ taskId: t.id, state: 'done' })
+    expect(gets).toBe(2)
+    expect(await client.slotStatus(slot.id)).toBeUndefined()
   })
 
   it("ends with a clear reason when the session's pod is gone", async () => {

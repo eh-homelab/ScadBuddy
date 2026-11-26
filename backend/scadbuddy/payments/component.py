@@ -52,8 +52,11 @@ class PaymentsComponent:
 
     def _webhook_url(self) -> str | None:
         """Where Plaid sends the linked Item's webhooks (#4961); none without a public URL.
-        Live (#322): read on each link token."""
-        public = self.core.settings.public_url
+        The storefront's host first: Plaid must reach it from the internet, and the back
+        office's own URL may be LAN-only (prod's is, so clusters pinholes this one path
+        on the storefront host). Live (#322): read on each link token."""
+        settings = self.core.settings
+        public = settings.storefront_public_url or settings.public_url
         return f"{public.rstrip('/')}/api/v1/payments/bank/webhook" if public else None
 
 

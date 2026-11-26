@@ -252,6 +252,10 @@ async def test_the_naming_takes_settings_read_before_over_the_live_ones(
     live = await reader.naming(plain)
     assert live.print_settings == {"wall_loops": "2"}
     assert live.part_settings == {1: PartSettings(wall_loops=5)}
+    # #7800 review: a refusal read with the key still refuses, though the model.json is
+    # fixed since.
+    refused = await reader.naming(plain, template_settings=TemplateSettings(refusal="bad"))
+    assert refused.invalid_meta == "bad"
 
 
 def test_the_request_wins_per_key_over_the_template() -> None:

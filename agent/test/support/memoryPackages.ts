@@ -86,6 +86,7 @@ export function memoryPackages(initial: PackageView[]) {
     delete: reject,
     enabledPins: reject,
     filesOf: reject,
+    recordMirror: reject,
   }
   return { repo, views, setEnabled }
 }

@@ -660,11 +660,27 @@ same UI guard as credential writes, with the same limitation (Known limitations,
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
 and file SHA-256 (`hashTree()`, `hash.ts`). The cached copy is hashed again before every
-load. If it does not match, it is deleted and fetched again at the pinned commit, and the
-package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
+load. If it does not match, it is deleted and read again from the pin's mirror (below;
+a load never fetches git), and the package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
 package is also vetted again at every load, so rules that have tightened since approval
 still apply. A process that writes the cache between the check and Claude Code's read is
 not caught; such a process already controls the pod.
+
+**Commit pin mirrors (#7907).** A commit pin's files are also kept in the blob store as a
+zip, through the same area `package-mirrors` and hold rules as a bytes pin (below). The
+row records the zip's SHA-256 (`mirror_sha256`, or `pending_mirror_sha256` for a re-pin)
+through `POST …/plugin-packages/{name}/mirror`, which the API accepts only for the commit
+and content hash that the row names, only while that package holds the zip, and which
+changes no pin, approval or switch. A cache miss unpacks the recorded zip with the
+unpacking rules below, under the content hash's caps (2,000 files, 5 MiB each, 20 MiB in
+all; `install.ts` `COMMIT_MIRROR_LIMITS`) rather than a download's, and uses it only when
+its files hash to `content_hash`; then it is
+vetted as a git copy is. So the mirror can only give back the files that the admin
+approved. A load never fetches git (the owner's
+[decision of 2026-11-26](https://github.com/eh-homelab/ScadBuddy/issues/7907)): with no
+usable mirror the package is left out of the turn, and the `PackageMirror` workflow on
+`agent-tools` fetches the pinned commit, checks the content hash, and only then writes and
+records the zip. A fetch whose files hash to anything else is refused and never recorded.
 
 **Bytes pins (#6935, spec 2026-11-21 §6.6).** An archive or npm package has no commit,
 so it is pinned to the SHA-256 of the file fetched at install (`pin_kind` `bytes`,

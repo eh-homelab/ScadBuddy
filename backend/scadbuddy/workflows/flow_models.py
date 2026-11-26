@@ -103,6 +103,10 @@ class FlowWaiting(BaseModel):
     #: Whether a parent's narrowing waits as a proposal for the person.
     proposed: bool = False
     hops: list[HopRecord] = []
+    #: A question's: whether only a person may answer it (#7471). None for an approval
+    #: and for a question parked before, which reads as True: only False lets another
+    #: answerer in.
+    people_only: bool | None = None
 
 
 class ProjectionWrite(BaseModel):
