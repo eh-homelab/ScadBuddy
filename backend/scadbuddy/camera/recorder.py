@@ -769,6 +769,9 @@ class Recorder:
         if feed.held and not held:
             # Only the leader reports: the new leader's report must not be overwritten.
             self._feed.forget(printer_id)
+            # Every way out of leading passes here (a not-held answer, the index's 409, the
+            # lease running out): a stall count must not carry over to the next time (#7998).
+            feed.stall_ticks = 0
         feed.held = held
         if held:
             feed.renewed_at = sent
@@ -824,8 +827,6 @@ class Recorder:
             return
         self._lead(printer_id, feed, answer.held, sent)
         if not answer.held:
-            # A count from a past time as leader must not carry over to the next one.
-            feed.stall_ticks = 0
             self._prune(feed, answer.indexed_until)
             return
         # A stale answer names an end this recorder's own index calls left (`own_ends`);
@@ -872,7 +873,10 @@ class Recorder:
         """MediaMTX's ``ready`` flags, read at most once per half tick: the stall checks of
         every printer in one tick share one listing (#7998)."""
         now = self._clock()
-        if self._ready_cache is not None and now - self._ready_cache[0] < TICK_SECONDS / 2:
+        if (
+            self._ready_cache is not None
+            and now - self._ready_cache[0] < (self._tick_seconds or TICK_SECONDS) / 2
+        ):
             return self._ready_cache[1]
         async with asyncio.timeout(CHECK_BUDGET):
             ready = await self._mtx.ready()
@@ -897,9 +901,12 @@ class Recorder:
 
     @staticmethod
     def _prune(feed: _Feed, indexed_until: datetime | None) -> None:
-        """A standby keeps the segments that end at or after the index's end."""
+        """A standby keeps the segments that end at or after the index's end, and forgets
+        each unsure end at or before it: that end can no longer be told from another
+        recorder's (#7998)."""
         if indexed_until is None:
             return
+        feed.unsure_ends = {e for e in feed.unsure_ends if e > indexed_until}
         for item in [i for i in feed.pending if i.seg.ends_at < indexed_until]:
             feed.pending.remove(item)
             item.seg.path.unlink(missing_ok=True)

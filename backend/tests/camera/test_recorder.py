@@ -1420,6 +1420,65 @@ async def test_the_stall_count_restarts_when_the_lease_is_lost(
     await rig.recorder.aclose()
 
 
+async def test_the_stall_count_restarts_when_the_index_answers_not_leader(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """The index's 409 ends the time as leader too; its count must not carry over (#7998)."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.segment(0)
+    await rig.recorder.tick(P1)
+    await rig.segment(4)
+    feed = rig.recorder._feeds[P1]
+    # The renewal counts one more stall tick (the path is ready, nothing new indexed), then
+    # the index call answers 409.
+    rig.mtx.ready[P1] = True
+    rig.clock.now += 5
+    feed.stall_mark = feed.indexed_ok
+    feed.stall_ticks = STALLED_LEAD_TICKS - 2
+    real = api.lease
+
+    def stolen(printer_id: str, recorder: str, action: str) -> httpx.Response:
+        answer = real(printer_id, recorder, action)
+        api.leases[printer_id] = ("rec-b", api.now + LEASE)
+        return answer
+
+    api.lease = stolen  # type: ignore[method-assign]
+    await rig.recorder.renew(P1)
+    assert feed.stall_ticks == STALLED_LEAD_TICKS - 1
+    await rig.recorder.upload(P1)
+    api.lease = real  # type: ignore[method-assign]
+    assert not feed.held
+    assert feed.stall_ticks == 0
+    await rig.recorder.aclose()
+
+
+async def test_a_standby_drops_unsure_ends_the_index_passed(
+    tmp_path: Path, api: FakeCamera
+) -> None:
+    """An unsure end that the index has passed can no longer be this recorder's last commit,
+    so a standby forgets it (#7998)."""
+    rig = Rig(tmp_path, api)
+    await rig.recorder.reconcile_all()
+    await rig.recorder.tick(P1)
+    feed = rig.recorder._feeds[P1]
+    feed.unsure_ends = {at(8), at(12)}
+    api.leases[P1] = ("rec-b", api.now + timedelta(hours=1))
+    row = SegmentIn(
+        started_at=at(4),
+        duration_ms=4000,
+        object_key="other",
+        bytes=1,
+        init_bytes=1,
+        init_sha256="0" * 64,
+    )
+    api.index.append((P1, "rec-b", row))
+    await rig.recorder.renew(P1)
+    assert not feed.held
+    assert feed.unsure_ends == {at(12)}
+    await rig.recorder.aclose()
+
+
 async def test_one_tick_reads_the_ready_paths_once(tmp_path: Path, api: FakeCamera) -> None:
     """The stall check of every printer in one tick shares one ``/v3/paths/list`` (#7998)."""
     api.printers = [P1, "p2"]
