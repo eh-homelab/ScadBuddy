@@ -59,6 +59,7 @@ from tests.api.test_print_preview_native import kek_file as kek_file  # the fixt
 from tests.api.test_print_run_choices import allow_reprints, body, follow_run, run_routes
 from tests.api.test_send import API, upload_route
 from tests.bambuddy.conftest import recording
+from tests.printers.conftest import unkeyed
 from tests.support.fake_slicer import FakeSlicer, fake_slicer_worker
 from tests.support.operations import press
 from tests.support.sb_rows import seed_app_sb_spools
@@ -664,8 +665,10 @@ def test_a_native_run_applies_the_accepted_fixes_it_names(
 # ── #5352: a check that asks for Bambuddy's queue on a printer the LAN reaches ──────
 
 #: A fresh LAN report of an H2C (`tests/printers/fixtures`).
-LAN_REPORT = json.loads(
-    (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c.json").read_text()
+LAN_REPORT = unkeyed(
+    json.loads(
+        (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c.json").read_text()
+    )
 )
 
 

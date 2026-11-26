@@ -37,18 +37,20 @@ from scadbuddy.slicing.component import Slicing
 from scadbuddy.slicing.own_presets import sb_ref
 from scadbuddy.workflows import lan_command as lan_command_module
 from tests.api.test_send import BASE, configure
-from tests.printers.conftest import KEK
+from tests.printers.conftest import KEK, unkeyed
 from tests.support.lan_script import Scripted, script_printer
 from tests.support.no_bambuddy import forbid_bambuddy
 
 pytestmark = pytest.mark.requires_postgres
 
 SERIAL = "01P00A000000071"
-RECORDED: dict[str, Any] = json.loads(
-    (Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c-idle.json").read_text(
-        encoding="utf-8"
-    )
-)["print"]
+RECORDED: dict[str, Any] = unkeyed(
+    json.loads(
+        (
+            Path(__file__).parents[1] / "printers" / "fixtures" / "lan-report-h2c-idle.json"
+        ).read_text(encoding="utf-8")
+    )["print"]
+)
 BODY = {"material": "PLA", "colour": "#FFFFFF", "nozzle_temp_min": 190, "nozzle_temp_max": 220}
 BASIC = "Bambu PLA Basic @BBL H2C"
 

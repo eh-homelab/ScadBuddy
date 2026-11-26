@@ -45,7 +45,12 @@ from scadbuddy.bambuddy.trays import EXTERNAL, loading_trays, place_label, seen_
 from scadbuddy.filament import ledger, prints, tags
 from scadbuddy.filament import models as m
 from scadbuddy.filament.catalog import resolve_or_add
-from scadbuddy.filament.inventory import FilamentInventory, FoundBy, try_tray_lock
+from scadbuddy.filament.inventory import (
+    _ADDED_SORT,
+    FilamentInventory,
+    FoundBy,
+    try_tray_lock,
+)
 from scadbuddy.filament.locations import LocationStore, NoAmsKindError
 from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.filament.types import SpoolTypeStore
@@ -65,8 +70,6 @@ BACKSTOP_ACTOR: Final = "system:capture-backstop"
 #: The ``data.by`` of the ``created`` event of a spool capture makes from an unknown RFID
 #: tray (#7143).
 RFID_MADE: Final = "rfid_capture"
-#: The sort order of a catalog row capture adds, as the Bambuddy pull's.
-_ADDED_SORT: Final = 1000
 
 
 @dataclass(frozen=True)
@@ -452,17 +455,24 @@ def _spool_from_tag(
 ) -> UUID:
     """Make a spool for a tray with an RFID key that no spool holds (#7143), place it in
     the tray and clear the tray's row. The caller runs this in a savepoint. `_TrayBusyError`
-    when the tray's lock is not free. When a spool holds the tray by now, that spool is
-    returned and nothing is made."""
+    when the tray's lock or its tag's row lock is not free. When a spool holds the tray by
+    now, that spool is returned and nothing is made."""
     if not try_tray_lock(conn, printer, seen.ams_id, seen.tray_id):
+        raise _TrayBusyError()
+    uid, tray = clean_tag_uid(seen.tag_uid), clean_tray_uuid(seen.tray_uuid)
+    kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
+    # A bind locks the tag before its spools (#6261), but the caller holds spools already,
+    # so a locked tag is skipped, not waited on (as `tags.seen_on` skips it). The tag is
+    # locked before the holder is read, so a bind that commits first is seen.
+    keyed = "SELECT id FROM filament_tags WHERE tag_uid = %s OR tray_uuid = %s"
+    exists = conn.execute(keyed, (uid, tray)).fetchall()
+    free = conn.execute(keyed + " FOR UPDATE SKIP LOCKED", (uid, tray)).fetchall()
+    if len(free) < len(exists):
         raise _TrayBusyError()
     holder, _ = FilamentInventory.holder_on(conn, printer, seen)
     if holder is not None:
         clear_on(conn, printer, seen.ams_id, seen.tray_id)
         return holder
-    uid, tray = clean_tag_uid(seen.tag_uid), clean_tray_uuid(seen.tray_uuid)
-    kind: m.TagKind = "bambu_mifare" if tray is not None else "other"
-    # A bind locks the tag before its spools (#6261), so the tag comes first here too.
     FilamentSpoolStore.tag_on(conn, uid, tray, kind)
     found = SpoolTypeStore.match_tray(conn, seen.material or "", seen.rgba, seen.tray_info_idx)
     if found is not None:
@@ -547,11 +557,14 @@ def note_unknown(
         ams_id, tray_id = key
         seen = filled.get(key)
         if seen is None:
-            result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
+            # A busy tray lock means a link or a resolve is settling the tray (D11).
+            if try_tray_lock(conn, printer, ams_id, tray_id):
+                result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
             continue
         holder, _ = FilamentInventory.holder_on(conn, printer, seen)
         if holder is not None:
-            result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
+            if try_tray_lock(conn, printer, ams_id, tray_id):
+                result += UnknownTrayResult(cleared=int(clear_on(conn, printer, ams_id, tray_id)))
             continue
         if seen.tray_uuid is not None or seen.tag_uid is not None:
             try:

@@ -124,13 +124,20 @@ def test_a_unit_the_report_omits_keeps_its_rows(pg_pool: PgPool) -> None:
     assert (0, 2) in rows
 
 
+def _with_bits(report: dict[str, Any]) -> dict[str, Any]:
+    """``report`` with presence bits, a change `trays_changed` sees (`tray_projection`)."""
+    report["ams"]["tray_exist_bits"] = "ffff"
+    return report
+
+
 def test_a_tray_that_flips_known_and_back_gets_a_new_row(pg_pool: PgPool) -> None:
     pid, _ = _printer(pg_pool)
     _advance(pg_pool, pid, _report(_tray(1)))
     (first,) = _rows(pg_pool, pid)
-    spool = _spool(pg_pool)
-    _link(pg_pool, pid, spool)
-    _advance(pg_pool, pid, _report(_tray(1)), T0 + timedelta(minutes=1))
+    _link(pg_pool, pid, _spool(pg_pool))
+    # `link` leaves the row to the next report (Task 3's `link_on` clears it); the bits
+    # make that report a tray change, so capture runs and finds the holder.
+    _advance(pg_pool, pid, _with_bits(_report(_tray(1))), T0 + timedelta(minutes=1))
     assert _rows(pg_pool, pid) == []
     FilamentInventory(pg_pool).unlink(UUID(pid), 0, 1, actor="t")
     t2 = T0 + timedelta(minutes=2)
@@ -194,12 +201,13 @@ def test_an_archived_spools_tag_goes_to_the_new_spool(pg_pool: PgPool) -> None:
             "SELECT spool_id FROM filament_tag_bindings WHERE unbound_at IS NULL"
         ).fetchall()
         closed = conn.execute(
-            "SELECT unbound_reason FROM filament_tag_bindings WHERE spool_id = %s"
+            "SELECT reason FROM filament_tag_bindings WHERE spool_id = %s"
             " AND unbound_at IS NOT NULL",
             (old,),
         ).fetchall()
     assert [r["spool_id"] for r in open_] == [new]
-    assert [r["unbound_reason"] for r in closed] == ["rebound"]
+    # `archive` closed the old binding, so the new spool took a free tag.
+    assert [r["reason"] for r in closed] == ["archived"]
 
 
 def test_the_pull_links_the_bb_spool_to_the_rfid_spool(pg_pool: PgPool) -> None:
@@ -231,6 +239,44 @@ def test_a_busy_tray_lock_writes_no_row(pg_pool: PgPool) -> None:
             other.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
     assert _rows(pg_pool, pid) == []
     assert reports.get(pid) is not None
+    # With the lock free, the next changed report writes the row.
+    _advance(pg_pool, pid, _report(_tray(2, tray_color="00FF00FF")), T0 + timedelta(minutes=1))
+    assert len(_rows(pg_pool, pid)) == 1
+
+
+def test_a_busy_tray_lock_leaves_the_row_on_clear(pg_pool: PgPool) -> None:
+    """D11: a link or a resolve that holds the tray's lock is settling the row, so capture
+    does not delete it; the next report does."""
+    pid, _ = _printer(pg_pool)
+    _advance(pg_pool, pid, _report(_tray(2)))
+    (row,) = _rows(pg_pool, pid)
+    key = f"filament_tray:{pid}:0:2"
+    with pg_pool.connection() as other:
+        other.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+        try:
+            empty = _report(_tray(2, tray_type="", state=0))
+            _advance(pg_pool, pid, empty, T0 + timedelta(minutes=1))
+        finally:
+            other.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
+    assert [r.id for r in _rows(pg_pool, pid)] == [row.id]
+    again = _report(_tray(2, tray_type="", state=0, tray_color="00000000"))
+    _advance(pg_pool, pid, again, T0 + timedelta(minutes=2))
+    assert _rows(pg_pool, pid) == []
+
+
+def test_a_locked_tag_makes_no_spool_and_waits_for_the_next_report(pg_pool: PgPool) -> None:
+    """A bind locks the tag before its spools; capture holds spools, so it skips a locked
+    tag row instead of waiting on it (no deadlock)."""
+    from scadbuddy.filament.spools import FilamentSpoolStore
+
+    FilamentSpoolStore(pg_pool).archive(_spool(pg_pool, tray_uuid=U1), True, actor="t")
+    pid, _ = _printer(pg_pool)
+    with pg_pool.connection() as holder, holder.transaction():
+        holder.execute("SELECT id FROM filament_tags WHERE tray_uuid = %s FOR UPDATE", (U1,))
+        _advance(pg_pool, pid, _report(_tray(1, U1)))
+    assert len(_spools(pg_pool)) == 1 and _rows(pg_pool, pid) == []
+    _advance(pg_pool, pid, _report(_tray(1, U1, remain=50)), T0 + timedelta(minutes=1))
+    assert len(_spools(pg_pool)) == 2
 
 
 def test_a_failing_unknown_step_still_writes_the_report(

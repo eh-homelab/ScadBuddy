@@ -64,7 +64,7 @@ from scadbuddy.workflows.print_models import (
 from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
 from scadbuddy.workflows.slicing_activities import _run_failed
 from tests.conftest import PgPool
-from tests.printers.conftest import KEK
+from tests.printers.conftest import KEK, unkeyed
 from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
 from tests.support.temporal import temporal_client
 from tests.test_print_workflow import PLAN, Fake, ended, start
@@ -159,7 +159,7 @@ def as_the_h2c(fake_lan: FakeLan) -> dict[str, Any]:
     """The fake printer reporting the live H2C's AMS and rack of that day
     (``lan-report-h2c-idle.json``); its ``device`` block, to change."""
     recorded = json.loads((PRINTER_FIXTURES / "lan-report-h2c-idle.json").read_text("utf-8"))
-    report = recorded["print"]
+    report = unkeyed(recorded["print"])
     fake_lan.printer.state.update(device=report["device"], ams=report["ams"])
     device: dict[str, Any] = report["device"]
     return device
