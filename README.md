@@ -1696,7 +1696,7 @@ workers restart.
   `s3` store cannot start (no endpoint, bucket or keys), see "Recovering an unready blob
   store" below.
 
-- **`s3`**: an S3-compatible object store, the second multi-worker backend (design:
+- **`s3`**: an S3-compatible object store, the multi-worker backend (design:
   `docs/superpowers/specs/2026-10-16-own-store-slicer-rust-workers-design.md` §4). The
   workers need no shared volume ("Render workers on `s3`" above: an `emptyDir` at
   `/data`, the cache and sweep settings). Settings → **Blob store** takes seven

@@ -96,7 +96,7 @@ document's claim and the code. These specs and docs were not changed in this PR.
 
 - `:262` "No database"; one container / the code needs Postgres and Temporal at start
   (`backend/scadbuddy/main.py:2161-2163`) and runs separate workers
-  (`backend/scadbuddy/worker.py:1737-1747`).
+  (`backend/scadbuddy/worker.py:1723-1733`).
 - `:302` job state in `jobs/<job-id>.json` / jobs are the `render_jobs` table
   (`backend/scadbuddy/migrations/20260927T2243Z_render_jobs.sql`).
 - `:888` one `<object>` per colour part / one assembly object per declared object with a
@@ -116,10 +116,10 @@ document's claim and the code. These specs and docs were not changed in this PR.
 - `:494` custom elements as `react-dom/client` roots / `createPortal`
   (`frontend/src/template-ui/TemplateUi.tsx:164-175`).
 - `:794` render workers hold Postgres / no database; `SCADBUDDY_DATABASE_URL` ignored
-  (`backend/scadbuddy/worker.py:1097-1100`).
+  (`backend/scadbuddy/worker.py:1091-1094`).
 - `:676-681` the store chosen by `SCADBUDDY_STORE_BACKEND`, `local` with one render
   worker / a stored setting (`backend/scadbuddy/core/settings.py:228`), and a separate
-  render worker refuses `local` (`backend/scadbuddy/worker.py:222-257`).
+  render worker refuses `local` (`backend/scadbuddy/worker.py:222-256`).
 - `:673-674` `SCADBUDDY_WORKER_CACHE_DIR` / no such setting; only `worker_cache_max_bytes`
   (`backend/scadbuddy/core/settings.py:349`).
 - `:700` pieces as `piece-….3mf` / `piece-{key}.zip` (`backend/scadbuddy/store/cache.py:202`).

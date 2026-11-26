@@ -95,20 +95,20 @@ flowchart LR
 
 ## Render worker
 
-- **Runs.** `run_worker` (`scadbuddy/worker.py:1081`) on queue `render`: renders and
+- **Runs.** `run_worker` (`scadbuddy/worker.py:1075`) on queue `render`: renders and
   template pipelines ([workflows.md](workflows.md#render-split-by-colour-3mf)).
 - **Reads.** `SCADBUDDY_API_INTERNAL_URL` and a service proof,
   `SCADBUDDY_SERVICE_TOKEN_FILE` or `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`; without one it
   refuses to start (`scadbuddy/auth/service_auth.py:235-256`). It ignores
-  `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1097-1100`) and refuses the `local` store
-  (`scadbuddy/worker.py:222-257`). The S3 keys come from its
+  `SCADBUDDY_DATABASE_URL` (`scadbuddy/worker.py:1091-1094`) and refuses the `local` store
+  (`scadbuddy/worker.py:222-256`). The S3 keys come from its
   CRUD settings route, which answers no Bambuddy key (#7882) (`scadbuddy/api/crud_render.py:199-220`).
 - **Zone.** Runs template Python and openscad; holds a 15-minute `crud.render` credential
   and the store keys. See trust-boundaries, "Where untrusted code runs".
 
 ## Print worker
 
-- **Runs.** `run_print_worker` (`scadbuddy/worker.py:1521`) on `bambuddy` and
+- **Runs.** `run_print_worker` (`scadbuddy/worker.py:1511`) on `bambuddy` and
   `bambuddy-follow`: print runs, LAN upload and start, follow, printer watches
   ([workflows.md](workflows.md#print-to-the-h2c)), and the filament sync with Bambuddy,
   the Bambuddy pull and the location-sensor alerts (`FilamentBbSync`, `FilamentBbPull`,
@@ -122,10 +122,10 @@ flowchart LR
 
 ## Projects worker
 
-- **Runs.** `run_projects_worker` (`scadbuddy/worker.py:1607`) on `projects`: flow runs
+- **Runs.** `run_projects_worker` (`scadbuddy/worker.py:1597`) on `projects`: flow runs
   ([workflows.md](workflows.md#flows)).
 - **Reads.** The API URL, a service proof, and the KEK (`SCADBUDDY_SECRET_KEY_FILE`,
-  `scadbuddy/worker.py:1627-1632`) for flow payload keys.
+  `scadbuddy/worker.py:1617-1622`) for flow payload keys.
 
 ## Storefront edge
 

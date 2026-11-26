@@ -72,7 +72,7 @@ The callers are agent, print, projects, render, storefront, intake and profile-f
 (`scadbuddy/auth/service_auth.py:25-27`); their scopes are in
 `scadbuddy/auth/service_credentials.py:100-107`. `GET …/<caller>/areas` lists what each
 caller may use (`scadbuddy/api/crud_areas.py:170-236`); a worker waits for its areas
-before it polls (for example `scadbuddy/worker.py:1106`). Retries are deduplicated by the
+before it polls (for example `scadbuddy/worker.py:1099`). Retries are deduplicated by the
 `crud_requests` ledger (`scadbuddy/crud/idempotency.py`).
 
 ## Blob store
@@ -91,8 +91,8 @@ The stored setting `store_backend` (seeded from the environment, default `local`
 
 | Backend | Where bytes go | Code |
 |---|---|---|
-| `local` | files on the API's data volume; works only with the render worker in-process (a separate render worker refuses it, `scadbuddy/worker.py:222-257`) | `scadbuddy/store/local.py:22-35` |
-| `bambuddy` | Bambuddy's library, one folder per template with a `Work/` folder, recorded in `store_folders`. The API does not start on it since #7257: it holds no saved output ([Saved outputs](#saved-outputs)). It stays only as a store migration's source, on the API (#7882) | `scadbuddy/store/bambuddy.py:3-15` |
+| `local` | files on the API's data volume; works only with the render worker in-process (a separate render worker refuses it, `scadbuddy/worker.py:222-256`) | `scadbuddy/store/local.py:22-35` |
+| `bambuddy` | Bambuddy's library, one folder per template with a `Work/` folder, recorded in `store_folders`. The API does not start on it since #7257: it holds no saved output ([Saved outputs](#saved-outputs)). It stays only as a store migration's source, on the API (#7882) | `scadbuddy/store/bambuddy.py:10-21` |
 | `s3` | an S3-compatible bucket, object key `<prefix>/<kind>/<sha256>` | `scadbuddy/store/s3.py:4-5`, `:47-48` |
 
 ### Keys and content addressing

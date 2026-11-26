@@ -92,7 +92,9 @@ def _defaults(tmp_path: Path) -> Settings:
     )
 
 
-def test_the_full_key_is_hidden_once_a_render_key_is_stored(owner: Pool, tmp_path: Path) -> None:
+def test_the_apis_own_read_takes_the_render_key_once_one_is_stored(
+    owner: Pool, tmp_path: Path
+) -> None:
     """What the API reads through the `render_settings` view (#5298): a store migration's
     key for the Bambuddy store. The CRUD route that answers a render worker withholds
     every Bambuddy key (`tests/crud/test_crud_render_settings.py`, #7882)."""

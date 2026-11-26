@@ -452,7 +452,7 @@ def test_the_bambuddy_store_falls_back_to_the_full_key(store: SettingsStore) -> 
     assert store.load().render_bambuddy_key() == "narrow"
 
 
-def test_a_render_worker_gets_the_narrow_key_the_url_and_the_inbox(
+def test_the_api_reads_the_narrow_key_the_url_and_the_inbox(
     store: SettingsStore, settings: Settings
 ) -> None:
     store.save(
