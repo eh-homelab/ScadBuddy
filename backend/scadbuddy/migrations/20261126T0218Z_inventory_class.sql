@@ -160,10 +160,27 @@ SELECT c.kind_id,
 FROM inventory_k1_chain c JOIN item_kinds a ON a.id = c.anc_id
 GROUP BY c.kind_id;
 
+-- Each kind's properties merged root to leaf, a child's key winning, as the phase 2 rule
+-- reads an item's schema (`inventory/kinds.py` `merged_schema`).
+CREATE TEMP VIEW inventory_k1_props AS
+SELECT c.kind_id, jsonb_object_agg(p.key, p.value ORDER BY c.depth DESC) AS props
+FROM inventory_k1_chain c
+JOIN item_kinds a ON a.id = c.anc_id
+CROSS JOIN LATERAL jsonb_each(coalesce(a.attribute_schema -> 'properties', '{}')) AS p
+GROUP BY c.kind_id;
+
+-- Every kind's parent and merged properties before this migration moves any kind
+-- (step 7a keeps them).
+CREATE TEMP TABLE inventory_k1_before ON COMMIT DROP AS
+SELECT k.id AS kind_id, k.parent_id, coalesce(p.props, '{}') AS props
+FROM item_kinds k LEFT JOIN inventory_k1_props p ON p.kind_id = k.id;
+
 -- 1. seeded_kinds: the roots, the `seed: true` kinds and every phase 2 built-in kind, as
 -- kinds.yaml has them. `printer` gets no special type until K6 builds its handlers
 -- (R-K1-7). A kind that exists keeps its uom and `saleable`. A person's kind that has one
--- of these ids becomes the built-in kind and is named in the detail. `tracking` and
+-- of these ids becomes the built-in kind and is named in the detail with its old name,
+-- parent, tracking, life basis and schema; if it has items and its tracking is not the
+-- seeded kind's, the migration stops (their stock would change meaning). `tracking` and
 -- `life_basis` are set in step 8.
 CREATE TEMP TABLE inventory_k1_seed ON COMMIT DROP AS
 SELECT * FROM (VALUES
@@ -203,10 +220,36 @@ SELECT * FROM (VALUES
     ('flat_service', 'Flat-rate service', 'service', NULL, NULL, NULL, 'flat', NULL, 'each', '{}', false)
 ) AS s (id, name, parent_id, nature, role, counting, billing, special_type, uom, steps, saleable);
 
+DO $$
+DECLARE
+    clash record;
+BEGIN
+    FOR clash IN
+        SELECT k.id, k.tracking,
+            CASE WHEN s.nature = 'service' OR s.billing IS NOT NULL THEN 'none'
+                ELSE s.counting END AS seeded,
+            (SELECT count(*) FROM items i WHERE i.kind_id = k.id) AS items
+        FROM inventory_k1_seed s JOIN item_kinds k ON k.id = s.id
+        WHERE NOT k.builtin
+    LOOP
+        IF clash.items > 0 AND clash.tracking IS DISTINCT FROM clash.seeded THEN
+            RAISE EXCEPTION 'inventory K1: the person''s kind % has % items tracked by %; '
+                'the built-in kind % tracks by %', clash.id, clash.items, clash.tracking,
+                clash.id, clash.seeded;
+        END IF;
+    END LOOP;
+END
+$$;
+
 INSERT INTO inventory_k1_report (rule, count, detail)
 SELECT 'seeded_kinds', count(*),
-    coalesce(jsonb_agg(jsonb_build_object('kind', s.id,
-        'was', CASE WHEN k.id IS NULL THEN 'new' ELSE 'a person''s kind' END) ORDER BY s.id)
+    coalesce(jsonb_agg(CASE WHEN k.id IS NULL THEN
+            jsonb_build_object('kind', s.id, 'was', 'new')
+        ELSE
+            jsonb_build_object('kind', s.id, 'was', 'a person''s kind', 'name', k.name,
+                'parent_id', k.parent_id, 'tracking', k.tracking, 'life_basis', k.life_basis,
+                'attribute_schema', k.attribute_schema)
+        END ORDER BY s.id)
         FILTER (WHERE k.id IS NULL OR NOT k.builtin), '[]')
 FROM inventory_k1_seed s LEFT JOIN item_kinds k ON k.id = s.id;
 
@@ -290,8 +333,9 @@ SELECT 'person_kinds',
 
 -- 3. kind_life (§8): a person kind's `life_basis` becomes its `steps.life` handler, with
 -- no `hours` or `months`, so the kind is incomplete until a person sets them (R-K1-8).
--- Only a durable kind has a life; another kind's basis is dropped and named. A kind whose
--- parents already name that handler sets nothing (it would change their parameters).
+-- Only a durable kind has a life; another kind's basis is dropped and named. This holds
+-- under a parent that names the same handler too (a kind under `nozzle` gets
+-- `source: own_run_hours`), as §8 says.
 CREATE TEMP TABLE inventory_k1_kind_life ON COMMIT DROP AS
 SELECT k.id, k.life_basis, c.role, c.life
 FROM item_kinds k JOIN inventory_k1_class c ON c.kind_id = k.id
@@ -303,7 +347,7 @@ UPDATE item_kinds k SET steps = k.steps || jsonb_build_object('life',
         ELSE '{"handler": "life.months", "params": {}}'::jsonb
     END)
 FROM inventory_k1_kind_life l
-WHERE l.id = k.id AND l.role = 'durable' AND l.life IS DISTINCT FROM 'life.' || l.life_basis;
+WHERE l.id = k.id AND l.role = 'durable';
 
 INSERT INTO inventory_k1_report (rule, count, detail)
 SELECT 'kind_life', count(*),
@@ -505,6 +549,32 @@ SELECT 'model_codes', (SELECT count(*) FROM inventory_k1_model_kinds),
         FROM inventory_k1_printers WHERE cardinality(kinds) > 1
     ) x), '[]');
 
+-- 7a. kind_schemas (§8: every row keeps its meaning): a kind whose parent changed keeps
+-- each property its old chain gave it. A key the new chain lacks, or gives another
+-- definition, goes into the kind's own schema, so its items keep the same schema.
+CREATE TEMP TABLE inventory_k1_schemas ON COMMIT DROP AS
+SELECT b.kind_id, b.parent_id AS old_parent, k.parent_id AS new_parent,
+    (SELECT coalesce(jsonb_object_agg(o.key, o.value), '{}')
+     FROM jsonb_each(b.props) AS o
+     WHERE (n.props -> o.key) IS DISTINCT FROM o.value) AS kept
+FROM inventory_k1_before b
+JOIN item_kinds k ON k.id = b.kind_id
+LEFT JOIN inventory_k1_props n ON n.kind_id = b.kind_id
+WHERE k.parent_id IS DISTINCT FROM b.parent_id;
+
+UPDATE item_kinds k SET attribute_schema = jsonb_set(k.attribute_schema, '{properties}',
+    coalesce(k.attribute_schema -> 'properties', '{}') || s.kept)
+FROM inventory_k1_schemas s
+WHERE s.kind_id = k.id AND s.kept <> '{}';
+
+INSERT INTO inventory_k1_report (rule, count, detail)
+SELECT 'kind_schemas', count(*) FILTER (WHERE kept <> '{}'),
+    coalesce(jsonb_agg(jsonb_build_object('kind', kind_id, 'old_parent', old_parent,
+        'new_parent', new_parent, 'keys', (SELECT jsonb_agg(key ORDER BY key)
+            FROM jsonb_object_keys(kept) AS key)) ORDER BY kind_id)
+        FILTER (WHERE kept <> '{}'), '[]')
+FROM inventory_k1_schemas;
+
 -- 8. tracking_derived (R-K1-6): `tracking` and `life_basis` follow the class and
 -- `steps.life`, so the SQL readers of phase 2 stay right. `tracking` is `filament` for
 -- the special type `filament_spool`, `none` for a service, else the counting (`lot` when
@@ -533,5 +603,6 @@ SELECT 'tracking_derived', count(*),
         'life_basis', jsonb_build_array(old_life_basis, life_basis)) ORDER BY id), '[]')
 FROM changed;
 
+DROP VIEW inventory_k1_props;
 DROP VIEW inventory_k1_class;
 DROP VIEW inventory_k1_chain;

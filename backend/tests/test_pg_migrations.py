@@ -1751,6 +1751,7 @@ _REPORT_RULES = {
     "unit_life",
     "part_lots",
     "model_codes",
+    "kind_schemas",
     "tracking_derived",
 }
 
@@ -1923,8 +1924,8 @@ def test_every_phase_2_combination_is_placed(pg_conninfo: str) -> None:
             and conn.execute("SELECT life_hours FROM items WHERE id = %s", (item,)).fetchone()
             != (None,)
         }
-        # A durable person kind's basis is its `steps.life` handler, unless its parent's
-        # chain already names it (`equipment` gives `life.months`).
+        # A durable person kind's basis is its `steps.life` handler, even where its parent's
+        # chain names the same handler (`equipment` gives `life.months`): §8.
         assert dict(
             conn.execute(
                 "SELECT id, steps -> 'life' FROM item_kinds WHERE id IN"
@@ -1936,7 +1937,7 @@ def test_every_phase_2_combination_is_placed(pg_conninfo: str) -> None:
                 "params": {"source": "own_run_hours"},
             },
             "k_unit_months_part": {"handler": "life.months", "params": {}},
-            "k_unit_months_equipment": None,
+            "k_unit_months_equipment": {"handler": "life.months", "params": {}},
         }
         assert conn.execute(
             "SELECT tracking, life_basis FROM item_kinds WHERE id = 'k_filament_hours_root'"
@@ -2057,4 +2058,113 @@ def test_item_life_moves_into_steps(pg_conninfo: str) -> None:
                     "params": {"hours": 50, "source": "own_run_hours"},
                 }
             },
+        }
+
+
+@pytest.mark.requires_postgres
+def test_a_durable_kind_under_nozzle_gets_its_basis_handler(pg_conninfo: str) -> None:
+    """§8: `hours` gives `life.hours` with `source: own_run_hours` and no `hours`, also
+    under a parent that names `life.hours` itself."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking, life_basis)"
+            " VALUES ('cht', 'CHT', 'nozzle', 'unit', 'hours')"
+        )
+        migrate(conn)
+        assert conn.execute("SELECT steps FROM item_kinds WHERE id = 'cht'").fetchone() == (
+            {"life": {"handler": "life.hours", "params": {"source": "own_run_hours"}}},
+        )
+
+
+@pytest.mark.requires_postgres
+def test_a_person_kind_with_a_seeded_id_is_named_with_its_old_values(pg_conninfo: str) -> None:
+    """A person's kind that has a seeded id becomes the built-in kind; the report keeps
+    its old name, parent, tracking, life basis and schema."""
+    schema = {"type": "object", "properties": {"rate": {"type": "number"}}}
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking, attribute_schema)"
+            " VALUES ('labour', 'My labour', 'service', 'none', %s),"
+            " ('durable', 'Durables', 'part', 'lot', DEFAULT)",
+            (Jsonb(schema),),
+        )
+        _item(conn, "labour", "Assembly hour")
+        migrate(conn)
+        assert conn.execute(
+            "SELECT name, parent_id, billing, builtin FROM item_kinds WHERE id = 'labour'"
+        ).fetchone() == ("Labour", "service", "hourly", True)
+        _, detail = _report(conn, "seeded_kinds")
+        taken = {d["kind"]: d for d in detail if d["was"] != "new"}
+        assert taken == {
+            "labour": {
+                "kind": "labour",
+                "was": "a person's kind",
+                "name": "My labour",
+                "parent_id": "service",
+                "tracking": "none",
+                "life_basis": "none",
+                "attribute_schema": schema,
+            },
+            "durable": {
+                "kind": "durable",
+                "was": "a person's kind",
+                "name": "Durables",
+                "parent_id": "part",
+                "tracking": "lot",
+                "life_basis": "none",
+                "attribute_schema": {"type": "object", "properties": {}},
+            },
+        }
+
+
+@pytest.mark.requires_postgres
+def test_a_person_kind_with_a_seeded_id_and_other_stock_raises(pg_conninfo: str) -> None:
+    """Its items would change meaning under the seeded class, so the migration stops and
+    nothing of it is applied."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, tracking) VALUES ('general_consumable', 'G', 'unit')"
+        )
+        _item(conn, "general_consumable", "Fan")
+        conn.commit()
+        with pytest.raises(
+            psycopg.errors.RaiseException, match="general_consumable has 1 items tracked by unit"
+        ):
+            migrate(conn)
+        conn.rollback()
+        assert conn.execute("SELECT to_regclass('inventory_k1_report')").fetchone() == (None,)
+
+
+@pytest.mark.requires_postgres
+def test_a_moved_kind_keeps_its_old_chains_schema(pg_conninfo: str) -> None:
+    """§8 keeps every row's meaning: a kind whose parent changed keeps the properties its
+    old chain gave it, in its own schema, and the report names it."""
+    with psycopg.connect(pg_conninfo) as conn:
+        _before_inventory_class(conn)
+        conn.execute(
+            "UPDATE item_kinds SET attribute_schema = %s WHERE id = 'part'",
+            (Jsonb({"type": "object", "properties": {"mpn": {"type": "string"}}}),),
+        )
+        conn.execute(
+            "INSERT INTO item_kinds (id, name, parent_id, tracking)"
+            " VALUES ('foam', 'Foam', 'spool_part', 'lot')"
+        )
+        migrate(conn)
+        props = dict(
+            conn.execute(
+                "SELECT id, attribute_schema -> 'properties' FROM item_kinds"
+                " WHERE id IN ('foam', 'hardware', 'ams_part')"
+            ).fetchall()
+        )
+        assert set(props["foam"]) == {"empty_weight_g", "role"}
+        assert props["foam"]["role"]["enum"] == ["shell", "addon"]
+        assert props["hardware"] == props["ams_part"] == {"mpn": {"type": "string"}}
+        _, detail = _report(conn, "kind_schemas")
+        assert {d["kind"]: d["keys"] for d in detail} == {
+            "foam": ["empty_weight_g", "role"],
+            "hardware": ["mpn"],
+            "ams_part": ["mpn"],
         }
