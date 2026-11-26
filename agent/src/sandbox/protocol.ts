@@ -31,6 +31,12 @@ export const MAX_SEGMENTS = 4
 export const SCRATCH_DIRS: ReadonlySet<string> = new Set(['node_modules', '__pycache__'])
 /** How many entries a manifest walk visits before it stops and says it is truncated. */
 export const MANIFEST_MAX_ENTRIES = 20_000
+/**
+ * The most a PUT of a path record (the base, the kept record) may be: MANIFEST_MAX_ENTRIES
+ * entries of `"<path>":"<sha256>",`, each path at most WORKSPACE_PATH_MAX characters that JSON
+ * never escapes (WORKSPACE_PATH), so a full manifest's record always fits (about 11.6 MiB).
+ */
+export const RECORD_MAX_BYTES = MANIFEST_MAX_ENTRIES * (WORKSPACE_PATH_MAX + 72) + 64
 
 /** Whether `rel` is a workspace path that syncs: the workspace's form, and no scratch directory in it. */
 export function syncPath(rel: string): boolean {
@@ -77,3 +83,70 @@ export type ExecResult = {
 
 /** The header that carries a file's sha256 on PUT and GET /v1/files/<path>. */
 export const SHA_HEADER = 'x-sandbox-sha256'
+
+// Background slots (#5916, #7310): a command that runs past its call (a Monitor's command, or a
+// Bash or PowerShell call with `run_in_background`) in its own process group, beside the
+// foreground commands. The sweep after a command (server.ts reapStrays) spares a running slot's
+// group, and only that group: a process that leaves it (`setsid`, a double fork) is killed at the
+// next sweep. A slot has the same uid, `ulimit -u`, environment, egress proxy and /work as a
+// foreground command.
+
+/** How many slots may run at once in one sandbox pod; a start past it is refused (409). */
+export const MAX_SLOTS = 4
+/** What a slot keeps of its output, both streams, the newest bytes; a watch that asks for older ones is told they are lost. */
+export const SLOT_KEEP_BYTES = 1024 * 1024
+/** A slot's longest run: the pod's own lifetime (pods.ts ACTIVE_DEADLINE_S). */
+export const SLOT_MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000
+/** What a slot writes of its output to its output file in the pod (`output_file`); past it, the file says so and stops. */
+export const SLOT_FILE_MAX_BYTES = 16 * 1024 * 1024
+/** How often a watch sends a heartbeat line while nothing else happens. */
+export const WATCH_HEARTBEAT_MS = 10_000
+/**
+ * A slot no watch has followed for this long is stopped: its watcher (a worker's activity) is gone,
+ * so nothing would report or stop it. Longer than the activity may wait to start (its
+ * schedule-to-start timeout is 5 minutes, temporal/backgroundTask.ts).
+ */
+export const SLOT_UNWATCHED_MS = 6 * 60_000
+/** How long an ended slot is kept for its status and watch before it is forgotten. */
+export const SLOT_ENDED_KEEP_MS = 10 * 60_000
+/** A slot's id: the server makes it, 32 lowercase hex digits; any other id is refused. */
+export const SLOT_ID_RE = /^[0-9a-f]{32}$/
+/** The most raw bytes one watch `data` frame carries. */
+export const WATCH_CHUNK_BYTES = 32 * 1024
+
+/** POST /v1/slots. */
+export type SlotRequest = { shell: Shell; command: string; timeout_ms: number }
+/** POST /v1/slots' answer: the slot's id and the file in the pod its output is written to. */
+export type SlotStarted = { id: string; output_file: string }
+/** GET /v1/slots/<id>, and the end of a watch. */
+export type SlotStatus = {
+  id: string
+  running: boolean
+  exit_code: number | null
+  signal: string | null
+  timed_out: boolean
+  /** Stopped by DELETE /v1/slots/<id>, or because no watch followed it for SLOT_UNWATCHED_MS. */
+  stopped: boolean
+  /** Every byte of output so far, both streams. */
+  bytes: number
+  output_file: string
+}
+/**
+ * One line of GET /v1/slots/<id>/watch?from=<offset> (a JSON line each): output from byte `at`
+ * of the slot's output, whose `bytes` raw bytes follow the line at once (no encoding), a range no
+ * longer kept, a heartbeat, or the end.
+ */
+export type WatchLine =
+  | { type: 'data'; at: number; stream: 'stdout' | 'stderr'; bytes: number }
+  | { type: 'lost'; from: number; to: number }
+  | { type: 'beat' }
+  | { type: 'end'; status: SlotStatus }
+
+/**
+ * GET and PUT /v1/base: the pod's files by path (their sha256) as the last sync left them, or null
+ * before a sync set it. A file that differs from it changed in the pod since (a slot wrote it),
+ * so the next sync in brings it back to the session rather than overwriting it (client.ts
+ * syncIn). As untrusted as the rest of what the pod says: it can only make a sync bring back
+ * what a command could have written anyway.
+ */
+export type BaseRecord = { base: Record<string, string> | null }

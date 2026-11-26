@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import type { SpoolEvent, TimelineRow } from '../../api/filament'
+import { filamentLinks } from '../../lib/filamentLinks'
 import { Button } from '@/components/ui/button'
 import { actorText, changeEntries, eventNames, fromTypeText, KIND_TEXT, valueText, type EventNames } from './eventText'
 import { EntityLink } from './EntityLink'
@@ -21,12 +22,26 @@ type Filter = (typeof FILTERS)[number]['label']
 const SOURCE: Record<string, string> = { scale: 'scale', person: 'by hand', ams_remain: 'AMS', bb: 'Bambuddy', print_actual: 'measured', print_estimate: 'estimate' }
 
 const grams = (value: number) => `${Number(value.toFixed(1))} g`
+const metres = (value: number) => `${Number(value.toFixed(1))} m`
 const delta = (value: number) => `${value > 0 ? '+' : value < 0 ? '−' : ''}${grams(Math.abs(value))}`
 const tray = (event: SpoolEvent) => (event.ams_id != null && event.tray_id != null ? `AMS ${String.fromCharCode(65 + event.ams_id)}${event.tray_id + 1}` : null)
 
 /** The short text after an event's kind: its grams, where it went, how it was dried. */
 function detail(event: SpoolEvent, names: EventNames): string {
-  const data = event.data as { temp_c?: number | null; hours?: string | number | null; reason?: string | null; from?: string | null; to?: string | null; bb_status?: string | null; reading_g?: number | null; empty_g?: number | null; drift_g?: number | null }
+  const data = event.data as {
+    temp_c?: number | null
+    hours?: string | number | null
+    reason?: string | null
+    from?: string | null
+    to?: string | null
+    bb_status?: string | null
+    reading_g?: number | null
+    empty_g?: number | null
+    drift_g?: number | null
+    resolution?: string | null
+    shortfall_g?: number | null
+    length_m?: number | null
+  }
   const source = event.source ? SOURCE[event.source] : undefined
   const parts: (string | null | undefined)[] = []
   switch (event.kind) {
@@ -35,7 +50,11 @@ function detail(event: SpoolEvent, names: EventNames): string {
       parts.push(event.grams_after != null ? grams(event.grams_after) : null, source)
       if (data.reading_g != null) {
         // #7682: the breakdown and the drift against what the ledger expected.
-        parts.push(`reading ${grams(data.reading_g)}`, data.empty_g != null ? `spool ${grams(data.empty_g)}` : null)
+        parts.push(`reading ${grams(data.reading_g)}`, data.empty_g != null && data.resolution !== 'tared' ? `spool ${grams(data.empty_g)}` : null)
+        // #7683: how a new spool's reading under its label was read.
+        if (data.resolution === 'tared') parts.push('scale tared on the spool')
+        else if (data.resolution === 'short') parts.push(`spool short by ${grams(data.shortfall_g ?? 0)}`)
+        else if (data.resolution === 'label_wrong') parts.push('label corrected')
         if (data.drift_g != null) parts.push(Math.abs(data.drift_g) < 1 ? 'matches the ledger' : `${grams(Math.abs(data.drift_g))} ${data.drift_g < 0 ? 'less' : 'more'} than expected`)
       } else {
         parts.push(event.delta_g ? `${grams(Math.abs(event.delta_g))} ${event.delta_g < 0 ? 'less' : 'more'} than the last value` : null)
@@ -43,7 +62,8 @@ function detail(event: SpoolEvent, names: EventNames): string {
       break
     case 'print_started':
     case 'print_ended':
-      parts.push(event.delta_g != null ? delta(event.delta_g) : null, event.grams_after != null ? `${grams(event.grams_after)} left` : null, source, data.bb_status && data.bb_status !== 'completed' ? data.bb_status : null, tray(event))
+      // #7685: the plate's length beside its grams, when the sliced plate gave one.
+      parts.push(event.delta_g != null ? delta(event.delta_g) : null, data.length_m ? metres(data.length_m) : null, event.grams_after != null ? `${grams(event.grams_after)} left` : null, source, data.bb_status && data.bb_status !== 'completed' ? data.bb_status : null, tray(event))
       break
     case 'created':
       parts.push(event.grams_after != null ? `with ${grams(event.grams_after)}` : null)
@@ -61,6 +81,17 @@ function detail(event: SpoolEvent, names: EventNames): string {
   }
   if (data.reason) parts.push(data.reason.replace(/_/g, ' '))
   return parts.filter(Boolean).join(', ')
+}
+
+/**
+ * #7684 — a respooled spool's two ends: the `archived` event names the spool its filament went
+ * on as, the new spool's `created` event the spool it came from. The ids are spool ids.
+ */
+function continuation(event: SpoolEvent): { text: string; label: string; id: string } | null {
+  const data = event.data as { continued_as?: string | null; continued_from?: string | null }
+  if (event.kind === 'archived' && data.continued_as) return { text: 'continues as', label: 'a new spool', id: data.continued_as }
+  if (event.kind === 'created' && data.continued_from) return { text: 'continues', label: 'an earlier spool', id: data.continued_from }
+  return null
 }
 
 /** An id's name, as a link to its page when `hrefs` has one (#6869); any other value as text. */
@@ -131,6 +162,7 @@ export function SpoolTimeline({ rows, catalogs, types, hrefs = NO_HREFS }: Props
             const lines = event.kind === 'edited' ? changeEntries((event.data as { changes?: unknown }).changes) : []
             const move = event.kind === 'moved' ? moveText(event, names, hrefs) : null
             const text = detail(event, names)
+            const linked = continuation(event)
             return (
               <li key={event.id} className="relative grid grid-cols-1 gap-x-4 gap-y-0.5 py-2 pl-4 sm:grid-cols-[11rem_minmax(0,1fr)_auto]">
                 <span aria-hidden="true" className={`absolute top-[0.85rem] -left-[4.5px] size-2 rounded-full ring-2 ring-background ${dot(event.kind)}`} />
@@ -142,6 +174,11 @@ export function SpoolTimeline({ rows, catalogs, types, hrefs = NO_HREFS }: Props
                     <span className="font-medium">{KIND_TEXT[event.kind] ?? event.kind.replace(/_/g, ' ')}</span>
                     {move && <span className="text-muted-foreground">, {move}</span>}
                     {text && <span className="text-muted-foreground tabular-nums">{`, ${text}`}</span>}
+                    {linked && (
+                      <span className="text-muted-foreground">
+                        , {linked.text} <EntityLink to={filamentLinks.spool(linked.id)}>{linked.label}</EntityLink>
+                      </span>
+                    )}
                   </p>
                   {lines.length > 0 && (
                     <ul aria-label="Changes" className="flex flex-col text-[12px]">

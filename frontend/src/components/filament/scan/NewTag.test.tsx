@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { postTagRead, type TagReadResult } from '../../../api/filament'
 import { filamentLinks } from '../../../lib/filamentLinks'
 import { server } from '../../../mocks/server'
+import { entityMock } from '../../../mocks/features/entities'
 import { renderPage } from '../../../test/utils'
 import { DecodedFields, NewTag } from './NewTag'
 
@@ -73,5 +74,22 @@ describe('NewTag (#7273)', () => {
     expect(screen.getByRole('link', { name: 'Make the spool by hand' })).toHaveAttribute('href', filamentLinks.newSpool)
     expect(screen.queryByRole('button', { name: 'Create a spool from this tag' })).toBeNull()
     expect(screen.getByRole('searchbox', { name: 'Bind to a spool' })).toBeInTheDocument()
+  })
+
+  it('a new tag spool shows the required fields and sends them with the create (#7703)', async () => {
+    entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+    const uid = '04:01:02:03:04:05:09'
+    const result = await postTagRead({ uid, records: OPENSPOOL })
+    const bound = vi.fn<(next: TagReadResult) => void>()
+    const { user } = renderPage(<NewTag uid={uid} records={OPENSPOOL} result={result} onBound={bound} />)
+    const field = await screen.findByLabelText('lot_number')
+    await user.click(screen.getByRole('button', { name: 'Create a spool from this tag' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Fill the required properties first: lot_number.')
+    expect(bound).not.toHaveBeenCalled()
+    await user.type(field, 'L-42')
+    await user.click(screen.getByRole('button', { name: 'Create a spool from this tag' }))
+    await waitFor(() => expect(bound).toHaveBeenCalledOnce())
+    const made = [...entityMock.properties].find(([, list]) => list.some((p) => p.value === 'L-42'))
+    expect(made?.[0]).toMatch(/^spool:/)
   })
 })

@@ -110,7 +110,7 @@ const TOOLS: Record<string, readonly BuiltInTool[]> = {
       label: 'Watch a source',
       description:
         "Streams a WebSocket's frames, or a shell command's output lines, to the session as events. A WebSocket asks first, as WebFetch does; " +
-        'a command runs only while Bash is on, at its tier, and never where Bash runs in a sandbox pod.',
+        "a command runs only while Bash is on, at its tier, where Bash runs (in the session's sandbox pod where one is set up).",
       risk: 'write',
       note: MONITOR_NOTE,
       served: true,

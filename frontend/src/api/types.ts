@@ -412,6 +412,8 @@ export type QueueItem = Schemas['FarmQueueItem']
 export type ScadBuddyJob = Schemas['ScadBuddyJob']
 export type ArchiveStats = Schemas['ArchiveStats']
 export type PrinterNow = Schemas['PrinterNow']
+export type PrinterCamera = Schemas['PrinterCamera']
+export type CameraFeed = Schemas['CameraFeed']
 /** #3823 — the printer registry: one row per physical printer, keyed by serial. */
 export type PrinterRow = Schemas['PrinterRow']
 export type PrinterCreate = Schemas['PrinterCreate']
@@ -839,14 +841,19 @@ export interface RenderLimits {
 }
 
 /**
- * The long edge, in pixels, the assistant panel scales an attached image to before
- * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
- * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.
+ * The assistant's image settings (`GET/PUT /api/v1/ai/settings/images`, agent
+ * `src/routes/imageSettings.ts`): the long edge, in pixels, the panel scales an attached
+ * image to before sending it (`min`..`max`), and the largest image, in bytes, a tool shows
+ * the model inline (`tool_inline_min`..`tool_inline_max`; a larger one goes to the session's
+ * files, #7745). The PUT sends only the fields that changed.
  */
 export interface ImageSettings {
   long_edge: number
   min: number
   max: number
+  tool_inline_max_bytes: number
+  tool_inline_min: number
+  tool_inline_max: number
 }
 
 /**

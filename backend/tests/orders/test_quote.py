@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.bambuddy.output_reader import TemplateSettings
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.core.events import InProcessEventBus
 from scadbuddy.core.problems import ApiError
@@ -166,6 +167,8 @@ class FakeSlicer:
         self.slot_presets: list[SlotPresets | None] = []
         #: Each library file start's request and keywords (#6710).
         self.library_starts: list[dict[str, Any]] = []
+        #: Each output start's template settings (#7633).
+        self.template_settings: list[TemplateSettings | None] = []
 
     async def start(
         self,
@@ -174,9 +177,11 @@ class FakeSlicer:
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         self.subjects.append(subject)
         self.slot_presets.append(slot_presets)
+        self.template_settings.append(template_settings)
         return [PreviewStarted(job_id=plate, plate_id=plate) for plate in sorted(self.files)]
 
     async def start_library(

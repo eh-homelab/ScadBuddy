@@ -394,14 +394,16 @@ async def test_a_hand_attempt_is_answered_when_its_archive_read_is_slow(
     shop: Shop, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#6145: the write waits for the archives' read only so long; past it, the attempt
-    is recorded and answered with no actuals."""
+    is recorded and answered with no actuals. No wall-clock bound around the write: its
+    database work once took over 2 s on a loaded runner (#7820). A write that waited for
+    the read would get its facts after 5 s and record their actuals, which the check
+    below refuses."""
     monkeypatch.setattr("scadbuddy.api.orders.ARCHIVE_READ_TIMEOUT", 0.05)
     order, item = shop.accepted()
     body = FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81)
 
-    answered = await asyncio.wait_for(
-        record_fulfilment(order.id, item.id, body, orders_of(shop, SlowArchives(facts(81)))),
-        2,
+    answered = await record_fulfilment(
+        order.id, item.id, body, orders_of(shop, SlowArchives(facts(81)))
     )
 
     assert (answered.archive_ids, answered.actual_seconds, answered.actual_grams) == (
@@ -1497,3 +1499,26 @@ async def test_the_read_answers_a_medium_refused_as_too_large(shop: Shop, step: 
     )
     [offer] = read.archives
     assert (offer.timelapse_attachment_id, offer.timelapse_too_large) == (None, False)
+
+
+def test_a_naive_bambuddy_completion_time_reads_as_utc() -> None:
+    """#7826: Bambuddy writes naive UTC times. Compared with the aware `now` of an
+    attempt's media step, one raised TypeError, so no medium of that attempt was copied."""
+    from scadbuddy.bambuddy.models import ArchiveDetail
+    from scadbuddy.orders.bambuddy import archive_facts
+
+    completed = datetime.now(UTC) - timedelta(days=2)
+    archive = ArchiveDetail.model_validate(
+        {
+            "id": 7,
+            "status": "completed",
+            "started_at": "2026-11-20T10:00:00",
+            "completed_at": completed.replace(tzinfo=None).isoformat(),
+        }
+    )
+    facts = archive_facts(archive)
+
+    assert facts.started_at == datetime(2026, 11, 20, 10, tzinfo=UTC)
+    assert facts.completed_at == completed
+    # Past FRESH, offering neither medium: nothing is missing.
+    assert archives_module._missing([facts], set(), datetime.now(UTC)) is False

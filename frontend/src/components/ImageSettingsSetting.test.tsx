@@ -7,6 +7,7 @@ import { renderPage } from '../test/utils'
 import { ImageSettingsSetting } from './ImageSettingsSetting'
 
 const LABEL = 'Image long edge (px)'
+const INLINE_LABEL = 'Largest image the assistant sees at once (KB)'
 
 describe('ImageSettingsSetting', () => {
   it('shows the stored edge, 1568 px by default, and saves a new one', async () => {
@@ -23,6 +24,26 @@ describe('ImageSettingsSetting', () => {
     await user.click(save)
     expect(await screen.findByRole('status')).toHaveTextContent('Saved')
     expect((await api.getImageSettings()).long_edge).toBe(2576)
+  })
+
+  it("saves the largest image a tool shows inline, in KB, and sends only that field", async () => {
+    let sent: unknown
+    const { user } = renderPage(<ImageSettingsSetting />)
+    const field = await screen.findByRole('spinbutton', { name: INLINE_LABEL })
+    expect(field).toHaveValue(512)
+    expect(field).toHaveAttribute('min', '16')
+    expect(field).toHaveAttribute('max', '3840')
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PUT') sent = await request.clone().json()
+    })
+    await user.clear(field)
+    await user.type(field, '256')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved')
+    server.events.removeAllListeners()
+    expect(sent).toEqual({ tool_inline_max_bytes: 256 * 1024 })
+    const stored = await api.getImageSettings()
+    expect(stored).toMatchObject({ long_edge: 1568, tool_inline_max_bytes: 256 * 1024 })
   })
 
   it('is for the user only: an agent cannot save it', async () => {

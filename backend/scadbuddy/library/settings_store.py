@@ -103,6 +103,7 @@ from scadbuddy.core.settings import (
     env_var,
 )
 from scadbuddy.core.settings_cache import SETTINGS_CACHE_TTL, SettingsCache
+from scadbuddy.filament.label_output import LabelOutput
 from scadbuddy.filament.label_templates import LabelTemplateChoice
 from scadbuddy.flows.answerers import MAX_ANSWERERS, AnswererRule
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
@@ -111,6 +112,7 @@ from scadbuddy.orders.message_models import MessagingBinding
 from scadbuddy.orders.money import DepositRule, ShippingOption
 from scadbuddy.orders.storefront.slice_profile import StorefrontSliceProfile
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
+from scadbuddy.store.index import STAGE_LOCK_POOL_SIZE
 
 if TYPE_CHECKING:
     from scadbuddy.core.pg_listener import PgListener
@@ -531,6 +533,9 @@ class StoredSettings(BambuddyIds):
     #: #7157: the label template the Labels page and the labels PDF use (R-7157-2).
     #: ``None``: `label_templates.DEFAULT_TEMPLATE`. Stored only.
     filament_label_template: LabelTemplateChoice | None = None
+    #: #7216: the labels file's format, its PNG dpi and the spool label's fields
+    #: (R-7216-8). ``None``: `LabelOutput()`, a PDF. Stored only.
+    filament_label_output: LabelOutput | None = None
 
     # -- the shop's money rules (#5281), stored only: no environment seeds them --------
     #: The deposit policy's rules; ``None`` asks no deposit.
@@ -867,6 +872,8 @@ class SettingsPatch(BaseModel):
     filament_sync_pass_ttl_days: int | None = Field(default=None, ge=1, le=3650)
     #: #7157: the label template; ``null`` puts back the 50 x 25 mm roll label.
     filament_label_template: LabelTemplateChoice | None = None
+    #: #7216: the labels output; ``null`` puts back a PDF at 300 dpi.
+    filament_label_output: LabelOutput | None = None
 
     # -- the shop's money rules (#5281), stored only; only the user sets them ----------
     #: ``null`` asks no deposit.
@@ -913,6 +920,7 @@ class SettingsPatch(BaseModel):
     git_remote_token: str | None = Field(default=None, max_length=4096)
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
+    event_log_retention_kinds: dict[str, float] | None = None
     flow_approval_timeout_seconds: int | None = None
     spool_overlay_refresh_seconds: int | None = None
     #: The Filament section (#6262 Task 13): see `core.settings.FilamentSync`.
@@ -920,6 +928,7 @@ class SettingsPatch(BaseModel):
     filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
     filament_weighing_drift_notice_g: int | None = Field(default=None, ge=0, le=100000)
+    filament_weighing_finished_left_g: int | None = Field(default=None, ge=0, le=100000)
     filament_drying_temp_c: int | None = Field(default=None, ge=1, le=150)
     filament_drying_hours: Decimal | None = Field(
         default=None, ge=Decimal("0.1"), le=Decimal("999.9")
@@ -1174,6 +1183,13 @@ class SettingsStore:
             min_size=1,
             max_size=defaults.database_pool_size,
         )
+        # A save's stage holds (#7477 review I2, `store/index.py` `StageLocks`): a small
+        # pool of their own, so a save's hold never takes the shared pool's connections,
+        # nor does a removal's exclusive lock, held through the backend's remove (#7756
+        # review). Nothing connects until a save stages or a removal claims.
+        self._stage_lock_pool = row_pool(
+            defaults.database_url, name="scadbuddy-stage-locks", max_size=STAGE_LOCK_POOL_SIZE
+        )
 
     @property
     def kek(self) -> Kek | None:
@@ -1183,6 +1199,7 @@ class SettingsStore:
     def open(self) -> None:
         """Connect and bring the schema up to date. Fails the start when it cannot."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
+        self._stage_lock_pool.open()
         self.migrate_and_seal()
 
     def migrate_and_seal(self) -> None:
@@ -1202,6 +1219,7 @@ class SettingsStore:
                     logger.info("sealed plaintext API keys", extra={"settings": sealed})
 
     def close(self) -> None:
+        self._stage_lock_pool.close()
         self._pool.close()
 
     def follow(self, listener: PgListener) -> None:
@@ -1216,6 +1234,12 @@ class SettingsStore:
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
         return self._pool
+
+    @property
+    def stage_lock_pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The stage holds' and removals' own pool, `STAGE_LOCK_POOL_SIZE` connections
+        (`StageLocks`)."""
+        return self._stage_lock_pool
 
     def snapshot(self, timeout: float | None = None) -> SettingsSnapshot:
         """``timeout``, in seconds, is this read's whole budget (#1111): the wait for a

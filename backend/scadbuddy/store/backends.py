@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -27,7 +28,11 @@ class UnrecordedSweeper(Protocol):
     written (#701); the blob sweep deletes those older than its cutoff."""
 
     async def sweep_unrecorded(
-        self, *, cutoff: datetime, recorded: Callable[[str], bool]
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool],
+        claim: Callable[[str], AbstractAsyncContextManager[bool]] | None = None,
     ) -> int | list[str]: ...
 
 

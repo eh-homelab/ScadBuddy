@@ -1,6 +1,6 @@
-"""The camera relay's and recorder's settings (printer camera recording, phase 1). Neither
-process has a database, key or SQL client: both reach the CRUD service over HTTP with a
-service credential, and refuse to start with a database secret."""
+"""The camera relay's, recorder's and live edge's settings (printer camera recording, phases
+1 and 3). No camera process has a database, key or SQL client: each reaches the CRUD service
+over HTTP with a service credential, and refuses to start with a database secret."""
 
 from __future__ import annotations
 
@@ -74,5 +74,28 @@ class RecorderSettings(BaseSettings):
             reasons.append(
                 f"TZ is {environ['TZ']!r}; segment times are read as UTC, so TZ must be UTC"
             )
+        if reasons:
+            raise CameraRefusal(reasons)
+
+
+class EdgeSettings(BaseSettings):
+    """The live edge (camera phase 3): it reads the relay with the relay read secret, as the
+    recorders do, and holds no access code and no bucket keys."""
+
+    model_config = SettingsConfigDict(env_prefix="SCADBUDDY_", extra="ignore")
+
+    api_internal_url: str
+    service_token_file: Path | None = None
+    service_bootstrap_file: Path | None = None
+    camera_mediamtx_api_url: str = "http://127.0.0.1:9997"
+    #: The relay's RTSP address, e.g. ``rtsp://scadbuddy-camera-relay:8554``.
+    camera_relay_rtsp_url: str
+    camera_relay_read_user: str
+    camera_relay_read_pass: SecretStr
+    log_level: str = "INFO"
+
+    @staticmethod
+    def check_environment(environ: Mapping[str, str]) -> None:
+        reasons = _forbidden(environ, "edge")
         if reasons:
             raise CameraRefusal(reasons)

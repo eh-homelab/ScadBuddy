@@ -28,7 +28,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
-from contextlib import aclosing, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -359,7 +359,11 @@ class BambuddyContentBackend:
                     raise
 
     async def sweep_unrecorded(
-        self, *, cutoff: datetime, recorded: Callable[[str], bool] | None = None
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool] | None = None,
+        claim: Callable[[str], AbstractAsyncContextManager[bool]] | None = None,
     ) -> list[str]:
         """Delete the files in this Bambuddy's recorded `Work/` folders that no
         `store_blobs` row names and that were added before ``cutoff`` (#701): an upload
@@ -368,7 +372,8 @@ class BambuddyContentBackend:
         read again right before its DELETE, as `remove` does (#1272): the listing can be
         many round trips old by then, and a file moved out of `Work/` meanwhile is left
         alone (#2115). ``recorded`` says whether a row names an id (by default, one of
-        this backend's). Returns the deleted ids."""
+        this backend's). ``claim`` is not used: every upload here is a new file, so no
+        save shares one with another (#7477). Returns the deleted ids."""
         is_recorded = self._recorded_id if recorded is None else recorded
         removed: list[str] = []
         async with self._client() as (client, inbox):

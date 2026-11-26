@@ -657,16 +657,17 @@ def flow_kinds(
         ask: Callable[[], Awaitable[bool | None]],
         err: BaseException,
         undo: Callable[[], Awaitable[None]],
-    ) -> bool:
+    ) -> bool | None:
         """After a send that failed other than by a refusal: True when the Update landed
-        anyway (the decision stands); otherwise False, having deleted the row (`undo`) only
-        when Temporal says the Update never existed."""
+        anyway (the decision stands); False when Temporal says it never existed, having
+        deleted the row (`undo`); None when it could not say, or the send was cancelled
+        (nothing is asked then), and the row stays."""
         if isinstance(err, asyncio.CancelledError):
-            return False
+            return None
         verdict = await ask()
         if verdict is False:
             await undo()
-        return verdict is True
+        return verdict
 
     def _decision(request: dict[str, Any], checked: dict[str, Any], **fields: Any) -> Decision:
         return Decision(
@@ -848,8 +849,22 @@ def flow_kinds(
                 ) from None
             raise (taken() if resolved else _stale()) from None
         except BaseException as err:
-            if not await settle(arrived, err, undo):
-                raise
+            verdict = await settle(arrived, err, undo)
+            if verdict is True:
+                return
+            if isinstance(err, RPCError) and err.status == RPCStatusCode.NOT_FOUND:
+                # The run closed, or was closing, under the send ("workflow update was
+                # aborted by closing workflow").
+                if verdict is False:
+                    # The Update never existed: the call is no longer waiting (#7822).
+                    raise _stale() from None
+                # Whether it landed is unknown, so the row and the error stay (#7883, #7900).
+                activity.logger.warning(
+                    "flow decision %s: the run closed under its send, and whether it landed"
+                    " is unknown; its row stays",
+                    decision.request_id,
+                )
+            raise
 
     async def give(
         request: dict[str, Any],

@@ -20,6 +20,11 @@ const LABELS = {
   connectors: 'Connectors (keys, pegs, hinge pins)',
 }
 
+/** A piece's name for people, lower case, as a sentence uses it; an unknown key stays as it is. */
+export function pieceLabel(piece) {
+  return LABELS[piece]?.toLowerCase() ?? piece
+}
+
 const COURSED = new Set(['wall', 'corner_post'])
 
 export function clampHouse(house) {

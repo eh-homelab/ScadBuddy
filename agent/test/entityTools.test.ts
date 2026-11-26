@@ -1,10 +1,15 @@
+import { createHash } from 'node:crypto'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { keptName } from '../src/tools/entities.js'
 import { runTool, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
+import { memoryWorkspace } from './helpers/workspace.js'
+import { IMAGE_BYTES_MAX } from '../src/sessions/images.js'
+import { WorkspaceError } from '../src/workspace/store.js'
 
 // Entity attachments and links (#6950, phase 1 Task 7): the generic `/entities/{ref}` routes.
 
@@ -24,6 +29,39 @@ function tool(name: string): Tool {
   return t
 }
 
+/** A workspace that keeps what is written, for a file the tool stores. */
+function memoryWorkspaceWithWrites() {
+  const written = new Map<string, Buffer>()
+  const workspace = {
+    async write(_ws: unknown, path: string, bytes: Uint8Array, o?: { mediaType?: string }) {
+      written.set(path, Buffer.from(bytes))
+      return { path, mediaType: o?.mediaType ?? 'application/octet-stream', size: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') }
+    },
+  } as unknown as NonNullable<ToolContext['workspace']>
+  return { written, workspace }
+}
+
+/** The backend's inline types (orders/models.py INLINE): any other file is served as application/octet-stream. */
+const INLINE = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/avif', 'image/heic', 'video/mp4', 'video/quicktime', 'video/webm', 'application/pdf'])
+
+/** An entity's one file as the backend serves it: its record in the list, and its bytes under its type only when inline. */
+function serveFile(entity: string, mediaType: string, body: Buffer | null, headers: Record<string, string> = {}, filename = 'file.bin') {
+  return [
+    http.get(`${base(entity)}/attachments`, () =>
+      HttpResponse.json({ attachments: [{ id: ID, entity, filename, media_type: mediaType, kind: 'file', role: 'other' }] }),
+    ),
+    http.get(`${base(entity)}/attachments/${ID}/content`, () =>
+      new HttpResponse(body, {
+        headers: {
+          'Content-Type': INLINE.has(mediaType) ? mediaType : 'application/octet-stream',
+          ...(INLINE.has(mediaType) ? {} : { 'Content-Disposition': `attachment; filename="${filename}"` }),
+          ...headers,
+        },
+      }),
+    ),
+  ]
+}
+
 function ctx(): ToolContext {
   return {
     ...services(),
@@ -38,6 +76,7 @@ describe('entity attachment and link tools', () => {
   it('tiers lists as read and every change as outward, and maps each to its route', () => {
     const expected: Record<string, [string, string]> = {
       entity_attachment_list: ['read', 'GET /api/v1/entities/{ref}/attachments'],
+      entity_attachment_add: ['outward', 'POST /api/v1/entities/{ref}/attachments'],
       entity_attachment_update: ['outward', 'PATCH /api/v1/entities/{ref}/attachments/{attachment_id}'],
       entity_attachment_delete: ['outward', 'DELETE /api/v1/entities/{ref}/attachments/{attachment_id}'],
       entity_link_list: ['read', 'GET /api/v1/entities/{ref}/links'],
@@ -49,6 +88,176 @@ describe('entity attachment and link tools', () => {
       expect(tool(name).risk, name).toBe(risk)
       expect(tool(name).routes, name).toEqual([route])
     }
+  })
+
+  it("answers a photo as an image, its thumbnail on request, and any other file as its bytes", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])
+    const webp = Buffer.from('RIFF\0\0\0\0WEBPVP8 ')
+    server.use(
+      ...serveFile(SPOOL, 'image/jpeg', jpeg),
+      http.get(`${base(SPOOL)}/attachments/${ID}/thumbnail`, () => new HttpResponse(webp, { headers: { 'Content-Type': 'image/webp' } })),
+      ...serveFile(PRINTER, 'application/pdf', Buffer.from('%PDF-1.7'), {}, 'manual.pdf'),
+    )
+    const get = tool('entity_attachment_get')
+    expect(get.risk).toBe('read')
+    expect(get.routes).toEqual([
+      'GET /api/v1/entities/{ref}/attachments',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/content',
+      'GET /api/v1/entities/{ref}/attachments/{attachment_id}/thumbnail',
+    ])
+    const photo = await get.execute({ entity: SPOOL, attachment_id: ID }, ctx())
+    expect(photo.content).toEqual([{ type: 'image', mimeType: 'image/jpeg', data: jpeg.toString('base64') }])
+    const thumb = await get.execute({ entity: SPOOL, attachment_id: ID, thumbnail: true }, ctx())
+    expect(thumb.content).toEqual([{ type: 'image', mimeType: 'image/webp', data: webp.toString('base64') }])
+    const ws = memoryWorkspaceWithWrites()
+    const pdf = await get.execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
+    expect(pdf.content.some((c) => c.type === 'resource' || c.type === 'resource_link')).toBe(false)
+    expect(firstText(pdf)).toMatchObject({
+      workspace_file: { name: `attachments/${ID}-manual.pdf`, mediaType: 'application/pdf', size: 8 },
+    })
+    expect(ws.written.get(`attachments/${ID}-manual.pdf`)?.toString()).toBe('%PDF-1.7')
+  })
+
+  it('keeps an SVG or STL by its own name and type, though the content route serves it as octet-stream', async () => {
+    for (const [type, filename, body] of [
+      ['image/svg+xml', 'label.svg', '<svg/>'],
+      ['model/stl', 'bracket.stl', 'solid x'],
+    ] as const) {
+      server.use(...serveFile(PRINTER, type, Buffer.from(body), {}, filename))
+      const ws = memoryWorkspaceWithWrites()
+      const result = await tool('entity_attachment_get').execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
+      expect(firstText(result)).toMatchObject({ workspace_file: { name: `attachments/${ID}-${filename}`, mediaType: type } })
+    }
+  })
+
+  it('answers a TIFF as a note by its record, though the content route serves it as octet-stream', async () => {
+    server.use(...serveFile(SPOOL, 'image/tiff', Buffer.from('II*\0')))
+    expect(firstText(await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx()))).toMatchObject({
+      viewable: false,
+      media_type: 'image/tiff',
+    })
+  })
+
+  it('keeps a file with a long name, cut to fit a workspace path segment with its extension', async () => {
+    const long = `${'a'.repeat(120)}.pdf`
+    expect(keptName(ID, long)).toHaveLength(128)
+    expect(keptName(ID, long)).toMatch(/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/)
+    expect(keptName(ID, long).endsWith('.pdf')).toBe(true)
+    expect(keptName(ID, 'manual.pdf')).toBe(`${ID}-manual.pdf`)
+    expect(keptName(ID, '..')).toBe(`${ID}-file`)
+    server.use(...serveFile(PRINTER, 'application/pdf', Buffer.from('%PDF-1.7'), {}, long))
+    const ws = memoryWorkspaceWithWrites()
+    const result = await tool('entity_attachment_get').execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: ws.workspace } as ToolContext)
+    expect(firstText(result)).toMatchObject({ workspace_file: { name: `attachments/${keptName(ID, long)}` } })
+  })
+
+  it('refuses a file the entity does not hold', async () => {
+    server.use(http.get(`${base(SPOOL)}/attachments`, () => HttpResponse.json({ attachments: [] })))
+    await expect(tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())).rejects.toThrow(/has no file/)
+  })
+
+  it('answers a HEIC or AVIF photo as a note, never as an image block the model would refuse', async () => {
+    for (const type of ['image/heic', 'image/avif']) {
+      server.use(...serveFile(SPOOL, type, Buffer.from('ftyp')))
+      const result = await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())
+      expect(result.content.some((c) => c.type === 'image')).toBe(false)
+      expect(firstText(result)).toMatchObject({ viewable: false, media_type: type, size_bytes: 4 })
+    }
+  })
+
+  it('answers a file too large to read as a note, never a backend path', async () => {
+    server.use(
+      ...serveFile(PRINTER, 'video/mp4', null, { 'Content-Length': String(26 * 1024 * 1024) }),
+    )
+    const result = await tool('entity_attachment_get').execute({ entity: PRINTER, attachment_id: ID }, ctx())
+    expect(firstText(result)).toMatchObject({ viewable: false, media_type: 'video/mp4', size_bytes: 26 * 1024 * 1024 })
+    expect(JSON.stringify(result.content)).not.toContain('/api/v1/entities')
+  })
+
+  it('answers a non-image file as a note with no workspace, or when the workspace refuses it', async () => {
+    server.use(...serveFile(PRINTER, 'application/pdf', Buffer.from('%PDF-1.7')))
+    const get = tool('entity_attachment_get')
+    expect(firstText(await get.execute({ entity: PRINTER, attachment_id: ID }, ctx()))).toMatchObject({
+      media_type: 'application/pdf',
+      size_bytes: 8,
+      note: 'There is no workspace to keep it in here.',
+    })
+    const full = {
+      async write() {
+        throw new WorkspaceError('too_large', 'the workspace is full')
+      },
+    } as unknown as NonNullable<ToolContext['workspace']>
+    expect(firstText(await get.execute({ entity: PRINTER, attachment_id: ID }, { ...ctx(), workspace: full } as ToolContext))).toMatchObject({
+      note: 'Not kept: the workspace is full',
+    })
+  })
+
+  it('refuses an attachment id that is not a plain id, before anything is fetched', async () => {
+    expect((await runTool(tool('entity_attachment_get'), { entity: PRINTER, attachment_id: '..' }, ctx())).isError).toBe(true)
+  })
+
+  it('answers a photo over the read cap with the thumbnail hint', async () => {
+    server.use(
+      ...serveFile(SPOOL, 'image/jpeg', null, { 'Content-Length': String(26 * 1024 * 1024) }),
+    )
+    const answer = firstText(await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())) as { note: string }
+    expect(answer.note).toContain('thumbnail: true')
+  })
+
+  it('answers a GIF too large to view without the thumbnail hint, which has no GIF', async () => {
+    const big = Buffer.alloc(IMAGE_BYTES_MAX + 1)
+    big.write('GIF89a')
+    server.use(...serveFile(SPOOL, 'image/gif', big))
+    const answer = firstText(await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())) as { note: string }
+    expect(answer.note).not.toContain('thumbnail')
+  })
+
+  it('answers a photo too large to view as a note, never as an image block the model would refuse', async () => {
+    const big = Buffer.alloc(IMAGE_BYTES_MAX + 1)
+    big.set([0xff, 0xd8, 0xff])
+    server.use(...serveFile(SPOOL, 'image/jpeg', big))
+    const result = await tool('entity_attachment_get').execute({ entity: SPOOL, attachment_id: ID }, ctx())
+    expect(result.content.some((c) => c.type === 'image')).toBe(false)
+    expect(firstText(result)).toMatchObject({ inline: false, media_type: 'image/jpeg', size_bytes: IMAGE_BYTES_MAX + 1 })
+  })
+
+  it("refuses an order's entity with the backend's use_order_route", async () => {
+    server.use(
+      http.post(`${base(`order:${ID}`)}/attachments`, () =>
+        HttpResponse.json({ type: 'https://scadbuddy.dev/problems/use_order_route', detail: "an order's files go through the order routes" }, { status: 409 }),
+      ),
+    )
+    const ws = memoryWorkspace({ 'a.jpg': Buffer.from('jpg') }, 'image/jpeg')
+    const c = { ...ctx(), workspace: ws.workspace } as ToolContext
+    await expect(tool('entity_attachment_add').execute({ entity: `order:${ID}`, ...ws.ref('a.jpg') }, c)).rejects.toMatchObject({
+      status: 409,
+      problem: 'use_order_route',
+    })
+  })
+
+  it('attaches a workspace file to an entity as a command, with its role and caption', async () => {
+    const seen: { key: string | null; fields: Record<string, string>; file: { name: string; size: number } }[] = []
+    server.use(
+      http.post(`${base(SPOOL)}/attachments`, async ({ request }) => {
+        const form = await request.formData()
+        const file = form.get('file') as File
+        const fields = Object.fromEntries([...form.entries()].filter((e): e is [string, string] => typeof e[1] === 'string'))
+        seen.push({ key: request.headers.get('Idempotency-Key'), fields, file: { name: file.name, size: file.size } })
+        return HttpResponse.json({ id: ID, entity: SPOOL, filename: file.name })
+      }),
+    )
+    const ws = memoryWorkspace({ 'photos/label.jpg': Buffer.from('jpg bytes') }, 'image/jpeg')
+    const c = { ...ctx(), workspace: ws.workspace } as ToolContext
+    const add = tool('entity_attachment_add')
+    const result = await add.execute({ entity: SPOOL, ...ws.ref('photos/label.jpg'), role: 'label', caption: 'Lot 7' }, c)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.key).toBeTruthy()
+    expect(seen[0]!.fields).toEqual({ role: 'label', caption: 'Lot 7' })
+    expect(seen[0]!.file).toEqual({ name: 'label.jpg', size: 9 })
+    expect(firstText(result)).toMatchObject({
+      id: ID,
+      workspace_file: { path: 'photos/label.jpg', size_bytes: 9, media_type: 'image/jpeg' },
+    })
   })
 
   it('lists attachments and links with the entity page where the kind has one', async () => {

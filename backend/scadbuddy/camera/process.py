@@ -1,4 +1,4 @@
-"""The parts the camera relay and the camera recorder share as processes: the local hook
+"""The parts the camera relay, recorder and live edge share as processes: the local hook
 server that MediaMTX's commands call, ``/healthz``, ``/readyz`` and ``/metrics``, and
 ``main``."""
 
@@ -107,7 +107,10 @@ async def serve_health(port: int, alive: Check, ready: Check | None = None) -> a
             status = b"200 OK"
             target = line.split(b" ")[1:2]
             if target == [b"/metrics"]:
-                body, kind = generate_latest(), CONTENT_TYPE_LATEST.encode()
+                # In a thread: a collector may call MediaMTX at scrape time (the edge's
+                # viewers), and the probes must not wait on it.
+                body = await asyncio.to_thread(generate_latest)
+                kind = CONTENT_TYPE_LATEST.encode()
             elif await _alive(ready if target == [b"/readyz"] and ready is not None else alive):
                 body, kind = b"ok", b"text/plain"
             else:

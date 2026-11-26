@@ -13,7 +13,7 @@ import asyncio
 import logging
 import re
 from collections.abc import AsyncGenerator, Callable, Iterator
-from contextlib import AsyncExitStack, contextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, BinaryIO, Final, get_args
@@ -268,7 +268,9 @@ class S3ContentBackend:
             # naming this key, or `sweep_unrecorded`, could delete the object between
             # this HEAD and that insert, leaving a row that names a missing object. That
             # read is a miss, not corruption, and the piece re-renders; and the sweep
-            # only removes objects last written before its cutoff. So no lock.
+            # only removes objects last written before its cutoff. So no lock here. A save
+            # (`ContentStore.stage` with a `StageHold`) holds the object's stage lock
+            # across this HEAD, which every removal claims (#7477); other puts take none.
             return key
         client = await self._s3()
         bucket = self.settings.bucket
@@ -526,10 +528,21 @@ class S3ContentBackend:
                 if _STAGED.fullmatch(key.removeprefix(f"{self.settings.prefix}/")):
                     yield key, item["LastModified"]
 
-    async def sweep_unrecorded(self, *, cutoff: datetime, recorded: Callable[[str], bool]) -> int:
+    async def sweep_unrecorded(
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool],
+        claim: Callable[[str], AbstractAsyncContextManager[bool]] | None = None,
+    ) -> int:
         """Delete every object under the prefix last written before ``cutoff`` that
         ``recorded`` (given the object's key) says no `store_blobs` row names. A naive
-        ``cutoff`` is UTC; an object whose key is not one this backend writes is left."""
+        ``cutoff`` is UTC; an object whose key is not one this backend writes is left.
+        With ``claim`` (`ContentStore.claim_object`), such an object is then claimed, which
+        checks the rows again under its lock, and is deleted only inside the claim's block:
+        one a save uploaded and has not indexed yet stays,
+        even when an older upload of the same bytes made it (#7477). A save that died
+        before its commit holds no lock, so its objects go once past ``cutoff``."""
         if cutoff.tzinfo is None:
             cutoff = cutoff.replace(tzinfo=UTC)
         prefix = f"{self.settings.prefix}/"
@@ -540,11 +553,25 @@ class S3ContentBackend:
                 key = item["Key"]
                 if not _OBJECT.fullmatch(key.removeprefix(prefix)):
                     continue
-                if item["LastModified"] < cutoff and not await asyncio.to_thread(recorded, key):
-                    with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
-                        await client.delete_object(Bucket=self.settings.bucket, Key=key)
+                if item["LastModified"] >= cutoff:
+                    continue
+                # One query for an object a row names, the most of them; only one no row
+                # names is claimed (#7477 review M3).
+                if await asyncio.to_thread(recorded, key):
+                    continue
+                if claim is None:
+                    await self._delete_unrecorded(client, key)
                     removed += 1
+                    continue
+                async with claim(key) as free:
+                    if free:
+                        await self._delete_unrecorded(client, key)
+                        removed += 1
         return removed
+
+    async def _delete_unrecorded(self, client: S3Client, key: str) -> None:
+        with _request("DeleteObject", _kind_of(self.settings.prefix, key)):
+            await client.delete_object(Bucket=self.settings.bucket, Key=key)
 
     async def _listed(
         self, client: S3Client, prefix: str, kind: str

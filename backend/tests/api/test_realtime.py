@@ -30,6 +30,7 @@ from scadbuddy.core.events import (
     JobProgress,
     LibraryRemoved,
     ModelEvent,
+    OpaqueEvent,
     OutputEvent,
     PluginPackagesChanged,
     PreviewSliceEvent,
@@ -461,6 +462,33 @@ def test_a_task_topic_place_may_be_100_characters() -> None:
     assert realtime.valid_topic("tasks:" + "x" * 100)
     assert realtime.valid_topic("tasks")
     assert realtime.valid_topic(f"task:{TASK_ID}")
+
+
+def _opaque(kind: str, topics: list[str]) -> OpaqueEvent:
+    raw = {"id": "x", "at": "2026-11-25T00:00:00Z", "kind": kind, "topics": topics}
+    return OpaqueEvent.model_validate({**raw, "payload": raw})
+
+
+def test_an_opaque_event_reaches_no_browser_socket() -> None:
+    event = _opaque("fleet.message", ["fleet:agent:a", "fonts", "job:abc"])
+    assert realtime.topics_of(event) == []
+
+    async def scenario() -> list[dict[str, Any]]:
+        bus = InProcessEventBus()
+        subscription: Subscription = bus.subscribe()
+        bus.deliver(event)
+        bus.publish(FontInstalled(family="DejaVu Sans"))
+        sent: list[dict[str, Any]] = []
+
+        async def send(frame: dict[str, Any]) -> None:
+            sent.append(frame)
+            subscription.close()
+
+        await realtime.pump(subscription, {"fleet:agent:a", "fonts", "job:abc"}, send)
+        return sent
+
+    sent = asyncio.run(scenario())
+    assert [frame["kind"] for frame in sent] == ["font.installed"]
 
 
 def test_topics_of_handles_every_event_in_the_union() -> None:

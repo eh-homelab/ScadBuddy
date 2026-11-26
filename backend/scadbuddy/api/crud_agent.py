@@ -58,6 +58,7 @@ from uuid import UUID
 from fastapi import Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from scadbuddy.api.crud_agent_changes import FLEET_KIND_PREFIX
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.api.internal_workspace import WORKSPACE_BLOB_KEY_PATTERN
 from scadbuddy.api.orders import _run, check_path
@@ -261,9 +262,11 @@ def _event_log_gap(pool: agent_reads.Pool, after: int, limit: int) -> EventLogGa
     # read of the gap had it (the GUARD of the older agent's `events/pgListener.ts`).
     with pool.connection() as conn, conn.transaction():
         rows = conn.execute(
+            # The fleet's kinds name its session ids, its only identity: they are for the
+            # `fleet` caller alone (#7818), as in the agent's change stream (`keep_agent`).
             "SELECT seq, event_id, payload, logged_at FROM events"
-            " WHERE seq > %s ORDER BY seq DESC LIMIT %s",
-            (after, limit),
+            " WHERE seq > %s AND NOT starts_with(kind, %s) ORDER BY seq DESC LIMIT %s",
+            (after, FLEET_KIND_PREFIX, limit),
         ).fetchall()
         clock = conn.execute("SELECT now() AS at").fetchone()
     assert clock is not None

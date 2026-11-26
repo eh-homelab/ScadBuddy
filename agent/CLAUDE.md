@@ -181,7 +181,7 @@ and its backend module:
   `mcpTransportProblem`, `authenticate`), only approved pins, each zip URL on the origin the
   `marketplace.json` request came on (`effectiveRequest`; Claude Code sends the marketplace's
   `headers` only to that origin), a zip request reading only its own package;
-  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); the feed and /mcp are reached on the LAN host and on the public URL, where the ingress does no sign-in for them (clusters#4017, 2026-11-25). #6936: a commit pin of any source
+  `GET /api/v1/ai/plugin-feeds/{feed}` is Settings' read (its `marketplace_url` is on the request's origin too); /mcp and the feed's three bearer-checked reads (marketplace.json, versions, archives) are reached on the LAN host and on the public URL, where the ingress does no sign-in for them (clusters#4017, #4368); Settings' feed routes take no token and stay behind the ingress's sign-in. #6936: a commit pin of any source
   (a bare `marketplace.json` URL's git entry too) is listed with its `sha`; a bytes pin (archive,
   npm) as an `archive` at `…/plugins/{name}/archives/{sha256}.zip` (the served zip's sha256),
   served from its mirror (`package-mirrors`): a zip pin as its exact bytes, a tarball as a
@@ -600,7 +600,12 @@ opens every one and seals it again byte for byte).
     file listing, #6710 spec 2026-11-21 §11.3: the body the editor saves for a new listing of that
     file, `fileTitle`, `fileColours` over `declaredSlots`, `platePictures`, which the vectors' file
     case pins, but `materials`, which is the offered filaments' (`draftMaterials`) where the page
-    leaves the shop's default) and
+    leaves the shop's default; for a pipeline template, #5701 spec 2026-11-17 §9, an output's own
+    inputs and their version go with the draft, `soldDesign`, which the vectors' `source` cases
+    pin, a parameter the pipeline sets is neither offered nor locked, and a draft from a model
+    sets no inputs and says in `notes` to set up the design in the editor, as a draft from an
+    output that holds none of them does; a version whose pipeline declares no inputs says it
+    cannot be listed instead, #7879) and
     `storefront_listing_publish` (`outward`). The listings' other routes stay the page's.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry, or,
     #6935, a bare `marketplace.json` URL's entry, an archive or an npm package) live
@@ -678,8 +683,10 @@ opens every one and seals it again byte for byte).
     (`background/temporal.ts`, plan Step 9.8, its older jobs converted at start by
     `convertCronTasks`), and a wakeup or a one-shot cron one `BackgroundTask` workflow on
     `agent-tools`; a Monitor's command
-    runs on the replica that ran the turn, its own queue, and never where a sandbox is set up
-    (#5864: its description there offers `ws` only), its events in
+    runs on the replica that ran the turn, its own queue, or, where a sandbox is set up, in the
+    session's pod as a background slot (`sandbox/slots.ts`) that the activity on that queue
+    follows (`background/sandboxSource.ts`, #5916), as does a sandboxed Bash or PowerShell with
+    `run_in_background` (a `monitor` task with `spec.background` `shell`, #7310), its events in
     `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
     (`workflowAgents.ts`, a chat with no background built-in of its own), its results journalled in `ai_workflow_calls`; every turn that has them

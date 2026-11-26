@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 import httpx
 from fastapi import status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE
 from scadbuddy.bambuddy.models import ProcessValue
@@ -66,6 +66,17 @@ class OutputNaming(BaseModel):
     title: str | None = None
 
 
+class TemplateSettings(BaseModel):
+    """A template's ``print_settings`` and ``part_print_settings`` (by colour parameter)
+    as its model.json had them at one read (#7633): a storefront price key holds them, and
+    its slice takes these, not the template's as they are when the slice runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    print_settings: dict[str, ProcessValue] = Field(default_factory=dict)
+    part_settings: dict[str, PartSettings] = Field(default_factory=dict)
+
+
 class OutputReader(OutputFiles, Protocol):
     async def get(self, output_id: str) -> OutputMeta:
         """The output's record; `OutputNotFoundError` when it is gone."""
@@ -100,7 +111,12 @@ class LocalOutputs:
     async def model_3mf(self, output_id: str) -> bytes | None:
         return await self.outputs.model_3mf(output_id)
 
-    async def naming(self, meta: OutputMeta) -> OutputNaming:
+    async def naming(
+        self, meta: OutputMeta, *, template_settings: TemplateSettings | None = None
+    ) -> OutputNaming:
+        """With ``template_settings`` (a storefront slice, #7633), those settings in place
+        of the template's as they are now. A model.json that refuses its settings now
+        still refuses."""
         stem = await output_stem(meta, self.outputs, self.catalogue)
         title = await asyncio.to_thread(
             template_title, self.catalogue.paths.model_source(meta.slug).parent, meta.slug
@@ -108,6 +124,9 @@ class LocalOutputs:
         settings, declared, refusal = await self._settings(meta)
         if refusal is not None:
             return OutputNaming(stem=stem, invalid_meta=refusal, title=title)
+        if template_settings is not None:
+            settings = template_settings.print_settings
+            declared = template_settings.part_settings
         parts = await asyncio.to_thread(self._part_settings, meta, declared) if declared else None
         return OutputNaming(stem=stem, print_settings=settings, part_settings=parts, title=title)
 
@@ -151,6 +170,19 @@ class LocalOutputs:
         values: dict[str, object] = {k: v for k, v in defaults.items() if v is not None}
         values.update(self.outputs.params(meta.id))
         return by_colour(declared, values, meta.colors)
+
+
+def read_template_settings(catalogue: Catalogue, slug: str) -> TemplateSettings | None:
+    """The template's settings as its model.json has them now (#7633), read as
+    :meth:`LocalOutputs.naming` reads them; None when the model.json refuses them, so the
+    slice reads them itself and refuses. Blocking: call it in a thread."""
+    try:
+        return TemplateSettings(
+            print_settings=catalogue.print_settings(slug),
+            part_settings=catalogue.part_print_settings(slug),
+        )
+    except InvalidModelMetaError:
+        return None
 
 
 def _problem(response: httpx.Response) -> ApiError:

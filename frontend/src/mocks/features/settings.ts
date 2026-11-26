@@ -240,7 +240,9 @@ function putSettings(body: Record<string, unknown>) {
               ? (value ?? true)
               : name === 'filament_label_template'
                 ? (value ?? { template: 'roll_50x25', width_mm: null, height_mm: null })
-                : value
+                : name === 'filament_label_output'
+                  ? (value ?? structuredClone(fixtures.settings.filament_label_output))
+                  : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {

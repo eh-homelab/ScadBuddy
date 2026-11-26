@@ -5,13 +5,13 @@ import { defineTool, json, ToolError, type ToolContext } from './registry.js'
 import { withoutBackground } from './sessions.js'
 
 // #7273 G4: an agent reads or writes a tag through the person's phone. The tool queues an
-// NFC job (backend filament/tags.py `create_job`); the /filament/scan page shows it, the
+// NFC job (backend filament/tags.py `create_job`); the /scan page shows it, the
 // person taps Arm and holds a tag, and the page posts what the tag held.
 
 const ENDED = new Set(['done', 'failed', 'expired', 'cancelled'])
 const SOURCE = 'NDEF records read from a physical tag, which anyone holding the tag could have written'
 const HOW =
-  "The user must have ScadBuddy's /filament/scan page open in Chrome on Android. It shows the job; the user " +
+  "The user must have ScadBuddy's /scan page (Scan in the nav; /filament/scan redirects there) open in Chrome on Android. It shows the job; the user " +
   'taps Arm and holds a tag. Records are NDEF records with data as hex. The write replaces every record on the ' +
   'tag, after a backup the user can restore.'
 

@@ -108,6 +108,9 @@ The change:
   resolution that `check_on` in `insert_weights.py` already does.
 - `person` and `scale` weighings are treated alike here; `bb` weighings (pulled from
   Bambuddy) record no breakdown, since Bambuddy gives no reading.
+- As built in #7683: `empty_source` has a third value, `tared`, for a weighing resolved as
+  §5.3's `tared`: nothing was taken off the reading, so `empty_g` is 0 and `empty_basis`
+  and `empty_name` are null.
 
 ### 5.2 What the person sees (slice A)
 
@@ -141,7 +144,7 @@ The change:
 spool reads at or under its label weight, and the page then books the reading less the
 placeholder empty weight. The change:
 
-- For a spool that is new by #7280's rule (added full, nothing consumed, grams left at
+- For a spool that is new by #7280's rule (nothing consumed, grams left at
   the label), a reading under the label weight makes the check answer `below_label`
   with `shortfall_g = label - reading` and three resolutions, each with its filament
   grams:
@@ -159,6 +162,26 @@ placeholder empty weight. The change:
 - With no empty weight known, only `tared` is offered.
 - #7280's offer needs a reading above the label weight, so `below_label` and the offer
   never meet on one reading.
+- As built in #7683: the check needs an insert with a weight, as #7280's does (it answers
+  `no_insert` first); with no empty weight known the client records the reading as the
+  filament, which is `tared` by nature, with no choice. `below_label` fires for a reading
+  under `label - 0.5 g` (#7280's full tolerance), after `used` and `not_full` and before
+  `not_above_label`. The resolutions come in the order `tared`, `short`, `label_wrong`;
+  the last two only when the reading is at least the empty weight, so a reading under it
+  offers `tared` alone. `label_wrong`'s new label is the filament rounded half up, at
+  least 1 g. The store checks the choice again under the row locks: a `resolution` the
+  check does not offer now is 422 `no_below_label` with the check's `reason`, and
+  nothing is booked. `short` and `label_wrong` book their side effect as an `edited`
+  event (`data.changes` `{"added_full": [before, false]}` or
+  `{"label_weight_g": [before, new]}`, `before` the spool's own value, null when it came
+  from the type) at the weighing's `at`, before the weighing, in the same transaction.
+- As built in #7683: a weighing with a `resolution` keeps `expected_g` (what the ledger
+  believed) and records `drift_g` null, so `last_drift_g` stays null and no Drift mark
+  appears: the person just explained the gap (the owner's call of 2026-11-25).
+- As built in #7683: "new" is what `check_on` reads, the ledger's consumption and the grams
+  left at the label (`insert_weights.consumed` and `full`), never `added_full`; a spool
+  added with `added_full` false or unknown and its label's grams is new too, and `short`
+  on one already not added full books no `edited` event.
 
 ### 5.4 End of life (slice C, #7684)
 
@@ -192,6 +215,19 @@ The change:
   type's.
 - An archived spool's page shows the closing summary in the Weight section; the history
   timeline shows the reason on the archive.
+- As built in #7684: the reason and the final weighing go on the archive route's body
+  (`SpoolArchive.reason`, `final_reading_g`, `final_grams`; a patch's `archived` records no
+  reason), not on `SpoolPatch`; the closing also keeps `started_from` (`reading` or
+  `label`) and `final_filament_g`; the preview is `GET /filament/spools/{id}/closing` with
+  its `notices`, against the setting `filament_weighing_finished_left_g` (5 g), which also
+  name a reading the archive would refuse (`no_empty_weight`, `reading_below_empty`, and
+  since #7909 `reading_below_grams`, a reading under the `final_grams` sent with it); the
+  dialog takes the spool's effective empty weight from the preview's `empty_g`, and says so
+  when that changes the meaning of a number already typed (#7909); the sync's
+  archives record `other`; and `continued_from` is a field of `SpoolDraft`, sent with
+  `copy_of`, for one spool, and refused (`continued_from_taken`, #7909) while a spool that
+  continues the source still exists. `SpoolDetail.closing` carries the archived spool's
+  closing, `null` for an archive from before #7684 (#7909).
 
 ### 5.5 Tolerances
 
@@ -222,6 +258,37 @@ change:
   and the label weight is right (a wrong density on the type), or the drift matches
   the empty weight's placeholder (a wrong empty weight), or the drift matches the
   label's shortfall (a wrong label weight). With no fit it names none.
+- As built in #7685: measured on `backend/tests/printers/fixtures/rack-slice-info-h2c.config`
+  (a real H2C slice): each `<filament>` of `slice_info.config` carries `used_m` beside
+  `used_g` (`used_m="2.01" used_g="6.09"` for filament 1). `slicing/slice_info.py`
+  `plate_uses` reads both, the metres moved onto the printed filament as the grams are;
+  `LanUploaded.length_by_slot` and `SlotUse.length_m` carry them, and `print_uses.py` writes
+  `data.length_m` on the `print_started` (absent when the plate gave no length) and
+  `prints.book_end` copies it onto the `print_ended` (`0.0` on a `not_applied` end, as its
+  grams are 0). `metrics.py` `implied_density` is the formula above with the diameter in
+  millimetres (`grams / (metres * 100 * pi * (diameter_mm / 20) ** 2)`), over the plates
+  that carry a length only; `SpoolMetrics` gains `used_m`, `implied_density_g_cm3`,
+  `density_g_cm3` (the spool's effective type density) and `density_mismatch`
+  (`DENSITY_TOLERANCE` 0.05). The page's Density tile says the mismatch ("The prints imply
+  1.31 g/cm³, 6% over the type's 1.24 g/cm³: check the type's density or the label."). The
+  drift's likely cause is the frontend's `driftCause.ts` (`weighingCause`), read against the
+  anchor the weighing was compared with (`previousAnchor`: the newest anchor strictly before
+  it in time, as `ledger.expected_before` reads, by the ledger's own anchor rule over the
+  history's events) and checked in this order, the first fit winning, none
+  under a gram of drift: the starting amount (an added-full spool whose anchor is the
+  `created` figure of a pull: the drift is the gap from that figure to the label, within a
+  gram or a tenth, so the scale found the label weight and the figure was wrong), the
+  density (the drift is `since × (1 − type / implied)`, where `since` is the grams the
+  ledger took off between that anchor and the weighing, the anchor's grams less
+  `expected_g`; the same tolerance, with a mismatch), then a placeholder empty weight. The
+  sentence follows the drift sentence in the Weight section ("Likely cause: …"). Two
+  readings of this section as built: for a plate ScadBuddy alone booked, the implied
+  density is the slicer's own grams over its own metres, so it is the slicer preset's
+  density read back, not a measurement (a plate Bambuddy also booked takes Bambuddy's grams
+  over the slicer's metres, summed over the job's ends on the spool), and a
+  mismatch means the preset's density and the type's disagree; and a placeholder empty
+  weight is named for any drift of a gram or more, since nothing knows the real empty weight
+  to match the drift against. Every cause needs the history, so none shows until it loads.
 
 ### 5.7 Carriers (slice E, #7278)
 

@@ -9,16 +9,18 @@ import hashlib
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from scadbuddy.api.orders import item_detail
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.events import BusResync, PrintEvent, PrintOutcome, PrintRunEvent
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.library.outputs import OutputMeta, OutputNotFoundError, OutputStore
 from scadbuddy.orders.lifecycle import (
     FULFILMENT_HOLDER,
     QUOTE_HOLDER,
@@ -35,6 +37,7 @@ from scadbuddy.orders.printing import (
 )
 from scadbuddy.orders.printing import test_print_check as check_test_print
 from scadbuddy.orders.quote import OutputsRead
+from scadbuddy.orders.rendering import kit_output_id
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
@@ -319,23 +322,33 @@ async def _until(done: Any, timeout: float = 60.0) -> None:
 
 
 class Outputs:
-    """``OutputsRead`` over one output, the reference's render unless told otherwise."""
+    """``OutputsRead`` over the item's output, the reference's render unless told
+    otherwise, and the later outputs of its render (``kit``, #5701)."""
 
-    def __init__(self, item: OrderItem, *, gone: bool = False, plates: int = 0) -> None:
-        assert item.reference is not None
+    def __init__(
+        self, item: OrderItem, *, gone: bool = False, plates: int = 0, kit: int = 1
+    ) -> None:
+        assert item.reference is not None and item.output_id is not None
         self.reference = item.reference
         self.gone = gone
         self.plates = plates
+        self.ids = [item.output_id] + [kit_output_id(item.output_id, k) for k in range(1, kit)]
 
     def get(self, output_id: str) -> OutputMeta:
         if self.gone:
             raise OSError(output_id)
+        if output_id not in self.ids:
+            raise OutputNotFoundError(output_id)
         meta = SimpleNamespace(
             slug=self.reference.slug,
             model_version=self.reference.commit,
             layout_plates=[{}] * self.plates,
+            job_id="job-1",
         )
         return cast(OutputMeta, meta)
+
+    def existing(self, output_ids: Iterable[str]) -> set[str]:
+        return {output_id for output_id in output_ids if output_id in self.ids}
 
     def inputs(self, output_id: str) -> dict[str, Any]:
         return dict(self.reference.inputs)
@@ -414,6 +427,79 @@ def test_an_output_with_other_plates_than_the_quote_is_requoted(
     assert _check(shop, order, item, blobs, Outputs(item, plates=same))["quote_id"] == quote.id
     more = Outputs(item, plates=quoted + 1)
     assert _refusal(lambda: _check(shop, order, item, blobs, more)) == "requote_needed"
+
+
+def test_a_kit_item_is_printed_output_by_output(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
+    """#5701 PR 5: an item whose render made several outputs is a kit. The item's print
+    starts one output, and an attempt of one output would count the whole kit made, so it
+    refuses (``item_kit``, naming the outputs): the order page prints each output."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 1))
+    shop.quoted(order, item)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    kit = Outputs(item, kit=2)
+    with pytest.raises(ApiError) as refused:
+        _check(shop, order, item, blobs, kit)
+    assert str(refused.value.type).rsplit("/", 1)[-1] == "item_kit"
+    assert refused.value.extensions["outputs"] == kit.ids
+    assert refused.value.extensions["items"] == [item.id]
+    assert _check(shop, order, item, blobs, Outputs(item))["output_id"] == item.output_id
+    # Review of #7790: an output set by another path saves none of the others, and its
+    # render job, while it can be read, still says it is one of several.
+    jobs = SimpleNamespace(read=lambda job_id: SimpleNamespace(outputs=[{}, {}]))
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(print_check(shop.rows, Outputs(item), blobs, order.id, item.id, jobs=jobs))
+    assert str(refused.value.type).endswith("/item_kit")
+    assert refused.value.extensions["outputs"] == [item.output_id]
+    assert "a kit of 2 outputs" in refused.value.detail
+    assert "save the others" in str(refused.value.detail)
+
+
+def test_the_orders_read_and_the_print_agree_on_a_kit(
+    shop: Shop, pool: PgPool, tmp_path: Path
+) -> None:
+    """Review of #7790: the order's read marks an item a kit (``kit_count``) exactly when
+    its print refuses ``item_kit``, by the same count: by its saved outputs, and by its
+    render job when only the item's own output is saved."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 1))
+    shop.quoted(order, item)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    item = next(row for row in shop.rows.items(order.id) if row.id == item.id)
+    two = SimpleNamespace(read=lambda job_id: SimpleNamespace(outputs=[{}, {}]))
+    one = SimpleNamespace(read=lambda job_id: SimpleNamespace(outputs=[{}]))
+    for outputs, jobs, count, saved in [
+        (Outputs(item, kit=2), None, 2, 2),
+        (Outputs(item), two, 2, 1),
+        (Outputs(item), one, 0, 0),
+        (Outputs(item), None, 0, 0),
+    ]:
+        detail = item_detail(shop.rows, item, cast(OutputStore, outputs), jobs)
+        assert detail.kit_count == count and len(detail.kit_outputs) == saved
+        check = print_check(shop.rows, outputs, blobs, order.id, item.id, jobs=jobs)
+        if count:
+            with pytest.raises(ApiError) as refused:
+                asyncio.run(check)
+            assert refused.value.extensions["count"] == count
+            assert refused.value.extensions["outputs"] == detail.kit_outputs
+        else:
+            assert asyncio.run(check)["output_id"] == item.output_id
+
+
+def test_the_orders_read_survives_a_kit_it_cannot_read(shop: Shop, pool: PgPool) -> None:
+    """Review of #7790: a store that fails while the read looks for a kit leaves the item
+    without one; the order still reads."""
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 1))
+
+    class Broken(Outputs):
+        def existing(self, output_ids: Iterable[str]) -> set[str]:
+            raise RuntimeError("store down")
+
+    detail = item_detail(shop.rows, item, cast(OutputStore, Broken(item)), None)
+    assert detail.kit_count == 0 and detail.kit_outputs == []
 
 
 def test_the_check_prints_what_is_left(shop: Shop, pool: PgPool, tmp_path: Path) -> None:

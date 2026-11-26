@@ -442,10 +442,13 @@ func TestWorkspaceHoldsAreHeldListedAndReleased(t *testing.T) {
 func TestTheEventLogHeadAndGap(t *testing.T) {
 	a := agentAPI(t)
 	a.sql(`INSERT INTO events (event_id, kind, at, payload) VALUES ('e1', 'x', now(), '{"kind":"x"}'),
-		('e2', 'y', now(), '{"kind":"y"}')`)
+		('e2', 'y', now(), '{"kind":"y"}'),
+		('e3', 'fleet.message', now(), '{"kind":"fleet.message","recipients":["s1"]}')`)
 	head := a.ok("GET", "/events/head", "")
-	expect(t, head.body["seq"], "2")
+	expect(t, head.body["seq"], "3")
+	// The fleet's kinds name its session ids: they are for the fleet caller alone (#7818).
 	gap := a.ok("GET", "/events?after=0", "").body["events"].([]any)
+	expect(t, len(gap), 2)
 	expect(t, gap[0].(map[string]any)["event_id"], "e2")
 	expect(t, gap[1].(map[string]any)["payload"], map[string]any{"kind": "x"})
 	expect(t, a.do("GET", base+"/events", "").status, 422)

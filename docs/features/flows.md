@@ -263,8 +263,6 @@ change: the call does what the new decision says.
 
 ## Limits and known issues
 
-- Grant checks do not follow the inherited chain
-  ([#5685](https://github.com/eh-homelab/ScadBuddy/issues/5685)).
 - Some rare Resets can leave a task row behind its run: one made by hand in Temporal, and one
   through ScadBuddy whose commit was lost and which was then tried again
   ([#7413](https://github.com/eh-homelab/ScadBuddy/issues/7413)).

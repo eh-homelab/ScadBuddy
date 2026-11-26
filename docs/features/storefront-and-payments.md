@@ -51,7 +51,7 @@ sequenceDiagram
   (`listings.py:230`, `file_listings.py`, `renders.py`, `drafts.py`, `submit.py:138`, `accounts.py`,
   `mail.py`, `turnstile.py`, `prepare.py`, `intake.py`).
 - Back office: `backend/scadbuddy/api/storefront.py:51`, `frontend/src/pages/StorefrontPage.tsx`,
-  `frontend/src/components/storefront/ListingEditor.tsx:826`.
+  `frontend/src/components/storefront/ListingEditor.tsx:927`.
 - Public UI: `frontend/src/storefront/` (router `App.tsx:86-97`, client
   `api/client.ts:67`); its OpenAPI is exported by
   `backend/scadbuddy/tools/export_openapi.py` `--storefront`.
@@ -101,6 +101,10 @@ sequenceDiagram
   [#4960](https://github.com/eh-homelab/ScadBuddy/issues/4960)).
 - A pipeline template is listed only when it declares its inputs (`model.json`
   `pipeline.inputs`). The shop sets them through the API only, the customer never sets
-  them, and a visitor gets no slice price of a render of several outputs yet: the shop
-  prices that line by hand (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`;
+  them (`backend/scadbuddy/orders/storefront/pipeline_inputs.py`). A render of several
+  outputs has one price over all of them. The order page prints each output on its own, and
+  the shop records the item's attempt by hand: the item's own print refuses a kit
+  (`item_kit`, `backend/scadbuddy/orders/printing.py`). When the order holds fewer outputs
+  than the render made, the page says to save the others from the model's recent renders
+  (`kit_count`, `backend/scadbuddy/api/orders.py`;
   [#5701](https://github.com/eh-homelab/ScadBuddy/issues/5701)).

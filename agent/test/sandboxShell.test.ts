@@ -169,12 +169,6 @@ describe('Bash in the session sandbox', () => {
     expect(body.timed_out).toContain('300 ms')
   })
 
-  it('refuses run_in_background', async () => {
-    const result = await runShell(ctx, 'bash', { command: 'sleep 1', run_in_background: true })
-    expect(result).toMatchObject({ isError: true, text: expect.stringContaining('in the foreground') })
-    expect(sandboxes.acquires).toBe(0)
-  })
-
   it("answers an error when the session's sandbox cannot be had", async () => {
     const broken: Sandboxes = { acquire: async () => Promise.reject(new Error('no pod')) }
     const result = await runShell({ ...ctx, sandboxes: broken }, 'bash', { command: 'true' })
