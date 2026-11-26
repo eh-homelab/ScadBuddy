@@ -178,7 +178,8 @@ Where the accounts live:
 - Proof in the cluster: the `github` mode (#8012) keeps a `fleet-rotator` service credential from
   a Kubernetes ServiceAccount proof, renewed like the other callers'
   (`tools/go/fleet/sbfleet` `NewExchange`).
-- Routes under `/api/v1/internal/crud/fleet-rotator/`, all requiring the caller:
+- Routes under `/api/v1/internal/crud/fleet-rotator/`, each requiring the `fleet-rotator` caller
+  or a `fleet`-scope token:
   - `PUT /machines/{id}`: register or refresh the machine (hostname, OS, user, service version).
   - `PUT /machines/{machine_id}/sessions/{session_id}`: write this machine's row for a session
     (§6.3).
@@ -188,7 +189,8 @@ Where the accounts live:
     Answers `recovers_at` when none is usable.
   - `PUT /leases/{credential}`: write back the current login (the refresh token changes) while
     the lease is held, keyed by `lease_epoch`.
-  - `DELETE /leases/{credential}`: release, after a final write-back.
+  - `DELETE /leases/{credential}`: release. A lease whose login was installed is released after a
+    final write-back; a lease that was never installed (§6.6 step 3) is released without one.
   - `POST /events`: a rate limit, auth failure or recovery, with its source (transcript, session,
     entry uuid), deduplicated on the entry uuid.
   - `POST /rotations`, `PUT /rotations/{id}`: a rotation (from, to, reason, time) and its check
@@ -256,7 +258,10 @@ Where the accounts live:
      Write it to the old row (`PUT /leases/{credential}`), with a 10 s timeout, below the 15 s
      stale time of `.storage-write.lock`. If that write fails, release the locks, release the
      new lease (`DELETE /leases/{new}`) and stop: the file is not changed, the old lease is
-     kept, and the new row is free for other machines. The next attempt asks for a lease again.
+     kept, and the new row is free for other machines. If that release fails too (the API is
+     down), the service keeps the lease's id and releases it first on its next attempt. `POST
+     /leases` also gives a machine back the lease it already holds and never installed, before it
+     leases another row, so a machine holds at most one such lease.
   4. Still inside the locks, write the new `claudeAiOauth` to a 0600 temp file in the dir and
      rename it over `.credentials.json`.
   5. Release the locks. Only then release the old lease (`DELETE /leases/{credential}`), so no
@@ -312,8 +317,9 @@ Where the accounts live:
 
 ## 7. Deploying
 
-- The `fleet-rotator` routes must be reachable from the machines, on ScadBuddy's LAN host, with
-  the service credential required; the exchange route too. The ingress change is in
+- The `fleet-rotator` routes must be reachable from the machines, on ScadBuddy's LAN host, with a
+  `fleet` token (§6.2) required. Machines do not use the exchange route; only the in-cluster
+  `github` mode does, inside the cluster. The ingress change is in
   eh-homelab/clusters, dry-run on the server before merge.
 - Each machine gets a `fleet` token (§6.2), made in Settings → System → Access tokens and
   written to a 0600 file on the machine.
