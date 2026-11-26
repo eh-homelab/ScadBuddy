@@ -32,11 +32,12 @@ var ErrHandleTaken = errors.New("another session has this session's handle")
 
 // reasons map core's problem reasons to the errors fleetchat knows.
 var reasons = map[string]error{
-	"unknown-agent": fleetchat.ErrUnknownAgent,
-	"not-member":    fleetchat.ErrNotMember,
-	"handle-taken":  ErrHandleTaken,
-	"seq-ahead":     fleetchat.ErrBadSeq,
-	"text-too-long": fleetchat.ErrTooLong,
+	"unknown-agent":   fleetchat.ErrUnknownAgent,
+	"not-member":      fleetchat.ErrNotMember,
+	"handle-taken":    ErrHandleTaken,
+	"seq-ahead":       fleetchat.ErrBadSeq,
+	"text-too-long":   fleetchat.ErrTooLong,
+	"unknown-session": ErrUnknownSession,
 }
 
 type client struct {

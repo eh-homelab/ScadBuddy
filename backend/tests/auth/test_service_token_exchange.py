@@ -490,6 +490,39 @@ def test_one_secret_for_two_callers_is_a_start_error(tmp_path: Path) -> None:
         BootstrapVerifier.from_dir(_bootstrap_dir(tmp_path, print=shared, projects=shared))
 
 
+async def test_each_machine_has_its_own_fleet_rotator_secret(tmp_path: Path) -> None:
+    devbox, laptop = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    directory = _bootstrap_dir(tmp_path)
+    (directory / "fleet-rotator.devbox").write_text(devbox + "\n")
+    (directory / "fleet-rotator.laptop-2").write_text(laptop + "\n")
+    verifier = BootstrapVerifier.from_dir(directory)
+    proof = VerifiedProof("fleet-rotator", "bootstrap", None, None)
+    assert await verifier.verify(devbox) == proof
+    assert await verifier.verify(laptop) == proof
+    # One machine is revoked alone: its file goes, the other's secret still passes.
+    (directory / "fleet-rotator.devbox").unlink()
+    verifier = BootstrapVerifier.from_dir(directory)
+    assert await verifier.verify(devbox) is None
+    assert await verifier.verify(laptop) == proof
+
+
+@pytest.mark.parametrize("name", ["fleet-rotator", "fleet-rotator.", "fleet-rotator.Dev Box"])
+def test_a_fleet_rotator_secret_names_its_machine(tmp_path: Path, name: str) -> None:
+    directory = _bootstrap_dir(tmp_path)
+    (directory / name).write_text(secrets.token_urlsafe(32))
+    with pytest.raises(BootstrapConfigError):
+        BootstrapVerifier.from_dir(directory)
+
+
+def test_two_machines_with_one_secret_is_a_start_error(tmp_path: Path) -> None:
+    shared = secrets.token_urlsafe(32)
+    directory = _bootstrap_dir(tmp_path)
+    (directory / "fleet-rotator.a").write_text(shared)
+    (directory / "fleet-rotator.b").write_text(shared)
+    with pytest.raises(BootstrapConfigError):
+        BootstrapVerifier.from_dir(directory)
+
+
 def test_a_missing_bootstrap_dir_is_a_start_error(tmp_path: Path) -> None:
     with pytest.raises(BootstrapConfigError):
         BootstrapVerifier.from_dir(tmp_path / "nope")

@@ -53,6 +53,11 @@ flowchart LR
   settings.
 - `tools/go/core/internal/fleet/fleet.go`: the routes; `tools/go/core/internal/bus/`: the
   event publish.
+- `tools/go/core/internal/fleet/registry.go`: the session registry (#7985, spec
+  `2026-11-26-fleet-session-registry-and-rotator-design` §6.3). Caller `fleet` reads
+  `GET …/fleet/sessions` and `…/fleet/sessions/{session_id}` (`sbfleet` `Registry`); caller
+  `fleet-rotator`, the machine service, writes `PUT …/fleet-rotator/machines/{id}` and
+  `…/fleet-rotator/sessions/{session_id}`. Each caller is refused on the other's routes.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:
   `backend/scadbuddy/auth/` (`exchange.py`, `service_credentials.py`, `routes.py`).
 - `backend/scadbuddy/core/events.py`, `pg_events.py`: unknown kinds pass the bus as
@@ -65,9 +70,17 @@ last seen), `fleet_channels`, `fleet_members`, `fleet_messages` (DM or channel p
 and `fleet_deliveries` (one row per recipient). The `fleet.message` events are rows of the
 event log `events`.
 
+`backend/scadbuddy/migrations/20261126T1615Z_fleet_session_registry.sql`: `fleet_machines`
+(the SHA-256 of `/etc/machine-id` and the user, never the raw id; host, OS, user, service
+version) and `fleet_session_hosts` (one row per session id: machine, pid and `proc_start`,
+paths, git facts, Claude Code facts, the credential's id, the account, the last rate limit,
+and `previous_session_id`, the row of the same process before a `/clear`). It also adds
+`fleet-rotator` to the two caller CHECKs.
+
 ## Tests
 
 - `tools/go/core/fleet_test.go`: the routes, against Postgres.
+- `tools/go/core/fleet_registry_test.go`: the registry's routes, their checks and callers.
 - `tools/go/fleet/sbfleet/*_test.go`, `tools/go/fleet/main_test.go`: the store, the bus,
   the exchange and the binary, against fakes.
 - `tools/go/fleetchat/*_test.go`: the service and the MCP server.

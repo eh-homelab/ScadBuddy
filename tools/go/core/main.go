@@ -264,6 +264,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 			router.Add("agent", turn.Writes()...)
 		case "fleet":
 			router.Add(fleet.Caller, fleet.Routes(pool)...)
+			router.Add(fleet.Caller, fleet.RegistryReads(pool)...)
+			router.Add(fleet.RotatorCaller, fleet.RegistryWrites(pool)...)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)

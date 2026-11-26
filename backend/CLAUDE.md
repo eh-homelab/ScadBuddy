@@ -1207,7 +1207,11 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   CHECKs, which every new caller needs). Python serves only `api/crud_fleet.py`, `GET
   …/changes`, the stream of events whose kind starts with `fleet.` (an `OpaqueEvent`, its frame
   data the stored payload) with a budget of its own (`FLEET_STREAMS_MAX`); the `fleet` area's
-  routes are core's (Go). Test: `tests/api/test_crud_fleet_changes.py`.
+  routes are core's (Go). Test: `tests/api/test_crud_fleet_changes.py`. The session registry
+  (#7985): the `fleet-rotator` CRUD caller (scope `crud.fleet-rotator`, area `fleet`; no
+  ServiceAccount, its proof is one bootstrap secret per machine, `fleet-rotator.<machine>`,
+  `auth/exchange.py` `PER_MACHINE_CALLERS`) and `*_fleet_session_registry.sql`
+  (`fleet_machines`, `fleet_session_hosts`); its routes are core's.
 - `backend/scadbuddy/filament/` labels and printer places (#6955, plan
   `docs/superpowers/plans/2026-11-22-printer-location-labels.md`). A location has a `number`
   (identity, never reused; its code is `L-<n>`; migration `20261122T0603Z_filament_location_numbers.sql`).

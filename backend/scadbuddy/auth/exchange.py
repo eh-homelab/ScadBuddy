@@ -23,6 +23,7 @@ import hmac
 import logging
 import math
 import os
+import re
 import ssl
 import time
 from collections import deque
@@ -136,6 +137,10 @@ IN_CLUSTER_CA = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 REVIEW_TIMEOUT = 5.0
 #: A bootstrap secret shorter than this is a start error.
 MIN_BOOTSTRAP_CHARS = 32
+#: The callers with one bootstrap secret per machine, each in ``<caller>.<machine>``.
+PER_MACHINE_CALLERS: frozenset[ServiceCaller] = frozenset({"fleet-rotator"})
+#: A machine's name in such a file.
+MACHINE_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62})")
 
 
 @dataclass(frozen=True)
@@ -453,10 +458,15 @@ class BootstrapConfigError(ValueError):
 
 class BootstrapVerifier:
     """§7.2: each caller's bootstrap secret, as the SHA-256 of the file named after it
-    (``render``, ``print``, ``projects``, ``agent``) read once at start."""
+    (``render``, ``print``, ``projects``, ``agent``) read once at start. The machine
+    service has one secret per machine, ``fleet-rotator.<machine>`` (fleet registry spec
+    §6.2), so one machine can be revoked alone: its file goes, and the API restarts.
 
-    def __init__(self, hashes: Mapping[ServiceCaller, bytes]) -> None:
+    ``hashes`` is keyed by file name; ``callers`` names each file's caller."""
+
+    def __init__(self, hashes: Mapping[str, bytes], callers: Mapping[str, ServiceCaller]) -> None:
         self.hashes = dict(hashes)
+        self.callers = dict(callers)
 
     @classmethod
     def from_dir(cls, directory: Path) -> BootstrapVerifier:
@@ -464,34 +474,48 @@ class BootstrapVerifier:
             raise BootstrapConfigError(
                 f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR {directory} is not a directory"
             )
-        hashes: dict[ServiceCaller, bytes] = {}
+        files: dict[str, ServiceCaller] = {}
         for caller in CALLERS:
-            path = directory / caller
-            if not path.is_file():
-                continue
-            secret = path.read_text().strip()
+            if caller in PER_MACHINE_CALLERS:
+                if (directory / caller).exists():
+                    raise BootstrapConfigError(
+                        f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {caller} secret is one per"
+                        f" machine, in a file named {caller}.<machine>"
+                    )
+                for path in sorted(directory.glob(f"{caller}.*")):
+                    if not MACHINE_NAME.fullmatch(path.name[len(caller) + 1 :]):
+                        raise BootstrapConfigError(
+                            f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: {path.name!r} does not name a"
+                            " machine (lower-case letters, digits and '-', at most 63)"
+                        )
+                    files[path.name] = caller
+            elif (directory / caller).is_file():
+                files[caller] = caller
+        hashes: dict[str, bytes] = {}
+        for name in files:
+            secret = (directory / name).read_text().strip()
             if len(secret) < MIN_BOOTSTRAP_CHARS:
                 raise BootstrapConfigError(
-                    f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {caller} secret is shorter than"
+                    f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {name} secret is shorter than"
                     f" {MIN_BOOTSTRAP_CHARS} characters"
                 )
             digest = hashlib.sha256(secret.encode()).digest()
             if digest in hashes.values():
                 raise BootstrapConfigError(
-                    f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {caller} secret is another caller's"
+                    f"SCADBUDDY_SERVICE_BOOTSTRAP_DIR: the {name} secret is another caller's"
                 )
-            hashes[caller] = digest
+            hashes[name] = digest
         if not hashes:
             logger.warning("SCADBUDDY_SERVICE_BOOTSTRAP_DIR holds no caller's secret")
-        return cls(hashes)
+        return cls(hashes, files)
 
     async def verify(self, token: str) -> VerifiedProof | None:
         presented = hashlib.sha256(token.strip().encode()).digest()
         found: ServiceCaller | None = None
         # Every hash is compared, in constant time, whichever matches.
-        for caller, digest in self.hashes.items():
+        for name, digest in self.hashes.items():
             if hmac.compare_digest(presented, digest):
-                found = caller
+                found = self.callers[name]
         return (
             None
             if found is None or not token.strip()

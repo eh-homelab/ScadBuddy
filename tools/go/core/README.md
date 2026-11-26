@@ -87,6 +87,19 @@ the messages returned. A text over 16 MiB is a 422 whose detail names the limit 
 `text-too-long`). A cursor `PUT` only moves it back: a `seq` past the cursor is a 422
 (reason `seq-ahead`). `GET /changes` stays Python's.
 
+The same area serves the session registry (`internal/fleet/registry.go`, #7985). Caller
+`fleet` reads `GET /sessions` (`?limit=`, as the inbox: the most recently seen first, and
+`more`) and `GET /sessions/{session_id}` (404 reason `unknown-session`): each row with its
+machine and its credential's `id`, `name`, `kind` and `last4` only, joined from
+`ai_credentials`, never a secret column. Caller `fleet-rotator` (scope `crud.fleet-rotator`),
+under `/api/v1/internal/crud/fleet-rotator`, writes `PUT /machines/{id}` (the id is 64
+lower-case hex: a SHA-256, never the raw machine id) and `PUT /sessions/{session_id}` (the
+whole row: an optional field left out is cleared). A session `PUT` makes the session's fleet
+agent as `touch` does (409 `handle-taken`), needs its machine (404 `unknown-machine`), and
+links a new row to the newest row of the same machine, pid and `proc_start`
+(`previous_session_id`, the session before a `/clear`). Every field is checked: lengths,
+absolute paths, no control characters, no password in `git_remote`, a full `git_head`.
+
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)
 is Python's.

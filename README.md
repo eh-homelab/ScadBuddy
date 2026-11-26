@@ -879,7 +879,7 @@ database (render, print, projects and the agent, #5299 step 12):
 | Proof | On the caller | On the API |
 |---|---|---|
 | Kubernetes | `SCADBUDDY_SERVICE_TOKEN_FILE`: a projected ServiceAccount token, audience `scadbuddy`, from a projected volume (not `subPath`) | `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` (e.g. `bambuddy`); the API asks the apiserver with a TokenReview, with its own token, and reads the cluster's issuer discovery and JWKS. The API needs two roles: `system:auth-delegator` (TokenReview) and `system:service-account-issuer-discovery` (the discovery and the JWKS). A default ClusterRoleBinding [gives the second to every ServiceAccount](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#service-account-issuer-discovery) (`system:serviceaccounts`); an explicit binding to the API's ServiceAccount (eh-homelab/clusters#3246) keeps the JWKS read from depending on that default |
-| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named `render`, `print`, `projects` or `agent`; only the hashes are kept |
+| Bootstrap (compose, a laptop) | `SCADBUDDY_SERVICE_BOOTSTRAP_FILE`: its random secret, at least 32 characters | `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`: one file per caller, named after it (`render`, `print`, `projects`, `agent` …); the fleet's machine service has one per machine, `fleet-rotator.<machine>`, so one machine can be revoked alone; only the hashes are kept |
 
 The API takes a proof only when its own variable is set. The ServiceAccounts it maps are
 `scadbuddy-render` (caller `render`), `scadbuddy-print`, `scadbuddy-projects`,

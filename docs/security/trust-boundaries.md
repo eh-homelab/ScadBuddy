@@ -74,6 +74,7 @@ pods started 13:01Z-13:05Z log no line for it, so the owner is the only login ro
 | slicer worker, 1 replica | `workers/rust/` | none (`scadbuddy-slicer.yaml`) | 0 | none: transfer URLs only |
 | `bambuddy-fs` | `tools/go/` | none | 0 | none: the public API only |
 | fleet chat server (not deployed) | `tools/go/fleet/` | none | 0 | none: core's `…/crud/fleet/` routes with the `crud.fleet` credential, exchanged for its ServiceAccount token and renewed in process |
+| fleet machine service (not built yet, #7987) | none yet | none | 0 | none: core's `…/crud/fleet-rotator/` routes (today `PUT /machines/{id}` and `PUT /sessions/{session_id}`, the session registry, #7985) with the `crud.fleet-rotator` credential, exchanged for a bootstrap secret of its own machine (`fleet-rotator.<machine>` in `SCADBUDDY_SERVICE_BOOTSTRAP_DIR`); it has no ServiceAccount mapping |
 
 The grant lists are today's state. They describe the per-caller roles of PR #5210, which
 #5295 supersedes. The agent grants nothing since #6501; on separate roles the API's role must own the `ai_*` tables.
