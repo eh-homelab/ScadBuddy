@@ -500,8 +500,8 @@ If the previous file cannot be loaded, the API's log says so and nothing is re-w
 ## 4. Setting up the Claude credential
 
 There can be several credentials, one row each in `ai_credentials`, in priority order
-(#1093). Each is of one of three kinds (`CREDENTIAL_KINDS`,
-[`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
+(#1093). Each credential the assistant runs is of one of three kinds
+(`AGENT_CREDENTIAL_KINDS`, [`agent/src/credentials.ts`](../../agent/src/credentials.ts); spec D2):
 
 - `anthropic_api_key`: a Console key (`sk-ant-api03-…`), passed to Claude Code as
   `ANTHROPIC_API_KEY`.
@@ -516,7 +516,10 @@ The pool also holds the fleet's rows (#7983): kind `claude_login` (a whole Claud
 `claudeAiOauth` login, which only the fleet's login rotator uses) and any row whose `scope`
 is `fleet`. The assistant never uses or tests those rows; Settings lists them with their
 scope. A row's `scope` is `agent` by default; a `claude_login` is always `fleet`. The API's
-reveal answers the assistant only the rows whose scope is `agent` or `both`.
+reveal answers the assistant only the rows whose scope is `agent` or `both`. The API also
+refuses the assistant's caller (409) a save that creates or changes a `claude_login` or a
+`fleet` row, or that makes a row `fleet`, so the assistant cannot plant a login that a fleet
+machine installs.
 
 The mapping is in `credentialEnv()` in [`agent/src/harness/run.ts`](../../agent/src/harness/run.ts).
 Its sources are the [LLM gateway docs](https://code.claude.com/docs/en/llm-gateway-connect)

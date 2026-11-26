@@ -7,6 +7,7 @@ import {
   type AiCredentialEntry,
   type AiCredentialKind,
   type AiCredentialList,
+  type AiStoredCredentialKind,
 } from '../../api/aiCredential'
 import { AI_NOT_ROUTED, api, ApiError } from '../../api/client'
 import { timeAgo } from '../../lib/format'
@@ -33,10 +34,20 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Spinner } from '../ui/spinner'
 import { Tip } from './Tip'
 
-const KIND_LABEL: Record<AiCredentialKind, string> = {
+const KIND_LABEL: Record<AiStoredCredentialKind, string> = {
   anthropic_api_key: 'Anthropic API key',
+  claude_login: 'Claude login',
   claude_oauth_token: 'Claude Code OAuth token',
   gateway: 'Gateway',
+}
+
+/**
+ * The kind the assistant saves this credential as, or null for one it does not use (#7983: a
+ * `claude_login`, or scope `fleet`): such a row is never tested or given a new key here, and the
+ * API refuses a save over it.
+ */
+function ownKind(entry: AiCredentialEntry): AiCredentialKind | null {
+  return entry.agent_uses && entry.kind !== 'claude_login' ? entry.kind : null
 }
 
 const KIND_OPTION: Record<AiCredentialKind, string> = {
@@ -97,8 +108,9 @@ function replaceMismatch(kind: AiCredentialKind, secret: string): string | null 
  * with no key-encryption key mounted nothing can be decrypted or saved.
  */
 function noneUsable(credentials: readonly AiCredentialEntry[], canSave: boolean): string {
-  const locked = credentials.some((c) => !c.usable)
-  const refused = credentials.some((c) => c.usable && c.status === 'disabled')
+  const own = credentials.filter((c) => c.agent_uses)
+  const locked = own.some((c) => !c.usable)
+  const refused = own.some((c) => c.usable && c.status === 'disabled')
   if (locked && !canSave) {
     return 'No credential is usable now: the agent cannot decrypt the stored keys, or save new ones, until its key-encryption key is mounted.'
   }
@@ -178,7 +190,7 @@ const OVERDUE_MAX_MS = 30_000
 
 /** What deleting `entry` does to the assistant, for the confirmation. */
 function afterDelete(entry: AiCredentialEntry, credentials: AiCredentialEntry[]): string {
-  const live = (c: AiCredentialEntry) => c.usable && c.status === 'active'
+  const live = (c: AiCredentialEntry) => c.agent_uses && c.usable && c.status === 'active'
   // Named by position in the list as it will be once the delete lands.
   const left = credentials.filter((c) => c.id !== entry.id)
   const inUse = credentials.find(live)
@@ -426,11 +438,11 @@ export function AiCredentialSection() {
     if (tested.ok) setTests((all) => ({ ...all, [entry.id]: tested.value }))
   }
 
-  async function replace(event: FormEvent, entry: AiCredentialEntry) {
+  async function replace(event: FormEvent, entry: AiCredentialEntry, kind: AiCredentialKind) {
     event.preventDefault()
     const saved = await act(
       { id: entry.id, action: 'replace' },
-      () => api.saveAiCredential(entry.id, { kind: entry.kind, base_url: entry.base_url, secret: replacement.trim() }),
+      () => api.saveAiCredential(entry.id, { kind, base_url: entry.base_url, secret: replacement.trim() }),
       (answer) => `Saved a new key for ${nameOf(answer, credentials)}.`,
       'Could not save the key',
     )
@@ -523,7 +535,12 @@ export function AiCredentialSection() {
                       {entry.last4}
                     </span>
                   )}
+                  {entry.email && <span className="break-all text-muted-foreground">{entry.email}</span>}
+                  {entry.subscription_type && (
+                    <span className="text-muted-foreground">{entry.subscription_type} plan</span>
+                  )}
                   <StatusBadge entry={entry} />
+                  <ScopeBadge entry={entry} />
                   {entry.last_used_at && (
                     <Tip content={entry.last_used_at}>
                       <span className="text-xs text-muted-foreground">used {timeAgo(entry.last_used_at)}</span>
@@ -533,7 +550,7 @@ export function AiCredentialSection() {
                 {entry.status !== 'active' && entry.last_error && (
                   <p className="text-xs text-muted-foreground">{entry.last_error}</p>
                 )}
-                {!entry.usable && (
+                {!entry.usable && entry.agent_uses && (
                   <p className="text-xs text-warn">
                     {current.can_save
                       ? 'The agent cannot decrypt this key (it was saved under another encryption key, or in an old format). Replace it.'
@@ -563,6 +580,7 @@ export function AiCredentialSection() {
                       {isBusy(entry.id, 'down') ? <Spinner /> : <ArrowDownIcon />}
                     </Button>
                   </Tip>
+                  {ownKind(entry) && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -574,6 +592,7 @@ export function AiCredentialSection() {
                     {isBusy(entry.id, 'test') && <Spinner />}
                     Test
                   </Button>
+                  )}
                   {entry.status !== 'active' && entry.usable && (
                     <Button
                       size="sm"
@@ -611,6 +630,7 @@ export function AiCredentialSection() {
                   >
                     Rename
                   </Button>
+                  {ownKind(entry) && (
                   <CollapsibleTrigger asChild>
                     <Button
                       size="sm"
@@ -625,6 +645,7 @@ export function AiCredentialSection() {
                       />
                     </Button>
                   </CollapsibleTrigger>
+                  )}
                   <Button
                     size="sm"
                     variant="destructive"
@@ -640,11 +661,15 @@ export function AiCredentialSection() {
                     Delete
                   </Button>
                 </div>
+                {ownKind(entry) && (
                 <CollapsibleContent asChild>
-                  <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void replace(event, entry)}>
+                  <form
+                    className="flex flex-wrap items-end gap-2"
+                    onSubmit={(event) => void replace(event, entry, ownKind(entry)!)}
+                  >
                     <div className="flex flex-col gap-1">
                       <Label htmlFor={`ai-credential-replace-${entry.id}`} className="text-[13px] font-normal">
-                        {REPLACE_LABEL[entry.kind]}
+                        {REPLACE_LABEL[ownKind(entry)!]}
                       </Label>
                       <Input
                         id={`ai-credential-replace-${entry.id}`}
@@ -657,9 +682,9 @@ export function AiCredentialSection() {
                         spellCheck={false}
                       />
                     </div>
-                    {replaceMismatch(entry.kind, replacement) && (
+                    {replaceMismatch(ownKind(entry)!, replacement) && (
                       <p data-testid="ai-credential-replace-kind-warning" className="basis-full text-xs text-warn">
-                        {replaceMismatch(entry.kind, replacement)}
+                        {replaceMismatch(ownKind(entry)!, replacement)}
                       </p>
                     )}
                     <Button
@@ -672,6 +697,7 @@ export function AiCredentialSection() {
                     </Button>
                   </form>
                 </CollapsibleContent>
+                )}
                 {renaming === entry.id && (
                   <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void rename(event, entry)}>
                     <div className="flex flex-col gap-1">
@@ -892,6 +918,30 @@ export function AiCredentialSection() {
         </AlertDialogContent>
       </AlertDialog>
     </Frame>
+  )
+}
+
+/**
+ * Who uses the credential, when not only the assistant (#7983). A fleet row is for the fleet's
+ * machines alone: the assistant never runs or tests it.
+ */
+function ScopeBadge({ entry }: { entry: AiCredentialEntry }) {
+  if (entry.scope === 'agent' && entry.agent_uses) return null
+  if (!entry.agent_uses) {
+    return (
+      <Tip content="Your machines' Claude Code logins use it. The assistant does not.">
+        <Badge variant="outline" data-testid="ai-credential-scope">
+          Fleet only
+        </Badge>
+      </Tip>
+    )
+  }
+  return (
+    <Tip content="The assistant and your machines' Claude Code logins both use it.">
+      <Badge variant="outline" data-testid="ai-credential-scope">
+        Shared with the fleet
+      </Badge>
+    </Tip>
   )
 }
 

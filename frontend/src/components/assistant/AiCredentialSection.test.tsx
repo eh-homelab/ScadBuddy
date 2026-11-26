@@ -116,6 +116,40 @@ describe('AiCredentialSection (#1000, #1093)', () => {
     expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent('each one needs a reset or a new key')
   })
 
+  it('lists the fleet’s credentials with their scope and account, never tested or replaced here (#7983)', async () => {
+    setCredentials([
+      credentialEntry({
+        id: 'l1',
+        kind: 'claude_login',
+        scope: 'fleet',
+        agent_uses: false,
+        last4: 'AAAA',
+        email: 'ops@example.com',
+        subscription_type: 'max',
+        usable: false,
+      }),
+      credentialEntry({ id: 'f1', last4: 'FFFF', scope: 'fleet', agent_uses: false }),
+      credentialEntry({ id: 'b1', last4: 'BBBB', scope: 'both', status: 'disabled', last_error: 'refused' }),
+    ])
+    renderPage(<AiCredentialSection />)
+    const [login, fleet, both] = await screen.findAllByTestId('ai-credential')
+    expect(login).toHaveTextContent('1.Claude login')
+    expect(login).toHaveTextContent('ops@example.com')
+    expect(login).toHaveTextContent('max plan')
+    expect(login).not.toHaveTextContent('cannot decrypt')
+    for (const row of [login!, fleet!]) {
+      expect(within(row).getByTestId('ai-credential-scope')).toHaveTextContent('Fleet only')
+      expect(within(row).queryByRole('button', { name: /^Test / })).toBeNull()
+      expect(within(row).queryByRole('button', { name: /^Replace the key/ })).toBeNull()
+      expect(within(row).getByRole('button', { name: /^Delete / })).toBeInTheDocument()
+    }
+    expect(within(both!).getByTestId('ai-credential-scope')).toHaveTextContent('Shared with the fleet')
+    expect(within(both!).getByRole('button', { name: /^Test / })).toBeInTheDocument()
+    expect(within(both!).getByRole('button', { name: /^Replace the key/ })).toBeInTheDocument()
+    // The fleet's rows do not count: the assistant's only one is refused.
+    expect(screen.getByTestId('ai-credentials-none-usable')).toHaveTextContent('each one needs a reset or a new key')
+  })
+
   it('names the first rate-limited one by its name when it has one (#3710)', async () => {
     setCredentials([
       credentialEntry({ id: 'n1', name: 'Work', last4: 'Q7xA', status: 'cooling_down', cooldown_until: '2099-01-01T12:30:00Z' }),

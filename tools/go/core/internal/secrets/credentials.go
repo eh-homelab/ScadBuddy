@@ -37,6 +37,10 @@ const (
 	legacyFormatMessage = "the stored credential was saved in an older format that did not bind its kind and" +
 		" base URL; save it again"
 	wideningMessage = "to share a fleet credential with the agent, enter its secret again"
+	// fleetRowMessage refuses the agent's caller a fleet row (#7983): a fleet machine installs a
+	// claude_login, so the agent must never plant one or replace a fleet row's secret.
+	fleetRowMessage = "the fleet's credentials are not written here: the assistant may not save a" +
+		" claude_login or a credential whose scope is fleet"
 )
 
 var kinds = []string{"anthropic_api_key", "claude_login", "claude_oauth_token", "gateway"}
@@ -500,9 +504,27 @@ func loginAccount(secret string) (account, string, error) {
 	return a, last4(access), nil
 }
 
+// refuseFleetRows is the agent's caller's rule (#7983): it writes the agent's rows only, never a
+// claude_login and never a row whose scope is or becomes fleet. A 409, which the agent's store
+// passes on.
+func refuseFleetRows(u update, current *row) error {
+	if u.kind == claudeLogin || (u.scope != nil && *u.scope == "fleet") {
+		return refused(409, fleetRowMessage)
+	}
+	if current != nil && (current.Kind == claudeLogin || current.Scope == "fleet") {
+		return refused(409, fleetRowMessage)
+	}
+	return nil
+}
+
 // plan is credentials.ts planPut: its envelope nil to keep the stored secret (only when
-// neither kind nor base_url changes).
-func (s *Store) plan(u update, current *row, id string) (*plan, error) {
+// neither kind nor base_url changes). agent: the agent's caller writes, so a fleet row is refused.
+func (s *Store) plan(u update, current *row, id string, agent bool) (*plan, error) {
+	if agent {
+		if err := refuseFleetRows(u, current); err != nil {
+			return nil, err
+		}
+	}
 	var baseURL *string
 	if u.kind == "gateway" {
 		if u.baseURL == nil || *u.baseURL == "" {
@@ -536,8 +558,9 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 		if current.SealVersion == seal.V1 {
 			return nil, refused(409, legacyFormatMessage)
 		}
-		// The agent's reveal opens agent and both rows only. A fleet row that the agent's caller
-		// widens must carry its secret, so that caller cannot open a secret it never knew.
+		// The agent's reveal opens agent and both rows only. A caller that widens a fleet row (never
+		// the agent's: refuseFleetRows) must carry its secret, so the agent's reveal never opens a
+		// secret the widening caller did not know.
 		if current.Scope == "fleet" && scope != "fleet" {
 			return nil, refused(422, wideningMessage)
 		}
@@ -565,7 +588,7 @@ func (s *Store) plan(u update, current *row, id string) (*plan, error) {
 
 func equal(a, b *string) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 
-func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update) (*row, error) {
+func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update, agent bool) (*row, error) {
 	// Under the table lock, so racing creates cannot pass the cap together.
 	var n int
 	if err := tx.QueryRow(ctx, `SELECT count(*) AS n FROM ai_credentials`).Scan(&n); err != nil {
@@ -579,7 +602,7 @@ func (s *Store) insert(ctx context.Context, tx pgx.Tx, u update) (*row, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := s.plan(u, nil, id)
+	p, err := s.plan(u, nil, id, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -611,21 +634,29 @@ func (s *Store) create(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
-	if u.secret == nil {
-		return nil, refused(400, "secret is required for a new credential")
-	}
-	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		if err := lock(r.Context(), tx); err != nil {
-			return err
-		}
-		out, err = s.insert(r.Context(), tx, u)
-		return err
-	})
+	out, err := s.createRow(r.Context(), u, true)
 	if err != nil {
 		return nil, err
 	}
 	return one(out), nil
+}
+
+// createRow is a new credential, in its own transaction. agent: the agent's caller creates it, so
+// a claude_login or a fleet row is refused (#7983); only the fleet's own caller passes false.
+func (s *Store) createRow(ctx context.Context, u update, agent bool) (*row, error) {
+	if u.secret == nil {
+		return nil, refused(400, "secret is required for a new credential")
+	}
+	var out *row
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lock(ctx, tx); err != nil {
+			return err
+		}
+		var err error
+		out, err = s.insert(ctx, tx, u, agent)
+		return err
+	})
+	return out, err
 }
 
 // id is the optional credential id name of f.
@@ -651,9 +682,19 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 	if err := f.err(); err != nil {
 		return nil, err
 	}
+	out, err := s.saveRow(r.Context(), id, u, true)
+	if err != nil {
+		return nil, err
+	}
+	return one(out), nil
+}
+
+// saveRow is a save over a credential (the first by priority when id is nil; one is created when
+// there is none), in its own transaction. agent as for createRow: the agent's caller never saves
+// over a claude_login or a fleet row.
+func (s *Store) saveRow(ctx context.Context, id *string, u update, agent bool) (*row, error) {
 	var out *row
-	err = pgx.BeginFunc(r.Context(), s.Pool, func(tx pgx.Tx) error {
-		ctx := r.Context()
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := lock(ctx, tx); err != nil {
 			return err
 		}
@@ -665,10 +706,10 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 			if id != nil {
 				return refused(404, "no credential "+*id)
 			}
-			out, err = s.insert(ctx, tx, u)
+			out, err = s.insert(ctx, tx, u, agent)
 			return err
 		}
-		p, err := s.plan(u, current, current.ID)
+		p, err := s.plan(u, current, current.ID, agent)
 		if err != nil {
 			return err
 		}
@@ -678,19 +719,23 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 			return nil
 		case p.envelope == nil:
 			// The scope or the email only: the secret and its epoch stay.
-			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET scope = $1, email = $2 WHERE id = $3`,
+			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET scope = $1, email = $2, updated_at = now()
+				WHERE id = $3`,
 				p.scope, p.email, current.ID); err != nil {
 				return err
 			}
 		default:
-			// A kind other than claude_login holds no lease.
+			// A kind other than claude_login holds no lease: a lease it held ends, and each lease
+			// change bumps lease_epoch.
 			if _, err := tx.Exec(ctx, `UPDATE ai_credentials SET kind = $1, base_url = $2, secret_sealed = $3,
 				dek_sealed = $4, kek_id = $5, last4 = $6, updated_at = now(),
 				status = 'active', cooldown_until = NULL, last_error = NULL,
 				last_error_at = NULL, epoch = epoch + 1, scope = $7, account_uuid = $8,
 				organization_uuid = $9, subscription_type = $10, rate_limit_tier = $11, email = $12,
 				leased_to = CASE WHEN $1 = 'claude_login' THEN leased_to END,
-				leased_at = CASE WHEN $1 = 'claude_login' THEN leased_at END WHERE id = $13`,
+				leased_at = CASE WHEN $1 = 'claude_login' THEN leased_at END,
+				lease_epoch = CASE WHEN $1 <> 'claude_login' AND leased_to IS NOT NULL
+					THEN lease_epoch + 1 ELSE lease_epoch END WHERE id = $13`,
 				u.kind, p.baseURL, p.envelope.SecretSealed, p.envelope.DEKSealed, p.envelope.KEKID, p.last4,
 				p.scope, p.account.AccountUUID, p.account.OrganizationUUID, p.account.SubscriptionType,
 				p.account.RateLimitTier, p.email, current.ID); err != nil {
@@ -703,10 +748,7 @@ func (s *Store) save(r *http.Request, _ crud.Params) (any, error) {
 		out, err = first(ctx, tx, &current.ID)
 		return err
 	})
-	if err != nil {
-		return nil, err
-	}
-	return one(out), nil
+	return out, err
 }
 
 func (s *Store) delete(r *http.Request, _ crud.Params) (any, error) {

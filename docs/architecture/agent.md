@@ -205,7 +205,8 @@ security: [browser-bridge.md](../ai/browser-bridge.md).
   Claude Code `claudeAiOauth` login, its account in clear columns, with a machine lease) and
   column `scope` (`agent`, `fleet` or `both`; a `claude_login` is `fleet` only). The API's
   reveal answers the agent only rows of scope `agent` or `both`, in its SQL; the agent's own
-  `agentUses` check is a second, defensive one.
+  `agentUses` check is a second, defensive one. The agent's caller cannot write a
+  `claude_login` or a `fleet` row (a 409 from the API).
 
 ## Tests and evals
 

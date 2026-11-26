@@ -880,12 +880,28 @@ def _created(agent: Agent, body: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
+def _fleet(tables: PgPool, body: dict[str, Any], row_id: str | None = None) -> dict[str, Any]:
+    """A create (or, with ``row_id``, a save) by a caller other than the agent's: the agent's
+    routes refuse a claude_login and a fleet row, so the fleet's rows are written here."""
+    update = store.Update(**body)
+    with tables.connection() as conn:
+        row = (
+            store.create(conn, update, KEK, agent=False)
+            if row_id is None
+            else store.put(conn, update, KEK, row_id, agent=False)
+        )
+    return store.stored(row)
+
+
+def _fleet_refused(tables: PgPool, body: dict[str, Any], row_id: str | None = None) -> int:
+    with pytest.raises(store.CredentialRefusedError) as refused:
+        _fleet(tables, body, row_id)
+    status: int = refused.value.status
+    return status
+
+
 def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent, tables: PgPool) -> None:
-    created = agent.post(
-        "/credentials", {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"}
-    )
-    assert created.status_code == 201
-    row = created.json()["credential"]
+    row = _fleet(tables, {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"})
     assert (row["kind"], row["scope"], row["last4"], row["base_url"]) == (
         "claude_login",
         "fleet",
@@ -911,9 +927,10 @@ def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent, tables
     assert (row["leased_to"], row["leased_at"], row["lease_epoch"]) == (None, None, 0)
     listed = agent.get("/credentials")
     one = agent.get("/credentials/one", id=row["id"])
-    for raw in (created.text, listed.text, one.text):
+    for raw in (listed.text, one.text):
         assert ACCESS not in raw and REFRESH not in raw
     assert listed.json()["credentials"][0]["scope"] == "fleet"
+    assert one.json()["credential"]["email"] == "ops@example.com"
     # The agent's reveal never opens a fleet row: as for an unknown id.
     opened = agent.post("/credentials/reveal", {"id": row["id"], "purpose": "test"})
     assert opened.json() == {"credential": None, "credentials": None}
@@ -934,11 +951,9 @@ def test_a_claude_login_is_sealed_with_its_account_in_clear(agent: Agent, tables
     assert open_secret(KEK, envelope, aad) == LOGIN
 
 
-def test_the_agents_reveal_never_opens_a_fleet_row(agent: Agent) -> None:
-    login = _created(agent, {"kind": "claude_login", "secret": LOGIN})
-    fleet = _created(
-        agent, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"}
-    )
+def test_the_agents_reveal_never_opens_a_fleet_row(agent: Agent, tables: PgPool) -> None:
+    login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
+    fleet = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"})
     own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
     both = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY + "b", "scope": "both"})
     every = agent.post("/credentials/reveal", {"all": True, "purpose": "turn"})
@@ -950,6 +965,66 @@ def test_the_agents_reveal_never_opens_a_fleet_row(agent: Agent) -> None:
     first = agent.post("/credentials/reveal", {"purpose": "test"}).json()["credential"]
     assert first["secret"] == API_KEY
     assert len(agent.get("/credentials").json()["credentials"]) == 4
+
+
+def _secrets(tables: PgPool) -> dict[str, str]:
+    """Every row's secret, opened with the KEK: what a save left stored."""
+    with tables.connection() as conn:
+        found = conn.execute(
+            "SELECT id, secret_sealed, dek_sealed, kek_id, kind, base_url FROM ai_credentials"
+        ).fetchall()
+    return {
+        r["id"]: open_secret(
+            KEK,
+            Envelope(
+                secret_sealed=bytes(r["secret_sealed"]),
+                dek_sealed=bytes(r["dek_sealed"]),
+                kek_id=r["kek_id"],
+            ),
+            store.credential_aad(r["id"], r["kind"], r["base_url"]),
+        )
+        for r in found
+    }
+
+
+def test_the_agents_caller_never_writes_a_fleet_row(agent: Agent, tables: PgPool) -> None:
+    """A fleet machine installs a claude_login, so the agent's caller may not plant one, nor
+    replace (or change) a row whose scope is fleet, nor make a row the fleet's."""
+    for body in (
+        {"kind": "claude_login", "secret": LOGIN},
+        {"kind": "claude_login", "secret": LOGIN, "scope": "fleet"},
+        {"kind": "anthropic_api_key", "secret": API_KEY, "scope": "fleet"},
+    ):
+        r = agent.post("/credentials", body)
+        assert (r.status_code, r.json()["reason"]) == (409, "credential-refused"), r.text
+        assert r.json()["detail"] == store.FLEET_ROW_MESSAGE
+    login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
+    fleet = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"})
+    own = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
+    for row_id, update in (
+        (login["id"], {"kind": "claude_login", "secret": LOGIN.replace("AAAA", "CCCC")}),
+        (login["id"], {"kind": "claude_login", "email": "other@example.com"}),
+        (login["id"], {"kind": "anthropic_api_key", "secret": API_KEY}),
+        (fleet["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "x"}),
+        (fleet["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "x", "scope": "both"}),
+        (own["id"], {"kind": "claude_login", "secret": LOGIN}),
+        (own["id"], {"kind": "anthropic_api_key", "scope": "fleet"}),
+    ):
+        r = agent.post("/credentials/save", {"id": row_id, "update": update})
+        assert (r.status_code, r.json()["reason"]) == (409, "credential-refused"), (update, r.text)
+    # With no id, a save goes to the first row by priority: the fleet's login here.
+    r = agent.post("/credentials/save", {"update": {"kind": "anthropic_api_key", "secret": "k"}})
+    assert r.status_code == 409, r.text
+    listed = {c["id"]: c for c in agent.get("/credentials").json()["credentials"]}
+    assert len(listed) == 3
+    assert [listed[i]["epoch"] for i in (login["id"], fleet["id"], own["id"])] == [0, 0, 0]
+    assert (listed[login["id"]]["kind"], listed[login["id"]]["email"]) == ("claude_login", None)
+    assert listed[own["id"]]["scope"] == "agent"
+    assert _secrets(tables) == {
+        login["id"]: LOGIN,
+        fleet["id"]: API_KEY + "f",
+        own["id"]: API_KEY,
+    }
 
 
 @pytest.mark.parametrize(
@@ -971,22 +1046,21 @@ def test_the_agents_reveal_never_opens_a_fleet_row(agent: Agent) -> None:
         {"kind": "claude_login", "secret": LOGIN, "email": "two words@example.com"},
     ],
 )
-def test_a_claude_login_keeps_the_kinds_rules(agent: Agent, body: dict[str, Any]) -> None:
-    r = agent.post("/credentials", body)
-    assert (r.status_code, r.json()["reason"]) == (400, "credential-refused"), r.text
+def test_a_claude_login_keeps_the_kinds_rules(tables: PgPool, body: dict[str, Any]) -> None:
+    assert _fleet_refused(tables, body) == 400
 
 
-def test_a_scope_outside_the_three_is_invalid(agent: Agent) -> None:
+def test_a_scope_outside_the_three_is_invalid(agent: Agent, tables: PgPool) -> None:
     r = agent.post("/credentials", {"kind": "anthropic_api_key", "secret": API_KEY, "scope": "x"})
     assert r.status_code == 422
     for scope in ("agent", "both"):
-        r = agent.post("/credentials", {"kind": "claude_login", "secret": LOGIN, "scope": scope})
-        assert (r.status_code, r.json()["reason"]) == (422, "credential-refused"), r.text
-    fleet = _created(agent, {"kind": "claude_login", "secret": LOGIN, "scope": "fleet"})
+        body = {"kind": "claude_login", "secret": LOGIN, "scope": scope}
+        assert _fleet_refused(tables, body) == 422
+    fleet = _fleet(tables, {"kind": "claude_login", "secret": LOGIN, "scope": "fleet"})
     assert (fleet["scope"], fleet["email"]) == ("fleet", None)
 
 
-def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent) -> None:
+def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent, tables: PgPool) -> None:
     def save(row_id: str, update: dict[str, Any]) -> dict[str, Any]:
         r = agent.post("/credentials/save", {"id": row_id, "update": update})
         assert r.status_code == 200, r.text
@@ -995,81 +1069,77 @@ def test_the_scope_defaults_to_the_agent_and_a_save_moves_it(agent: Agent) -> No
 
     key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
     assert (key["scope"], key["account_uuid"], key["email"]) == ("agent", None, None)
-    fleet = _created(
-        agent, {"kind": "anthropic_api_key", "secret": API_KEY + "x", "scope": "fleet"}
-    )
-    assert fleet["scope"] == "fleet"
     moved = save(key["id"], {"kind": "anthropic_api_key", "scope": "both"})
     assert (moved["scope"], moved["epoch"]) == ("both", 0)
     kept = save(key["id"], {"kind": "anthropic_api_key", "secret": API_KEY + "y"})
     assert (kept["scope"], kept["epoch"]) == ("both", 1)
-    as_login = save(
-        key["id"], {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"}
+    # The fleet's caller turns it into a login, and back.
+    as_login = _fleet(
+        tables,
+        {"kind": "claude_login", "secret": LOGIN, "email": "ops@example.com"},
+        key["id"],
     )
     assert (as_login["scope"], as_login["subscription_type"], as_login["email"]) == (
         "fleet",
         "max",
         "ops@example.com",
     )
-    back = save(key["id"], {"kind": "anthropic_api_key", "secret": API_KEY})
+    back = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY}, key["id"])
     assert (back["account_uuid"], back["email"]) == (None, None)
     agent_key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY + "z"})
-    login = save(agent_key["id"], {"kind": "claude_login", "secret": LOGIN})
+    login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN}, agent_key["id"])
     assert login["scope"] == "fleet"
-    mailed = save(agent_key["id"], {"kind": "claude_login", "email": "new@example.com"})
+    mailed = _fleet(tables, {"kind": "claude_login", "email": "new@example.com"}, agent_key["id"])
     assert (mailed["email"], mailed["epoch"]) == ("new@example.com", login["epoch"])
 
 
-def test_widening_a_fleet_row_to_the_agent_needs_its_secret_again(agent: Agent) -> None:
-    fleet = _created(
-        agent, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"}
-    )
+def test_a_scope_or_email_save_moves_updated_at(agent: Agent, tables: PgPool) -> None:
+    key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
+    login = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
+    with tables.connection() as conn:
+        conn.execute("UPDATE ai_credentials SET updated_at = '2026-01-01T00:00:00Z'")
+    moved = agent.post(
+        "/credentials/save",
+        {"id": key["id"], "update": {"kind": "anthropic_api_key", "scope": "both"}},
+    ).json()["credential"]
+    mailed = _fleet(tables, {"kind": "claude_login", "email": "ops@example.com"}, login["id"])
+    for row in (moved, mailed):
+        assert row["epoch"] == 0
+        assert not row["updated_at"].startswith("2026-01-01"), row
+
+
+def test_widening_a_fleet_row_to_the_agent_needs_its_secret_again(
+    agent: Agent, tables: PgPool
+) -> None:
+    fleet = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY + "f", "scope": "fleet"})
     for scope in ("agent", "both"):
-        r = agent.post(
-            "/credentials/save",
-            {"id": fleet["id"], "update": {"kind": "anthropic_api_key", "scope": scope}},
-        )
-        assert (r.status_code, r.json()["reason"], r.json()["detail"]) == (
-            422,
-            "credential-refused",
-            "to share a fleet credential with the agent, enter its secret again",
-        ), r.text
+        update = {"kind": "anthropic_api_key", "scope": scope}
+        with pytest.raises(store.CredentialRefusedError) as refused:
+            _fleet(tables, update, fleet["id"])
+        assert (refused.value.status, str(refused.value)) == (422, store.WIDENING_MESSAGE)
         row = agent.get(f"/credentials/one?id={fleet['id']}").json()["credential"]
         assert (row["scope"], row["epoch"]) == ("fleet", 0)
         one = agent.post("/credentials/reveal", {"id": fleet["id"], "purpose": "test"})
         assert one.json() == {"credential": None, "credentials": None}
     # With its secret in the same save, the row widens and its epoch moves.
-    widened = agent.post(
-        "/credentials/save",
-        {
-            "id": fleet["id"],
-            "update": {"kind": "anthropic_api_key", "secret": API_KEY + "w", "scope": "both"},
-        },
+    widened = _fleet(
+        tables,
+        {"kind": "anthropic_api_key", "secret": API_KEY + "w", "scope": "both"},
+        fleet["id"],
     )
-    assert widened.status_code == 200, widened.text
-    assert (widened.json()["credential"]["scope"], widened.json()["credential"]["epoch"]) == (
-        "both",
-        1,
-    )
+    assert (widened["scope"], widened["epoch"]) == ("both", 1)
     opened = agent.post("/credentials/reveal", {"id": fleet["id"], "purpose": "test"})
     assert opened.json()["credential"]["secret"] == API_KEY + "w"
     # A narrowing needs no secret and keeps the epoch.
-    narrowed = agent.post(
-        "/credentials/save",
-        {"id": fleet["id"], "update": {"kind": "anthropic_api_key", "scope": "fleet"}},
-    )
-    assert narrowed.status_code == 200, narrowed.text
-    assert (narrowed.json()["credential"]["scope"], narrowed.json()["credential"]["epoch"]) == (
-        "fleet",
-        1,
-    )
+    narrowed = _fleet(tables, {"kind": "anthropic_api_key", "scope": "fleet"}, fleet["id"])
+    assert (narrowed["scope"], narrowed["epoch"]) == ("fleet", 1)
 
 
 def test_only_a_login_holds_a_lease_or_an_account(agent: Agent, tables: PgPool) -> None:
     key = _created(agent, {"kind": "anthropic_api_key", "secret": API_KEY})
-    held = _created(agent, {"kind": "claude_login", "secret": LOGIN})
+    held = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
     # Two machines may each hold a login to one account.
-    _created(agent, {"kind": "claude_login", "secret": LOGIN})
+    _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
     with pytest.raises(psycopg.errors.CheckViolation), tables.connection() as conn:
         conn.execute("UPDATE ai_credentials SET scope = 'both' WHERE id = %s", (held["id"],))
     for sql in (
@@ -1093,3 +1163,21 @@ def test_only_a_login_holds_a_lease_or_an_account(agent: Agent, tables: PgPool) 
         "2026-11-26T00:00:00+00:00",
         3,
     )
+
+
+def test_a_kind_change_that_ends_a_lease_bumps_lease_epoch(tables: PgPool) -> None:
+    held = _fleet(tables, {"kind": "claude_login", "secret": LOGIN})
+    with tables.connection() as conn:
+        conn.execute(
+            "UPDATE ai_credentials SET leased_to = 'm1', leased_at = now(), lease_epoch = 3"
+            " WHERE id = %s",
+            (held["id"],),
+        )
+    # The lease ends with the kind, and each lease change bumps lease_epoch, so the machine
+    # that held it cannot write back.
+    ended = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY}, held["id"])
+    assert (ended["leased_to"], ended["leased_at"], ended["lease_epoch"]) == (None, None, 4)
+    # A kind change with no lease held changes no lease, so the epoch stays.
+    _fleet(tables, {"kind": "claude_login", "secret": LOGIN}, held["id"])
+    again = _fleet(tables, {"kind": "anthropic_api_key", "secret": API_KEY}, held["id"])
+    assert again["lease_epoch"] == 4

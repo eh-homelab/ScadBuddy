@@ -56,6 +56,12 @@ EMAIL_MESSAGE = (
     "email must be one address, at most 320 characters, with no space or control character"
 )
 WIDENING_MESSAGE = "to share a fleet credential with the agent, enter its secret again"
+#: The agent's caller writes the agent's rows only (#7983): a fleet machine installs a
+#: claude_login, so the agent must never plant one or replace a fleet row's secret.
+FLEET_ROW_MESSAGE = (
+    "the fleet's credentials are not written here: the assistant may not save a"
+    " claude_login or a credential whose scope is fleet"
+)
 LOGIN_MESSAGE = "a claude_login secret must be a claudeAiOauth JSON object"
 LOGIN_NEEDS = (
     "a claude_login secret needs accessToken and refreshToken as text and expiresAt as a number"
@@ -360,10 +366,23 @@ class _Plan:
 _NO_ACCOUNT: dict[str, str | None] = dict.fromkeys(ACCOUNT_FIELDS)
 
 
-def _plan(update: Update, current: dict[str, Any] | None, kek: Kek | None, row_id: str) -> _Plan:
+def _refuse_fleet_rows(update: Update, current: dict[str, Any] | None) -> None:
+    """The agent's caller writes the agent's rows only (#7983): never a claude_login, never
+    a row whose scope is or becomes fleet. A 409, which the agent's store passes on."""
+    if update.kind == CLAUDE_LOGIN or update.scope == "fleet":
+        raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
+    if current is not None and (current["kind"] == CLAUDE_LOGIN or current["scope"] == "fleet"):
+        raise CredentialRefusedError(FLEET_ROW_MESSAGE, 409)
+
+
+def _plan(
+    update: Update, current: dict[str, Any] | None, kek: Kek | None, row_id: str, *, agent: bool
+) -> _Plan:
     """credentials.ts ``planPut``: the base URL, the new envelope (None to keep the stored
     secret, only when neither ``kind`` nor ``base_url`` changes), the scope, the email and a
-    claude_login's account."""
+    claude_login's account. ``agent``: the agent's caller writes, so a fleet row is refused."""
+    if agent:
+        _refuse_fleet_rows(update, current)
     base_url: str | None = None
     if update.kind == "gateway":
         if not update.base_url:
@@ -385,8 +404,9 @@ def _plan(update: Update, current: dict[str, Any] | None, kek: Kek | None, row_i
             )
         if current["seal_version"] == SEAL_V1:
             raise CredentialRefusedError(LEGACY_FORMAT_MESSAGE, 409)
-        # The agent's reveal opens agent and both rows only. A fleet row that the agent's
-        # caller widens must carry its secret, so that caller cannot open a secret it never knew.
+        # The agent's reveal opens agent and both rows only. A caller that widens a fleet row
+        # (never the agent's: `_refuse_fleet_rows`) must carry its secret, so the agent's reveal
+        # never opens a secret the widening caller did not know.
         if current["scope"] == "fleet" and scope != "fleet":
             raise CredentialRefusedError(WIDENING_MESSAGE, 422)
         return _Plan(base_url, None, "", scope, email, _NO_ACCOUNT)
@@ -424,7 +444,9 @@ def get(conn: Connection[Any], row_id: str | None) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
-def _insert(conn: Connection[Any], update: Update, kek: Kek | None) -> dict[str, Any]:
+def _insert(
+    conn: Connection[Any], update: Update, kek: Kek | None, *, agent: bool
+) -> dict[str, Any]:
     # Under the table lock, so racing creates cannot pass the cap together.
     count = conn.execute("SELECT count(*) AS n FROM ai_credentials").fetchone()
     n = _dict(count, ["n"])["n"] if count is not None else 0
@@ -432,7 +454,7 @@ def _insert(conn: Connection[Any], update: Update, kek: Kek | None) -> dict[str,
         raise CredentialRefusedError(TOO_MANY_MESSAGE, 409)
     row_id = str(uuid.uuid4())
     name = check_name(update.name)
-    plan = _plan(update, None, kek, row_id)
+    plan = _plan(update, None, kek, row_id, agent=agent)
     envelope = plan.envelope
     if envelope is None:
         raise RuntimeError("a save kept a credential that does not exist")
@@ -460,38 +482,50 @@ def _insert(conn: Connection[Any], update: Update, kek: Kek | None) -> dict[str,
     return _one(conn, row_id)
 
 
-def create(conn: Connection[Any], update: Update, kek: Kek | None) -> dict[str, Any]:
+def create(
+    conn: Connection[Any], update: Update, kek: Kek | None, *, agent: bool = True
+) -> dict[str, Any]:
+    """A new credential. ``agent`` (the default): the agent's caller creates it, so a
+    claude_login or a fleet row is refused (#7983); only the fleet's own caller passes False."""
     if update.secret is None:
         raise CredentialRefusedError("secret is required for a new credential", 400)
     with conn.transaction():
         _lock(conn)
-        return _insert(conn, update, kek)
+        return _insert(conn, update, kek, agent=agent)
 
 
 def put(
-    conn: Connection[Any], update: Update, kek: Kek | None, row_id: str | None
+    conn: Connection[Any],
+    update: Update,
+    kek: Kek | None,
+    row_id: str | None,
+    *,
+    agent: bool = True,
 ) -> dict[str, Any]:
     """A save over a credential, the first by priority when ``row_id`` is None (one is
-    created when there is none). A new secret makes it ``active`` again."""
+    created when there is none). A new secret makes it ``active`` again. ``agent`` as for
+    ``create``: the agent's caller never saves over a claude_login or a fleet row."""
     with conn.transaction():
         _lock(conn)
         current = get(conn, row_id)
         if current is None:
             if row_id is not None:
                 raise CredentialRefusedError(f"no credential {row_id}", 404)
-            return _insert(conn, update, kek)
-        plan = _plan(update, current, kek, current["id"])
+            return _insert(conn, update, kek, agent=agent)
+        plan = _plan(update, current, kek, current["id"], agent=agent)
         envelope = plan.envelope
         if envelope is None:
             if not plan.changes(current):
                 return current
             # The scope or the email only: the secret and its epoch stay.
             conn.execute(
-                "UPDATE ai_credentials SET scope = %s, email = %s WHERE id = %s",
+                "UPDATE ai_credentials SET scope = %s, email = %s, updated_at = now()"
+                " WHERE id = %s",
                 (plan.scope, plan.email, current["id"]),
             )
         else:
-            # A kind other than claude_login holds no lease.
+            # A kind other than claude_login holds no lease: a lease it held ends, and each
+            # lease change bumps lease_epoch.
             conn.execute(
                 "UPDATE ai_credentials SET kind = %(kind)s, base_url = %(base_url)s,"
                 " secret_sealed = %(secret_sealed)s, dek_sealed = %(dek_sealed)s,"
@@ -502,7 +536,9 @@ def put(
                 " subscription_type = %(subscription_type)s,"
                 " rate_limit_tier = %(rate_limit_tier)s, email = %(email)s,"
                 " leased_to = CASE WHEN %(kind)s = 'claude_login' THEN leased_to END,"
-                " leased_at = CASE WHEN %(kind)s = 'claude_login' THEN leased_at END"
+                " leased_at = CASE WHEN %(kind)s = 'claude_login' THEN leased_at END,"
+                " lease_epoch = CASE WHEN %(kind)s <> 'claude_login' AND leased_to IS NOT NULL"
+                " THEN lease_epoch + 1 ELSE lease_epoch END"
                 " WHERE id = %(id)s",
                 {
                     "kind": update.kind,

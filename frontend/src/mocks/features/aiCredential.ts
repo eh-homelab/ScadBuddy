@@ -38,6 +38,10 @@ function entry(over: Partial<AiCredentialEntry> & Pick<AiCredentialEntry, 'id' |
     last_error: null,
     last_error_at: null,
     last_used_at: null,
+    scope: 'agent',
+    agent_uses: true,
+    email: null,
+    subscription_type: null,
     ...over,
   }
 }
@@ -102,9 +106,11 @@ function expire(): void {
 
 function listView(): AiCredentialList {
   expire()
-  const usable = state.credentials.filter((c) => c.usable && c.status === 'active')
+  // Agent `listView`: only the credentials the assistant uses count (#7983).
+  const own = state.credentials.filter((c) => c.agent_uses)
+  const usable = own.filter((c) => c.usable && c.status === 'active')
   // Agent `soonestRecovery`: only a credential the mounted key opens recovers.
-  const cooling = state.credentials
+  const cooling = own
     .filter((c) => c.usable && c.status === 'cooling_down' && c.cooldown_until)
     .map((c) => c.cooldown_until!)
     .sort()

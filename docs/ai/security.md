@@ -409,9 +409,12 @@ The agent reads no KEK (#5299 step 12).
   rows whose `scope` is `agent` or `both`, filtered in the reveal's SQL, so a fleet row and every
   `claude_login` stay closed to the agent and a fleet row's id reads as unknown, #7983; so
   `redact` leaves fleet secrets out too, which is correct: the agent's process never holds a
-  fleet secret, so it has none to leak. A save that widens a `fleet` row to `agent` or `both`
-  must carry the secret again, else it is a 422, so the agent's caller cannot open a fleet
-  secret it does not already know), a
+  fleet secret, so it has none to leak. The agent's caller writes the agent's rows only: a
+  create or save of a `claude_login`, a save over a `fleet` row, or a scope of `fleet` is a
+  409 (`agent_data/credentials.py` `_refuse_fleet_rows`, core's `refuseFleetRows`), so the
+  agent can neither plant a login that a fleet machine installs nor replace a fleet row's
+  secret. Any other caller's save that widens a `fleet` row to `agent` or `both` must carry
+  the secret again, else it is a 422), a
   subject's payload data key from `POST …/crud/agent/payload-keys/{subject}`, never the
   KEK. Each answers the `agent` service credential only, writes its `ai_audit` row in the
   same transaction (principal `service:agent`, never the secret), and is `no-store`. A
