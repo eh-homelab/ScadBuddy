@@ -27,7 +27,7 @@ import math
 import secrets
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, get_args
@@ -150,6 +150,7 @@ class CredentialInfo:
     proof: Proof
     pod_name: str | None
     pod_uid: str | None
+    machine: str | None
 
 
 @dataclass(frozen=True)
@@ -328,11 +329,13 @@ class ServiceCredentialStore:
         *,
         pod_name: str | None = None,
         pod_uid: str | None = None,
+        machine: str | None = None,
         rate_limited: bool = True,
         now: datetime | None = None,
     ) -> Issued:
         """An exchanged credential for ``caller`` (spec 2026-11-05 §6.2): no sealed copy,
-        :data:`EXCHANGE_LIFETIME`, bound to the pod a Kubernetes proof named. Under the
+        :data:`EXCHANGE_LIFETIME`, bound to the pod a Kubernetes proof named, or to the
+        machine of a per-machine bootstrap proof (``fleet-rotator.<machine>``). Under the
         caller's lock, so every replica counts the same rows. Raises
         :class:`CallerSuspendedError`, or :class:`RateLimitedError` past
         :data:`RATE_PER_POD` a minute per pod (a bootstrap caller is one pod) or
@@ -364,8 +367,8 @@ class ServiceCredentialStore:
             expires_at = at + EXCHANGE_LIFETIME
             conn.execute(
                 "INSERT INTO service_credentials (id, caller, scopes, secret_hash, created_at,"
-                " expires_at, proof, pod_name, pod_uid)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                " expires_at, proof, pod_name, pod_uid, machine)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                 (
                     credential_id,
                     caller,
@@ -376,6 +379,7 @@ class ServiceCredentialStore:
                     proof,
                     pod_name,
                     pod_uid,
+                    machine,
                 ),
             )
         return Issued(token, credential_id, scopes, expires_at)
@@ -407,7 +411,7 @@ class ServiceCredentialStore:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, caller, scopes, created_at, expires_at, revoked_at, last_used_at,"
-                " proof, pod_name, pod_uid"
+                " proof, pod_name, pod_uid, machine"
                 " FROM service_credentials ORDER BY caller, created_at DESC"
             ).fetchall()
         return [CredentialInfo(**row) for row in rows]
@@ -430,6 +434,26 @@ class ServiceCredentialStore:
                 "UPDATE service_credentials SET revoked_at = %s WHERE proof = 'legacy'"
                 " AND revoked_at IS NULL AND NOT (caller = ANY(%s))",
                 (_now(now), list(LEGACY_CALLERS)),
+            )
+        return cur.rowcount
+
+    def revoke_machines_without_proof(
+        self,
+        caller: ServiceCaller,
+        machines: Collection[str],
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """Revokes every live credential of a per-machine ``caller`` (``fleet-rotator``)
+        whose machine is not in ``machines``, the machines that still have a proof file,
+        or that names no machine; how many. Idempotent."""
+        at = _now(now)
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE service_credentials SET revoked_at = %s"
+                " WHERE caller = %s AND revoked_at IS NULL AND expires_at > %s"
+                " AND (machine IS NULL OR NOT (machine = ANY(%s)))",
+                (at, caller, at, sorted(machines)),
             )
         return cur.rowcount
 

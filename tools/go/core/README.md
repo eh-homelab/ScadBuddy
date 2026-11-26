@@ -98,7 +98,20 @@ whole row: an optional field left out is cleared). A session `PUT` makes the ses
 agent as `touch` does (409 `handle-taken`), needs its machine (404 `unknown-machine`), and
 links a new row to the newest row of the same machine, pid and `proc_start`
 (`previous_session_id`, the session before a `/clear`). Every field is checked: lengths,
-absolute paths, no control characters, no password in `git_remote`, a full `git_head`.
+absolute paths, no control characters, a full `git_head`. `git_remote` is an `http(s)://`,
+`ssh://` or `git://` URL with no query and no fragment, or the scp-like `user@host:path`
+(user `[A-Za-z0-9._-]+`). Only an `ssh://` URL may name a user, with no password; anything
+else (a token in the user part, a local path, `file://`, `ext::`) is a 422.
+
+A `fleet-rotator` credential names its machine: the `<machine>` of the bootstrap proof file
+`fleet-rotator.<machine>` it was exchanged for (`service_credentials.machine`; `crud.ServiceOf`
+gives a handler the verified service). The machine's `id` is the service's own hash, so the
+first `PUT /machines/{id}` records the caller's proof name in `fleet_machines.proof_name`. A
+`PUT /machines/{id}` of a row another proof registered is a 403 (reason
+`machine-of-another-proof`), and so is a session `PUT` whose `machine_id` is registered to
+another proof. A session `PUT` that would move an existing row to another `machine_id` is a
+409 (reason `session-on-another-machine`). A `fleet-rotator` credential with no machine
+writes nothing (403 `no-machine`).
 
 Each of `browser-origins`, `bridge-tabs`, `pairings`, `mcp-tokens`, `plugin-packages` and
 `plugin-feeds` also has a `:read` form, its GETs only. Area `package-mirrors` (the blob store)

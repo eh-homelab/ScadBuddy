@@ -195,6 +195,48 @@ def test_without_a_bootstrap_dir_the_bootstrap_proof_is_refused(
         assert _exchange(client, JWT_PRINT).status_code == 401
 
 
+def test_a_fleet_rotator_credential_lives_only_while_its_machines_proof_does(
+    settings: Settings,
+) -> None:
+    from scadbuddy.main import _rotate_service_credentials, create_app
+
+    bootstrap = settings.service_bootstrap_dir
+    assert bootstrap is not None
+    m1, m2 = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    (bootstrap / "fleet-rotator.m1").write_text(m1)
+    (bootstrap / "fleet-rotator.m2").write_text(m2)
+    app = create_app(settings)
+    with TestClient(app, base_url=PUBLIC) as client:
+        state = getattr(app.state, STATE_ATTR)
+        credentials = state.components.get(AUTH).credentials
+        t1 = _exchange(client, m1, BOOTSTRAP).json()["access_token"]
+        t2 = _exchange(client, m2, BOOTSTRAP).json()["access_token"]
+        # Each credential names the machine whose proof it was exchanged for.
+        rows = {row.id: row for row in credentials.list() if row.caller == "fleet-rotator"}
+        assert sorted(row.machine for row in rows.values()) == ["m1", "m2"]
+        assert credentials.resolve(t1) is not None
+        # m1 is revoked: its file goes. Its secret is refused at once, and the sweep (as
+        # every start does) revokes the credential it already holds.
+        (bootstrap / "fleet-rotator.m1").unlink()
+        assert _exchange(client, m1, BOOTSTRAP).status_code == 401
+        _rotate_service_credentials(state)
+        assert credentials.resolve(t1) is None
+        assert credentials.resolve(t2) is not None
+        assert _exchange(client, m2, BOOTSTRAP).status_code == 200
+        t1_again = credentials.issue("fleet-rotator", "bootstrap", machine="m1", rate_limited=False)
+    # A credential issued for m1 after it lost its file (an old replica) is revoked at start.
+    app = create_app(settings)
+    with TestClient(app, base_url=PUBLIC):
+        credentials = getattr(app.state, STATE_ATTR).components.get(AUTH).credentials
+        assert credentials.resolve(t1_again.token) is None
+        assert credentials.resolve(t2) is not None
+    # Without the bootstrap directory, no fleet-rotator credential lives.
+    app = create_app(settings.model_copy(update={"service_bootstrap_dir": None}))
+    with TestClient(app, base_url=PUBLIC):
+        credentials = getattr(app.state, STATE_ATTR).components.get(AUTH).credentials
+        assert credentials.resolve(t2) is None
+
+
 def test_rate_limited_per_pod_with_retry_after(client: TestClient, app: FastAPI) -> None:
     for _ in range(6):
         assert _exchange(client, JWT_PRINT).status_code == 200

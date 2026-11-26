@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,9 +46,69 @@ var (
 	versionPattern  = regexp.MustCompile(`^[0-9A-Za-z.+_-]+$`)
 	procPattern     = regexp.MustCompile(`^[0-9]{1,20}$`)
 	headPattern     = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
-	// passwordPattern finds a password in a URL's user part (https://user:token@host).
-	passwordPattern = regexp.MustCompile(`://[^/@]*:[^/@]*@`)
+	// userPattern is the only user name a remote may carry (ssh's git@).
+	userPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	// hostPattern is a remote's host name or address: no leading '-', so ssh cannot read it
+	// as an option.
+	hostPattern = regexp.MustCompile(`^[A-Za-z0-9_\[][A-Za-z0-9._:\[\]-]*$`)
+	// scpPattern is git's scp-like form, user@host:path. The user is required, so a local
+	// path or a transport such as ext:: is never read as one.
+	scpPattern = regexp.MustCompile(`^([A-Za-z0-9._-]+)@([A-Za-z0-9_][A-Za-z0-9.-]*):(.+)$`)
 )
+
+// remoteProblem is why remote is no remote the registry keeps, "" when it is one. Only
+// http(s), ssh and git URLs and the scp-like form pass. No form may carry a password, a
+// token, a query or a fragment; only ssh may carry a user name.
+func remoteProblem(remote string) string {
+	if strings.ContainsAny(remote, "?#\\") {
+		return "a remote must not hold a query, a fragment or a backslash"
+	}
+	if m := scpPattern.FindStringSubmatch(remote); m != nil {
+		if strings.HasPrefix(m[3], "-") || strings.HasPrefix(m[3], ":") {
+			return "a remote's path must not start with '-' or ':'"
+		}
+		return ""
+	}
+	scheme, _, found := strings.Cut(remote, "://")
+	if !found {
+		return "a remote is an http(s), ssh or git URL, or user@host:path"
+	}
+	u, err := url.Parse(remote)
+	if err != nil || u.Opaque != "" {
+		return "a remote is an http(s), ssh or git URL, or user@host:path"
+	}
+	switch scheme {
+	case "http", "https", "ssh", "git":
+	default:
+		return "a remote is an http(s), ssh or git URL, or user@host:path"
+	}
+	if !hostPattern.MatchString(u.Host) {
+		return "a remote names a host"
+	}
+	if u.User != nil {
+		_, hasPassword := u.User.Password()
+		if scheme != "ssh" || hasPassword || !userPattern.MatchString(u.User.Username()) ||
+			strings.Contains(u.User.String(), "%") {
+			return "a remote must not hold a password or a token; only ssh names a user"
+		}
+	}
+	return ""
+}
+
+// proofName is the machine of the caller's bootstrap proof (fleet-rotator.<machine>), or a
+// 403 when its credential names none.
+func proofName(r *http.Request) (string, error) {
+	if s := crud.ServiceOf(r); s != nil && s.Machine != "" {
+		return s.Machine, nil
+	}
+	return "", httpx.WithReason(http.StatusForbidden,
+		"this credential names no machine: exchange the machine's own bootstrap proof", "no-machine")
+}
+
+func anotherProof() error {
+	return httpx.WithReason(http.StatusForbidden,
+		"another machine's proof registered that machine", "machine-of-another-proof")
+}
 
 // RegistryReads are caller fleet's registry routes, under /api/v1/internal/crud/fleet.
 func RegistryReads(pool *pgxpool.Pool) []crud.Route {
@@ -87,8 +149,13 @@ func (m *machine) targets() []any {
 		&m.CreatedAt, &m.UpdatedAt}
 }
 
-// putMachine registers the machine, or refreshes its facts and last_seen.
+// putMachine registers the machine under the caller's proof name, or refreshes its facts
+// and last_seen. A machine another proof registered is a 403.
 func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
+	proof, err := proofName(r)
+	if err != nil {
+		return nil, err
+	}
 	id, err := p.Match("id", machinePattern)
 	if err != nil {
 		return nil, err
@@ -106,10 +173,15 @@ func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
 	}
 	var m machine
 	err = f.Pool.QueryRow(r.Context(), `INSERT INTO fleet_machines AS m
-			(id, hostname, os, os_user, service_version) VALUES ($1, $2, $3, $4, $5)
+			(id, hostname, os, os_user, service_version, proof_name) VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (id) DO UPDATE SET hostname = $2, os = $3, os_user = $4, service_version = $5,
 			last_seen = now(), updated_at = now()
-		RETURNING `+machineColumns, id, hostname, os, user, version).Scan(m.targets()...)
+		WHERE m.proof_name = $6
+		RETURNING `+machineColumns, id, hostname, os, user, version, proof).Scan(m.targets()...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The row exists and another proof registered it: ON CONFLICT updated nothing.
+		return nil, anotherProof()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +190,14 @@ func (f *Fleet) putMachine(r *http.Request, p crud.Params) (any, error) {
 
 // putSession writes the session's row whole: an optional field left out is cleared. It makes
 // the session's fleet agent as touch does, when there is none. A new row is linked to the
-// newest row of the same machine, pid and proc_start (the session before a /clear).
+// newest row of the same machine, pid and proc_start (the session before a /clear). The
+// machine must be registered to the caller's proof (403), and a row never moves to another
+// machine (409).
 func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
+	proof, err := proofName(r)
+	if err != nil {
+		return nil, err
+	}
 	session, err := p.UUID("session_id")
 	if err != nil {
 		return nil, err
@@ -138,8 +216,10 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 	configDir := b.Match("config_dir", 1, pathMax, absolutePattern)
 	transcript := b.OptText("transcript_path", 1, pathMax, absolutePattern)
 	remote := b.OptText("git_remote", 1, 2048, plainPattern)
-	if remote != nil && passwordPattern.MatchString(*remote) {
-		b.Fail([]string{"git_remote"}, "a remote must not hold a password")
+	if remote != nil {
+		if problem := remoteProblem(*remote); problem != "" {
+			b.Fail([]string{"git_remote"}, problem)
+		}
 	}
 	branch := b.OptText("git_branch", 1, 255, plainPattern)
 	worktree := b.OptText("worktree_root", 1, pathMax, absolutePattern)
@@ -158,14 +238,18 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 	}
 	ctx := r.Context()
 	err = pgx.BeginFunc(ctx, f.Pool, func(tx pgx.Tx) error {
-		var one int
-		err := tx.QueryRow(ctx, `SELECT 1 FROM fleet_machines WHERE id = $1 FOR KEY SHARE`, machineID).Scan(&one)
+		var owner string
+		err := tx.QueryRow(ctx, `SELECT proof_name FROM fleet_machines WHERE id = $1 FOR KEY SHARE`,
+			machineID).Scan(&owner)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return httpx.WithReason(http.StatusNotFound,
 				"no fleet machine has that id: register it first", "unknown-machine")
 		}
 		if err != nil {
 			return err
+		}
+		if owner != proof {
+			return anotherProof()
 		}
 		_, err = tx.Exec(ctx, `INSERT INTO fleet_agents (session_id, handle) VALUES ($1, $2)
 			ON CONFLICT (session_id) DO NOTHING`, session, session[:8])
@@ -177,7 +261,7 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO fleet_session_hosts (session_id, machine_id, pid, proc_start,
+		tag, err := tx.Exec(ctx, `INSERT INTO fleet_session_hosts (session_id, machine_id, pid, proc_start,
 				cwd, config_dir, transcript_path, git_remote, git_branch, worktree_root, git_head, cc_version,
 				kind, entrypoint, name, status, credential_id, account_uuid, last_rate_limit_at,
 				last_reset_at, previous_session_id)
@@ -191,9 +275,15 @@ func (f *Fleet) putSession(r *http.Request, p crud.Params) (any, error) {
 				worktree_root = $10, git_head = $11, cc_version = $12, kind = $13, entrypoint = $14,
 				name = $15, status = $16, credential_id = $17, account_uuid = $18,
 				last_rate_limit_at = $19::timestamptz, last_reset_at = $20::timestamptz,
-				last_seen = now(), updated_at = now()`,
+				last_seen = now(), updated_at = now()
+			WHERE fleet_session_hosts.machine_id = $2`,
 			session, machineID, pid, proc, cwd, configDir, transcript, remote, branch, worktree, head,
 			ccVersion, kind, entrypoint, name, status, credential, account, rateLimited, reset)
+		if err == nil && tag.RowsAffected() == 0 {
+			// The row exists on another machine: ON CONFLICT updated nothing.
+			return httpx.WithReason(http.StatusConflict,
+				"that session is on another machine", "session-on-another-machine")
+		}
 		return err
 	})
 	if err != nil {

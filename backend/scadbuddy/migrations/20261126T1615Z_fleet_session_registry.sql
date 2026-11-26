@@ -4,9 +4,12 @@
 -- reads it through core's `fleet` routes.
 
 -- id is the SHA-256, in hex, of the machine's /etc/machine-id and the OS user. The raw
--- machine id is never stored.
+-- machine id is never stored. proof_name is the <machine> of the bootstrap proof file
+-- `fleet-rotator.<machine>` whose credential registered the row first: only a credential
+-- of that proof refreshes the row or writes its sessions.
 CREATE TABLE fleet_machines (
     id text PRIMARY KEY CHECK (id ~ '^[0-9a-f]{64}$'),
+    proof_name text NOT NULL CHECK (proof_name ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
     hostname text NOT NULL,
     os text NOT NULL,
     os_user text NOT NULL,
@@ -61,6 +64,13 @@ ALTER TABLE service_credentials DROP CONSTRAINT service_credentials_caller_check
 ALTER TABLE service_credentials ADD CONSTRAINT service_credentials_caller_check
     CHECK (caller IN ('agent', 'print', 'projects', 'render', 'storefront', 'intake',
                       'profile-fetch', 'camera', 'camera-relay', 'fleet', 'fleet-rotator'));
+
+-- The machine whose bootstrap proof (`fleet-rotator.<machine>`) a fleet-rotator credential
+-- was exchanged for. The API revokes the credential when that proof file is gone
+-- (`auth/service_credentials.py` `revoke_machines_without_proof`), and core binds the
+-- caller's writes to it (`fleet_machines.proof_name`).
+ALTER TABLE service_credentials ADD COLUMN machine text
+    CHECK (machine IS NULL OR (caller = 'fleet-rotator' AND machine ~ '^[a-z0-9][a-z0-9-]{0,62}$'));
 
 ALTER TABLE service_caller_suspensions DROP CONSTRAINT service_caller_suspensions_caller_check;
 ALTER TABLE service_caller_suspensions ADD CONSTRAINT service_caller_suspensions_caller_check

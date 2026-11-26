@@ -57,7 +57,9 @@ flowchart LR
   `2026-11-26-fleet-session-registry-and-rotator-design` §6.3). Caller `fleet` reads
   `GET …/fleet/sessions` and `…/fleet/sessions/{session_id}` (`sbfleet` `Registry`); caller
   `fleet-rotator`, the machine service, writes `PUT …/fleet-rotator/machines/{id}` and
-  `…/fleet-rotator/sessions/{session_id}`. Each caller is refused on the other's routes.
+  `…/fleet-rotator/sessions/{session_id}`. Each caller is refused on the other's routes. A
+  `fleet-rotator` credential writes only the machines its proof file registered
+  (`fleet_machines.proof_name`) and their sessions.
 - `backend/scadbuddy/api/crud_fleet.py`: the change stream. The caller `fleet`:
   `backend/scadbuddy/auth/` (`exchange.py`, `service_credentials.py`, `routes.py`).
 - `backend/scadbuddy/core/events.py`, `pg_events.py`: unknown kinds pass the bus as
@@ -75,7 +77,9 @@ event log `events`.
 version) and `fleet_session_hosts` (one row per session id: machine, pid and `proc_start`,
 paths, git facts, Claude Code facts, the credential's id, the account, the last rate limit,
 and `previous_session_id`, the row of the same process before a `/clear`). It also adds
-`fleet-rotator` to the two caller CHECKs.
+`fleet-rotator` to the two caller CHECKs, `fleet_machines.proof_name` (the proof file's
+`<machine>` that registered the row) and `service_credentials.machine` (the machine a
+`fleet-rotator` credential was exchanged for).
 
 ## Tests
 

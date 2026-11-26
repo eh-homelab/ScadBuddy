@@ -1,6 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"strings"
 	"testing"
@@ -27,8 +31,24 @@ func newRegistry(t *testing.T) *registry {
 	return &registry{
 		api:          a,
 		fleetToken:   a.credential("fleet", "crud.fleet"),
-		rotatorToken: a.credential("fleet-rotator", "crud.fleet-rotator"),
+		rotatorToken: rotatorCredential(a, "devbox"),
 	}
+}
+
+// rotatorCredential is a fleet-rotator credential as the exchange issues it for the proof
+// file fleet-rotator.<machine>: the row names the machine.
+func rotatorCredential(a *api, machine string) string {
+	a.t.Helper()
+	id, secret := make([]byte, 8), make([]byte, 32)
+	_, _ = rand.Read(id)
+	_, _ = rand.Read(secret)
+	token := "sbsvc_" + hex.EncodeToString(id) + "." + base64.RawURLEncoding.EncodeToString(secret)
+	hash := sha256.Sum256([]byte(token))
+	a.sql(`INSERT INTO service_credentials (id, caller, scopes, secret_hash, expires_at, proof, machine)
+		VALUES ($1, 'fleet-rotator', '{crud.fleet-rotator}', $2, now() + interval '15 minutes',
+			'bootstrap', $3)`,
+		hex.EncodeToString(id), hash[:], machine)
+	return token
 }
 
 func bearer(token string) func(*http.Request) {
@@ -229,7 +249,6 @@ func TestTheRegistryRefusesBadFields(t *testing.T) {
 		"too long a path":                   sessionBody("cwd", "/"+strings.Repeat("p", 4096)),
 		"a control character in the name":   sessionBody("name", "a\u001bb"),
 		"too long a branch":                 sessionBody("git_branch", strings.Repeat("b", 256)),
-		"a password in the remote":          sessionBody("git_remote", "https://me:ghp_secret@github.com/x/y.git"),
 		"a short git head":                  sessionBody("git_head", "abc123"),
 		"an upper-case git head":            sessionBody("git_head", strings.Repeat("AB", 20)),
 		"pid 0":                             sessionBody("pid", 0),
@@ -257,9 +276,6 @@ func TestTheRegistryRefusesBadFields(t *testing.T) {
 	expect(t, got.status, 404)
 	expect(t, got.body["reason"], "unknown-machine")
 	expect(t, g.count(`SELECT count(*) FROM fleet_agents`), 0)
-
-	// A remote with a user but no password is kept (ssh's git@).
-	g.write("/sessions/"+session, sessionBody("git_remote", "git@github.com:eh-homelab/ScadBuddy.git"), 200)
 }
 
 func TestASessionWhoseHandleIsTakenIsAConflict(t *testing.T) {
@@ -293,4 +309,113 @@ func TestEachCallerReachesOnlyItsRegistryRoutes(t *testing.T) {
 	}
 	none := g.do("PUT", rotatorBase+"/machines/"+machineID, machineBody(), func(r *http.Request) { r.Header.Del("Authorization") })
 	expect(t, none.status, 401)
+}
+
+// A machine belongs to the proof that registered it first. Only that proof's credential
+// refreshes it or writes its sessions, and a session never moves to another machine.
+func TestAMachineBelongsToItsProof(t *testing.T) {
+	g := newRegistry(t)
+	laptop := rotatorCredential(g.api, "laptop")
+	laptopID := strings.Repeat("1", 64)
+	put := func(path, body, token string) answer {
+		return g.do("PUT", rotatorBase+path, body, bearer(token))
+	}
+
+	g.write("/machines/"+machineID, machineBody(), 200)
+	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE proof_name = 'devbox'`), 1)
+	// Another machine's credential cannot take the row over.
+	got := put("/machines/"+machineID, object("hostname", "stolen", "os", "linux",
+		"os_user", "u", "service_version", "1"), laptop)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, g.count(`SELECT count(*) FROM fleet_machines WHERE hostname = 'stolen'`), 0)
+	if got := put("/machines/"+laptopID, machineBody(), laptop); got.status != 200 {
+		t.Fatalf("the laptop registers its own machine: %d %s", got.status, got.raw)
+	}
+
+	// A session on a machine of another proof is refused, and makes no agent.
+	session := uuid()
+	got = put("/sessions/"+session, sessionBody(), laptop)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "machine-of-another-proof")
+	expect(t, g.count(`SELECT count(*) FROM fleet_agents`), 0)
+
+	// A session row never moves to another machine, even one of the caller's own.
+	g.write("/sessions/"+session, sessionBody(), 200)
+	other := strings.Repeat("2", 64)
+	g.write("/machines/"+other, machineBody(), 200)
+	got = put("/sessions/"+session, sessionBody("machine_id", other), g.rotatorToken)
+	expect(t, got.status, 409)
+	expect(t, got.body["reason"], "session-on-another-machine")
+	got = put("/sessions/"+session, sessionBody("machine_id", laptopID), laptop)
+	expect(t, got.status, 409)
+	expect(t, got.body["reason"], "session-on-another-machine")
+	expect(t, g.read("/sessions/"+session, 200).body["machine"].(map[string]any)["id"], machineID)
+
+	// A fleet-rotator credential that names no machine writes nothing.
+	unbound := g.credential("fleet-rotator", "crud.fleet-rotator")
+	got = put("/machines/"+strings.Repeat("3", 64), machineBody(), unbound)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "no-machine")
+	got = put("/sessions/"+uuid(), sessionBody(), unbound)
+	expect(t, got.status, 403)
+	expect(t, got.body["reason"], "no-machine")
+}
+
+func TestTheRemoteIsAPlainGitURL(t *testing.T) {
+	g := newRegistry(t)
+	g.write("/machines/"+machineID, machineBody(), 200)
+	for _, c := range []struct {
+		remote string
+		ok     bool
+	}{
+		{"https://github.com/o/r", true},
+		{"https://github.com/o/r.git", true},
+		{"http://git.lan:3000/o/r.git", true},
+		{"ssh://git@github.com/o/r", true},
+		{"ssh://github.com:22/o/r", true},
+		{"git://github.com/o/r.git", true},
+		{"git@github.com:o/r.git", true},
+		{"deploy.bot-1@git.lan:team/r.git", true},
+		{"https://token@github.com/o/r", false},
+		{"https://u:p@github.com/o/r", false},
+		{"https://u:@github.com/o/r", false},
+		{"https://@github.com/o/r", false},
+		{"ssh://git:pw@github.com/o/r", false},
+		{"ssh://g%20it@github.com/o/r", false},
+		{"git://u@github.com/o/r", false},
+		{"https://github.com/o/r?x=1", false},
+		{"https://github.com/o/r?", false},
+		{"https://github.com/o/r#main", false},
+		{"https://github.com/o/r#", false},
+		{"ssh://git@github.com/o/r?x=1", false},
+		{"git@github.com:o/r.git#frag", false},
+		{"git@github.com:o/r.git?x", false},
+		{"u:p@github.com:o/r.git", false},
+		{"t@k@github.com:o/r.git", false},
+		{"git@-oProxyCommand=x:o/r", false},
+		{"git@github.com:", false},
+		{"git@github.com:-u/r", false},
+		{"github.com:o/r.git", false},
+		{"/home/elan/repos/r", false},
+		{"../r", false},
+		{"file:///home/elan/repos/r", false},
+		{"ext::sh -c touch% /tmp/pwned", false},
+		{"fd::17", false},
+		{"https:///o/r", false},
+		{"https://-x/o/r", false},
+		{"ftp://github.com/o/r", false},
+		{"git+ssh://git@github.com/o/r", false},
+		{"HTTPS://token@github.com/o/r", false},
+		{`https://github.com\@evil/o/r`, false},
+	} {
+		want := 422
+		if c.ok {
+			want = 200
+		}
+		got := g.do("PUT", rotatorBase+"/sessions/"+uuid(), sessionBody("git_remote", c.remote), bearer(g.rotatorToken))
+		if got.status != want {
+			t.Errorf("%q: %d %s, want %d", c.remote, got.status, got.raw, want)
+		}
+	}
 }

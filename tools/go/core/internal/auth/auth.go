@@ -28,6 +28,9 @@ var tokenPattern = regexp.MustCompile(`^sbsvc_[0-9a-f]{16}\.[A-Za-z0-9_-]{43}$`)
 type Service struct {
 	Caller string
 	Scopes []string
+	// Machine is the <machine> of the bootstrap proof file fleet-rotator.<machine> the
+	// credential was exchanged for; empty for every other credential.
+	Machine string
 }
 
 // Has says whether the credential's scopes hold class.
@@ -68,10 +71,10 @@ func (r *Resolver) lookup(ctx context.Context, hash [32]byte, now time.Time) (*S
 		last *time.Time
 	)
 	err := r.Pool.QueryRow(ctx,
-		`SELECT id, caller, scopes, last_used_at FROM service_credentials c
+		`SELECT id, caller, scopes, coalesce(machine, ''), last_used_at FROM service_credentials c
 		 WHERE secret_hash = $1 AND revoked_at IS NULL AND expires_at > $2
 		   AND NOT EXISTS (SELECT 1 FROM service_caller_suspensions s WHERE s.caller = c.caller)`,
-		hash[:], now).Scan(&id, &s.Caller, &s.Scopes, &last)
+		hash[:], now).Scan(&id, &s.Caller, &s.Scopes, &s.Machine, &last)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

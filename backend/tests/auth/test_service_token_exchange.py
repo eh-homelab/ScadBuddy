@@ -496,14 +496,21 @@ async def test_each_machine_has_its_own_fleet_rotator_secret(tmp_path: Path) -> 
     (directory / "fleet-rotator.devbox").write_text(devbox + "\n")
     (directory / "fleet-rotator.laptop-2").write_text(laptop + "\n")
     verifier = BootstrapVerifier.from_dir(directory)
-    proof = VerifiedProof("fleet-rotator", "bootstrap", None, None)
-    assert await verifier.verify(devbox) == proof
-    assert await verifier.verify(laptop) == proof
-    # One machine is revoked alone: its file goes, the other's secret still passes.
+    # The proof names the machine whose file matched, so its credential is bound to it.
+    on_devbox = VerifiedProof("fleet-rotator", "bootstrap", None, None, machine="devbox")
+    on_laptop = VerifiedProof("fleet-rotator", "bootstrap", None, None, machine="laptop-2")
+    assert await verifier.verify(devbox) == on_devbox
+    assert await verifier.verify(laptop) == on_laptop
+    assert verifier.machines() == {"devbox", "laptop-2"}
+    # One machine is revoked alone: its file goes, and its secret no longer passes, before
+    # any restart too. The other's still passes.
     (directory / "fleet-rotator.devbox").unlink()
+    assert await verifier.verify(devbox) is None
+    assert await verifier.verify(laptop) == on_laptop
+    assert verifier.machines() == {"laptop-2"}
     verifier = BootstrapVerifier.from_dir(directory)
     assert await verifier.verify(devbox) is None
-    assert await verifier.verify(laptop) == proof
+    assert await verifier.verify(laptop) == on_laptop
 
 
 @pytest.mark.parametrize("name", ["fleet-rotator", "fleet-rotator.", "fleet-rotator.Dev Box"])

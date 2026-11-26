@@ -149,6 +149,8 @@ class VerifiedProof:
     proof: ExchangeProof
     pod_name: str | None
     pod_uid: str | None
+    #: The ``<machine>`` of a per-machine bootstrap file (``fleet-rotator.<machine>``).
+    machine: str | None = None
 
 
 class VerifierUnavailableError(Exception):
@@ -460,13 +462,36 @@ class BootstrapVerifier:
     """§7.2: each caller's bootstrap secret, as the SHA-256 of the file named after it
     (``render``, ``print``, ``projects``, ``agent``) read once at start. The machine
     service has one secret per machine, ``fleet-rotator.<machine>`` (fleet registry spec
-    §6.2), so one machine can be revoked alone: its file goes, and the API restarts.
+    §6.2), so one machine can be revoked alone: its file goes. Its proof names the machine,
+    and its credential is bound to it (`service_credentials.py` ``issue``). A per-machine
+    secret passes only while its file is still there (one stat per exchange), and every
+    start and auth sweep revokes the credentials of a machine with no file
+    (``revoke_machines_without_proof``).
 
-    ``hashes`` is keyed by file name; ``callers`` names each file's caller."""
+    ``hashes`` is keyed by file name; ``callers`` names each file's caller; ``directory``
+    is where the per-machine files are looked for again."""
 
-    def __init__(self, hashes: Mapping[str, bytes], callers: Mapping[str, ServiceCaller]) -> None:
+    def __init__(
+        self,
+        hashes: Mapping[str, bytes],
+        callers: Mapping[str, ServiceCaller],
+        directory: Path | None = None,
+    ) -> None:
         self.hashes = dict(hashes)
         self.callers = dict(callers)
+        self.directory = directory
+
+    def _present(self, name: str) -> bool:
+        return self.directory is None or (self.directory / name).is_file()
+
+    def machines(self, caller: ServiceCaller = "fleet-rotator") -> set[str]:
+        """The machines of ``caller`` whose proof file is still there, of those read at
+        start."""
+        return {
+            name[len(caller) + 1 :]
+            for name, owner in self.callers.items()
+            if owner == caller and caller in PER_MACHINE_CALLERS and self._present(name)
+        }
 
     @classmethod
     def from_dir(cls, directory: Path) -> BootstrapVerifier:
@@ -507,17 +532,21 @@ class BootstrapVerifier:
             hashes[name] = digest
         if not hashes:
             logger.warning("SCADBUDDY_SERVICE_BOOTSTRAP_DIR holds no caller's secret")
-        return cls(hashes, files)
+        return cls(hashes, files, directory)
 
     async def verify(self, token: str) -> VerifiedProof | None:
         presented = hashlib.sha256(token.strip().encode()).digest()
-        found: ServiceCaller | None = None
+        found: str | None = None
         # Every hash is compared, in constant time, whichever matches.
         for name, digest in self.hashes.items():
             if hmac.compare_digest(presented, digest):
-                found = self.callers[name]
-        return (
-            None
-            if found is None or not token.strip()
-            else VerifiedProof(found, "bootstrap", None, None)
-        )
+                found = name
+        if found is None or not token.strip():
+            return None
+        caller = self.callers[found]
+        if caller not in PER_MACHINE_CALLERS:
+            return VerifiedProof(caller, "bootstrap", None, None)
+        if not self._present(found):
+            # The machine was revoked: its file is gone since start.
+            return None
+        return VerifiedProof(caller, "bootstrap", None, None, machine=found[len(caller) + 1 :])
