@@ -227,6 +227,8 @@ async def test_an_unlock_that_held_nothing_is_logged_and_the_run_still_answers(
     said = [r.getMessage() for r in caplog.records]
     assert said.count("the output copy's unlock found its lock not held") == 1
     assert said.count("the byte copy's unlock found its lock not held") == 1
+    # The false answer, not a `psycopg.Error` taken by mistake beside it (#7892).
+    assert not [m for m in said if "could not be released" in m]
     assert _both_locks_free(projection.pool)
 
 
