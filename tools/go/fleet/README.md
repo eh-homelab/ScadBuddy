@@ -120,8 +120,10 @@ longer texts through.
 
 ## Deploying
 
-Nothing deploys it yet; the Kubernetes objects belong in eh-homelab/clusters. Before a
-deploy:
+The Kubernetes objects are eh-homelab/clusters' `applications/scadbuddy/scadbuddy-fleet.yaml`
+and `networkpolicy-fleet.yaml` (#7903). ScadBuddy's deploy (`deploy.reusable.yml`) moves the
+image pin with each build that published a fleet image, and keeps it otherwise. What they
+hold:
 
 - Core serves the fleet's routes only when `SCADBUDDY_CORE_AREAS` names `fleet`
   (`tools/go/core/README.md`). Without it the routes go to Python, which has none of them
