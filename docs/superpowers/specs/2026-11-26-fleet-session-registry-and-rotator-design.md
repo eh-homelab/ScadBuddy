@@ -158,6 +158,11 @@ Where the accounts live:
   other kinds take no lease.
 - Health writes stay the same conditional update the agent uses (`/credentials/events`): a
   rate limit from a transcript is a `cooldown` with the epoch reset, so both users skip it.
+- A usage limit belongs to the account, not to one login. Two machines that each ran `/login`
+  for one account hold two token families, so two rows with one `account_uuid` (measured
+  2026-11-26: this machine and spark-c9d9 have the same account uuid hash). A cooldown of a
+  `claude_login` row therefore cools every row with the same `account_uuid` **(call)**. The
+  lease is per row (one token family), not per account.
 
 ### 6.2 The `fleet-rotator` caller
 
