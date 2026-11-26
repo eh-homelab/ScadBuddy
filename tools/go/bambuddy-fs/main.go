@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"math"
 	"net/url"
 	"os"
@@ -393,7 +394,7 @@ func run(cfg config) int {
 		MountOptions: fuse.MountOptions{FsName: "bambuddy", Name: "bambuddy-fs", AllowOther: allow},
 	})
 	if err != nil {
-		log.Printf("bambuddy-fs: mount: %v", err)
+		slog.Error("bambuddy-fs: the mount failed", "path", cfg.Mountpoint, "err", err)
 		flush = time.Second
 		return 1
 	}
@@ -427,7 +428,7 @@ func run(cfg config) int {
 	}
 	stopRetry()
 	if err := server.Unmount(); err != nil {
-		log.Printf("bambuddy-fs: unmount %s: %v (is it busy? close what uses it, then fusermount3 -u)", cfg.Mountpoint, err)
+		slog.Error("bambuddy-fs: the unmount failed; is it busy? Close what uses it, then fusermount3 -u", "path", cfg.Mountpoint, "err", err)
 		return 1
 	}
 	<-exited

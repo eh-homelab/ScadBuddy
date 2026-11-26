@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"regexp"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/trace"
@@ -12,30 +13,66 @@ import (
 // LogHandler is base, which keeps writing where it writes (stderr, for kubectl logs),
 // plus, with logs on, the OTLP bridge (otelslog) under the scope name. A record logged
 // with a context inside a span carries its trace_id and span_id in both: the bridge reads
-// them from the context, and base gets them as attributes. keep, when it is not nil, says
-// which attributes the OTLP copy may carry; base gets them all.
+// them from the context, and base gets them as attributes. keep says which attributes the
+// OTLP copy may carry; nil is DefaultKeep. A module widens or narrows it with its own
+// function, which may call DefaultKeep. Whatever keep says, a URL with credentials never
+// reaches OTLP, in an attribute or in the message. Base gets everything.
 func (t *Telemetry) LogHandler(base slog.Handler, name string, keep func(slog.Attr) bool) slog.Handler {
 	h := slog.Handler(&traceIDs{base})
 	if t != nil && t.Logs != nil {
-		var otlp slog.Handler = otelslog.NewHandler(name, otelslog.WithLoggerProvider(t.Logs))
-		if keep != nil {
-			otlp = &kept{otlp, keep}
+		if keep == nil {
+			keep = DefaultKeep
 		}
+		otlp := &kept{otelslog.NewHandler(name, otelslog.WithLoggerProvider(t.Logs)), keep}
 		h = &fanout{h, otlp}
 	}
 	return h
 }
 
-// kept passes on only the attributes keep keeps.
+// dropped are the attributes DefaultKeep leaves out of the OTLP copy: a request's path or
+// query, an error's text (which can quote either, or a value), a URL and a DSN.
+var dropped = map[string]bool{"path": true, "error": true, "err": true, "url": true, "query": true, "dsn": true}
+
+// credentials is a URL with a user and a password in it.
+var credentials = regexp.MustCompile(`[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]*:[^\s/@]*@`)
+
+// DefaultKeep is the OTLP copy's default policy: every attribute but those named path,
+// error, err, url, query or dsn.
+func DefaultKeep(a slog.Attr) bool { return !dropped[a.Key] }
+
+// filter is a after keep and the credentials rule, and whether anything is left.
+func filter(a slog.Attr, keep func(slog.Attr) bool) (slog.Attr, bool) {
+	if !keep(a) {
+		return a, false
+	}
+	a.Value = a.Value.Resolve()
+	if a.Value.Kind() == slog.KindGroup {
+		var inner []slog.Attr
+		for _, g := range a.Value.Group() {
+			if g, ok := filter(g, keep); ok {
+				inner = append(inner, g)
+			}
+		}
+		return slog.Attr{Key: a.Key, Value: slog.GroupValue(inner...)}, len(inner) > 0
+	}
+	if a.Value.Kind() == slog.KindString || a.Value.Kind() == slog.KindAny {
+		if credentials.MatchString(a.Value.String()) {
+			return a, false
+		}
+	}
+	return a, true
+}
+
+// kept passes on only the attributes keep keeps, and no credentials.
 type kept struct {
 	slog.Handler
 	keep func(slog.Attr) bool
 }
 
 func (k *kept) Handle(ctx context.Context, r slog.Record) error {
-	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	out := slog.NewRecord(r.Time, r.Level, credentials.ReplaceAllString(r.Message, "<credentials>@"), r.PC)
 	r.Attrs(func(a slog.Attr) bool {
-		if k.keep(a) {
+		if a, ok := filter(a, k.keep); ok {
 			out.AddAttrs(a)
 		}
 		return true
@@ -46,7 +83,7 @@ func (k *kept) Handle(ctx context.Context, r slog.Record) error {
 func (k *kept) WithAttrs(attrs []slog.Attr) slog.Handler {
 	var keep []slog.Attr
 	for _, a := range attrs {
-		if k.keep(a) {
+		if a, ok := filter(a, k.keep); ok {
 			keep = append(keep, a)
 		}
 	}

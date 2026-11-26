@@ -136,8 +136,11 @@ Core sends OpenTelemetry traces, metrics and logs over OTLP/HTTP, set up by the 
   `go.memory.used`, `go.memory.class`, `go.gc.count`, `go.gc.pause.time`, `go.processor.limit`,
   `go.schedule.duration`, …) and the process's (`process.cpu.time`, `process.memory.usage`,
   `process.unix.file_descriptor.count`, `process.uptime`). Always cumulative.
-- **Logs.** The JSON on stderr stays. With logs on, each record also goes over OTLP, and a record
-  logged in a request carries its `trace_id` and `span_id` (on stderr too).
+- **Logs.** The JSON on stderr stays, with every attribute. With logs on, each record also goes
+  over OTLP, and a record logged in a request carries its `trace_id` and `span_id` (on stderr
+  too). The OTLP copy leaves out the attributes `path`, `error`, `err`, `url`, `query` and
+  `dsn`, and any value that is a URL with credentials; a message's credentials are replaced
+  (`telemetry.DefaultKeep`).
 
 At a stop, the servers drain and the three signals flush within the 20 s shutdown.
 

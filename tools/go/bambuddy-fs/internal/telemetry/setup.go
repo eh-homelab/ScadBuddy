@@ -60,12 +60,7 @@ func Start(cfg Config) (stop func(within time.Duration), err error) {
 	if t.Traces != nil || t.Meters != nil {
 		restore = install(t.Tracer(), t.Meter())
 	}
-	prev := slog.Default()
-	if t.Logs != nil {
-		// The mount's log lines keep their form on stderr; the OTLP copy keeps only ids.
-		slog.SetDefault(slog.New(t.LogHandler(&stderrLines{out: log.New(os.Stderr, "", log.LstdFlags)}, ServiceName,
-			func(a slog.Attr) bool { return loggedKeys[a.Key] })))
-	}
+	restoreLogs := useLogs(t)
 	return func(within time.Duration) {
 		ctx, cancel := context.WithTimeout(context.Background(), within)
 		defer cancel()
@@ -73,10 +68,24 @@ func Start(cfg Config) (stop func(within time.Duration), err error) {
 		if restore != nil {
 			restore()
 		}
-		if t.Logs != nil {
-			slog.SetDefault(prev)
-		}
+		restoreLogs()
 	}, nil
+}
+
+// useLogs makes slog's default logger write to stderr, in its form, and, with logs on,
+// to OTLP with only ids, until restore. The log package writes to stderr only.
+func useLogs(t *shared.Telemetry) (restore func()) {
+	if t.Logs == nil {
+		return func() {}
+	}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(t.LogHandler(&stderrLines{out: log.New(os.Stderr, "", log.LstdFlags)}, ServiceName,
+		func(a slog.Attr) bool { return loggedKeys[a.Key] })))
+	// SetDefault sends the log package's lines to that handler; a log.Printf message can
+	// hold a path, so the log package goes back to stderr alone, as before.
+	log.SetOutput(os.Stderr)
+	log.SetFlags(log.LstdFlags)
+	return func() { slog.SetDefault(prev) }
 }
 
 // stderrLines writes a record as slog's default handler does, "<time> LEVEL msg k=v",

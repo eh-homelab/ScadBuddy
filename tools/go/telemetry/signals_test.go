@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -144,6 +145,48 @@ func TestWithLogsOffOnlyStderrIsWritten(t *testing.T) {
 	slog.New(off.LogHandler(slog.NewJSONHandler(&stderr, nil), "test", nil)).Info("hi")
 	if !bytes.Contains(stderr.Bytes(), []byte(`"msg":"hi"`)) {
 		t.Fatalf("stderr %q", stderr.String())
+	}
+}
+
+func TestTheDefaultOTLPCopyHasNoPathErrorOrCredentials(t *testing.T) {
+	exp := &logs{}
+	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
+	t.Cleanup(func() { _ = lp.Shutdown(context.Background()) })
+	var stderr bytes.Buffer
+	logger := slog.New((&Telemetry{Logs: lp}).LogHandler(slog.NewJSONHandler(&stderr, nil), "test", nil))
+	logger.With("dsn", "postgres://u:pw@db/x").Warn("dial postgres://u:hunter2@db:5432/x failed",
+		"path", "/api/v1/things/42", "error", "boom 42", "err", "boom", "url", "http://x/y", "query", "q=1",
+		"upstream", "https://user:secret@host/", "group", slog.GroupValue(slog.String("path", "/p"), slog.Int("n", 3)),
+		"status", 503)
+
+	exp.mu.Lock()
+	defer exp.mu.Unlock()
+	r := exp.records[0]
+	if strings.Contains(r.Body().AsString(), "hunter2") {
+		t.Errorf("body %q holds a password", r.Body().AsString())
+	}
+	got := map[string]string{}
+	r.WalkAttributes(func(kv attribute.KeyValue) bool {
+		got[string(kv.Key)] = kv.Value.Emit()
+		return true
+	})
+	for key, value := range got {
+		if strings.Contains(value, "secret") || strings.Contains(value, "pw@") || strings.Contains(value, "/p") {
+			t.Errorf("%s = %q", key, value)
+		}
+	}
+	for _, key := range []string{"dsn", "path", "error", "err", "url", "query", "upstream"} {
+		if _, ok := got[key]; ok {
+			t.Errorf("%s reached OTLP", key)
+		}
+	}
+	if _, ok := got["status"]; !ok {
+		t.Errorf("status was dropped: %v", got)
+	}
+	for _, want := range []string{"hunter2", "/api/v1/things/42", "secret"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr lost %q: %s", want, stderr.String())
+		}
 	}
 }
 

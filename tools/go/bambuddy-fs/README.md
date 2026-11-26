@@ -434,9 +434,9 @@ metrics (`go.goroutine.count`, `go.memory.used`, `go.memory.class`, `go.gc.count
 
 Logs: every `slog` record goes over OTLP too, with its `trace_id` and `span_id` when it was
 logged inside a span. The OTLP copy keeps only the `file`, `files` and `folder` attributes
-(ids); a name, a path or an error's text stays on stderr. With logs on, a line on stderr is
-`<date> <time> LEVEL message key=value …`, as before, and a `log.Printf` line now has `INFO`
-in front of its message.
+(ids); a name, a path or an error's text stays on stderr, and a message is a fixed text.
+A line on stderr is `<date> <time> LEVEL message key=value …`, as before. The command's own
+start-up errors go to stderr only.
 
 What is recorded is ids (file, folder, operation), byte counts, operation names, errno
 names, status codes and durations. Never a file or folder name, a path, file contents,
