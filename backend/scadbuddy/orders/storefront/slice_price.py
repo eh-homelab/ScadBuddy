@@ -158,7 +158,8 @@ KEY_VERSION: Final = 4
 #: live read may ask Bambuddy for the printer's tasks.
 RATE_TTL: Final = 60.0
 #: How long a template's settings the key holds are read again only after (#7800
-#: review), as `RATE_TTL`, but short: a shop's edit should move the price soon.
+#: review), as `RATE_TTL`, but short: a shop's edit should move the price soon. Not
+#: `Final`: an api test sets it to 0 to read an edit at once.
 TEMPLATE_TTL = 5.0
 #: The advisory lock every claim takes, so the capacity is counted once at a time.
 _CLAIM_LOCK: Final = "storefront_slice_prices"
