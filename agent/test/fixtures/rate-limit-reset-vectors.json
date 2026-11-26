@@ -218,6 +218,24 @@
       "why": "#7986: 2:30am does not occur on 2026-03-08 in New York (DST starts at 2am); the rule reads it with the offset before the gap (EST), so it is 3:30am EDT, as Python's fold=0 does"
     },
     {
+      "text": "resets 1pm (Asia/Kolkata)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": "2026-10-18T07:30:00Z",
+      "why": "#8023: an IANA name that ICU answers as another ID (Asia/Calcutta) is still read, as Go and Python read it"
+    },
+    {
+      "text": "resets 1pm (asia/kolkata)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#8023: an IANA name in the wrong case is not read, even where ICU answers another ID for it"
+    },
+    {
+      "text": "resets 1pm (america/new_york)",
+      "now": "2026-10-17T22:16:05Z",
+      "at": null,
+      "why": "#8023: an IANA name in the wrong case is not read, as Go and Python read names only as written"
+    },
+    {
       "text": "resets 1pm (Mars/Olympus_Mons)",
       "now": "2026-10-17T22:16:05Z",
       "at": null,

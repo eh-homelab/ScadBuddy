@@ -963,7 +963,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   is none, `ReadingBelowEmptyError`, 422 `reading_below_empty`, when the reading is under it), `insert_weights.py` (#7280: an insert's empty weight from new spools'
   weighings, one row per spool in `filament_insert_weight_readings`, the mean of them with
   `filament_insert_types.empty_weight_basis` `derived`; routes `…/insert-weight-offer` and
-  `…/insert-weight`; #7683: `check_on` answers `below_label` for a new spool read under its
+  `…/insert-weight`; a spool's delete takes its row out of a derived mean, `forget_spool_on`, #7450; #7683: `check_on` answers `below_label` for a new spool read under its
   label, with `shortfall_g`, the `resolutions` (`below_label()`: `tared`, `short`,
   `label_wrong`, each with its `filament_g`) and the `default`; `add_event` takes a
   weighing's `resolution` with `reading_g` alone, checks it again under the row locks,

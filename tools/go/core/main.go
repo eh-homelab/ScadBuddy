@@ -153,7 +153,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		<-ctx.Done()
 		hub.Close()
 	}()
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), stream)
+	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), stream)
 	if err != nil {
 		return err
 	}
@@ -173,7 +173,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), stream)
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter(), stream)
 		if err != nil {
 			return err
 		}
@@ -246,6 +246,14 @@ var areaPackages = []areaRoutes{
 	transcripts.Areas, workspace.Areas,
 }
 
+// publicAreas is a package's public routes by area name, over the pool, with the KEKs.
+// newRouter serves each behind the one person-auth gate (internal/auth); an area may have
+// CRUD routes, public routes or both.
+type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
+
+// publicPackages are the packages with public areas.
+var publicPackages = []publicAreas{}
+
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
@@ -263,9 +271,16 @@ type streams struct {
 }
 
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
+// A named area's public routes stand in front of the CRUD router, behind the gate in
+// SCADBUDDY_AUTH_MODE's mode; meter, when not nil, counts what enforce would refuse.
 // stream is the process's event stream; without one, an area that needs it gets a hub of
 // its own.
-func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, stream ...*streams) (http.Handler, error) {
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, meter metric.MeterProvider, stream ...*streams) (http.Handler, error) {
+	mode, err := auth.ParseMode(authMode, authMode != "")
+	if err != nil {
+		return nil, fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
+	}
+	resolver := &auth.Resolver{Pool: pool}
 	var st *streams
 	if len(stream) > 0 {
 		st = stream[0]
@@ -279,9 +294,18 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 	}
 	socket := false
 	router := &crud.Router{
-		Resolver: &auth.Resolver{Pool: pool},
-		Enforce:  authMode == "enforce",
+		Resolver: resolver,
+		Enforce:  mode == auth.Enforce,
 		Next:     next,
+	}
+	gate := auth.NewGate(resolver, mode, meter)
+	public := http.NewServeMux()
+	served := false
+	publics := map[string][]auth.Public{}
+	for _, p := range publicPackages {
+		for name, routes := range p(pool, keys) {
+			publics[name] = append(publics[name], routes...)
+		}
 	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
 	more := map[string][]crud.Route{}
@@ -318,17 +342,27 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			routes, ok := more[name]
-			if !ok {
+			outside, open := publics[name]
+			if !ok && !open {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
 			}
 			router.Add("agent", routes...)
+			for _, p := range outside {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
 		}
+	}
+	var handler http.Handler = router
+	if served {
+		public.Handle("/", router)
+		handler = public
 	}
 	if socket {
 		// The browser's socket is no CRUD route: it stands in front of the router.
-		return realtime.New(context.Background(), st.hub, pool, router, st.env, st.meter)
+		return realtime.New(context.Background(), st.hub, pool, handler, st.env, st.meter)
 	}
-	return router, nil
+	return handler, nil
 }
 
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The
