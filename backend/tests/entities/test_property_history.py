@@ -23,7 +23,12 @@ from scadbuddy.entities.properties import EntityPropertyStore, PropertyPatch
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityStore, repoint_entity
 from scadbuddy.entities.sweep import sweep_orphan_entities
+from scadbuddy.filament.locations import LocationStore
+from scadbuddy.filament.models import SpoolCreate, SpoolPatch
+from scadbuddy.filament.spools import FilamentSpoolStore
 from scadbuddy.orders.models import Actor
+from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.printers.store import PrinterStore
 from tests.conftest import HistoryRows, PgPool
 
 pytestmark = pytest.mark.requires_postgres
@@ -123,34 +128,49 @@ def test_a_merge_publishes_each_key_it_moves(pg_pool: PgPool) -> None:
     }
 
 
-def _wait_for_the_log_lock(pool: PgPool) -> None:
-    """Until another backend waits for an advisory lock (the event log's)."""
+def _wait_for_the_log_lock(pool: PgPool, waiters: int = 1) -> None:
+    """Until ``waiters`` backends of this database wait for the event log's lock. A bigint
+    advisory key is ``classid`` (its high 32 bits) and ``objid`` (its low 32 bits) with
+    ``objsubid`` 1, so another test's advisory waiter under xdist is not counted."""
     deadline = time.monotonic() + 10
     with pool.connection() as conn:
         while time.monotonic() < deadline:
             row = conn.execute(
                 "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+                " AND classid = %s AND objid = %s AND objsubid = 1",
+                (EVENT_LOG_LOCK >> 32, EVENT_LOG_LOCK & 0xFFFFFFFF),
             ).fetchone()
-            if row is not None and row["n"]:
+            if row is not None and row["n"] >= waiters:
                 return
             time.sleep(0.02)
-    raise AssertionError("no writer waited for the event log's lock")
+    raise AssertionError(f"fewer than {waiters} writers waited for the event log's lock")
 
 
-def _row_is_free(pool: PgPool, entity_id: str) -> bool:
+def _row_is_free(pool: PgPool, table: str, row_id: str) -> bool:
     with pool.connection() as conn, conn.transaction():
         try:
-            conn.execute("SELECT 1 FROM entities WHERE id = %s FOR UPDATE NOWAIT", (entity_id,))
+            conn.execute(
+                f"SELECT 1 FROM {table} WHERE id = %s FOR UPDATE NOWAIT".encode(), (row_id,)
+            )
         except psycopg.errors.LockNotAvailable:
             return False
         return True
 
 
-@pytest.mark.parametrize("writer", ["apply_on", "merge", "sweep"])
+def _material(conn: Connection[DictRow]) -> str:
+    row = conn.execute("SELECT id FROM filament_materials WHERE name = 'PLA'").fetchone()
+    assert row is not None
+    return str(row["id"])
+
+
+@pytest.mark.parametrize("writer", ["apply_on", "merge", "sweep", "spool_update"])
 def test_a_writer_takes_the_log_lock_before_the_entity_row(pg_pool: PgPool, writer: str) -> None:
     """The lock order of `pg_events.py`: the log first, then rows. While another
-    transaction holds the log, the writer waits for it holding no entity row, so a merge
-    and a write on the merged entity cannot deadlock (40P01)."""
+    transaction holds the log, the writer waits for it holding no entity row (and a spool
+    save no spool row), so a merge and a write on the merged entity cannot deadlock
+    (40P01)."""
+    table = "entities"
     with pg_pool.connection() as conn:
         if writer == "apply_on":
             # `apply_on` checks its owner: a printer row whose id is the ref.
@@ -163,6 +183,12 @@ def test_a_writer_takes_the_log_lock_before_the_entity_row(pg_pool: PgPool, writ
         if writer == "apply_on":
             conn.execute("UPDATE entities SET ref = %s WHERE id = %s", (printer, entity_id))
         _entity(conn, "printer", "a", {"x": 1})
+        if writer == "spool_update":
+            table = "filament_spools"
+            spool = FilamentSpoolStore(pg_pool).create(
+                SpoolCreate(material_id=uuid.UUID(_material(conn))), actor="t"
+            )
+            entity_id = str(spool.id)
     errors: list[BaseException] = []
 
     def target() -> None:
@@ -174,6 +200,13 @@ def test_a_writer_takes_the_log_lock_before_the_entity_row(pg_pool: PgPool, writ
             elif writer == "merge":
                 with pg_pool.connection() as conn, conn.transaction():
                     repoint_entity(conn, "printer", "b", "a", AGENT)
+            elif writer == "spool_update":
+                FilamentSpoolStore(pg_pool).update(
+                    uuid.UUID(entity_id),
+                    SpoolPatch(properties={"lot_number": "L1"}),
+                    actor="t",
+                    by=AGENT,
+                )
             else:
                 entities = EntityStore(pg_pool)
                 sweep_orphan_entities(entities, EntityAttachmentStore(pg_pool, entities))
@@ -186,10 +219,60 @@ def test_a_writer_takes_the_log_lock_before_the_entity_row(pg_pool: PgPool, writ
             thread = threading.Thread(target=target)
             thread.start()
             _wait_for_the_log_lock(pg_pool)
-            assert _row_is_free(pg_pool, entity_id), f"{writer} locked the row before the log"
+            assert _row_is_free(pg_pool, table, entity_id), f"{writer} locked a row before the log"
         thread.join(timeout=10)
     assert not thread.is_alive()
     assert not errors, errors
+
+
+SERIAL = "01P00A000006949"
+
+
+def test_a_merge_and_a_spool_save_both_finish(pg_pool: PgPool) -> None:
+    """The deadlock of the Task 2 review: a printer merge holds the log and then locks the
+    gone printer's tray spools; a save of one of those spools with properties used to
+    lock the spool and then wait for the log. Queued in that order behind a held log, both
+    now finish, with no 40P01."""
+    printers = PrinterStore(pg_pool, None)
+    synthetic = printers.ensure_bambuddy(7, serial=None, name="H2C", model="H2C", by=PERSON)
+    mine = printers.create(PrinterCreate(serial=SERIAL, name="Mine"))
+    places, spools = LocationStore(pg_pool), FilamentSpoolStore(pg_pool)
+    gone_tray = places.ensure_ams(uuid.UUID(synthetic.id), 0, 1, label="gone A1")
+    places.ensure_ams(uuid.UUID(mine.id), 0, 1, label="kept A1")
+    with pg_pool.connection() as conn:
+        material = uuid.UUID(_material(conn))
+    spool = spools.create(SpoolCreate(material_id=material), actor="t")
+    places.move(spool.id, gone_tray.id, actor="t")
+    errors: list[BaseException] = []
+
+    def merge() -> None:
+        try:
+            printers.ensure_bambuddy(7, serial=SERIAL, name="H2C", model="H2C", by=AGENT)
+        except BaseException as e:  # reported on the test's thread
+            errors.append(e)
+
+    def save() -> None:
+        try:
+            spools.update(
+                spool.id, SpoolPatch(properties={"lot_number": "L1"}), actor="t", by=PERSON
+            )
+        except BaseException as e:  # reported on the test's thread
+            errors.append(e)
+
+    with pg_pool.connection() as holder:
+        with holder.transaction():
+            holder.execute("SELECT pg_advisory_xact_lock(%s)", (EVENT_LOG_LOCK,))
+            threads = [threading.Thread(target=merge), threading.Thread(target=save)]
+            threads[0].start()
+            _wait_for_the_log_lock(pg_pool, 1)
+            threads[1].start()
+            _wait_for_the_log_lock(pg_pool, 2)
+        for thread in threads:
+            thread.join(timeout=20)
+    assert not any(t.is_alive() for t in threads)
+    assert not errors, errors
+    saved = spools.get(spool.id)
+    assert saved is not None
 
 
 def test_history_lists_a_keys_changes_newest_first(
