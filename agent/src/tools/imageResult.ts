@@ -1,5 +1,5 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
-import { IMAGE_DATA_MAX } from '../sessions/images.js'
+import { IMAGE_DATA_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 import { sha256, sniffImage, WorkspaceError, workspaceOf } from '../workspace/store.js'
 import { DEFAULT_TOOL_IMAGE_INLINE_MAX } from './imageLimits.js'
 import { image, json, type ToolContext } from './registry.js'
@@ -32,15 +32,17 @@ export async function imageOrRef(bytes: Uint8Array, declaredType: string, ctx: T
   // An SVG is text the model reads, as it always was here.
   if (declaredType === 'image/svg+xml') return { content: [{ type: 'text', text: Buffer.from(bytes).toString('utf8') }] }
   const type = sniffImage(bytes)
-  if (type === undefined && !declaredType.startsWith('image/')) {
-    return json({ viewable: false, media_type: declaredType, size_bytes: bytes.byteLength, note: `A ${declaredType} file, not an image.` })
-  }
+  // A file that is not an image (a sample mesh, a DXF) is kept as it is, so its bytes stay reachable.
+  if (type === undefined && !declaredType.startsWith('image/')) return keepFile(bytes, declaredType, ctx, ref)
   if (type === undefined) {
+    const shown = (IMAGE_MEDIA_TYPES as readonly string[]).includes(declaredType)
     return json({
       viewable: false,
       media_type: declaredType,
       size_bytes: bytes.byteLength,
-      note: `A ${declaredType} image, which you cannot view: only PNG, JPEG, GIF and WebP can be shown to you.`,
+      note: shown
+        ? `Labelled ${declaredType}, but the bytes are not a valid ${declaredType} image.`
+        : `A ${declaredType} image, which you cannot view: only PNG, JPEG, GIF and WebP can be shown to you.`,
     })
   }
   const limit = await inlineLimit(ctx)
@@ -71,3 +73,20 @@ export async function imageOrRef(bytes: Uint8Array, declaredType: string, ctx: T
   }
 }
 
+/** A file that is not an image, kept in the workspace and answered as a pointer; with no workspace, a note. */
+async function keepFile(bytes: Uint8Array, mediaType: string, ctx: ToolContext, ref: ImageRef): Promise<CallToolResult> {
+  const notImage = `A ${mediaType} file, not an image.`
+  if (!ctx.workspace) return json({ viewable: false, media_type: mediaType, size_bytes: bytes.byteLength, note: `${notImage} There is no workspace to keep it in here.` })
+  const safe = ref.name.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 100) || 'file'
+  try {
+    const info = await ctx.workspace.write(workspaceOf(ctx), `files/${sha256(bytes).slice(0, 12)}-${safe}`, bytes, { mediaType, source: { route: ref.path } })
+    return json({
+      viewable: false,
+      workspace_file: { name: info.path, mediaType: info.mediaType, size: info.size, sha256: info.sha256 },
+      note: `${notImage} Kept in your workspace: workspace_read reads a text file, and a binary one can be attached or uploaded from there.`,
+    })
+  } catch (err) {
+    if (err instanceof WorkspaceError) return json({ viewable: false, media_type: mediaType, size_bytes: bytes.byteLength, note: `${notImage} Not kept: ${err.message}` })
+    throw err
+  }
+}

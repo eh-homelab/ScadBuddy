@@ -202,9 +202,11 @@ export const entityTools = [
     name: 'entity_attachment_get',
     label: "See an entity's file",
     description:
-      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo of up to " +
-      'about 3.75 MB as an image you can see (5 MB as base64, the most one image may be); a larger one, or any ' +
-      'other image type (HEIC, AVIF, TIFF, ...), only as a note that you cannot view it; an SVG, and any other file (a PDF ' +
+      "One file kept on an entity, as entity_attachment_list lists it: a PNG, JPEG, GIF or WebP photo up to the " +
+      'inline limit (Settings → Assistant → Images, 512 KB by default) as an image you can see; a larger one kept in ' +
+      'your workspace and answered as `workspace_file`, which workspace_read shows (one over 5 MB as base64 cannot be ' +
+      'viewed: ask for the thumbnail); any other image type (HEIC, AVIF, TIFF, ...) only as a note that you cannot ' +
+      'view it; an SVG, and any other file (a PDF ' +
       'manual, a receipt) kept in your workspace and answered as `workspace_file`: workspace_read reads a text ' +
       'file, and a binary one (a PDF) can be attached or uploaded from there but not read. `thumbnail` asks for a small WebP copy of a PNG, JPEG or WebP photo (404 for anything else): use ' +
       'it for a photo too large to view, or when a glance is enough.',

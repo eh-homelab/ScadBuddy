@@ -6,7 +6,7 @@ import { DEFAULT_TOOL_IMAGE_INLINE_MAX } from '../src/tools/imageLimits.js'
 import type { ToolContext } from '../src/tools/registry.js'
 import { firstText, services } from './helpers/mcp.js'
 import { createHash } from 'node:crypto'
-import type { WorkspaceFiles as SessionFiles } from '../src/workspace/store.js'
+import { WorkspaceError, type WorkspaceFiles as SessionFiles } from '../src/workspace/store.js'
 
 // Tool images (#7745): inline up to the limit, a workspace pointer over it, a note for a type the model cannot view.
 
@@ -68,11 +68,49 @@ describe('imageOrRef', () => {
     expect(answer.note).toMatch(/too large for you to view/)
   })
 
-  it('says a file that is not an image is not one', async () => {
-    const { ctx: c } = ctx(1000)
+  it('keeps a file that is not an image in the workspace, so its bytes stay reachable', async () => {
+    const { ctx: c, ws } = ctx(1000)
+    const answer = firstText(await imageOrRef(Buffer.from('solid x'), 'model/stl', c, { name: 'part.stl', path: '/api/v1/models/k/samples/part.stl' })) as {
+      note: string
+      workspace_file: { name: string; mediaType: string }
+    }
+    expect(answer.workspace_file).toMatchObject({ mediaType: 'model/stl' })
+    expect(answer.workspace_file.name).toMatch(/^files\/[0-9a-f]{12}-part\.stl$/)
+    expect(ws.written.get(answer.workspace_file.name)).toEqual(Buffer.from('solid x'))
+    expect(answer.note).toMatch(/^A model\/stl file, not an image\. Kept in your workspace/)
+  })
+
+  it('says a file that is not an image is not one when there is no workspace', async () => {
+    const { ctx: c } = ctx(1000, false)
     const answer = firstText(await imageOrRef(Buffer.from('solid x'), 'model/stl', c, REF)) as { note: string }
     expect(answer).toMatchObject({ viewable: false, media_type: 'model/stl' })
-    expect(answer.note).toBe('A model/stl file, not an image.')
+    expect(answer.note).toMatch(/^A model\/stl file, not an image\./)
+  })
+
+  it('says bytes labelled as a viewable type that are not that image are not valid', async () => {
+    const { ctx: c } = ctx(1000)
+    const answer = firstText(await imageOrRef(Buffer.from('not a png at all'), 'image/png', c, REF)) as { note: string }
+    expect(answer).toMatchObject({ viewable: false, media_type: 'image/png' })
+    expect(answer.note).toBe('Labelled image/png, but the bytes are not a valid image/png image.')
+  })
+
+  it('answers why an image or a file was not kept when the workspace refuses it', async () => {
+    const { ctx: c } = ctx(1000)
+    const refusing = {
+      ...c,
+      workspace: {
+        async write() {
+          throw new WorkspaceError('too_large', 'the file is over workspace_file_max_bytes')
+        },
+      } as unknown as SessionFiles,
+    } as ToolContext
+    const image = firstText(await imageOrRef(png(2000), 'image/png', refusing, REF)) as Record<string, unknown>
+    expect(image).toMatchObject({ inline: false, size_bytes: 2000 })
+    expect(image.note).toMatch(/^Not kept: .*workspace_file_max_bytes/)
+    expect(image).not.toHaveProperty('workspace_file')
+    const file = firstText(await imageOrRef(Buffer.from('solid x'), 'model/stl', refusing, REF)) as Record<string, unknown>
+    expect(file.note).toMatch(/Not kept: .*workspace_file_max_bytes/)
+    expect(file).not.toHaveProperty('workspace_file')
   })
 
   it('answers a HEIC photo as a note, an SVG as its text', async () => {
