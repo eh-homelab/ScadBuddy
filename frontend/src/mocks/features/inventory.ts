@@ -129,8 +129,21 @@ function fresh() {
     moves: [] as MockMove[],
     /** Each request body the routes took, by route name, for the tests. */
     bodies: [] as { route: string; body: unknown }[],
+    /** Each write's `Idempotency-Key`, by route name, for the tests. */
+    keys: [] as { route: string; key: string | null }[],
+    /** #6949 K1 — the writes answered 202 (`slowNextWrite`), running until `settleSlowWrites`. */
+    slow: [] as SlowWrite[],
     counter: 0,
   }
+}
+
+/** A write the mock did at once but answered 202, as Go does past the API's wait. */
+interface SlowWrite {
+  id: string
+  key: string | null
+  created_at: string
+  result: Record<string, unknown>
+  settled: boolean
 }
 
 export const inventoryMock = fresh()
@@ -151,6 +164,15 @@ const below = (value: string, than = '0') => cmpDecimals(value, than) < 0
 let recostBusy = false
 export function failNextRecost(): void {
   recostBusy = true
+}
+/** #6949 K1 — the next `n` writes answer 202; their operations run until `settleSlowWrites`. */
+let slowWrites = 0
+export function slowNextWrite(n = 1): void {
+  slowWrites = n
+}
+/** Ends every slow write's operation with its result. */
+export function settleSlowWrites(): void {
+  for (const op of inventoryMock.slow) op.settled = true
 }
 
 // -- seeds ----------------------------------------------------------------------------------
@@ -224,6 +246,7 @@ export function reset(): void {
   Object.assign(inventoryMock, fresh())
   seeded = false
   recostBusy = false
+  slowWrites = 0
   ready()
 }
 
@@ -440,10 +463,26 @@ function refused(request: Request, error: unknown) {
   return problem(request, error.status, error.message, error.base + error.code, { code: error.code })
 }
 
-/** The answer of `run()`, or its refusal as the route's problem. */
+const accepted = (op: SlowWrite, repeated: boolean) =>
+  HttpResponse.json({ id: op.id, kind: 'inventory.write', subject: '', status: 'running', created_at: op.created_at, repeated }, { status: 202 })
+
+/**
+ * The answer of `run()`, or its refusal as the route's problem. A write while `slowNextWrite`
+ * is set runs at once and answers 202; the same `Idempotency-Key` again attaches to it.
+ */
 async function answer(request: Request, run: () => object | Promise<object>, status = 200) {
+  const key = request.headers.get('Idempotency-Key')
+  const running = key ? inventoryMock.slow.find((op) => op.key === key && !op.settled) : undefined
+  if (running) return accepted(running, true)
   try {
-    return HttpResponse.json((await run()) as Record<string, unknown>, { status })
+    const result = (await run()) as Record<string, unknown>
+    if (request.method !== 'GET' && slowWrites > 0) {
+      slowWrites -= 1
+      const op: SlowWrite = { id: `op-${id()}`, key, created_at: now(), result, settled: false }
+      inventoryMock.slow.push(op)
+      return accepted(op, false)
+    }
+    return HttpResponse.json(result, { status })
   } catch (error) {
     return refused(request, error)
   }
@@ -459,9 +498,9 @@ function findItem(itemId: string): MockItem {
 function counted(itemId: string, tracking: 'lot' | 'unit'): MockItem {
   const item = findItem(itemId)
   const has = trackingOf(item)
-  if (has === 'none') throw new Refused(409, 'item_not_counted', "the item's kind is not counted (tracking `none`): no lots, units or moves")
+  if (has === 'none') throw new Refused(409, 'step_not_applicable', "the item's kind is not counted (tracking `none`): no lots, units or moves")
   if (has === 'filament') throw new Refused(409, 'filament_item_refused', 'filament items and their offers wait for the filament phase (#7068)')
-  if (has !== tracking) throw new Refused(409, 'wrong_tracking', 'a lot call on an item counted in units, or a unit call on one counted in lots')
+  if (has !== tracking) throw new Refused(409, 'wrong_counting', 'a lot call on an item counted in units, or a unit call on one counted in lots')
   return item
 }
 
@@ -722,6 +761,7 @@ const params = (request: Request) => new URL(request.url).searchParams
 async function body<T>(request: Request, route: string): Promise<T> {
   const read = (await request.json()) as T
   inventoryMock.bodies.push({ route, body: read })
+  inventoryMock.keys.push({ route, key: request.headers.get('Idempotency-Key') })
   return read
 }
 
@@ -732,6 +772,15 @@ export const handlers = [
   http.all(`${B}/*`, () => {
     ready()
   }),
+  // -- operations (#6949 K1): a slow write's, running until `settleSlowWrites`
+  http.get(`${B}/operations/:id`, ({ request, params: p }) =>
+    answer(request, () => {
+      const op = inventoryMock.slow.find((o) => o.id === p.id)
+      if (!op) throw new Refused(404, 'operation_not_found', `no operation '${String(p.id)}'`)
+      const base = { id: op.id, kind: 'inventory.write', subject: '', created_at: op.created_at }
+      return op.settled ? { ...base, status: 'succeeded', finished_at: now(), result: op.result } : { ...base, status: 'running' }
+    }),
+  ),
   // -- kinds
   http.get(`${B}/kinds`, ({ request }) => {
     const archived = params(request).get('archived') === 'true'
@@ -749,7 +798,8 @@ export const handlers = [
           id: input.id,
           name: input.name,
           parent_id: input.parent_id ?? null,
-          tracking: input.tracking,
+          // #6949 K1: a kind sent with no tracking is counted as its parent is.
+          tracking: input.tracking ?? (input.parent_id ? kindOf(input.parent_id)?.tracking : undefined) ?? 'none',
           uom: input.uom ?? 'each',
           attribute_schema: input.attribute_schema ?? { type: 'object', properties: {} },
           life_basis: input.life_basis ?? 'none',

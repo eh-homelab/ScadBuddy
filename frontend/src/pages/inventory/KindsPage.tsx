@@ -1,7 +1,6 @@
 import { ChevronLeftIcon, PlusIcon } from 'lucide-react'
 import { useId, useState, type FormEvent } from 'react'
 import { Link } from 'react-router'
-import { ApiError } from '../../api/client'
 import { PropertyKeyTable } from '../../components/entities/PropertyKeyTable'
 import { namedTwice, rowsOf, schemaOf, type KeyRow } from '../../components/entities/propertyKeys'
 import { inventoryPaths } from '../../lib/inventoryLinks'
@@ -14,8 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { inventoryApi, type ItemKind, type KindPatch, type Tracking } from './api'
 import { TRACKING_LABELS } from './format'
 import { kindTree, type KindNode } from './kindTree'
+import { StillWorking } from './StillWorking'
+import { activityHref, failed, usePress } from './usePress'
 
-const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
 const NONE = '__none'
 type LifeBasis = ItemKind['life_basis']
 const LIFE_LABELS: Record<LifeBasis, string> = { none: 'No service life', hours: 'In print hours', months: 'In months' }
@@ -34,12 +34,13 @@ export function KindsPage() {
   const [adding, setAdding] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const archiving = usePress()
   const all = kinds.data ?? []
 
   async function archive(kind: ItemKind) {
     setError(null)
     try {
-      await (kind.archived_at ? inventoryApi.restoreKind(kind.id) : inventoryApi.archiveKind(kind.id))
+      await archiving.press((o) => (kind.archived_at ? inventoryApi.restoreKind(kind.id, o) : inventoryApi.archiveKind(kind.id, o)), `${kind.archived_at ? 'restore' : 'archive'}:${kind.id}`)
       kinds.refresh()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be changed. Try again.'))
@@ -75,6 +76,7 @@ export function KindsPage() {
           <Checkbox checked={showArchived} aria-label="Show archived kinds" onCheckedChange={(next) => setShowArchived(next === true)} />
           Show archived
         </label>
+        {archiving.running && <StillWorking id={archiving.running.id} href={activityHref(archiving.running.id)} />}
         {error && (
           <p role="alert" className="mb-2 text-warn">
             {error}
@@ -232,7 +234,7 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
   const [uom, setUom] = useState('each')
   const [life, setLife] = useState<LifeBasis>('none')
   const [saleable, setSaleable] = useState(false)
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
   // Until the person picks one, a new kind is counted as its parent is.
   const parentTracking = kinds.find((k) => k.id === parent)?.tracking
@@ -242,14 +244,12 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
     event.preventDefault()
     if (!/^[a-z][a-z0-9_]{0,39}$/.test(kindId.trim())) return setError('The id is lower-case letters, digits and _, starting with a letter, such as magnet.')
     if (!name.trim()) return setError('Give the kind a name.')
-    setBusy(true)
     setError(null)
     try {
-      await inventoryApi.createKind({ id: kindId.trim(), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable })
+      await press((o) => inventoryApi.createKind({ id: kindId.trim(), name: name.trim(), parent_id: parent, tracking: counted, uom: uom.trim() || 'each', life_basis: life, saleable }, o))
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be added. Try again.'))
-      setBusy(false)
     }
   }
 
@@ -294,6 +294,7 @@ function AddKindForm({ kinds, onDone, onCancel }: { kinds: ItemKind[]; onDone: (
           Cancel
         </Button>
       </div>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       <FormError error={error} />
     </form>
   )
@@ -308,7 +309,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
   const [life, setLife] = useState<LifeBasis>(kind.life_basis)
   const [saleable, setSaleable] = useState(kind.saleable)
   const [rows, setRows] = useState<KeyRow[]>(() => rowsOf(kind.attribute_schema))
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
   // A built-in kind, or one with items, keeps how it is counted (409 `kind_in_use`).
   const trackingFixed = kind.builtin || kind.item_count > 0 || kind.tracking === 'filament'
@@ -319,14 +320,12 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
     if (namedTwice(rows)) return setError('Each key is named once.')
     const body: KindPatch = { name: name.trim(), parent_id: parent, uom: uom.trim() || 'each', life_basis: life, saleable, attribute_schema: schemaOf(kind.attribute_schema, rows) }
     if (tracking !== kind.tracking) body.tracking = tracking
-    setBusy(true)
     setError(null)
     try {
-      await inventoryApi.patchKind(kind.id, body)
+      await press((o) => inventoryApi.patchKind(kind.id, body, o))
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The kind could not be saved. Try again.'))
-      setBusy(false)
     }
   }
 
@@ -371,6 +370,7 @@ function EditKindForm({ kind, kinds, onDone, onCancel }: { kind: ItemKind; kinds
           Cancel
         </Button>
       </div>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       <FormError error={error} />
     </form>
   )

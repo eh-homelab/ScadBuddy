@@ -1,7 +1,6 @@
 import { PlusIcon } from 'lucide-react'
 import { useId, useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
-import { ApiError } from '../../api/client'
 import { useMoney } from '../../components/filament/purchasing/useMoney'
 import { PartRules } from '../../components/orders/PartRules'
 import { DataTable, type Column } from '../../components/records/DataTable'
@@ -15,6 +14,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { failed } from './usePress'
 import { inventoryApi, type Item, type ItemKind } from './api'
 import { dec, qtyText, valueText } from './format'
 import { kindTree, type KindNode } from './kindTree'
@@ -197,7 +197,7 @@ function NewItemForm({ kinds, kind, onCancel }: { kinds: ItemKind[]; kind: strin
       const made = await inventoryApi.createItem({ kind_id: kindId, name: name.trim(), ...(manufacturer.trim() ? { manufacturer: manufacturer.trim() } : {}), ...(low ? { low_stock: low } : {}) })
       void navigate(inventoryPaths.item(made.id))
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'The item could not be added. Try again.')
+      setError(failed(cause, 'The item could not be added. Try again.'))
       setBusy(false)
     }
   }

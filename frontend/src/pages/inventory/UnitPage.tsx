@@ -13,10 +13,12 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { inventoryApi, type Unit, type UnitStatus } from './api'
-import { dayText, lifeText, minorText, STATUS_LABELS } from './format'
+import { inventoryApi, type SettableStatus, type Unit } from './api'
+import { dayText, lifeText, minorText, SETTABLE_STATUSES, STATUS_LABELS } from './format'
 import { PlaceSelect, PlacesError } from './PlaceSelect'
 import { placeName, usePlaces, type Place } from './places'
+import { StillWorking } from './StillWorking'
+import { activityHref, failed, usePress } from './usePress'
 
 /**
  * #7067 — one unit at `/inventory/units/:id`: a nozzle, a build plate, a tool. Its status and
@@ -126,22 +128,19 @@ function DetailsForm({ unit, places, onChanged }: { unit: Unit; places: Place[];
   const [name, setName] = useState(unit.name)
   const [serial, setSerial] = useState(unit.serial ?? '')
   const [place, setPlace] = useState<string | null>(unit.location_id)
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    setBusy(true)
     setError(null)
     setSaved(false)
     try {
-      onChanged(await inventoryApi.patchUnit(unit.id, { name: name.trim(), serial: serial.trim() || null, location_id: place }))
+      onChanged(await press((o) => inventoryApi.patchUnit(unit.id, { name: name.trim(), serial: serial.trim() || null, location_id: place }, o)))
       setSaved(true)
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'The unit could not be saved. Try again.')
-    } finally {
-      setBusy(false)
+      setError(failed(cause, 'The unit could not be saved. Try again.'))
     }
   }
 
@@ -170,6 +169,7 @@ function DetailsForm({ unit, places, onChanged }: { unit: Unit; places: Place[];
         )}
       </div>
       <p className="text-muted-foreground">A serial is unique within the item. No stock moves.</p>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       {error && (
         <p role="alert" className="text-warn">
           {error}
@@ -181,22 +181,20 @@ function DetailsForm({ unit, places, onChanged }: { unit: Unit; places: Place[];
 
 function StatusForm({ unit, onChanged }: { unit: Unit; onChanged: (unit: Unit) => void }) {
   const id = useId()
-  const [status, setStatus] = useState<UnitStatus>(unit.status)
+  const [status, setStatus] = useState<SettableStatus | null>(unit.status === 'ended' ? null : unit.status)
   const [note, setNote] = useState('')
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    setBusy(true)
+    if (!status) return
     setError(null)
     try {
-      onChanged(await inventoryApi.setUnitStatus(unit.id, { status, ...(note.trim() ? { note: note.trim() } : {}) }))
+      onChanged(await press((o) => inventoryApi.setUnitStatus(unit.id, { status, ...(note.trim() ? { note: note.trim() } : {}) }, o), status))
       setNote('')
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'The status could not be changed. Try again.')
-    } finally {
-      setBusy(false)
+      setError(failed(cause, 'The status could not be changed. Try again.'))
     }
   }
 
@@ -205,12 +203,12 @@ function StatusForm({ unit, onChanged }: { unit: Unit; onChanged: (unit: Unit) =
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${id}-status`}>New status</Label>
-          <Select value={status} onValueChange={(next) => setStatus(next as UnitStatus)}>
+          <Select value={status ?? undefined} onValueChange={(next) => setStatus(next as SettableStatus)}>
             <SelectTrigger id={`${id}-status`} aria-label="New status" className="w-40">
               <SelectValue />
             </SelectTrigger>
             <SelectContent position="popper">
-              {(Object.keys(STATUS_LABELS) as UnitStatus[]).map((value) => (
+              {SETTABLE_STATUSES.map((value) => (
                 <SelectItem key={value} value={value}>
                   {STATUS_LABELS[value]}
                 </SelectItem>
@@ -222,11 +220,12 @@ function StatusForm({ unit, onChanged }: { unit: Unit; onChanged: (unit: Unit) =
           <Label htmlFor={`${id}-note`}>Note</Label>
           <Input id={`${id}-note`} value={note} onChange={(e) => setNote(e.target.value)} className="w-64" />
         </div>
-        <Button type="submit" size="sm" disabled={busy || status === unit.status}>
+        <Button type="submit" size="sm" disabled={busy || !status || status === unit.status}>
           Change status
         </Button>
       </div>
       <p className="text-muted-foreground">Leaving stock takes the unit out at its cost; coming back to stock puts it back.</p>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       {error && (
         <p role="alert" className="text-warn">
           {error}

@@ -78,7 +78,7 @@ describe('KindsPage (#7067)', () => {
     const { user } = renderPage(<KindsPage />)
     const tree = await kindList()
     await user.click(within(tree).getByRole('button', { name: 'Archive Hardware' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent("the kind's items")
+    expect(await screen.findByRole('alert')).toHaveTextContent('The kind has items')
     await user.click(within(tree).getByRole('button', { name: 'Archive Tool' }))
     await waitFor(() => expect(within(screen.getByRole('list', { name: 'Item kinds' })).queryByRole('link', { name: 'Tool' })).toBeNull())
   })

@@ -18,8 +18,8 @@ import { inventoryApi, type Item, type ItemKind } from './api'
 import { dec, lifeText, qtyText, valueText } from './format'
 import { ItemOffers } from './ItemOffers'
 import { LotStock, MovesTable, UnitStock } from './ItemStock'
-
-const failed = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.detail : fallback)
+import { StillWorking } from './StillWorking'
+import { activityHref, failed, usePress } from './usePress'
 
 /** The id an anchor names, without its prefix, or null. */
 function anchored(hashId: string | null, prefix: string): string | null {
@@ -46,6 +46,7 @@ export function ItemPage() {
   const moved = useMemo(() => new Set((moves.data ?? []).filter((m) => m.lot_id && m.kind !== 'receive').map((m) => m.lot_id!)), [moves.data])
   const [editing, setEditing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const archiving = usePress()
   const current = item.data
 
   /** After a change: everything is read again in the background, the page staying up meanwhile. */
@@ -59,7 +60,7 @@ export function ItemPage() {
   async function archive(next: boolean) {
     setError(null)
     try {
-      await (next ? inventoryApi.archiveItem(id) : inventoryApi.restoreItem(id))
+      await archiving.press((o) => (next ? inventoryApi.archiveItem(id, o) : inventoryApi.restoreItem(id, o)), next ? 'archive' : 'restore')
       changed()
     } catch (cause) {
       setError(failed(cause, 'The item could not be changed. Try again.'))
@@ -117,6 +118,7 @@ export function ItemPage() {
           {current.archived_at ? 'Restore' : 'Archive'}
         </Button>
       </header>
+      {archiving.running && <StillWorking id={archiving.running.id} href={activityHref(archiving.running.id)} />}
       {error && (
         <p role="alert" className="mb-3 text-[13px] text-warn">
           {error}
@@ -223,7 +225,7 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
   const [note, setNote] = useState(item.note)
   const [lifeHours, setLifeHours] = useState(item.life_hours ?? '')
   const [lifeMonths, setLifeMonths] = useState(item.life_months === null ? '' : String(item.life_months))
-  const [busy, setBusy] = useState(false)
+  const { busy, running, press } = usePress()
   const [error, setError] = useState<string | null>(null)
 
   async function submit(event: FormEvent) {
@@ -234,10 +236,12 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
     if (hours && !(/^\d+(\.\d{1,2})?$/.test(hours) && Number(hours) > 0)) return setError('The life in print hours is a number above 0, such as 500, or empty.')
     const months = lifeMonths.trim()
     if (months && !(/^\d+$/.test(months) && Number(months) > 0 && Number(months) <= 1200)) return setError('The life in months is a whole number from 1 to 1200, or empty.')
-    setBusy(true)
     setError(null)
     try {
-      await inventoryApi.patchItem(item.id, {
+      await press((o) =>
+        inventoryApi.patchItem(
+          item.id,
+          {
         name: name.trim(),
         manufacturer: manufacturer.trim(),
         low_stock: lowStock.trim(),
@@ -245,11 +249,13 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
         note,
         life_hours: hours || null,
         life_months: months ? Number(months) : null,
-      })
+          },
+          o,
+        ),
+      )
       onDone()
     } catch (cause) {
       setError(failed(cause, 'The item could not be saved. Try again.'))
-      setBusy(false)
     }
   }
 
@@ -304,6 +310,7 @@ function DetailsForm({ item, kind, onDone, onCancel }: { item: Item; kind: ItemK
           Cancel
         </Button>
       </div>
+      {running && <StillWorking id={running.id} href={activityHref(running.id)} />}
       {error && (
         <p role="alert" className="text-warn">
           {error}

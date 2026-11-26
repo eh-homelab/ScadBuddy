@@ -3,9 +3,15 @@
  * inventory.py`, `inventory_stock.py`), typed from the generated `schema.d.ts`. A quantity or
  * a cost is a decimal string on the wire; a cost is in minor units of the shop currency
  * (`orders_currency`), and an offer's pack price is a major amount in its own currency.
+ *
+ * #6949 K1 — a kind, item, lot, unit or move write runs as scadbuddy-core's activity: it goes
+ * through `command`, with an `Idempotency-Key`, and a slow one answers 202 with an operation,
+ * followed at `GET /inventory/operations/{id}` to its result or its problem. `onAccepted`
+ * hears that 202; a press while the write runs passes the same `key`, so it attaches.
  */
-import { request } from '../../api/client'
+import { command, request } from '../../api/client'
 import type { components } from '../../api/schema'
+import type { OperationAccepted } from '../../api/types'
 
 type Schemas = components['schemas']
 
@@ -28,6 +34,8 @@ export type Unit = Schemas['Unit']
 export type UnitPatch = Schemas['UnitPatch']
 export type UnitStatus = Unit['status']
 export type UnitStatusInput = Schemas['UnitStatusInput']
+/** A status a person can set: `ended` is a status only a unit's life sets. */
+export type SettableStatus = UnitStatusInput['status']
 export type UseInput = Schemas['UseInput']
 export type CountInput = Schemas['CountInput']
 export type Move = Schemas['Move']
@@ -46,6 +54,15 @@ function query(params: Record<string, string | number | boolean | null | undefin
 
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
+/** The press of one write: its key (kept while it runs) and who hears its 202. */
+export interface WriteOptions {
+  key?: string
+  onAccepted?: (operation: OperationAccepted) => void
+}
+
+const write = <T>(path: string, init: RequestInit, { key, onAccepted }: WriteOptions = {}) => command<T>(path, init, `${BASE}/operations`, key, onAccepted)
+const post: RequestInit = { method: 'POST' }
+
 export interface ItemFilter {
   kind?: string | null
   q?: string | null
@@ -55,21 +72,21 @@ export interface ItemFilter {
 
 export const inventoryApi = {
   kinds: (archived = false) => request<{ kinds: ItemKind[] }>(`${BASE}/kinds${query({ archived })}`).then((body) => body.kinds),
-  createKind: (body: KindInput) => request<ItemKind>(`${BASE}/kinds`, json('POST', body)),
+  createKind: (body: KindInput, o?: WriteOptions) => write<ItemKind>(`${BASE}/kinds`, json('POST', body), o),
   /** Only what is sent changes; a bad `attribute_schema` is 422 `bad_property_schema`. */
-  patchKind: (id: string, body: KindPatch) => request<ItemKind>(`${BASE}/kinds/${seg(id)}`, json('PATCH', body)),
-  archiveKind: (id: string) => request<ItemKind>(`${BASE}/kinds/${seg(id)}/archive`, { method: 'POST' }),
-  restoreKind: (id: string) => request<ItemKind>(`${BASE}/kinds/${seg(id)}/restore`, { method: 'POST' }),
+  patchKind: (id: string, body: KindPatch, o?: WriteOptions) => write<ItemKind>(`${BASE}/kinds/${seg(id)}`, json('PATCH', body), o),
+  archiveKind: (id: string, o?: WriteOptions) => write<ItemKind>(`${BASE}/kinds/${seg(id)}/archive`, post, o),
+  restoreKind: (id: string, o?: WriteOptions) => write<ItemKind>(`${BASE}/kinds/${seg(id)}/restore`, post, o),
   kindSchema: (id: string) => request<KindSchema>(`${BASE}/kinds/${seg(id)}/schema`),
 
   /** `kind` takes the kind with its descendants. */
   items: (filter: ItemFilter = {}) =>
     request<{ items: Item[] }>(`${BASE}/items${query({ kind: filter.kind, q: filter.q?.trim(), low: filter.low, archived: filter.archived })}`).then((body) => body.items),
   item: (id: string) => request<Item>(`${BASE}/items/${seg(id)}`),
-  createItem: (body: ItemInput) => request<Item>(`${BASE}/items`, json('POST', body)),
-  patchItem: (id: string, body: ItemPatch) => request<Item>(`${BASE}/items/${seg(id)}`, json('PATCH', body)),
-  archiveItem: (id: string) => request<Item>(`${BASE}/items/${seg(id)}/archive`, { method: 'POST' }),
-  restoreItem: (id: string) => request<Item>(`${BASE}/items/${seg(id)}/restore`, { method: 'POST' }),
+  createItem: (body: ItemInput, o?: WriteOptions) => write<Item>(`${BASE}/items`, json('POST', body), o),
+  patchItem: (id: string, body: ItemPatch, o?: WriteOptions) => write<Item>(`${BASE}/items/${seg(id)}`, json('PATCH', body), o),
+  archiveItem: (id: string, o?: WriteOptions) => write<Item>(`${BASE}/items/${seg(id)}/archive`, post, o),
+  restoreItem: (id: string, o?: WriteOptions) => write<Item>(`${BASE}/items/${seg(id)}/restore`, post, o),
 
   itemOffers: (itemId: string) => request<{ offers: Offer[] }>(`${BASE}/items/${seg(itemId)}/offers`).then((body) => body.offers),
   supplierOffers: (supplierId: string) => request<{ offers: Offer[] }>(`${BASE}/suppliers/${seg(supplierId)}/offers`).then((body) => body.offers),
@@ -80,18 +97,18 @@ export const inventoryApi = {
 
   lots: (itemId: string) => request<{ lots: Lot[] }>(`${BASE}/items/${seg(itemId)}/lots`).then((body) => body.lots),
   lot: (id: string) => request<Lot>(`${BASE}/lots/${seg(id)}`),
-  receiveLot: (itemId: string, body: ReceiveLot) => request<Lot>(`${BASE}/items/${seg(itemId)}/lots`, json('POST', body)),
+  receiveLot: (itemId: string, body: ReceiveLot, o?: WriteOptions) => write<Lot>(`${BASE}/items/${seg(itemId)}/lots`, json('POST', body), o),
   /** A cost set here moves no past move until the lot is re-costed. */
-  patchLot: (id: string, body: LotPatch) => request<Lot>(`${BASE}/lots/${seg(id)}`, json('PATCH', body)),
+  patchLot: (id: string, body: LotPatch, o?: WriteOptions) => write<Lot>(`${BASE}/lots/${seg(id)}`, json('PATCH', body), o),
   recostLot: (id: string) => request<RecostResult>(`${BASE}/lots/${seg(id)}/recost`, { method: 'POST' }),
-  use: (itemId: string, body: UseInput) => request<{ moves: Move[] }>(`${BASE}/items/${seg(itemId)}/use`, json('POST', body)).then((b) => b.moves),
-  count: (itemId: string, body: CountInput) => request<{ moves: Move[] }>(`${BASE}/items/${seg(itemId)}/count`, json('POST', body)).then((b) => b.moves),
+  use: (itemId: string, body: UseInput, o?: WriteOptions) => write<{ moves: Move[] }>(`${BASE}/items/${seg(itemId)}/use`, json('POST', body), o).then((b) => b.moves),
+  count: (itemId: string, body: CountInput, o?: WriteOptions) => write<{ moves: Move[] }>(`${BASE}/items/${seg(itemId)}/count`, json('POST', body), o).then((b) => b.moves),
 
   units: (itemId: string) => request<{ units: Unit[] }>(`${BASE}/items/${seg(itemId)}/units`).then((body) => body.units),
   unit: (id: string) => request<Unit>(`${BASE}/units/${seg(id)}`),
-  receiveUnits: (itemId: string, body: ReceiveUnits) => request<{ units: Unit[] }>(`${BASE}/items/${seg(itemId)}/units`, json('POST', body)).then((b) => b.units),
-  patchUnit: (id: string, body: UnitPatch) => request<Unit>(`${BASE}/units/${seg(id)}`, json('PATCH', body)),
-  setUnitStatus: (id: string, body: UnitStatusInput) => request<Unit>(`${BASE}/units/${seg(id)}/status`, json('POST', body)),
+  receiveUnits: (itemId: string, body: ReceiveUnits, o?: WriteOptions) => write<{ units: Unit[] }>(`${BASE}/items/${seg(itemId)}/units`, json('POST', body), o).then((b) => b.units),
+  patchUnit: (id: string, body: UnitPatch, o?: WriteOptions) => write<Unit>(`${BASE}/units/${seg(id)}`, json('PATCH', body), o),
+  setUnitStatus: (id: string, body: UnitStatusInput, o?: WriteOptions) => write<Unit>(`${BASE}/units/${seg(id)}/status`, json('POST', body), o),
 
   moves: (filter: { item_id?: string; lot_id?: string; unit_id?: string; limit?: number }) => request<{ moves: Move[] }>(`${BASE}/moves${query(filter)}`).then((body) => body.moves),
 }
