@@ -141,6 +141,7 @@ Where the accounts live:
 | 5 | `tools/go/fleetd` (new binary module) | The machine service (§6.6) |
 | 6 | `tools/go/fleet`, `tools/go/fleetchat` | The registry and rotations in the fleet's HTTP API and MCP tools, and the continue message (§6.7, §6.8) |
 | 7 | eh-homelab/clusters, the project-ops plugin | Routes, proofs and the install (§7) |
+| 8 | `tools/go/core`, `tools/go/fleetd` | Rotation targets, and the `github` mode that sets `CLAUDE_CODE_OAUTH_TOKEN` (§6.9) |
 
 ## 6. Design
 
@@ -272,6 +273,48 @@ Where the accounts live:
   account.
 - No route of the fleet server reveals or accepts a secret.
 
+### 6.9 Rotation targets, and GitHub secrets
+
+The owner asked on 2026-11-26 for a rotation target that is a GitHub Actions secret, at repo
+or org level **(owner)**, to set `CLAUDE_CODE_OAUTH_TOKEN` **(owner)**. Every Claude workflow
+in this repo reads that secret (`claude-code-review.yml`, `claude.yml`, `issue-intake.yml`), and
+the review workflow's comments say it is org-wide. On 2026-11-26 the review failed on every PR
+with "You've hit your 5-hour limit · resets 8:20pm (UTC)" in the gate's log (run 45864233589),
+so a person had to wait for the reset or set the secret by hand.
+
+- A **rotation target** is the place a credential is put. Two kinds **(call: names)**:
+  - `machine_login`: a config dir on a machine (§6.6). It takes `claude_login` rows.
+  - `github_secret`: an Actions secret, given as owner, repo (none for an org secret), secret
+    name and, for an org secret, its visibility (`all`, `private` or `selected` with the repo
+    list). It takes `claude_oauth_token` rows (a `claude setup-token` token, which the
+    action takes as `claude_code_oauth_token`), or `anthropic_api_key` rows for a secret that
+    names one.
+- Targets are rows in core (`fleet_rotation_targets`, with `created_at` and `updated_at`). Each
+  has the kinds it takes, the credential it holds now, when it was last set, and for a GitHub
+  target the workflows that read it. A person creates them through a settings route; `fleetd`
+  creates its own `machine_login` targets when it registers a config dir **(call)**.
+- A `claude_oauth_token` has no refresh token, so one row can be set in several targets at once.
+  It takes no lease. A `claude_login` keeps its lease (§6.1).
+- **Who writes a GitHub secret.** An in-cluster `fleetd` in `github` mode **(call)**, with no
+  machine targets. It authenticates as a GitHub App made for this alone, with only the
+  `secrets` (repo) and `organization_secrets` (org) write permissions, installed on the owners
+  that hold targets **(call)**. Its private key is a 1Password item mounted in that pod. The
+  pod holds no database secret. It reaches core as a `fleet-rotator` caller with its own proof,
+  as the machines do.
+- **Writing.** Read the target's public key (`GET …/actions/secrets/public-key`, or the org's),
+  seal the token with it (libsodium sealed box), and `PUT` the secret with the key id, and for
+  an org secret its visibility. Never log the token or the sealed value. Record the rotation.
+- **Detecting a limit.** The pod watches the completed, failed runs of the target's workflows.
+  #7971's GitHub stream gives these as events once it exists; until then it lists them from
+  the Actions API every 2 minutes with ETags **(call)**. It reads the failed job's log for the
+  limit text, and takes the reset from it (§6.5). The text names `(UTC)` there. The time also
+  cools the credential in the pool, so a machine and the agent skip it too.
+- **Continue and the check.** After it sets the secret, it re-runs the failed jobs of each run
+  that failed on the limit (`POST …/actions/runs/{id}/rerun-failed-jobs`). A re-run that gets
+  past the model call passes the check. A new limit text fails it, and the next credential is
+  set. It never re-runs a job more than once per rotation **(call)**.
+- No route of the fleet chat server takes or returns a token, as in §6.2.
+
 ## 7. Deploying
 
 - The `fleet-rotator` routes must be reachable from the machines, on ScadBuddy's LAN host, with
@@ -281,6 +324,8 @@ Where the accounts live:
   hash.
 - `fleetd` is published as a binary for linux/amd64 on a release tag, beside its image (every Go
   CLI has a Dockerfile, root `CLAUDE.md`). The project-ops plugin documents the systemd user unit.
+- The `github` mode runs from that image as one Deployment in the cluster, with the rotator
+  GitHub App's key and its own `fleet-rotator` proof (§6.9).
 
 ## 8. What is left to the builder
 
@@ -307,3 +352,7 @@ Epic: #7981. Item 12 is under the fleet UI epic #7972.
 10. #7991: The fleet's HTTP API and `fleet_sessions` (§6.8).
 11. #7993: Deploying (§7).
 12. #7994: The UI's session, machine and credential view, under the fleet UI epic #7972.
+13. #8011: Rotation targets in core (§6.9).
+14. #8012: `fleetd` `github` mode: set an Actions secret through a GitHub App (§6.9).
+15. #8013: `fleetd` `github` mode: detect a limit in failed runs, rotate, re-run and check (§6.9).
+16. #8014: Deploy the `github` mode and its GitHub App (§6.9, §7).
