@@ -1014,7 +1014,6 @@ function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: Ar
   }
 }
 
-/** `_reading_notice`: a reading the archive would refuse, said first. */
 const CLOSING_KEYS = ['reason', 'started_g', 'started_from', 'ledger_consumed_g', 'final_filament_g', 'scale_consumed_g', 'drift_g'] as const
 
 /** `spools.py` `detail()` (#7909): an `archived` event's data as the closing, or null when it carries none of the closing's keys. */
@@ -1023,6 +1022,7 @@ function closingOnEvent(data: Record<string, unknown> | undefined): S['Closing']
   return data as S['Closing']
 }
 
+/** `_reading_notice`: a reading the archive would refuse, said first. */
 function readingNotice(readingG: number | null, grams: number | null, emptyG: number | null): S['ClosingNotice'][] {
   if (readingG == null) return []
   // #7909: a reading under the filament sent with it is what `SpoolArchive` refuses.

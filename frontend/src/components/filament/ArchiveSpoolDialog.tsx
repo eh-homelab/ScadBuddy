@@ -69,6 +69,8 @@ function ArchiveForm({
 }) {
   const [reason, setReason] = useState<ArchiveReason | null>(null)
   const [reading, setReading] = useState('')
+  // #7909: whether the field meant a scale reading when the number in it was started.
+  const [typedWithEmpty, setTypedWithEmpty] = useState<boolean | null>(null)
   const [error, setError] = useState<string | null>(null)
   const fieldId = useId()
   const trimmed = reading.trim()
@@ -84,9 +86,15 @@ function ArchiveForm({
   const { preview, pending } = useClosingPreview(spool.id, reason, finalReadingG, finalGrams)
   if (preview && preview.empty_g !== previewEmptyG) setPreviewEmptyG(preview.empty_g)
   const closing = preview?.closing ?? null
-  // #7909: the preview's answer can change what the number in the field means, under a number
-  // already typed; say so rather than let the label change alone.
-  const meaningChanged = previewEmptyG !== undefined && withEmpty !== (emptyWeightG != null) && trimmed !== ''
+  // #7909: the preview's answer can change what the number in the field means under a number
+  // already typed; say so rather than let the label change alone. A number typed after the
+  // change was typed under the label it has now, so nothing is said for it.
+  const meaningChanged = typedWithEmpty !== null && typedWithEmpty !== withEmpty && trimmed !== ''
+  function changeReading(next: string) {
+    setReading(next)
+    if (next.trim() === '') setTypedWithEmpty(null)
+    else if (trimmed === '') setTypedWithEmpty(withEmpty)
+  }
 
   async function archive(andContinue: boolean) {
     if (!reason || !readingOk || busy) return
@@ -120,7 +128,7 @@ function ArchiveForm({
         </RadioGroup>
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${fieldId}-reading`}>{withEmpty ? 'Scale reading, with the spool (g)' : 'Filament left (g)'}</Label>
-          <Input id={`${fieldId}-reading`} inputMode="decimal" value={reading} onChange={(event) => setReading(event.target.value)} aria-invalid={readingOk ? undefined : true} className="max-w-40" />
+          <Input id={`${fieldId}-reading`} inputMode="decimal" value={reading} onChange={(event) => changeReading(event.target.value)} aria-invalid={readingOk ? undefined : true} className="max-w-40" />
           {emptyG != null && <p className="text-[13px] text-muted-foreground">The empty spool weighs {grams(emptyG)}; it is taken off the reading.</p>}
           {meaningChanged && (
             <p role="status" className="text-[13px] text-warn">
