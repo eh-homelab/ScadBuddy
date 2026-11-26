@@ -393,6 +393,10 @@ of it (`filament_spools.unit_id`). The gram ledger `filament_spool_events` stays
 of grams, and `filament_spools.cost_per_kg` the source of a spool's cost: moving grams into
 the generic move table would duplicate a ledger the filament epic is still changing, for no
 gain in cost accuracy. Reports read filament through a view (§6.6).
+Amended (owner, 2026-11-25, ruling 1 below): there is no link column. The spool type's id is
+the item's id, and the spool's id is the unit's id. The item's kind is its subtype, else its
+material, under `filament`. `stock_units.cost` is the source of a spool's cost, and
+`cost_per_kg` is its per-kg form. The ledger stays as written.
 
 Amendment (owner, 2026-11-25, ruling 1 on #7068): **spools and other items are treated the
 same; spools only have their own workflow.** The item and the unit are the shared model: a
@@ -513,7 +517,8 @@ measured figure, and phase 4 lets a person switch the rate to the measured figur
   `proposed_item`, `update_spool_ids` → `adopt_ids`. `colour_code` stays a line column,
   since a Bambu SKU's colour code names the item for any kind. Confirming a line:
   - `lot` items: one lot of the received units at `allocated_cost / received`;
-  - `unit` items, `filament` included: one unit per received unit at
+  - `unit` items, and `filament` items (`tracking = filament`, a unit with the spool
+    extension): one unit per received unit at
     `allocated_cost / received` each, `in_stock`; for a `filament` kind the spool
     extension makes each spool (§6.4) and writes its `cost_per_kg`;
   - adopted lots and units (`adopt_ids`: received by hand or by the interim rule of #7648
@@ -758,17 +763,17 @@ ships first.
 
 Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
 
-- D18. Spools and other items share one model; spools only have their own workflow, an
+- D19. Spools and other items share one model; spools only have their own workflow, an
   extension of the unit (§6.4).
-- D19. One kind tree: filament material and subtype are child kinds of `filament`. The
+- D20. One kind tree: filament material and subtype are child kinds of `filament`. The
   entity kinds of things in stock are `item` and `unit` (and phase 2's `lot`, §11.4 Q6);
   `spool_type:` and `spool:` are aliases for one release (§6.1, §6.4).
-- D20. Locations and suppliers are plain tables, `locations` and `suppliers` (§6.4, §6.5).
-- D21. One invoice line model; billed is kept apart from received; only `expense` lines
+- D21. Locations and suppliers are plain tables, `locations` and `suppliers` (§6.4, §6.5).
+- D22. One invoice line model; billed is kept apart from received; only `expense` lines
   write consumer rows (§6.7).
-- D22. The invoice import and the back-fill of confirmed invoices are flows with typed
+- D23. The invoice import and the back-fill of confirmed invoices are flows with typed
   prompts (§6.7).
-- D23. The Filament section moves into Inventory, and no purchasing or stock feature exists
+- D24. The Filament section moves into Inventory, and no purchasing or stock feature exists
   for filament only (§6.11, §11).
 
 ## 9. Phases (each one or more PRs, each an issue under one new epic)
@@ -790,8 +795,8 @@ Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
    see `docs/features/inventory.md`).*
 3. **Generic purchasing.** Rename suppliers, offers, price points, invoices; non-filament
    invoice lines receive lots/units; `invoice_line_links`; order purchases link lines;
-   invoice tools generalised; spool types and spools link to items/units; job cost reads
-   spool cost.
+   invoice tools generalised; spool types and spools become items and units, with their ids kept (§6.4, amended);
+   job cost reads spool cost.
    Amendment (owner, 2026-11-25): the rulings on #7068 and full parity (§11) make phase 3
    too large for one plan. It splits in two. Each part ships like any other PR; the data
    migration has no owner-run gate and no deploy window (owner, 2026-11-25, ruling 2 on
@@ -822,9 +827,12 @@ Rulings of the owner, 2026-11-25 (on #7068), not the designer's:
 
    **3b. The UI, the parity features and the flows** (a new issue under #6949, after 3a).
    §11 rows 1 to 6, 8, 14, 16, 17, 18, 19, 22 to 25, 29 to 31, 32 (the back-fill), 34, 35,
-   38 (UI), 39, 46, 47 and 48, plus whichever of Q1, Q3, Q5 and Q8 the owner says yes to:
+   10 (UI), 21 (UI), 26 (UI), 38 (UI), 39, 46, 47 and 48, plus Q1, Q3 and Q5 if the owner says
+   yes, and Q8 if the owner puts it in 3b:
    - the Filament section moves into Inventory, `/filament/*` redirects (§6.11);
    - Item types (list and type page), the stock list, bulk edit, copy;
+   - the kind tree page (`/inventory/kinds`), with the `filament` branch where the materials
+     and subtypes live (§6.11), and the price history and the invoice lines editor;
    - suppliers, supplier pages and stats, products, the price panel and price sheet,
      purchasing and stock metrics, the moves page, locations with their stock;
    - the invoices list and page for every line, with candidates, confirm, amend, the file
