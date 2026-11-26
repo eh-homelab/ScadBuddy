@@ -243,7 +243,9 @@ export class PackageStore implements PackageRepo {
             enabled = enabled AND NOT ${moved}, source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
             pin_kind = pending_pin_kind, commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,
             version = pending_version, content_hash = pending_content_hash,
-            files = pending_files, review = pending_review, mirror_sha256 = pending_mirror_sha256,
+            files = pending_files, review = pending_review,
+            mirror_sha256 = COALESCE(pending_mirror_sha256, CASE WHEN pending_commit_sha = commit_sha
+              AND pending_content_hash = content_hash THEN mirror_sha256 END),
             approved_at = now(), allow_refused = ${allow}, pending_mirror_sha256 = NULL, pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_pin_kind = NULL,
             pending_commit_sha = NULL, pending_bytes_sha256 = NULL, pending_version = NULL, pending_content_hash = NULL,
             pending_files = NULL, pending_review = NULL, updated_at = now()

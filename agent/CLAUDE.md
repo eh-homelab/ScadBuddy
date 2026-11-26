@@ -624,8 +624,11 @@ opens every one and seals it again byte for byte).
     `USE_EXISTING` + `ALLOW_DUPLICATE`, so a run open is joined and a finished one can run
     again), else in this process. Its activity reads the pin from the row, keeps a recorded
     mirror that reads back, else fetches with `MIRROR_FETCH_TIMEOUT_MS` (10 min), checks
-    the hash, and writes and records the zip (`makeMirror`); a hash mismatch or a package
-    past the unpack caps is `PackageMirrorRefused`, never retried. Install and re-pin put
+    the hash, and writes and records the zip (`makeMirror`); a hash mismatch, or a zip
+    past `MIRROR_MAX_BYTES` (24 MiB, the API's `MAX_MIRROR_BYTES`), is `PackageMirrorRefused`,
+    never retried. The zip is unpacked with the content hash's caps (`COMMIT_MIRROR_LIMITS`:
+    2,000 files, 5 MiB each, 20 MiB in all), not a download's (`unpack.ts`
+    `UNPACK_LIMITS`), so every package that can be pinned loads. Install and re-pin put
     and record their own zip (`recordPreparedMirror`) and start the job only when that
     failed; approving a commit pin with no mirror starts it. Downloads go through
     the egress check at every hop (`download.ts`), archives are unpacked by

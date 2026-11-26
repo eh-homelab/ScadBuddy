@@ -16,7 +16,7 @@ import { MIRROR_REFUSED, PACKAGE_MIRROR_ACTIVITY, type PackageMirrorInput, type 
 // slow part: a depth-1 fetch of the hindsight monorepo took 132 s on a worker pod (#7907),
 // so the activity's own limit is far above the fetcher's (main.ts `MIRROR_FETCH_TIMEOUT_MS`).
 // It is tried again with back-off on any failure but a refusal (`MIRROR_REFUSED`: the commit
-// gave other files, or files that cannot be mirrored), which no later try would change.
+// gave other files, or their zip is past the API's `MIRROR_MAX_BYTES`), which no later try would change.
 //
 // A new workflow type: no `patched()` (nothing replays it before this build). A change to
 // this function goes behind `patched()`.

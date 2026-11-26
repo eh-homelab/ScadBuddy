@@ -266,6 +266,28 @@ func TestACommitPinsMirrorIsRecordedMovedAndKeepsItsHold(t *testing.T) {
 		"greeter/"+z2)
 }
 
+// A re-pin of the same commit and content hash whose zip was not sent keeps the pin's
+// mirror at its approval; one of another commit takes only its own (#7907).
+func TestASameCommitRepinKeepsThePinsMirror(t *testing.T) {
+	a := newAPI(t, packageAreas)
+	z1 := strings.Repeat("d", 64)
+	a.do("POST", base+"/plugin-packages", install("greeter"))
+	a.sql(`INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES ($1, 'plugin_package_mirror', $2)`,
+		"plugin-mirror-"+z1, "greeter/"+z1)
+	a.ok("POST", "/plugin-packages/greeter/mirror", object("commit_sha", c1, "content_hash", h1, "bytes_sha256", z1))
+	a.ok("POST", "/plugin-packages/greeter/approve", object("commit_sha", c1, "content_hash", h1))
+	// The same commit and hash from another repository (a marketplace entry that moved).
+	same := object("ref", "main", "fetch_url", "https://git.test/moved.git", "fetch_path", "",
+		"commit_sha", c1, "content_hash", h1, "files", map[string]any{}, "review", review("greeter"))
+	a.ok("POST", "/plugin-packages/greeter/pending", same)
+	kept := a.ok("POST", "/plugin-packages/greeter/approve", object("commit_sha", c1, "content_hash", h1)).body
+	expect(t, kept["mirror_sha256"], z1)
+
+	a.ok("POST", "/plugin-packages/greeter/pending", pendingPin("greeter"))
+	other := a.ok("POST", "/plugin-packages/greeter/approve", object("commit_sha", c2, "content_hash", h2)).body
+	expect(t, other["mirror_sha256"], nil)
+}
+
 func TestAFeedListsItsPackagesAtTheirPins(t *testing.T) {
 	a := newAPI(t, packageAreas)
 	a.do("POST", base+"/plugin-packages", install("one"))

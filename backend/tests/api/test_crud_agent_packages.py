@@ -683,6 +683,34 @@ def test_a_repins_mirror_moves_to_the_pin_when_it_is_approved(
     assert client.get(f"{MIRRORS}/greeter/{ZIP_SHA}", headers=agent).status_code == 404
 
 
+def test_a_same_commit_repin_keeps_the_pins_mirror(
+    client: TestClient, agent: dict[str, str]
+) -> None:
+    # A re-pin of the same commit and content hash (a marketplace entry that moved to another
+    # repository) whose zip was not sent: its approval keeps the pin's mirror, as Go's does
+    # (tools/go/core/packages_test.go).
+    client.post(BASE, json=_install(), headers=agent)
+    _mirror(client, agent, ZIP)
+    client.post(f"{BASE}/greeter/mirror", json=_record(ZIP_SHA), headers=agent)
+    client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C1, "content_hash": H1}, headers=agent
+    )
+    moved = _pending(commit_sha=C1, content_hash=H1, fetch_url="https://git.test/moved.git")
+    staged = client.post(f"{BASE}/greeter/pending", json=moved, headers=agent)
+    assert staged.status_code == 200, staged.text
+    kept = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C1, "content_hash": H1}, headers=agent
+    )
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["mirror_sha256"] == ZIP_SHA
+    assert client.post(f"{BASE}/greeter/pending", json=_pending(), headers=agent).status_code == 200
+    other = client.post(
+        f"{BASE}/greeter/approve", json={"commit_sha": C2, "content_hash": H2}, headers=agent
+    )
+    assert other.status_code == 200, other.text
+    assert other.json()["mirror_sha256"] is None
+
+
 def test_a_new_or_discarded_repin_drops_the_old_repins_mirror(
     client: TestClient, agent: dict[str, str]
 ) -> None:

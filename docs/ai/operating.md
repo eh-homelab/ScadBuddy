@@ -1095,7 +1095,12 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   (a 10-minute limit, `MIRROR_FETCH_TIMEOUT_MS`, against install's 120 s), checks the
   content hash, and writes and records the zip again over a bad record. It is tried again
   with back-off (30 s doubling to 10 min, 6 tries); files that do not hash to the pin, or
-  that are past the unpack caps, fail it for good (`PackageMirrorRefused`). Install and
+  whose zip is past the API's 24 MiB cap (`MAX_MIRROR_BYTES`), fail it for good
+  (`PackageMirrorRefused`). The zip is unpacked with the content hash's caps (2,000 files,
+  5 MiB each, 20 MiB in all), not an archive download's (500 files, 2 MiB each), so every
+  package that can be pinned can load. A stored zip adds 76 bytes and twice the path to
+  each file, so the largest package (2,000 files, 20 MiB) fits the cap while its paths
+  average up to 1,010 bytes. Install and
   re-pin still put and record the zip they fetched, inline, and start the job only when
   that failed; approving a commit pin with no recorded mirror starts it too. A pin made
   before #7907 has no mirror: its first load after this deploy leaves it out and starts the

@@ -25,13 +25,21 @@ import { crc32, gunzipSync, inflateRawSync } from 'node:zlib'
 //     archive cannot make one directory per header; a hosted draft holds one file fewer, for
 //     the plugin.json that publish adds),
 //     `UNPACK_MAX_FILE_BYTES` per file and `UNPACK_MAX_TOTAL_BYTES` in all, checked
-//     before a byte is inflated, so a zip bomb never grows past them.
+//     before a byte is inflated, so a zip bomb never grows past them. A caller may pass
+//     other `UnpackLimits`: a commit pin's mirror (#7907) is unpacked with the content
+//     hash's caps (hash.ts), since its files already passed them.
 //
 // A refusal is an `UnpackError`, whose message names the entry.
 
 export const UNPACK_MAX_FILES = 500
 export const UNPACK_MAX_FILE_BYTES = 2 * 1024 * 1024
 export const UNPACK_MAX_TOTAL_BYTES = 20 * 1024 * 1024
+
+/** The caps an archive is unpacked under. */
+export type UnpackLimits = { files: number; fileBytes: number; totalBytes: number }
+
+/** A downloaded archive's or npm tarball's caps (spec §6.2). */
+export const UNPACK_LIMITS: UnpackLimits = { files: UNPACK_MAX_FILES, fileBytes: UNPACK_MAX_FILE_BYTES, totalBytes: UNPACK_MAX_TOTAL_BYTES }
 
 export class UnpackError extends Error {
   override name = 'UnpackError'
@@ -52,14 +60,18 @@ export function entryPath(raw: string): string {
 class Caps {
   private files = 0
   private total = 0
+  private readonly limits: UnpackLimits
+  constructor(limits: UnpackLimits) {
+    this.limits = limits
+  }
   dir(): void {
-    if (++this.files > UNPACK_MAX_FILES) throw new UnpackError(`the archive has more than ${UNPACK_MAX_FILES} files`)
+    if (++this.files > this.limits.files) throw new UnpackError(`the archive has more than ${this.limits.files} files`)
   }
   file(name: string, size: number): void {
     this.dir()
-    if (size > UNPACK_MAX_FILE_BYTES) throw new UnpackError(`${name} is larger than ${UNPACK_MAX_FILE_BYTES} bytes`)
+    if (size > this.limits.fileBytes) throw new UnpackError(`${name} is larger than ${this.limits.fileBytes} bytes`)
     this.total += size
-    if (this.total > UNPACK_MAX_TOTAL_BYTES) throw new UnpackError(`the archive unpacks to more than ${UNPACK_MAX_TOTAL_BYTES} bytes`)
+    if (this.total > this.limits.totalBytes) throw new UnpackError(`the archive unpacks to more than ${this.limits.totalBytes} bytes`)
   }
 }
 
@@ -74,7 +86,7 @@ const S_IFREG = 0o100000
 const S_IFDIR = 0o040000
 const S_IFLNK = 0o120000
 
-function zipEntries(buf: Buffer): Entry[] {
+function zipEntries(buf: Buffer, limits: UnpackLimits): Entry[] {
   let eocd = -1
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 22 - 0xffff); i--) {
     if (buf.readUInt32LE(i) === EOCD) {
@@ -88,7 +100,7 @@ function zipEntries(buf: Buffer): Entry[] {
   const offset = buf.readUInt32LE(eocd + 16)
   if (disk !== 0 || buf.readUInt16LE(eocd + 6) !== 0) throw new UnpackError('a zip split across disks is refused')
   if (count === 0xffff || offset === 0xffffffff) throw new UnpackError('a zip64 archive is refused')
-  const caps = new Caps()
+  const caps = new Caps(limits)
   const entries: Entry[] = []
   let at = offset
   for (let n = 0; n < count; n++) {
@@ -178,8 +190,8 @@ function paxPath(data: Buffer): string | undefined {
   return found
 }
 
-function tarEntries(buf: Buffer): Entry[] {
-  const caps = new Caps()
+function tarEntries(buf: Buffer, limits: UnpackLimits): Entry[] {
+  const caps = new Caps(limits)
   const entries: Entry[] = []
   let at = 0
   let longName: string | undefined
@@ -237,29 +249,29 @@ export function archiveFormat(buf: Buffer): 'zip' | 'gzip' | 'tar' | undefined {
 }
 
 /** The entries of `buf`, a zip or a (gzipped) tar, every rule above checked. */
-export function readArchive(buf: Buffer): Entry[] {
+export function readArchive(buf: Buffer, limits: UnpackLimits = UNPACK_LIMITS): Entry[] {
   const format = archiveFormat(buf)
-  if (format === 'zip') return zipEntries(buf)
-  if (format === 'tar') return tarEntries(buf)
+  if (format === 'zip') return zipEntries(buf, limits)
+  if (format === 'tar') return tarEntries(buf, limits)
   if (format === 'gzip') {
     let tar: Buffer
     try {
       // The caps, with room for each file's header and padding.
-      tar = gunzipSync(buf, { maxOutputLength: UNPACK_MAX_TOTAL_BYTES + UNPACK_MAX_FILES * 1024 + 1024 * 1024 })
+      tar = gunzipSync(buf, { maxOutputLength: limits.totalBytes + limits.files * 1024 + 1024 * 1024 })
     } catch {
-      throw new UnpackError(`the gzip does not unpack, or unpacks to more than ${UNPACK_MAX_TOTAL_BYTES} bytes`)
+      throw new UnpackError(`the gzip does not unpack, or unpacks to more than ${limits.totalBytes} bytes`)
     }
-    return tarEntries(tar)
+    return tarEntries(tar, limits)
   }
   throw new UnpackError('the file is not a zip or tar archive')
 }
 
 /**
  * Unpacks `buf` into `dest` (which must not exist): every directory and file of the
- * archive, a file executable when its mode says so. Throws UnpackError on any rule above.
+ * archive, a file executable when its mode says so, under `limits`. Throws UnpackError on any rule above.
  */
-export async function unpackArchive(buf: Buffer, dest: string): Promise<void> {
-  const entries = readArchive(buf)
+export async function unpackArchive(buf: Buffer, dest: string, limits: UnpackLimits = UNPACK_LIMITS): Promise<void> {
+  const entries = readArchive(buf, limits)
   const seen = new Set<string>()
   for (const entry of entries) {
     if (entry.path === '') continue

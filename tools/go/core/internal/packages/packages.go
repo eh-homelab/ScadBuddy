@@ -752,7 +752,11 @@ func (s *Packages) approve(r *http.Request, params crud.Params) (any, error) {
 				commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,
 				version = pending_version,
 				content_hash = pending_content_hash, files = pending_files,
-				review = pending_review, mirror_sha256 = pending_mirror_sha256,
+				review = pending_review,
+				-- A re-pin of the same commit and hash whose zip was not sent keeps the pin's mirror.
+				mirror_sha256 = COALESCE(pending_mirror_sha256, CASE WHEN
+					pending_commit_sha = commit_sha AND pending_content_hash = content_hash
+					THEN mirror_sha256 END),
 				approved_at = now(), allow_refused = $3,
 				pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
 				pending_pin_kind = NULL, pending_commit_sha = NULL,

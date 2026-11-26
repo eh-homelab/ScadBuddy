@@ -43,10 +43,13 @@ from scadbuddy.store.content_models import BlobScope
 HOLDER = "plugin_package_mirror"
 #: The one file in a mirror's blob directory.
 BLOB_FILE = "file"
-#: The largest mirror: the largest file the agent downloads, its ``ARCHIVE_MAX_BYTES``
-#: (``agent/src/plugins/packages/download.ts``: the unpacked cap of 20 MiB plus 1 MiB;
-#: spec 2026-11-21 §6.6).
-MAX_MIRROR_BYTES = 21 * 1024 * 1024
+#: The largest mirror (the agent's ``MIRROR_MAX_BYTES``, ``agent/src/plugins/packages/mirror.ts``;
+#: keep the two equal): the larger of the largest file the agent downloads, its
+#: ``ARCHIVE_MAX_BYTES`` (``download.ts``: the unpacked cap of 20 MiB plus 1 MiB; spec
+#: 2026-11-21 §6.6), and a commit pin's stored zip (#7907): at most 20 MiB of files plus
+#: 76 bytes and twice the path for each of at most 2,000 entries, so 4 MiB of room fits
+#: paths of 1,010 bytes on average.
+MAX_MIRROR_BYTES = 24 * 1024 * 1024
 #: How long a hold no package names is kept: far longer than an install's run (300 s).
 UNNAMED_GRACE = "1 day"
 #: The columns of ``ai_plugin_packages`` that name a mirror: a bytes pin's file, and a commit

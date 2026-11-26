@@ -672,7 +672,9 @@ row records the zip's SHA-256 (`mirror_sha256`, or `pending_mirror_sha256` for a
 through `POST …/plugin-packages/{name}/mirror`, which the API accepts only for the commit
 and content hash that the row names, only while that package holds the zip, and which
 changes no pin, approval or switch. A cache miss unpacks the recorded zip with the
-unpacking rules below and uses it only when its files hash to `content_hash`; then it is
+unpacking rules below, under the content hash's caps (2,000 files, 5 MiB each, 20 MiB in
+all; `install.ts` `COMMIT_MIRROR_LIMITS`) rather than a download's, and uses it only when
+its files hash to `content_hash`; then it is
 vetted as a git copy is. So the mirror can only give back the files that the admin
 approved. A load never fetches git (the owner's
 [decision of 2026-11-26](https://github.com/eh-homelab/ScadBuddy/issues/7907)): with no

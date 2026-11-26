@@ -3,13 +3,16 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MirrorNotReadyError, MirrorRefusedError, PackageInstaller, recordPreparedMirror } from '../src/plugins/packages/install.js'
+import { COMMIT_MIRROR_LIMITS, loadPackagesForRun, MirrorNotReadyError, MirrorRefusedError, PackageInstaller, recordPreparedMirror } from '../src/plugins/packages/install.js'
+import { MIRROR_MAX_BYTES } from '../src/plugins/packages/mirror.js'
+import { readArchive, UnpackError } from '../src/plugins/packages/unpack.js'
 import { localMirrorJobs, mirrorWorkflowId, runMirrorJob } from '../src/plugins/packages/mirrorJob.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import type { MirrorRecord, PackagePin, PreparedPackage } from '../src/plugins/packages/store.js'
 import { storedZip } from '../src/plugins/packages/zip.js'
 import { memoryMirror } from './support/memoryMirror.js'
 import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
+import { MAX_FILES, MAX_TOTAL_BYTES } from '../src/plugins/packages/hash.js'
 
 // A commit pin's mirror (#7907): its files as a zip in the API's area `package-mirrors`,
 // recorded on the row. A load (a turn, the warm-up) never fetches git (the owner's decision
@@ -111,9 +114,12 @@ describe.skipIf(gitMissing)('commit pin mirrors', () => {
       sha256: prepared.mirrorSha256,
     })
     expect(wantMirror).not.toHaveBeenCalled()
+    // A re-pin stored under the request's name is recorded under that name, not the review's.
+    await recordPreparedMirror({ recordMirror }, { wantMirror }, prepared, { name: 'renamed' })
+    expect(recordMirror).toHaveBeenLastCalledWith('renamed', expect.objectContaining({ sha256: prepared.mirrorSha256 }))
     // A record that fails is told, never thrown, and the mirror job is started instead.
     const told: string[] = []
-    await recordPreparedMirror({ recordMirror: () => Promise.reject(new Error('409 pin-mismatch')) }, { wantMirror }, prepared, (m) => told.push(m))
+    await recordPreparedMirror({ recordMirror: () => Promise.reject(new Error('409 pin-mismatch')) }, { wantMirror }, prepared, { warn: (m) => told.push(m) })
     expect(told).toEqual([expect.stringContaining('409 pin-mismatch')])
     expect(wantMirror).toHaveBeenCalledWith({ name: 'greeter', commit: repo.commit, contentHash: prepared.contentHash })
   })
@@ -237,6 +243,83 @@ describe.skipIf(gitMissing)('commit pin mirrors', () => {
     const wrong = { ...pinOf(prepared, null), contentHash: `sha256:${'0'.repeat(64)}` }
     await expect(installer.makeMirror(wrong)).rejects.toBeInstanceOf(MirrorRefusedError)
     expect(records).toEqual([])
+  })
+
+  it("mirrors and loads a package past a download's caps but within the content hash's (more than 500 files, one over 2 MiB)", async () => {
+    const files: Record<string, string> = { ...GREETER, 'big/blob.txt': 'x'.repeat(3 * 1024 * 1024) }
+    for (let i = 0; i < 520; i++) files[`notes/n${i}.md`] = `note ${i}\n`
+    const big = gitRepo(files)
+    try {
+      const fetchers = { greeter: repo, big }
+      const bigFetcher = localFetcher(fetchers)
+      const bigInstaller = new PackageInstaller({
+        fetcher: bigFetcher,
+        cacheRoot,
+        resolve: resolver(),
+        mirror: () => mirror,
+        recordMirror: async () => undefined,
+        warn: (message) => warnings.push(message),
+      })
+      const prepared = await bigInstaller.prepare(validateSource({ kind: 'git', url: 'https://git.test/big.git' }))
+      expect(prepared.mirrorSha256).toMatch(/^[0-9a-f]{64}$/)
+      rmSync(cacheRoot, { recursive: true, force: true })
+      bigFetcher.checkouts.length = 0
+      const dir = await bigInstaller.materialise(pinOf(prepared))
+      expect(bigFetcher.checkouts).toEqual([])
+      expect(statSync(path.join(dir, 'big/blob.txt')).size).toBe(3 * 1024 * 1024)
+      expect(statSync(path.join(dir, 'notes/n519.md')).isFile()).toBe(true)
+      expect(warnings).toEqual([])
+    } finally {
+      big.remove()
+    }
+  })
+
+  it("keeps the largest package's zip under the API's cap, with room for long paths", () => {
+    // 2,000 files of 20 MiB in all, each path 255 bytes: 76 bytes and twice the path of headers each.
+    const size = Math.floor(MAX_TOTAL_BYTES / MAX_FILES)
+    const files = Array.from({ length: MAX_FILES }, (_, i) => ({
+      path: `${String(i).padStart(4, '0')}/${'p'.repeat(250)}`,
+      data: Buffer.alloc(size, 0x61),
+      executable: false,
+    }))
+    const zip = storedZip(files)
+    expect(zip.length).toBeGreaterThan(21 * 1024 * 1024) // past the old cap
+    expect(zip.length).toBeLessThanOrEqual(MIRROR_MAX_BYTES)
+    expect(readArchive(zip, COMMIT_MIRROR_LIMITS).filter((e) => !e.dir)).toHaveLength(MAX_FILES)
+    // A download's caps still refuse it.
+    expect(() => readArchive(zip)).toThrow(UnpackError)
+  })
+
+  it('refuses a mirror whose files hash to the pin but fail the vetting, as the files themselves, and starts no job', async () => {
+    const bad = gitRepo({ ...GREETER, 'skills/x/SKILL.md': '!`env`\n' })
+    try {
+      const badFetcher = localFetcher({ greeter: bad })
+      const badInstaller = new PackageInstaller({
+        fetcher: badFetcher,
+        mirrorFetcher: jobFetcher,
+        cacheRoot,
+        resolve: resolver(),
+        mirror: () => mirror,
+        recordMirror: async () => undefined,
+        mirrorJobs: () => ({ start: (job) => started.push(mirrorWorkflowId(job)) }),
+      })
+      const prepared = await badInstaller.prepare(validateSource({ kind: 'git', url: URL }))
+      expect(prepared.mirrorSha256).toMatch(/^[0-9a-f]{64}$/)
+      rmSync(cacheRoot, { recursive: true, force: true })
+      badFetcher.checkouts.length = 0
+      const pin = pinOf(prepared)
+      await expect(badInstaller.materialise(pin)).rejects.toThrow(/refused/)
+      const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, badInstaller)
+      expect(loaded.loaded).toEqual([])
+      expect(loaded.problems).toEqual([expect.stringMatching(/^plugin package greeter was not loaded: skills\/x\/SKILL.md: runs a shell command/)])
+      expect(loaded.problems.join()).not.toMatch(/mirror/)
+      // The mirror was good: no job, and no git.
+      expect(started).toEqual([])
+      expect(badFetcher.checkouts).toEqual([])
+      expect(jobFetcher.checkouts).toEqual([])
+    } finally {
+      bad.remove()
+    }
   })
 
   it('mirrors nothing at install without a record to keep it', async () => {

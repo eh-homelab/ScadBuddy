@@ -69,12 +69,12 @@ describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgr
     const setPending = store.setPending.bind(store)
     store.create = async (prepared) => {
       const view = await create(prepared)
-      await recordPreparedMirror(store, {}, prepared)
+      await recordPreparedMirror(store, {}, prepared, { name: view.name })
       return view
     }
     store.setPending = async (name, prepared) => {
       const view = await setPending(name, prepared)
-      await recordPreparedMirror(store, {}, prepared)
+      await recordPreparedMirror(store, {}, prepared, { name: view.name })
       return view
     }
   })

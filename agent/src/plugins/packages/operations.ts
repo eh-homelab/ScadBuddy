@@ -134,7 +134,7 @@ export function packageKinds(deps: PackageKindDeps): OperationKind[] {
   /** `prepared` stored by `store`, then its commit mirror recorded on the row, or its mirror job started (#7907). */
   async function stored(prepared: PreparedPackage, store: (prepared: PreparedPackage) => Promise<PackageView>): Promise<PackageView> {
     const view = await store(prepared)
-    await recordPreparedMirror(deps.packages, deps.installer, prepared)
+    await recordPreparedMirror(deps.packages, deps.installer, prepared, { name: view.name })
     return view
   }
 

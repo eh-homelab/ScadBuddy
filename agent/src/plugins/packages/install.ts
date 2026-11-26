@@ -6,10 +6,10 @@ import { EgressError, type Resolver, systemResolver } from '../../http/egress.js
 import { assertEndpointAllowed, PluginError } from '../registry.js'
 import { ARCHIVE_LIMITS, type Downloader, egressDownload, MARKETPLACE_LIMITS } from './download.js'
 import { type Checkout, extractSubdir, FetchError, type RepoFetcher } from './git.js'
-import { hashTree, PackageContentError, type TreeHash } from './hash.js'
+import { hashTree, MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES, PackageContentError, type TreeHash } from './hash.js'
 import type { HostedPlugins } from './hosted.js'
 import { declaredHeaderSecrets } from './mcp.js'
-import type { PackageMirror } from './mirror.js'
+import { MIRROR_MAX_BYTES, type PackageMirror } from './mirror.js'
 import { fetchNpmTarball } from './npm.js'
 import {
   DEFAULT_REF,
@@ -20,7 +20,7 @@ import {
   validateRef,
   validateSource,
 } from './source.js'
-import { entryPath, pluginRoot, UNPACK_MAX_FILE_BYTES, UNPACK_MAX_FILES, UNPACK_MAX_TOTAL_BYTES, unpackArchive, UnpackError } from './unpack.js'
+import { entryPath, pluginRoot, type UnpackLimits, unpackArchive, UnpackError } from './unpack.js'
 import type { MirrorRecord, PackagePin, PackageRepo, PreparedPackage } from './store.js'
 import { storedZip } from './zip.js'
 import { builtInNamed } from './builtins.js'
@@ -55,8 +55,10 @@ import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, lis
 // (`makeMirror`; on Temporal the `PackageMirror` workflow, temporal/packageMirror.ts and
 // mirrorJob.ts). Install and re-pin still fetch git to vet and hash the package; that fetch
 // also puts the zip, and the caller records it once the pin is stored, or starts the job
-// when it could not (`recordPreparedMirror`). A package past the unpack caps (unpack.ts) is
-// never mirrored, so it cannot load until a re-pin makes it smaller.
+// when it could not (`recordPreparedMirror`). The zip is unpacked with the content hash's
+// caps (`COMMIT_MIRROR_LIMITS`, hash.ts), not a download's stricter ones, so every package
+// that can be pinned can be mirrored; only a zip past the API's `MIRROR_MAX_BYTES`
+// (mirror.ts: paths of over 1,010 bytes on average at the largest size) is not.
 //
 // BYTES PINS (#6935, spec 2026-11-21 §6.6): an `archive` or `npm` source, or a
 // marketplace entry of either (a `marketplace-url` source is a bare `marketplace.json`
@@ -147,7 +149,10 @@ export class MirrorNotReadyError extends PluginError {
   }
 }
 
-/** The mirror job fetched files that are not the pin's, or that cannot be mirrored: trying again gives the same. */
+/** A commit pin's mirror is unpacked with the content hash's caps (hash.ts): its files passed them when pinned. */
+export const COMMIT_MIRROR_LIMITS: UnpackLimits = { files: MAX_FILES, fileBytes: MAX_FILE_BYTES, totalBytes: MAX_TOTAL_BYTES }
+
+/** The mirror job fetched files that are not the pin's, or whose zip is past `MIRROR_MAX_BYTES`: trying again gives the same. */
 export class MirrorRefusedError extends Error {
   override name = 'MirrorRefusedError'
 }
@@ -319,11 +324,11 @@ export class PackageInstaller {
     return true
   }
 
-  /** The files of `pin`'s mirror, unpacked into `dest` and hashed against the pin; throws why not. */
+  /** The files of `pin`'s mirror, unpacked into `dest` (with the hash's caps) and hashed against the pin; throws why not. */
   private async readMirror(pin: PackagePin & { mirrorSha256: string }, dest: string): Promise<TreeHash> {
     const mirror = this.mirrorOf()
     if (!mirror) throw new PluginError('this API does not keep mirrors (CRUD area package-mirrors)', 503)
-    await unpackArchive(await mirror.get(pin.name, pin.mirrorSha256), dest)
+    await unpackArchive(await mirror.get(pin.name, pin.mirrorSha256), dest, COMMIT_MIRROR_LIMITS)
     const tree = await hashTree(dest)
     if (tree.hash !== pin.contentHash) throw new PluginError(`its files hash to ${tree.hash}, not the pinned ${pin.contentHash}`, 502)
     return tree
@@ -333,7 +338,7 @@ export class PackageInstaller {
    * The mirror job's work (mirrorJob.ts): ends at once when `pin`'s recorded mirror reads back
    * and hashes to the pin (`kept`); else fetches the commit with the job's fetcher, checks the
    * files against the pin, and writes and records the mirror again (`mirrored`), over a bad
-   * record. A fetch that gives other files, or files past the unpack caps, is a
+   * record. A fetch that gives other files, or a zip past `MIRROR_MAX_BYTES`, is a
    * MirrorRefusedError; any other failure may pass on a later try.
    */
   async makeMirror(pin: PackagePin, signal?: AbortSignal): Promise<{ outcome: 'kept' | 'mirrored'; sha256: string }> {
@@ -370,7 +375,7 @@ export class PackageInstaller {
         throw new MirrorRefusedError(`the files at commit ${pin.commit} hash to ${tree.hash}, not the pinned ${pin.contentHash}`)
       }
       const zip = await this.commitZip(tree, pkg)
-      if (!zip) throw new MirrorRefusedError('the package is past the unpack caps, so its files cannot be mirrored')
+      if (!zip) throw new MirrorRefusedError(`the zip of its files is larger than the API keeps (${MIRROR_MAX_BYTES} bytes)`)
       const sha256 = sha256Hex(zip)
       await this.mirror().put(pin.name, sha256, zip, signal)
       await this.recordMirror(pin.name, { commit: pin.commit, contentHash: pin.contentHash, sha256 })
@@ -382,19 +387,16 @@ export class PackageInstaller {
 
   /**
    * The deterministic zip of a commit pin's files at `dir` (hashed as `tree`), or undefined
-   * when no mirror can take it: no mirror or no record, or files past the unpack caps.
+   * when no mirror can take it: no mirror or no record, or a zip past `MIRROR_MAX_BYTES`.
+   * `tree` passed the content hash's caps, which `COMMIT_MIRROR_LIMITS` unpacks it under.
    */
   private async commitZip(tree: TreeHash, dir: string): Promise<Buffer | undefined> {
     if (!this.mirrorOf() || !this.recordMirror) return undefined
-    const entries = Object.entries(tree.files)
-    const total = entries.reduce((sum, [, f]) => sum + f.size, 0)
-    if (entries.length > UNPACK_MAX_FILES || total > UNPACK_MAX_TOTAL_BYTES || entries.some(([, f]) => f.size > UNPACK_MAX_FILE_BYTES)) {
-      return undefined
-    }
     const files = await Promise.all(
-      entries.map(async ([rel, f]) => ({ path: rel, data: await readFile(path.join(dir, rel)), executable: f.executable })),
+      Object.entries(tree.files).map(async ([rel, f]) => ({ path: rel, data: await readFile(path.join(dir, rel)), executable: f.executable })),
     )
-    return storedZip(files)
+    const zip = storedZip(files)
+    return zip.length > MIRROR_MAX_BYTES ? undefined : zip
   }
 
   /**
@@ -404,7 +406,10 @@ export class PackageInstaller {
   private async sendCommitMirror(name: string, commit: string, tree: TreeHash, dir: string, signal?: AbortSignal): Promise<string | undefined> {
     try {
       const zip = await this.commitZip(tree, dir)
-      if (!zip) return undefined
+      if (!zip) {
+        if (this.mirrorOf() && this.recordMirror) this.warn(`plugin package ${name}: the zip of commit ${commit} is larger than the API keeps (${MIRROR_MAX_BYTES} bytes), so it is not mirrored`)
+        return undefined
+      }
       const sha = sha256Hex(zip)
       await this.mirror().put(name, sha, zip, signal)
       return sha
@@ -1030,17 +1035,19 @@ export class PackageInstaller {
 
 /**
  * Records a prepared commit pin's mirror (`PreparedPackage.mirrorSha256`) once its pin or
- * re-pin is stored (#7907); when there is none, or the record fails (told to `warn`), starts
+ * re-pin is stored under `options.name` (#7907); when there is none, or the record fails (told to `warn`), starts
  * the mirror job instead, so the pin can load without git.
  */
 export async function recordPreparedMirror(
   packages: Pick<PackageRepo, 'recordMirror'>,
   installer: Partial<Pick<PackageInstaller, 'wantMirror'>>,
   prepared: PreparedPackage,
-  warn: (message: string) => void = (message) => console.warn(message),
+  options: { name?: string; warn?: (message: string) => void } = {},
 ): Promise<void> {
   if (!prepared.commit || prepared.bytesSha256 !== undefined || prepared.version !== undefined) return
-  const name = prepared.review.name
+  // The stored row's name (a re-pin is stored under the request's), not the review's.
+  const name = options.name ?? prepared.review.name
+  const warn = options.warn ?? ((message: string) => console.warn(message))
   if (prepared.mirrorSha256) {
     try {
       await packages.recordMirror(name, { commit: prepared.commit, contentHash: prepared.contentHash, sha256: prepared.mirrorSha256 })

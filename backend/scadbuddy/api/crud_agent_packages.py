@@ -41,7 +41,7 @@ pin's files are sent there too, as a zip, once a fetch hashes to the pin (#7907)
   ``pending_mirror_sha256``); else 404 ``mirror-not-found``, even while the blob is still in
   the store.
 
-Every package write also releases the holds of mirrors no pin names, past their grace.
+Every package write also releases the holds of mirrors no row names, past their grace.
 
 Area ``hosted-plugins`` (#6932): ``GET …/hosted-plugins/{name}`` a hosted plugin with its
 latest version's row (``plugin`` null when there is none), and
@@ -314,7 +314,7 @@ def _mirror_held(conn: psycopg.Connection[Any], name: str, body: Pin) -> None:
 
 def _written(conn: psycopg.Connection[Any]) -> None:
     """What every package write ends with: the warm-evict NOTIFY, and the release of the
-    mirrors no pin names any more."""
+    mirrors no row names any more."""
     package_mirrors.release_unnamed(conn)
     notify_warm_evict(conn)
 
@@ -630,7 +630,11 @@ async def plugin_package_approve(name: Name, body: Approve, state: StateDep) -> 
                 " commit_sha = pending_commit_sha, bytes_sha256 = pending_bytes_sha256,"
                 " version = pending_version,"
                 " content_hash = pending_content_hash, files = pending_files,"
-                " review = pending_review, mirror_sha256 = pending_mirror_sha256,"
+                " review = pending_review,"
+                # A same-commit re-pin whose zip was not sent keeps the pin's mirror.
+                " mirror_sha256 = COALESCE(pending_mirror_sha256, CASE WHEN"
+                " pending_commit_sha = commit_sha AND pending_content_hash = content_hash"
+                " THEN mirror_sha256 END),"
                 " approved_at = now(), allow_refused = %s,"
                 " pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,"
                 " pending_pin_kind = NULL, pending_commit_sha = NULL,"
