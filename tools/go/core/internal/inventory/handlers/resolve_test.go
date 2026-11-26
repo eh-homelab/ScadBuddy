@@ -103,11 +103,18 @@ func TestResolveProblems(t *testing.T) {
 
 func TestAKindMayLeaveItsClassOpen(t *testing.T) {
 	ch := model.Chain{{ID: "consumable", Class: model.Class{Nature: "physical", Role: "consumable"}}}
-	if _, _, err := Builtin().Resolve(ch, nil, nil); err != nil {
+	if _, _, err := Builtin().ResolveKind(ch); err != nil {
 		t.Fatalf("kind: %v", err)
 	}
 	if _, _, err := Builtin().Resolve(ch, model.Steps{}, nil); !errors.Is(err, model.ErrClassOpen) {
 		t.Fatalf("item: got %v, want ErrClassOpen", err)
+	}
+}
+
+func TestAnItemWithNoStepsNeedsAClosedClass(t *testing.T) {
+	ch := model.Chain{{ID: "consumable", Class: model.Class{Nature: "physical", Role: "consumable"}}}
+	if _, _, err := Builtin().Resolve(ch, nil, nil); !errors.Is(err, model.ErrClassOpen) {
+		t.Fatalf("got %v, want ErrClassOpen", err)
 	}
 }
 
@@ -117,11 +124,11 @@ func TestAClassThatDoesNotResolveIsAnError(t *testing.T) {
 		{ID: "odd", Class: model.Class{Role: "durable"}},
 	}
 	var cc *model.ClassChanged
-	if _, _, err := Builtin().Resolve(changed, nil, nil); !errors.As(err, &cc) {
+	if _, _, err := Builtin().ResolveKind(changed); !errors.As(err, &cc) {
 		t.Fatalf("got %v, want *ClassChanged", err)
 	}
 	lot := model.Chain{{ID: "d", Class: model.Class{Nature: "physical", Role: "durable", Counting: "lot"}}}
-	if _, _, err := Builtin().Resolve(lot, nil, nil); !errors.Is(err, model.ErrDurableLot) {
+	if _, _, err := Builtin().ResolveKind(lot); !errors.Is(err, model.ErrDurableLot) {
 		t.Fatalf("got %v, want ErrDurableLot", err)
 	}
 }

@@ -66,21 +66,30 @@ func filter(ps []Problem, keep func(Problem) bool) []Problem {
 	return out
 }
 
-// Resolve gives every step its handler and parameters (design §4.2): the class default,
-// then the special type, then the kinds root to leaf, then item, then unit (parameters
-// only). A layer that names a new handler drops the old one's parameters; a layer that
-// sets only params merges them.
+// Resolve gives an item's every step its handler and parameters (design §4.2): the
+// class default, then the special type, then the kinds root to leaf, then item, then
+// unit (parameters only). A layer that names a new handler drops the old one's
+// parameters; a layer that sets only params merges them. A nil item or unit sets nothing.
 //
 // The error is a class that does not resolve (*model.ClassChanged, model.ErrDurableLot,
-// model.ErrSecondSpecial, a value out of range), or model.ErrClassOpen when item is not
-// nil and the class is not complete: a kind may leave keys open, an item may not (§3).
-// A step with no handler (an open class has no default column) is left out.
+// model.ErrSecondSpecial, a value out of range), or model.ErrClassOpen: an item's class
+// must be complete (§3).
 func (c *Catalog) Resolve(chain model.Chain, item, unit model.Steps) (Resolution, []Problem, error) {
+	return c.resolve(chain, item, unit, false)
+}
+
+// ResolveKind is Resolve for a kind save: the kind may leave class keys open. A step
+// with no handler (an open class has no default column) is left out.
+func (c *Catalog) ResolveKind(chain model.Chain) (Resolution, []Problem, error) {
+	return c.resolve(chain, nil, nil, true)
+}
+
+func (c *Catalog) resolve(chain model.Chain, item, unit model.Steps, openOK bool) (Resolution, []Problem, error) {
 	cls, special, err := chain.Class()
 	if err != nil {
 		return Resolution{}, nil, err
 	}
-	if item != nil && !cls.Complete() {
+	if !openOK && !cls.Complete() {
 		return Resolution{}, nil, fmt.Errorf("%w: %+v", model.ErrClassOpen, cls)
 	}
 	res := Resolution{Class: cls, Special: special, Steps: map[Step]Choice{}}
