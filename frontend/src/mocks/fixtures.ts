@@ -1143,7 +1143,8 @@ export const settingsDefaults = {
   // #4974 — the off-box git remote; the token is reported only as `has_git_remote_token`.
   git_remote_url: null,
   git_remote_username: null,
-  event_log_retention_seconds: 86400,
+  event_log_retention_seconds: 0,
+  event_log_retention_kinds: {},
   flow_approval_timeout_seconds: 0,
   spool_overlay_refresh_seconds: 300,
   // #6262 Task 13 — the Filament section's settings; #6265 — `filament_sync` is the six-key default.
@@ -1152,6 +1153,8 @@ export const settingsDefaults = {
   filament_default_cost_per_kg: null,
   // #7682 — the drift notice threshold.
   filament_weighing_drift_notice_g: 10,
+  // #7684 — what counts as empty for the archive dialog's notices.
+  filament_weighing_finished_left_g: 5,
   // #7156 — the drying defaults; null offers none.
   filament_drying_temp_c: null,
   filament_drying_hours: null,
@@ -1160,7 +1163,7 @@ export const settingsDefaults = {
   filament_lead_time_days: 7,
   filament_safety_margin_days: 3,
   filament_tag_format: 'openspool',
-  event_log_retention_rows: 100_000,
+  event_log_retention_rows: 0,
   log_level: 'INFO',
   temporal_ui_url: null,
 } as const satisfies Partial<Settings>

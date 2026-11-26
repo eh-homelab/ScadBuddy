@@ -17,7 +17,7 @@ from scadbuddy.orders import operations as order_operations
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.models import Actor
-from scadbuddy.orders.rendering import output_for_reference
+from scadbuddy.orders.rendering import outputs_for_reference
 from tests.api.conftest import FAIL_WIDTH, follow_operation
 from tests.api.test_order_quote import (
     BambuddySlices,
@@ -179,7 +179,7 @@ def test_an_items_render_that_ends_after_the_item_settled_writes_nothing(
     """The run checks the item again before it sets the output (``render_check``): an
     item cancelled while it rendered is refused ``item_not_open``, its output unset."""
     shop = Shop(bambuddy, by_hand=True)
-    real = output_for_reference
+    real = outputs_for_reference
     lifecycle = _state(bambuddy).components.get(ORDERS).lifecycle
 
     async def cancelled_meanwhile(*args: Any, **kwargs: Any) -> Any:
@@ -188,7 +188,7 @@ def test_an_items_render_that_ends_after_the_item_settled_writes_nothing(
         )
         return await real(*args, **kwargs)
 
-    monkeypatch.setattr(order_operations, "output_for_reference", cancelled_meanwhile)
+    monkeypatch.setattr(order_operations, "outputs_for_reference", cancelled_meanwhile)
     op = rendered(bambuddy, shop.path)
     assert op["status"] == "failed", op
     assert op["error"]["type"].endswith("/item_not_open")

@@ -234,6 +234,12 @@ describe('the schema’s own form (#5701 §5.2)', () => {
     })
   })
 
+  it('keeps a key the schema does not declare, which publish then names (#7794 review)', () => {
+    // Not dropped in silence: an input of another version stays, and publish refuses it in the Design block.
+    const base = { house: { cols: 2, storeys: 1, gone: 1 }, old: true }
+    expect(fieldInputs(groups, { 'house.cols': 2, 'house.storeys': 1 }, base)).toEqual({ house: { cols: 2, storeys: 1, gone: 1 }, old: true })
+  })
+
   it('lays a top-level field over the inputs it opened on', () => {
     const base = { house: { cols: 2, storeys: 1 }, finish: 'gloss', rooms: [{ name: 'hall' }] }
     expect(fieldInputs(groups, { 'house.cols': 2, 'house.storeys': 1, finish: 'matte' }, base)).toEqual({

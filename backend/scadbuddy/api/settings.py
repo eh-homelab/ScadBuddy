@@ -314,12 +314,14 @@ class SettingsView(BaseModel):
     has_git_remote_token: bool = False
     event_log_retention_seconds: float
     event_log_retention_rows: int
+    event_log_retention_kinds: dict[str, float] = Field(default_factory=dict)
     flow_approval_timeout_seconds: int
     spool_overlay_refresh_seconds: int
     filament_sync: FilamentSync = Field(default_factory=FilamentSync)
     filament_low_stock_pct: int = 20
     filament_default_cost_per_kg: Decimal | None = None
     filament_weighing_drift_notice_g: int = 10
+    filament_weighing_finished_left_g: int = 5
     filament_drying_temp_c: int | None = None
     filament_drying_hours: Decimal | None = None
     filament_label_base_url: str | None = None

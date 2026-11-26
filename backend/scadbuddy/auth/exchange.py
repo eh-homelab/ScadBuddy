@@ -121,6 +121,7 @@ SERVICE_ACCOUNTS: Mapping[str, ServiceCaller] = {
     "scadbuddy-camera-relay": "camera-relay",
     # The live edge (camera phase 3) reads the same routes as the recorders.
     "scadbuddy-camera-edge": "camera",
+    "scadbuddy-fleet": "fleet",
     # The API pod's: mounted as a projected token in the agent sidecar's container only.
     "scadbuddy": "agent",
 }

@@ -73,6 +73,7 @@ pods started 13:01Z-13:05Z log no line for it, so the owner is the only login ro
 | agent-durable, 0 replicas | `agent-durable/` | none (`scadbuddy-agent-durable.yaml`: "No database URL and no KEK") | 0 | none: it runs no worker |
 | slicer worker, 1 replica | `workers/rust/` | none (`scadbuddy-slicer.yaml`) | 0 | none: transfer URLs only |
 | `bambuddy-fs` | `tools/go/` | none | 0 | none: the public API only |
+| fleet chat server (not deployed) | `tools/go/fleet/` | none | 0 | none: core's `…/crud/fleet/` routes with the `crud.fleet` credential, exchanged for its ServiceAccount token and renewed in process |
 
 The grant lists are today's state. They describe the per-caller roles of PR #5210, which
 #5295 supersedes. The agent grants nothing since #6501; on separate roles the API's role must own the `ai_*` tables.
@@ -94,6 +95,7 @@ controls.
 | Template UI modules | the browser | a shadow root; `default-src 'none'; sandbox` on the served files (`backend/scadbuddy/api/template_ui.py:45-49`) | No. |
 | 3dfilamentprofiles.com pages (JavaScript in Chromium) | the profile-fetch browser pod (`scadbuddy-profile-fetch-browser`, #6625, #6780), a headed Chromium that is a child of the browser service | Chromium's own sandbox (the code never passes `--no-sandbox`), an environment allowlist for the browser (`backend/scadbuddy/profile_fetch/site.py` `browser_env`), the pod's network policy (egress DNS and public 443 only, plan Decision 14; ingress from the worker's pods only). The pod holds the 3DFP login and the RPC token, and no CRUD credential, no proof and no Temporal or API address (`backend/scadbuddy/profile_fetch/browser.py`); it is no Temporal worker, and its policy has no rule to Temporal or the API (#6780). It runs a Localhost seccomp profile and a confining AppArmor profile of its own (#6779, "Browser and parser pod profiles" below), not `Unconfined`. | No: the pod holds no database secret and no CRUD credential, and reaches neither Temporal nor the API. The worker reads its answers as untrusted (`profile_fetch/remote.py`). |
 | Remote MCP servers, `http_request` targets | outside the cluster, reached through the agent | the loopback forwarder; results wrapped as untrusted data | No. |
+| Fleet chat messages (text other Claude Code sessions wrote) | not run: stored by core and relayed by the fleet chat server (`tools/go/fleet`), which holds `crud.fleet`, to the sessions that read their inbox | `fleet_inbox` and the inbox resource start with a line that says the text is untrusted data written by other agents (`tools/go/fleetchat`); its credential reaches only the `fleet` area. The server has no auth of its own: anything on the LAN may call it (the owner's decision of 2026-11-26), and a NetworkPolicy that admits only ScadBuddy's pods and the LAN's Gateway is to guard it, not deployed yet | No: the text is data, and the server has no SQL client. |
 
 ## Zones
 

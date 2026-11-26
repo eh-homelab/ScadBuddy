@@ -7,6 +7,7 @@ import {
   bulkArchiveSpools,
   bulkCreateSpools,
   bulkUpdateSpools,
+  closingPreview,
   copySpool,
   createLabelSheet,
   createSpool,
@@ -250,6 +251,25 @@ describe('the filament mocks', () => {
   it('archiving a spool takes its tag off', async () => {
     await archiveSpool(spoolId(4))
     expect((await getSpool(spoolId(4))).last_tag).toMatchObject({ tag: { id: TAG.BLACK }, reason: 'archived' })
+  })
+
+  it('archives with a reason and a final reading: the weighing, then the closing (#7684)', async () => {
+    await addSpoolEvent(spoolId(1), { kind: 'weighed', source: 'scale', grams: 700 })
+    const preview = await closingPreview(spoolId(1), 'finished', 280, null)
+    expect(preview.final_filament_g).toBe(30)
+    expect(preview.closing).toMatchObject({ reason: 'finished', started_from: 'reading', scale_consumed_g: (preview.closing.started_g ?? 0) - 30 })
+    expect(preview.notices.map((one) => one.code)).toEqual(['filament_left'])
+    expect(preview.notices[0]?.text).toBe('30 g of filament are still on it.')
+    expect((await closingPreview(spoolId(1), 'damaged', 253, null)).notices.map((one) => one.code)).toEqual(['not_finished_but_empty'])
+    const done = await archiveSpool(spoolId(1), { archived: true, reason: 'finished', final_reading_g: 280 })
+    expect(done.archived_at).not.toBeNull()
+    expect(done.grams_left).toBe(30)
+    const events = await listSpoolEvents(spoolId(1))
+    expect(events.slice(-2).map((one) => one.kind)).toEqual(['weighed', 'archived'])
+    expect(events.at(-1)?.data).toMatchObject({ reason: 'finished', final_filament_g: 30, scale_consumed_g: (preview.closing.started_g ?? 0) - 30, ledger_consumed_g: preview.closing.ledger_consumed_g })
+    expect(await refusal(archiveSpool(spoolId(2), { archived: false, reason: 'finished' }))).toMatchObject({ status: 422 })
+    expect(await refusal(archiveSpool(spoolId(2), { archived: true, reason: 'damaged', final_reading_g: 100 }))).toMatchObject({ status: 422, code: 'reading_below_empty' })
+    expect((await getSpool(spoolId(2))).archived_at).toBeNull()
   })
 
   it('moves a spool, and refuses a place that does not exist', async () => {

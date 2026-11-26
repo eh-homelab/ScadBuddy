@@ -112,7 +112,7 @@ updates:
       opentelemetry:
         patterns: ["opentelemetry-*"]
 
-  # Go (#2686): the two modules of the go.work workspace. A bump edits only
+  # Go (#2686): the modules of the go.work workspace. A bump edits only
   # the module's go.mod/go.sum; it does not run `go work vendor`, so the root
   # vendor/ (and scadbuddy-client's own) lag until vendor-autofix.yml commits
   # them, and the `go` job's drift check stays red until it does.
@@ -121,6 +121,8 @@ updates:
       - "/tools/go/scadbuddy-client"
       - "/tools/go/bambuddy-fs"
       - "/tools/go/core"
+      - "/tools/go/fleetchat"
+      - "/tools/go/fleet"
     schedule:
       interval: "weekly"
       day: "monday"

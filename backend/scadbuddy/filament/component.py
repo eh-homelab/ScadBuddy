@@ -102,6 +102,7 @@ def _build(core: Core, components: Components) -> Filament:
                 "filament_drying_temp_c",
                 "filament_drying_hours",
                 "filament_weighing_drift_notice_g",
+                "filament_weighing_finished_left_g",
             }
         )
         return FilamentDefaults(
@@ -110,6 +111,7 @@ def _build(core: Core, components: Components) -> Filament:
             drying_temp_c=read["filament_drying_temp_c"],
             drying_hours=read["filament_drying_hours"],
             drift_notice_g=int(read["filament_weighing_drift_notice_g"]),
+            finished_left_g=int(read["filament_weighing_finished_left_g"]),
         )
 
     def shop_currency() -> str:

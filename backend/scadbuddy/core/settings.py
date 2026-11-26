@@ -818,9 +818,13 @@ class Settings(BaseSettings):
 
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
-    # limit on that dimension.
+    # limit on that dimension, and the default (an event is kept forever).
+    # SCADBUDDY_EVENT_LOG_RETENTION_KINDS (JSON object): seconds to keep each kind and
+    # its sub-kinds, by dotted prefix ({"job": 3600}); the longest prefix that matches
+    # wins, and 0 keeps that prefix forever. An event's own `retention_seconds` beats it.
     event_log_retention_seconds: float = DEFAULT_EVENT_LOG_RETENTION_SECONDS
     event_log_retention_rows: int = DEFAULT_EVENT_LOG_RETENTION_ROWS
+    event_log_retention_kinds: dict[str, float] = Field(default_factory=dict)
 
     @field_validator("event_log_retention_seconds", "event_log_retention_rows")
     @classmethod
@@ -828,6 +832,22 @@ class Settings(BaseSettings):
         if value < 0:
             name = f"SCADBUDDY_{(info.field_name or '').upper()}"
             raise ValueError(f"{name} must be at least 0, not {value}")
+        return value
+
+    @field_validator("event_log_retention_kinds")
+    @classmethod
+    def _retention_kinds_valid(cls, value: dict[str, float]) -> dict[str, float]:
+        for prefix, seconds in value.items():
+            if not KIND_PREFIX.fullmatch(prefix):
+                raise ValueError(
+                    f"SCADBUDDY_EVENT_LOG_RETENTION_KINDS: {prefix!r} is not a kind prefix"
+                    " (dotted lowercase segments, such as 'job.progress')"
+                )
+            if seconds < 0:
+                raise ValueError(
+                    f"SCADBUDDY_EVENT_LOG_RETENTION_KINDS: {prefix!r} must be at least 0,"
+                    f" not {seconds}"
+                )
         return value
 
     # SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS (#1057): how long an outward host call of
@@ -853,6 +873,9 @@ class Settings(BaseSettings):
     # SCADBUDDY_FILAMENT_WEIGHING_DRIFT_NOTICE_G (#7682): a weighing whose drift is at or
     # over this many grams, either way, is a notice on the spool and in the list.
     filament_weighing_drift_notice_g: int = Field(default=10, ge=0, le=100000)
+    # SCADBUDDY_FILAMENT_WEIGHING_FINISHED_LEFT_G (#7684): a spool archived as finished
+    # with more than this many grams of filament left gets a notice first.
+    filament_weighing_finished_left_g: int = Field(default=5, ge=0, le=100000)
     # SCADBUDDY_FILAMENT_DRYING_TEMP_C and _FILAMENT_DRYING_HOURS (#7156, R-7156-5): the
     # drying a spool is offered when nothing in the catalog (spool, type, subtype,
     # material) sets one (`filament/spools.py` `_drying_defaults`). Unset offers none.
@@ -988,6 +1011,9 @@ class NoDatabaseSettings(Settings):
     def _database_required(cls, value: str) -> str:
         return value
 
+
+#: A kind prefix of `event_log_retention_kinds`: dotted kind segments (`job`, `job.progress`).
+KIND_PREFIX: Final = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*")
 
 #: What ``log_level`` takes: the standard library's own level names.
 LOG_LEVELS: Final = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
@@ -1263,6 +1289,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "filament_low_stock_pct": "live",
         "filament_default_cost_per_kg": "live",
         "filament_weighing_drift_notice_g": "live",
+        "filament_weighing_finished_left_g": "live",
         "filament_drying_temp_c": "live",
         "filament_drying_hours": "live",
         "filament_label_base_url": "live",
@@ -1278,6 +1305,7 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "duplicate_staging_max_age": "live",
         "event_log_retention_seconds": "live",
         "event_log_retention_rows": "live",
+        "event_log_retention_kinds": "live",
         # Read by every flow run's start.
         "flow_approval_timeout_seconds": "live",
         # A key change swaps the client and refetches the catalogue.
