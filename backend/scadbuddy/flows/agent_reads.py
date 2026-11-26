@@ -106,12 +106,15 @@ def decision_checks(pool: Pool, request_id: str, input_hash: str) -> dict[str, b
             params,
         ).fetchall()
         approved = unresolved = by_person = lapsed = False
+        # Each grant's chain is read once, however many rows name it (#7890).
+        chains: dict[str, bool] = {}
         for row in rows:
             responder = str(row["responder"])
             by_grant = responder.startswith("grant:")
-            holds = not by_grant or (
-                row["grant_id"] is not None and chain_in_force(conn, row["grant_id"])
-            )
+            grant_id = row["grant_id"]
+            if grant_id is not None and grant_id not in chains:
+                chains[grant_id] = chain_in_force(conn, grant_id)
+            holds = not by_grant or (grant_id is not None and chains[grant_id])
             approved = approved or holds
             unresolved = unresolved or (holds and (by_grant or bool(row["narrowed"])))
             by_person = by_person or responder == "browser"
