@@ -59,7 +59,16 @@ flowchart LR
   first, then indexes it (`POST …/crud/camera/printers/{id}/segments`). The standby keeps the
   segments that the index has not reached yet, so a handover leaves no gap. The object key is
   `<prefix>/camera/<printer_id>/<yyyy>/<mm>/<dd>/<HHMMSS.ffffff>.mp4`, by the segment's UTC
-  start (`camera/uploads.py`).
+  start (`camera/uploads.py`). The API refuses an index call that names a key outside
+  `camera/<printer_id>/` (422 `foreign_object_key`, `store.py` `in_camera_folder`).
+- **A stalled leader (#7407).** The lease renewal runs in a task of its own, so a leader whose
+  uploads or indexes are stuck still renews. When a leader has indexed no segment in 6
+  renewals in a row (`STALLED_LEAD_TICKS`, 30 s) while its MediaMTX says the path is ready
+  (`ready` in `GET /v3/paths/list`), it releases the lease and acquires none for 10 s
+  (`START_HOLDOFF`), so the standby takes over. A path that is not ready (the printer is off)
+  is no stall. 30 s is past the longest a healthy leader goes without an index while video
+  arrives: a lost hook's file waits `ADOPT_AGE` (12 s), then an upload pass (5 s) and at most
+  `INDEX_EVERY` (8 s) of puts.
 - **The edge** (`python -m scadbuddy.camera.edge`, `camera/edge.py`) is the live view's
   server. Its controller puts one on-demand path per recorded printer in its MediaMTX
   (`source` is the relay's RTSP URL with the relay read user, `sourceOnDemand: true`,
@@ -95,11 +104,12 @@ flowchart LR
 - **Readiness and rolling updates.** Each controller also answers `/readyz` on 9090
   (`serve_health`'s `ready` check). It answers 503 until the change follower runs, a full
   reconcile has put the API's paths in MediaMTX (`Relay.ready`, `Recorder.ready`), and
-  `/healthz` would answer 200. The recorder is ready only when every recorded printer has
-  delivered a segment since the process started, or has delivered none for 120 s
-  (`STALL_SECONDS`): a printer that is off sends no video to any recorder, so it must not
-  stop a rollout. The relay does not wait for its pulls, so a printer that is off does not
-  take the relay out of its Service.
+  `/healthz` would answer 200. The recorder is ready only when every printer it recorded at
+  its first full reconcile has delivered a segment since the process started, or has
+  delivered none for 120 s (`STALL_SECONDS`): a printer that is off sends no video to any
+  recorder, so it must not stop a rollout. A printer added later does not count, so adding a
+  printer does not take a running recorder out of ready. The relay does not wait for its
+  pulls, so a printer that is off does not take the relay out of its Service.
 
   This is what makes a rolling update of the recorders gapless. The Deployment rolls one pod
   at a time (`maxSurge: 0`, `maxUnavailable: 1`). With a liveness probe only, Kubernetes
@@ -111,8 +121,10 @@ flowchart LR
   end (spec D14), even when the old leader cannot flush at SIGTERM. The probe numbers are in the
   README.
 - **Deleted printers.** The lease and feed routes answer 404 `printer_not_found` for a printer
-  that was deleted (their rows need the printer's row). The feed senders stop on a 4xx, and a
-  recorder that gets a 404 on a lease call leads that printer no more. A recorder that stops
+  that was deleted (their rows need the printer's row). The feed senders stop on a 4xx (a 429
+  is retried with back-off, and a state wanted while the refused post was on its way is still
+  posted), and a recorder that gets a 404 on a lease call leads that printer no more. A
+  recorder that stops
   leading drops the feed state it has not posted yet (`FeedSender.forget`), so it does not
   overwrite the new leader's report.
 - **Clock (spec

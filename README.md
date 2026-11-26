@@ -2873,9 +2873,10 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   the same numbers: `curl -fsS -o /dev/null http://127.0.0.1:9997/v3/paths/list`.
   Each controller also answers `/readyz` on 9090: 503 until the change follower runs, a full
   reconcile has put the API's paths in MediaMTX, and `/healthz` would answer 200. The
-  recorder adds one rule: every recorded printer has delivered a segment since the process
-  started, or has delivered none for 120 s (`STALL_SECONDS`; a printer that is off sends no
-  video to any recorder, and must not stop a rollout). The relay does not wait for its pulls:
+  recorder adds one rule: every printer it recorded at its first full reconcile has delivered
+  a segment since the process started, or has delivered none for 120 s (`STALL_SECONDS`; a
+  printer that is off sends no video to any recorder, and must not stop a rollout). A printer
+  added later does not count. The relay does not wait for its pulls:
   a printer that is off must not take the relay out of its Service. Use it as the
   controller's readiness probe with the same numbers (`periodSeconds: 10`,
   `timeoutSeconds: 4`, `failureThreshold: 3`). On the recorder Deployment, set

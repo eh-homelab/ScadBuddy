@@ -92,7 +92,7 @@ def test_relay_reads_codes(client: TestClient, printer: str) -> None:
 
 def test_segments_409_when_not_leader(client: TestClient, printer: str) -> None:
     headers = bearer_of(client, "camera")
-    body = {"recorder": "r1", "segments": [_segment(datetime.now(UTC), "camera/a.mp4")]}
+    body = {"recorder": "r1", "segments": [_segment(datetime.now(UTC), f"camera/{printer}/a.mp4")]}
     response = client.post(f"{CAMERA}/printers/{printer}/segments", json=body, headers=headers)
     assert (response.status_code, response.json()["reason"]) == (409, "not_leader")
 
@@ -106,7 +106,7 @@ def test_lease_answers_indexed_until(client: TestClient, printer: str) -> None:
     other = client.post(lease, json={"recorder": "r2", "action": "acquire"}, headers=headers)
     assert (other.json()["held"], other.json()["holder"]) == (False, "r1")
     start = datetime.now(UTC) - timedelta(seconds=10)
-    body = {"recorder": "r1", "segments": [_segment(start, "camera/a.mp4")]}
+    body = {"recorder": "r1", "segments": [_segment(start, f"camera/{printer}/a.mp4")]}
     posted = client.post(f"{CAMERA}/printers/{printer}/segments", json=body, headers=headers)
     assert posted.json() == {"indexed": 1}
     renewed = client.post(lease, json={"recorder": "r1", "action": "renew"}, headers=headers)
@@ -114,6 +114,16 @@ def test_lease_answers_indexed_until(client: TestClient, printer: str) -> None:
     assert until == start + timedelta(seconds=4)
     released = client.post(lease, json={"recorder": "r1", "action": "release"}, headers=headers)
     assert released.json()["held"] is False
+
+
+def test_segments_422_for_another_printers_key(client: TestClient, printer: str) -> None:
+    headers = bearer_of(client, "camera")
+    lease = f"{CAMERA}/printers/{printer}/lease"
+    client.post(lease, json={"recorder": "r1", "action": "acquire"}, headers=headers)
+    key = f"rec/camera/{uuid.uuid4()}/a.mp4"
+    body = {"recorder": "r1", "segments": [_segment(datetime.now(UTC), key)]}
+    response = client.post(f"{CAMERA}/printers/{printer}/segments", json=body, headers=headers)
+    assert (response.status_code, response.json()["reason"]) == (422, "foreign_object_key")
 
 
 def test_segments_are_capped_at_500(client: TestClient, printer: str) -> None:

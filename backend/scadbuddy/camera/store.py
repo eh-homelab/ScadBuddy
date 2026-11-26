@@ -35,8 +35,9 @@ LEASE_SECONDS = 20
 #: The end of a printer's index. It reads only the rows that start in the 5 minutes before
 #: the newest start (found through ``camera_segments_printer_started``), not the printer's
 #: whole index, on every lease call. The result is the full scan's: MediaMTX cuts a segment
-#: every 4 s at a key frame (``recordSegmentDuration``), so an older segment that ends after
-#: the newest one would have to be more than 5 minutes long.
+#: at the first key frame after 4 s (``recordSegmentDuration`` is a minimum,
+#: https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml), so an older segment
+#: that ends after the newest one would have to be more than 5 minutes long.
 INDEXED_UNTIL = (
     "(SELECT max(started_at + duration_ms * interval '1 millisecond')"
     " FROM camera_segments WHERE printer_id = %(pid)s AND started_at >="
@@ -47,6 +48,22 @@ INDEXED_UNTIL = (
 
 class NotLeaderError(Exception):
     """The recorder holds no live lease for the printer."""
+
+
+class ObjectKeyError(Exception):
+    """A segment's object key is not in the printer's camera folder."""
+
+
+def in_camera_folder(printer_id: str, key: str) -> bool:
+    """Whether ``key`` is a ``.mp4`` under ``[<prefix>/]camera/<printer_id>/``, the folder
+    `uploads.object_key` puts the printer's segments in. The API does not know the
+    recorders' prefix, so any prefix passes; an empty, ``.`` or ``..`` part does not."""
+    parts = key.split("/")
+    if not key.endswith(".mp4") or any(part in ("", ".", "..") for part in parts):
+        return False
+    return any(
+        parts[at] == "camera" and parts[at + 1] == printer_id for at in range(len(parts) - 2)
+    )
 
 
 class CameraStore:
@@ -118,6 +135,8 @@ class CameraStore:
         key = printer_uuid(printer_id)
         if key is None:
             raise NotLeaderError(printer_id)
+        if not all(in_camera_folder(str(key), s.object_key) for s in segments):
+            raise ObjectKeyError(printer_id)
         with self._pool.connection() as conn, conn.transaction():
             held = conn.execute(
                 "SELECT 1 FROM camera_leases WHERE printer_id = %s AND holder = %s"

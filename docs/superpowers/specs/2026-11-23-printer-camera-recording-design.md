@@ -283,7 +283,7 @@ would rebuild the same parts.
   replica, last segment time, upload lag, buffered bytes). A report is sent on a change of
   state, not on a timer. The API stores it and emits `camera.feed` on `printers` and
   `printer:<id>`. The UI and the alerts design follow that event; nothing polls the feed.
-  Segments do not each emit an event (one every 4 seconds per printer would flood the bus);
+  Segments do not each emit an event (one about every 4 seconds per printer would flood the bus);
   a playlist reader re-reads the index.
 - A printer that does not answer keeps its relay path; MediaMTX retries the pull. A gap in
   the recording is normal and is visible in the index (§6.3).
