@@ -86,7 +86,7 @@ Routes are auto-registered from every `routes/*.ts` that exports `route`
 | `/api/v1/ai/credentials…` | Claude credentials | `routes/credentials.ts:207-412` |
 | `/api/v1/ai/settings/*`, `/capabilities/*` | model, limits, workspace, tool access | `routes/model.ts:37`, `routes/capabilities.ts:141-180` |
 | `/api/v1/ai/plugins…`, `/plugin-packages…`, `/mcp-tokens…` | plugins, packages, tokens for external MCP clients | `routes/plugins.ts:161`, `routes/pluginPackages.ts:120`, `routes/mcpTokens.ts:116` |
-| `/api/v1/ai/plugin-feeds…` | the marketplace feed for outside Claude Code (its `marketplace.json` and zips on `/mcp`'s auth, LAN-only), and Settings' read and writes of it | `routes/pluginFeeds.ts:159-272` |
+| `/api/v1/ai/plugin-feeds…` | the marketplace feed for outside Claude Code (its `marketplace.json` and zips on `/mcp`'s auth, on the LAN host and the public URL), and Settings' read and writes of it | `routes/pluginFeeds.ts:159-272` |
 | `/api/v1/ai/notify/*`, `/push/*`, `/audit` | notifications and the audit log | `routes/notifyChannels.ts:24`, `routes/push.ts:29`, `routes/audit.ts:68` |
 | `/api/v1/ai/orders/*` | customer messages through a bound plugin | `routes/orderMessages.ts:85`, `routes/messagingBinding.ts:63` |
 

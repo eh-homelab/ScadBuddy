@@ -271,6 +271,26 @@ def app_run_holds_sweep_off(
     return real
 
 
+@pytest.fixture(autouse=True)
+def app_warm_listings_sweep_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[AppState], Coroutine[Any, Any, None]]:
+    """#7737: the app's own warm-listings sweep does nothing. The prune Schedule's boot run
+    (as in `app_payment_sweep_off`) runs it at a time the test does not choose; with
+    `storefront_warm_prices` on (`test_storefront_warm_prices.py`) it starts a published
+    listing's default price run beside the test's own pass (`warm_unpriced`), so that pass
+    finds the run started already, or the test's recorded starts hold one more. A test
+    runs the sweep itself (`swept`). The real sweep is returned for a test that runs it
+    itself (#7771)."""
+    real = main_module._warm_listings_logged
+
+    async def off(state: AppState) -> None:
+        return None
+
+    monkeypatch.setattr(main_module, "_warm_listings_logged", off)
+    return real
+
+
 def files_only(client: TestClient) -> None:
     """The app saves as a build before #7256 did: files and rows, no blobs. On `local` the
     outputs have a blob store of their own (#7257, plan D7); a test that rewrites or

@@ -244,6 +244,47 @@ def test_a_reading_alone_needs_an_empty_weight(client: TestClient) -> None:
     assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created"]
 
 
+def _new_spool(client: TestClient) -> dict[str, object]:
+    """New by #7280's rule: 1000 g left of a 1000 g label, nothing consumed, on a 200 g insert."""
+    return _spool(
+        client,
+        label_weight_g=1000,
+        insert_type_id=_insert(client),
+        grams_left=1000,
+        added_full=True,
+    )
+
+
+def test_a_new_spool_under_its_label_takes_a_resolution(client: TestClient) -> None:
+    """#7683: the choice the check offered rides on the weighing and stays in its data."""
+    made = _new_spool(client)
+    one = f"{SPOOLS}/{made['id']}"
+    check = client.get(f"{one}/insert-weight-offer", params={"reading_g": 900}).json()
+    assert check["reason"] == "below_label" and check["default"] == "tared"
+    weighed = client.post(
+        f"{one}/events",
+        json={"kind": "weighed", "source": "scale", "reading_g": 900, "resolution": "tared"},
+    )
+    assert weighed.status_code == 201, weighed.text
+    assert weighed.json()["grams_after"] == 900
+    data = weighed.json()["data"]
+    assert (data["resolution"], data["shortfall_g"]) == ("tared", 100)
+    assert data["empty_source"] == "tared"
+
+
+def test_a_resolution_on_a_used_spool_is_refused(client: TestClient) -> None:
+    made = _new_spool(client)
+    one = f"{SPOOLS}/{made['id']}"
+    used = client.post(f"{one}/events", json={"kind": "weighed", "grams": 900})
+    assert used.status_code == 201, used.text
+    refused = client.post(
+        f"{one}/events", json={"kind": "weighed", "reading_g": 900, "resolution": "tared"}
+    )
+    assert refused.status_code == 422, refused.text
+    assert (refused.json()["code"], refused.json()["reason"]) == ("no_below_label", "used")
+    assert [e["kind"] for e in client.get(f"{one}/events").json()] == ["created", "weighed"]
+
+
 def test_patching_a_colour_to_null_returns_the_spool_to_its_types_colour(
     client: TestClient,
 ) -> None:

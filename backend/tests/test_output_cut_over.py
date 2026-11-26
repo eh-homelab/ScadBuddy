@@ -21,7 +21,7 @@ from scadbuddy import main
 from scadbuddy.library.output_byte_copy import copy_output_bytes
 from scadbuddy.library.output_bytes import OutputBytes
 from scadbuddy.library.output_copy import copy_outputs
-from scadbuddy.library.output_rows import OutputRows, output_blob_key
+from scadbuddy.library.output_rows import BYTES_LOCK, COPY_LOCK, OutputRows, output_blob_key
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.store.content import ContentStore
@@ -120,6 +120,36 @@ async def test_byte_run_that_finished_writes_the_mark(
     marks = [r for r in caplog.records if r.getMessage() == "the outputs are cut over (#7257)"]
     assert len(marks) == 1
     assert marks[0].at == at  # type: ignore[attr-defined]
+
+
+def _both_locks_free(pool: Pool) -> bool:
+    """Whether another session takes both copies' locks now, as `try_cut_over` does."""
+    with pool.connection() as conn, conn.transaction():
+        found = conn.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0))"
+            " AND pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS free",
+            (COPY_LOCK, BYTES_LOCK),
+        ).fetchone()
+    assert found is not None
+    return bool(found["free"])
+
+
+async def test_each_copy_frees_its_lock_before_it_returns(
+    saved: tuple[OutputStore, list[OutputMeta]],
+    content: ContentStore,
+    projection: JobProjection,
+) -> None:
+    """#7769: a copy releases its advisory lock before it returns, not when the server
+    ends its closed session a moment later, so the cut-over's check of both locks, made
+    at once, finds them free. Several times, as the race is short: without the fix it
+    failed 2 of 3 runs of 25 loops (#7769); 10 keep the shard balanced (#7823)."""
+    store, _ = saved
+    rows = _rows(store)
+    for _ in range(10):
+        assert copy_outputs(store, rows, projection.conninfo) is not None
+        assert _both_locks_free(projection.pool)
+        assert await copy_output_bytes(store, rows, content, projection.conninfo) is not None
+        assert _both_locks_free(projection.pool)
 
 
 async def test_no_mark_while_a_row_has_no_bytes(

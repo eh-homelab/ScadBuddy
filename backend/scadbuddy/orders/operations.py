@@ -29,7 +29,12 @@ from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
-from scadbuddy.bambuddy.output_reader import LocalOutputs, invalid_meta, require
+from scadbuddy.bambuddy.output_reader import (
+    LocalOutputs,
+    TemplateSettings,
+    invalid_meta,
+    require,
+)
 from scadbuddy.bambuddy.part_settings import dumped
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import (
@@ -215,8 +220,15 @@ class PreviewSlicer:
         subject: str,
         *,
         slot_presets: SlotPresets | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
-        return await self._start(request, subject, output_id=output_id, slot_presets=slot_presets)
+        return await self._start(
+            request,
+            subject,
+            output_id=output_id,
+            slot_presets=slot_presets,
+            template_settings=template_settings,
+        )
 
     async def start_library(
         self,
@@ -250,6 +262,7 @@ class PreviewSlicer:
         slot_presets: SlotPresets | None = None,
         slot_colours: SlotColours | None = None,
         held: HeldFile | None = None,
+        template_settings: TemplateSettings | None = None,
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
@@ -300,7 +313,7 @@ class PreviewSlicer:
         assert output_id is not None
         outputs = LocalOutputs(core.outputs, core.catalogue)
         meta = await require(outputs, output_id)
-        naming = await outputs.naming(meta)
+        naming = await outputs.naming(meta, template_settings=template_settings)
         # The run's refusal (#5649): never a price for a print the run refuses.
         if naming.invalid_meta is not None:
             raise invalid_meta(naming.invalid_meta)

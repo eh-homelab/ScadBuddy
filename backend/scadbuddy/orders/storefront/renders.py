@@ -114,8 +114,9 @@ UNAVAILABLE_RETRY: Final = 5
 #: The longest a status or estimate request waits on work behind it (#6120): a done
 #: render's files being fetched. Past it the request answers "not ready yet" and the page
 #: asks again, so no request is held near Cloudflare's 100 s. The fetch state below
-#: (`_fetches`, `_ready`, `_failed`) is this process's: it assumes one API process, as
-#: today; with more, a preview read may still fetch on its own.
+#: (`_fetches`, `_ready`, `_failed`) is this process's, as the cache is: a status read on
+#: one replica says nothing of another's cache, so a preview read waits on its own
+#: replica's fetch the same way (`preview_ready`, #6968).
 READY_WAIT: Final = 3.0
 
 
@@ -171,9 +172,10 @@ _fetches: dict[str, asyncio.Task[None]] = {}
 _ready: OrderedDict[str, None] = OrderedDict()
 READY_KEPT: Final = 4096
 #: Each job's failed fetches in a row, and when the first failed. Past `FETCH_TRIES`
-#: its files are taken as lost for the status only: it names the preview, whose read then
-#: says so at once (404), rather than the page polling a render that can never show. The
-#: estimate never takes lost files as there (`files_ready`). A count older than
+#: its files are taken as lost for the status and for the preview read (`preview_ready`):
+#: the status names the preview, whose read then goes on and says so within `READY_WAIT`
+#: (404), rather than the page polling a render that can never show. The estimate never
+#: takes lost files as there (`files_ready`). A count older than
 #: `FAILED_FOR` starts over, so an outage that ends is tried again; bounded as `_ready`.
 _failed: OrderedDict[str, tuple[int, float]] = OrderedDict()
 FETCH_TRIES: Final = 3
@@ -260,6 +262,27 @@ async def shown_render(state: AppState, job: Job) -> StoreRender:
         or files_lost(job.id)
     )
     return store_render(job, ready=ready)
+
+
+def _cached(state: AppState, job: Job) -> bool:
+    """Whether every output's 3MF of ``job`` is in this process's cache now: one stat each,
+    no fetch."""
+    return all(
+        result_file(state.store.blobs, state.paths.root, result.model_3mf).is_file()
+        for result in job_results(job)
+    )
+
+
+async def preview_ready(state: AppState, job: Job) -> bool:
+    """Whether the done ``job``'s preview can be read here now (#6968): its files are in
+    this process's cache (a job fetched before whose files are still there answers at once,
+    `_cached`), or after a wait of at most `READY_WAIT` on its fetch, or they are taken as
+    lost (`files_lost`), so the read says so. False: the read answers 503, and the next one
+    finds the fetch further on. A job in `_ready` whose files the cache has evicted since
+    is fetched again, as the read needs them on this replica."""
+    if job.id in _ready and await asyncio.to_thread(_cached, state, job):
+        return True
+    return await _fetch(state, job) or files_lost(job.id)
 
 
 def limited(error: RenderLimited) -> ApiError:

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -266,10 +267,9 @@ func QueryInt(r *http.Request, name string, least, most int64) (value int64, giv
 
 // QueryText is the required query parameter name, 1 to most characters.
 func QueryText(r *http.Request, name string, most int) (string, error) {
-	values := r.URL.Query()[name]
+	value, given := query(r, name)
 	issue := httpx.Issue{Loc: []string{"query", name}, Msg: "Field required"}
-	if len(values) > 0 {
-		value := values[len(values)-1]
+	if given {
 		issue.Msg = lengthIssue(value, 1, most)
 		if issue.Msg == "" {
 			return value, nil
@@ -283,6 +283,7 @@ type Body struct {
 	fields map[string]json.RawMessage
 	issues []httpx.Issue
 	at     []string
+	parent *Body
 }
 
 // ReadBody is the request's body as an object whose members are all among names.
@@ -291,6 +292,11 @@ func ReadBody(r *http.Request, names ...string) (*Body, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseBody(raw, names...)
+}
+
+// ParseBody is raw as an object whose members are all among names.
+func ParseBody(raw []byte, names ...string) (*Body, error) {
 	if len(raw) == 0 {
 		return nil, httpx.Invalid(httpx.Issue{Loc: []string{"body"}, Msg: "Field required"})
 	}
@@ -417,6 +423,184 @@ func (b *Body) Object(name string, names ...string) *Nested {
 	n.object(raw, names)
 	return n
 }
+
+// Need is the required object name. A null or absent one is an issue, and nil.
+func (b *Body) Need(name string, names ...string) *Nested {
+	raw, ok := b.required(name)
+	if !ok {
+		return nil
+	}
+	if string(raw) == "null" {
+		b.fail([]string{name}, "Input should be a valid dictionary or object to extract fields from")
+		return nil
+	}
+	return b.Object(name, names...)
+}
+
+// Null says whether name is absent or null.
+func (b *Body) Null(name string) bool {
+	raw, ok := b.fields[name]
+	return !ok || string(raw) == "null"
+}
+
+// TextOr is the string name, least to most characters, or fallback when it is absent. A null
+// one is an issue.
+func (b *Body) TextOr(name, fallback string, least, most int) string {
+	raw, ok := b.fields[name]
+	if !ok {
+		return fallback
+	}
+	return b.text([]string{name}, raw, least, most)
+}
+
+// Pattern is the issue of s that does not match pattern, written as pydantic does.
+func (b *Body) Pattern(name string, s string, pattern *regexp.Regexp) {
+	if !pattern.MatchString(s) {
+		b.fail([]string{name}, fmt.Sprintf("String should match pattern '%s'", pattern))
+	}
+}
+
+// IntRange is the required integer name within [least, most]; a float with no fraction counts.
+func (b *Body) IntRange(name string, least, most int64) int64 {
+	raw, ok := b.required(name)
+	if !ok {
+		return 0
+	}
+	return b.intIn([]string{name}, raw, least, most)
+}
+
+// IntOr is the integer name within [least, most], or fallback when it is absent.
+func (b *Body) IntOr(name string, fallback, least, most int64) int64 {
+	raw, ok := b.fields[name]
+	if !ok {
+		return fallback
+	}
+	return b.intIn([]string{name}, raw, least, most)
+}
+
+// OptIntRange is the optional integer name within [least, most]; nil when absent or null.
+func (b *Body) OptIntRange(name string, least, most int64) *int64 {
+	if b.Null(name) {
+		return nil
+	}
+	v := b.intIn([]string{name}, b.fields[name], least, most)
+	return &v
+}
+
+func (b *Body) intIn(path []string, raw json.RawMessage, least, most int64) int64 {
+	var n *int64
+	if json.Unmarshal(raw, &n) != nil || n == nil {
+		var f *float64
+		// pydantic takes a float with no fraction as an integer.
+		if json.Unmarshal(raw, &f) != nil || f == nil || *f != float64(int64(*f)) {
+			b.fail(path, "Input should be a valid integer")
+			return 0
+		}
+		v := int64(*f)
+		n = &v
+	}
+	switch {
+	case *n < least:
+		b.fail(path, fmt.Sprintf("Input should be greater than or equal to %d", least))
+	case *n > most:
+		b.fail(path, fmt.Sprintf("Input should be less than or equal to %d", most))
+	}
+	return *n
+}
+
+// OptFloat is the optional finite number name within [least, most]; nil when absent or null.
+func (b *Body) OptFloat(name string, least, most float64) *float64 {
+	if b.Null(name) {
+		return nil
+	}
+	var f *float64
+	if json.Unmarshal(b.fields[name], &f) != nil || f == nil {
+		b.fail([]string{name}, "Input should be a valid number")
+		return nil
+	}
+	if *f < least || *f > most {
+		b.fail([]string{name}, fmt.Sprintf("Input should be between %g and %g", least, most))
+	}
+	return f
+}
+
+// List is the list name's items: required unless optional, nil when absent or null and
+// optional. At most most items.
+func (b *Body) List(name string, optional bool, most int) []json.RawMessage {
+	raw, ok := b.fields[name]
+	if !ok || (optional && string(raw) == "null") {
+		if !optional {
+			b.required(name)
+		}
+		return nil
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil || items == nil {
+		b.fail([]string{name}, "Input should be a valid list")
+		return nil
+	}
+	if len(items) > most {
+		b.fail([]string{name}, fmt.Sprintf("List should have at most %d items after validation", most))
+		return nil
+	}
+	return items
+}
+
+// TextItems is List's items as strings of least to most characters.
+func (b *Body) TextItems(name string, items []json.RawMessage, least, most int) []string {
+	texts := make([]string, len(items))
+	for i, item := range items {
+		texts[i] = b.text([]string{name, strconv.Itoa(i)}, item, least, most)
+	}
+	return texts
+}
+
+// ChoiceItems is List's items as strings, each one of values.
+func (b *Body) ChoiceItems(name string, items []json.RawMessage, values ...string) []string {
+	texts := make([]string, len(items))
+	for i, item := range items {
+		texts[i] = b.choice([]string{name, strconv.Itoa(i)}, item, values)
+	}
+	return texts
+}
+
+// Datetime is the date and time name as Postgres reads it (`::timestamptz`); required
+// unless optional, nil when absent or null and optional. pydantic's forms: an ISO 8601 text,
+// or a Unix time in seconds (milliseconds past 2e10).
+func (b *Body) Datetime(name string, optional bool) *string {
+	raw, ok := b.fields[name]
+	if !ok || string(raw) == "null" {
+		if !optional {
+			if !ok {
+				b.required(name)
+			} else {
+				b.fail([]string{name}, "Input should be a valid datetime")
+			}
+		}
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		if datetimePattern.MatchString(s) {
+			return &s
+		}
+	} else {
+		var f float64
+		if json.Unmarshal(raw, &f) == nil {
+			if f > 2e10 || f < -2e10 {
+				f /= 1000
+			}
+			sec := int64(f)
+			t := time.Unix(sec, int64((f-float64(sec))*1e9)).UTC().Format(time.RFC3339Nano)
+			return &t
+		}
+	}
+	b.fail([]string{name}, "Input should be a valid datetime")
+	return nil
+}
+
+var datetimePattern = regexp.MustCompile(
+	`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|z|[+-]\d{2}(:?\d{2})?)?$`)
 
 // Nested is an object within a body. Done gives its issues to the body.
 type Nested struct {

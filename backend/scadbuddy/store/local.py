@@ -5,8 +5,9 @@ import os
 import re
 import shutil
 import uuid
-from collections.abc import AsyncGenerator
-from contextlib import suppress
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import get_args
 
@@ -115,8 +116,9 @@ _CHUNK = 1 << 20
 
 
 class LocalContentBackend:
-    """Objects under a directory, one file per sha256: tests, `verify.sh`, and the
-    stand-in for a remote backend in the worker-cache tests."""
+    """Objects under a directory, one file per sha256: the outputs' own store on `local`
+    (#7257), tests, `verify.sh`, and the stand-in for a remote backend in the
+    worker-cache tests."""
 
     backend = "local"
 
@@ -167,3 +169,59 @@ class LocalContentBackend:
 
     async def remove(self, backend_id: str) -> None:
         await asyncio.to_thread(self._path(backend_id).unlink, missing_ok=True)
+
+    async def sweep_unrecorded(
+        self,
+        *,
+        cutoff: datetime,
+        recorded: Callable[[str], bool],
+        claim: Callable[[str], AbstractAsyncContextManager[bool]] | None = None,
+    ) -> int:
+        """Remove every object last written before ``cutoff`` that no row names, as
+        `S3ContentBackend.sweep_unrecorded` does: on `local` the outputs' own store
+        (`data/output-blobs/`, #7257) keeps what a save that died before its commit
+        uploaded (#7477). ``recorded`` is asked first; with ``claim``, an object no row
+        names is removed only inside its block, so one a live save holds stays. A naive
+        ``cutoff`` is UTC."""
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
+        removed = 0
+        limit = cutoff.timestamp()
+        for backend_id in await asyncio.to_thread(self._older_than, limit):
+            if await asyncio.to_thread(recorded, backend_id):
+                continue
+            if claim is None:
+                await self.remove(backend_id)
+                removed += 1
+                continue
+            async with claim(backend_id) as free:
+                # Read again under the claim: a plain put (no stage hold) of the same
+                # bytes may have written the file afresh since `_older_than` (#7756 review).
+                if free and await asyncio.to_thread(self._written_before, backend_id, limit):
+                    await self.remove(backend_id)
+                    removed += 1
+        return removed
+
+    def _written_before(self, backend_id: str, limit: float) -> bool:
+        """Whether the object is still there, last written before ``limit``."""
+        try:
+            return self._path(backend_id).stat().st_mtime < limit
+        except FileNotFoundError:
+            return False
+
+    def _older_than(self, limit: float) -> list[str]:
+        """The objects (not a write's staging file) last written before ``limit``."""
+        found: list[str] = []
+        if not self.root.is_dir():
+            return found
+        for folder in sorted(self.root.iterdir()):
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.iterdir()):
+                backend_id = f"{folder.name}/{path.name}"
+                if not _OBJECT.fullmatch(backend_id):
+                    continue
+                with suppress(FileNotFoundError):
+                    if path.stat().st_mtime < limit:
+                        found.append(backend_id)
+        return found
