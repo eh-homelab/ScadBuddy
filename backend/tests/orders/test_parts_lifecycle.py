@@ -12,7 +12,6 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from scadbuddy.inventory.items import ItemStore
 from scadbuddy.inventory.models import ItemInput, ReceiveLot, RecostResult
 from scadbuddy.inventory.stock import BadQuantity
 from scadbuddy.orders import lifecycle as lifecycle_module
@@ -33,6 +32,7 @@ from scadbuddy.render.pg_store import MIGRATIONS, migrate
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop, resolved
+from tests.support.inventory_rows import ItemRows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -43,7 +43,7 @@ def _shop(rows: OrderStore, pool: PgPool) -> Shop:
 
 
 def _new_item(shop: Shop, kind_id: str, name: str) -> str:
-    items = ItemStore(shop.rows._pool, shop.rows._entities)
+    items = ItemRows(shop.rows._pool)
     return str(items.create(ItemInput(kind_id=kind_id, name=name), BY).id)
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from psycopg.types.json import Jsonb
 from pydantic import JsonValue
 
 from scadbuddy.entities.properties import (
@@ -19,11 +20,9 @@ from scadbuddy.entities.properties import (
 )
 from scadbuddy.entities.refs import EntityRef
 from scadbuddy.entities.registry import EntityNotFound, EntityStore, UnknownEntityKind
-from scadbuddy.inventory.items import ItemStore
-from scadbuddy.inventory.kinds import KindStore
-from scadbuddy.inventory.models import ItemInput, KindPatch
 from tests.conftest import PgPool
 from tests.entities.test_sweep import BY
+from tests.support.inventory_rows import insert_item
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -604,15 +603,13 @@ def test_a_write_raced_by_a_merge_that_deletes_the_owner_is_refused(
 
 
 def test_an_items_schema_is_its_kinds(pg_pool: PgPool, props: EntityPropertyStore) -> None:
-    KindStore(pg_pool).update(
-        "consumable",
-        KindPatch(attribute_schema={"type": "object", "properties": {"mpn": {"type": "string"}}}),
-        BY,
-    )
-    made = ItemStore(pg_pool, EntityStore(pg_pool)).create(
-        ItemInput(kind_id="hardware", name="M3 nut"), BY
-    )
-    item = EntityRef("item", str(made.id))
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE item_kinds SET attribute_schema = %s WHERE id = 'consumable'",
+            (Jsonb({"type": "object", "properties": {"mpn": {"type": "string"}}}),),
+        )
+    made = insert_item(pg_pool, "hardware", name="M3 nut")
+    item = EntityRef("item", str(made))
 
     with pytest.raises(BadPropertyValue) as refused:
         props.apply(item, _patch({"mpn": 5}), BY)

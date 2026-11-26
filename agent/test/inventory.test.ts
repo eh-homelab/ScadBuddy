@@ -422,6 +422,37 @@ describe('inventory tools', () => {
     await expect(tool('inventory_lot_update').execute({ lot_id: LOT }, ctx())).rejects.toThrow('nothing to change')
   })
 
+  it('says a write past the wait still runs, names its operation and sends it once (#6949 K1)', async () => {
+    let uses = 0
+    let patches = 0
+    const accepted = (id: string) =>
+      HttpResponse.json({ id, kind: 'inventory.Take', subject: `item:${ITEM}`, status: 'running', created_at: '2026-11-26T12:00:00Z', repeated: false }, { status: 202 })
+    server.use(
+      http.post(`${INV}/items/${ITEM}/use`, () => (uses++, accepted('req:op-1'))),
+      http.post(`${INV}/items`, () => accepted('req:op-2')),
+      http.patch(props, () => (patches++, HttpResponse.json({ properties: [] }))),
+    )
+
+    const used = firstText(await runTool(tool('inventory_move_use'), { item_id: ITEM, qty: '2' }, ctx()))
+    const made = firstText(await runTool(tool('inventory_item_upsert'), { fields: { kind_id: 'hardware', name: 'M3 nut' }, properties: { thread: 'M3' } }, ctx()))
+
+    expect(used).toMatchObject({ still_running: true, operation_id: 'req:op-1' })
+    expect((used as { note: string }).note).toContain('still running, operation req:op-1')
+    expect(uses).toBe(1)
+    expect(made).toMatchObject({ still_running: true, operation_id: 'req:op-2' })
+    expect((made as { note: string }).note).toContain('The properties were not set')
+    expect(patches).toBe(0)
+  })
+
+  it("names Go's codes for a stock call on the wrong item", () => {
+    expect(tool('inventory_lot_receive').description).toContain('`wrong_counting`')
+    expect(tool('inventory_lot_receive').description).toContain('`step_not_applicable`')
+    expect(tool('inventory_unit_receive').description).toContain('`wrong_counting`')
+    for (const t of ALL_TOOLS.filter((x) => x.name.startsWith('inventory_'))) {
+      expect(t.description, t.name).not.toMatch(/wrong_tracking|item_not_counted/)
+    }
+  })
+
   it('receives units, edits one and changes its status', async () => {
     const calls: string[] = []
     const body = async (what: string, request: Request) => calls.push(`${what} ${JSON.stringify(await request.json())}`)

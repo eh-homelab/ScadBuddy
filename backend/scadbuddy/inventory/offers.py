@@ -16,7 +16,6 @@ import psycopg
 from psycopg import Connection
 from psycopg.rows import DictRow
 
-from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound
 from scadbuddy.inventory.models import (
     Offer,
     OfferInput,
@@ -24,6 +23,7 @@ from scadbuddy.inventory.models import (
     OfferPricePoint,
     PriceInput,
 )
+from scadbuddy.inventory.stock import FilamentItemRefused, ItemNotFound
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]

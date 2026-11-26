@@ -19,8 +19,6 @@ from pydantic import ValidationError
 import scadbuddy.inventory.stock as stock_module
 from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import EntityStore
-from scadbuddy.inventory.items import ItemNotFound, ItemStore
-from scadbuddy.inventory.kinds import KindStore
 from scadbuddy.inventory.models import (
     AdjustInput,
     ItemInput,
@@ -36,6 +34,7 @@ from scadbuddy.inventory.stock import (
     BadQuantity,
     Conn,
     ItemNotCounted,
+    ItemNotFound,
     LocationNotFound,
     LotEmpty,
     LotNotFound,
@@ -47,6 +46,7 @@ from scadbuddy.inventory.stock import (
 )
 from scadbuddy.orders.models import Actor
 from tests.conftest import PgPool
+from tests.support.inventory_rows import ItemRows, KindRows
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -58,7 +58,7 @@ def stock(pg_pool: PgPool) -> StockStore:
     return StockStore(pg_pool, EntityStore(pg_pool), lambda: "USD")
 
 
-def _item(items: ItemStore, kind: str = "hardware", name: str = "M3 bolt") -> UUID:
+def _item(items: ItemRows, kind: str = "hardware", name: str = "M3 bolt") -> UUID:
     return items.create(ItemInput(kind_id=kind, name=name), BY).id
 
 
@@ -108,7 +108,7 @@ def _on_hand_is_the_sum_of_moves(pg_pool: PgPool) -> None:
 
 
 def test_fifo_takes_the_oldest_lot_first(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     first, second = _two_lots(stock, item)
@@ -124,7 +124,7 @@ def test_fifo_takes_the_oldest_lot_first(
     _on_hand_is_the_sum_of_moves(pg_pool)
 
 
-def test_a_named_lot_is_taken_first(stock: StockStore, items: ItemStore, pg_pool: PgPool) -> None:
+def test_a_named_lot_is_taken_first(stock: StockStore, items: ItemRows, pg_pool: PgPool) -> None:
     item = _item(items)
     first, second = _two_lots(stock, item)
 
@@ -135,7 +135,7 @@ def test_a_named_lot_is_taken_first(stock: StockStore, items: ItemStore, pg_pool
 
 
 def test_a_lot_of_another_item_is_not_found(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item, other = _item(items), _item(items, name="M4 bolt")
     _, second = _two_lots(stock, item)
@@ -145,7 +145,7 @@ def test_a_lot_of_another_item_is_not_found(
 
 
 def test_a_shortfall_goes_negative_on_the_newest_lot(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _, second = _two_lots(stock, item)
@@ -162,7 +162,7 @@ def test_a_shortfall_goes_negative_on_the_newest_lot(
 
 
 def test_an_item_with_no_lot_opens_a_cost_unknown_lot(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
 
@@ -185,7 +185,7 @@ def test_an_item_with_no_lot_opens_a_cost_unknown_lot(
 
 
 def test_give_back_reverses_each_use_at_its_own_cost(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """Review Focus 2: a lot cost edited after the use does not reach the return."""
     item = _item(items)
@@ -210,7 +210,7 @@ def test_give_back_reverses_each_use_at_its_own_cost(
 
 
 def test_give_back_reverses_a_shortfall_too(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _two_lots(stock, item)
@@ -224,7 +224,7 @@ def test_give_back_reverses_a_shortfall_too(
 
 
 def test_set_lot_cost_moves_no_past_move(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _, second = _two_lots(stock, item)
@@ -238,7 +238,7 @@ def test_set_lot_cost_moves_no_past_move(
 
 
 def test_recost_resnapshots_and_names_the_order_items(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _, second = _two_lots(stock, item)
@@ -267,7 +267,7 @@ def test_recost_resnapshots_and_names_the_order_items(
 
 
 def test_recost_keeps_a_use_and_its_return_netting_to_zero(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _, second = _two_lots(stock, item)
@@ -291,7 +291,7 @@ def _mark_unknown(pg_pool: PgPool, where: str, *params: object) -> None:
 
 
 def test_recost_reads_an_unknown_use_as_job_cost_does(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """R-P2-31: a use of unknown cost adds nothing to job cost, so once a re-cost makes it
     known the job cost rises: before 0 and unknown, after its amount and known."""
@@ -316,7 +316,7 @@ def test_recost_reads_an_unknown_use_as_job_cost_does(
 
 
 def test_recost_ignores_an_unknown_use_that_was_given_back(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """R-P2-31: a use of unknown cost and its return leave job cost known, before and
     after a re-cost of another lot of the item."""
@@ -343,7 +343,7 @@ def test_recost_ignores_an_unknown_use_that_was_given_back(
 
 
 def test_lock_items_locks_item_by_item_in_item_id_order(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+    stock: StockStore, items: ItemRows, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R-P2-28, R-P2-32: whatever order the caller names them in, each item is locked in
     `item_id` order: the item, the lock every lot insert takes, then its lots."""
@@ -367,7 +367,7 @@ def test_lock_items_locks_item_by_item_in_item_id_order(
 
 
 def test_a_receive_waits_for_a_holder_of_lock_items(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """R-P2-32: a lot insert takes the lock that `lock_items` holds, so no lot appears under
     a fulfil that has locked the item. A short `lock_timeout` shows the wait."""
@@ -400,7 +400,7 @@ def _spy(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, UUID]], *names:
 
 
 def test_lock_items_locks_an_item_with_lots_in_the_same_order(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
+    stock: StockStore, items: ItemRows, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """M6: an item that has lots takes the open lock before its lots too, so a receive
     waits for the holder whether the item has lots or not."""
@@ -422,7 +422,7 @@ def test_lock_items_locks_an_item_with_lots_in_the_same_order(
 
 
 def test_a_count_takes_the_open_lock_before_the_lots(
-    stock: StockStore, items: ItemStore, monkeypatch: pytest.MonkeyPatch
+    stock: StockStore, items: ItemRows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """M6, R-P2-32: `count_item` keeps the order of `lock_items`, with or without lots."""
     empty, stocked = _item(items, name="Empty"), _item(items, name="Stocked")
@@ -437,7 +437,7 @@ def test_a_count_takes_the_open_lock_before_the_lots(
 
 
 def test_a_whole_number_uom_refuses_a_fraction(
-    stock: StockStore, items: ItemStore, kinds: KindStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, kinds: KindRows, pg_pool: PgPool
 ) -> None:
     bolt = _item(items)
     with pytest.raises(BadQuantity):
@@ -455,7 +455,7 @@ def test_a_whole_number_uom_refuses_a_fraction(
     assert (move.qty, move.amount_minor) == (Decimal("-1.5"), Decimal("-0.500000"))
 
 
-def test_a_lot_is_costed_from_its_total(stock: StockStore, items: ItemStore) -> None:
+def test_a_lot_is_costed_from_its_total(stock: StockStore, items: ItemRows) -> None:
     item = _item(items)
 
     lot = stock.receive_lot(item, ReceiveLot(qty=Decimal(3), total_cost_minor=Decimal(1000)), BY)
@@ -475,7 +475,7 @@ def test_a_lot_is_costed_from_its_total(stock: StockStore, items: ItemStore) -> 
         ReceiveLot(qty=Decimal(1), unit_cost_minor=Decimal(1), total_cost_minor=Decimal(1))
 
 
-def test_a_lot_in_another_currency_opens_cost_unknown(stock: StockStore, items: ItemStore) -> None:
+def test_a_lot_in_another_currency_opens_cost_unknown(stock: StockStore, items: ItemRows) -> None:
     """R-7067-11, D11: the shop is USD."""
     item = _item(items)
 
@@ -511,7 +511,7 @@ def test_a_lot_in_another_currency_opens_cost_unknown(stock: StockStore, items: 
     assert receive.cost_unknown is True
 
 
-def test_a_lot_at_an_unknown_location_is_refused(stock: StockStore, items: ItemStore) -> None:
+def test_a_lot_at_an_unknown_location_is_refused(stock: StockStore, items: ItemRows) -> None:
     item = _item(items)
     with pytest.raises(LocationNotFound):
         stock.receive_lot(item, ReceiveLot(qty=Decimal(1), location_id=uuid4()), BY)
@@ -519,7 +519,7 @@ def test_a_lot_at_an_unknown_location_is_refused(stock: StockStore, items: ItemS
 
 
 def test_adjust_lot_writes_the_difference(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     first, _ = _two_lots(stock, item)
@@ -538,7 +538,7 @@ def test_adjust_lot_writes_the_difference(
 
 
 def test_a_count_takes_fifo_down_and_adds_to_the_newest_lot_up(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     first, second = _two_lots(stock, item)
@@ -567,7 +567,7 @@ def test_a_count_takes_fifo_down_and_adds_to_the_newest_lot_up(
     _on_hand_is_the_sum_of_moves(pg_pool)
 
 
-def test_unit_status_writes_its_move(stock: StockStore, items: ItemStore) -> None:
+def test_unit_status_writes_its_move(stock: StockStore, items: ItemRows) -> None:
     nozzle = _item(items, kind="nozzle", name="0.4 hardened")
     one, two = stock.receive_units(
         nozzle, ReceiveUnits(count=2, cost_minor=Decimal(3000), serials=["A1", " "]), BY
@@ -607,7 +607,7 @@ def test_unit_status_writes_its_move(stock: StockStore, items: ItemStore) -> Non
 
 
 def test_a_unit_status_names_its_entity(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     nozzle = _item(items, kind="nozzle", name="0.4")
     (unit,) = stock.receive_units(nozzle, ReceiveUnits(count=1), BY)
@@ -620,7 +620,7 @@ def test_a_unit_status_names_its_entity(
         assert move.entity_id == EntityStore(pg_pool).find(conn, EntityRef("item", str(other)))
 
 
-def test_a_repeated_serial_is_refused(stock: StockStore, items: ItemStore) -> None:
+def test_a_repeated_serial_is_refused(stock: StockStore, items: ItemRows) -> None:
     nozzle = _item(items, kind="nozzle", name="0.4")
     stock.receive_units(nozzle, ReceiveUnits(count=1, serials=["S1"]), BY)
 
@@ -631,7 +631,7 @@ def test_a_repeated_serial_is_refused(stock: StockStore, items: ItemStore) -> No
         ReceiveUnits(count=2, serials=["only one"])
 
 
-def test_an_installed_unit_is_refused(stock: StockStore, items: ItemStore, pg_pool: PgPool) -> None:
+def test_an_installed_unit_is_refused(stock: StockStore, items: ItemRows, pg_pool: PgPool) -> None:
     """#7278 owns install and remove."""
     nozzle = _item(items, kind="nozzle", name="0.4")
     host, part = stock.receive_units(nozzle, ReceiveUnits(count=2), BY)
@@ -645,7 +645,7 @@ def test_an_installed_unit_is_refused(stock: StockStore, items: ItemStore, pg_po
 
 
 def test_lot_calls_on_a_unit_item_are_refused(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     nozzle = _item(items, kind="nozzle", name="0.4")
     bolt = _item(items)
@@ -667,7 +667,7 @@ def test_lot_calls_on_a_unit_item_are_refused(
 
 
 def test_a_not_counted_item_takes_no_stock(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """Ruling 1: a `none` kind has offers and prices, never lots, units or moves."""
     service = _item(items, kind="service", name="Laser cutting")
@@ -692,7 +692,7 @@ def test_a_not_counted_item_takes_no_stock(
     assert _count(pg_pool, "SELECT count(*) AS n FROM entities") == 0
 
 
-def test_use_names_its_entity(stock: StockStore, items: ItemStore, pg_pool: PgPool) -> None:
+def test_use_names_its_entity(stock: StockStore, items: ItemRows, pg_pool: PgPool) -> None:
     grease = _item(items, kind="lubricant", name="Grease")
     target = _item(items, kind="nozzle", name="Target")
     stock.receive_lot(grease, ReceiveLot(qty=Decimal(10), unit_cost_minor=Decimal(5)), BY)
@@ -706,7 +706,7 @@ def test_use_names_its_entity(stock: StockStore, items: ItemStore, pg_pool: PgPo
     assert (move.kind, move.reason) == ("use", "Rails")
 
 
-def test_estimate_matches_take(stock: StockStore, items: ItemStore, pg_pool: PgPool) -> None:
+def test_estimate_matches_take(stock: StockStore, items: ItemRows, pg_pool: PgPool) -> None:
     item = _item(items)
     _two_lots(stock, item)
     moves_before = _count(pg_pool, "SELECT count(*) AS n FROM stock_moves")
@@ -727,7 +727,7 @@ def test_estimate_matches_take(stock: StockStore, items: ItemStore, pg_pool: PgP
 
 
 def test_a_wait_on_the_lots_takes_what_the_first_take_left(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """`take` locks the item's lots `FOR UPDATE`: a second take waits and then takes
     from what the first left, not from what it read before the first committed."""
@@ -746,7 +746,7 @@ def test_a_wait_on_the_lots_takes_what_the_first_take_left(
 
 
 def test_two_takes_on_an_item_with_no_lot_open_one_lot(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
 
@@ -761,7 +761,7 @@ def test_two_takes_on_an_item_with_no_lot_open_one_lot(
 
 
 def test_two_give_backs_return_each_use_once(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _two_lots(stock, item)
@@ -808,7 +808,7 @@ def _while_held[T](pool: PgPool, first: Callable[[Conn], object], second: Callab
 
 
 def test_a_kind_made_by_a_person_is_counted_by_its_tracking(
-    stock: StockStore, items: ItemStore, kinds: KindStore
+    stock: StockStore, items: ItemRows, kinds: KindRows
 ) -> None:
     kinds.create(KindInput(id="fastener", name="Fastener", parent_id="part", tracking="lot"), BY)
     item = _item(items, kind="fastener", name="Rivet")
@@ -825,7 +825,7 @@ def test_a_kind_made_by_a_person_is_counted_by_its_tracking(
 
 
 def test_recost_of_an_order_item_with_uses_on_two_lots(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     _, second = _two_lots(stock, item)
@@ -847,7 +847,7 @@ def test_recost_of_an_order_item_with_uses_on_two_lots(
 
 
 def test_recost_of_a_cost_unknown_lot_clears_its_moves_flag(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """The order item is named although its amount stays 0: its cost became known."""
     item = _item(items)
@@ -875,7 +875,7 @@ def test_recost_of_a_cost_unknown_lot_clears_its_moves_flag(
 
 @pytest.mark.parametrize("give_back_first", [True, False])
 def test_recost_and_give_back_wait_for_each_other(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool, give_back_first: bool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool, give_back_first: bool
 ) -> None:
     """Either order, the use and its return end at one cost and net to 0."""
     item = _item(items)
@@ -907,9 +907,7 @@ def test_recost_and_give_back_wait_for_each_other(
     assert [lot.on_hand for lot in stock.lots(item)] == [10, 10]
 
 
-def test_an_empty_named_lot_is_refused(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
-) -> None:
+def test_an_empty_named_lot_is_refused(stock: StockStore, items: ItemRows, pg_pool: PgPool) -> None:
     """R-P2-14: a named lot is honoured or refused, never silently replaced."""
     item = _item(items)
     first, second = _two_lots(stock, item)
@@ -925,7 +923,7 @@ def test_an_empty_named_lot_is_refused(
 
 
 def test_a_named_older_lot_and_a_shortfall_take_the_newest_lots_cost(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     first, second = _two_lots(stock, item)
@@ -940,7 +938,7 @@ def test_a_named_older_lot_and_a_shortfall_take_the_newest_lots_cost(
 
 
 def test_a_named_lot_on_an_item_with_no_lot_opens_none(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """Checked before a lot is opened, so a caller that goes on in its transaction keeps
     no stray lot."""
@@ -954,7 +952,7 @@ def test_a_named_lot_on_an_item_with_no_lot_opens_none(
 
 
 def test_give_back_returns_only_the_named_item(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     bolt, nut = _item(items), _item(items, name="M3 nut")
     _two_lots(stock, bolt)
@@ -969,14 +967,14 @@ def test_give_back_returns_only_the_named_item(
     assert [lot.on_hand for lot in stock.lots(nut)] == [7, 10]
 
 
-def test_a_count_needs_a_note(stock: StockStore, items: ItemStore) -> None:
+def test_a_count_needs_a_note(stock: StockStore, items: ItemRows) -> None:
     item = _item(items)
 
     with pytest.raises(ValueError, match="note"):
         stock.count_item(item, Decimal(1), "  ", BY)
 
 
-def test_a_cost_set_later_keeps_the_currency_bought_in(stock: StockStore, items: ItemStore) -> None:
+def test_a_cost_set_later_keeps_the_currency_bought_in(stock: StockStore, items: ItemRows) -> None:
     """R-P2-12: `cost_currency` is the currency the lot was bought in."""
     item = _item(items)
     lot = stock.receive_lot(
@@ -996,7 +994,7 @@ def test_a_cost_set_later_keeps_the_currency_bought_in(stock: StockStore, items:
 
 
 def test_a_count_settles_a_negative_lot_first(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     """R-P2-15: no lot keeps an offsetting negative balance after a count. The negative
     lot is zeroed, then the difference is taken FIFO or added to the newest lot."""
@@ -1025,7 +1023,7 @@ def test_a_count_settles_a_negative_lot_first(
 
 
 def test_a_recost_whose_amount_would_not_fit_is_bad_quantity(
-    stock: StockStore, items: ItemStore, pg_pool: PgPool
+    stock: StockStore, items: ItemRows, pg_pool: PgPool
 ) -> None:
     item = _item(items)
     lot = stock.receive_lot(item, ReceiveLot(qty=Decimal(1), unit_cost_minor=Decimal(1)), BY)
@@ -1038,7 +1036,7 @@ def test_a_recost_whose_amount_would_not_fit_is_bad_quantity(
 
 
 def test_a_cost_whose_lot_value_would_not_fit_is_bad_quantity(
-    stock: StockStore, items: ItemStore
+    stock: StockStore, items: ItemRows
 ) -> None:
     item = _item(items)
     lot = stock.receive_lot(item, ReceiveLot(qty=Decimal(10**13)), BY)

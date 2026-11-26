@@ -4,19 +4,39 @@ fulfil."""
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.inventory.component import INVENTORY, InventoryComponent
+from scadbuddy.inventory.models import ReceiveLot
+from scadbuddy.orders.models import Actor
 from tests.api.test_orders_lifecycle import fulfil
 from tests.api.test_orders_unfulfil import accepted_order, unfulfil
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG
-from tests.support.operations import press
+from tests.support.inventory_rows import insert_item
 
 pytestmark = pytest.mark.requires_git
+
+
+def _inventory(client: TestClient) -> InventoryComponent:
+    return _state(client).components.get(INVENTORY)
+
+
+def _lots(client: TestClient, item_id: str) -> list[dict[str, Any]]:
+    """The item's lots as Python's stock store, which the aliases write, reads them: the
+    public read is Go's since K1 (#6949)."""
+    return [lot.model_dump(mode="json") for lot in _inventory(client).stock.lots(UUID(item_id))]
+
+
+def _new_item(client: TestClient, kind_id: str, name: str) -> str:
+    """An item made elsewhere: Go makes items since K1, so the row is inserted."""
+    return str(insert_item(_state(client).refs.pool, kind_id, name=name))
 
 
 def make_part(client: TestClient, **fields: Any) -> dict[str, Any]:
@@ -126,14 +146,7 @@ def test_low_when_at_or_below_its_level(client: TestClient) -> None:
 def test_a_rename_clash_names_the_item_of_the_parts_kind(client: TestClient) -> None:
     """M3: the clash is in the part's own kind: a `hardware` part of the name is not it."""
     make_part(client, name="Feeder gear")
-    ams = [
-        client.post(
-            "/api/v1/inventory/items",
-            json={"kind_id": "ams_part", "name": name},
-            headers=press(),
-        ).json()["id"]
-        for name in ("Feeder gear", "Cutter")
-    ]
+    ams = [_new_item(client, "ams_part", name) for name in ("Feeder gear", "Cutter")]
     clash = client.patch(f"/api/v1/parts/{ams[1]}", json={"name": "feeder GEAR"})
     assert clash.status_code == 409, clash.text
     assert clash.json()["part_id"] == ams[0]
@@ -184,9 +197,9 @@ def test_a_part_with_no_supplier_has_no_offer(client: TestClient) -> None:
         f"/api/v1/parts/{part['id']}/stock", json={"packs": 3, "pack_price_minor": 40}
     ).json()
     assert (priced["on_hand"], priced["pack_price_minor"]) == (5, 0)
-    lots = client.get(f"/api/v1/inventory/items/{part['id']}/lots").json()["lots"]
+    lots = _lots(client, part["id"])
     assert [(lot["on_hand"], lot["cost_unknown"]) for lot in lots] == [("2", True), ("3", False)]
-    assert client.get(f"/api/v1/inventory/items/{part['id']}/offers").json()["offers"] == []
+    assert _inventory(client).offers.for_item(UUID(part["id"]), False) == []
 
     refused = client.patch(f"/api/v1/parts/{part['id']}", json={"pack_size": 10})
     assert refused.status_code == 422
@@ -207,7 +220,7 @@ def test_a_create_with_a_pack_needs_a_supplier(client: TestClient, pack: dict[st
 def test_a_counted_part_with_no_supplier_is_of_unknown_cost(client: TestClient) -> None:
     part = _no_supplier(client, on_hand=4)
     assert (part["on_hand"], part["unit_cost_minor"], part["cost_unknown"]) == (4, "0", True)
-    [lot] = client.get(f"/api/v1/inventory/items/{part['id']}/lots").json()["lots"]
+    [lot] = _lots(client, part["id"])
     assert lot["cost_unknown"] is True
     [move] = _moves(client, part["id"])
     assert (move["kind"], move["amount_minor"]) == ("add", None)
@@ -216,10 +229,9 @@ def test_a_counted_part_with_no_supplier_is_of_unknown_cost(client: TestClient) 
 def test_the_unit_cost_leaves_out_lots_of_unknown_cost(client: TestClient) -> None:
     """R-P2-35: 2 units of unknown cost and 3 at 40 cost 40 a unit, not 24."""
     part = make_part(client, pack_size=1, pack_price_minor=40)
-    received = client.post(
-        f"/api/v1/inventory/items/{part['id']}/lots", json={"qty": "2"}, headers=press()
+    _inventory(client).stock.receive_lot(
+        UUID(part["id"]), ReceiveLot(qty=Decimal(2)), Actor(kind="browser")
     )
-    assert received.status_code == 201, received.text
     added = client.post(f"/api/v1/parts/{part['id']}/stock", json={"packs": 3}).json()
     assert (added["on_hand"], added["unit_cost_minor"], added["cost_unknown"]) == (5, "40", False)
 
@@ -263,14 +275,13 @@ def test_a_part_in_another_currency_round_trips(client: TestClient) -> None:
     )
     assert added.status_code == 200, added.text
     assert (added.json()["currency"], added.json()["pack_price_minor"]) == ("EUR", 450)
-    [lot] = client.get(f"/api/v1/inventory/items/{part['id']}/lots").json()["lots"]
+    [lot] = _lots(client, part["id"])
     assert (lot["cost_unknown"], lot["cost_currency"], lot["unit_cost_minor"]) == (
         True,
         "EUR",
         "0",
     )
     assert lot["foreign_unit_cost_minor"] == "450"
-    assert client.get(f"/api/v1/inventory/items/{part['id']}").json()["cost_unknown"] is True
 
     # R-P2-36: a part with no supplier has no price point. As the parts migration leaves an
     # EUR part (step 5: an `opening` lot, its cost unknown in the shop's currency and kept
@@ -290,7 +301,7 @@ def test_a_part_in_another_currency_round_trips(client: TestClient) -> None:
     )
     assert stocked.status_code == 200, stocked.text
     assert stocked.json()["currency"] == "EUR"
-    lots = client.get(f"/api/v1/inventory/items/{ring['id']}/lots").json()["lots"]
+    lots = _lots(client, ring["id"])
     added = [lot for lot in lots if lot["origin"] == "manual"]
     assert [
         (lot["cost_unknown"], lot["cost_currency"], lot["unit_cost_minor"], lot["on_hand"])
@@ -377,23 +388,13 @@ def test_an_items_parts_are_set_by_hand(client: TestClient) -> None:
 
 def test_the_parts_page_reads_items_made_elsewhere(client: TestClient) -> None:
     """An item of kind `hardware` made on `/inventory` is a part on `/parts`."""
-    made = client.post(
-        "/api/v1/inventory/items",
-        json={"kind_id": "hardware", "name": "M3 nut"},
-        headers=press(),
-    )
-    assert made.status_code == 201, made.text
-    nozzle = client.post(
-        "/api/v1/inventory/items",
-        json={"kind_id": "nozzle", "name": "0.4 nozzle"},
-        headers=press(),
-    )
-    assert nozzle.status_code == 201, nozzle.text
+    _new_item(client, "hardware", "M3 nut")
+    nozzle = _new_item(client, "nozzle", "0.4 nozzle")
     names = [p["name"] for p in client.get("/api/v1/parts").json()]
     # M2: only kinds that track lots are parts; a nozzle is counted in units.
     assert "M3 nut" in names
     assert "0.4 nozzle" not in names
-    assert client.get(f"/api/v1/parts/{nozzle.json()['id']}/moves").status_code == 404
+    assert client.get(f"/api/v1/parts/{nozzle}/moves").status_code == 404
 
 
 def test_a_blank_link_clears_a_migrated_purchase_link(client: TestClient, pg_conninfo: str) -> None:

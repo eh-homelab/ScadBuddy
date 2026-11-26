@@ -897,6 +897,10 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "Profile fetch task queue",
             _TEMPORAL_QUEUE.format(what="the exports of a type's slicer profiles"),
         ),
+        "temporal_task_queue_inventory": SettingDoc(
+            "Inventory task queue",
+            _TEMPORAL_QUEUE.format(what="the inventory's writes (scadbuddy-core's worker)"),
+        ),
         "profile_fetch_nozzles": SettingDoc(
             "Nozzles to fetch from 3DFP",
             "The nozzle diameters that Fetch from 3DFP exports for each printer model: any"
@@ -955,6 +959,11 @@ SETTING_DOCS: Final[Mapping[str, SettingDoc]] = MappingProxyType(
             "API internal URL",
             "Where the workers reach the API inside the cluster. The API also makes the"
             " native slicer's transfer URLs under it.",
+        ),
+        "core_crud_url": SettingDoc(
+            "Core CRUD URL",
+            "Where the API reads the inventory from scadbuddy-core, in its own pod. Unset,"
+            " every inventory read answers that the inventory is unavailable.",
         ),
         "slicer_profiles_dir": SettingDoc(
             "Slicer profiles folder",

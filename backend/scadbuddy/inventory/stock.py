@@ -40,7 +40,6 @@ from psycopg.types.json import Jsonb
 
 from scadbuddy.entities.refs import BadEntityRef, EntityRef
 from scadbuddy.entities.registry import EntityStore
-from scadbuddy.inventory.items import FilamentItemRefused, ItemNotFound
 from scadbuddy.inventory.models import (
     AdjustInput,
     Lot,
@@ -59,6 +58,14 @@ from scadbuddy.inventory.models import (
 from scadbuddy.orders.models import Actor
 
 Conn = Connection[DictRow]
+
+
+class ItemNotFound(LookupError):  # noqa: N818
+    """No such item."""
+
+
+class FilamentItemRefused(ValueError):  # noqa: N818
+    """Items of a `filament` kind wait for phase 3 (#7068; the plan's Ruling 9)."""
 
 
 class LotNotFound(LookupError):  # noqa: N818

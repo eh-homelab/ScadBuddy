@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, TypedDict
 from uuid import UUID
 
 from pydantic import (
@@ -24,6 +24,15 @@ from scadbuddy.orders.models import Actor
 #: §6.4 of 2026-11-23): offers and prices, never lots, units or moves.
 Tracking = Literal["lot", "unit", "filament", "none"]
 LifeBasis = Literal["none", "hours", "months"]
+
+#: A kind's class (#6949 K1, design §3): each key a kind answers itself, null where it
+#: leaves the key open for its children. `role` and `counting` are physical only (a
+#: `durable` is always `unit`), `billing` service only. `scadbuddy-core` checks the
+#: combinations; these are the values the columns take.
+Nature = Literal["physical", "service"]
+Role = Literal["consumable", "durable"]
+Counting = Literal["lot", "unit"]
+Billing = Literal["term", "hourly", "flat"]
 
 #: The column CHECKs of `item_kinds` (migration `20261124T0323Z_inventory_core.sql`).
 KIND_ID = r"^[a-z][a-z0-9_]{0,39}$"
@@ -46,37 +55,80 @@ def empty_schema() -> dict[str, Any]:
     return {"type": "object", "properties": {}}
 
 
+class StepConf(TypedDict, total=False):
+    """One step's setting on a layer (design §4.2): a handler, its parameters, or both. A
+    layer that names a new handler drops the old parameters; one that sets only `params`
+    merges them."""
+
+    __pydantic_config__ = ConfigDict(extra="forbid")  # type: ignore[misc]
+
+    handler: Annotated[str, Field(min_length=1, max_length=80)]
+    params: dict[str, Any]
+
+
+#: A layer's settings, keyed by step (`receive`, `consume`, `count`, `move`, `retire`,
+#: `cost`, `life`, `bill`, `label`, `sync`). `scadbuddy-core` checks the steps and the
+#: handlers (422 `steps_invalid`).
+Steps = dict[Annotated[str, Field(max_length=40)], StepConf]
+
+
 class ItemKind(BaseModel):
     id: str
     name: str
     parent_id: str | None
+    #: Read from the class and the special type since K1 (R-K1-6): `filament` for a
+    #: filament spool, `none` for a service, else the counting (`lot` while it is open).
     tracking: Tracking
     uom: str
     attribute_schema: dict[str, Any]
+    #: Read from `steps.life` since K1: `hours`, `months` or `none`.
     life_basis: LifeBasis
     saleable: bool
     builtin: bool
     archived_at: datetime | None
     #: Its unarchived items, not its descendants'.
     item_count: int
+    #: The class keys the kind answers itself (C22); null leaves the key to its children.
+    nature: Nature | None = None
+    role: Role | None = None
+    counting: Counting | None = None
+    billing: Billing | None = None
+    special_type: str | None = None
+    #: The kind's own steps, not its parents'.
+    steps: Steps = Field(default_factory=dict)
+    #: The steps whose handler lacks a required parameter (R-K1-8): a call of one is 409
+    #: `step_incomplete`.
+    incomplete_steps: list[str] = Field(default_factory=list)
 
 
 class KindInput(BaseModel):
+    """A new kind. Its class keys narrow its parent's (design §3); `tracking` and
+    `life_basis` are the phase 2 inputs, still taken for one release (R-K1-6): a tracking
+    sets the class keys its rule gives that the parents leave open, and a life basis names
+    the `steps.life` handler. A field that is not sent is not sent to `scadbuddy-core`."""
+
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(pattern=KIND_ID)
     name: Text = Field(min_length=1, max_length=100)
     parent_id: str | None = Field(default=None, pattern=KIND_ID)
-    tracking: Tracking
+    tracking: Tracking | None = None
     uom: str = Field(default="each", pattern=UOM)
     attribute_schema: dict[str, Any] = Field(default_factory=empty_schema)
     life_basis: LifeBasis = "none"
     saleable: bool = False
+    nature: Nature | None = None
+    role: Role | None = None
+    counting: Counting | None = None
+    billing: Billing | None = None
+    special_type: str | None = Field(default=None, pattern=KIND_ID)
+    steps: Steps | None = None
 
 
 class KindPatch(BaseModel):
     """The fields to change; an absent field keeps its value. `parent_id` null makes the
-    kind a root."""
+    kind a root; a class key or `special_type` null opens it; `steps` replaces the kind's
+    own steps."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -87,6 +139,12 @@ class KindPatch(BaseModel):
     attribute_schema: dict[str, Any] | None = None
     life_basis: LifeBasis | None = None
     saleable: bool | None = None
+    nature: Nature | None = None
+    role: Role | None = None
+    counting: Counting | None = None
+    billing: Billing | None = None
+    special_type: str | None = Field(default=None, pattern=KIND_ID)
+    steps: Steps | None = None
 
 
 class _Decimals(BaseModel):
@@ -98,7 +156,19 @@ class _Decimals(BaseModel):
         return None if value is None else format(value.normalize(), "f")
 
 
+class ItemClass(BaseModel):
+    """An item's class, resolved down its kind's chain (design §3); null is a key no kind
+    answered."""
+
+    nature: Nature | None = None
+    role: Role | None = None
+    counting: Counting | None = None
+    billing: Billing | None = None
+
+
 class Item(_Decimals):
+    model_config = ConfigDict(populate_by_name=True)
+
     id: UUID
     kind_id: str
     #: The kind's ancestors and the kind, root first.
@@ -129,6 +199,15 @@ class Item(_Decimals):
     low: bool
     #: Its unarchived supplier offers (R-P2-37).
     offer_count: int
+    #: The item's own steps (design §4.2 layer 4).
+    steps: Steps = Field(default_factory=dict)
+    #: The steps whose handler lacks a required parameter (R-K1-8).
+    incomplete_steps: list[str] = Field(default_factory=list)
+    class_: ItemClass = Field(default_factory=ItemClass, alias="class")
+    special_type: str | None = None
+    #: The keys the special type and the kinds' schemas require that the item has no
+    #: value for, read on every read (Task 10).
+    missing_properties: list[str] = Field(default_factory=list)
 
     @field_serializer("low_stock", "life_hours", "on_hand", "stock_value_minor")
     def _decimals(self, value: Decimal | None) -> str | None:
@@ -158,11 +237,12 @@ class ItemInput(BaseModel):
     #: A blank one is stored as null.
     source_ref: Text | None = Field(default=None, max_length=200)
     note: Text = Field(default="", max_length=4000)
+    steps: Steps | None = None
 
 
 class InventoryItemPatch(BaseModel):
     """The fields a person changes; an absent field keeps its value. `life_hours`,
-    `life_months` and `saleable` null clear it."""
+    `life_months` and `saleable` null clear it; `steps` replaces the item's own steps."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -174,6 +254,7 @@ class InventoryItemPatch(BaseModel):
     life_months: int | None = Field(default=None, gt=0, le=MAX_LIFE_MONTHS)
     saleable: bool | None = None
     note: Text | None = Field(default=None, max_length=4000)
+    steps: Steps | None = None
 
 
 #: The ISO code of `offer_price_points.currency`.
@@ -318,6 +399,8 @@ def _checked_sku(sku: str) -> str:
 #: invoice yet.
 Origin = Literal["invoice_line", "production_run", "opening", "adjustment", "manual"]
 UnitStatus = Literal["in_stock", "in_service", "retired", "scrapped", "sold"]
+#: A unit's status as it reads: a service term `ended` too (`life.term`, design §4.5).
+UnitState = Literal["in_stock", "in_service", "retired", "scrapped", "sold", "ended"]
 MoveKind = Literal[
     "receive", "use", "return", "adjust", "produce", "transfer", "sell", "retire", "scrap"
 ]
@@ -356,7 +439,7 @@ class Unit(_Decimals):
     serial: str | None
     name: str
     location_id: UUID | None
-    status: UnitStatus
+    status: UnitState
     installed_in_unit_id: UUID | None
     cost_minor: Decimal
     cost_unknown: bool
@@ -371,6 +454,11 @@ class Unit(_Decimals):
     location_ref_id: UUID | None
     received_at: datetime
     created_by: Actor
+    #: The unit's own parameters (design §4.2 layer 5).
+    steps: Steps = Field(default_factory=dict)
+    #: A service term's start and end.
+    starts_at: datetime | None = None
+    ends_at: datetime | None = None
 
     @field_serializer("cost_minor", "life_hours")
     def _decimals(self, value: Decimal | None) -> str | None:
@@ -558,3 +646,17 @@ class RecostResult(_Decimals):
     @field_serializer("before_unit_costs_minor")
     def _costs(self, values: list[Decimal]) -> list[str | None]:
         return [self._decimal(v) for v in values]
+
+
+class MovedRows(BaseModel):
+    """The stock rows a repoint moved, by id."""
+
+    moves: list[UUID]
+    units: list[UUID]
+
+
+class Moved(BaseModel):
+    """`inventory.Repoint`'s answer (Task 11): the rows it moved from the entity gone to
+    the one kept. A repeat finds nothing to move."""
+
+    moved: MovedRows

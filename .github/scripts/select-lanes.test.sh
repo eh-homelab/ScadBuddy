@@ -45,6 +45,12 @@ expect "false false false true false" tools/go/bambuddy-fs/main.go
 expect "true false false true false" tools/go/core/internal/bus/testdata/history/entity_property.changed.json
 expect "true false false true false" tools/go/core/internal/inventory/store/testdata/actors.json
 expect "false false false true false" tools/go/core/internal/inventory/store/tx.go
+# The backend reads Go's recorded answers, the Python input's payload and Go's notice
+# (#6949 K1: tests/inventory/test_go_answers.py, test_core_client.py).
+expect "true false false true false" tools/go/core/internal/inventory/activities/testdata/answers/Item.json
+expect "true false false true false" tools/go/core/internal/inventory/activities/testdata/python_input.json
+expect "true false false true false" tools/go/core/internal/publish/testdata/inventory_operation_changed.json
+expect "false false false true false" tools/go/core/internal/inventory/activities/activities.go
 expect "false false false true false" tools/go/core/internal/bus/in.go
 expect "false false false true false" go.work
 expect "false false false true false" vendor/modules.txt
