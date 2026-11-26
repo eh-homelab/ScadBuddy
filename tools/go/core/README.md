@@ -129,7 +129,9 @@ registered by its name: `inventory.KindCreate`, `…KindUpdate`, `…KindArchive
   (`scadbuddy_inventory_record_failures`); it never fails the activity.
 - `GET /operations/one` reads a `running` row older than 60 s with Temporal (the activity's
   Describe, or the workflow's): one that Temporal closed without a result answers `failed` with
-  the problem `inventory_activity_failed`. The read writes nothing.
+  the problem `inventory_activity_failed`. One that completed answers from its answer in
+  `crud_requests` (`succeeded` with the result, or `failed` with the problem), or `failed` when
+  there is none. The read writes nothing.
 - The SDK is `go.temporal.io/sdk` v1.52.0 (Standalone Activities on the client side,
   [`internal/internal_activity_client.go`](https://github.com/temporalio/sdk-go/blob/v1.52.0/internal/internal_activity_client.go)),
   with its OpenTelemetry tracing interceptor (`contrib/opentelemetry` v0.9.0) when traces are on.

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/auth"
@@ -211,8 +213,14 @@ func TestARefusalIsAnAnswerNotAFailure(t *testing.T) {
 func TestADatabaseOutOfReachFailsTheActivity(t *testing.T) {
 	f := newFixture(t)
 	f.pool.Close()
-	if _, err := f.try("inventory.ItemCreate", nil, map[string]any{"kind_id": "hardware", "name": "x"}); err == nil {
+	_, err := f.try("inventory.ItemCreate", nil, map[string]any{"kind_id": "hardware", "name": "x"})
+	if err == nil {
 		t.Fatal("the activity did not fail")
+	}
+	// Temporal retries it: not a non-retryable application error.
+	var app *temporal.ApplicationError
+	if errors.As(err, &app) && app.NonRetryable() {
+		t.Fatalf("the failure is not retried: %v", err)
 	}
 }
 
@@ -367,6 +375,11 @@ func TestGiveBackAndRecostAnswerAsPhase2(t *testing.T) {
 	back := f.call("inventory.GiveBack", 200, p("item_id", bolt), map[string]any{"order_item_id": "oi1"})
 	if ms := movesOf(back); len(ms) != 1 || ms[0]["qty"] != "3" {
 		t.Fatalf("%v", back)
+	}
+	// A repoint names its kind, the entity gone and the one kept.
+	for _, body := range []map[string]any{{"kind": "", "gone": "1", "kept": "2"}, {"kind": "printer", "gone": "", "kept": "2"},
+		{"kind": "printer", "gone": "1", "kept": ""}, {"gone": "1", "kept": "2"}} {
+		f.refused("inventory.Repoint", 422, "bad_input", nil, body)
 	}
 	// A repoint of a kind no stock row names moves nothing.
 	moved := f.call("inventory.Repoint", 200, nil, map[string]any{"kind": "printer", "gone": "1", "kept": "2"})

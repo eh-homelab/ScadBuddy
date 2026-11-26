@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -31,8 +30,8 @@ func (anyone) Resolve(context.Context, string) *auth.Service {
 
 type closed struct{}
 
-func (closed) Closed(context.Context, string, string) (bool, string, time.Time, error) {
-	return true, "activity timed out", time.Time{}, nil
+func (closed) Closed(context.Context, string, string) (store.Closure, error) {
+	return store.Closure{State: store.Failed, Detail: "activity timed out"}, nil
 }
 
 func get(t *testing.T, pool *pgxpool.Pool, path string) (int, map[string]any) {

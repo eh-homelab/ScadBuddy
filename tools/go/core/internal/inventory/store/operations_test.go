@@ -12,17 +12,26 @@ import (
 
 // fakeTemporal answers a Describe as the test says, and counts the calls.
 type fakeTemporal struct {
-	closed bool
-	detail string
-	err    error
-	calls  int
-	asked  [2]string
+	closed    bool
+	completed bool
+	detail    string
+	err       error
+	calls     int
+	asked     [2]string
 }
 
-func (f *fakeTemporal) Closed(_ context.Context, id, workflowID string) (bool, string, time.Time, error) {
+func (f *fakeTemporal) Closed(_ context.Context, id, workflowID string) (Closure, error) {
 	f.calls++
 	f.asked = [2]string{id, workflowID}
-	return f.closed, f.detail, time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC), f.err
+	c := Closure{State: Open}
+	switch {
+	case f.completed:
+		c.State = Completed
+	case f.closed:
+		c.State = Failed
+	}
+	c.Detail, c.At = f.detail, time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	return c, f.err
 }
 
 func TestAnOperationStartsRunsAndSucceedsWithItsWrite(t *testing.T) {
@@ -218,5 +227,47 @@ func TestTheShopCurrencyIsTheSettingOrTheFallback(t *testing.T) {
 		if err != nil || got != c.want {
 			t.Fatalf("%s: %q %v", c.row, got, err)
 		}
+	}
+}
+
+func TestACompletedActivityWhoseRowRunsReadsItsLedger(t *testing.T) {
+	pool := setup(t)
+	ctx := context.Background()
+	stale := func(id string) {
+		t.Helper()
+		if err := StartOperation(ctx, pool, Operation{ID: id, Kind: "inventory.Test", Attempt: 1, Actor: Actor(browser)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE inventory_operations SET updated_at = now() - interval '2 minutes' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completed := &fakeTemporal{completed: true}
+	// The write committed with no record of its end (a record that failed to start).
+	runs := 0
+	stale("done")
+	if _, err := Write(ctx, pool, req("done", `{}`), insert(ctx, &runs)); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := ReadOperation(ctx, pool, "done", completed)
+	if err != nil || got.Status != "succeeded" || got.Result == nil || got.Error != nil {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// A refusal in the ledger.
+	stale("refused")
+	if _, err := Write(ctx, pool, req("refused", `{}`), func(pgx.Tx) (int, any, error) {
+		return 0, nil, &Refused{Status: 409, Code: "lot_empty", Detail: "no stock"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = ReadOperation(ctx, pool, "refused", completed)
+	if err != nil || got.Status != "failed" || got.Error == nil || got.Error.Extensions["code"] != "lot_empty" || got.Result != nil {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// Nothing in the ledger.
+	stale("lost")
+	got, _, err = ReadOperation(ctx, pool, "lost", completed)
+	if err != nil || got.Status != "failed" || got.Error.Extensions["code"] != "inventory_activity_failed" {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

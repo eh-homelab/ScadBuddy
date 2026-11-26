@@ -406,6 +406,10 @@ func (a *Activities) Repoint(ctx context.Context, in Input) (store.Answer, error
 		if err := decode(in.Body, &body); err != nil {
 			return 0, nil, err
 		}
+		if body.Kind == "" || body.Gone == "" || body.Kept == "" {
+			return 0, nil, &store.Refused{Status: http.StatusUnprocessableEntity, Code: "bad_input",
+				Detail: "a repoint names its kind, the entity gone and the one kept"}
+		}
 		m, err := a.Flow.Repoint(ctx, tx, body.Kind, body.Gone, body.Kept, body.Only)
 		return answer(http.StatusOK, moved{m}, err)
 	})

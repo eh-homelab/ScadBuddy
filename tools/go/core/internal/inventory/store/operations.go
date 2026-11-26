@@ -126,40 +126,59 @@ func nullJSON(raw []byte) any {
 	return string(raw)
 }
 
-// Temporal tells whether an activity that its row says is running has closed without a
-// result in Temporal (failed, timed out, cancelled or terminated): the activity id, or the
-// workflow that runs it when workflowID is not empty. It gives the last failure's message
-// and the close time.
+// The states of an activity (or of the workflow that runs it) as Temporal tells them.
+const (
+	// Open is still running, or waiting for its next attempt.
+	Open = "open"
+	// Failed is closed without a result: failed, timed out, cancelled or terminated, or not
+	// known to Temporal.
+	Failed = "failed"
+	// Completed is closed with a result.
+	Completed = "completed"
+)
+
+// Closure is what Temporal tells of an activity: its state, the last failure's message (for
+// Failed) and the close time.
+type Closure struct {
+	State, Detail string
+	At            time.Time
+}
+
+// Temporal tells the state of an activity that its row says is running: the activity id,
+// or the workflow that runs it when workflowID is not empty.
 type Temporal interface {
-	Closed(ctx context.Context, id, workflowID string) (closed bool, detail string, at time.Time, err error)
+	Closed(ctx context.Context, id, workflowID string) (Closure, error)
 }
 
 // ReadOperation is the operation id as Python's Operation, and whether there is one. A row
-// running for more than staleAfter is checked with temporal (when not nil): an activity that
-// Temporal closed without a result is answered as failed with inventory_activity_failed.
-// The read writes nothing; Temporal is the source, and no row is repaired. A Temporal out
-// of reach leaves the row as it reads.
+// running for more than staleAfter is checked with temporal (when not nil). An activity that
+// Temporal closed without a result is answered as failed with inventory_activity_failed. One
+// that completed is answered from its answer in crud_requests (succeeded with the result, or
+// failed with the problem), since its record's end was not written; with no answer there, it
+// is failed too. The read writes nothing; Temporal is the source, and no row is repaired. A
+// Temporal out of reach leaves the row as it reads.
 func ReadOperation(ctx context.Context, q Querier, id string, temporal Temporal) (wire.Operation, bool, error) {
 	var op wire.Operation
 	var workflowID *string
 	var problemBody, result []byte
 	var stale bool
+	var ledgerStatus *int
 	err := q.QueryRow(ctx, `SELECT o.id, o.kind, o.subject, o.status, o.workflow_id, o.problem,
 			o.created_at, o.finished_at,
 			o.status = 'running' AND o.updated_at < now() - make_interval(secs => $2),
-			CASE WHEN o.status = 'succeeded' THEN r.body END
+			r.status, r.body
 		FROM inventory_operations o
 		LEFT JOIN crud_requests r ON r.caller = $3 AND r.key = o.id
 		WHERE o.id = $1`, id, staleAfter.Seconds(), Caller).
 		Scan(&op.ID, &op.Kind, &op.Subject, &op.Status, &workflowID, &problemBody,
-			&op.CreatedAt, &op.FinishedAt, &stale, &result)
+			&op.CreatedAt, &op.FinishedAt, &stale, &ledgerStatus, &result)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return wire.Operation{}, false, nil
 	}
 	if err != nil {
 		return wire.Operation{}, false, err
 	}
-	if result != nil {
+	if op.Status == "succeeded" && result != nil {
 		op.Result = result
 	}
 	if problemBody != nil {
@@ -167,26 +186,41 @@ func ReadOperation(ctx context.Context, q Querier, id string, temporal Temporal)
 			return wire.Operation{}, false, err
 		}
 	}
-	if stale && temporal != nil {
-		closed, detail, at, err := temporal.Closed(ctx, op.ID, deref(workflowID))
-		if err != nil {
-			slog.WarnContext(ctx, "could not ask Temporal about a running inventory activity",
-				"operation_id", op.ID, "error", err.Error())
-		} else if closed {
-			failed := &problem.Refused{Status: 500, Code: "inventory_activity_failed", Detail: detail}
-			body, err := httpx.Marshal(failed.Body())
-			if err != nil {
-				return wire.Operation{}, false, err
-			}
-			if op.Error, err = printRunError(body); err != nil {
-				return wire.Operation{}, false, err
-			}
-			op.Status = "failed"
-			if !at.IsZero() {
-				op.FinishedAt = &at
-			}
-		}
+	if !stale || temporal == nil {
+		return op, true, nil
 	}
+	c, err := temporal.Closed(ctx, op.ID, deref(workflowID))
+	if err != nil {
+		slog.WarnContext(ctx, "could not ask Temporal about a running inventory activity",
+			"operation_id", op.ID, "error", err.Error())
+		return op, true, nil
+	}
+	if c.State == Open {
+		return op, true, nil
+	}
+	if !c.At.IsZero() {
+		op.FinishedAt = &c.At
+	}
+	switch {
+	case c.State == Completed && ledgerStatus != nil && *ledgerStatus < 400:
+		op.Status, op.Result = "succeeded", result
+		return op, true, nil
+	case c.State == Completed && ledgerStatus != nil:
+		op.Status = "failed"
+		op.Error, err = printRunError(result)
+		return op, err == nil, err
+	case c.State == Completed:
+		c.Detail = "the activity completed with no answer in the ledger"
+	}
+	failed := &problem.Refused{Status: 500, Code: "inventory_activity_failed", Detail: c.Detail}
+	body, err := httpx.Marshal(failed.Body())
+	if err != nil {
+		return wire.Operation{}, false, err
+	}
+	if op.Error, err = printRunError(body); err != nil {
+		return wire.Operation{}, false, err
+	}
+	op.Status = "failed"
 	return op, true, nil
 }
 

@@ -18,6 +18,8 @@ import (
 	temporalotel "go.temporal.io/sdk/contrib/opentelemetry"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/log"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/inventory/store"
 )
 
 const (
@@ -81,45 +83,52 @@ func Client(c Config, tracer trace.TracerProvider) (client.Client, error) {
 // Checker answers the operations read's question (store.Temporal) with a client.
 type Checker struct{ Client client.Client }
 
-// Closed says whether Temporal closed the activity id (a standalone one) or the workflow
-// workflowID (one that runs it as a step) without a result: failed, timed out, cancelled
-// or terminated. An id Temporal does not know is closed too: no attempt of it will run.
-func (c Checker) Closed(ctx context.Context, id, workflowID string) (bool, string, time.Time, error) {
+// Closed tells the state of the activity id (a standalone one) or of the workflow
+// workflowID (one that runs it as a step). Failed, timed out, cancelled or terminated is
+// store.Failed, with the last failure's message; completed is store.Completed. An id
+// Temporal does not know is store.Failed too: no attempt of it will run.
+func (c Checker) Closed(ctx context.Context, id, workflowID string) (store.Closure, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	var notFound *serviceerror.NotFound
 	if workflowID != "" {
 		d, err := c.Client.DescribeWorkflowExecution(ctx, workflowID, "")
 		if errors.As(err, &notFound) {
-			return true, "Temporal has no workflow " + workflowID, time.Time{}, nil
+			return store.Closure{State: store.Failed, Detail: "Temporal has no workflow " + workflowID}, nil
 		}
 		if err != nil {
-			return false, "", time.Time{}, err
+			return store.Closure{}, err
 		}
 		info := d.GetWorkflowExecutionInfo()
+		at := info.GetCloseTime().AsTime()
 		switch status := info.GetStatus(); status {
+		case enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED:
+			return store.Closure{State: store.Completed, At: at}, nil
 		case enumspb.WORKFLOW_EXECUTION_STATUS_FAILED, enumspb.WORKFLOW_EXECUTION_STATUS_TIMED_OUT,
 			enumspb.WORKFLOW_EXECUTION_STATUS_CANCELED, enumspb.WORKFLOW_EXECUTION_STATUS_TERMINATED:
-			return true, fmt.Sprintf("the workflow %s ended %s", workflowID, status), info.GetCloseTime().AsTime(), nil
+			return store.Closure{State: store.Failed, At: at,
+				Detail: fmt.Sprintf("the workflow %s ended %s", workflowID, status)}, nil
 		}
-		return false, "", time.Time{}, nil
+		return store.Closure{State: store.Open}, nil
 	}
 	d, err := c.Client.GetActivityHandle(client.GetActivityHandleOptions{ActivityID: id}).
 		Describe(ctx, client.DescribeActivityOptions{})
 	if errors.As(err, &notFound) {
-		return true, "Temporal has no activity " + id, time.Time{}, nil
+		return store.Closure{State: store.Failed, Detail: "Temporal has no activity " + id}, nil
 	}
 	if err != nil {
-		return false, "", time.Time{}, err
+		return store.Closure{}, err
 	}
 	switch d.Status {
+	case enumspb.ACTIVITY_EXECUTION_STATUS_COMPLETED:
+		return store.Closure{State: store.Completed, At: d.CloseTime}, nil
 	case enumspb.ACTIVITY_EXECUTION_STATUS_FAILED, enumspb.ACTIVITY_EXECUTION_STATUS_TIMED_OUT,
 		enumspb.ACTIVITY_EXECUTION_STATUS_CANCELED, enumspb.ACTIVITY_EXECUTION_STATUS_TERMINATED:
 		detail := d.RawResponse.GetInfo().GetLastFailure().GetMessage()
 		if detail == "" {
 			detail = "the activity ended " + d.Status.String()
 		}
-		return true, detail, d.CloseTime, nil
+		return store.Closure{State: store.Failed, Detail: detail, At: d.CloseTime}, nil
 	}
-	return false, "", time.Time{}, nil
+	return store.Closure{State: store.Open}, nil
 }
