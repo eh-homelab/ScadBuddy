@@ -180,6 +180,8 @@ printer ──1 RTSPS pull──▶ relay (scadbuddy-camera-relay, 1 replica)
     So it restarts almost never. A relay restart is the one planned cause of a gap: the
     pod restart plus the RTSPS reconnect, about 10 to 30 seconds. A standby relay with a
     lease (option B) can be added later if relay restarts happen in practice.
+    Changed on 2026-11-26 by #7997: the deploy pins the relay's image with every build, as
+    it pins the recorder's and the edge's, so each deploy restarts the relay.
 - **Recorders** (deployment `scadbuddy-camera-recorder`, two replicas, on different
   nodes). Each runs MediaMTX, which reads RTSP from the relay and records fMP4 segments
   with no re-encode, and the recorder controller (Python, D7), which uploads, indexes and
