@@ -360,6 +360,10 @@ class LanUploaded(BaseModel):
     #: ``…/filament/print-uses``). Empty
     #: in a history from before it, or for a file that does not say.
     grams_by_slot: dict[int, float] = Field(default_factory=dict)
+    #: The plate's metres per slot (#7685, `slice_info.plate_uses`), booked beside the
+    #: grams as ``data.length_m``. Empty in a history from before it, or for a file that
+    #: does not say.
+    length_by_slot: dict[int, float] = Field(default_factory=dict)
 
 
 class LanPrintInput(BaseModel):

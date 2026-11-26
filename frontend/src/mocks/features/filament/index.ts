@@ -513,8 +513,8 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
     last_weighing: [...ledger].reverse().find((event) => event.kind === 'weighed') ?? null,
-    // #7684: an archived spool's closing is its newest `archived` event's data.
-    closing: row.archived_at ? (([...ledger].reverse().find((event) => event.kind === 'archived')?.data as S['Closing'] | undefined) ?? null) : null,
+    // #7684: an archived spool's closing is its newest `archived` event's data; #7909: none when the event (from before the closing) carries no closing key.
+    closing: row.archived_at ? closingOnEvent([...ledger].reverse().find((event) => event.kind === 'archived')?.data) : null,
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
@@ -1015,8 +1015,18 @@ function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: Ar
 }
 
 /** `_reading_notice`: a reading the archive would refuse, said first. */
-function readingNotice(readingG: number | null, emptyG: number | null): S['ClosingNotice'][] {
+const CLOSING_KEYS = ['reason', 'started_g', 'started_from', 'ledger_consumed_g', 'final_filament_g', 'scale_consumed_g', 'drift_g'] as const
+
+/** `spools.py` `detail()` (#7909): an `archived` event's data as the closing, or null when it carries none of the closing's keys. */
+function closingOnEvent(data: Record<string, unknown> | undefined): S['Closing'] | null {
+  if (!data || !CLOSING_KEYS.some((key) => key in data)) return null
+  return data as S['Closing']
+}
+
+function readingNotice(readingG: number | null, grams: number | null, emptyG: number | null): S['ClosingNotice'][] {
   if (readingG == null) return []
+  // #7909: a reading under the filament sent with it is what `SpoolArchive` refuses.
+  if (grams != null) return readingG < grams ? [{ code: 'reading_below_grams', text: `The reading, ${gramsText(readingG)}, is under the ${gramsText(grams)} of filament: a spool cannot weigh less than the filament on it.` }] : []
   if (emptyG == null) return [{ code: 'no_empty_weight', text: 'No empty weight is known for this spool, so the reading cannot be turned into filament: enter the filament left instead, or give the spool an insert.' }]
   if (readingG < emptyG) return [{ code: 'reading_below_empty', text: `The reading is under the empty spool's ${emptyG} g.` }]
   return []
@@ -1328,6 +1338,8 @@ export interface MockPlate {
   // `metrics_models.Outcome`.
   outcome: 'completed' | 'failed' | 'cancelled' | 'unknown'
   printer_id: string | null
+  /** #7685: the plate's metres (`data.length_m`); `null` for a plate booked without one. */
+  length_m?: number | null
 }
 
 /**
@@ -1338,18 +1350,35 @@ export interface MockPlate {
  */
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
+  // #7685: Bambuddy's rows carry no length, so a paired plate takes the length of SB's own ends of the
+  // job, summed (one spool can feed several slots of a job, each an end of its own).
+  const sbLengths = new Map<string | null, number>()
+  for (const event of events) {
+    const length = event.kind === 'print_ended' && event.ref_kind === 'print_run' ? lengthOf(event) : null
+    if (length != null) sbLengths.set(jobOf(event), (sbLengths.get(jobOf(event)) ?? 0) + length)
+  }
   return [...events].sort(byTime).flatMap((event) => {
     if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0
     if (event.ref_kind === 'bb_usage') {
       const status = event.data?.bb_status
       const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
-      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id, length_m: sbLengths.get(jobOf(event)) ?? null }]
     }
     if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
     const failed = event.data?.basis === 'not_applied'
-    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id }]
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id, length_m: lengthOf(event) }]
   })
+}
+
+/** `metrics.DENSITY_TOLERANCE` (#7685): the implied and the type's density apart by more than this is a mismatch. */
+const DENSITY_TOLERANCE = 0.05
+
+/** `metrics.implied_density` (#7685, spec §5.6): `grams / (metres * 100 * pi * (diameter_mm / 20)^2)`, g/cm³; `null` when either is 0 or less. */
+export function impliedDensity(grams: number, metres: number, diameterMm: number): number | null {
+  if (grams <= 0 || metres <= 0 || diameterMm <= 0) return null
+  return grams / (metres * 100 * Math.PI * (diameterMm / 20) ** 2)
 }
 
 /** The grams the plates in `events` used, each spool's plates counted by `platesOf` (`summary`'s `consumed_g`). */
@@ -1445,6 +1474,14 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const effective = view(row).effective
   const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
   const labelWeight = effective?.label_weight_g
+  // #7685 (`metrics.spool_metrics`): the metres of the plates with a length over 0 m (a failed
+  // plate's 0 m counts for nothing), and the density their grams imply over the spool's
+  // diameter, against the type's.
+  const lengthed = plates.filter((plate) => plate.length_m != null && plate.length_m > 0)
+  const usedMetres = lengthed.length > 0 ? lengthed.reduce((sum, plate) => sum + (plate.length_m ?? 0), 0) : null
+  const implied = usedMetres != null ? impliedDensity(lengthed.reduce((sum, plate) => sum + plate.grams, 0), usedMetres, Number(effective?.diameter_mm ?? '1.75')) : null
+  const typeDensity = effective?.density_g_cm3 != null ? Number(effective.density_g_cm3) : null
+  const mismatch = implied != null && typeDensity != null && typeDensity > 0 && Math.abs(implied / typeDensity - 1) > DENSITY_TOLERANCE
   const bySeq = [...events].sort((a, b) => a.seq - b.seq)
   const series: S['GramsPoint'][] = bySeq
     .flatMap((event, i) => {
@@ -1477,6 +1514,10 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
       hours_outside_dry: row.hours_outside_dry,
       ams_error: amsError(amsErrors(events, labelWeight)),
+      used_m: usedMetres,
+      implied_density_g_cm3: implied,
+      density_g_cm3: typeDensity,
+      density_mismatch: mismatch,
     },
     type_ams_error: row.type_id
       ? amsError(sameType.flatMap((one) => amsErrors(state.events.filter((event) => event.spool_id === one.id), view(one).effective?.label_weight_g)))
@@ -2353,6 +2394,10 @@ export const handlers = [
       const source = body.continued_from ? findSpool(body.continued_from) : null
       if (body.continued_from && !source) return problem(422, 'copy_of names no spool')
       if (source && !source.archived_at) return problem(422, 'continued_from names a spool that is not archived', { code: 'continued_from_not_archived' })
+      // #7909: one continuation per source, while the spool it names still exists.
+      const sourceClosing = source ? state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1) : undefined
+      const continuedAs = sourceClosing?.data?.continued_as
+      if (typeof continuedAs === 'string' && findSpool(continuedAs)) return problem(422, 'continued_from names a spool another spool already continues', { code: 'continued_from_taken' })
       const carried = state.spoolPresets.filter((one) => body.copy_of && one.spool_id === body.copy_of && one.migrated)
       const presets = (body.presets ?? []).map((row) => ({
         ...row,
@@ -2558,11 +2603,11 @@ export const handlers = [
     const grams = query.get('final_grams') == null ? null : Number(query.get('final_grams'))
     const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
     // `_final_filament`: a reading that cannot be resolved closes on nothing, not on the ledger.
-    const finalFilament = grams ?? (readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null)
+    const finalFilament = grams != null ? (readingG != null && readingG < grams ? null : grams) : readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null
     const weighed = readingG != null || grams != null
     const events = state.events.filter((event) => event.spool_id === row.id)
     const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
-    const notices = [...readingNotice(grams != null ? null : readingG, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
+    const notices = [...readingNotice(readingG, grams, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
     return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
   http.post(`${BASE}/spools/:id/tags`, async ({ params, request }) => {

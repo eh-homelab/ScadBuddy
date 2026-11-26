@@ -714,6 +714,23 @@
           "legendFormat": "{{printer}} {{pod}}"
         }
       ]
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Live viewers",
+      "description": "MediaMTX readers of the printer's live path on the camera edge, by printer, read at each scrape. WebRTC counts one reader per session. HLS counts one reader for the whole muxer, however many browsers watch, so this is not a count of people. A reader stays about 40 s after the last HLS request (measured 2026-11-25, MediaMTX v1.21.4, hlsMuxerCloseAfter 10s).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 87, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "max by (printer) (scadbuddy_camera_viewers{namespace=\"$namespace\"})",
+          "legendFormat": "{{printer}}"
+        }
+      ]
     }
   ]
 }

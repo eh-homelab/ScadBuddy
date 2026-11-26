@@ -157,6 +157,18 @@ describe('the spool timeline', () => {
     expect(within(items()[2]!).getByRole('link', { name: 'an earlier spool' })).toHaveAttribute('href', '/filament/spools/s-old')
   })
 
+  it("shows a print's length beside its grams when the plate had one (#7685)", () => {
+    const lengthed = [
+      row({ at: '2026-11-10T10:00:00Z', kind: 'print_ended', source: 'print_actual', delta_g: -35, data: { job: 'j', basis: 'sliced', length_m: 11.7 } }),
+      row({ at: '2026-11-09T10:00:00Z', kind: 'print_ended', source: 'print_actual', delta_g: 0, data: { job: 'k', basis: 'not_applied', length_m: 0 } }),
+    ]
+    renderPage(<SpoolTimeline rows={lengthed} catalogs={catalogs} types={types} />)
+    const [done, failed] = items()
+    expect(done).toHaveTextContent('−35 g, 11.7 m, measured')
+    expect(failed).toHaveTextContent('Print ended, 0 g, measured')
+    expect(failed).not.toHaveTextContent(/\d m\b/)
+  })
+
   it("says how a reading differs from the last value, in words", () => {
     renderPage(<SpoolTimeline rows={[row({ kind: 'weighed', source: 'scale', grams_after: 820, delta_g: -20 })]} catalogs={catalogs} types={types} />)
     expect(items()[0]).toHaveTextContent('Weighed, 820 g, scale, 20 g less than the last value')

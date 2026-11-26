@@ -33,6 +33,7 @@ import {
 } from '../../api/filament'
 import { ArchiveSpoolDialog } from '../../components/filament/ArchiveSpoolDialog'
 import { ClosingSummary } from '../../components/filament/ClosingSummary'
+import { weighingCause } from '../../components/filament/driftCause'
 import { GramsBasis } from '../../components/filament/GramsBasis'
 import { WeighingBreakdown } from '../../components/filament/WeighingBreakdown'
 import { BelowLabelChoice, type Resolution } from '../../components/filament/BelowLabelChoice'
@@ -1005,7 +1006,11 @@ export function SpoolPage() {
                   <p className="text-2xl font-semibold tracking-tight tabular-nums">{leftNow == null ? 'Not known' : grams(leftNow)}</p>
                   {saved?.archived_at && saved.closing && <ClosingSummary closing={saved.closing} at={saved.archived_at} />}
                   {saved?.last_weighing && saved.last_weighing.data.reading_g != null ? (
-                    <WeighingBreakdown event={saved.last_weighing} />
+                    <WeighingBreakdown
+                      event={saved.last_weighing}
+                      // #7685: the drift's likely cause, once the history (the previous anchor, the density) has loaded.
+                      cause={history ? weighingCause(saved.last_weighing, history, { addedFull: saved.added_full ?? null, labelWeight: effective?.label_weight_g ?? null, weightLocked: saved.weight_locked }) : null}
+                    />
                   ) : (
                     <p className="text-[13px] text-muted-foreground">
                       {saved?.last_weighed_g != null && saved.last_weighed_at

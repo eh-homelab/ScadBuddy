@@ -82,6 +82,21 @@ describe('ArchiveSpoolDialog (#7684)', () => {
     expect(posts).toEqual([{ archived: true, reason: 'finished', final_reading_g: 210 }])
   })
 
+  it('says so when the preview changes what a typed number means (#7909)', async () => {
+    // The page believes the spool is on a 180 g insert; the preview finds no empty weight, so the number is the filament left.
+    server.use(http.get('*/api/v1/filament/spools/:id/closing', () => HttpResponse.json({ closing: { reason: null, started_g: 1000, started_from: 'reading', ledger_consumed_g: 750, final_filament_g: null, scale_consumed_g: null, drift_g: null }, final_filament_g: null, empty_g: null, notices: [] })))
+    const posts = recorded()
+    const { dialog, onArchived } = await show(3, 180)
+    const field = within(dialog).getByLabelText('Scale reading, with the spool (g)')
+    await userEvent.type(field, '210')
+    expect(await within(dialog).findByText('No empty weight is known for this spool after all: the number is read as the filament left, not as a scale reading.')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Filament left (g)')).toBe(field)
+    await userEvent.click(within(dialog).getByRole('radio', { name: 'Damaged' }))
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    await waitFor(() => expect(onArchived).toHaveBeenCalledTimes(1))
+    expect(posts).toEqual([{ archived: true, reason: 'damaged', final_grams: 210 }])
+  })
+
   it('starts afresh each time it opens', async () => {
     const spool = await getSpool(spoolId(10))
     const noop = vi.fn()

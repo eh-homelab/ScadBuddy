@@ -417,9 +417,8 @@ class FlowStore:
     async def grant_in_force(self, grant: Grant) -> bool:
         """Whether calls inside `grant` run without asking now: it is in force, and so is
         every grant it inherits from and the standing grant it was seeded from
-        (`_chain_in_force`, #4252), as a call is checked."""
-        if not grant.in_force(datetime.now(UTC)):
-            return False
+        (`_chain_in_force`, #4252), as a call is checked. The chain re-reads `grant`'s own
+        row, so the database's clock decides its expiry too (#7922)."""
         return await asyncio.to_thread(self._grant_in_force, grant)
 
     def _grant_in_force(self, grant: Grant) -> bool:
@@ -1540,7 +1539,7 @@ def chain_in_force(conn: Connection[DictRow], grant_id: str) -> bool:
         " LEFT JOIN flow_trigger_grants t ON t.id = c.standing_grant_id",
         (grant_id,),
     ).fetchall()
-    # Both expiries by the database's clock, as before #5685 (#7890).
+    # Both expiries by the database's clock, as the agent's reads did before #5685 (#7890).
     return (
         bool(rows)
         and all(

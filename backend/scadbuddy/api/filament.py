@@ -186,6 +186,7 @@ from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensors import SensorBandError
 from scadbuddy.filament.spools import (
     ContinuedFromNotArchivedError,
+    ContinuedFromTakenError,
     NoBelowLabelError,
     NoEmptyWeightError,
     OverrideKindError,
@@ -1300,8 +1301,9 @@ BULK_ROUTE = "POST /filament/spools/bulk"
         "that names no spool. `continued_from` (#7684) is the archived spool whose filament "
         "the new one continues (respooled): the new spool's `created` event keeps it, the "
         "source's newest `archived` event gets `continued_as`, `quantity` must be 1, and a "
-        "source not archived is a 422 with `code` `continued_from_not_archived`. Nothing is "
-        "written on a refusal."
+        "source not archived is a 422 with `code` `continued_from_not_archived`, a source "
+        "another spool already continues (its `continued_as` names a spool that exists) one "
+        "with `continued_from_taken` (#7909). Nothing is written on a refusal."
     ),
 )
 async def bulk_create_spools(
@@ -1344,6 +1346,10 @@ async def bulk_create_spools(
     except ContinuedFromNotArchivedError as exc:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="continued_from_not_archived"
+        ) from None
+    except ContinuedFromTakenError as exc:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc), code="continued_from_taken"
         ) from None
     except (
         *_SPOOL_REFUSED,
@@ -1595,7 +1601,8 @@ async def delete_spool(filament: FilamentDep, spool_id: UUID) -> Response:
         "finished spool with more than the setting `filament_weighing_finished_left_g` on "
         "it, `not_finished_but_empty` for any other reason at or under it; and what the "
         "archive would refuse: `no_empty_weight` for a reading with no empty weight known, "
-        "`reading_below_empty` for a reading under it. Nothing is "
+        "`reading_below_empty` for a reading under it, `reading_below_grams` for a reading "
+        "under the `final_grams` sent with it (#7909). Nothing is "
         "refused by a notice. 404 for no such spool, 422 for a reason that is not "
         "`finished`, `respooled`, `damaged` or `other`."
     ),

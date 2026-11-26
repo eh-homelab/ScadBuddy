@@ -1892,7 +1892,11 @@ class ClosingNotice(BaseModel):
     """What the archive dialog says when the numbers disagree with the reason."""
 
     code: Literal[
-        "filament_left", "not_finished_but_empty", "no_empty_weight", "reading_below_empty"
+        "filament_left",
+        "not_finished_but_empty",
+        "no_empty_weight",
+        "reading_below_empty",
+        "reading_below_grams",
     ]
     text: str
 
@@ -1900,7 +1904,8 @@ class ClosingNotice(BaseModel):
 class ClosingPreview(BaseModel):
     """What archiving a spool with these inputs would record (#7684): the closing, the
     final filament the reading means (``None`` when it cannot be worked out: no empty
-    weight known, or a reading under it), the empty weight taken off and the notices."""
+    weight known, a reading under it, or a reading under ``final_grams``, #7909), the
+    empty weight taken off and the notices."""
 
     closing: Closing
     final_filament_g: float | None

@@ -769,6 +769,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'printer_kprofile_delete',
   'printer_kprofile_note_set',
   'printer_kprofile_note_delete',
+  // #7330: a camera reconnect restarts ScadBuddy's pull; a camera is no recorded resource kind.
+  'reconnect_printer_camera',
   // The filament inventory (#6261: catalogs, types, spools, tags, the ledger, locations)
   // is no recorded resource kind either; each spool's ledger is its own history.
   'filament_catalog_upsert',

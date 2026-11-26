@@ -94,7 +94,7 @@ from scadbuddy.rack.usage import (
     settle_lan_print,
 )
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
-from scadbuddy.slicing.slice_info import plate_grams
+from scadbuddy.slicing.slice_info import plate_uses
 from scadbuddy.workflows.print_activities import raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -320,7 +320,7 @@ class LanActivities:
             count = project_filament_count(spool)
             spool.seek(0)
             rack = read_rack_plan(spool, input.plate_id)
-            grams = plate_grams(spool, input.plate_id)  # type: ignore[arg-type]
+            uses = plate_uses(spool, input.plate_id)  # type: ignore[arg-type]
             spool.seek(0)
             try:
                 md5 = await heartbeating(lan.upload(spool, f"{UPLOAD_DIR}{input.remote_name}"))  # type: ignore[arg-type]
@@ -333,7 +333,8 @@ class LanActivities:
             filament_count=count,
             rack=rack,
             run_id=input.run_id,
-            grams_by_slot=grams,
+            grams_by_slot=uses.grams_by_slot,
+            length_by_slot=uses.length_by_slot,
         )
 
     @activity.defn(name=LAN_CHECK_ACTIVITY)
@@ -438,7 +439,12 @@ class LanActivities:
         takes off at once, settled once the run's print settles
         (`filament.print_uses.print_use_hook`). Advisory, never raising."""
         run_id = input.uploaded.run_id
-        uses = slot_uses(input.spools, input.uploaded.grams_by_slot, started_at)
+        uses = slot_uses(
+            input.spools,
+            input.uploaded.grams_by_slot,
+            started_at,
+            input.uploaded.length_by_slot,
+        )
         store = self.d.uses
         if run_id is None or not uses or store is None:
             return
