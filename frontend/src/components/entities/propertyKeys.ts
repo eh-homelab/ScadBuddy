@@ -1,4 +1,5 @@
 // A kind's property schema as rows of keys (#7067): the item kinds' form and every other kind's.
+import { requiredOf } from './definedProperties'
 
 /** A key's JSON Schema type as the key table names it. */
 export const KEY_TYPES = { string: 'Text', number: 'Number', integer: 'Whole number', boolean: 'Yes/no', array: 'List' } as const
@@ -23,9 +24,6 @@ function keyTypeOf(sub: Record<string, unknown> | undefined): KeyType {
 }
 
 const propertiesOf = (schema: Record<string, unknown>) => (schema.properties && typeof schema.properties === 'object' ? (schema.properties as Record<string, Record<string, unknown>>) : {})
-
-/** The keys a schema requires (#7703). */
-export const requiredOf = (schema: Record<string, unknown>): string[] => (Array.isArray(schema.required) ? schema.required.filter((k): k is string => typeof k === 'string') : [])
 
 export function rowsOf(schema: Record<string, unknown>): KeyRow[] {
   const required = new Set(requiredOf(schema))
