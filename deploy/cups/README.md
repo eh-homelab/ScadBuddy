@@ -61,10 +61,18 @@ never cancelled for the wrong labels. Only that queue waits; the others print.
   for: CUPS's sample drivers (Zebra ZPL, EPL, CPCL, Dymo, generic PCL and ESC/P) and
   driverless IPP Everywhere and AirPrint printers through cups-filters.
 - `cupsd.conf` lets a network client print, see jobs and cancel one job. Every
-  administration and operator operation is refused (a remote `lpadmin` gets `Forbidden`,
-  checked by the CI smoke), so with the image's `cupsd.conf` the queue is set only by env,
-  the volume or a mounted config.
-  Connections from inside the pod are trusted as local; nothing else runs there.
+  administration and operator operation, and the web page's `/admin`, asks for the user
+  `admin` and its password (HTTP Basic auth). `start.sh` reads the password from
+  `CUPS_ADMIN_PASSWORD_FILE` (default `/run/secrets/cups-admin/password`, a mounted
+  Secret), and PAM checks it (`pam_pwdfile`, against a crypt in
+  `/var/lib/cups/etc/admin.passwd` that `start.sh` rewrites at every start; cupsd runs
+  without root, so not against `/etc/shadow`). With no password file, every admin login
+  fails. A remote `lpadmin` without the login gets `Forbidden`, and the web page answers
+  401 without it and 200 with it (the CI smoke checks both, and a pause through the web
+  page). This holds inside the pod too: `kubectl exec … cupsdisable` is refused, because
+  it cannot log in.
+  Changes made on the web page stay until the next start; with `CUPS_QUEUES` set,
+  `start.sh` then rewrites the queues from env.
 - TLS ends at the shared Envoy Gateway; cupsd serves plain HTTP. Clients add the printer
   as `ipps://cups.internal.nullreference.io/printers/<queue>`, e.g. `S-EDCDU03-2x1`
   (Windows: "Select a shared printer by name" with the `https://` form and the Microsoft

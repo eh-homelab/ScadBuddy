@@ -20,11 +20,24 @@
 #                print dialog offers nothing else. DEVICE-URI is usually
 #                zebra://HOST:9100?length=DOTS, which holds a job until the loaded
 #                labels match (deploy/cups/zebra). The first queue is the default.
+#   CUPS_ADMIN_PASSWORD_FILE
+#                a file holding the password of the web page's and IPP's `admin`
+#                user (default /run/secrets/cups-admin/password, a mounted Secret).
+#                Without it, every admin login fails.
 set -eu
 
 state=/var/lib/cups
 mkdir -p "$state/etc/ppd" "$state/spool/tmp" "$state/cache"
 cp -Rn /usr/local/share/scadbuddy-cups/server-root/. "$state/etc/"
+
+# pam_pwdfile's file (the image's /etc/pam.d/cups): `admin:` and the password's crypt.
+admin_file=${CUPS_ADMIN_PASSWORD_FILE:-/run/secrets/cups-admin/password}
+rm -f "$state/etc/admin.passwd"
+if [ -s "$admin_file" ]; then
+  (umask 077 && printf 'admin:%s\n' "$(head -n1 "$admin_file" | tr -d '\r\n' | openssl passwd -6 -stdin)" > "$state/etc/admin.passwd")
+else
+  echo "no admin password at $admin_file: admin logins are refused" >&2
+fi
 
 run_cupsd() {
   exec /usr/sbin/cupsd -f -c /etc/cups/cupsd.conf -s /etc/cups/cups-files.conf
