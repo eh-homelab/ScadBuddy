@@ -146,10 +146,16 @@ describe('the anchor a weighing was compared with (#7685)', () => {
   })
 
   it('gives the grams the ledger took off since it', () => {
-    expect(gramsSinceAnchor(created, 120)).toBe(148)
-    expect(gramsSinceAnchor(created, 300)).toBe(0)
-    expect(gramsSinceAnchor(null, 120)).toBeNull()
-    expect(gramsSinceAnchor(created, null)).toBeNull()
+    expect(gramsSinceAnchor(created, 120, null)).toBe(148)
+    expect(gramsSinceAnchor(created, 300, null)).toBe(0)
+    expect(gramsSinceAnchor(null, 120, null)).toBeNull()
+    expect(gramsSinceAnchor(created, null, null)).toBeNull()
+  })
+
+  it('reads a percentage-only AMS anchor through the label weight, as the anchor rule does (#7932)', () => {
+    const pct = event('2026-11-15T09:30:00Z', 'ams_reading', { source: 'ams_remain', data: { remain_pct: 11 } })
+    expect(gramsSinceAnchor(pct, 100, 1000)).toBe(10)
+    expect(gramsSinceAnchor(pct, 100, null)).toBeNull()
   })
 })
 
@@ -159,6 +165,16 @@ describe('the cause of a weighing on the spool page (#7685)', () => {
     // Not added full, or an anchor after the start: no gap to name.
     expect(weighingCause(weighed, history([created, printed, weighed]), { ...facts, addedFull: false })).toBeNull()
     expect(weighingCause(weighed, history([created, printed, ams, weighed]), facts)).toBeNull()
+  })
+
+  it('names the density cause against a percentage-only AMS anchor (#7932)', () => {
+    // The anchor is 11 % of the 1000 g label, 110 g; the ledger expected 100 g at the weighing, so 10 g were used
+    // since it, and a drift of about 10 × (1 − 1.24 / 1.31) ≈ 0.5 g is under a gram: no cause. At 60 g used
+    // (the ledger expected 50 g) the drift 60 × (1 − 1.24 / 1.31) ≈ 3.2 g names the density.
+    const pct = event('2026-11-15T09:30:00Z', 'ams_reading', { source: 'ams_remain', data: { remain_pct: 11 } })
+    const weighing = event('2026-11-16T10:00:00Z', 'weighed', { source: 'scale', grams_after: 53, data: { reading_g: 303, empty_g: 250, empty_source: 'insert', empty_basis: 'catalog', expected_g: 50, drift_g: 3.2 } })
+    const over = { implied_density_g_cm3: 1.31, density_g_cm3: 1.24, density_mismatch: true }
+    expect(weighingCause(weighing, history([created, printed, pct, weighing], over), { ...facts, addedFull: false })).toEqual({ kind: 'density', implied: 1.31, type: 1.24 })
   })
 
   it('scales the density cause by the grams since the previous anchor', () => {

@@ -280,6 +280,23 @@ def _on_printed(grams: dict[int, float], printed: PrintedFilaments) -> dict[int,
     return dict(sorted(moved.items()))
 
 
+def _lengths_on_printed(
+    sliced: Sequence[FilamentRequirement], printed: PrintedFilaments
+) -> dict[int, float]:
+    """The metres on the filaments the plate prints (#7685), moved as `_on_printed` moves
+    the grams. A slot whose sources include one with grams but no length is left out
+    (#7932): its metres would cover only part of its grams and skew the implied density."""
+    moved: dict[int, float] = {}
+    partial: set[int] = set()
+    for slot in sliced:
+        key = printed.slot(slot.slot_id)
+        if slot.used_meters > 0:
+            moved[key] = round(moved.get(key, 0.0) + slot.used_meters, 2)
+        elif slot.used_grams > 0:
+            partial.add(key)
+    return dict(sorted((key, used) for key, used in moved.items() if key not in partial))
+
+
 class NativeSliceRead(BaseModel):
     """What the native slicer's 3MF says about one plate. Not ``SlicedPlate``:
     ``filaments3mf.py`` has one."""
@@ -288,7 +305,8 @@ class NativeSliceRead(BaseModel):
     print_time_seconds: int | None = None
     grams_by_slot: dict[int, float] = {}
     #: The metres each slot extrudes (#7685, ``slice_info.config``'s ``used_m``); a slot
-    #: the file gives no length is absent.
+    #: the file gives no length is absent, as is a merged slot one of whose sources with
+    #: grams had none (#7932, `_lengths_on_printed`).
     length_by_slot: dict[int, float] = {}
     filament_used_g: float | None = None
     filament_changes: int | None = None
@@ -309,14 +327,14 @@ def _uses(
     payload: bytes | BinaryIO, plate_index: int, sliced: Sequence[FilamentRequirement]
 ) -> PlateUses:
     grams = {slot.slot_id: slot.used_grams for slot in sliced}
-    lengths = {slot.slot_id: slot.used_meters for slot in sliced if slot.used_meters > 0}
     try:
         with zipfile.ZipFile(_file(payload)) as archive:
             printed = printed_filaments(archive, plate_index)
     except (*_MEMBER_ERRORS, KeyError):
         printed = PrintedFilaments()
     return PlateUses(
-        grams_by_slot=_on_printed(grams, printed), length_by_slot=_on_printed(lengths, printed)
+        grams_by_slot=_on_printed(grams, printed),
+        length_by_slot=_lengths_on_printed(sliced, printed),
     )
 
 
@@ -365,14 +383,13 @@ def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
     index = plate.index
     sliced = read.sliced.get(index, [])
     grams = {slot.slot_id: slot.used_grams for slot in sliced}
-    lengths = {slot.slot_id: slot.used_meters for slot in sliced if slot.used_meters > 0}
     gcode, printed, sides = _plate_files(payload, index)
     grams_by_slot = _on_printed(grams, printed)
     return NativeSliceRead(
         plate_id=plate_id,
         print_time_seconds=plate.print_seconds,
         grams_by_slot=grams_by_slot,
-        length_by_slot=_on_printed(lengths, printed),
+        length_by_slot=_lengths_on_printed(sliced, printed),
         filament_used_g=round(sum(grams_by_slot.values()), 2) if grams_by_slot else None,
         filament_changes=None if gcode is None else filament_changes(gcode),
         side_by_slot=_sides_on_printed(sides, printed),
