@@ -217,9 +217,14 @@ public sealed class NfcBridge : Java.Lang.Object, NfcAdapter.IReaderCallback, We
 		{
 			var count = mifare["blocks"]!.AsArray().Count;
 			Android.Util.Log.Info("ScadBuddyNfc", "blocks " + string.Join(' ', mifare["blocks"]!.AsArray().Select(b => $"{b!["index"]}:{b["dataHex"]}")));
+			// Sectors 0-4 (blocks 1-18) hold every field that names the filament; the rest is
+			// the signature, so a read that has them already identifies the spool.
+			var identified = Enumerable.Range(0, 5).All(s => mifare["blocks"]!.AsArray().Any(b => b!["index"]!.GetValue<int>() == s * 4));
 			Toast(mifare["error"] is null
 				? $"Tag read: {count} blocks."
-				: $"Read {count} blocks. Hold the tag still and tap again to finish.");
+				: identified
+					? $"Spool identified ({count} of 48 blocks). Tap again to finish the full read."
+					: $"Read {count} blocks. Hold the tag still and tap again to finish.");
 		}
 		var reading = new JsonObject { ["type"] = "reading", ["serialNumber"] = serial, ["records"] = records };
 		if (mifare is not null) reading["mifare"] = mifare;
