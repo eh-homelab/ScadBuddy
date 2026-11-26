@@ -116,9 +116,10 @@ Items follow the spool rule of spec
   [#7809](https://github.com/eh-homelab/ScadBuddy/pull/7809),
   [#7910](https://github.com/eh-homelab/ScadBuddy/pull/7910)). Nothing is written. A value
   that the caller sends and that does not fit stays 422 `bad_property_value`.
-- These writes are not checked: a save that changes only `archived`, `sort_order` or
-  both (an archive, a restore); stock steps and other events; syncs and imports. They
-  write the item, and the item reads incomplete.
+- These writes are not checked: an item `PATCH` that sends no field; an item archive and
+  an item restore (their own activities; items have no `archived` or `sort_order`
+  field); stock steps and other events; syncs and imports. They write the item, and the
+  item reads incomplete.
 - Every item read carries `missing_properties` and `invalid_properties` (keys). A read
   computes them; nothing stores them. An archived item is never marked.
 - This replaces the first K1 rule (plan R-K1-8), which saved the item and only listed the
