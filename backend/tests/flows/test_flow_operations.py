@@ -344,6 +344,27 @@ async def test_an_answer_that_landed_but_whose_reply_was_lost_stands_and_is_not_
     assert decision is not None and decision.response == {"answer": "ok"}
 
 
+async def test_a_send_that_meets_the_run_closing_is_stale_and_keeps_no_row(
+    flows: Flows, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#7822: a send that reaches the run while it closes, or after, never landed. Its
+    row is withdrawn and the caller is told the call moved on, not a raw RPC error."""
+    run, call_id = await two_questions(flows)
+    answer = kinds(flows)[FLOW_ANSWER]
+    request = {"run_id": run.id, "call_id": call_id, "answer": "ok"}
+
+    async def closing(self: AgentClient, *args: Any, **kwargs: Any) -> Any:
+        raise RPCError(
+            "workflow update was aborted by closing workflow", RPCStatusCode.NOT_FOUND, b""
+        )
+
+    monkeypatch.setattr(AgentClient, "provide_callback_result", closing)
+    with pytest.raises(ApiError) as err:
+        await operate(flows, answer, request)
+    assert (err.value.status, err.value.type) == (409, STALE_ENTRY)
+    assert await flows.store.get_decision(request_id(run, call_id)) is None
+
+
 async def test_an_answer_cancelled_after_it_landed_keeps_its_row_and_resends(
     flows: Flows, monkeypatch: pytest.MonkeyPatch
 ) -> None:
