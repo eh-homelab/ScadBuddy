@@ -2,6 +2,7 @@ import { CheckIcon, XIcon } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { listTags, spoolTagRecords, spoolTagWritten, type Spool, type TagReadResult, type TagRecords, type TagRow } from '../../../api/filament'
 import { headlineOf, restoreBackup, writeWithBackup, type WriteOutcome, type WriteStep } from '../../../lib/tagWrite'
+import { cleanTagUid } from '../../../lib/tagUid'
 import type { NfcSession, WireRecord } from '../../../lib/webNfc'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -228,12 +229,13 @@ function Outcome({ outcome, restoring, onRestore }: { outcome: WriteOutcome; res
   )
 }
 
-/** `clean_tag_uid`: hex digits only, the last 16, upper case. */
-const cleanUid = (uid: string) => uid.replace(/[^0-9a-fA-F]/g, '').toUpperCase().slice(-16)
-
-/** The id of the tag with this UID: the opened tag's when it is that one, else from the tag list. */
+/**
+ * The id of the tag with this UID: the opened tag's when it is that one, else from the tag list.
+ * The UID is cleaned as the server stores it (`lib/tagUid.ts`), so a phone's 4-byte read finds the
+ * AMS's `<uid>00000100` row (#8042).
+ */
 async function tagIdFor(uid: string, opened: TagRow | null | undefined): Promise<string> {
-  const clean = cleanUid(uid)
+  const clean = cleanTagUid(uid)
   if (opened?.tag_uid === clean) return opened.id
   const found = (await listTags({ includeUnbound: true })).find((one) => one.tag_uid === clean)
   if (!found) throw new Error('ScadBuddy has no tag with this serial number')

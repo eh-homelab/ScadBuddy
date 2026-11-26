@@ -84,7 +84,6 @@ def store(keyed: Settings) -> Iterator[SettingsStore]:
     opened.open()
     opened.save(
         SettingsPatch(
-            store_backend="bambuddy",
             bambuddy_url=BASE_URL,
             library_folder_id=INBOX,
             bambuddy_api_key="full-key-123456",

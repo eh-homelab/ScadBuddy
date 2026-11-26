@@ -113,12 +113,9 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type serviceKey struct{}
-
 // ServiceOf is the verified service of a guarded request, nil outside a route's handler.
 func ServiceOf(r *http.Request) *auth.Service {
-	s, _ := r.Context().Value(serviceKey{}).(*auth.Service)
-	return s
+	return auth.ServiceOf(r.Context())
 }
 
 func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, error) {
@@ -126,7 +123,7 @@ func (rt *Router) answer(route *mounted, r *http.Request, params Params) (any, e
 	if p != nil {
 		return nil, p
 	}
-	r = r.WithContext(context.WithValue(r.Context(), serviceKey{}, service))
+	r = r.WithContext(auth.WithService(r.Context(), service))
 	if route.MaxBody > 0 {
 		if r.ContentLength < 0 {
 			return nil, &httpx.Problem{

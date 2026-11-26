@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import shutil
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import psycopg
 import pytest
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
@@ -24,7 +22,6 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy import main
 from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, OutputEvent
 from scadbuddy.library import backfill as backfill_module
-from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.backfill import (
     AmbiguousOutputError,
     _announce,
@@ -34,20 +31,17 @@ from scadbuddy.library.backfill import (
     follow_backfills,
 )
 from scadbuddy.library.outputs import (
-    META_NAME,
     OUTPUT_HOLDER,
     BackfillState,
     OutputStore,
-    hold_parts,
-    reap_orphan_holds,
     release_parts,
 )
-from scadbuddy.render.inputs import legacy_inputs
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
 from scadbuddy.workflows.housekeeping import BACKFILL_SWEEP, SWEEPS
+from tests.conftest import PgPool
 from tests.support.arrange import finished_job
-from tests.support.saved_outputs import save_files
+from tests.support.row_outputs import output_store, update_row
 from tests.support.store import store_pool
 from tests.support.waits import until
 
@@ -71,68 +65,20 @@ def _holders(refs: BlobRefs, key: str) -> list[tuple[str, str]]:
     return [(row["holder_kind"], row["holder_id"]) for row in rows]
 
 
-async def _legacy_output(tmp_path: Path):  # type: ignore[no-untyped-def]
+async def _legacy_output(tmp_path: Path, pool: PgPool):  # type: ignore[no-untyped-def]
     """An output saved before manifests, and the done re-render of it."""
     paths, job, written = await finished_job(tmp_path, job_id="rerender")
-    store = OutputStore(paths)
-    old = save_files(store, job.model_copy(update={"outputs": [], "id": "old"}), name="mine")
+    store = output_store(tmp_path, pool, paths=paths)
+    old = await store.save(job.model_copy(update={"outputs": [], "id": "old"}), name="mine")
     assert store.manifest(old.id) == []
     return store, old, job, written
 
 
-@pytest.mark.parametrize(
-    ("name", "read", "none"),
-    [
-        (outputs_module.BACKFILL_NAME, OutputStore.backfill, None),
-        (outputs_module.PARAMS_NAME, OutputStore.params, {}),
-        (outputs_module.BOM_NAME, OutputStore.bom, []),
-        (outputs_module.MANIFEST_NAME, OutputStore.manifest, []),
-        (outputs_module.ARRANGED_NAME, OutputStore.arranged_from, []),
-        (outputs_module.RECORD_NAME, OutputStore.record, None),
-    ],
-)
-async def test_no_reader_checks_then_reads(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    read: Callable[[OutputStore, str], object],
-    none: object,
-) -> None:
-    """A regression guard, not a race reproduction: should a check-then-read come back,
-    this fails. The attach clears ``backfill.json`` on its own thread, and a read that
-    found it and then could not open it raised (a CI flake on #3975).
-
-    ``is_file`` answering yes for the gone file is what made a check-then-read fail
-    (main's, before the fix); the read-once readers never ask it, so here each must
-    read a missing file as none. Should a check come back, this fails."""
-    store, old, job, _ = await _legacy_output(tmp_path)
-    store.start_backfill(old.id, job.id)
-    (store.directory(old.id) / name).unlink(missing_ok=True)
-    is_file = Path.is_file
-    monkeypatch.setattr(Path, "is_file", lambda self: self.name == name or is_file(self))
-    assert read(store, old.id) == none
-
-
-async def test_inputs_cleared_as_they_are_read_read_as_the_params(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """As above for ``inputs.json``, whose absence means an output from before inputs.
-    (Before read-once this already held, through a warning for an "unreadable" file.)"""
-    store, old, _, _ = await _legacy_output(tmp_path)
-    expected = legacy_inputs(store.params(old.id))
-    (store.directory(old.id) / outputs_module.INPUTS_NAME).unlink(missing_ok=True)
-    is_file = Path.is_file
-    monkeypatch.setattr(
-        Path, "is_file", lambda self: self.name == outputs_module.INPUTS_NAME or is_file(self)
-    )
-    assert store.inputs(old.id) == expected
-
-
 @pytest.mark.requires_postgres
 async def test_a_finished_rerender_gives_the_output_its_manifest_and_holds(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
@@ -148,11 +94,11 @@ async def test_a_finished_rerender_gives_the_output_its_manifest_and_holds(
 
 @pytest.mark.requires_postgres
 async def test_attaching_again_after_a_crash_changes_nothing(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
     """A crash after the hold, before the manifest: the next pass finishes the job, and
     one after that finds nothing to do."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     key = written.manifest[0].part
     with store_pool(pg_conninfo) as pool:
@@ -165,10 +111,12 @@ async def test_attaching_again_after_a_crash_changes_nothing(
 
 
 @pytest.mark.requires_postgres
-async def test_a_stopped_pass_attaches_nothing_more(tmp_path: Path, pg_conninfo: str) -> None:
+async def test_a_stopped_pass_attaches_nothing_more(
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
+) -> None:
     """#2128: the boot's pass runs in a thread the shutdown cannot cancel; once its stop
     is set it attaches no further output, and what it left waits for the next pass."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     stop = threading.Event()
     stop.set()
@@ -182,9 +130,9 @@ async def test_a_stopped_pass_attaches_nothing_more(tmp_path: Path, pg_conninfo:
 
 @pytest.mark.requires_postgres
 async def test_an_unfinished_rerender_is_left_for_the_next_pass(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
-    store, old, job, _ = await _legacy_output(tmp_path)
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     running = job.model_copy(update={"state": "running", "result": None, "outputs": []})
     with store_pool(pg_conninfo) as pool:
@@ -204,9 +152,9 @@ async def test_an_unfinished_rerender_is_left_for_the_next_pass(
     ],
 )
 async def test_a_rerender_that_did_not_finish_says_why_and_is_not_retried(
-    tmp_path: Path, pg_conninfo: str, failed: dict[str, str] | None, message: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, failed: dict[str, str] | None, message: str
 ) -> None:
-    store, old, job, _ = await _legacy_output(tmp_path)
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     jobs = (
         _jobs(job.model_copy(update={**failed, "result": None, "outputs": []}))
@@ -253,24 +201,25 @@ async def test_outputs_with_the_same_parts_are_told_apart_by_their_saved_index(
     assert elsewhere.value.recorded_index == 2
 
 
-async def test_a_saved_output_records_which_of_its_jobs_outputs_it_is(tmp_path: Path) -> None:
+@pytest.mark.requires_postgres
+async def test_a_saved_output_records_which_of_its_jobs_outputs_it_is(
+    tmp_path: Path, pg_pool: PgPool
+) -> None:
     paths, job, written = await finished_job(tmp_path, job_id="j1")
     twin = written.model_copy(update={"name": "second layout"})
-    store = OutputStore(paths)
-    saved = save_files(store, job.model_copy(update={"outputs": [written, twin]}), index=1)
+    store = output_store(tmp_path, pg_pool, paths=paths)
+    saved = await store.save(job.model_copy(update={"outputs": [written, twin]}), index=1)
     record = store.record(saved.id)
     assert record is not None and record.output_index == 1
 
 
 @pytest.mark.requires_postgres
 async def test_an_ambiguous_rerender_fails_the_backfill_and_says_why(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
-    (store.directory(old.id) / "record.json").write_text(
-        written.record.model_dump_json(), encoding="utf-8"
-    )
+    update_row(store, old.id, record=written.record.model_dump(mode="json"))
     twin = written.model_copy(update={"name": "second layout"})
     rerender = job.model_copy(update={"outputs": [written, twin]})
     with store_pool(pg_conninfo) as pool:
@@ -283,15 +232,16 @@ async def test_an_ambiguous_rerender_fails_the_backfill_and_says_why(
 
 @pytest.mark.requires_postgres
 async def test_an_ambiguous_rerender_of_an_output_with_an_index_says_it_is_not_there(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
     """#3142: an output that did record its index, which none of the matching outputs
     has, was told it was saved before outputs recorded one."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
-    (store.directory(old.id) / "record.json").write_text(
-        written.record.model_copy(update={"output_index": 2}).model_dump_json(),
-        encoding="utf-8",
+    update_row(
+        store,
+        old.id,
+        record=written.record.model_copy(update={"output_index": 2}).model_dump(mode="json"),
     )
     twin = written.model_copy(update={"name": "second layout"})
     rerender = job.model_copy(update={"outputs": [written, twin]})
@@ -304,10 +254,10 @@ async def test_an_ambiguous_rerender_of_an_output_with_an_index_says_it_is_not_t
     assert store.manifest(old.id) == []
 
 
-def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
+async def _two_legacy(store: OutputStore, job: Job) -> tuple[str, str]:
     """A second output saved before manifests, of the same render, both waiting on it."""
     first = store.ids_for("demo")[0]
-    second = save_files(store, job.model_copy(update={"outputs": [], "id": "old2"}), name="two").id
+    second = (await store.save(job.model_copy(update={"outputs": [], "id": "old2"}), name="two")).id
     store.start_backfill(first, job.id)
     store.start_backfill(second, job.id)
     return first, second
@@ -325,12 +275,12 @@ def _in_order(store: OutputStore, monkeypatch: pytest.MonkeyPatch, first: str) -
 
 @pytest.mark.requires_postgres
 async def test_an_output_deleted_before_its_hold_keeps_no_holds_and_the_pass_goes_on(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The delete lands while the Parts are being held, after the output was read: its
     release has already run, so the pass must drop the holds it took after it."""
-    store, _, job, written = await _legacy_output(tmp_path)
-    gone, kept = _two_legacy(store, job)
+    store, _, job, written = await _legacy_output(tmp_path, pg_pool)
+    gone, kept = await _two_legacy(store, job)
     _in_order(store, monkeypatch, gone)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
@@ -350,22 +300,20 @@ async def test_an_output_deleted_before_its_hold_keeps_no_holds_and_the_pass_goe
 
 @pytest.mark.requires_postgres
 async def test_an_output_deleted_inside_the_attach_keeps_no_holds_and_the_pass_goes_on(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The delete's rmtree lands while the attach writes: the write's temporary file has
-    no directory to go to (FileNotFoundError)."""
-    store, _, job, written = await _legacy_output(tmp_path)
-    gone, kept = _two_legacy(store, job)
+    """The delete lands while the attach runs: the attach's write finds no row."""
+    store, _, job, written = await _legacy_output(tmp_path, pg_pool)
+    gone, kept = await _two_legacy(store, job)
     _in_order(store, monkeypatch, gone)
-    directory = store.directory(gone)
-    replace = outputs_module._replace
+    attach = store.rows.attach_backfill
 
-    def delete_then_replace(path: Path, text: str) -> None:
-        if path.parent == directory and directory.exists():
-            shutil.rmtree(directory)
-        replace(path, text)
+    def delete_then_attach(output_id: str, *args: Any, **kwargs: Any) -> Any:
+        if output_id == gone and store.rows.get(gone) is not None:
+            store.delete(gone)
+        return attach(output_id, *args, **kwargs)
 
-    monkeypatch.setattr(outputs_module, "_replace", delete_then_replace)
+    monkeypatch.setattr(store.rows, "attach_backfill", delete_then_attach)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
         assert attach_backfills(store, refs, _jobs(job)) == 1
@@ -375,12 +323,12 @@ async def test_an_output_deleted_inside_the_attach_keeps_no_holds_and_the_pass_g
 
 @pytest.mark.requires_postgres
 async def test_a_corrupt_output_does_not_stop_the_ones_behind_it(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, _, job, written = await _legacy_output(tmp_path)
-    corrupt, good = _two_legacy(store, job)
+    store, _, job, written = await _legacy_output(tmp_path, pg_pool)
+    corrupt, good = await _two_legacy(store, job)
     _in_order(store, monkeypatch, corrupt)
-    (store.directory(corrupt) / "record.json").write_text("{not json", encoding="utf-8")
+    update_row(store, corrupt, record=["not", "a", "record"])
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
         assert attach_backfills(store, refs, _jobs(job)) == 1
@@ -394,10 +342,10 @@ async def test_a_corrupt_output_does_not_stop_the_ones_behind_it(
 
 @pytest.mark.requires_postgres
 async def test_a_transient_failure_is_left_for_the_next_pass(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store, _, job, written = await _legacy_output(tmp_path)
-    flaky, good = _two_legacy(store, job)
+    store, _, job, written = await _legacy_output(tmp_path, pg_pool)
+    flaky, good = await _two_legacy(store, job)
     _in_order(store, monkeypatch, flaky)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
@@ -420,11 +368,11 @@ async def test_a_transient_failure_is_left_for_the_next_pass(
 
 @pytest.mark.requires_postgres
 async def test_a_job_that_does_not_validate_is_retried_not_failed(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
     """#1007: a ValidationError reading the job is not the output's fault; the next pass
     tries again instead of marking the backfill failed for good."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
 
     def unreadable(job_id: str) -> Job:
@@ -442,6 +390,7 @@ async def test_a_job_that_does_not_validate_is_retried_not_failed(
 @pytest.mark.requires_postgres
 async def test_a_job_that_never_validates_logs_its_trace_once(
     tmp_path: Path,
+    pg_pool: PgPool,
     pg_conninfo: str,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -449,7 +398,7 @@ async def test_a_job_that_never_validates_logs_its_trace_once(
     """#1007 re-review: retried every pass, a row that never validates logged a full
     trace each time. Once per job, then a warning."""
     monkeypatch.setattr(backfill_module, "_unreadable_jobs", set())
-    store, old, job, _ = await _legacy_output(tmp_path)
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
 
     def unreadable(job_id: str) -> Job:
@@ -469,12 +418,12 @@ async def test_a_job_that_never_validates_logs_its_trace_once(
 
 @pytest.mark.requires_postgres
 async def test_a_pass_forgets_an_unreadable_job_no_output_waits_on(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#3143: a job whose row never validated, and whose outputs then stopped waiting on
     it, was kept for the life of the process. A full pass keeps only the jobs pending."""
     monkeypatch.setattr(backfill_module, "_unreadable_jobs", set())
-    store, old, job, _ = await _legacy_output(tmp_path)
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
 
     def unreadable(job_id: str) -> Job:
@@ -494,11 +443,11 @@ async def test_a_pass_forgets_an_unreadable_job_no_output_waits_on(
 
 @pytest.mark.requires_postgres
 async def test_attaching_one_job_forgets_no_other_unreadable_job(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#3792: only the full pass prunes the unreadable jobs. A per-job attach, for a job
     no output waits on, leaves a job another output still waits on in the set."""
-    store, old, job, _ = await _legacy_output(tmp_path)
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     monkeypatch.setattr(backfill_module, "_unreadable_jobs", {job.id, "gone-job"})
     with store_pool(pg_conninfo) as pool:
@@ -507,36 +456,11 @@ async def test_attaching_one_job_forgets_no_other_unreadable_job(
 
 
 @pytest.mark.requires_postgres
-async def test_a_pass_while_a_marker_is_rewritten_keeps_its_unreadable_job(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#3792: a marker is renamed in whole, so a pass that lists it while it is being
-    written again still finds it, and keeps its job."""
-    monkeypatch.setattr(backfill_module, "_unreadable_jobs", set())
-    store, old, job, _ = await _legacy_output(tmp_path)
-    store.start_backfill(old.id, job.id)
-    marker = store.directory(old.id) / "backfill.json"
-    # A rewrite's temporary file, not yet renamed over the marker: half the JSON.
-    half = marker.with_name(f".{marker.name}.0123")
-    half.write_text(marker.read_text(encoding="utf-8")[:5], encoding="utf-8")
-
-    def unreadable(job_id: str) -> Job:
-        Job.model_validate({"id": job_id})
-        raise AssertionError("unreachable")
-
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        assert attach_backfills(store, refs, unreadable) == 0
-        assert attach_backfills(store, refs, unreadable) == 0
-    assert backfill_module._unreadable_jobs == {job.id}
-
-
-@pytest.mark.requires_postgres
 async def test_a_marker_left_after_its_manifest_was_written_is_cleared_not_failed(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
     """A crash after the manifest, before the marker's removal, then the job pruned."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     with store_pool(pg_conninfo) as pool:
         refs = BlobRefs(pool)
@@ -569,10 +493,10 @@ def _output_events() -> tuple[InProcessEventBus, list[OutputEvent]]:
     [pytest.param("done", id="attached"), pytest.param("failed", id="marked-failed")],
 )
 async def test_a_settled_backfill_is_announced_on_the_output(
-    tmp_path: Path, pg_conninfo: str, state: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, state: str
 ) -> None:
     """#1970: Arrange reads the output on this rather than polling it."""
-    store, old, job, _ = await _legacy_output(tmp_path)
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     if state == "failed":
         job = job.model_copy(
@@ -586,28 +510,12 @@ async def test_a_settled_backfill_is_announced_on_the_output(
 
 
 @pytest.mark.requires_postgres
-async def test_an_output_that_cannot_be_read_is_still_attached_and_the_pass_goes_on(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+async def test_a_failed_row_read_is_logged_and_announces_nothing(
+    tmp_path: Path, pg_pool: PgPool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#2011 review: announcing runs after the attach is done. A ``meta.json`` that no
-    longer validates must not mark that attach failed, nor stop the outputs behind it."""
-    store, _, job, written = await _legacy_output(tmp_path)
-    unreadable, good = _two_legacy(store, job)
-    _in_order(store, monkeypatch, unreadable)
-    (store.directory(unreadable) / META_NAME).write_text("{not json", encoding="utf-8")
-    bus, heard = _output_events()
-    with store_pool(pg_conninfo) as pool:
-        assert attach_backfills(store, BlobRefs(pool), _jobs(job), bus) == 2
-    for output_id in (unreadable, good):
-        assert store.manifest(output_id) == written.manifest
-        assert store.backfill(output_id) is None
-    assert [(e.output_id, e.slug) for e in heard] == [(unreadable, "demo"), (good, "demo")]
-
-
-async def test_a_failed_row_read_still_announces_from_the_directory(tmp_path: Path) -> None:
-    """#7256 review B-M4: the slug's row read fails (a pool timeout); the announcement
-    takes the directory's slug and still goes out."""
-    store, old, _, _ = await _legacy_output(tmp_path)
+    """The slug's row read fails (a pool timeout): the rows are the only record (#7257),
+    so the announcement is logged as failed and not sent; it never raises."""
+    store, old, _, _ = await _legacy_output(tmp_path, pg_pool)
 
     class _Unreadable:
         def slug_of(self, output_id: str) -> str | None:
@@ -615,13 +523,17 @@ async def test_a_failed_row_read_still_announces_from_the_directory(tmp_path: Pa
 
     store.rows = _Unreadable()
     bus, heard = _output_events()
-    _announce(bus, store, old.id)
-    assert [(e.output_id, e.slug) for e in heard] == [(old.id, "demo")]
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.library.backfill"):
+        _announce(bus, store, old.id)
+    assert heard == []
+    assert "could not announce a backfill" in caplog.text
 
 
 @pytest.mark.requires_postgres
-async def test_an_unfinished_backfill_is_not_announced(tmp_path: Path, pg_conninfo: str) -> None:
-    store, old, job, _ = await _legacy_output(tmp_path)
+async def test_an_unfinished_backfill_is_not_announced(
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     running = job.model_copy(update={"state": "running", "result": None, "outputs": []})
     bus, heard = _output_events()
@@ -632,9 +544,9 @@ async def test_an_unfinished_backfill_is_not_announced(tmp_path: Path, pg_connin
 
 @pytest.mark.requires_postgres
 async def test_a_job_done_event_attaches_its_backfill_promptly(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     bus, heard = _output_events()
     with store_pool(pg_conninfo) as pool:
@@ -655,12 +567,12 @@ async def test_a_job_done_event_attaches_its_backfill_promptly(
 
 @pytest.mark.requires_postgres
 async def test_a_failed_re_read_after_an_attach_never_marks_it_failed(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#2038: the re-read that decides the announcement runs after the attach is done.
     A ``ValueError`` from it (a half-written ``backfill.json``) must not reach the
     attach's ``fail_backfill``; it announces anyway, which only makes a reader re-read."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     reads = 0
     backfill: Callable[[str], BackfillState | None] = store.backfill
@@ -710,10 +622,12 @@ async def test_removing_the_follower_waits_for_an_attach_in_flight() -> None:
 
 
 @pytest.mark.requires_postgres
-async def test_an_attach_needs_one_connection_of_the_pool(tmp_path: Path, pg_conninfo: str) -> None:
+async def test_an_attach_needs_one_connection_of_the_pool(
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
+) -> None:
     """#1757: the claim's lock must not keep a pool connection while the attach takes
     another, or a pool of one (`SCADBUDDY_DATABASE_POOL_SIZE=1`) never attaches."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     with store_pool(pg_conninfo):  # migrated
         pass
@@ -733,8 +647,10 @@ async def test_an_attach_needs_one_connection_of_the_pool(tmp_path: Path, pg_con
 
 
 @pytest.mark.requires_postgres
-async def test_another_jobs_event_attaches_nothing(tmp_path: Path, pg_conninfo: str) -> None:
-    store, old, job, _ = await _legacy_output(tmp_path)
+async def test_another_jobs_event_attaches_nothing(
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    store, old, job, _ = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     with store_pool(pg_conninfo) as pool:
         assert attach_job_backfills(store, BlobRefs(pool), _jobs(job), "someone-else") == 0
@@ -743,10 +659,10 @@ async def test_another_jobs_event_attaches_nothing(tmp_path: Path, pg_conninfo: 
 
 @pytest.mark.requires_postgres
 async def test_duplicate_events_and_the_backstop_attach_once(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
     """Two `job.done` (a replica each) and the Schedule's backstop, all at once."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     read: Callable[[str], Job] = _jobs(job)
 
@@ -782,10 +698,10 @@ async def test_duplicate_events_and_the_backstop_attach_once(
 
 @pytest.mark.requires_postgres
 async def test_the_backstop_sweep_attaches_a_backfill_whose_event_was_missed(
-    tmp_path: Path, pg_conninfo: str
+    tmp_path: Path, pg_pool: PgPool, pg_conninfo: str
 ) -> None:
     """The API was down when the job finished: no event, so the Schedule's sweep."""
-    store, old, job, written = await _legacy_output(tmp_path)
+    store, old, job, written = await _legacy_output(tmp_path, pg_pool)
     store.start_backfill(old.id, job.id)
     with store_pool(pg_conninfo) as pool:
         state = SimpleNamespace(
@@ -806,370 +722,3 @@ async def test_the_backstop_sweep_attaches_a_backfill_whose_event_was_missed(
 def test_the_api_runs_no_attach_loop() -> None:
     assert not hasattr(main, "_attach_backfills_forever")
     assert not hasattr(main, "BACKFILL_ATTACH_INTERVAL")
-
-
-def _age_holds(refs: BlobRefs, output_id: str, hours: int) -> None:
-    with refs.pool.connection() as conn:
-        conn.execute(
-            "UPDATE blob_refs SET created_at = now() - make_interval(hours => %s)"
-            " WHERE holder_kind = %s AND holder_id = %s",
-            (hours, OUTPUT_HOLDER, output_id),
-        )
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_releases_old_holds_of_outputs_with_no_record(
-    tmp_path: Path, pg_conninfo: str, spans: InMemorySpanExporter
-) -> None:
-    """#1007: a delete racing a write can leave Parts held by an output with no
-    meta.json; the reaper releases them, and only them."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    part = written.manifest[0].part
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)  # a live output
-        hold_parts(refs, "gone", written.manifest, old.slug)  # its record deleted under it
-        hold_parts(refs, "saving", written.manifest, old.slug)  # held, meta.json not written yet
-        _age_holds(refs, old.id, 2)
-        _age_holds(refs, "gone", 2)
-        spans.clear()
-        assert reap_orphan_holds(refs, store) == 1
-        (reap,) = [s for s in spans.get_finished_spans() if s.name == "outputs.reap_orphan_holds"]
-        assert reap.attributes is not None
-        assert reap.attributes["scadbuddy.released"] == 1
-        assert "scadbuddy.outputs" not in reap.attributes
-        holders = _holders(refs, part)
-        assert (OUTPUT_HOLDER, "gone") not in holders
-        assert (OUTPUT_HOLDER, old.id) in holders
-        assert (OUTPUT_HOLDER, "saving") in holders  # inside the grace
-        assert reap_orphan_holds(refs, store) == 0
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_removes_an_orphan_s_old_directory_too(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """#1815: an output whose meta.json is gone leaves a directory no read sees; once
-    its holds are released it is removed, past the same grace. One written inside the
-    grace (a save still writing) is kept."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    stale, fresh = "a" * 32, "b" * 32
-    two_hours_ago = time.time() - 7200
-    for output_id in (stale, fresh):
-        directory = store.paths.output_dir(old.slug, output_id)
-        directory.mkdir()
-        (directory / "model.3mf").write_bytes(b"x")
-    os.utime(store.paths.output_dir(old.slug, stale), (two_hours_ago, two_hours_ago))
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        for output_id in (old.id, stale, fresh):
-            hold_parts(refs, output_id, written.manifest, old.slug)
-            _age_holds(refs, output_id, 2)
-        assert reap_orphan_holds(refs, store) == 2
-    assert not store.paths.output_dir(old.slug, stale).exists()
-    assert store.paths.output_dir(old.slug, fresh).is_dir()
-    assert store.get(old.id).id == old.id
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_removes_an_old_claimed_directory_that_holds_nothing(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """#5448: a save that claimed its id (`OutputStore.claim`) and stopped before it
-    held its Parts leaves a directory with no meta.json and no hold. Past the grace it
-    goes, with no hold to release; one inside the grace, or one still held, stays."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    stale, fresh, held = "d" * 32, "e" * 32, "f" * 32
-    two_hours_ago = time.time() - 7200
-    for output_id in (stale, fresh, held):
-        assert store.claim(old.slug, output_id)
-    for output_id in (stale, held):
-        directory = store.paths.output_dir(old.slug, output_id)
-        os.utime(directory, (two_hours_ago, two_hours_ago))
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        hold_parts(refs, held, written.manifest, old.slug)  # inside its holds' grace
-        assert reap_orphan_holds(refs, store) == 0
-    assert not store.paths.output_dir(old.slug, stale).exists()
-    assert store.paths.output_dir(old.slug, fresh).is_dir()
-    assert store.paths.output_dir(old.slug, held).is_dir()
-    assert store.get(old.id).id == old.id
-
-
-@pytest.mark.requires_postgres
-async def test_an_unlistable_directory_is_logged_when_no_hold_is_aged(
-    tmp_path: Path,
-    pg_conninfo: str,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """#5453: with no hold past the grace only the unheld-directory pass walks the
-    outputs, so a listing that fails is logged and the pass ends, rather than failing
-    every tick. With a hold to release, the walk still raises."""
-    store, old, _, written = await _legacy_output(tmp_path)
-
-    def unlistable(root: Path) -> None:
-        raise PermissionError(root)
-
-    monkeypatch.setattr(outputs_module, "_live_outputs", unlistable)
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)  # inside the grace
-        with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-            assert reap_orphan_holds(refs, store) == 0
-        assert any("unheld directories" in r.getMessage() for r in caplog.records)
-        _age_holds(refs, old.id, 2)
-        with pytest.raises(PermissionError):
-            reap_orphan_holds(refs, store)
-
-
-@pytest.mark.requires_postgres
-@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory of mode 000")
-async def test_a_slug_directory_it_cannot_list_is_logged_when_no_hold_is_aged(
-    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    """#5453, with a real listing that fails: a slug directory of mode 000 is logged
-    when no hold is past the grace, and raises once one is."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    locked = store.paths.outputs / "locked"
-    locked.mkdir()
-    locked.chmod(0o000)
-    try:
-        with store_pool(pg_conninfo) as pool:
-            refs = BlobRefs(pool)
-            hold_parts(refs, old.id, written.manifest, old.slug)  # inside the grace
-            with caplog.at_level(logging.WARNING, logger="scadbuddy.library.outputs"):
-                assert reap_orphan_holds(refs, store) == 0
-            warned = [r for r in caplog.records if "unheld directories" in r.getMessage()]
-            assert [r.__dict__["path"] for r in warned] == [str(locked)]
-            _age_holds(refs, old.id, 2)
-            with pytest.raises(PermissionError):
-                reap_orphan_holds(refs, store)
-    finally:
-        locked.chmod(0o755)
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_never_removes_a_symlinked_orphan_directory(
-    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    """#2129: an aged orphan whose directory is a symlink (no meta.json behind it) has
-    its holds released, but the link and its target are left alone, and quietly: the
-    guard skips it rather than leaving `rmtree` to refuse it."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    orphan = "c" * 32
-    target = tmp_path / "elsewhere" / orphan
-    target.mkdir(parents=True)
-    (target / "model.3mf").write_bytes(b"x")
-    two_hours_ago = time.time() - 7200
-    os.utime(target, (two_hours_ago, two_hours_ago))
-    link = store.paths.output_dir(old.slug, orphan)
-    link.symlink_to(target, target_is_directory=True)
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        for output_id in (old.id, orphan):
-            hold_parts(refs, output_id, written.manifest, old.slug)
-            _age_holds(refs, output_id, 2)
-        with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
-            assert reap_orphan_holds(refs, store) == 1
-    assert link.is_symlink()
-    assert (target / "model.3mf").read_bytes() == b"x"
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_never_removes_a_directory_not_named_as_an_output(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """#2129: the directory comes from a hold's id; one that is not an output id
-    (`OUTPUT_ID_PATTERN`) is never removed, though its holds are released."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    holder = "not-an-output-id"
-    directory = store.paths.output_dir(old.slug, holder)
-    directory.mkdir()
-    (directory / "keep.txt").write_bytes(b"x")
-    two_hours_ago = time.time() - 7200
-    os.utime(directory, (two_hours_ago, two_hours_ago))
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        for output_id in (old.id, holder):
-            hold_parts(refs, output_id, written.manifest, old.slug)
-            _age_holds(refs, output_id, 2)
-        assert reap_orphan_holds(refs, store) == 1
-        assert (OUTPUT_HOLDER, holder) not in _holders(refs, written.manifest[0].part)
-    assert (directory / "keep.txt").read_bytes() == b"x"
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_releases_nothing_when_it_finds_no_outputs(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """An unmounted or emptied outputs volume reads like every output deleted."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    part = written.manifest[0].part
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        _age_holds(refs, old.id, 2)
-        shutil.rmtree(store.paths.outputs)
-        assert reap_orphan_holds(refs, store) == 0
-        assert (OUTPUT_HOLDER, old.id) in _holders(refs, part)
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_stops_on_a_directory_it_cannot_list(
-    tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#1806 review: glob skips an unreadable slug directory, and its outputs would look
-    deleted. The reaper raises and releases nothing instead."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    part = written.manifest[0].part
-    real = os.scandir
-
-    def refusing(path: str | os.PathLike[str]) -> Iterator[os.DirEntry[str]]:
-        if str(path) != str(store.paths.outputs):
-            raise PermissionError(13, "Permission denied", str(path))
-        return real(path)
-
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        hold_parts(refs, "gone", written.manifest, old.slug)
-        _age_holds(refs, old.id, 2)
-        _age_holds(refs, "gone", 2)
-        monkeypatch.setattr(os, "scandir", refusing)
-        with pytest.raises(PermissionError):
-            reap_orphan_holds(refs, store)
-        holders = _holders(refs, part)
-        assert (OUTPUT_HOLDER, old.id) in holders
-        assert (OUTPUT_HOLDER, "gone") in holders
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_follows_symlinks_as_the_store_does(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """#1806 review: an output reached through a symlinked directory is served by the
-    store, so the reaper must count it live, not release its Parts. A second, plain
-    output keeps the no-outputs guard out of the way."""
-    store, old, job, written = await _legacy_output(tmp_path)
-    save_files(store, job.model_copy(update={"outputs": [], "id": "plain"}), name="plain")
-    part = written.manifest[0].part
-    out_dir = store.directory(old.id)
-    moved = tmp_path / "elsewhere" / out_dir.name
-    moved.parent.mkdir()
-    shutil.move(out_dir, moved)
-    out_dir.symlink_to(moved, target_is_directory=True)
-    assert store.get(old.id).id == old.id  # the store still serves it
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        _age_holds(refs, old.id, 2)
-        assert reap_orphan_holds(refs, store) == 0
-        assert (OUTPUT_HOLDER, old.id) in _holders(refs, part)
-
-
-def _forget_slug(refs: BlobRefs, output_id: str) -> None:
-    """A hold taken before `output_hold_slugs` existed."""
-    with refs.pool.connection() as conn:
-        conn.execute("DELETE FROM output_hold_slugs WHERE output_id = %s", (output_id,))
-
-
-def _slug_of(refs: BlobRefs, output_id: str) -> str | None:
-    with refs.pool.connection() as conn:
-        row = conn.execute(
-            "SELECT slug FROM output_hold_slugs WHERE output_id = %s", (output_id,)
-        ).fetchone()
-    return None if row is None else str(row["slug"])
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_releases_nothing_of_a_missing_slug_directory(
-    tmp_path: Path, pg_conninfo: str, caplog: pytest.LogCaptureFixture
-) -> None:
-    """#1806: a slug directory that is missing (not yet copied onto a new volume) must
-    not read as every one of its outputs deleted, while another slug's outputs are live.
-    A deleted output of a slug whose directory is there is still released."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    part = written.manifest[0].part
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        hold_parts(refs, "uncopied", written.manifest, "builtin:not-copied-yet")
-        hold_parts(refs, "gone", written.manifest, old.slug)
-        for output_id in (old.id, "uncopied", "gone"):
-            _age_holds(refs, output_id, 2)
-        with caplog.at_level(logging.ERROR, logger="scadbuddy.library.outputs"):
-            assert reap_orphan_holds(refs, store) == 1
-        holders = _holders(refs, part)
-        assert (OUTPUT_HOLDER, "uncopied") in holders
-        assert (OUTPUT_HOLDER, "gone") not in holders
-        assert (OUTPUT_HOLDER, old.id) in holders
-        assert "builtin:not-copied-yet is missing" in caplog.text
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_keeps_holds_of_unknown_template_and_learns_live_ones(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """A hold taken before slugs were recorded: a live output's slug is learnt from its
-    directory; one with no output cannot be placed, so it is never released."""
-    store, old, _, written = await _legacy_output(tmp_path)
-    part = written.manifest[0].part
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        hold_parts(refs, "legacy", written.manifest, old.slug)
-        for output_id in (old.id, "legacy"):
-            _age_holds(refs, output_id, 2)
-            _forget_slug(refs, output_id)
-        assert reap_orphan_holds(refs, store) == 0
-        assert (OUTPUT_HOLDER, "legacy") in _holders(refs, part)
-        assert _slug_of(refs, old.id) == old.slug
-        assert _slug_of(refs, "legacy") is None
-
-
-@pytest.mark.requires_postgres
-async def test_the_reaper_writes_no_slug_it_has_already_and_corrects_a_wrong_one(
-    tmp_path: Path, pg_conninfo: str
-) -> None:
-    """#2353: every pass used to upsert every held live output's slug, one transaction
-    each, though all were recorded already. Now one statement writes only what differs."""
-    store, old, _, written = await _legacy_output(tmp_path)
-
-    def version(refs: BlobRefs, output_id: str) -> str:
-        with refs.pool.connection() as conn:
-            row = conn.execute(
-                "SELECT xmin::text AS v FROM output_hold_slugs WHERE output_id = %s",
-                (output_id,),
-            ).fetchone()
-        assert row is not None
-        return str(row["v"])
-
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        _age_holds(refs, old.id, 2)
-        before = version(refs, old.id)
-        assert reap_orphan_holds(refs, store) == 0
-        assert version(refs, old.id) == before, "an unchanged slug is not written again"
-
-        with refs.pool.connection() as conn:
-            conn.execute(
-                "UPDATE output_hold_slugs SET slug = 'wrong' WHERE output_id = %s", (old.id,)
-            )
-        assert reap_orphan_holds(refs, store) == 0
-        assert _slug_of(refs, old.id) == old.slug
-
-
-@pytest.mark.requires_postgres
-async def test_releasing_an_output_forgets_its_slug(tmp_path: Path, pg_conninfo: str) -> None:
-    _, old, _, written = await _legacy_output(tmp_path)
-    with store_pool(pg_conninfo) as pool:
-        refs = BlobRefs(pool)
-        hold_parts(refs, old.id, written.manifest, old.slug)
-        assert _slug_of(refs, old.id) == old.slug
-        release_parts(refs, old.id)
-        assert _slug_of(refs, old.id) is None

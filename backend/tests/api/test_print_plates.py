@@ -23,7 +23,12 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.printers.component import PRINTERS, Printers
-from tests.api.conftest import files_only, read_stored, set_plate_image, wait_for_job
+from tests.api.conftest import (
+    PNG_BYTES,
+    read_stored,
+    set_plate_image,
+    wait_for_job,
+)
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_filaments import slice_kept, slice_routes
@@ -34,21 +39,11 @@ from tests.api.test_send import configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
 from tests.support.printers import linked_printer
+from tests.support.row_outputs import update_row
+from tests.support.saved_outputs import rewrite_model
 from tests.test_bambu3mf import add_plate
 
 pytestmark = pytest.mark.usefixtures("recorded_sb_spools")
-
-
-@pytest.fixture(autouse=True)
-def outputs_as_files(client: TestClient) -> None:
-    """These tests add plates to an output's file after its save: reads take the files
-    (`files_only`, #7257)."""
-    files_only(client)
-
-
-def _output_3mf(paths: DataPaths, output_id: str) -> Path:
-    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
-    return path
 
 
 # --- plate type ---------------------------------------------------------------------
@@ -227,7 +222,9 @@ def test_every_plate_of_a_multi_plate_output_is_listed_with_its_cover(
 ) -> None:
     configure(client)
     output_id = _output_without_cover(client, model)
-    add_plate(_output_3mf(paths, output_id), 2, thumbnail=b"\x89PNG plate two")
+    rewrite_model(
+        client, output_id, lambda path: add_plate(path, 2, thumbnail=b"\x89PNG plate two")
+    )
 
     plates = client.get(f"/api/v1/outputs/{output_id}/plates").json()
     assert [(plate["index"], plate["has_thumbnail"]) for plate in plates] == [
@@ -242,6 +239,34 @@ def test_every_plate_of_a_multi_plate_output_is_listed_with_its_cover(
     assert client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail").status_code == 404
 
 
+@respx.mock
+def test_a_plate_with_no_cover_shows_the_outputs_thumbnail_when_asked(
+    client: TestClient, model: str
+) -> None:
+    """#7939: a queue item's picture asks with ``cover_if_missing``; a plate with no cover
+    then answers as the output's thumbnail does. A plate with one keeps its own."""
+    configure(client)
+    output_id = _output_without_cover(client, model)
+    rewrite_model(
+        client, output_id, lambda path: add_plate(path, 2, thumbnail=b"\x89PNG plate two")
+    )
+    covered = client.put(
+        f"/api/v1/outputs/{output_id}/thumbnail",
+        files={"file": ("t.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert covered.status_code == 204, covered.text
+    asked = {"cover_if_missing": "true"}
+
+    fallback = client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail", params=asked)
+    kept = client.get(f"/api/v1/outputs/{output_id}/plates/2/thumbnail", params=asked)
+
+    assert (fallback.status_code, fallback.content) == (200, PNG_BYTES)
+    assert kept.content == b"\x89PNG plate two"
+    # Not asked, a plate with no cover is still a 404: the plate picker shows none.
+    assert client.get(f"/api/v1/outputs/{output_id}/plates/1/thumbnail").status_code == 404
+
+
 @pytest.mark.requires_postgres
 @respx.mock
 def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
@@ -249,7 +274,7 @@ def test_a_chosen_plate_is_sliced_and_queued_by_its_index(
 ) -> None:
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     sliced = slice_routes()
@@ -269,7 +294,7 @@ def test_all_plates_are_queued_as_one_item_each(
 ) -> None:
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     sliced = slice_routes()
@@ -293,8 +318,8 @@ def test_chosen_plates_are_queued_as_one_item_each_in_plate_order(
     """#3652: plates 1 and 3 of three, named in any order, print as one request."""
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
-    add_plate(_output_3mf(paths, output_id), 3)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
+    rewrite_model(client, output_id, lambda path: add_plate(path, 3))
     upload_route()
     run_routes()
     sliced = slice_routes()
@@ -350,7 +375,7 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     """Plate 1 is on Bambuddy's queue when plate 2's slice fails; the output keeps it."""
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     respx.post(f"{API}/library/files/41/slice").mock(
@@ -390,7 +415,7 @@ def test_every_plate_of_an_all_plates_print_is_recorded(
     """The single ids hold one plate; ``plates`` keeps each plate's queue item and slice."""
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     respx.post(f"{API}/library/files/41/slice").mock(
@@ -436,7 +461,7 @@ def test_all_plates_of_a_3mf_that_lists_none_is_refused(
     configure(client)
     output_id = make_output(client, model)
     upload = upload_route()
-    _drop_plates(_output_3mf(paths, output_id))
+    rewrite_model(client, output_id, _drop_plates)
     queue = queue_route()
 
     answer = run_print(client, output_id, json=run_request(all_plates=True))
@@ -489,10 +514,10 @@ def test_a_meta_json_without_plates_still_loads(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     output_id = make_output(client, model)
-    path = _output_3mf(paths, output_id).with_name("meta.json")
-    raw = json.loads(path.read_text())
+    outputs = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    raw = outputs.get(output_id).model_dump(mode="json")
     del raw["plates"]
-    path.write_text(json.dumps(raw))
+    update_row(outputs, output_id, meta=raw)
 
     assert client.get(f"/api/v1/outputs/{output_id}").json()["plates"] == []
 
@@ -530,7 +555,7 @@ def _plan_run(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     _plates_use(used, grams)
@@ -559,7 +584,7 @@ def test_a_plan_reads_an_outputs_slots_from_its_own_3mf(
     plate at once, and a 14 MB copy's ten reads all outlasted the request."""
     configure(client)
     output_id = make_output(client, model)
-    add_plate(_output_3mf(paths, output_id), 2)
+    rewrite_model(client, output_id, lambda path: add_plate(path, 2))
     upload_route()
     run_routes()
     asked = _plates_use({1: {1}, 2: {1}})

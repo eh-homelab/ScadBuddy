@@ -307,6 +307,13 @@ describe('PendingCard, a prompt (#7364)', () => {
     expect(screen.getByRole('button', { name: 'Answer' })).toBeInTheDocument()
   })
 
+  it('names the assistant that answered, and the run grant that let it (#7471)', async () => {
+    setTask(PROMPT_TASK_ID, { state: 'answered', answer: {}, answered_by: 'session:s-9', admitted_by: 'grant-1' })
+    draw(question({ state: 'answered' }))
+    expect(await screen.findByText("under the run's grant")).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /assistant/i })).toHaveAttribute('href', expect.stringContaining('s-9'))
+  })
+
   it('asks again when a task answered elsewhere is opened again', async () => {
     refuse(409, { type: NOT_OPEN, state: 'open' }, { once: true })
     const { user, again } = draw()

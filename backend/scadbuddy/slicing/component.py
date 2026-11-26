@@ -15,6 +15,7 @@ from temporalio.client import Client
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.filament.bb_sync_nudge import instance_for
 from scadbuddy.filament.sb_presets import FilamentPresetStore, adopt_at_start
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
@@ -43,8 +44,15 @@ class Slicing:
     @cached_property
     def own(self) -> FilamentPresetStore:
         """ScadBuddy's own filament presets (#7176); the blob store is asked at each read,
-        as it is set after the components are built."""
-        return FilamentPresetStore(self.core.settings_store.pool, lambda: self.core.store.blobs)
+        as it is set after the components are built, and the configured Bambuddy at each
+        list, so a catalogue maps only that Bambuddy's preset ids (#7223)."""
+        settings = self.core.settings_store
+
+        def instance() -> str | None:
+            url = settings.read({"bambuddy_url"})["bambuddy_url"]
+            return instance_for(url) if url else None
+
+        return FilamentPresetStore(settings.pool, lambda: self.core.store.blobs, instance)
 
     @cached_property
     def profiles(self) -> Profiles | None:

@@ -47,6 +47,15 @@ class NoInsertWeightOfferError(Exception):
         self.reason: m.NoOfferReason = reason
 
 
+class InsertWeightChangedError(Exception):
+    """An accept that names another weight than the mean under the locks (#7450-2):
+    another spool's accept or delete moved it since the offer was read."""
+
+    def __init__(self, new_empty_weight_g: int) -> None:
+        super().__init__(f"the insert weight is now {new_empty_weight_g} g")
+        self.new_empty_weight_g = new_empty_weight_g
+
+
 def is_placeholder(basis: str, note: str | None) -> bool:
     """Whether an insert's weight is a placeholder: its basis, or its note (R-7280-3).
     The catalog's ``placeholder`` column is the same rule in SQL."""
@@ -61,8 +70,10 @@ def unused(events: Sequence[m.SpoolEvent], *, grams_left: float | None, label: i
 
 
 def full(grams_left: float | None, label: int) -> bool:
-    """Whether the grams left equal the label weight (D2)."""
-    return grams_left is not None and abs(grams_left - label) < FULL_TOLERANCE_G
+    """Whether the grams left equal the label weight (D2), within the tolerance and at its
+    edge (#7449-3). No grams left is full: a spool made without them and never weighed holds
+    its label weight, and `consumed` rules out one that was used (#7449-1)."""
+    return grams_left is None or abs(grams_left - label) <= FULL_TOLERANCE_G
 
 
 def consumed(events: Sequence[m.SpoolEvent], label: int) -> bool:
@@ -147,7 +158,8 @@ def check_on(
     insert: dict[str, Any] | None = None
     if spool["insert_type_id"] is not None:
         insert = conn.execute(
-            "SELECT id, name, empty_weight_g, empty_weight_basis, note"
+            "SELECT id, name, empty_weight_g, empty_weight_basis, note,"
+            " archived_at IS NOT NULL AS archived"
             f" FROM filament_insert_types WHERE id = %s{' FOR UPDATE' if lock else ''}",
             (spool["insert_type_id"],),
         ).fetchone()
@@ -183,6 +195,10 @@ def check_on(
         return answer("not_full")
     if reading_g < label - FULL_TOLERANCE_G:
         return answer("below_label")
+    # An archived insert keeps its weight for the filament, but takes no new one (#7449-4).
+    # A reading under the label still gets its resolutions: none of them writes the insert.
+    if insert["archived"]:
+        return answer("no_insert")
     reason = offer_reason(reading_g, label)
     if reason is not None:
         return answer(reason)
@@ -196,8 +212,8 @@ def check_on(
     ]
     derived = reading_g - label
     new_weight = mean_weight([*others, derived])
-    if new_weight < 1:  # the table's CHECK (empty_weight_g > 0)
-        return answer("not_above_label")
+    if new_weight < 1:  # the table's CHECK (empty_weight_g > 0); #7449-2
+        return answer("mean_below_1g")
     placeholder = is_placeholder(insert["empty_weight_basis"], insert["note"])
     offer = m.InsertWeightOffer(
         insert_type_id=insert["id"],
@@ -216,12 +232,16 @@ def check_on(
     return answer(None, offer)
 
 
-def accept_on(conn: Conn, spool_id: UUID, reading_g: float) -> m.InsertWeightAccepted | None:
+def accept_on(
+    conn: Conn, spool_id: UUID, reading_g: float, *, expected_g: int | None = None
+) -> m.InsertWeightAccepted | None:
     """Keep ``reading_g`` as the spool's row and set its insert's weight to the mean of
     the insert's rows, basis ``derived``; ``None`` for no such spool. Every condition is
     checked again under the row locks (D3); `NoInsertWeightOfferError` when none is met
-    now. A spool's second accept replaces its row, and a row of the spool's old insert
-    moves to its new one; the old insert keeps its weight (D5). Run it in a transaction."""
+    now. With ``expected_g`` (the offer's ``new_empty_weight_g``), a mean that differs under
+    the locks is `InsertWeightChangedError` and nothing is written (#7450-2). A spool's
+    second accept replaces its row, and a row of the spool's old insert moves to its new
+    one; the old insert keeps its weight (D5). Run it in a transaction."""
     check = check_on(conn, spool_id, reading_g, lock=True)
     if check is None:
         return None
@@ -229,6 +249,8 @@ def accept_on(conn: Conn, spool_id: UUID, reading_g: float) -> m.InsertWeightAcc
     if offer is None:
         assert check.reason is not None
         raise NoInsertWeightOfferError(check.reason)
+    if expected_g is not None and offer.new_empty_weight_g != expected_g:
+        raise InsertWeightChangedError(offer.new_empty_weight_g)
     conn.execute(
         "INSERT INTO filament_insert_weight_readings"
         " (insert_type_id, spool_id, reading_g, label_weight_g, derived_g)"
@@ -253,6 +275,41 @@ def accept_on(conn: Conn, spool_id: UUID, reading_g: float) -> m.InsertWeightAcc
     )
 
 
+def forget_spool_on(conn: Conn, spool_id: UUID) -> None:
+    """Take a spool's row out of its insert's mean before the spool is deleted (#7450-1).
+    The insert's row is locked first, as `accept_on` locks it, so an accept of another
+    spool of the insert reads the rows after this. Only a ``derived`` weight is the mean of
+    its rows; a person's or a placeholder weight stays. With no row left the weight stays
+    as it was and nothing new is set (plan ruling R-7450-1). Run it in the delete's
+    transaction."""
+    row = conn.execute(
+        "SELECT insert_type_id FROM filament_insert_weight_readings WHERE spool_id = %s",
+        (spool_id,),
+    ).fetchone()
+    if row is None:
+        return
+    insert = conn.execute(
+        "SELECT empty_weight_basis FROM filament_insert_types WHERE id = %s FOR UPDATE",
+        (row["insert_type_id"],),
+    ).fetchone()
+    conn.execute("DELETE FROM filament_insert_weight_readings WHERE spool_id = %s", (spool_id,))
+    if insert is None or insert["empty_weight_basis"] != "derived":
+        return
+    derived = [
+        r["derived_g"]
+        for r in conn.execute(
+            "SELECT derived_g FROM filament_insert_weight_readings WHERE insert_type_id = %s",
+            (row["insert_type_id"],),
+        ).fetchall()
+    ]
+    if not derived:
+        return
+    conn.execute(
+        "UPDATE filament_insert_types SET empty_weight_g = %s, updated_at = now() WHERE id = %s",
+        (mean_weight(derived), row["insert_type_id"]),
+    )
+
+
 class InsertWeightStore:
     """`check_on` and `accept_on`, each in a transaction of the spools store's pool.
     Synchronous: callers run it in a thread."""
@@ -264,6 +321,8 @@ class InsertWeightStore:
         with self._spools.transaction() as conn:
             return check_on(conn, spool_id, reading_g)
 
-    def accept(self, spool_id: UUID, reading_g: float) -> m.InsertWeightAccepted | None:
+    def accept(
+        self, spool_id: UUID, reading_g: float, *, expected_g: int | None = None
+    ) -> m.InsertWeightAccepted | None:
         with self._spools.transaction() as conn:
-            return accept_on(conn, spool_id, reading_g)
+            return accept_on(conn, spool_id, reading_g, expected_g=expected_g)

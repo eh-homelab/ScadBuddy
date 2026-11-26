@@ -1,0 +1,235 @@
+"""An `OutputStore` as release B builds it (#7257): its rows in Postgres and its bytes in
+a local content store, for the tests that save and read outputs."""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from fastapi.testclient import TestClient
+from psycopg import sql
+from psycopg.types.json import Jsonb
+
+from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.output_bytes import OutputBytes
+from scadbuddy.library.output_prints import OutputPrintStore
+from scadbuddy.library.output_rows import (
+    OUTPUT_HOLDER,
+    OutputBlobs,
+    OutputRow,
+    OutputRows,
+    Role,
+    plate_cover_prefix,
+)
+from scadbuddy.library.outputs import STOREFRONT, OutputMeta, OutputStore
+from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_models import Job
+from scadbuddy.store.index import Pool
+from tests.support.store import local_content
+
+#: The ``outputs`` columns a test may set with `update_row`; all but ``meta`` are JSON.
+_JSON_COLUMNS = frozenset(
+    {"params", "inputs", "record", "manifest", "bom", "arranged_from", "backfill"}
+)
+
+
+def output_store(
+    tmp_path: Path,
+    pool: Pool,
+    *,
+    paths: DataPaths | None = None,
+    prints: OutputPrintStore | None = None,
+) -> OutputStore:
+    """Rows on ``pool``, bytes on a local content store at ``paths.output_blobs``, where
+    an app built on the same ``paths`` keeps the outputs' blobs on `local` (plan D7).
+    ``paths`` defaults to a data root under ``tmp_path``."""
+    paths = paths if paths is not None else DataPaths(root=tmp_path / "data")
+    content = local_content(paths.output_blobs, pool)
+    content.spool = tmp_path / "blob-spool"
+    return OutputStore(paths, rows=OutputRows(pool), bytes=OutputBytes(content), prints=prints)
+
+
+def save_now(store: OutputStore, job: Job, **kwargs: Any) -> OutputMeta:
+    """`OutputStore.save` from a test with no running loop. Blocking."""
+    return asyncio.run(store.save(job, **kwargs))
+
+
+def update_row(store: OutputStore, output_id: str, **columns: Any) -> None:
+    """Set columns of the output's row by hand, as a test of what a reader makes of
+    them. ``meta`` takes an `OutputMeta` or a dict."""
+    assignments: list[sql.Composable] = []
+    values: list[Any] = []
+    for column, value in columns.items():
+        if column == "meta":
+            data = value.model_dump(mode="json") if isinstance(value, OutputMeta) else value
+            values.append(Jsonb(data))
+        elif column in _JSON_COLUMNS:
+            values.append(None if value is None else Jsonb(value))
+        else:
+            raise ValueError(f"not a column a test sets: {column}")
+        assignments.append(sql.SQL("{} = %s").format(sql.Identifier(column)))
+    query = sql.SQL("UPDATE outputs SET {} WHERE output_id = %s").format(
+        sql.SQL(", ").join(assignments)
+    )
+    with store.rows._pool.connection() as conn:
+        conn.execute(query, [*values, output_id])
+
+
+def copy_row(store: OutputStore, meta: OutputMeta, *, slug: str, output_id: str) -> OutputMeta:
+    """``meta``'s output again as ``output_id`` of template ``slug``, naming the same
+    blobs: a second template's output without rendering a second template (#1864)."""
+    row = store.rows.get(meta.id)
+    assert row is not None
+    copied = meta.model_copy(update={"id": output_id, "slug": slug})
+    store.rows.insert(dataclasses.replace(row, output_id=output_id, slug=slug, meta=copied))
+    return store.get(output_id)
+
+
+def output_meta(output_id: str, slug: str, *, created_at: datetime | None = None) -> OutputMeta:
+    """A bare output record: no name, one 1 mm box."""
+    return OutputMeta(
+        id=output_id,
+        slug=slug,
+        job_id="j",
+        created_at=created_at or datetime.now(UTC),
+        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+    )
+
+
+def insert_row(store: OutputStore, meta: OutputMeta, **columns: Any) -> None:
+    """An output's row with ``meta`` and no bytes, as a test's record of an output it
+    never rendered. ``columns`` sets `OutputRow` fields (``params``, ``manifest`` ...)."""
+    fields: dict[str, Any] = {
+        "params": {},
+        "inputs": None,
+        "record": None,
+        "manifest": None,
+        "bom": None,
+        "arranged_from": None,
+        "backfill": None,
+        "has_plate_cover": False,
+        **columns,
+    }
+    store.rows.insert(
+        OutputRow(output_id=meta.id, slug=meta.slug, meta=meta, copied_at=meta.created_at, **fields)
+    )
+
+
+def app_outputs(client: TestClient) -> OutputStore:
+    """The app's `OutputStore`."""
+    outputs: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    return outputs
+
+
+def mark_storefront(store: OutputStore, output_id: str) -> None:
+    """Mark the output as the storefront slice run's (#6371) in its row's meta, as a test's
+    stand-in for a storefront save."""
+    row = store.rows.get(output_id)
+    assert row is not None
+    store.rows.update_meta(output_id, row.meta.model_copy(update={"source": STOREFRONT}))
+
+
+def name_blobs(
+    rows: OutputRows,
+    output_id: str,
+    blobs: OutputBlobs,
+    *,
+    damaged: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Name ``blobs`` as the output's bytes, its ``output_files`` rows too, and hold each
+    key, in one transaction: a test's stand-in for an output whose bytes it put itself
+    (`put_folder_at_keys`). The holds of byte keys it no longer names go; the plate
+    cover's stays. False when the row is gone: then nothing is written."""
+    keys = blobs.keys()
+    with rows._pool.connection() as conn, conn.transaction():
+        cursor = conn.execute(
+            "UPDATE outputs SET model_blob = %s, preview_blob = %s, thumbnail_blob = %s,"
+            " damaged = %s, bytes_at = clock_timestamp() WHERE output_id = %s",
+            (blobs.model, blobs.preview, blobs.thumbnail, Jsonb(damaged or []), output_id),
+        )
+        if not cursor.rowcount:
+            return False
+        conn.execute("DELETE FROM output_files WHERE output_id = %s", (output_id,))
+        for item in blobs.files:
+            conn.execute(
+                "INSERT INTO output_files (output_id, name, blob_key, size)"
+                " VALUES (%s, %s, %s, %s)",
+                (output_id, item.name, item.blob_key, item.size),
+            )
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s"
+            " AND starts_with(key, 'output-' || holder_id || '-')"
+            " AND NOT key = ANY(%s) AND NOT starts_with(key, %s)",
+            (OUTPUT_HOLDER, output_id, keys, plate_cover_prefix(output_id)),
+        )
+        for key in keys:
+            conn.execute(
+                "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT DO NOTHING",
+                (key, OUTPUT_HOLDER, output_id),
+            )
+    return True
+
+
+def _record_run(rows: OutputRows, table: str, columns: dict[str, Any]) -> int:
+    """Insert one run row; ``finished_at`` is the database's clock unless given, so it is
+    never before the row's own ``started_at``."""
+    values = {
+        name: Jsonb(value) if isinstance(value, (list, dict)) else value
+        for name, value in columns.items()
+    }
+    names = [sql.Identifier(name) for name in values]
+    slots: list[sql.Composable] = [sql.Placeholder() for _ in values]
+    if "finished_at" not in values:
+        names.append(sql.Identifier("finished_at"))
+        slots.append(sql.SQL("clock_timestamp()"))
+    query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
+        sql.Identifier(table), sql.SQL(", ").join(names), sql.SQL(", ").join(slots)
+    )
+    with rows._pool.connection() as conn:
+        found = conn.execute(query, list(values.values())).fetchone()
+    assert found is not None
+    return int(found["id"])
+
+
+def record_copy_run(rows: OutputRows, **columns: Any) -> int:
+    """A row copy run as release A recorded it (#7255); its id. Release B writes none
+    (#7257), but `GET /outputs/copy-status` still reads the last one. ``columns`` are
+    ``output_copy_runs`` columns; ``finished_at`` is now unless given."""
+    return _record_run(rows, "output_copy_runs", columns)
+
+
+def record_byte_run(rows: OutputRows, **columns: Any) -> int:
+    """A byte copy run as release A recorded it (#7256); its id. ``columns`` are
+    ``output_byte_runs`` columns; ``finished_at`` is now unless given."""
+    return _record_run(rows, "output_byte_runs", columns)
+
+
+def mark_cut_over(rows: OutputRows) -> None:
+    """The cut-over mark as release A wrote it (#7257): a finished row copy run, then a
+    finished byte run, and the mark that names it."""
+    record_copy_run(rows)
+    byte_run = record_byte_run(rows)
+    with rows._pool.connection() as conn:
+        conn.execute("INSERT INTO output_cutover (byte_run_id) VALUES (%s)", (byte_run,))
+
+
+def name_blob(rows: OutputRows, output_id: str, role: Role, key: str) -> None:
+    """Name ``key`` as the blob of the output's ``role`` and hold it: a test's row that
+    names a blob the store may not have."""
+    with rows._pool.connection() as conn, conn.transaction():
+        conn.execute(
+            sql.SQL("UPDATE outputs SET {} = %s WHERE output_id = %s").format(
+                sql.Identifier(f"{role}_blob")
+            ),
+            (key, output_id),
+        )
+        conn.execute(
+            "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
+            " ON CONFLICT DO NOTHING",
+            (key, OUTPUT_HOLDER, output_id),
+        )

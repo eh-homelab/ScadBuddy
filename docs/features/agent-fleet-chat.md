@@ -71,7 +71,11 @@ flowchart LR
 
 `backend/scadbuddy/migrations/20261125T1954Z_fleet.sql`: `fleet_agents` (handle, cursor,
 last seen), `fleet_channels`, `fleet_members`, `fleet_messages` (DM or channel post, text)
-and `fleet_deliveries` (one row per recipient). The `fleet.message` events are rows of the
+and `fleet_deliveries` (one row per recipient). Every row has a timestamp
+(`20261126T1533Z_fleet_row_timestamps.sql`, #7968): `fleet_agents` `created_at` and
+`updated_at` (core sets it when the cursor moves), `fleet_channels` `created_at`,
+`fleet_members` `joined_at`, `fleet_messages` `sent_at` and `fleet_deliveries`
+`created_at`. The `fleet.message` events are rows of the
 event log `events`.
 
 `backend/scadbuddy/migrations/20261126T1615Z_fleet_session_registry.sql`: `fleet_machines`

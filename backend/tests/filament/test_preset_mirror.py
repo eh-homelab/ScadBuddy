@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from psycopg.types.json import Jsonb
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.models import LocalPreset, LocalPresetCatalogue
@@ -579,12 +580,24 @@ async def test_with_only_preset_links_the_presets_prove_the_same_bambuddy(
     blobs = LocalBlobStore(tmp_path / "blobs")
     first, second = await _preset_links_only(pg_pool, blobs)
     presets = _catalogue(_stamped(7, "One"), _stamped(8, "Two", "2026-11-23T10:00:00"))
+    files = {"H2C": {"0.4": {"key": "k", "name": "n", "sha256": "s", "preset_id": "7"}}}
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO filament_profile_fetches (type_id, tdfp_id, files, status)"
+            " VALUES (%s, 30173, %s, 'imported')",
+            (_type(pg_pool, "PLA-K"), Jsonb(files)),
+        )
 
     preview = reset_preview(_filament(pg_pool), HERE, ([], []), presets=presets)
     assert (preview.same_bambuddy, preview.changed_since_pull) == (True, False)
 
     done = reset_links(_filament(pg_pool), OLD, HERE, ([], []), presets=presets, expect_kept=True)
     assert (done.kept, done.configured_instance) == (True, HERE)
+    # #7223: the same Bambuddy, so a fetch run's preset ids stay.
+    with pg_pool.connection() as conn:
+        row = conn.execute("SELECT files FROM filament_profile_fetches").fetchone()
+    assert row is not None
+    assert row["files"] == files
     rows = [_row(pg_pool, i) for i in (first, second)]
     assert [(r["bb_preset_id"], r["bb_instance"]) for r in rows] == [(7, HERE), (8, HERE)]
     assert [r["mirrored_sha256"] == r["sha256"] for r in rows] == [True, True]
