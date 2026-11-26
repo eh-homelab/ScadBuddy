@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry"
 	"github.com/eh-homelab/ScadBuddy/tools/go/telemetry/pgxtrace"
@@ -141,7 +142,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 	if err != nil {
 		return err
 	}
-	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+	router, err := newRouter(pool, upstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter())
 	if err != nil {
 		return err
 	}
@@ -158,7 +159,7 @@ func run(ctx context.Context, env func(string) string, tel *telemetry.Telemetry)
 		if err != nil {
 			return fmt.Errorf("SCADBUDDY_CORE_CRUD_UPSTREAM: %w", err)
 		}
-		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"))
+		crudRouter, err := newRouter(pool, crudUpstream, keys, env("SCADBUDDY_CORE_AREAS"), env("SCADBUDDY_AUTH_MODE"), tel.Meter())
 		if err != nil {
 			return err
 		}
@@ -231,17 +232,41 @@ var areaPackages = []areaRoutes{
 	transcripts.Areas, workspace.Areas,
 }
 
+// publicAreas is a package's public routes by area name, over the pool, with the KEKs.
+// newRouter serves each behind the one person-auth gate (internal/auth); an area may have
+// CRUD routes, public routes or both.
+type publicAreas func(pool *pgxpool.Pool, keys *seal.Keys) map[string][]auth.Public
+
+// publicPackages are the packages with public areas.
+var publicPackages = []publicAreas{}
+
 // sealed are the areas that seal or open with the KEK: without one they refuse to start.
 var sealed = map[string]bool{
 	"credentials": true, "payload-keys": true, "keys": true, "notify": true, "transcripts": true,
 }
 
 // newRouter answers the named areas: <area> for all its routes here, <area>:read for its GETs.
-func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string) (*crud.Router, error) {
+// A named area's public routes stand in front of the CRUD router, behind the gate in
+// SCADBUDDY_AUTH_MODE's mode; meter, when not nil, counts what enforce would refuse.
+func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, authMode string, meter metric.MeterProvider) (http.Handler, error) {
+	mode, err := auth.ParseMode(authMode, authMode != "")
+	if err != nil {
+		return nil, fmt.Errorf("SCADBUDDY_AUTH_MODE: %w", err)
+	}
+	resolver := &auth.Resolver{Pool: pool}
 	router := &crud.Router{
-		Resolver: &auth.Resolver{Pool: pool},
-		Enforce:  authMode == "enforce",
+		Resolver: resolver,
+		Enforce:  mode == auth.Enforce,
 		Next:     next,
+	}
+	gate := auth.NewGate(resolver, mode, meter)
+	public := http.NewServeMux()
+	served := false
+	publics := map[string][]auth.Public{}
+	for _, p := range publicPackages {
+		for name, routes := range p(pool, keys) {
+			publics[name] = append(publics[name], routes...)
+		}
 	}
 	log, turn := &events.Log{Pool: pool}, &turns.Turns{Pool: pool}
 	more := map[string][]crud.Route{}
@@ -270,13 +295,22 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)
 			}
 			routes, ok := more[name]
-			if !ok {
+			outside, open := publics[name]
+			if !ok && !open {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which this build does not have", name)
 			}
 			router.Add("agent", routes...)
+			for _, p := range outside {
+				public.Handle(p.Pattern, gate.Wrap(p.Route, p.Handler))
+				served = true
+			}
 		}
 	}
-	return router, nil
+	if !served {
+		return router, nil
+	}
+	public.Handle("/", router)
+	return public, nil
 }
 
 // newUpstream forwards to the Python API at an http:// URL or a unix:///path socket. The

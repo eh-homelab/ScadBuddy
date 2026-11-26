@@ -154,6 +154,15 @@ type Route struct {
 	Scriptless bool
 }
 
+// Public is one public route an area serves (a path outside /internal/crud/): Pattern is
+// net/http's ("POST /api/v1/filament/presets"), Route what the gate checks, Handler the
+// answer, which reads its caller with CallerOf.
+type Public struct {
+	Pattern string
+	Route   Route
+	Handler http.Handler
+}
+
 // Gate is auth/gate.py AuthGate and auth/check.py auth_check for the routes it wraps.
 type Gate struct {
 	Resolver *Resolver

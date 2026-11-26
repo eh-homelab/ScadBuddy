@@ -121,11 +121,18 @@ A public area (a route outside `/internal/crud/`, which a browser, an access tok
 service calls) checks its caller with `internal/auth` (#8038), never with a check of its
 own. The check is Python's (`backend/scadbuddy/auth/`: `gate.py`, `check.py`, `routes.py`):
 
+An area's package serves them from one function in `main.go` `publicPackages`; `newRouter`
+puts each named area's routes behind the one gate, in front of the CRUD router, and every
+other path still goes on to Python. An area may have CRUD routes, public routes or both:
+
 ```go
-gate := auth.NewGate(&auth.Resolver{Pool: pool}, mode, tel.Meter())
-mux.Handle("GET /api/v1/filament/presets", gate.Wrap(auth.Route{
-	Class: "api", Template: "/api/v1/filament/presets",
-}, handler))
+func PublicAreas(pool *pgxpool.Pool, _ *seal.Keys) map[string][]auth.Public {
+	return map[string][]auth.Public{"filament-presets": {{
+		Pattern: "GET /api/v1/filament/presets",
+		Route:   auth.Route{Class: "api", Template: "/api/v1/filament/presets"},
+		Handler: http.HandlerFunc(list),
+	}}}
+}
 ```
 
 - `auth.ParseMode(value, set)` reads `SCADBUDDY_AUTH_MODE` as Python does: unset is `off`,
