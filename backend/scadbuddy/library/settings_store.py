@@ -925,6 +925,7 @@ class SettingsPatch(BaseModel):
     git_remote_token: str | None = Field(default=None, max_length=4096)
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
+    event_log_retention_kinds: dict[str, float] | None = None
     flow_approval_timeout_seconds: int | None = None
     spool_overlay_refresh_seconds: int | None = None
     #: The Filament section (#6262 Task 13): see `core.settings.FilamentSync`.
@@ -932,6 +933,7 @@ class SettingsPatch(BaseModel):
     filament_low_stock_pct: int | None = Field(default=None, ge=0, le=100)
     filament_default_cost_per_kg: Decimal | None = Field(default=None, ge=0)
     filament_weighing_drift_notice_g: int | None = Field(default=None, ge=0, le=100000)
+    filament_weighing_finished_left_g: int | None = Field(default=None, ge=0, le=100000)
     filament_drying_temp_c: int | None = Field(default=None, ge=1, le=150)
     filament_drying_hours: Decimal | None = Field(
         default=None, ge=Decimal("0.1"), le=Decimal("999.9")

@@ -357,6 +357,7 @@ def _build_core(settings: Settings) -> AppState:
         retention=EventLogRetention(
             seconds=settings.event_log_retention_seconds,
             rows=settings.event_log_retention_rows,
+            kinds=settings.event_log_retention_kinds,
         ),
     )
     # Job events commit with the job change that they describe.

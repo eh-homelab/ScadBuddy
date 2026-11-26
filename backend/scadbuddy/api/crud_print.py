@@ -224,7 +224,7 @@ from scadbuddy.bambuddy.uploads import (
 )
 from scadbuddy.core.cancel import CancelToken
 from scadbuddy.core.credentials import strip_credentials
-from scadbuddy.core.events import PrintOutcome, decode_event, emit
+from scadbuddy.core.events import PrintOutcome, decode_known_event, emit
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError
@@ -1097,7 +1097,7 @@ async def publish_event(body: EventPost, events: EventsDep) -> Logged:
             reason=EVENT_KIND_REFUSED,
         )
     try:
-        event = decode_event(json.dumps(body.event))
+        event = decode_known_event(json.dumps(body.event))
     except ValueError as error:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, f"Not a {kind} event: {error}"

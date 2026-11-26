@@ -546,6 +546,7 @@ describe('filament spool tools', () => {
     ['filament_spool_set_presets', 'write'],
     ['filament_spool_set_k_values', 'write'],
     ['filament_spool_archive', 'write'],
+    ['filament_spool_closing', 'read'],
     ['filament_spool_delete', 'write'],
     ['filament_spool_bind_tag', 'write'],
     ['filament_tag_unbind', 'write'],
@@ -705,6 +706,39 @@ describe('filament spool tools', () => {
     const deleted = await runTool(tool('filament_spool_delete'), { spool_id: ROW }, ctx())
     expect(firstText(deleted)).toEqual({ deleted: ROW })
     expect(calls).toEqual([['add', fields], ['edit', { rgba: null }], ['archive', { archived: true }], ['delete']])
+  })
+
+  it('archives a spool with a reason and a final weighing (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${SPOOL}/archive`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: ROW, archived_at: '2026-11-25T12:00:00Z' })
+      }),
+    )
+    const call = { spool_id: ROW, reason: 'finished', final_reading_g: 230 }
+    expect((await runTool(tool('filament_spool_archive'), call, ctx())).isError).toBeFalsy()
+    await runTool(tool('filament_spool_archive'), { spool_id: ROW, reason: 'damaged', final_grams: 12 }, ctx())
+    expect(bodies).toEqual([
+      { archived: true, reason: 'finished', final_reading_g: 230 },
+      { archived: true, reason: 'damaged', final_grams: 12 },
+    ])
+    expect(() => tool('filament_spool_archive').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
+  })
+
+  it("previews a spool's closing with the query it was given (#7684)", async () => {
+    const seen: string[] = []
+    server.use(
+      http.get(`${SPOOL}/closing`, ({ request }) => {
+        seen.push(new URL(request.url).search)
+        return HttpResponse.json({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+      }),
+    )
+    const out = await runTool(tool('filament_spool_closing'), { spool_id: ROW, reason: 'finished', final_reading_g: 230 }, ctx())
+    expect(firstText(out)).toEqual({ closing: { reason: 'finished', drift_g: -3 }, notices: ['filament_left'] })
+    await runTool(tool('filament_spool_closing'), { spool_id: ROW }, ctx())
+    expect(seen).toEqual(['?reason=finished&final_reading_g=230', ''])
+    expect(() => tool('filament_spool_closing').parse({ spool_id: ROW, reason: 'lost' })).toThrow()
   })
 
   it("sets a spool's properties after the spool write, and reports a refused set (#7026)", async () => {
@@ -1977,6 +2011,26 @@ describe('filament_spool_upsert quantity and copy_of', () => {
       // R-7150-13: the draft names its source (the route answers `copy_of`), so the backend keeps a copied migrated row so.
       { spool: { type_id: ROW, colour_name: 'Teal', weight_locked: false, note: 'second' }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID },
     ])
+  })
+
+  it('passes continued_from through for a respooled spool (#7684)', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.get(`${SPOOLS}/${SOURCE_ID}/copy`, () =>
+        HttpResponse.json({ spool: { type_id: ROW, weight_locked: false }, location_id: null, presets: [], k_values: [], copy_of: SOURCE_ID }),
+      ),
+      http.post(BULK, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json([{ id: ROW, number: 22 }], { status: 201 })
+      }),
+    )
+    const call = { copy_of: SOURCE_ID, continued_from: SOURCE_ID, fields: { grams_left: 480, added_full: false } }
+    expect((await runTool(tool('filament_spool_upsert'), call, ctx())).isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { spool: { type_id: ROW, weight_locked: false, grams_left: 480, added_full: false }, location_id: null, presets: [], k_values: [], quantity: 1, copy_of: SOURCE_ID, continued_from: SOURCE_ID },
+    ])
+    const refused = await runTool(tool('filament_spool_upsert'), { spool_id: ROW, continued_from: SOURCE_ID }, ctx())
+    expect(refused.isError).toBe(true)
   })
 
   // R-7150-8: a resend reads the copy again, so its key names the draft it read too.

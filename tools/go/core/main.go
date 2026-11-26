@@ -30,6 +30,7 @@ import (
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/edits"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/escalations"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/events"
+	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/fleet"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/forget"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/front"
 	"github.com/eh-homelab/ScadBuddy/tools/go/core/internal/gate"
@@ -225,6 +226,8 @@ func newRouter(pool *pgxpool.Pool, next http.Handler, keys *seal.Keys, areas, au
 		case "session-turns":
 			router.Add("agent", turn.Reads()...)
 			router.Add("agent", turn.Writes()...)
+		case "fleet":
+			router.Add(fleet.Caller, fleet.Routes(pool)...)
 		default:
 			if keys == nil && sealed[strings.TrimSuffix(name, ":read")] {
 				return nil, fmt.Errorf("SCADBUDDY_CORE_AREAS names %q, which needs %s", name, seal.Variable)

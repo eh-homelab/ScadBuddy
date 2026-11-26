@@ -218,14 +218,59 @@ so it raises no Drift mark: the person just explained the gap. The timeline says
 100 g" or "label corrected", and the Weight section's sentence reads "filament 900 g (the
 scale was tared on the spool)". Design: the same spec, §5.3.
 
-### The phone page (#7273)
+### End of life: finished, respooled, damaged out (#7684)
 
-`/filament/scan` reads and writes spool tags with the phone's own NFC reader, through Web NFC
-(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`). It works only in Chrome on
+Archive asks why the spool goes and offers one last weighing. The spool page's Archive
+button opens a dialog: a reason (`finished`, `respooled`, `damaged`, `other`; the dialog
+needs one, the API keeps it optional, and the sync's archives record `other`), and the
+scale reading with the spool when its empty weight is known, else the filament left.
+`GET /filament/spools/{id}/closing` previews, as the inputs settle, what the archive would
+record, and says when the numbers disagree with the reason: a finished spool with more
+than the setting `filament_weighing_finished_left_g` (5 g by default) still on it ("30 g of
+filament are still on it."), or any other reason at or under it ("It reads empty; is it
+finished?"), and what the archive would refuse: a reading with no empty weight known
+(`no_empty_weight`) or under it (`reading_below_empty`). The person can go on; nothing
+refuses. `POST /filament/spools/{id}/archive`
+takes `reason`, `final_reading_g` and `final_grams`: a final weighing is booked as a
+`weighed` event just before the `archived` event, by the same rules as any weighing
+(422 `no_empty_weight`, `reading_below_empty`; a restore takes neither).
+
+The `archived` event's `data` keeps the lifetime reconciliation: `reason`, `started_g` and
+`started_from` (`reading`, the spool's first scale or by-hand filament reading, or `label`,
+the label weight of an added-full spool), `ledger_consumed_g` (the plates since that start,
+never reset by a used-counter reset), `final_filament_g`, `scale_consumed_g` (start less
+final filament, null without a final weighing) and `drift_g` (ledger less scale: negative
+means the scale found less filament than the ledger expected). An archived spool's Weight
+section says it in one sentence ("Finished on 25 Nov 2026: started with 1000 g (from the
+label), the ledger used 508 g, the scale says 520 g were used; 12 g less than the ledger
+expected." or "…the ledger used 508 g; not weighed at the end."), and the timeline shows
+the reason on the archive.
+
+Respooled offers "Archive and continue as a new spool": the copy flow opens with the final
+filament as the new spool's grams and "Added full: No", and the save sends `continued_from`
+with `copy_of`. The source must be archived (422 `continued_from_not_archived`) and the
+request makes one spool. The new spool's `created` event keeps `continued_from`, the source's
+newest `archived` event gets `continued_as`, and the timeline links the two ends. The agent's
+`filament_spool_archive` takes the reason and the final reading, `filament_spool_closing` (a
+read) previews the closing and its notices, and `filament_spool_upsert` takes `continued_from`. Design: the same spec, §5.4 and §5.5.
+
+### The phone page, the hand-held Scan mode (#7273)
+
+`/scan` ("Scan" in the nav; `/filament/scan` redirects there) reads and writes tags with the
+phone's own NFC reader, through Web NFC
+(spec `docs/superpowers/specs/2026-11-23-web-nfc-tags-design.md`; the Scan mode's plan
+`docs/superpowers/plans/2026-11-25-scan-mode.md`). It works only in Chrome on
 Android, in its own tab: Web NFC refuses a frame, so inside Bambuddy the page shows its address
-to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens the
-spool that holds the tag, or offers to bind it or make a spool from what the tag says
-(OpenSpool or OpenTag3D). "Write tag" on a spool backs the tag up first, writes the spool's
+to open. A tap posts the tag's UID and records to `POST /filament/tags/reads`, which opens
+what the tag names, in this order: the spool that holds the tag (`next` `open_spool`; the
+binding wins over anything the records say); else the thing a typed code in the records names,
+a `url` record whose path ends `/x/<code>` (a printed label) or a `text` record such as `L-12`
+or `S-142`, or a `scadbuddy:spool:<id>` text (`next` `open_code`, with `resolved` in the
+`GET /codes/{code}` shape; `backend/scadbuddy/filament/tag_codes.py`); else it offers to bind
+the tag or make a spool from what the tag says (OpenSpool or OpenTag3D). A code that names no
+row is a new tag. The switch "Open what I scan at once" (remembered on the phone, localStorage
+`scadbuddy.scan.openAtOnce`) opens the thing's page on each such read, and the page then starts
+scanning by itself when it opens. "Write tag" on a spool backs the tag up first, writes the spool's
 records in the tag's own format (else the `filament_tag_format` setting), reads the tag back,
 and binds it only when the read-back equals what was sent. Every write keeps a backup, which
 the page can write back. An agent reads or writes a tag through an NFC job (`nfc_read`,

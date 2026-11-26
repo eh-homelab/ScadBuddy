@@ -13,7 +13,14 @@ from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.filament import ledger
 from scadbuddy.filament.catalog import CatalogStore
 from scadbuddy.filament.empty_weight import EmptyWeight
-from scadbuddy.filament.ledger import breakdown, expected_before, grams_left, job_of, record
+from scadbuddy.filament.ledger import (
+    breakdown,
+    closing,
+    expected_before,
+    grams_left,
+    job_of,
+    record,
+)
 from scadbuddy.filament.models import Material, SpoolEvent
 from tests.conftest import PgPool
 
@@ -674,3 +681,88 @@ def test_is_anchor_takes_a_reading_but_not_a_locked_or_printing_ams_one() -> Non
     assert not ledger.is_anchor(ams, weight_locked=True, label_weight_g=1000)
     assert not ledger.is_anchor(printing, weight_locked=False, label_weight_g=1000)
     assert not ledger.is_anchor(plate, weight_locked=False, label_weight_g=1000)
+
+
+# -- the closing (#7684) ---------------------------------------------------------------
+
+
+def _lifetime() -> list[SpoolEvent]:
+    return [
+        _event(0, "created", None),
+        _event(1, "weighed", "scale", grams_after=1000),
+        _event(2, "print_ended", "print_actual", delta_g=-300, ref_kind="print_run", ref_id="a"),
+        _event(3, "consumed_reset", "person"),
+        _event(4, "print_ended", "print_actual", delta_g=-200, ref_kind="print_run", ref_id="b"),
+    ]
+
+
+def test_closing_from_a_first_weighing() -> None:
+    got = closing(
+        _lifetime(), label_weight_g=1000, added_full=None, final_filament_g=480, reason="finished"
+    )
+    assert got == {
+        "reason": "finished",
+        "started_g": 1000,
+        "started_from": "reading",
+        "ledger_consumed_g": 500,
+        "final_filament_g": 480,
+        "scale_consumed_g": 520,
+        "drift_g": -20,
+    }
+
+
+def test_closing_ignores_consumed_resets() -> None:
+    got = closing(
+        _lifetime(), label_weight_g=1000, added_full=None, final_filament_g=480, reason="finished"
+    )
+    assert got["ledger_consumed_g"] == 500
+
+
+def test_closing_from_the_label_of_an_added_full_spool() -> None:
+    events = [e for e in _lifetime() if e.kind != "weighed"]
+    got = closing(
+        events, label_weight_g=1000, added_full=True, final_filament_g=480, reason="respooled"
+    )
+    assert got["started_g"] == 1000 and got["started_from"] == "label"
+    assert got["ledger_consumed_g"] == 500
+    assert got["scale_consumed_g"] == 520 and got["drift_g"] == -20
+
+
+def test_closing_with_nothing_to_start_from() -> None:
+    events = [e for e in _lifetime() if e.kind != "weighed"]
+    got = closing(
+        events, label_weight_g=1000, added_full=None, final_filament_g=480, reason="other"
+    )
+    assert got["started_g"] is None and got["started_from"] is None
+    assert got["ledger_consumed_g"] is None
+    assert got["scale_consumed_g"] is None and got["drift_g"] is None
+    assert got["final_filament_g"] == 480
+
+
+def test_closing_without_a_final_reading_has_no_scale_side() -> None:
+    got = closing(
+        _lifetime(),
+        label_weight_g=1000,
+        added_full=None,
+        final_filament_g=None,
+        reason="damaged",
+        grams_left=500,
+    )
+    assert got["final_filament_g"] == 500
+    assert got["ledger_consumed_g"] == 500
+    assert got["scale_consumed_g"] is None and got["drift_g"] is None
+
+
+def test_closing_counts_the_plates_from_the_first_weighing_on() -> None:
+    events = [
+        _event(0, "created", "person", grams_after=1000),
+        _event(1, "print_ended", "print_actual", delta_g=-100, ref_kind="print_run", ref_id="a"),
+        _event(2, "weighed", "scale", grams_after=880),
+        _event(3, "print_ended", "print_actual", delta_g=-300, ref_kind="print_run", ref_id="b"),
+    ]
+    got = closing(
+        events, label_weight_g=1000, added_full=True, final_filament_g=560, reason="finished"
+    )
+    assert got["started_g"] == 1000 and got["started_from"] == "reading"
+    assert got["ledger_consumed_g"] == 400 and got["scale_consumed_g"] == 440
+    assert got["drift_g"] == -40

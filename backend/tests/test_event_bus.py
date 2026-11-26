@@ -4,6 +4,7 @@ the publishers that live below the API (the history, settings)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from pathlib import Path
@@ -13,11 +14,13 @@ import pytest
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver
 from scadbuddy.core.events import (
     EVENT_KINDS,
+    AnyEvent,
     Event,
     FontInstalled,
     InProcessEventBus,
     JobEvent,
     ModelEvent,
+    OpaqueEvent,
     OrderChanged,
     OrderItemChanged,
     SessionBusEvent,
@@ -68,14 +71,14 @@ async def test_an_unknown_kind_is_refused() -> None:
         InProcessEventBus().subscribe(kinds={"model.renamed"})
 
 
-def _drain(subscription: Subscription) -> list[Event]:
-    events: list[Event] = []
+def _drain(subscription: Subscription) -> list[AnyEvent]:
+    events: list[AnyEvent] = []
     while (event := subscription.get_nowait()) is not None:
         events.append(event)
     return events
 
 
-def _slugs(events: list[Event]) -> list[str]:
+def _slugs(events: list[AnyEvent]) -> list[str]:
     return [event.slug for event in events if isinstance(event, ModelEvent)]
 
 
@@ -118,7 +121,7 @@ async def test_closing_ends_iteration_and_unsubscribes() -> None:
     bus = InProcessEventBus()
     subscription = bus.subscribe()
     bus.publish(_model("a"))
-    received: list[Event] = []
+    received: list[AnyEvent] = []
 
     async def consume() -> None:
         async for event in subscription:
@@ -294,13 +297,13 @@ def test_every_kind_from_the_spec_is_known() -> None:
 # ── publishers below the API ─────────────────────────────────────────────────────
 
 
-def _record(bus: InProcessEventBus) -> list[Event]:
-    seen: list[Event] = []
+def _record(bus: InProcessEventBus) -> list[AnyEvent]:
+    seen: list[AnyEvent] = []
     bus.add_listener(seen.append)
     return seen
 
 
-def _jobs(seen: list[Event]) -> list[tuple[str, str]]:
+def _jobs(seen: list[AnyEvent]) -> list[tuple[str, str]]:
     return [(e.kind, e.job_id) for e in seen if isinstance(e, JobEvent)]
 
 
@@ -450,3 +453,92 @@ def test_a_failing_commit_listener_does_not_fail_the_commit(
     with caplog.at_level(logging.ERROR):
         assert history.commit("Add demo", "demo") is not None
     assert "a commit listener failed" in caplog.text
+
+
+# --- opaque events: a kind this process has no model for ----------------------------------
+
+FLEET_MESSAGE = (
+    '{"id":"x","at":"2026-11-25T00:00:00Z","kind":"fleet.message",'
+    '"topics":["fleet:agent:54a63686"],"seq":1}'
+)
+
+
+def test_decode_unknown_kind_is_opaque() -> None:
+    event = decode_event(FLEET_MESSAGE)
+    assert isinstance(event, OpaqueEvent)
+    assert event.kind == "fleet.message"
+    assert event.topics == ["fleet:agent:54a63686"]
+    assert event.payload["seq"] == 1
+    assert event.retention_seconds is None
+    assert encode_event(event) == json.dumps(event.payload)
+
+
+def test_decode_known_kind_unchanged() -> None:
+    event = decode_event(encode_event(ModelEvent(kind="model.created", slug="m")))
+    assert isinstance(event, ModelEvent)
+
+
+def test_opaque_extra_fields() -> None:
+    event = decode_event(
+        '{"id":"x","at":"2026-11-25T00:00:00Z","kind":"fleet.message","body":{"a":[1]},'
+        '"retention_seconds":5.5}'
+    )
+    assert isinstance(event, OpaqueEvent)
+    assert event.payload["body"] == {"a": [1]}
+    assert event.retention_seconds == 5.5
+    assert event.topics == []
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"id":"x","at":"2026-11-25T00:00:00Z"}',
+        '{"id":"x","at":"2026-11-25T00:00:00Z","kind":"Bad"}',
+        '{"id":"x","at":"2026-11-25T00:00:00Z","kind":"nodot"}',
+        '{"id":"x","at":"2026-11-25T00:00:00Z","kind":"fleet.message","topics":"fleet:a"}',
+        '{"id":"x","at":"2026-11-25T00:00:00Z","kind":"fleet.message","topics":[1]}',
+        '{"at":"2026-11-25T00:00:00Z","kind":"fleet.message"}',
+        '{"id":"x","at":"not a time","kind":"fleet.message"}',
+        '["fleet.message"]',
+        "not json",
+    ],
+)
+def test_decode_broken_envelope_refused(payload: str) -> None:
+    with pytest.raises(ValueError):
+        decode_event(payload)
+
+
+@pytest.mark.parametrize(
+    "topics",
+    [[f"fleet:{n}" for n in range(65)], ["fleet:" + "x" * 195]],
+)
+def test_opaque_topics_are_bounded(topics: list[str]) -> None:
+    payload = json.dumps(
+        {"id": "x", "at": "2026-11-25T00:00:00Z", "kind": "fleet.message", "topics": topics}
+    )
+    with pytest.raises(ValueError):
+        decode_event(payload)
+
+
+def test_opaque_topics_at_the_bound_are_kept() -> None:
+    topics = [f"fleet:{n}" for n in range(64)]
+    payload = json.dumps(
+        {"id": "x", "at": "2026-11-25T00:00:00Z", "kind": "fleet.message", "topics": topics}
+    )
+    assert isinstance(decode_event(payload), OpaqueEvent)
+
+
+def test_a_known_kind_with_a_bad_body_is_still_refused() -> None:
+    with pytest.raises(ValueError):
+        decode_event('{"id":"x","at":"2026-11-25T00:00:00Z","kind":"model.created"}')
+
+
+async def test_an_opaque_event_reaches_subscribers_but_not_listeners() -> None:
+    bus = InProcessEventBus()
+    heard: list[object] = []
+    bus.add_listener(heard.append)
+    subscription = bus.subscribe()
+    event = decode_event(FLEET_MESSAGE)
+    bus.deliver(event)
+    assert await asyncio.wait_for(subscription.get(), 1) == event
+    assert heard == []

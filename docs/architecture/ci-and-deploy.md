@@ -30,8 +30,9 @@ copied into `app`; `test` (`Dockerfile:1007`) is the CI image. Only `build` gate
 workflow: every other job is `continue-on-error` (for example `build-image.yml:221`).
 
 The Go CLIs are published by `build-go-image.yml`, one image per `tools/go/*` module with
-a `main.go` (`build-go-image.yml:46`, `:133`): today `scadbuddy-bambuddy-fs` only. Nothing
-deploys it ([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
+a `main.go`, except core (`build-go-image.yml:46`, `:133`), as
+`ghcr.io/eh-homelab/scadbuddy-<module>`. Nothing in this repo deploys them
+([`tools/go/CLAUDE.md`](../../tools/go/CLAUDE.md)). `build-go-image.yml` skips
 `tools/go/core`: `build-image.yml`'s `core` job publishes `scadbuddy-core` with every
 build, and the deploy pins it (#7667).
 
@@ -51,7 +52,7 @@ sequenceDiagram
     BI-->>DM: workflow_run completed (main only)
     DM->>GHCR: digest of scadbuddy:sha-<7>
     DM->>DR: digest, version, revision
-    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp, core digests
+    DR->>GHCR: agent, agent-durable, slicer, sandbox, profile-fetch, playwright-mcp, fleet, core digests
     DR->>CL: PR on deploy/scadbuddy, image@sha256 pins, auto-merge armed
     CL->>Argo: merge (after clusters' own checks)
     Argo->>Argo: sync the scadbuddy Application
@@ -75,7 +76,10 @@ sequenceDiagram
    sandbox, profile-fetch and playwright-mcp manifests (`:116-158`, `:924-1030`; the
    playwright-mcp pin in `applications/scadbuddy/playwright-mcp.yaml` since #7546). It also
    pins the `core` image line in the API manifest once that manifest names it (#7667); a
-   build with no core image keeps the pin and warns. Where clusters keeps a
+   build with no core image keeps the pin and warns. The fleet chat server's pin in
+   `applications/scadbuddy/scadbuddy-fleet.yaml` (#7903) moves the same way, but its image
+   comes from `build-go-image.yml`, only for a push that touches Go, so it is looked up
+   once with no wait, and a build with no fleet image keeps the pin. Where clusters keeps a
    copy of `deploy/grafana`, it replaces that copy with the files at the deployed revision
    and writes the revision into its `.revision` file (`:818-831`, `:997`). It fails on any `ghcr.io/eh-homelab/scadbuddy*` reference
    it did not pin (`:1044-1071`), then opens or replaces the PR on the fixed branch

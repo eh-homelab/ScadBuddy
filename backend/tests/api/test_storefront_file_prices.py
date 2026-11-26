@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.api import storefront as storefront_api
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.print_library.store import NativeFile
@@ -234,9 +235,18 @@ def test_an_unpublished_listings_price_is_never_anothers_last_price(
     keychain: NativeFile,
     pla_red: str,
     pla_blue: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A visitor sees no price of a listing they cannot open."""
+    """A visitor sees no price of a listing they cannot open.
+
+    The second listing's publish starts no warm: a warmed default price would be its own
+    ``last`` price, and the read would not meet the case under test (#7858)."""
     priced(crud, listed, {0: pla_red, 1: pla_blue})
+
+    async def no_warm(state: Any, listing: Any) -> None:
+        return None
+
+    monkeypatch.setattr(storefront_api, "warm_default", no_warm)
     second = publish(crud.api, create(crud.api, body(keychain, [pla_red, pla_blue]))["id"])
     assert crud.api.post(f"{LISTINGS}/{listed['id']}/unpublish").status_code == 200
     r = read(crud, second, {0: pla_blue, 1: pla_red})

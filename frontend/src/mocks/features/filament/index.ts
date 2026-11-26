@@ -355,6 +355,9 @@ const problem = (status: keyof typeof TITLES, detail: string, extensions: object
  * The fields each write body takes: every body model of `filament/models.py` extends
  * `_In` (`extra="forbid"`), so a key outside them is a 422. Read from the models' fields.
  */
+type ArchiveReason = NonNullable<S['SpoolArchive']['reason']>
+const ARCHIVE_REASONS: readonly ArchiveReason[] = ['finished', 'respooled', 'damaged', 'other']
+
 const FIELDS = {
   preset: ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name'],
   kValue: ['printer_id', 'extruder', 'nozzle_diameter', 'nozzle_type', 'k_value', 'name', 'cali_idx', 'setting_id'],
@@ -363,7 +366,7 @@ const FIELDS = {
   move: ['location_id'],
   csvImport: ['rows', 'dry_run'],
   proposalPick: ['brand_id', 'material_id', 'subtype_id', 'rgba', 'label_weight_g', 'material_number', 'code', 'spool_ids'],
-  archive: ['archived'],
+  archive: ['archived', 'reason', 'final_reading_g', 'final_grams'],
   tag: ['tag_uid', 'tray_uuid', 'kind', 'override'],
   event: ['kind', 'source', 'at', 'grams', 'reading_g', 'resolution', 'temp_c', 'hours', 'note'],
   locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order'],
@@ -510,6 +513,8 @@ function detail(row: SpoolRow): S['SpoolDetail'] {
     k_values: effectiveKValues(row.id),
     basis: { anchor, deltas },
     last_weighing: [...ledger].reverse().find((event) => event.kind === 'weighed') ?? null,
+    // #7684: an archived spool's closing is its newest `archived` event's data.
+    closing: row.archived_at ? (([...ledger].reverse().find((event) => event.kind === 'archived')?.data as S['Closing'] | undefined) ?? null) : null,
     in_use: ledger.some((event) => event.kind === 'print_started' || event.kind === 'print_ended'),
     invoice: invoiceRefOf(row.id, invoicedLine.get(row.id)),
     type_suppliers: row.type_id ? typeSuppliersOf(row.type_id) : [],
@@ -901,8 +906,66 @@ function spoolRefusal(values: SpoolRow): Response | null {
   return temps ? problem(422, temps) : null
 }
 
-/** `_archive`: archiving closes the spool's open tag binding (reason `archived`). */
-function setArchived(at: number, archived: boolean) {
+/**
+ * `add_event`'s weighing (`_weigh_on`), the spool at `at` locked by the caller: the breakdown
+ * of a `reading_g` (#7682), a `resolution`'s side effect (#7683), then the event; a refusal is
+ * its problem response. An archive's final weighing goes through here too (#7684).
+ */
+function weighOn(at: number, body: { kind: 'weighed'; source?: S['SpoolEventAdd']['source']; grams?: number | null; reading_g?: number | null; resolution?: S['SpoolEventAdd']['resolution'] }, when: string): Response | S['SpoolEvent'] {
+  const row = state.spools[at]!
+  // #7682: a weighing with its reading keeps the breakdown (`ledger.breakdown`); the grams
+  // left just before it stand in for `expected_before`.
+  let grams = body.grams ?? null
+  const data: Record<string, unknown> = {}
+  if (body.reading_g != null) {
+    const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
+    if (body.resolution != null) {
+      // #7683 `add_event`: checked again, the side effect an `edited` event before the weighing.
+      const check = insertWeightCheck(row, body.reading_g)
+      const chosen = check.resolutions.find((one) => one.kind === body.resolution)
+      if (check.reason !== 'below_label' || !chosen) {
+        return problem(422, `no reading under the label weight to resolve: ${check.reason}`, { code: 'no_below_label', reason: check.reason })
+      }
+      grams = chosen.filament_g
+      if (chosen.kind === 'short') {
+        addEvent(row.id, 'edited', { at: when, data: { changes: { added_full: [row.added_full, false] } } })
+        state.spools[at] = { ...row, added_full: false }
+      } else if (chosen.kind === 'label_wrong') {
+        addEvent(row.id, 'edited', { at: when, data: { changes: { label_weight_g: [row.label_weight_g, chosen.new_label_weight_g] } } })
+        state.spools[at] = { ...row, label_weight_g: chosen.new_label_weight_g ?? null }
+      }
+      Object.assign(data, { resolution: chosen.kind, shortfall_g: check.shortfall_g })
+    } else if (grams == null) {
+      if (!insert) return problem(422, 'the spool has no empty weight to take off the reading', { code: 'no_empty_weight' })
+      grams = body.reading_g - insert.empty_weight_g
+      if (grams < 0) return problem(422, "the reading is below the spool's empty weight", { code: 'reading_below_empty' })
+    }
+    const emptyG = body.reading_g - grams
+    const tared = body.resolution === 'tared'
+    const own = !tared && insert != null && Math.abs(emptyG - insert.empty_weight_g) < 0.05 ? insert : null
+    const expected = row.grams_left
+    Object.assign(data, {
+      reading_g: body.reading_g,
+      empty_g: emptyG,
+      empty_source: tared ? 'tared' : own ? 'insert' : 'person',
+      empty_basis: own ? (isPlaceholder(own.empty_weight_basis, own.note) ? 'placeholder' : own.empty_weight_basis) : null,
+      empty_name: own?.name ?? null,
+      expected_g: expected,
+      // #7683: a resolved weighing keeps what was expected and records no drift.
+      drift_g: expected == null || body.resolution != null ? null : Math.round((grams - expected) * 10) / 10,
+    })
+  }
+  const drift = typeof data.drift_g === 'number' ? data.drift_g : null
+  state.spools[at] = { ...state.spools[at]!, grams_left: grams, last_weighed_g: grams, last_weighed_at: when, last_drift_g: drift }
+  return addEvent(row.id, 'weighed', { at: when, source: body.source ?? 'person', grams_before: row.grams_left, grams_after: grams, data })
+}
+
+/**
+ * `_archive`: archiving closes the spool's open tag binding (reason `archived`), and the
+ * `archived` event keeps the closing (#7684): `reason` and the final weighing's filament
+ * when one was booked, else the ledger's grams left with no scale side.
+ */
+function setArchived(at: number, archived: boolean, reason: ArchiveReason | null = null, finalFilament: number | null = null) {
   const row = state.spools[at]!
   if ((row.archived_at !== null) === archived) return
   if (archived) {
@@ -913,8 +976,62 @@ function setArchived(at: number, archived: boolean) {
     }
   }
   state.spools[at] = { ...state.spools[at]!, archived_at: archived ? now() : null, updated_at: now() }
-  addEvent(row.id, archived ? 'archived' : 'restored')
+  if (!archived) {
+    addEvent(row.id, 'restored')
+    return
+  }
+  const events = state.events.filter((event) => event.spool_id === row.id)
+  addEvent(row.id, 'archived', { data: closingOf(events, row, reason, finalFilament, finalFilament == null ? row.grams_left : null) })
 }
+
+const tenth = (value: number | null) => (value == null ? null : Math.round(value * 10) / 10)
+
+/**
+ * `ledger.closing` (#7684): what the spool started with (its first scale or person reading,
+ * else its label for a spool added full), the plates' grams since then (`platesOf`, never cut
+ * by a consumed reset), the final filament (the weighing's, else `gramsLeft`), what the scale
+ * says was used and the drift, `ledger - scale` (negative: the scale found less).
+ */
+function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: ArchiveReason | null, finalFilament: number | null, gramsLeft: number | null): S['Closing'] {
+  const ordered = [...events].sort(byTime)
+  const first = ordered.find((event) => (event.source === 'scale' || event.source === 'person') && event.grams_after != null)
+  const label = view(row).effective?.label_weight_g ?? null
+  let started: number | null = null
+  let startedFrom: S['Closing']['started_from'] = null
+  let since: string | null = null
+  if (first) [started, startedFrom, since] = [first.grams_after ?? null, 'reading', first.at]
+  else if (row.added_full && label != null) [started, startedFrom] = [label, 'label']
+  const consumed = started == null ? null : platesOf(ordered).filter((plate) => since == null || plate.at.localeCompare(since) >= 0).reduce((sum, plate) => sum + plate.grams, 0)
+  const scale = started != null && finalFilament != null ? started - finalFilament : null
+  return {
+    reason,
+    started_g: tenth(started),
+    started_from: startedFrom,
+    ledger_consumed_g: tenth(consumed),
+    final_filament_g: tenth(finalFilament ?? gramsLeft),
+    scale_consumed_g: tenth(scale),
+    drift_g: tenth(scale != null && consumed != null ? consumed - scale : null),
+  }
+}
+
+/** `_reading_notice`: a reading the archive would refuse, said first. */
+function readingNotice(readingG: number | null, emptyG: number | null): S['ClosingNotice'][] {
+  if (readingG == null) return []
+  if (emptyG == null) return [{ code: 'no_empty_weight', text: 'No empty weight is known for this spool, so the reading cannot be turned into filament: enter the filament left instead, or give the spool an insert.' }]
+  if (readingG < emptyG) return [{ code: 'reading_below_empty', text: `The reading is under the empty spool's ${emptyG} g.` }]
+  return []
+}
+
+/** `_closing_notices`: what the archive dialog says when the numbers disagree with the reason. */
+function closingNotices(reason: ArchiveReason | null, finalFilament: number | null): S['ClosingNotice'][] {
+  if (finalFilament == null || reason == null) return []
+  const limit = mockSettings().filament_weighing_finished_left_g ?? 5
+  if (reason === 'finished' && finalFilament > limit) return [{ code: 'filament_left', text: `${gramsText(finalFilament)} of filament are still on it.` }]
+  if (reason !== 'finished' && finalFilament <= limit) return [{ code: 'not_finished_but_empty', text: 'It reads empty; is it finished?' }]
+  return []
+}
+
+const gramsText = (value: number) => `${Math.round(value * 10) / 10} g`
 
 /** `spools.models` `clean_tag_uid` and `clean_tray_uuid`: hex digits only, zeros are none. */
 const hexOf = (value: string | null | undefined) => (value ?? '').replace(/[^0-9a-fA-F]/g, '').toUpperCase()
@@ -1747,12 +1864,36 @@ function csvRows(body: { rows?: unknown }): Record<string, string | null>[] | Re
 // -- codes and printer labels (#6955) --
 
 /** `codes/parse.py`: any case, an optional dash, a one-letter prefix and a number. */
-function parseCode(text: string): { prefix: string; number: number } | null {
+export function parseCode(text: string): { prefix: string; number: number } | null {
   const hit = /^([A-Z])-?([0-9]+)$/.exec(text.trim().toUpperCase())
   return hit ? { prefix: hit[1]!, number: Number(hit[2]) } : null
 }
 
 const placeCode = (place: S['Location']) => `L-${place.number}`
+
+/**
+ * `codes/resolve.py` `resolve` over `parseCode`: the row a code's text names, in the
+ * `/codes/{code}` shape, or null. Shared by `GET /codes/{code}` and the tag-read mock
+ * (`tags.ts` `readOn`), so a scanned label and a typed code resolve by one rule (#6955).
+ */
+export function resolveCodeText(text: string): S['Resolved'] | null {
+  const parsed = parseCode(text)
+  if (!parsed) return null
+  if (parsed.prefix === 'L') {
+    const place = state.locations.find((one) => one.number === parsed.number)
+    return place ? { kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } : null
+  }
+  if (parsed.prefix === 'S') {
+    const row = state.spools.find((one) => one.number === parsed.number)
+    return row ? resolvedSpool(row) : null
+  }
+  return null
+}
+
+/** A spool in the `/codes/{code}` shape; also what a `scadbuddy:spool:<id>` text resolves to. */
+export function resolvedSpool(row: { id: string; number: number; archived_at?: string | null }): S['Resolved'] {
+  return { kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at }
+}
 const step = (place: S['Location']): S['PathStep'] => ({ id: place.id, code: placeCode(place), name: place.name })
 const byOrder = (a: S['Location'], b: S['Location']) => a.sort_order - b.sort_order || a.name.localeCompare(b.name)
 
@@ -1874,6 +2015,9 @@ export function spoolViewOf(spoolId: string): FilamentSpool | null {
   const row = findSpool(spoolId)
   return row ? view(row) : null
 }
+
+/** The spool's own row by its id, archived or not; null for an unknown id. */
+export const spoolRowOf = (spoolId: string) => findSpool(spoolId) ?? null
 
 /** The tag by its id. */
 export const tagOf = (tagId: string): S['Tag'] | undefined => tagById(tagId)
@@ -2191,19 +2335,24 @@ export const handlers = [
     const raw = (await request.json()) as Record<string, unknown>
     const presetKeys = ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name']
     const extra =
-      extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of']) ??
+      extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of', 'continued_from']) ??
       extraKeys(raw.spool, FIELDS.spoolCreate) ??
       extraKeys(raw.presets, presetKeys)
     if (extra) return extra
     const body = raw as S['SpoolBulkCreate']
     const quantity = body.quantity ?? 1
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) return problem(422, 'quantity: Input should be between 1 and 100')
+    if (body.continued_from && quantity !== 1) return problem(422, 'body: Value error, only one spool continues a respooled one')
     return keyed(request, JSON.stringify(raw), () => {
       const place = body.location_id ? state.locations.find((one) => one.id === body.location_id && !one.archived_at) : null
       if (body.location_id && !place) return problem(422, REFUSED.moveTarget)
       if (place && place.tray_id != null) return problem(422, REFUSED.trayPlace)
       // R-7150-13: a client never marks a row migrated; a row that matches the copy source's migrated row stays so.
       if (body.copy_of && !findSpool(body.copy_of)) return problem(422, 'copy_of names no spool')
+      // #7684: the source must be archived; the two ledgers link each other.
+      const source = body.continued_from ? findSpool(body.continued_from) : null
+      if (body.continued_from && !source) return problem(422, 'copy_of names no spool')
+      if (source && !source.archived_at) return problem(422, 'continued_from names a spool that is not archived', { code: 'continued_from_not_archived' })
       const carried = state.spoolPresets.filter((one) => body.copy_of && one.spool_id === body.copy_of && one.migrated)
       const presets = (body.presets ?? []).map((row) => ({
         ...row,
@@ -2220,7 +2369,11 @@ export const handlers = [
       }
       for (const row of made) {
         state.spools.push(row)
-        addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left })
+        addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left, data: source ? { continued_from: source.id } : {} })
+        if (source) {
+          const closing = state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1)
+          if (closing) closing.data = { ...closing.data, continued_as: row.id }
+        }
         if (place) addEvent(row.id, 'moved', { data: { from: null, to: place.id } })
         state.spoolPresets.push(...presets.map((one) => ({ slicer_filament_name: null, ...one, spool_id: row.id })))
         state.spoolKValues.push(...(body.k_values ?? []).map((one) => ({ nozzle_type: null, name: null, cali_idx: null, setting_id: null, ...one, k_value: String(one.k_value), spool_id: row.id })))
@@ -2375,9 +2528,42 @@ export const handlers = [
     const sent = await request.json()
     const extra = extraKeys(sent, FIELDS.archive)
     if (extra) return extra
-    const { archived = true } = sent as S['SpoolArchive']
-    setArchived(at, archived)
+    const body = normalised(sent as S['SpoolArchive'])
+    const archived = body.archived ?? true
+    if (!archived && (body.reason != null || body.final_reading_g != null || body.final_grams != null)) {
+      return problem(422, 'body: Value error, a restore takes no reason or reading')
+    }
+    if (body.final_reading_g != null && body.final_grams != null && body.final_reading_g < body.final_grams) {
+      return problem(422, 'body: Value error, final_reading_g is below final_grams')
+    }
+    const row = state.spools[at]!
+    let finalFilament: number | null = null
+    if (archived && row.archived_at === null && (body.final_reading_g != null || body.final_grams != null)) {
+      // The final weighing first, as `add_event` books one; a refusal archives nothing.
+      const weighed = weighOn(at, { kind: 'weighed', source: body.final_reading_g != null ? 'scale' : 'person', grams: body.final_grams ?? null, reading_g: body.final_reading_g ?? null }, now())
+      if (weighed instanceof Response) return weighed
+      finalFilament = weighed.grams_after ?? null
+    }
+    setArchived(at, archived, body.reason ?? null, finalFilament)
     return HttpResponse.json(view(state.spools[at]!))
+  }),
+  // #7684 — `GET /filament/spools/{id}/closing`: the archive dialog's preview, reads only.
+  http.get(`${BASE}/spools/:id/closing`, ({ params, request }) => {
+    const row = findSpool(String(params.id))
+    if (!row) return problem(404, `no spool ${String(params.id)}`)
+    const query = new URL(request.url).searchParams
+    const reason = query.get('reason')
+    if (reason != null && !ARCHIVE_REASONS.includes(reason as ArchiveReason)) return problem(422, "reason: Input should be 'finished', 'respooled', 'damaged' or 'other'")
+    const readingG = query.get('final_reading_g') == null ? null : Number(query.get('final_reading_g'))
+    const grams = query.get('final_grams') == null ? null : Number(query.get('final_grams'))
+    const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
+    // `_final_filament`: a reading that cannot be resolved closes on nothing, not on the ledger.
+    const finalFilament = grams ?? (readingG != null && insert && readingG >= insert.empty_weight_g ? readingG - insert.empty_weight_g : null)
+    const weighed = readingG != null || grams != null
+    const events = state.events.filter((event) => event.spool_id === row.id)
+    const closing = closingOf(events, row, (reason as ArchiveReason | null) ?? null, finalFilament, weighed ? null : row.grams_left)
+    const notices = [...readingNotice(grams != null ? null : readingG, insert?.empty_weight_g ?? null), ...closingNotices((reason as ArchiveReason | null) ?? null, closing.final_filament_g ?? null)]
+    return HttpResponse.json({ closing, final_filament_g: closing.final_filament_g ?? null, empty_g: insert?.empty_weight_g ?? null, notices } satisfies S['ClosingPreview'])
   }),
   http.post(`${BASE}/spools/:id/tags`, async ({ params, request }) => {
     const body = (await request.json()) as S['TagBind']
@@ -2470,54 +2656,8 @@ export const handlers = [
     // #7149 R-7149-4: no grams; the grams left stay.
     if (body.kind === 'consumed_reset') return HttpResponse.json(addEvent(row.id, 'consumed_reset', { at: when, source: 'person' }), { status: 201 })
     if (body.kind === 'weighed') {
-      // #7682: a weighing with its reading keeps the breakdown (`ledger.breakdown`); the grams
-      // left just before it stand in for `expected_before`.
-      let grams = body.grams ?? null
-      const data: Record<string, unknown> = {}
-      if (body.reading_g != null) {
-        const insert = state.catalogs['insert-types'].find((one) => one.id === view(row).effective?.insert_type_id)
-        if (body.resolution != null) {
-          // #7683 `add_event`: checked again, the side effect an `edited` event before the weighing.
-          const check = insertWeightCheck(row, body.reading_g)
-          const chosen = check.resolutions.find((one) => one.kind === body.resolution)
-          if (check.reason !== 'below_label' || !chosen) {
-            return problem(422, `no reading under the label weight to resolve: ${check.reason}`, { code: 'no_below_label', reason: check.reason })
-          }
-          grams = chosen.filament_g
-          if (chosen.kind === 'short') {
-            addEvent(row.id, 'edited', { at: when, data: { changes: { added_full: [row.added_full, false] } } })
-            state.spools[at] = { ...row, added_full: false }
-          } else if (chosen.kind === 'label_wrong') {
-            addEvent(row.id, 'edited', { at: when, data: { changes: { label_weight_g: [row.label_weight_g, chosen.new_label_weight_g] } } })
-            state.spools[at] = { ...row, label_weight_g: chosen.new_label_weight_g ?? null }
-          }
-          Object.assign(data, { resolution: chosen.kind, shortfall_g: check.shortfall_g })
-        } else if (grams == null) {
-          if (!insert) return problem(422, 'the spool has no empty weight to take off the reading', { code: 'no_empty_weight' })
-          grams = body.reading_g - insert.empty_weight_g
-          if (grams < 0) return problem(422, "the reading is below the spool's empty weight", { code: 'reading_below_empty' })
-        }
-        const emptyG = body.reading_g - grams
-        const tared = body.resolution === 'tared'
-        const own = !tared && insert != null && Math.abs(emptyG - insert.empty_weight_g) < 0.05 ? insert : null
-        const expected = row.grams_left
-        Object.assign(data, {
-          reading_g: body.reading_g,
-          empty_g: emptyG,
-          empty_source: tared ? 'tared' : own ? 'insert' : 'person',
-          empty_basis: own ? (isPlaceholder(own.empty_weight_basis, own.note) ? 'placeholder' : own.empty_weight_basis) : null,
-          empty_name: own?.name ?? null,
-          expected_g: expected,
-          // #7683: a resolved weighing keeps what was expected and records no drift.
-          drift_g: expected == null || body.resolution != null ? null : Math.round((grams - expected) * 10) / 10,
-        })
-      }
-      const drift = typeof data.drift_g === 'number' ? data.drift_g : null
-      state.spools[at] = { ...state.spools[at]!, grams_left: grams, last_weighed_g: grams, last_weighed_at: when, last_drift_g: drift }
-      return HttpResponse.json(
-        addEvent(row.id, 'weighed', { at: when, source: body.source ?? 'person', grams_before: row.grams_left, grams_after: grams, data }),
-        { status: 201 },
-      )
+      const weighed = weighOn(at, { ...body, kind: 'weighed' }, when)
+      return weighed instanceof Response ? weighed : HttpResponse.json(weighed, { status: 201 })
     }
     // A field left out takes the spool's drying default; `null` records none (#6720).
     const defaults = dryingDefaults(row)
@@ -2625,18 +2765,8 @@ export const handlers = [
   // -- places --
   http.get('/api/v1/codes/:code', ({ params }) => {
     const code = String(params.code)
-    const parsed = parseCode(code)
-    const unknown = () => problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
-    if (!parsed) return unknown()
-    if (parsed.prefix === 'L') {
-      const place = state.locations.find((one) => one.number === parsed.number)
-      return place ? HttpResponse.json({ kind: 'location', id: place.id, code: placeCode(place), name: place.name, archived: !!place.archived_at } satisfies S['Resolved']) : unknown()
-    }
-    if (parsed.prefix === 'S') {
-      const row = state.spools.find((one) => one.number === parsed.number)
-      return row ? HttpResponse.json({ kind: 'spool', id: row.id, code: `S-${row.number}`, name: null, archived: !!row.archived_at } satisfies S['Resolved']) : unknown()
-    }
-    return unknown()
+    const resolved = resolveCodeText(code)
+    return resolved ? HttpResponse.json(resolved) : problem(404, `no thing has the code '${code}'`, { code: 'code_unknown' })
   }),
   http.get(`${BASE}/locations/:id`, ({ params }) => {
     const place = state.locations.find((one) => one.id === params.id)
