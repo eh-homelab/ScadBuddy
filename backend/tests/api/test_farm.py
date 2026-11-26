@@ -225,6 +225,37 @@ def test_a_queue_item_for_a_later_plate_shows_that_plate(client: TestClient) -> 
 
 
 @respx.mock
+def test_a_scadbuddy_item_for_a_later_plate_shows_that_plate(client: TestClient) -> None:
+    """#7939: ScadBuddy's own item for plate 2 or later shows its plate's image, the
+    output's thumbnail when the plate has none; plate 1 keeps the thumbnail."""
+    configure(client)
+    rows = recording("queue.json")
+    queue = [
+        {**rows[1], "id": 280, "status": "pending", "plate_id": 2},
+        {**rows[1], "id": 281, "status": "pending", "plate_id": 1},
+    ]
+    respx.get(f"{API}/queue/").mock(return_value=httpx.Response(200, json=queue))
+    state = _state(client)
+
+    async def seed() -> None:
+        await state.print_links.record_sends(
+            PrintSubject.output("o" * 32),
+            [PrintSend(queue_item_id=280), PrintSend(queue_item_id=281)],
+        )
+
+    asyncio.run(seed())
+
+    response = client.get("/api/v1/farm/queue")
+
+    assert response.status_code == 200, response.text
+    output = f"/api/v1/outputs/{'o' * 32}"
+    assert {item["id"]: item["picture"] for item in response.json()} == {
+        280: f"{output}/plates/2/thumbnail?cover_if_missing=true",
+        281: f"{output}/thumbnail",
+    }
+
+
+@respx.mock
 @pytest.mark.parametrize(
     ("route", "plate_path", "cover_path"),
     [
@@ -257,6 +288,26 @@ def test_a_plate_bambuddy_has_no_image_of_shows_the_cover(
     assert response.status_code == 200, response.text
     assert response.content == b"\x89PNG"
     assert plate.called and cover.called
+
+
+@respx.mock
+def test_a_library_cover_bambuddy_lacks_reads_as_on_its_own_route(client: TestClient) -> None:
+    """#7955: a library file's cover that Bambuddy lacks, reached through its plate's
+    route, names the file's thumbnail, as `get_library_thumbnail`'s miss does."""
+    configure(client)
+    respx.get(f"{API}/library/files/1615/plate-thumbnail/2").mock(
+        return_value=httpx.Response(404, json={"detail": "Plate thumbnail not found"})
+    )
+    respx.get(f"{API}/library/files/1615/thumbnail").mock(
+        return_value=httpx.Response(404, json={"detail": "Thumbnail not found"})
+    )
+
+    plate = client.get("/api/v1/farm/library/1615/plates/2/thumbnail")
+    own = client.get("/api/v1/farm/library/1615/thumbnail")
+
+    assert plate.status_code == own.status_code == 404
+    assert "show the file's thumbnail" in plate.json()["detail"]
+    assert plate.json()["detail"] == own.json()["detail"]
 
 
 @respx.mock

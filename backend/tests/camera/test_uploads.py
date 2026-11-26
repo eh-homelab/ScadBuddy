@@ -1,58 +1,18 @@
 from __future__ import annotations
 
-import struct
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import SecretStr
 
-from scadbuddy.camera.mp4 import SEGMENT_NAME
 from scadbuddy.camera.settings import RecorderSettings
 from scadbuddy.camera.uploads import LocalSegment, Uploader, UploadError, object_key
+from tests.camera.support import KEY_ID, SECRET, settings, write_segment
 from tests.support.store import moto_s3
 
-KEY_ID = "AKIAKEYIDSECRET0001"
-SECRET = "SECRETACCESSKEY0002"
-RELAY_PASS = "RELAYPASS0003"
 T0 = datetime(2026, 11, 23, 10, 15, 2, 123456, tzinfo=UTC)
-
-
-def box(kind: bytes, payload: bytes) -> bytes:
-    return struct.pack(">I4s", 8 + len(payload), kind) + payload
-
-
-def write_segment(
-    root: Path, printer_id: str, start: datetime, *, init: bytes = b"A", media: int = 100
-) -> Path:
-    """A file as MediaMTX names it, with an init (``ftyp`` + ``moov``) and a media box."""
-    folder = root / printer_id
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{start.strftime(SEGMENT_NAME)}.mp4"
-    path.write_bytes(
-        box(b"ftyp", b"isom\0\0\0\0")
-        + box(b"moov", box(b"trak", init * 16))
-        + box(b"mdat", b"\0" * media)
-    )
-    return path
-
-
-def settings(**overrides: Any) -> RecorderSettings:
-    values: dict[str, Any] = {
-        "api_internal_url": "http://api",
-        "camera_s3_endpoint": "http://s3",
-        "camera_s3_bucket": "cams",
-        "camera_s3_prefix": "rec",
-        "camera_s3_access_key": SecretStr(KEY_ID),
-        "camera_s3_secret_key": SecretStr(SECRET),
-        "camera_recorder_name": "rec-a",
-        "camera_relay_rtsp_url": "rtsp://relay:8554",
-        "camera_relay_read_user": "reader",
-        "camera_relay_read_pass": SecretStr(RELAY_PASS),
-    }
-    return RecorderSettings(**(values | overrides))
 
 
 def segment(path: Path, printer_id: str = "p1", start: datetime = T0) -> LocalSegment:

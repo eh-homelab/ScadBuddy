@@ -193,7 +193,8 @@ A setting telemetry cannot use (such as a malformed endpoint URL) is logged once
   over OTLP, and a record logged in a request carries its `trace_id` and `span_id` (on stderr
   too). The OTLP copy leaves out the attributes `path`, `error`, `err`, `url`, `query` and
   `dsn`, and any value that is a URL with credentials; a message's credentials are replaced
-  (`telemetry.DefaultKeep`).
+  (`telemetry.DefaultKeep`). The `log` package's lines (net/http's and the forward's, which
+  can hold client addresses and upstream errors) stay on stderr only (`SetDefaultLogger`).
 
 At a stop, the servers drain and the three signals flush within the 20 s shutdown.
 

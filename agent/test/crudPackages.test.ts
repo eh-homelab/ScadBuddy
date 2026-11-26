@@ -129,6 +129,14 @@ class FakeApi {
       row.approved_at = AT
       return this.#json(row)
     }
+    if (m[2] === 'mirror') {
+      const current = row.commit_sha === b.commit_sha && row.content_hash === b.content_hash
+      const pending = row.pending_commit_sha === b.commit_sha && row.pending_content_hash === b.content_hash
+      if (!current && !pending) return this.#problem(409, `"${name}" is not pinned to ${String(b.commit_sha)}`, 'pin-mismatch')
+      if (current) row.mirror_sha256 = b.bytes_sha256
+      if (pending) row.pending_mirror_sha256 = b.bytes_sha256
+      return this.#json(row)
+    }
     if (m[2] === 'enabled') {
       if (b.enabled && row.approved_at === null) return this.#problem(409, 'approve the pin before enabling the package', 'package-unapproved')
       row.enabled = b.enabled
@@ -312,6 +320,28 @@ describe('hosted packages through CRUD routes (#6934)', () => {
     // The current pin keeps loading until the re-pin is approved.
     expect((await store.enabledPins())[0]).toMatchObject({ version: 1, contentHash: H1 })
     expect(await store.filesOf('greeter', true)).toMatchObject({ pin: { version: 2, contentHash: H2 } })
+  })
+
+  it("records a commit pin's mirror, and loads the pin and its re-pin with it (#7907)", async () => {
+    const api = new FakeApi()
+    const store = new CrudPackageStore({ baseUrl: BASE, fetch: api.fetch })
+    await store.create(prepared())
+    // An API from before #7907 answers no mirror columns: the pin has none.
+    expect(await store.pinOf('greeter')).not.toHaveProperty('mirrorSha256')
+    const sha = 'e'.repeat(64)
+    await store.recordMirror('greeter', { commit: C1, contentHash: H1, sha256: sha })
+    expect(api.seen.at(-1)).toEqual({
+      method: 'POST',
+      path: '/plugin-packages/greeter/mirror',
+      body: { commit_sha: C1, content_hash: H1, bytes_sha256: sha },
+    })
+    expect(await store.pinOf('greeter')).toMatchObject({ commit: C1, mirrorSha256: sha })
+    await store.setPending('greeter', prepared(C2, H2))
+    await store.recordMirror('greeter', { commit: C2, contentHash: H2, sha256: 'f'.repeat(64) })
+    expect(await store.filesOf('greeter', true)).toMatchObject({ pin: { commit: C2, mirrorSha256: 'f'.repeat(64) } })
+    const refused = await store.recordMirror('greeter', { commit: 'c'.repeat(40), contentHash: H1, sha256: sha }).catch((e: unknown) => e)
+    expect(refused).toBeInstanceOf(PluginError)
+    expect(refused).toMatchObject({ status: 409 })
   })
 
   it('reads an API from before #6934 as nothing not offered', async () => {

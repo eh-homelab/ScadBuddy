@@ -92,6 +92,8 @@ function ArchiveForm({
   const meaningChanged = typedWithEmpty !== null && typedWithEmpty !== withEmpty && trimmed !== ''
   // #7945: whether the keystroke or paste about to change the field lands on the whole of its text. The
   // text alone cannot tell a replace-all from a shortening: "210" to "2" is the first keystroke of both.
+  // Read again on every selection change, and dropped on blur, so a keydown that changed nothing (Shift
+  // over a select-all) cannot leave it standing for a later edit that fires no keydown or paste (a drop).
   const replacingAll = useRef(false)
   function noteSelection(input: HTMLInputElement) {
     replacingAll.current = input.value !== '' && input.selectionStart === 0 && input.selectionEnd === input.value.length
@@ -138,7 +140,7 @@ function ArchiveForm({
         </RadioGroup>
         <div className="flex flex-col gap-1">
           <Label htmlFor={`${fieldId}-reading`}>{withEmpty ? 'Scale reading, with the spool (g)' : 'Filament left (g)'}</Label>
-          <Input id={`${fieldId}-reading`} inputMode="decimal" value={reading} onKeyDown={(event) => noteSelection(event.currentTarget)} onPaste={(event) => noteSelection(event.currentTarget)} onChange={(event) => changeReading(event.target.value)} aria-invalid={readingOk ? undefined : true} className="max-w-40" />
+          <Input id={`${fieldId}-reading`} inputMode="decimal" value={reading} onKeyDown={(event) => noteSelection(event.currentTarget)} onPaste={(event) => noteSelection(event.currentTarget)} onSelect={(event) => noteSelection(event.currentTarget)} onBlur={() => { replacingAll.current = false }} onChange={(event) => changeReading(event.target.value)} aria-invalid={readingOk ? undefined : true} className="max-w-40" />
           {emptyG != null && <p className="text-[13px] text-muted-foreground">The empty spool weighs {grams(emptyG)}; it is taken off the reading.</p>}
           {meaningChanged && (
             <p role="status" className="text-[13px] text-warn">

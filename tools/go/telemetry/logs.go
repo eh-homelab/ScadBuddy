@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"log"
 	"log/slog"
 	"regexp"
 
@@ -16,7 +17,8 @@ import (
 // them from the context, and base gets them as attributes. keep says which attributes the
 // OTLP copy may carry; nil is DefaultKeep. A module widens or narrows it with its own
 // function, which may call DefaultKeep. Whatever keep says, a URL with credentials never
-// reaches OTLP, in an attribute or in the message. Base gets everything.
+// reaches OTLP, in an attribute or in the message. Base gets everything. To make it slog's
+// default, use SetDefaultLogger, which keeps the log package off OTLP.
 func (t *Telemetry) LogHandler(base slog.Handler, name string, keep func(slog.Attr) bool) slog.Handler {
 	h := slog.Handler(&traceIDs{Handler: base})
 	if t != nil && t.Logs != nil {
@@ -27,6 +29,18 @@ func (t *Telemetry) LogHandler(base slog.Handler, name string, keep func(slog.At
 		h = &fanout{h, otlp}
 	}
 	return h
+}
+
+// SetDefaultLogger makes slog's default logger LogHandler(base, name, keep). A service
+// sets its default logger with it, not with slog.SetDefault alone. slog.SetDefault also
+// sends the log package's lines to the new handler, and so to OTLP. Those lines are
+// net/http's ErrorLog and httputil.ReverseProxy's, and their message holds client
+// addresses, upstream error text and panic values, which keep does not filter. So the log
+// package writes to base alone.
+func (t *Telemetry) SetDefaultLogger(base slog.Handler, name string, keep func(slog.Attr) bool) {
+	slog.SetDefault(slog.New(t.LogHandler(base, name, keep)))
+	log.SetOutput(slog.NewLogLogger(base, slog.LevelInfo).Writer())
+	log.SetFlags(0)
 }
 
 // dropped are the attributes DefaultKeep leaves out of the OTLP copy: a request's path or

@@ -180,6 +180,7 @@ from scadbuddy.printers.bambuddy_sync import (
     sync_printers,
 )
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.native import LanCommands
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
 from scadbuddy.rack.component import RACK_USAGE
@@ -2537,12 +2538,16 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         ),
         # The printers' trays reconciled with the ledger, the watch's backstop (#6263).
         capture_backstop_activity(state.components.get(PRINTERS)),
-        # The tag bindings ScadBuddy changed, told to Bambuddy (#6264).
+        # The tag bindings ScadBuddy changed, told to Bambuddy, and the override tags'
+        # slots configured over the LAN (#6264, #7276).
         filament_rfid_activity(
             state.components.get(PRINTERS),
             state.components.get(FILAMENT),
             lambda: state.settings_store.load(),
             lambda: state.settings_store.read({"filament_sync"})["filament_sync"],
+            # The LanCommand runs, started on this worker's own Temporal client.
+            LanCommands(lambda: client, settings.temporal_task_queue_bambuddy),
+            lambda: state.components.get(SLICING).profiles,
         ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,

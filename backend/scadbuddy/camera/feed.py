@@ -2,7 +2,8 @@
 
 A process records the state it wants the API to hold for each printer (`FeedSender.want`).
 A sender posts it in the background, on change only, and again with back-off until it lands;
-the newest state wins. A refusal (4xx) stops the sender until the next state. A failed post
+the newest state wins. A refusal (4xx but 429) stops the sender until the next state; a state
+wanted while the refused post was on its way is posted, and a 429 is retried. A failed post
 forgets the reported state, since the post may have reached the API before its answer was
 lost, so the next state is always posted."""
 
@@ -100,9 +101,20 @@ class FeedSender:
             try:
                 await self._crud.request("POST", path, json=body)
             except CrudRefusedError as refused:
-                # A refusal does not pass with time: stop. A later state or resync tries
-                # again, since the API's state is no longer known.
                 self._reported.pop(printer_id, None)
+                if refused.status == 429:
+                    # Too many requests passes with time: retry with back-off.
+                    logger.warning(
+                        "%s: the API asked to slow down the feed state of %s; retrying",
+                        self._who,
+                        printer_id,
+                    )
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, self._retry_max)
+                    continue
+                # Any other refusal does not pass with time: stop, unless a newer state
+                # was wanted while the post was on its way. A later state or resync tries
+                # again, since the API's state is no longer known.
                 logger.warning(
                     "%s: the API refused feed state %s for %s (%s)",
                     self._who,
@@ -110,7 +122,9 @@ class FeedSender:
                     printer_id,
                     refused.status,
                 )
-                return
+                if (self._desired.get(printer_id), self._error) == sent:
+                    return
+                continue
             except Exception as error:
                 # The post may have reached the API before it failed (a lost answer): its
                 # state is no longer known, so the next desired state is always posted.

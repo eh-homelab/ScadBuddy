@@ -1,18 +1,34 @@
 import { HttpResponse, http } from 'msw'
-import type { AmsUnitView, AmsView, SlotConfigureBody, SlotPresetBody, SlotView } from '../../api/types'
+import type {
+  AmsLabelSaved,
+  AmsUnitView,
+  AmsView,
+  SavedSlotPreset,
+  SlotCommandSent,
+  SlotConfigureBody,
+  SlotConfigured,
+  SlotPresetBody,
+  SlotView,
+} from '../../api/types'
+import { answersAtOnce, commandAnswer, joined, lanRefusal } from './printerCommands'
+import { printersState } from './printers'
 
 /**
- * #7153 — a printer's AMS slots through Bambuddy (`backend/scadbuddy/api/printer_slots.py`).
- * Printer 1's row (`printers.ts`, the H2C linked to Bambuddy printer 1) has AMS-A with three
- * spools and an empty slot, and an empty external holder; any other printer is not linked, a 409,
- * as the route answers. `setAmsPrinting(true)` makes the printer print, so every printer write is
- * the route's 409 `printer_busy`; `setAmsAdminOnly(true)` makes a label or saved-preset write
- * Bambuddy's admin-only scope problem. A configure from a spool sends its type's ScadBuddy preset
- * (`sb-<id>`) by its mirror's Bambuddy local preset id, `141`, so the route names its source `local`.
+ * #7153, #7276 — a printer's AMS slots over ScadBuddy's LAN link
+ * (`backend/scadbuddy/api/printer_slots.py`). The printer's last report has AMS-A with three
+ * spools and an empty slot, and an empty external holder. A printer `lan_linked` is false on is
+ * refused 409 `not_lan_linked` (`printerCommands.ts` `lanRefusal`), so a test links printer 1's
+ * row first. `setAmsPrinting(true)` makes the printer print, so every printer write is the route's
+ * 409 `printer_busy`; `setAmsUnconfirmed(true)` makes the printer leave every write
+ * unacknowledged; `printerCommands.ts` `setPrinterCommandSlow` makes every write a 202 to follow.
+ * The saved presets and the labels are ScadBuddy's own and need only the printer's row. A
+ * configure from a spool sends its type's preset's filament id, `GFL99`.
  */
 
 export const H2C = '00000000-0000-4000-8000-000000000001'
-const SCOPE_PROBLEM = 'https://scadbuddy.dev/problems/bambuddy-scope'
+const FEATURE = 'AMS'
+const SENT = 'sent'
+const UNCONFIRMED = 'sent; the printer did not acknowledge it in time'
 
 function slot(tray_id: number, values: Partial<SlotView>): SlotView {
   return {
@@ -88,7 +104,7 @@ function seedUnits(): AmsUnitView[] {
 const state = {
   units: seedUnits(),
   printing: false,
-  adminOnly: false,
+  unconfirmed: false,
   sent: [] as string[],
   presets: [] as SlotPresetBody[],
   trayNow: undefined as number | null | undefined,
@@ -97,7 +113,7 @@ const state = {
 export function reset(): void {
   state.units = seedUnits()
   state.printing = false
-  state.adminOnly = false
+  state.unconfirmed = false
   state.sent = []
   state.presets = []
   state.trayNow = undefined
@@ -112,8 +128,14 @@ export function setAmsTrayNow(value: number | null | undefined): void {
   state.trayNow = value
 }
 
-export function setAmsAdminOnly(on: boolean): void {
-  state.adminOnly = on
+/** Marks only AMS-A's tray `tray` loaded, or none with `null`. */
+export function setAmsLoaded(tray: number | null): void {
+  state.units.forEach((u) => u.slots.forEach((s) => (s.loaded = u.ams_id === 0 && s.tray_id === tray)))
+}
+
+/** Every printer write answers that the printer did not acknowledge it in time. */
+export function setAmsUnconfirmed(on: boolean): void {
+  state.unconfirmed = on
 }
 
 /** The saved-preset bodies the mock was sent, in order. */
@@ -139,45 +161,62 @@ function view(): AmsView {
   }
 }
 
-const adminOnly = (what: string) =>
-  HttpResponse.json(
-    {
-      type: SCOPE_PROBLEM,
-      title: 'Bambuddy API key scope',
-      status: 409,
-      detail: `Bambuddy refused the API key when asked to ${what} of printer 1. No Bambuddy API key can change a printer's slot presets or AMS labels while Bambuddy's auth is on: turn its auth off, or make the change in Bambuddy`,
-      required_scope: 'Printers (admin only)',
-    },
-    { status: 409 },
-  )
+/** The backend's `ams_slots.py` `GENERIC_FILAMENT_IDS`, as Bambuddy's configure route maps them. */
+const GENERIC_FILAMENT_IDS: Record<string, string> = {
+  PLA: 'GFL99',
+  PETG: 'GFG99',
+  ABS: 'GFB99',
+  ASA: 'GFB98',
+  PC: 'GFC99',
+  PA: 'GFN99',
+  NYLON: 'GFN99',
+  TPU: 'GFU99',
+  PVA: 'GFS99',
+  HIPS: 'GFS98',
+  'PLA-CF': 'GFL98',
+  'PETG-CF': 'GFG98',
+  'PA-CF': 'GFN98',
+  'PETG HF': 'GFG96',
+  'PLA SILK': 'GFL96',
+  'PLA HIGH SPEED': 'GFL95',
+  PCTG: 'GFG97',
+  PE: 'GFP99',
+  PP: 'GFP97',
+}
 
-const notLinked = () =>
-  HttpResponse.json(
-    { detail: 'Garage is not linked to a Bambuddy printer, so ScadBuddy cannot reach its AMS' },
-    { status: 409 },
-  )
+/** `ams_slots.py` `generic_filament_id`: the whole name, then its first word; "" when none is known. */
+function genericFilamentId(material: string): string {
+  const name = material.toUpperCase().trim()
+  return GENERIC_FILAMENT_IDS[name] ?? GENERIC_FILAMENT_IDS[name.split('-')[0]!.split(' ')[0]!] ?? ''
+}
 
-const busy = (action: string) =>
-  HttpResponse.json(
-    { status: 409, detail: `H2C is printing (RUNNING); ${action} the slot once the print has ended`, code: 'printer_busy' },
-    { status: 409 },
-  )
+const problem = (status: number, detail: string, code?: string) =>
+  HttpResponse.json({ title: detail, status, detail, ...(code ? { code } : {}) }, { status })
+
+/** A saved preset or a label is ScadBuddy's own: the printer needs only a row (`_owner`). */
+const noPrinter = (id: string) =>
+  printersState().some((row) => row.id === id) ? undefined : problem(404, `no printer ${id}`)
 
 function find(ams: number, tray: number): SlotView | undefined {
   return state.units.find((u) => u.ams_id === ams)?.slots.find((s) => s.tray_id === tray)
 }
 
 export const handlers = [
-  http.get('/api/v1/printers/:id/ams', ({ params }) => (params.id === H2C ? HttpResponse.json(view()) : notLinked())),
+  http.get('/api/v1/printers/:id/ams', ({ params }) => lanRefusal(String(params.id), FEATURE) ?? HttpResponse.json(view())),
   http.post('/api/v1/printers/:id/trays/:ams/:tray/:action', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    const action = String(params.action)
+    const id = String(params.id)
+    const refused = lanRefusal(id, FEATURE) ?? joined(id, request)
+    if (refused) return refused
+    const action = String(params.action) as SlotCommandSent['action']
     const ams = Number(params.ams)
     const tray = Number(params.tray)
-    if (state.printing) return busy(action)
+    const label = ams === 255 ? `External slot ${tray + 1}` : `AMS-A slot ${tray + 1}`
+    if (state.printing) {
+      return problem(409, `H2C is printing (RUNNING); ${action} the slot once the print has ended`, 'printer_busy')
+    }
     const target = find(ams, tray)
-    if (!target) return HttpResponse.json({ detail: 'no such slot', code: 'no_slot' }, { status: 409 })
-    state.sent.push(`${action} ${ams}/${tray}`)
+    if (!target) return problem(409, `H2C reports no ${label}`, 'no_slot')
+    const message = state.unconfirmed ? UNCONFIRMED : SENT
     if (action === 'configure') {
       const body = (await request.json()) as SlotConfigureBody
       const colour = (body.colour ?? '#808080').toUpperCase()
@@ -186,70 +225,89 @@ export const handlers = [
         filled: true,
         material: body.material ?? 'PLA',
         colour: colour.length === 7 ? `${colour}FF` : colour,
-        preset_id: body.preset_id ?? (fromSpool ? '141' : ''),
+        // With no preset, the material's generic filament id, "" for one it has none for
+        // (`ams_slots.py` `configure_values`).
+        preset_id: body.preset_id || genericFilamentId(body.material ?? 'PLA'),
         preset_name: body.preset_name ?? (fromSpool ? 'Shop PLA' : (body.material ?? 'PLA')),
         nozzle_temp_min: body.nozzle_temp_min ?? 190,
         nozzle_temp_max: body.nozzle_temp_max ?? 230,
       })
-      return HttpResponse.json({
+      state.sent.push(`${action} ${ams}/${tray}`)
+      return commandAnswer(id, request, {
         ams_id: ams,
         tray_id: tray,
         spool_id: body.spool_id ?? null,
-        material: target.material,
-        colour: target.colour,
-        preset_id: target.preset_id,
-        preset_name: target.preset_name,
-        preset_source: fromSpool && body.preset_id == null ? 'local' : null,
-        nozzle_temp_min: target.nozzle_temp_min,
-        nozzle_temp_max: target.nozzle_temp_max,
+        material: target.material!,
+        colour: target.colour!,
+        preset_id: target.preset_id!,
+        preset_name: target.preset_name!,
+        preset_source: null,
+        nozzle_temp_min: target.nozzle_temp_min!,
+        nozzle_temp_max: target.nozzle_temp_max!,
         nozzle_diameter: body.nozzle_diameter ?? '0.4',
         cali_idx: null,
         k_value: null,
-      })
+        message,
+      } satisfies SlotConfigured)
     }
     if (action === 'load') {
-      if (!target.filled) return HttpResponse.json({ detail: 'holds no spool', code: 'tray_empty' }, { status: 409 })
+      if (!target.filled) return problem(409, `H2C's ${label} holds no spool to load`, 'tray_empty')
+      if (target.loaded) return problem(409, `H2C is already loaded from ${label}`, 'already_loaded')
       state.units.forEach((u) => u.slots.forEach((s) => (s.loaded = false)))
       target.loaded = true
     }
     if (action === 'unload') {
-      if (!target.loaded) return HttpResponse.json({ detail: 'Bambuddy reported a conflict: No hotend is loaded from that slot' }, { status: 409 })
+      if (!target.loaded) return problem(409, `H2C is not loaded from ${label}`, 'not_loaded')
       target.loaded = false
     }
-    if (action === 'reset') {
-      Object.assign(target, { material: null, colour: null, preset_id: null, preset_name: null, saved_preset: null })
+    // As `ams_slots.any_loaded`: a slot shows `loaded`, or `tray_now` names a slot.
+    const trayNow = view().tray_now
+    const anyLoaded = (trayNow != null && trayNow !== 255) || state.units.some((u) => u.slots.some((s) => s.loaded))
+    if (action === 'refresh' && anyLoaded) {
+      return problem(409, 'H2C has filament loaded; unload it before the AMS can read a tag again', 'filament_loaded')
     }
-    return HttpResponse.json({ ams_id: ams, tray_id: tray, action, message: `Sent ${action}` })
+    if (action === 'reset') {
+      Object.assign(target, { material: null, colour: null, preset_id: null, preset_name: null })
+      // As the route: only a reset the printer acknowledged in this answer clears the saved preset (P43).
+      if (message === SENT && answersAtOnce()) target.saved_preset = null
+    }
+    state.sent.push(`${action} ${ams}/${tray}`)
+    return commandAnswer(id, request, { ams_id: ams, tray_id: tray, action, message } satisfies SlotCommandSent)
   }),
   http.put('/api/v1/printers/:id/trays/:ams/:tray/preset', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly('save the preset of a slot')
+    const refused = noPrinter(String(params.id))
+    if (refused) return refused
     const body = (await request.json()) as SlotPresetBody
     state.presets.push(body)
     const target = find(Number(params.ams), Number(params.tray))
-    const saved = { preset_id: body.preset_id, preset_name: body.preset_name, tray_info_idx: body.tray_info_idx ?? null }
+    const saved = {
+      preset_id: body.preset_id,
+      preset_name: body.preset_name,
+      tray_info_idx: body.tray_info_idx ?? null,
+    } satisfies SavedSlotPreset
     if (target) target.saved_preset = saved
     return HttpResponse.json(saved)
   }),
   http.delete('/api/v1/printers/:id/trays/:ams/:tray/preset', ({ params }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly('clear the preset of a slot')
+    const refused = noPrinter(String(params.id))
+    if (refused) return refused
     const target = find(Number(params.ams), Number(params.tray))
     if (target) target.saved_preset = null
     return new HttpResponse(null, { status: 204 })
   }),
   http.put('/api/v1/printers/:id/ams/:ams/label', async ({ params, request }) => {
-    if (params.id !== H2C) return notLinked()
-    if (state.adminOnly) return adminOnly('label AMS 0')
+    const refused = noPrinter(String(params.id))
+    if (refused) return refused
     const { label } = (await request.json()) as { label: string }
     const unit = state.units.find((u) => u.ams_id === Number(params.ams))
     if (unit) Object.assign(unit, { label, place_name: label })
-    return HttpResponse.json({ ams_id: Number(params.ams), label, place: null, place_problem: null })
+    return HttpResponse.json({ ams_id: Number(params.ams), label, place: null, place_problem: null } satisfies AmsLabelSaved)
   }),
   http.delete('/api/v1/printers/:id/ams/:ams/label', ({ params }) => {
-    if (params.id !== H2C) return notLinked()
+    const refused = noPrinter(String(params.id))
+    if (refused) return refused
     const unit = state.units.find((u) => u.ams_id === Number(params.ams))
     if (unit) Object.assign(unit, { label: null, place_name: `H2C ${unit.unit}` })
-    return HttpResponse.json({ ams_id: Number(params.ams), label: null, place: null, place_problem: null })
+    return HttpResponse.json({ ams_id: Number(params.ams), label: null, place: null, place_problem: null } satisfies AmsLabelSaved)
   }),
 ]

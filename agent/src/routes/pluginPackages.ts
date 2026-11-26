@@ -79,7 +79,7 @@ export type PackageRouteDeps = {
   packages: PackageRepo | undefined
   /** The plugins that ship with the agent (builtins.ts), listed first; undefined when this process was not given it (tests). */
   builtIns: BuiltInPackages | undefined
-  installer: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
+  installer: (Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> & Partial<Pick<PackageInstaller, 'wantMirror'>>) | undefined
   /** A pending re-pin's review with its hooks' ids, for one stored without them (#4757); kept as stored when omitted or failing. */
   verifiedReviewOf?: (pin: PackagePin) => Promise<PackageReview>
   /** Install and re-pin run here; undefined without Temporal (503). */
@@ -316,6 +316,21 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     return commandResponse(c, await deps.commands!.run(INSTALL_KIND, { source }, key(c), { principal: UI_ACTOR.id }), 201)
   })
 
+  // An approved commit pin with no mirror recorded gets its mirror job (#7907), so its first
+  // load finds one. Not awaited: the approval is answered either way.
+  const startMirrorJob = (repo: PackageRepo, name: string): void => {
+    const want = deps.installer?.wantMirror?.bind(deps.installer)
+    if (!want) return
+    void repo
+      .pinOf(name)
+      .then((p) => {
+        if (p && !p.mirrorSha256 && p.bytesSha256 === undefined && p.version === undefined) {
+          want({ name, commit: p.commit, contentHash: p.contentHash })
+        }
+      })
+      .catch((err: unknown) => console.warn(`plugin package ${name}: its mirror job was not started: ${(err as Error).message}`))
+  }
+
   app.post(`${base}/:name/approve`, async (c) => {
     const refused = isBuiltIn(c, 'approved: it ships with the agent, so there is no pin')
     if (refused) return refused
@@ -330,7 +345,9 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
           : body.bytes_sha256 !== undefined
             ? [body.bytes_sha256, 'bytes' as const]
             : [body.commit_sha!, 'commit' as const]
-      return c.json(await repo.approve(c.req.param('name'), pin, body.content_hash, body.allow_refused ?? false, kind))
+      const approved = await repo.approve(c.req.param('name'), pin, body.content_hash, body.allow_refused ?? false, kind)
+      if (kind === 'commit') startMirrorJob(repo, c.req.param('name'))
+      return c.json(approved)
     } catch (err) {
       return refusal(c, err)
     }
@@ -387,7 +404,7 @@ declare module '../app.js' {
     /** Installed plugin packages (#297, plugins/packages/); undefined when this process was not given it (tests). */
     pluginPackages?: PackageRepo | undefined
     /** Fetches and caches plugin packages; undefined disables installing. */
-    packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile' | 'acquire'> | undefined
+    packageInstaller?: (Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile' | 'acquire'> & Partial<Pick<PackageInstaller, 'wantMirror'>>) | undefined
     /**
      * A pin's review vetted from its cached copy (#4757), for one stored by an older vet (hooks
      * without ids): main.ts's over the read-only `PackageInstaller.review`, held to a short wait

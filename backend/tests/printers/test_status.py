@@ -17,7 +17,13 @@ import pytest
 
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.status import STALE_AFTER, hms_errors, status_from_report
+from scadbuddy.printers.status import (
+    STALE_AFTER,
+    decode_snow,
+    extruder_loaded,
+    hms_errors,
+    status_from_report,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "lan-report-h2c.json"
 
@@ -355,3 +361,111 @@ def test_a_spool_pulled_and_pushed_back(recorded_h2c: LanReport) -> None:
     assert seen[0] == (True, "PLA") and seen[1] == (False, None)
     assert (True, None) in seen[2:]
     assert seen[-1] == (True, "PLA")
+
+
+# --- #7276: tray_now, the AMS state and each tray's K -----------------------------------
+
+
+def _with_print(report: LanReport, **fields: object) -> LanReport:
+    return report.model_copy(update={"print": {**report.print, **fields}})
+
+
+def test_tray_now_and_the_ams_state(report_h2c: LanReport) -> None:
+    """``print.ams.tray_now`` and the high byte of ``print.ams_status`` (Bambuddy
+    ``bambu_mqtt.py`` L2819-L2831, L3644-L3655)."""
+    ams = {**report_h2c.print["ams"], "tray_now": "2"}
+    report = _with_print(report_h2c, ams=ams, ams_status=0x0100)
+    status = status_from_report(row(), report, now=report.received_at)
+    assert status.tray_now == 2
+    assert status.ams_status_main == 1
+
+
+def test_a_report_without_ams_status_says_nothing_of_the_ams(report_h2c: LanReport) -> None:
+    status = status_from_report(row(), report_h2c, now=report_h2c.received_at)
+    assert status.ams_status_main is None
+    report = _with_print(report_h2c, ams_status="idle")
+    assert status_from_report(row(), report, now=report.received_at).ams_status_main is None
+    report = _with_print(report_h2c, ams_status=-1)
+    assert status_from_report(row(), report, now=report.received_at).ams_status_main is None
+
+
+def test_a_numeric_string_ams_status_reads_as_a_number(report_h2c: LanReport) -> None:
+    """Other report numbers (``tray_now``) may come as strings; ``ams_status`` reads alike."""
+    report = _with_print(report_h2c, ams_status="768")
+    assert status_from_report(row(), report, now=report.received_at).ams_status_main == 3
+
+
+def test_each_extruders_loaded_slot_from_snow(report_h2c: LanReport) -> None:
+    """P40: ``device.extruder.info[].snow`` is ``ams_id << 8 | slot``: the recorded H2C
+    feeds AMS-A slot 1 (``tray_now`` 1) and HT-A on the other extruder."""
+    status = status_from_report(row(), report_h2c, now=report_h2c.received_at)
+    assert status.tray_now == 1
+    assert status.extruder_loaded == [(0, 1), (128, 0)]
+
+
+def test_the_idle_h2c_has_nothing_loaded() -> None:
+    """The recorded idle H2C: 0xFFFF and 0xFEFF with ``tray_now`` 255."""
+    idle = json.loads((FIXTURE.parent / "lan-report-h2c-idle.json").read_text("utf-8"))["print"]
+    assert extruder_loaded(idle) == [None, None]
+
+
+@pytest.mark.parametrize(
+    ("snow", "slot"),
+    [
+        (0x0003, (0, 3)),
+        (0x0302, (3, 2)),
+        (0x8000, (128, 0)),
+        (0x8700, (135, 0)),
+        ("257", (1, 1)),
+        (0xFFFF, None),
+        (0xFEFF, None),
+        (0xFE00, None),
+        (0xFF01, None),
+        (0x0400, None),
+        (-1, None),
+        (True, None),
+        ("x", None),
+        (None, None),
+        (1.5, None),
+    ],
+)
+def test_snow_decodes_an_ams_or_ams_ht_slot_only(snow: object, slot: object) -> None:
+    assert decode_snow(snow) == slot
+
+
+@pytest.mark.parametrize(
+    "info",
+    [
+        None,
+        [],
+        [{"id": 0, "snow": 1}],
+        [{"id": 0, "snow": 1}, {"id": 1}],
+        [{"id": 0, "snow": 1}, {"id": "x", "snow": 2}],
+    ],
+)
+def test_fewer_than_two_extruders_snow_reads_as_none_reported(info: object) -> None:
+    """Bambuddy reads ``snow`` only from a two-extruder report (``bambu_mqtt.py`` L3551)."""
+    assert extruder_loaded({"device": {"extruder": {"info": info}}}) == []
+
+
+def test_each_tray_carries_its_cali_idx_and_k() -> None:
+    report = _lan(
+        {
+            **_two_nozzles(),
+            "ams": {
+                "ams": [{"id": "0", "tray": [{"id": "0", "cali_idx": 3, "k": "0.025"}]}],
+                "tray_now": "0",
+            },
+            "vt_tray": {"id": "254", "cali_idx": "-1", "k": 0.02},
+        }
+    )
+    status = status_from_report(row(), report, now=report.received_at)
+    tray = status.ams[0].tray[0]
+    assert (tray.cali_idx, tray.k) == (3, 0.025)
+    assert (status.vt_tray[0].cali_idx, status.vt_tray[0].k) == (-1, 0.02)
+
+
+def test_a_mistyped_cali_idx_or_k_reads_as_absent() -> None:
+    report = _lan({**_two_nozzles(), "vt_tray": {"id": "254", "cali_idx": "x", "k": None}})
+    holder = status_from_report(row(), report, now=report.received_at).vt_tray[0]
+    assert (holder.cali_idx, holder.k) == (None, None)
