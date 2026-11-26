@@ -389,6 +389,8 @@ type fakeS3 struct {
 	noChecksum bool
 	// afterGet, when set, runs after each GET is answered, under mu, with its path.
 	afterGet func(path string)
+	// beforeGet, when set, runs before each GET is looked up, under mu, with its path.
+	beforeGet func(path string)
 	// requests are each request's method and path.
 	requests []string
 }
@@ -423,6 +425,9 @@ func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.objects[r.URL.Path] = body
 	case http.MethodGet:
+		if f.beforeGet != nil {
+			f.beforeGet(r.URL.Path)
+		}
 		body, ok := f.objects[r.URL.Path]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -647,7 +652,7 @@ func TestASecondPutToTheStagingKeyChangesNothingIndexed(t *testing.T) {
 }
 
 // A content object that is there already is never written, as store/s3.py `upload`
-// skips it; the row is verified only when its bytes are the key's.
+// skips it; the commit reads it and marks the row verified.
 func TestAContentObjectThereAlreadyIsNotWritten(t *testing.T) {
 	h := newHarness(t)
 	body := []byte("a dump stored before")
@@ -674,23 +679,139 @@ func TestAContentObjectThereAlreadyIsNotWritten(t *testing.T) {
 	if staged := h.stagingKeys(); len(staged) != 0 {
 		t.Fatalf("%v", staged)
 	}
-	// Other bytes at the content key stay, and the row is not marked verified.
-	other := []byte("another dump")
-	osum := sha256.Sum256(other)
-	osha := hex.EncodeToString(osum[:])
-	h.s3.objects["/"+h.bucket+"/t/tag_dump/"+osha] = []byte("corrupt")
-	_, upload = h.post("/uploads", core, ask(other))
-	if got := put(t, upload, other); got != http.StatusOK {
+}
+
+// verifiedAt is key's verified_at.
+func verifiedAt(t *testing.T, h *harness, key string) time.Time {
+	t.Helper()
+	var at time.Time
+	if err := h.pool.QueryRow(context.Background(),
+		"SELECT verified_at FROM store_blobs WHERE key = $1", key).Scan(&at); err != nil {
+		t.Fatal(err)
+	}
+	return at
+}
+
+// A content object that is not its key's bytes is a 503 store_object_mismatch: it is not
+// overwritten, nothing is indexed, a row that named it verified before stays as it was,
+// and the staging object stays, so the commit goes through once the object is repaired.
+func TestAWrongContentObjectIsRefused(t *testing.T) {
+	h := newHarness(t)
+	body := []byte("a dump stored and verified")
+	sum := sha256.Sum256(body)
+	sha := hex.EncodeToString(sum[:])
+	key := "tag_dump-" + sha
+	content := "/" + h.bucket + "/t/tag_dump/" + sha
+	_, upload := h.post("/uploads", core, ask(body))
+	if got := put(t, upload, body); got != http.StatusOK {
 		t.Fatal(got)
 	}
 	if status, got := h.post("/uploads/"+upload["upload_id"].(string)+"/commit", core, nil); status != http.StatusOK {
 		t.Fatal(status, got)
 	}
-	if got, _ := h.object("t/tag_dump/" + osha); string(got) != "corrupt" {
+	stamped, before := verifiedAt(t, h, key), row(t, h.pool, key)
+	// The store's object goes bad; another upload of the same bytes is committed.
+	h.s3.objects[content] = []byte("corrupt")
+	_, upload = h.post("/uploads", core, ask(body))
+	if got := put(t, upload, body); got != http.StatusOK {
+		t.Fatal(got)
+	}
+	id := upload["upload_id"].(string)
+	status, got := h.post("/uploads/"+id+"/commit", core, nil)
+	if status != http.StatusServiceUnavailable || got["reason"] != "store_object_mismatch" {
+		t.Fatal(status, got)
+	}
+	if got, _ := h.object("t/tag_dump/" + sha); string(got) != "corrupt" {
 		t.Fatalf("%q", got)
 	}
-	if r := row(t, h.pool, "tag_dump-"+osha); r["verified"] != false {
+	if r, at := row(t, h.pool, key), verifiedAt(t, h, key); !reflect.DeepEqual(r, before) || !at.Equal(stamped) {
+		t.Fatal(r, at, stamped)
+	}
+	if staged := h.stagingKeys(); len(staged) != 1 {
+		t.Fatalf("%v", staged)
+	}
+	// With no row before, nothing is indexed either.
+	other := []byte("another dump")
+	osum := sha256.Sum256(other)
+	osha := hex.EncodeToString(osum[:])
+	h.s3.objects["/"+h.bucket+"/t/tag_dump/"+osha] = []byte("corrupt")
+	_, oupload := h.post("/uploads", core, ask(other))
+	if got := put(t, oupload, other); got != http.StatusOK {
+		t.Fatal(got)
+	}
+	status, got = h.post("/uploads/"+oupload["upload_id"].(string)+"/commit", core, nil)
+	if status != http.StatusServiceUnavailable || got["reason"] != "store_object_mismatch" {
+		t.Fatal(status, got)
+	}
+	var rows int
+	if err := h.pool.QueryRow(context.Background(), "SELECT count(*) FROM store_blobs WHERE key = $1",
+		"tag_dump-"+osha).Scan(&rows); err != nil || rows != 0 {
+		t.Fatal(rows, err)
+	}
+	// Once the object is repaired, the first refused commit goes through.
+	h.s3.mu.Lock()
+	h.s3.objects[content] = body
+	h.s3.mu.Unlock()
+	if status, got := h.post("/uploads/"+id+"/commit", core, nil); status != http.StatusOK {
+		t.Fatal(status, got)
+	}
+	if staged := h.stagingKeys(); len(staged) != 1 {
+		t.Fatalf("only the other upload's staging object stays: %v", staged)
+	}
+}
+
+// Two commits of one upload at once: when the other commit writes the content object and
+// deletes the staging object between this commit's two reads, this one reads the content
+// object again and answers as a repeated commit, not 409 upload_not_received.
+func TestACommitRacingAnotherOfTheSameUploadSucceeds(t *testing.T) {
+	h := newHarness(t)
+	body := []byte("a dump committed twice")
+	sum := sha256.Sum256(body)
+	sha := hex.EncodeToString(sum[:])
+	content := "/" + h.bucket + "/t/tag_dump/" + sha
+	_, upload := h.post("/uploads", core, ask(body))
+	if got := put(t, upload, body); got != http.StatusOK {
+		t.Fatal(got)
+	}
+	// Just before this commit reads the staging object, the other commit has stored the
+	// content and deleted the staging object.
+	h.s3.beforeGet = func(path string) {
+		if strings.Contains(path, "/staging/") {
+			h.s3.objects[content] = h.s3.objects[path]
+			delete(h.s3.objects, path)
+		}
+	}
+	status, got := h.post("/uploads/"+upload["upload_id"].(string)+"/commit", core, nil)
+	if status != http.StatusOK || got["sha256"] != sha {
+		t.Fatal(status, got)
+	}
+	if r := row(t, h.pool, "tag_dump-"+sha); r["verified"] != true {
 		t.Fatal(r)
+	}
+}
+
+// A commit that finds every one of the stage lock's slots busy for SlotWait is a 503
+// store_busy; once a slot is free, it goes through.
+func TestACommitWaitsForASlotThenGivesUp(t *testing.T) {
+	h := newHarness(t)
+	h.blobs.SlotWait = 50 * time.Millisecond
+	body := []byte("a dump behind busy slots")
+	_, upload := h.post("/uploads", core, ask(body))
+	if got := put(t, upload, body); got != http.StatusOK {
+		t.Fatal(got)
+	}
+	h.blobs.slotsOnce.Do(func() { h.blobs.slots = make(chan struct{}, stageSlots) })
+	for range stageSlots {
+		h.blobs.slots <- struct{}{}
+	}
+	id := upload["upload_id"].(string)
+	status, got := h.post("/uploads/"+id+"/commit", core, nil)
+	if status != http.StatusServiceUnavailable || got["reason"] != "store_busy" {
+		t.Fatal(status, got)
+	}
+	<-h.blobs.slots
+	if status, got := h.post("/uploads/"+id+"/commit", core, nil); status != http.StatusOK {
+		t.Fatal(status, got)
 	}
 }
 

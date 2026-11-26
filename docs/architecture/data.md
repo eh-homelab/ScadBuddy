@@ -129,7 +129,8 @@ presigned PUT of a random staging object (`<prefix>/staging/<32 hex>`, the store
 staging form), its length, type and SHA-256 checksum signed in; the content key is never
 presigned. At the commit core reads the staging object, checks its size and SHA-256, PUTs those
 verified bytes to the content key unless that object is there already (never overwritten, as
-`store/s3.py` `upload`), writes the `store_blobs` row as `BlobIndex.put` does with
+`store/s3.py` `upload`; one that is not its key's bytes is a 503 `store_object_mismatch`, with
+nothing indexed and the staging object kept), writes the `store_blobs` row as `BlobIndex.put` does with
 `verified_at` set (`backend/tests/fixtures/blob-upload-vectors.json` pins both), and deletes
 the staging object; one left behind goes with `sweep_staged` after a day. Any other backend
 answers 503 `not_configured`.

@@ -13,7 +13,9 @@
 // object; when there is none, it reads the staging object, checks its size and SHA-256, and
 // PUTs those verified bytes to the content key itself, so a PUT to the staging key after
 // the check changes nothing indexed. It never overwrites a content key, as store/s3.py
-// `upload` does not. Any other backend is a 503 not_configured.
+// `upload` does not: a content object that is not its key's bytes is a 503
+// store_object_mismatch, with nothing indexed and the staging object kept. Any other
+// backend is a 503 not_configured.
 //
 // A committed blob of a swept kind (store/content_models.py SWEPT_KINDS) is collected unless
 // its caller holds it in blob_refs within the sweep's grace. The commit deletes the staging
@@ -71,6 +73,11 @@ const (
 	// stageSlots is how many commits may hold a lock connection at once, each its own
 	// connection outside the pool (store/index.py STAGE_LOCK_SLOTS).
 	stageSlots = 3
+	// slotWait is how long a commit waits for one of stageSlots; then 503 store_busy, so
+	// no queue grows behind 3 busy slots. Python's semaphore waits unbounded; this is its
+	// lock's own budget (stageLockTries × stageLockTimeout, 30 s), so a commit waits for a
+	// slot no longer than one slot's holder may wait for the lock.
+	slotWait = stageLockTries * stageLockTimeout
 	// bodyMax bounds a request's JSON.
 	bodyMax = 4 << 10
 	// The canned ACL every object is written with (store/s3.py STAGED_ACL).
@@ -96,9 +103,11 @@ type Blobs struct {
 	// the URL, whose query is the presigned signature.
 	HTTP *http.Client
 	Now  func() time.Time
-	// LockTimeout and LockTries, when set, replace stageLockTimeout and stageLockTries.
+	// LockTimeout, LockTries and SlotWait, when set, replace stageLockTimeout,
+	// stageLockTries and slotWait.
 	LockTimeout time.Duration
 	LockTries   int
+	SlotWait    time.Duration
 
 	slotsOnce sync.Once
 	slots     chan struct{}
@@ -150,6 +159,10 @@ func notConfigured(detail string) error {
 
 func unavailable(detail string) error {
 	return refused(http.StatusServiceUnavailable, "store_unavailable", detail)
+}
+
+func busy(detail string) error {
+	return refused(http.StatusServiceUnavailable, "store_busy", detail)
 }
 
 // s3Store is the S3 store, or the 503 of a store that takes no upload.
@@ -284,12 +297,11 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 		return nil, err
 	}
 	defer release()
-	verified, err := b.place(ctx, store.S3, objectKey, staging, t, limit)
-	if err != nil {
+	if err := b.place(ctx, store.S3, objectKey, staging, t, limit); err != nil {
 		return nil, err
 	}
 	err = pgx.BeginFunc(ctx, b.Pool, func(tx pgx.Tx) error {
-		before, err := index(ctx, tx, key, ref, verified)
+		before, err := index(ctx, tx, key, ref, true)
 		if err != nil {
 			return err
 		}
@@ -310,14 +322,22 @@ func (b *Blobs) commit(r *http.Request, p crud.Params) (any, error) {
 
 // hold takes the stage lock of the objects of sha256 shared (store/index.py `StageHold`,
 // `_lock_shared`), on a connection of its own outside the pool, once one of stageSlots is
-// free. Each try is a transaction whose `set_config(…, true)` ends with it, so the lock
+// free (at most slotWait; then 503 store_busy). Each try is a transaction whose `set_config(…, true)` ends with it, so the lock
 // timeout does not outlive the try; the session lock outlives the commit. A removal that
 // holds the lock through every try is a 503 store_busy. release closes the connection,
 // which drops the lock; it may be called more than once.
 func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err error) {
 	b.slotsOnce.Do(func() { b.slots = make(chan struct{}, stageSlots) })
+	wait := b.SlotWait
+	if wait <= 0 {
+		wait = slotWait
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case b.slots <- struct{}{}:
+	case <-timer.C:
+		return nil, busy("every commit slot stayed busy; commit the upload again")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -363,8 +383,7 @@ func (b *Blobs) hold(ctx context.Context, sha256 string) (release func(), err er
 		slog.InfoContext(ctx, "an object's stage lock is claimed by a removal; trying again")
 	}
 	release()
-	return nil, refused(http.StatusServiceUnavailable, "store_busy",
-		"a removal held the blob's object for every try; commit the upload again")
+	return nil, busy("a removal held the blob's object for every try; commit the upload again")
 }
 
 // matches says whether body is t's bytes.
@@ -373,48 +392,67 @@ func matches(body []byte, t ticket) bool {
 	return int64(len(body)) == t.Size && hex.EncodeToString(sum[:]) == t.SHA256
 }
 
-// place makes the content object hold t's bytes, and says whether the commit read them
-// there (the row's verified_at). A content object that is there already is never written
-// (store/s3.py `upload`); otherwise the staging object is read, checked, and its verified
-// bytes, not the staging object, are PUT to the content key.
-func (b *Blobs) place(ctx context.Context, s3 *S3, objectKey, staging string, t ticket, limit int64) (bool, error) {
+// place makes the content object hold t's bytes. A content object that is there already
+// is never written (store/s3.py `upload`); one that is not t's bytes is a 503
+// store_object_mismatch. Otherwise the staging object is read, checked, and its verified
+// bytes, not the staging object, are PUT to the content key. On every refusal the staging
+// object stays, so the commit may be sent again.
+func (b *Blobs) place(ctx context.Context, s3 *S3, objectKey, staging string, t ticket, limit int64) error {
 	body, found, err := b.read(ctx, s3, objectKey, limit)
 	if err != nil {
-		return false, err
+		return err
 	}
 	if found {
-		ok := matches(body, t)
-		if !ok {
-			slog.WarnContext(ctx, "the store's object is not the bytes its key names; it is left as it is",
-				"kind", t.Kind, "sha256", t.SHA256)
-		}
-		return ok, nil
+		return stored(ctx, body, t)
 	}
 	body, found, err = b.read(ctx, s3, staging, limit)
 	switch {
 	case err != nil:
-		return false, err
+		return err
 	case !found:
-		return false, refused(http.StatusConflict, "upload_not_received", "nothing was uploaded for this upload")
+		// Another commit of this upload may have written the content object and deleted
+		// the staging object since the first read: read the content object again.
+		body, found, err = b.read(ctx, s3, objectKey, limit)
+		if err != nil {
+			return err
+		}
+		if found {
+			return stored(ctx, body, t)
+		}
+		return refused(http.StatusConflict, "upload_not_received", "nothing was uploaded for this upload")
 	case !matches(body, t):
 		// S3 should have refused bytes that are not the signed checksum. The staging
 		// object stays for a commit after a PUT of the right bytes, or the staging sweep.
-		return false, refused(http.StatusUnprocessableEntity, "upload_mismatch",
+		return refused(http.StatusUnprocessableEntity, "upload_mismatch",
 			"what was uploaded is not the size and sha256 asked for")
 	}
 	url, headers, err := b.presignPut(s3, objectKey, t, readTTL)
 	if err != nil {
-		return false, notConfigured(err.Error())
+		return notConfigured(err.Error())
 	}
 	res, err := b.send(ctx, http.MethodPut, url, body, headers)
 	if err != nil {
-		return false, err
+		return err
 	}
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return false, unavailable(fmt.Sprintf("the S3 store answered %d to the blob's PUT", res.StatusCode))
+		return unavailable(fmt.Sprintf("the S3 store answered %d to the blob's PUT", res.StatusCode))
 	}
-	return true, nil
+	return nil
+}
+
+// stored refuses a content object that is not t's bytes: the store's object is wrong, and
+// the commit neither overwrites it nor indexes it, as Python's `_verified` (#6233) refuses
+// a ref whose object is not its SHA-256 and size and writes no row. A row that named it
+// before stays as it is.
+func stored(ctx context.Context, body []byte, t ticket) error {
+	if matches(body, t) {
+		return nil
+	}
+	slog.WarnContext(ctx, "the store's object is not the bytes its key names; it is left as it is",
+		"kind", t.Kind, "sha256", t.SHA256)
+	return refused(http.StatusServiceUnavailable, "store_object_mismatch",
+		"the store's object at this blob's key is not its bytes; nothing was indexed")
 }
 
 // send is one request to the store. Its error never names the URL, which carries a signature.
