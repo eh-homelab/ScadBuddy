@@ -1338,6 +1338,8 @@ export interface MockPlate {
   // `metrics_models.Outcome`.
   outcome: 'completed' | 'failed' | 'cancelled' | 'unknown'
   printer_id: string | null
+  /** #7685: the plate's metres (`data.length_m`); `null` for a plate booked without one. */
+  length_m?: number | null
 }
 
 /**
@@ -1348,18 +1350,35 @@ export interface MockPlate {
  */
 function platesOf(events: readonly S['SpoolEvent'][]): MockPlate[] {
   const bbJobs = new Set(events.filter((event) => event.ref_kind === 'bb_usage' && event.kind === 'print_ended').map(jobOf))
+  const lengthOf = (event: S['SpoolEvent']) => (typeof event.data?.length_m === 'number' ? event.data.length_m : null)
+  // #7685: Bambuddy's rows carry no length, so a paired plate takes the length of SB's own ends of the
+  // job, summed (one spool can feed several slots of a job, each an end of its own).
+  const sbLengths = new Map<string | null, number>()
+  for (const event of events) {
+    const length = event.kind === 'print_ended' && event.ref_kind === 'print_run' ? lengthOf(event) : null
+    if (length != null) sbLengths.set(jobOf(event), (sbLengths.get(jobOf(event)) ?? 0) + length)
+  }
   return [...events].sort(byTime).flatMap((event) => {
     if (event.kind !== 'print_ended') return []
     const grams = event.delta_g ? -event.delta_g : 0
     if (event.ref_kind === 'bb_usage') {
       const status = event.data?.bb_status
       const outcome = typeof status === 'string' && BB_OUTCOMES.has(status) ? (status as MockPlate['outcome']) : 'unknown'
-      return [{ at: event.at, grams, outcome, printer_id: event.printer_id }]
+      return [{ at: event.at, grams, outcome, printer_id: event.printer_id, length_m: sbLengths.get(jobOf(event)) ?? null }]
     }
     if (event.ref_kind !== 'print_run' || bbJobs.has(jobOf(event)) || event.data?.basis === 'covered') return []
     const failed = event.data?.basis === 'not_applied'
-    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id }]
+    return [{ at: event.at, grams: failed ? 0 : grams, outcome: failed ? 'failed' : 'completed', printer_id: event.printer_id, length_m: lengthOf(event) }]
   })
+}
+
+/** `metrics.DENSITY_TOLERANCE` (#7685): the implied and the type's density apart by more than this is a mismatch. */
+const DENSITY_TOLERANCE = 0.05
+
+/** `metrics.implied_density` (#7685, spec §5.6): `grams / (metres * 100 * pi * (diameter_mm / 20)^2)`, g/cm³; `null` when either is 0 or less. */
+export function impliedDensity(grams: number, metres: number, diameterMm: number): number | null {
+  if (grams <= 0 || metres <= 0 || diameterMm <= 0) return null
+  return grams / (metres * 100 * Math.PI * (diameterMm / 20) ** 2)
 }
 
 /** The grams the plates in `events` used, each spool's plates counted by `platesOf` (`summary`'s `consumed_g`). */
@@ -1455,6 +1474,14 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
   const effective = view(row).effective
   const perKg = effective?.cost_per_kg ?? mockSettings().filament_default_cost_per_kg ?? null
   const labelWeight = effective?.label_weight_g
+  // #7685 (`metrics.spool_metrics`): the metres of the plates with a length over 0 m (a failed
+  // plate's 0 m counts for nothing), and the density their grams imply over the spool's
+  // diameter, against the type's.
+  const lengthed = plates.filter((plate) => plate.length_m != null && plate.length_m > 0)
+  const usedMetres = lengthed.length > 0 ? lengthed.reduce((sum, plate) => sum + (plate.length_m ?? 0), 0) : null
+  const implied = usedMetres != null ? impliedDensity(lengthed.reduce((sum, plate) => sum + plate.grams, 0), usedMetres, Number(effective?.diameter_mm ?? '1.75')) : null
+  const typeDensity = effective?.density_g_cm3 != null ? Number(effective.density_g_cm3) : null
+  const mismatch = implied != null && typeDensity != null && typeDensity > 0 && Math.abs(implied / typeDensity - 1) > DENSITY_TOLERANCE
   const bySeq = [...events].sort((a, b) => a.seq - b.seq)
   const series: S['GramsPoint'][] = bySeq
     .flatMap((event, i) => {
@@ -1487,6 +1514,10 @@ function spoolHistory(row: SpoolRow): S['SpoolHistory'] {
       days_since_last_use: row.last_used_at ? (nowMs - Date.parse(row.last_used_at)) / DAY_MS : null,
       hours_outside_dry: row.hours_outside_dry,
       ams_error: amsError(amsErrors(events, labelWeight)),
+      used_m: usedMetres,
+      implied_density_g_cm3: implied,
+      density_g_cm3: typeDensity,
+      density_mismatch: mismatch,
     },
     type_ams_error: row.type_id
       ? amsError(sameType.flatMap((one) => amsErrors(state.events.filter((event) => event.spool_id === one.id), view(one).effective?.label_weight_g)))
