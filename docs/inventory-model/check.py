@@ -7,7 +7,7 @@ It resolves every example item's class and handlers from kinds.yaml and handlers
 checks every handler's step, class and parameters, every instance, and every
 relationship in examples.yaml (including the ones marked `expect: refused`), then checks
 that README.md's handler table is the one it resolved. It exits 1 on the first rule
-broken. The Go implementation's first test loads these same files (design §8).
+broken. The Go implementation's first test loads these same files (design §7).
 """
 
 from __future__ import annotations
@@ -195,23 +195,28 @@ def accepting_rule(container: str, unit: str, accepts: list[dict]) -> dict | Non
     return None
 
 
-def check_relation(rel: dict, accepts: list[dict], held: dict) -> str | None:
+def check_relation(rel: dict, accepts: list[dict], held: dict) -> tuple[str, str] | None:
+    """None when the relationship is allowed, else (reason code, text). The codes are the
+    `reason:` values a refused relationship in examples.yaml names."""
     t = RTYPES.get(rel["type"])
     if t is None:
-        return f"unknown relationship type {rel['type']}"
+        return "unknown_type", f"unknown relationship type {rel['type']}"
     for end in ("from", "to"):
         why = end_ok(rel[end], t[end])
         if why:
-            return why
+            return "end_not_allowed", why
     if rel["type"] == "contains":
         if rel["to"] in held:
-            return f"{rel['to']} is already in {held[rel['to']]}"
+            return "already_contained", f"{rel['to']} is already in {held[rel['to']]}"
         rule = accepting_rule(rel["from"], rel["to"], accepts)
         if rule is None:
-            return f"{rel['from']} does not accept {rel['to']}"
+            return "not_accepted", f"{rel['from']} does not accept {rel['to']}"
         inside = [u for u, c in held.items() if c == rel["from"] and accepting_rule(c, u, [rule])]
         if rule.get("max") is not None and len(inside) >= rule["max"]:
-            return f"{rel['from']} holds {rule['max']} of {rule['to']} at most, and has {inside}"
+            return (
+                "over_max",
+                f"{rel['from']} holds {rule['max']} of {rule['to']} at most, and has {inside}",
+            )
     return None
 
 
@@ -231,14 +236,16 @@ for inst in X["instances"]:
         raise Broken(f"instance {inst['id']}: is a {inst['type']}, its class counts by {want}")
 
 for rel in X["relations"]:
-    why = check_relation(rel, accepts, held)
+    refusal = check_relation(rel, accepts, held)
     if rel.get("expect") == "refused":
-        if why is None:
+        if refusal is None:
             raise Broken(f"allowed what the design must refuse: {rel}")
-        print(f"refused as expected: {rel['type']} {rel['from']} -> {rel['to']}: {why}")
+        if refusal[0] != rel.get("reason"):
+            raise Broken(f"refused {rel} as {refusal[0]} ({refusal[1]}), not as {rel.get('reason')}")
+        print(f"refused as expected: {rel['type']} {rel['from']} -> {rel['to']}: {refusal[0]}: {refusal[1]}")
         continue
-    if why:
-        raise Broken(f"refused {rel}: {why}")
+    if refusal:
+        raise Broken(f"refused {rel}: {refusal[1]}")
     if rel["type"] == "accepts":
         accepts.append(rel)
     if rel["type"] == "contains":
@@ -337,9 +344,9 @@ for u in TRACKED:
 for ev in X.get("history", []):
     at = ev["at"]
     if ev["do"] == "add":
-        why = check_relation(ev["rel"], accepts, held)
-        if why:
-            raise Broken(f"history {at}: refused {ev['rel']}: {why}")
+        refusal = check_relation(ev["rel"], accepts, held)
+        if refusal:
+            raise Broken(f"history {at}: refused {ev['rel']}: {refusal[1]}")
         held[ev["rel"]["to"]] = ev["rel"]["from"]
         recompute(ev["rel"]["to"], at, "relation")
     elif ev["do"] == "remove":

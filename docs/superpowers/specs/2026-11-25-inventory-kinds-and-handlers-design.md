@@ -368,9 +368,15 @@ Go owns stock; Python calls it.
   write takes an `Idempotency-Key`. The ledger is the existing `crud_requests`
   (`migrations/20261106T1836Z_crud_requests.sql`, `crud/idempotency.py`), kept 7 days for
   the caller `inventory` (24 hours for the others); a repeat returns the stored result.
-  The Python caller writes its own row first, then calls Go with a key derived from that
-  row (`order_item:<id>:parts:<version>`), and Temporal retries a failed call (§6.1a). A
-  caller that must undo its own row on a refusal does so in its own transaction.
+  The caller starts its workflow first, and the workflow's first activity writes the
+  caller's row (§6.1a "Nothing manual, no sweeps"); Go is called with a key derived from
+  that row (the workflow `order_item:<id>:parts:<n>`, each `inventory.Take`
+  `order_item:<id>:parts:<n>:<item>`), and Temporal retries a failed call. A refusal in
+  the first activity rolls back and fails the workflow as non-retryable, so nothing was
+  written and the same id may start again. A refusal by Go after the first activity has
+  committed (a `Take` refused for a business reason) is an answer, not a failure: it is
+  not retried, the workflow's last activity records it on the order
+  (`parts.stock_refused`), the person sees it there, and nothing is rolled back.
 - In Go, a handler runs in the base flow's transaction: every table a handler writes is
   in the same database, written by `scadbuddy-core`.
 
@@ -386,9 +392,9 @@ gives us the visibility into the Activities tab in SB".
   GA, read 2026-11-25). Every stock write that crosses from Python to Go is one: the
   Python caller starts the Go activity by its type name (`inventory.Receive`,
   `inventory.Take`, `inventory.GiveBack`, `inventory.Recost`, `inventory.Repoint`, …) on
-  the task queue `inventory`. A public route waits for the result inline
-  (`client.execute_activity`); a background settle starts it and returns
-  (`client.start_activity`). Reads stay plain HTTP on the internal routes.
+  the task queue `inventory`. A public route starts it (`client.start_activity`) and
+  waits up to 15 s for the result, then answers 202 ("A slow write" below); a workflow
+  runs it as a step by the same type name. Reads stay plain HTTP on the internal routes.
 - **Go runs the activities.** `scadbuddy-core` gets a Temporal client and a worker for
   the `inventory` queue. Each activity runs the base flow in its own database
   transaction, so the activity is the Go code itself, with no second HTTP hop. The same
@@ -413,10 +419,15 @@ gives us the visibility into the Activities tab in SB".
   no state ever needs a sweep, a backstop, a repair loop or a person to settle it.
 - **Orders.** Fulfilling an order item starts the workflow `FulfilOrderItem` with the
   item's key. Its steps: a Python activity that commits the order change; the Go activity
-  `inventory.Take`; a Python activity that records `parts.used`. Temporal retries each
-  step until it succeeds. If the workflow does not finish in 15 s, fulfil answers 202
+  `inventory.Take`; a Python activity that records `parts.used`. Temporal retries a step
+  that fails; a refusal is an answer, not a failure. A refusal in the first activity ends
+  the workflow as failed (a non-retryable error carrying the problem), with nothing
+  written, so the same id can start again once the cause is fixed. A refusal of `Take`
+  is recorded by the last activity as `parts.stock_refused`, which the order shows; the
+  order change stays, and nothing is rolled back. If the workflow does not finish in 15 s, fulfil answers 202
   ("stock still settling") and the order settles by itself when the workflow ends. If the start itself fails, the fulfil call answers an error
-  and the person retries; the fulfil is idempotent.
+  and nothing was written; a client that sends it again does its own idempotent retry,
+  not a repair.
 - **Merges.** An entity or printer merge is a workflow too: it first executes
   `inventory.Repoint` (move the stock rows from the old id to the kept one), then an
   activity runs the merge's own transaction and deletes the old row. Calling Go from inside the merge's locked transaction would make the two
@@ -425,10 +436,13 @@ gives us the visibility into the Activities tab in SB".
   repeats the first step. The foreign key protects only `stock_moves.entity_id`.
   `stock_units.printer_id` is `ON DELETE SET NULL`, so a delete would clear it, not
   fail. So the printer merge locks the gone printer's row `FOR UPDATE`, then checks
-  whether a stock row names it; if one does, it executes `inventory.Repoint` first. The
-  printer merge runs inside its callers' transactions (`printers/store.py` l.667, l.949),
-  so it rolls back, executes `inventory.Repoint` with no transaction open, and runs
-  again, at most 3 times (plan K1, R-K1-15, R-K1-25).
+  whether a stock row names it; if one does, it rolls back, and the workflow executes
+  `inventory.Repoint` again (with a new key per round) and runs the merge again. There is
+  no cap: only a stock write racing the merge repeats it, and the workflow ends only once
+  the merge has committed (owner, 2026-11-25; plan K1, R-K1-29). A round repeats only
+  after a new stock write named the gone printer, and the workflow waits between rounds
+  (`workflow.sleep`, doubling from 1 s to 60 s), so a busy stock writer cannot spin it. The callers that need the
+  kept row (`link_bambuddy`, `ensure_bambuddy_written`) wait on the workflow's result.
 - **Visibility.** It is not automatic; every feature writes its own record row and the
   activity record follows it. Renders, print runs and the backend's operations write an
   `activity` row in the same transaction as their own row (`ActivityIndex.upsert_in`, for
@@ -524,7 +538,7 @@ and examples of every thing named in §2 G1 with instances and relationships. It
 `check.py` resolves every item's handlers by §4.2, checks every handler's step, class and
 parameters, every instance and every relationship (each container field's `max`
 included), checks that five relationships the design must refuse are refused for their
-stated reason, and checks that the README's table is the resolved one. On 2026-11-25 it
+stated reason (each entry's `reason` code is the rule that refuses it), and checks that the README's table is the resolved one. On 2026-11-25 it
 passed (`uvx --with pyyaml python -I docs/inventory-model/check.py`): 33 kinds, 38
 handlers, 16 items, 17 instances, 16 relationships, and a history of 16 events whose 6
 unit lives, 21 value history rows, the parameter history, and 16 property history rows (8
