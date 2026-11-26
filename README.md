@@ -2879,9 +2879,10 @@ holds the manifests. Phase 1 added two Deployments, the relay and the recorders.
   the printers' LAN (RTSPS, port 322 on the H2C, spec §2), the API's CRUD port 8082, and DNS.
   The recorders: egress to the relay's 8554, the API's 8082, the bucket and DNS; no ingress
   but the metrics scrape on 9090. Temporal egress is phase 4's. The relay's 8554 also
-  admits the edge's pods. The edge: ingress on 8888 and 8889 from the API's pods only (with
-  the edge read password, the two guards for the HLS session id, which acts as a bearer key
-  once made and which only the API's proxy sees), 8189/udp from the browsers' networks, and
+  admits the edge's pods. The edge: ingress on 8888 and 8889 from the API's pods only, beside
+  the edge read password. An HLS session id acts as a bearer key once made: the browser gets
+  it in the proxied playlists, and the edge admits a request that names it without the read
+  password, so this policy alone keeps it from being used from other pods. Also 8189/udp from the browsers' networks, and
   the scrape on 9090; egress to the relay's 8554, the API's 8082 and DNS.
 
 ### Switching continuous deploy off

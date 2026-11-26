@@ -5,10 +5,12 @@
 # WebRTC (WHEP, :8889, ICE over UDP :8189) and LL-HLS (:8888). Keys:
 # https://github.com/bluenviron/mediamtx/blob/v1.21.4/mediamtx.yml
 #
-# The browser never reaches this pod: the API proxies `/api/v1/camera/live/{printer_id}/...`
-# to it. A NetworkPolicy in eh-homelab/clusters admits only the API to :8888 and :8889, and
-# the API must also send the edge read user's password (HTTP Basic), so the edge fails
-# closed without the policy.
+# The browser never reaches this pod's HTTP ports (:8888, :8889): the API proxies
+# `/api/v1/camera/live/{printer_id}/...` to them. Browsers reach only UDP :8189 (WebRTC
+# media). A NetworkPolicy in eh-homelab/clusters admits only the API to :8888 and :8889, and
+# the API must also send the edge read user's password (HTTP Basic). A request that names an
+# HLS session id passes without that password, and the browser gets the id in the proxied
+# playlists, so only the NetworkPolicy keeps such a request from other pods.
 #
 # The read user and the address browsers reach for ICE come from the environment. MediaMTX
 # reads no variables inside this file; it overrides a key from `MTX_<KEY>`, and a list entry

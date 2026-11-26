@@ -2,6 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+## Changes during execution
+
+These decisions replace the task text below. The task bodies are kept as written; where they disagree, this list and the code are correct.
+
+- **Edge read password.** The edge's HLS and WHEP ports need a read password: an `any` user with no password (Global Constraints, Task 3 Config) was replaced by the edge read user (`MTX_AUTHINTERNALUSERS_0_*`), and the API sends it as HTTP Basic auth. The API reads four settings: `SCADBUDDY_CAMERA_EDGE_WHEP_URL`, `SCADBUDDY_CAMERA_EDGE_HLS_URL`, `SCADBUDDY_CAMERA_EDGE_READ_USER` and `SCADBUDDY_CAMERA_EDGE_READ_PASS`. The NetworkPolicy stays: a request that names an HLS session id passes without the password.
+- **Pull lifetime.** The edge sets `hlsMuxerCloseAfter: 10s`. The e2e checks that the relay loses the edge's reader within 60 s of the last request, not 20 s (Task 3 e2e; measured 48.5 s).
+- **HLS query keys.** The proxy passes `_HLS_msn`, `_HLS_part`, `_HLS_skip`, `session` and `cookieCheck` (Task 4). MediaMTX names the session in `session` and checks cookies with `cookieCheck`.
+- **HLS name regex.** The proxy uses `[A-Za-z0-9_-]{1,128}\.(?:m3u8|mp4|m4s)`, from the names MediaMTX v1.21.4 serves (`index.m3u8`, `video1_stream.m3u8`, `<hex>_video1_seg<N>.mp4` …), not the Task 4 regex.
+- **`camera_live`.** It is true when the printer is recorded and all four edge settings are set (`Settings.camera_edge_ready()`), not only the edge URL (Task 5).
+
 **Goal:** Show each recorded printer's live camera in ScadBuddy without Bambuddy: a live edge reads the relay, the API proxies WHEP and LL-HLS on ScadBuddy's own origin, and the camera dialog plays it, with the feed state and a "Reconnect" button.
 
 **Architecture:** A third camera deployment, `scadbuddy-camera-edge`, runs MediaMTX (WebRTC and LL-HLS, reading each printer's path from the relay on demand) and a small controller that follows the camera change stream with `crud.camera`. The API proxies the browser's WHEP exchange and HLS requests to the edge under `/api/v1/camera/live/...`, after its session check. The browser tries WebRTC first and falls back to LL-HLS (hls.js) when ICE does not connect, so phase 3 works whether or not the cluster lets WebRTC media reach browsers. A session route reads the feed state; a reconnect route emits `camera.reconnect`, which makes the relay restart that printer's pull.
