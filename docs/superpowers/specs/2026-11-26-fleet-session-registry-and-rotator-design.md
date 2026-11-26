@@ -196,11 +196,16 @@ Where the accounts live:
   - `fleet_session_hosts`: `session_id` (a fleet agent), machine, pid, `procStart`, cwd, config
     dir, transcript path, git remote, branch, worktree root and HEAD, Claude Code version,
     kind, entrypoint, name, status, the credential in use (id), the account uuid, the last rate
-    limit and its reset, last seen. A session that moves (`/clear` gives a new id under the same
-    pid) gets a new row, linked to the old one by pid and `procStart`.
+    limit and its reset, last seen. A row is keyed by session and machine: one session id can run
+    on several machines at once (measured 2026-11-26: fleet session `b79d1dcc` posts from both
+    spark and a laptop), and each machine writes only its own row
+    (`PUT …/fleet-rotator/machines/{machine_id}/sessions/{session_id}`). A session that moves
+    (`/clear` gives a new id under the same pid) gets a new row on that machine, linked to the
+    old one by pid and `procStart`.
 - The service writes through `fleet-rotator`'s routes; the fleet server reads through new
-  `fleet` routes (`GET /sessions`, `GET /sessions/{id}`), which return the credential's id,
-  name, kind and last four characters, never the secret.
+  `fleet` routes (`GET /sessions`, `GET /sessions/{id}`). They return each session once, with
+  one host per machine, and give the credential's id, name, kind and last four characters, never
+  the secret.
 - **Touched items stay server-side (owner).** The registry feeds #7971: the session's git remote
   and worktree become its repo context (#7971 part 4, step 2), and its cwd links its files to a
   repo (part 5). The service sends no touched items of its own.
