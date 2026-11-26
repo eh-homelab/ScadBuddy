@@ -195,6 +195,8 @@ interface Props {
   onCancel?: () => void
   /** #2484 — a trigger's standing grant: up to 30 days, 7 by default, and no starting session to ask. */
   standing?: boolean
+  /** #7471 — a run a person starts here: it has no starting session to let answer. */
+  personStarts?: boolean
 }
 
 /**
@@ -231,6 +233,7 @@ function Form({
   onSubmit,
   onCancel,
   standing = false,
+  personStarts = false,
   outwardTools,
 }: Props & { outwardTools: string[] }) {
   const maxMs = standing ? MAX_STANDING_GRANT_MS : MAX_GRANT_MS
@@ -321,6 +324,7 @@ function Form({
             onChange={setAnswerers}
             label="Who else may answer its questions"
             empty="People only, unless the setting says otherwise."
+            starter={!personStarts}
           />
         </div>
       )}

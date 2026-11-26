@@ -166,7 +166,12 @@ class RemoteFlowStore:
             "held": held.model_dump(mode="json"),
             "seen": seen,
         }
-        response = await self._send("POST", "/decisions/take-over", json=body)
+        try:
+            response = await self._send("POST", "/decisions/take-over", json=body)
+        except CrudRefusedError as error:
+            if error.status == 409 and error.problem.get("reason") == GRANT_LAPSED:
+                raise GrantLapsedError(decision.request_id) from error
+            raise
         return bool(response.json()["recorded"])
 
     async def withdraw_decision(self, decision: Decision) -> None:

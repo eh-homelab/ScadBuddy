@@ -346,7 +346,8 @@ def run_grant_view(grant: Grant, uses: list[GrantUse], in_force: bool) -> GrantV
 
 class AnswerBy(BaseModel):
     """Who answered a run's question: `browser` for a person, `session:<id>` or
-    `token:<id>` for an agent, and what admitted the agent (`setting`)."""
+    `token:<id>` for an agent, and what admitted the agent (`setting`, or the id of the
+    run's grant)."""
 
     call_id: str
     answered_by: str
@@ -1269,7 +1270,8 @@ def browser_only(
     # Spec §6.6, plan 6 Ruling 6: a flow's approvals and grants are decided on the
     # Workflows page, never by an agent, whatever grant it holds; nor by a service
     # credential or the agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
-    # Its questions go by the setting `flow_answerers` (#7471, `answerer`, `admit`).
+    # Its questions go by the setting `flow_answerers` or the run's grant (#7471, `answerer`,
+    # `admit`).
     if not by_a_person():
         raise ApiError(status.HTTP_403_FORBIDDEN, detail, type_=type_)
 
@@ -1290,12 +1292,13 @@ def agent_answer(found: Answerer, admitted_by: str) -> dict[str, Any]:
 
 async def admission(
     found: Answerer, settings: SettingsStore, flows: Flows, run_id: str, call_id: str
-) -> tuple[str, ApiError | None]:
+) -> tuple[str, Exception | None]:
     """`admit`, read once before the operation: what admits the agent, and the refusal a
-    new request gets (`before_start` raises it; a repeat gets its first answer)."""
+    new request gets (`before_start` raises it). A repeat gets its first answer, also when
+    the reads failed (a database error is the new request's refusal too)."""
     try:
         return await admit(found, settings, flows, run_id, call_id), None
-    except ApiError as error:
+    except Exception as error:
         return BY_SETTING, error
 
 
@@ -1373,7 +1376,8 @@ async def answer_flow_run(
     idempotency_key: IdempotencyKey = None,
 ) -> Decided | JSONResponse:
     """A person answers; an assistant session or MCP token only when the setting
-    `flow_answerers` names it and the question is not for people only (#7471)."""
+    `flow_answerers` or the run's approved grant names it and the question is not for
+    people only (#7471)."""
     found = answerer(caller)
     if await _asks_a_task(tasks, body.call_id):
         # Its answer is checked against the task's schema there, and never reaches the run

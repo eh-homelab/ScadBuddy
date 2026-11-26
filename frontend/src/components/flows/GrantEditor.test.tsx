@@ -83,6 +83,13 @@ describe('GrantEditor', () => {
     expect(screen.queryByRole('group', { name: 'Who else may answer its questions' })).not.toBeInTheDocument()
   })
 
+  it('offers no starting session to answer for a run a person starts (#7471)', async () => {
+    renderPage(<GrantEditor personStarts submitLabel="Start run" onSubmit={vi.fn()} />)
+    const who = await screen.findByRole('group', { name: 'Who else may answer its questions' })
+    expect(within(who).queryByRole('checkbox', { name: 'The session that started the run' })).toBeNull()
+    expect(within(who).getByRole('checkbox', { name: 'Any of your assistant sessions' })).toBeInTheDocument()
+  })
+
   it('warns in red about a rule with no bounds, until one is set', async () => {
     const { user } = render()
     const arrange = await rule('arrange')

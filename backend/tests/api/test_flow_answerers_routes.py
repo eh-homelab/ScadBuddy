@@ -10,6 +10,7 @@ import base64
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import psycopg
 import pytest
@@ -191,6 +192,7 @@ def test_sessions_admits_a_browser_users_session(
     if entry["task"] is not None:
         task = client.get(f"/api/v1/tasks/{entry['call_id']}").json()
         assert task["answered_by"] == f"session:{MINE}"
+        assert task["admitted_by"] == "setting"
 
 
 def test_each_rule_admits_its_answerer_and_no_other(
@@ -379,6 +381,9 @@ def test_an_approved_grant_admits_its_answerer_and_is_recorded(
     assert decision(app, run_id) == {"responder": f"session:{MINE}", "admitted_by": by}
     done = until(client, run_id, lambda v: v["status"] == "succeeded")
     assert done["answers"][0]["admitted_by"] == by
+    if entry["task"] is not None:
+        task = client.get(f"/api/v1/tasks/{entry['call_id']}").json()
+        assert (task["answered_by"], task["admitted_by"]) == (f"session:{MINE}", by)
 
 
 def test_a_grant_admits_only_whom_it_names(
@@ -464,3 +469,34 @@ def test_a_grant_revoked_after_the_route_records_nothing(
     # A grant that is not the run's lets nothing through either.
     with pytest.raises(GrantLapsedError):
         asyncio.run(store.record_decision(made("another-grant")))
+
+
+def test_a_take_over_checks_the_grant_and_a_put_back_does_not(
+    app: FastAPI, client: TestClient, credential: str
+) -> None:
+    """An agent's take-over of its own answer that never landed is a new answer: its grant
+    must still be in force. A put-back (`seen` None) restores an answer that landed."""
+    run_id, entry = waiting(client, "await wait_for_human('Swap?')", answers_grant("sessions"))
+    by = grant_id(client, run_id)
+    execution = client.get(f"/api/v1/workflow-runs/{run_id}").json()["run"]["workflow_run_id"]
+    store = FlowStore(getattr(app.state, STATE_ATTR).settings_store.pool)
+    held = Decision(
+        request_id=f"flow:{run_id}:{execution}:{entry['call_id']}",
+        run_id=run_id,
+        workflow_run_id=execution,
+        call_id=entry["call_id"],
+        kind="answer",
+        outcome="answered",
+        response={"answer": "no"},
+        responder=f"session:{MINE}",
+        admitted_by=by,
+    )
+    assert asyncio.run(store.record_decision(held))
+    assert client.post(f"/api/v1/workflow-runs/{run_id}/grant/revoke").status_code == 200
+    again = held.model_copy(update={"response": {"answer": "yes"}})
+    with pytest.raises(GrantLapsedError):
+        asyncio.run(store.take_over_decision(again, held=held, seen=[]))
+    assert asyncio.run(store.get_decision(held.request_id)) == held.model_copy(
+        update={"created_at": ANY}
+    )
+    assert asyncio.run(store.take_over_decision(again, held=held, seen=None))

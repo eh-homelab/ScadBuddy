@@ -279,11 +279,15 @@ async def record_decision(body: DecisionWrite, flows: FlowsDep) -> Recorded:
             reason=HOP_MOVED,
         ) from None
     except GrantLapsedError:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            "The run grant that let this answer through is no longer in force.",
-            reason=GRANT_LAPSED,
-        ) from None
+        raise _grant_lapsed() from None
+
+
+def _grant_lapsed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The run grant that let this answer through is no longer in force.",
+        reason=GRANT_LAPSED,
+    )
 
 
 @router.post("/decisions/grant", name="crud_projects_record_grant_decision")
@@ -305,7 +309,10 @@ async def answer_allowed(body: AnswererAsk, flows: FlowsDep) -> Allowed:
 
 @router.post("/decisions/take-over", name="crud_projects_take_over_decision")
 async def take_over_decision(body: TakeOver, flows: FlowsDep) -> Recorded:
-    taken = await flows.store.take_over_decision(body.decision, held=body.held, seen=body.seen)
+    try:
+        taken = await flows.store.take_over_decision(body.decision, held=body.held, seen=body.seen)
+    except GrantLapsedError:
+        raise _grant_lapsed() from None
     return Recorded(recorded=taken)
 
 

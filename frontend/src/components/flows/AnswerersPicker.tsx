@@ -14,7 +14,8 @@ const TOKEN = 'token:'
  * #7471 — who besides a person may answer a flow's questions: the session that started the
  * run, any of the person's sessions, or named MCP tokens. The setting `flow_answerers` and a
  * run grant's `answers` both use it. A token that is revoked or gone stays shown while the
- * list holds it, so it can be removed.
+ * list holds it, so it can be removed. Without `starter` (a run a person starts), the starting
+ * session is not offered: no session matches it there.
  */
 export function AnswerersPicker({
   id,
@@ -22,12 +23,14 @@ export function AnswerersPicker({
   onChange,
   label = 'Who else may answer',
   empty = 'People only: nothing is chosen.',
+  starter = true,
 }: {
   id: string
   rules: readonly string[]
   onChange: (rules: string[]) => void
   label?: string
   empty?: string
+  starter?: boolean
 }) {
   const tokens = useAsync(() => api.listMcpTokens(), [])
   const held = rules.filter((rule) => rule.startsWith(TOKEN)).map((rule) => rule.slice(TOKEN.length))
@@ -54,7 +57,7 @@ export function AnswerersPicker({
       <span className="text-xs text-muted-foreground">
         {rules.length === 0 ? empty : "A question the flow asks of people only is still a person's."}
       </span>
-      {RULES.map(({ rule, label: text }) => (
+      {RULES.filter(({ rule }) => starter || rule !== 'starter').map(({ rule, label: text }) => (
         <label key={rule} className="flex items-center gap-2 text-sm">
           <Checkbox aria-label={text} checked={rules.includes(rule)} onCheckedChange={(c) => toggle(rule, c === true)} />
           <span>{text}</span>

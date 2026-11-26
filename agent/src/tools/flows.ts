@@ -499,7 +499,7 @@ export const flowTools: Tool[] = [
     description:
       'One flow run: its record, and `pending`, what it waits on now (a question for a person, or an approval). ' +
       'People approve on the Workflows page, never through a tool. A question whose `people_only` is false may be ' +
-      "answered with answer_flow_question when the user's setting flow_answerers allows it. To go back to an " +
+      "answered with answer_flow_question when the user's setting flow_answerers or the run's approved grant allows it. To go back to an " +
       'earlier point, see preview_flow_reset.',
     input: z.object({ run_id: runId }),
     risk: 'read',

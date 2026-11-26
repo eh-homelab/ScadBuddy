@@ -15,7 +15,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import psycopg
@@ -487,7 +487,8 @@ class FlowStore:
         but those `seen`, under the row's lock. An approval or denial only while the call
         waits too, under the run's lock. With `seen` None, whatever operations it has:
         `decision`'s Update is in the run; an approval is never put back so. True too when
-        the row has `decision` already; False otherwise."""
+        the row has `decision` already; False otherwise. A take-over by an answer that a
+        grant admitted raises `GrantLapsedError` unless the grant is in force."""
         return await asyncio.to_thread(self._take_over_decision, decision, held, seen)
 
     async def withdraw_decision(self, decision: Decision) -> None:
@@ -943,6 +944,9 @@ class FlowStore:
 
     def _record_decision(self, decision: Decision, at_hop: Hop | None = None) -> bool:
         with self._pool.connection() as conn, conn.transaction():
+            # Before the insert, which key-share-locks the run's row: the grant first, as
+            # `_record_grant_decision` and `_delete_run` lock them.
+            grant = self._lock_admitting_grant(conn, decision)
             if at_hop is not None:
                 locked = conn.execute(
                     "SELECT waiting_on FROM workflow_runs WHERE id = %s FOR UPDATE",
@@ -975,8 +979,9 @@ class FlowStore:
                 ),
             ).fetchone()
             if row is not None:
-                if decision.kind == "answer" and decision.admitted_by not in (None, BY_SETTING):
-                    self._grant_admits(conn, decision)
+                if grant is not False:
+                    # Only a new answer: one recorded already stands, whatever the grant is now.
+                    self._grant_admits(decision, grant)
                 return True
             # In SQL: jsonb writes some numbers (1e23) another way than they came. Locked: a
             # take-over under way ends first, and a later one sees this caller's operation.
@@ -988,21 +993,29 @@ class FlowStore:
             ).fetchone()
         return held is not None and bool(held["same"])
 
-    def _grant_admits(self, conn: Connection[DictRow], decision: Decision) -> None:
-        """`GrantLapsedError` (which rolls the insert back) unless the run grant
-        `decision.admitted_by` is the run's, still lets agents answer, and is in force with
-        its chain. Its row is share-locked, so a revocation lands wholly before or after."""
+    def _lock_admitting_grant(
+        self, conn: Connection[DictRow], decision: Decision
+    ) -> tuple[Grant | None, bool] | Literal[False]:
+        """For an answer that a run grant admitted (`admitted_by` its id): that grant, if it
+        is the run's, share-locked so a revocation lands wholly before or after, and whether
+        it and its chain are in force now. False for any other decision."""
+        if decision.kind != "answer" or decision.admitted_by in (None, BY_SETTING):
+            return False
         row = conn.execute(
             f"SELECT {_GRANT} FROM flow_grants WHERE id = %s AND run_id = %s FOR SHARE",
             (decision.admitted_by, decision.run_id),
         ).fetchone()
-        grant = None if row is None else Grant.model_validate(row)
-        if (
-            grant is None
-            or grant.spec.answers is None
-            or not grant.in_force(datetime.now(UTC))
-            or not self._chain_in_force(conn, grant)
-        ):
+        if row is None:
+            return None, False
+        grant = Grant.model_validate(row)
+        return grant, grant.in_force(datetime.now(UTC)) and self._chain_in_force(conn, grant)
+
+    @staticmethod
+    def _grant_admits(decision: Decision, locked: tuple[Grant | None, bool]) -> None:
+        """`GrantLapsedError` (which rolls the write back) unless the grant locked by
+        `_lock_admitting_grant` still lets agents answer and is in force with its chain."""
+        grant, in_force = locked
+        if grant is None or grant.spec.answers is None or not in_force:
             raise GrantLapsedError(decision.request_id)
 
     def _answers_of(self, run_id: str) -> list[Decision]:
@@ -1263,6 +1276,10 @@ class FlowStore:
         if decision.kind == "approval" and seen is None and decision.outcome != "denied":
             return False
         with self._pool.connection() as conn, conn.transaction():
+            # A take-over is a new answer, so its grant is checked as `_record_decision`
+            # checks it, and locked first as there. Putting back (`seen` None) restores an
+            # answer that landed, whatever its grant is now.
+            grant = self._lock_admitting_grant(conn, decision) if seen is not None else False
             # The run's row first, as `_record_decision` locks them.
             waits = decision.kind == "answer" or seen is None or self._waits(conn, decision)
             row = conn.execute(
@@ -1282,6 +1299,8 @@ class FlowStore:
             ).fetchone()
             if not waits or not row["held"] or unseen is not None:
                 return False
+            if grant is not False:
+                self._grant_admits(decision, grant)
             conn.execute(
                 "UPDATE workflow_run_decisions SET outcome = %s, response = %s, input_hash = %s,"
                 " hops = %s, created_at = coalesce(%s, now()), responder = %s, admitted_by = %s"

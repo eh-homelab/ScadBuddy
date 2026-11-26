@@ -378,7 +378,7 @@ only the sleeps move; a budget on the real clock fails on a slow runner (#6252).
   `validate.py` (`validate_answer`: its problems never quote a value), `store.py`
   (`TaskStore`, the table `tasks`), `component.py` (`TASKS`, `TasksDep`). Routes
   `api/tasks.py`: `GET /tasks` (`TaskQuestion`s), `GET /tasks/{id}` and `POST /tasks/{id}/answer`
-  (a person, or an agent that `flow_answerers` admits, `api/flows.py` `answerer` and `admit`;
+  (a person, or an agent that `flow_answerers` or the run's grant admits, `api/flows.py` `answerer` and `admit`;
   the answer sealed into the operation). The projects
   worker's area `tasks` is `api/crud_tasks.py` (`…/projects/tasks`, its `/{id}/close` and
   `/{id}/answered`), client `crud/tasks.py` `RemoteTasks`; the area is in the worker's
