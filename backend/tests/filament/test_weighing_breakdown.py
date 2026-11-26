@@ -489,6 +489,28 @@ def test_archiving_with_a_final_reading_books_the_weighing_then_the_closing(
 
 
 @pg
+def test_the_final_weighing_is_never_the_closings_start(pg_pool: PgPool) -> None:
+    """A spool added full and never weighed before its archive: the archive's own final
+    weighing is the first manual reading on record, and must not become ``started_g``
+    (the closing would then say 0 g consumed). The closing is computed on the events
+    before that weighing, so it starts from the label and matches the preview."""
+    spool = _spool(pg_pool, _insert(pg_pool), added_full=True)
+    _print(pg_pool, spool, 8, T0 + H, "r")
+    store = _store(pg_pool)
+    preview = store.closing_preview(spool, "finished", final_reading_g=230, final_grams=None)
+    assert preview is not None
+    store.archive(spool, True, actor="t", reason="finished", final_reading_g=230)
+    archived = store.events(spool)[-1]
+    assert archived.kind == "archived"
+    assert archived.data["started_g"] == 1000 and archived.data["started_from"] == "label"
+    assert archived.data["ledger_consumed_g"] == 8 and archived.data["final_filament_g"] == 30
+    assert archived.data["scale_consumed_g"] == 970 and archived.data["drift_g"] == pytest.approx(
+        -962
+    )
+    assert archived.data == preview.closing.model_dump(mode="json")
+
+
+@pg
 def test_archiving_without_a_reading_closes_on_the_ledger(pg_pool: PgPool) -> None:
     spool = _spool(pg_pool, _insert(pg_pool))
     _weighed_once(pg_pool, spool)

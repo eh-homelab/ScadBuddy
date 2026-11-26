@@ -458,13 +458,16 @@ def _closing_on(
     final_filament_g: float | None,
     *,
     grams_left: bool = True,
+    events: Sequence[m.SpoolEvent] | None = None,
 ) -> dict[str, Any]:
     """The spool's closing now (`ledger.closing`, #7684): with ``final_filament_g`` the
-    final weighing's filament, else, when ``grams_left``, on the spool's grams left."""
+    final weighing's filament, else, when ``grams_left``, on the spool's grams left.
+    ``events`` are the ledger to close on when the caller read it already: `archive`
+    reads them before it books the final weighing, which must not become the start."""
     spool = _closing_inputs(conn, spool_id)
     assert spool is not None
     return ledger.closing(
-        ledger.events(conn, spool_id),
+        ledger.events(conn, spool_id) if events is None else events,
         label_weight_g=spool["label_weight_g"],
         added_full=spool["added_full"],
         final_filament_g=final_filament_g,
@@ -1334,6 +1337,10 @@ class FilamentSpoolStore:
             if current is None:
                 return None
             if current["archived_at"] is None:
+                # The ledger before the final weighing: `ledger.closing` starts from the
+                # first manual reading, which the final weighing would otherwise be on a
+                # spool never weighed before (the review of #7844).
+                before = ledger.events(conn, spool_id)
                 final: float | None = None
                 if final_reading_g is not None or final_grams is not None:
                     weighing = m.SpoolEventAdd(
@@ -1345,7 +1352,7 @@ class FilamentSpoolStore:
                     weighed = self._weigh_on(conn, spool_id, weighing, actor, {})
                     assert weighed is not None
                     final = weighed.grams_after
-                closing = _closing_on(conn, spool_id, reason, final)
+                closing = _closing_on(conn, spool_id, reason, final, events=before)
                 self._archive(conn, current, True, actor, data=closing)
             return self._spool(conn, spool_id, defaults, self._clock())
 
