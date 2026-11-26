@@ -9,6 +9,7 @@ import { INVOICE, LINE, SUPPLIER } from '../../mocks/features/filamentPurchasing
 import { ORDER_CLOSED } from '../../mocks/features/orders/state'
 import { mockSettings, setMockSettings } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
+import { entityMock } from '../../mocks/features/entities'
 import { rememberAdvanced } from '../../test/advanced'
 import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
@@ -133,22 +134,22 @@ describe('the spool page', () => {
     expect((await getSpool(spoolId(4))).added_full).toBe(false)
   })
 
-  it('resets an overridden colour with one PATCH of null, and the mark stays until the answer', async () => {
+  it('resets an overridden colour with one unchecked bulk-update of null, and the mark stays until the answer (#7703)', async () => {
     await patchSpool(spoolId(3), { rgba: '#112233FF' })
     const edited = (await listSpoolEvents(spoolId(3))).filter((event) => event.kind === 'edited').length
-    const patches = recorded('PATCH', /\/spools\//)
+    const patches = recorded('POST', /\/spools\/bulk-update$/)
     let release!: () => void
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
     // Holds the answer; a resolver that returns nothing falls through to the mock.
-    server.use(http.patch('*/api/v1/filament/spools/:id', async () => { await gate }))
+    server.use(http.post('*/api/v1/filament/spools/bulk-update', async () => { await gate }))
     const { user } = open(3)
     await heading(3)
     const field = () => document.querySelector('[data-field="rgba"]') as HTMLElement
     expect(within(field()).getByText('Set on this spool')).toBeInTheDocument()
     await user.click(within(field()).getByRole('button', { name: 'Reset Colour to type' }))
-    await waitFor(() => expect(patches).toEqual([{ rgba: null }]))
+    await waitFor(() => expect(patches).toEqual([{ spool_ids: [spoolId(3)], patch: { rgba: null } }]))
     expect(within(field()).getByText('Set on this spool')).toBeInTheDocument()
     release()
     await waitFor(() => expect(within(field()).queryByText('Set on this spool')).toBeNull())
@@ -160,7 +161,7 @@ describe('the spool page', () => {
   it('keeps the mark and shows the refusal when the reset is refused', async () => {
     await patchSpool(spoolId(3), { rgba: '#112233FF' })
     server.use(
-      http.patch('*/api/v1/filament/spools/:id', () =>
+      http.post('*/api/v1/filament/spools/bulk-update', () =>
         HttpResponse.json({ type: 'about:blank', title: 'Conflict', status: 409, detail: 'the spool changed under you' }, { status: 409, headers: { 'Content-Type': 'application/problem+json' } }),
       ),
     )
@@ -856,5 +857,69 @@ describe("the spool page's Advanced toggle", () => {
     await user.click(screen.getByRole('button', { name: 'Discard changes' }))
     expect(screen.queryByLabelText('Diameter (mm)')).toBeNull()
     expect(screen.queryByRole('checkbox', { name: /Lock the weight/ })).toBeNull()
+  })
+
+  describe('defined and required properties (#7703)', () => {
+    it('saves the row and its defined properties with one request', async () => {
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const posts = recorded('POST', /\/filament\/spools\/bulk$/)
+      const { user } = render('/filament/spools/new')
+      await choose(user, await screen.findByRole('combobox', { name: 'Type' }), /BL-PLA-BASIC-HOT-PINK/)
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      expect(await screen.findByText('Fill the required properties first: lot_number.')).toBeVisible()
+      expect(screen.getByLabelText('lot_number')).toHaveAttribute('aria-invalid', 'true')
+      await user.type(screen.getByLabelText('lot_number'), 'L-7')
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(async () => expect((await listSpools()).length).toBe(12))
+      expect(posts.at(-1)).toMatchObject({ quantity: 1, spool: { properties: { lot_number: 'L-7' } } })
+      const made = (await listSpools()).find((one) => one.number === 20)!
+      expect(entityMock.properties.get(`spool:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['lot_number', 'L-7']])
+    })
+
+    it('an edit sends a changed defined property with its PATCH', async () => {
+      const patches = recorded('PATCH', new RegExp(`/filament/spools/${spoolId(1)}$`))
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('lot_number'), 'L-9')
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'lot_number')?.value).toBe('L-9'))
+      expect(patches).toEqual([{ properties: { lot_number: 'L-9' } }])
+    })
+
+    // #7809 review: `before` is what was sent, so a blank list item does not keep the form dirty.
+    it('is clean after saving a list with a blank trailing item', async () => {
+      entityMock.schemas.spool = { type: 'object', properties: { barcodes: { type: 'array', items: { type: 'string' } } } }
+      const { user } = open(1)
+      await user.type(await screen.findByLabelText('barcodes item 1'), ' x')
+      await user.click(screen.getByRole('button', { name: 'Add barcodes item' }))
+      await user.click(screen.getByRole('button', { name: 'Save spool' }))
+      await waitFor(() => expect(entityMock.properties.get(`spool:${spoolId(1)}`)?.find((p) => p.key === 'barcodes')?.value).toEqual(['x']))
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Save spool' })).toBeDisabled())
+    })
+
+    it('resets a field to its type on a spool its required keys leave incomplete', async () => {
+      await patchSpool(spoolId(3), { rgba: '#112233FF' })
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const { user } = open(3)
+      await heading(3)
+      const field = () => document.querySelector('[data-field="rgba"]') as HTMLElement
+      await user.click(within(field()).getByRole('button', { name: 'Reset Colour to type' }))
+      await waitFor(async () => expect((await getSpool(spoolId(3))).overridden).not.toContain('rgba'))
+    })
+
+    it('create type from spool asks for the required keys and sends them', async () => {
+      entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+      entityMock.schemas.spool = { ...entityMock.schemas.spool!, required: ['lot_number'] }
+      const { user } = open(6)
+      await heading(6)
+      await user.click(screen.getByRole('button', { name: 'Create type from this spool' }))
+      const dialog = await screen.findByRole('dialog', { name: 'The new type needs these properties' })
+      await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+      expect(await within(dialog).findByText('Fill the required properties first: mpn.')).toBeVisible()
+      await user.type(within(dialog).getByLabelText('mpn'), 'A00-T1')
+      await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+      await waitFor(async () => expect((await getSpool(spoolId(6))).type_id).not.toBeNull())
+      const typeId = (await getSpool(spoolId(6))).type_id!
+      expect(entityMock.properties.get(`spool_type:${typeId}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'A00-T1']])
+    })
   })
 })

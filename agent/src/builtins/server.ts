@@ -9,6 +9,7 @@ import { MAX_ACTIVE } from '../background/store.js'
 import { WORKFLOW_SCRIPT_MAX } from '../background/workflowScript.js'
 import { CALL_ID_META } from './callId.js'
 import { runShell, SHELL_BUILTINS, SHELL_DESCRIPTIONS, ShellInput, type ShellContext } from './sandboxShell.js'
+import { MAX_SLOTS } from '../sandbox/protocol.js'
 
 // The built-ins the session provides in place of Claude Code's (#2393): WebFetch,
 // WebSearch and the background ones, as one MCP server named `builtin`. Each takes
@@ -135,12 +136,12 @@ export const BUILTINS: Record<string, Builtin> = {
   Bash: {
     description: SHELL_DESCRIPTIONS.Bash!,
     input: ShellInput,
-    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'bash', input) : noSandbox()),
+    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'bash', input, ctx.background) : noSandbox()),
   },
   PowerShell: {
     description: SHELL_DESCRIPTIONS.PowerShell!,
     input: ShellInput,
-    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'pwsh', input) : noSandbox()),
+    run: (ctx, input: Parameters<typeof runShell>[2]) => (ctx.shell ? runShell(ctx.shell, 'pwsh', input, ctx.background) : noSandbox()),
   },
   TaskStop: {
     description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup, monitor or workflow) by its ID.",
@@ -207,14 +208,18 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
 export const CLASSIC_BUILTINS: readonly string[] = Object.keys(BUILTINS)
 
 /**
- * Monitor's description where the session's Bash runs in a sandbox pod (#5864): `ws` only, since
- * a command would run on the worker, not in the pod (#5916).
+ * Monitor's description where the session's Bash runs in a sandbox pod (#5864): its `command`
+ * runs in that pod too, in a background slot (#5916), with the same caps as on a worker.
  */
-export const MONITOR_WS_ONLY =
-  "Claude Code's Monitor: starts a background watch that streams events from a WebSocket (`ws`), whose text frames are the " +
-  'events. `command` is not available in this session: its Bash runs in a sandbox pod, and a monitor command would not. It ' +
+export const MONITOR_IN_SANDBOX =
+  "Claude Code's Monitor: starts a background watch that streams events. With `command`, a bash script run in this session's " +
+  "sandbox (where its Bash runs, in the same directory of the session's files), whose stdout lines are the events, batched within " +
+  '200 ms, and whose exit ends the watch; filter it to the lines you would act on (grep --line-buffered), covering failures as ' +
+  'well as success. Files it changes come back to the session when it ends and at each later Bash or PowerShell command; at most ' +
+  `${MAX_SLOTS} background commands run at once in the sandbox. With \`ws\`, a WebSocket whose text frames are the events. It ` +
   'expires after `timeout_ms` (default 5 minutes, at most 30); a monitor making more than 200 events is stopped. Events reach ' +
-  'you as a new message once the session is idle. Use TaskStop to cancel it early.'
+  'you as a new message once the session is idle. Use TaskStop to cancel it early. For one notification ("tell me when X is ' +
+  'ready"), prefer a command that exits when the condition holds.'
 
 /** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`, and Bash and PowerShell with a sandbox (#5864). */
 export function classicBuiltinServer(
@@ -227,7 +232,7 @@ export function classicBuiltinServer(
       .filter((n) => CLASSIC_BUILTINS.includes(n) || (context.shell !== undefined && SHELL_BUILTINS.includes(n)))
       .map((name) => {
         const builtin = BUILTINS[name]!
-        const description = name === 'Monitor' && context.shell !== undefined ? MONITOR_WS_ONLY : builtin.description
+        const description = name === 'Monitor' && context.shell !== undefined ? MONITOR_IN_SANDBOX : builtin.description
         return tool(name, description, (builtin.input as z.ZodObject).shape, async (args, extra) => {
           // The call's own signal, when the SDK gives one: a call Claude Code gives up on stops its command too.
           const signal = (extra as { signal?: AbortSignal } | undefined)?.signal
@@ -240,11 +245,10 @@ export function classicBuiltinServer(
 
 /**
  * What a classic turn's model is told about the built-ins it gets that way: `served` with
- * their tiers, `shell`, Bash's tier when Claude Code's own Bash is on (a Monitor may run a
- * command, at the stricter of the two), else undefined, and `sandboxed`, whether the session's
- * Bash runs in a sandbox pod (#5864), where a Monitor runs no command.
+ * their tiers, and `shell`, Bash's tier when Bash is on (Claude Code's own, or the session's in
+ * its sandbox pod: a Monitor may run a command, at the stricter of the two), else undefined.
  */
-export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined, sandboxed = false): string {
+export function classicBuiltinNote(served: readonly { name: string; tier: string }[], shell: string | undefined): string {
   const names = served.map((t) => t.name)
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const asking = served.filter((t) => t.tier === 'outward').map((t) => t.name)
@@ -258,9 +262,7 @@ export function classicBuiltinNote(served: readonly { name: string; tier: string
       ? shell === 'outward'
         ? ' A Monitor with a `ws` or a `command` source asks the user first (Bash is outward here).'
         : ' A Monitor with a `ws` source asks the user first.'
-      : sandboxed
-        ? " Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source would not run in this session's sandbox."
-        : ' Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source needs Bash, which is off here.'
+      : ' Monitor watches a WebSocket (`ws`) only, and asks the user first: its `command` source needs Bash, which is off here.'
     : ''
   return (
     `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server. Use them ` +

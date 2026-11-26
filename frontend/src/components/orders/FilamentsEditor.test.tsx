@@ -6,6 +6,7 @@ import { listTypes } from '../../api/filament'
 import { T } from '../../mocks/features/filament/seed'
 import { server } from '../../mocks/server'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
+import { entityMock } from '../../mocks/features/entities'
 import { FILAMENT_PLA, seedOrders, state as orders } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { FilamentsEditor } from './FilamentsEditor'
@@ -209,5 +210,19 @@ describe('FilamentsEditor (#4250)', () => {
     release()
     await waitFor(async () => expect((await listTypes()).some((type) => type.filament_id === row.id)).toBe(true))
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  // #7703: "Make a type" asks for the keys a type requires before it makes one.
+  it('make a type asks for the required keys and sends them', async () => {
+    entityMock.schemas.spool_type = { ...entityMock.schemas.spool_type!, required: ['mpn'] }
+    const row = await api.createFilament({ material: 'PETG', brand: 'Polymaker', colour: '#102030', cost_per_kg: '24' })
+    const { user } = renderPage(<FilamentsEditor types={[]} />)
+    await user.click(await within(await screen.findByTestId(`filament-${row.id}`)).findByRole('button', { name: /Make a type/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'The new type needs these properties' })
+    await user.type(within(dialog).getByLabelText('mpn'), 'P-1')
+    await user.click(within(dialog).getByRole('button', { name: 'Create type' }))
+    await waitFor(async () => expect((await listTypes()).some((type) => type.filament_id === row.id)).toBe(true))
+    const made = (await listTypes()).find((type) => type.filament_id === row.id)!
+    expect(entityMock.properties.get(`spool_type:${made.id}`)?.map((p) => [p.key, p.value])).toEqual([['mpn', 'P-1']])
   })
 })

@@ -13,6 +13,8 @@ import { invoiceRefOf, typeSuppliersOf } from '../filamentPurchasing'
 import { printersState } from '../printers'
 import { H2C, seed, spoolId, type Catalogs, type Seed, type SpoolRow } from './seed'
 import { jobOf } from '../../../components/filament/eventText'
+import { CATALOGS } from '../../../components/filament/catalogs'
+import { checksSave, marksOf, rowPropertiesRefusal, saveRowProperties } from '../entities'
 
 type S = components['schemas']
 
@@ -371,6 +373,15 @@ const FIELDS = {
   event: ['kind', 'source', 'at', 'grams', 'reading_g', 'resolution', 'temp_c', 'hours', 'note'],
   locationCreate: ['name', 'kind_id', 'parent_id', 'identifier', 'capacity', 'printer_id', 'ams_id', 'tray_id', 'note', 'sort_order'],
 } as const
+/** A row not made yet holds no properties: its checks run against this entity (#7703). */
+const UNMADE = '00000000-0000-4000-8000-0000000000ff'
+const catalogEntity = (kind: string) => CATALOGS.find((spec) => spec.kind === kind)!.entity
+/** A body without its `properties`, and those. */
+function split(raw: unknown): [Record<string, unknown>, unknown] {
+  const { properties, ...rest } = (raw ?? {}) as Record<string, unknown>
+  return [rest, properties]
+}
+
 const PATCH_FIELDS = { type: [...FIELDS.typeCreate, 'archived'], spool: [...FIELDS.spoolCreate.filter((field) => field !== 'grams_left'), 'archived'], location: [...FIELDS.locationCreate, 'archived'] }
 
 /** The 422 for a body (or each row of a list body) that has a key `allowed` lacks, or `null`. */
@@ -410,6 +421,11 @@ const OVERRIDABLE = [
 const nameOf = <K extends keyof Catalogs>(kind: K, id: string | null | undefined) =>
   id ? (state.catalogs[kind] as { id: string; name: string }[]).find((row) => row.id === id)?.name ?? null : null
 
+/** A type as its reads answer it (#7703: with its marks). */
+function typeView(type: S['SpoolType']): S['SpoolType'] {
+  return { ...type, ...marksOf(`spool_type:${type.id}`, type.archived_at != null) }
+}
+
 function view(row: SpoolRow): FilamentSpool {
   const type = state.types.find((one) => one.id === row.type_id)
   const effective: S['EffectiveValues'] = {}
@@ -426,6 +442,7 @@ function view(row: SpoolRow): FilamentSpool {
   const pct = effective.low_stock_pct ?? LOW_STOCK_PCT
   return {
     ...row,
+    ...marksOf(`spool:${row.id}`, row.archived_at != null),
     // The invoice line it was bought on (#6700): a line may fill a spool with none.
     invoice_line_id: invoicedLine.get(row.id) ?? invoiceRefOf(row.id)?.line_id ?? null,
     effective,
@@ -1014,7 +1031,6 @@ function closingOf(events: readonly S['SpoolEvent'][], row: SpoolRow, reason: Ar
   }
 }
 
-/** `_reading_notice`: a reading the archive would refuse, said first. */
 const CLOSING_KEYS = ['reason', 'started_g', 'started_from', 'ledger_consumed_g', 'final_filament_g', 'scale_consumed_g', 'drift_g'] as const
 
 /** `spools.py` `detail()` (#7909): an `archived` event's data as the closing, or null when it carries none of the closing's keys. */
@@ -1023,6 +1039,7 @@ function closingOnEvent(data: Record<string, unknown> | undefined): S['Closing']
   return data as S['Closing']
 }
 
+/** `_reading_notice`: a reading the archive would refuse, said first. */
 function readingNotice(readingG: number | null, grams: number | null, emptyG: number | null): S['ClosingNotice'][] {
   if (readingG == null) return []
   // #7909: a reading under the filament sent with it is what `SpoolArchive` refuses.
@@ -2081,7 +2098,8 @@ export const handlers = [
         .filter((row) => archived || !row.archived_at)
         .filter((row) => words.every((word) => texts(row).some((text) => text.includes(word))))
         .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))
-        .map((row) => (params.kind === 'insert-types' ? insertView(row as unknown as S['InsertType']) : row)),
+        .map((row) => (params.kind === 'insert-types' ? insertView(row as unknown as S['InsertType']) : row))
+        .map((row) => ({ ...row, ...marksOf(`${catalogEntity(String(params.kind))}:${(row as unknown as { id: string }).id}`, row.archived_at != null) })),
     )
   }),
   // -- the colour catalog's syncs (#6907) --
@@ -2131,15 +2149,18 @@ export const handlers = [
   http.post(`${BASE}/catalog/:kind`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs
     if (!(kind in state.catalogs)) return problem(404, `no catalog ${String(kind)}`)
-    const body = normalised((await request.json()) as Record<string, unknown>)
-    const refused = catalogRefusal(kind, body, body)
+    const [raw, properties] = split(await request.json())
+    const body = normalised(raw)
+    const refused = catalogRefusal(kind, body, body) ?? rowPropertiesRefusal(request, `${catalogEntity(kind)}:${UNMADE}`, properties, true)
     if (refused) return refused
     const blank = Object.fromEntries([...CATALOG_FIELDS[kind]].map((field) => [field, null]))
     // #6907: a person's colour has no source, no sync time and no Bambuddy link.
     const own = kind === 'colours' ? { source: null, synced_at: null, bb_colour_id: null } : kind === 'insert-types' ? { empty_weight_basis: insertBasis(body) } : {}
     const made = { ...blank, sort_order: 0, ...body, ...own, ...(isAliased(kind) ? { aliases: [] } : {}), id: newId(), archived_at: null, created_at: now(), updated_at: now() }
     ;(state.catalogs[kind] as unknown[]).push(made)
-    return HttpResponse.json(kind === 'insert-types' ? insertView(made as unknown as S['InsertType']) : made, { status: 201 })
+    const entity = `${catalogEntity(kind)}:${made.id}`
+    saveRowProperties(entity, properties)
+    return HttpResponse.json({ ...(kind === 'insert-types' ? insertView(made as unknown as S['InsertType']) : made), ...marksOf(entity, false) }, { status: 201 })
   }),
   http.patch(`${BASE}/catalog/:kind/:id`, async ({ params, request }) => {
     const kind = params.kind as keyof Catalogs
@@ -2147,12 +2168,15 @@ export const handlers = [
     const rows = state.catalogs[kind] as { id: string; archived_at: string | null }[]
     const at = rows.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no ${String(kind)} row ${String(params.id)}`)
-    const body = (await request.json()) as Record<string, unknown>
+    const sent = (await request.json()) as Record<string, unknown>
+    const [body, properties] = split(sent)
     const clear = cleared(body, ['name', 'sort_order'])
     if (clear) return problem(422, clear)
     const next = patched(rows[at]!, body)
-    const refused = catalogRefusal(kind, next, body, rows[at]!.id)
+    const entity = `${catalogEntity(kind)}:${rows[at]!.id}`
+    const refused = catalogRefusal(kind, next, body, rows[at]!.id) ?? rowPropertiesRefusal(request, entity, properties, checksSave(sent))
     if (refused) return refused
+    saveRowProperties(entity, properties)
     if (isAliased(kind) && typeof body.name === 'string') {
       const key = catalogKey(body.name)
       const own = next as unknown as AliasedRow
@@ -2165,7 +2189,7 @@ export const handlers = [
     // #7280 D6: a person's weight is `person` unless it says `placeholder`.
     if (kind === 'insert-types' && body.empty_weight_g != null) (next as unknown as S['InsertType']).empty_weight_basis = insertBasis(body)
     rows[at] = next
-    return HttpResponse.json(kind === 'insert-types' ? insertView(next as unknown as S['InsertType']) : next)
+    return HttpResponse.json({ ...(kind === 'insert-types' ? insertView(next as unknown as S['InsertType']) : next), ...marksOf(entity, next.archived_at != null) })
   }),
   http.get(`${BASE}/catalog/:kind/resolve`, ({ params, request }) => {
     const kind = String(params.kind)
@@ -2202,17 +2226,27 @@ export const handlers = [
   // -- spool types --
   http.get(`${BASE}/types`, ({ request }) => {
     const archived = flag(request, 'include_archived')
-    return HttpResponse.json(state.types.filter((type) => archived || !type.archived_at).sort((a, b) => a.code.localeCompare(b.code)))
+    return HttpResponse.json(
+      state.types
+        .filter((type) => archived || !type.archived_at)
+        .sort((a, b) => a.code.localeCompare(b.code))
+        .map(typeView),
+    )
   }),
   http.post(`${BASE}/types`, async ({ request }) => {
-    const made = createType(await request.json())
-    return made instanceof Response ? made : HttpResponse.json(made, { status: 201 })
+    const [raw, properties] = split(await request.json())
+    const refused = rowPropertiesRefusal(request, `spool_type:${UNMADE}`, properties, true)
+    if (refused) return refused
+    const made = createType(raw)
+    if (made instanceof Response) return made
+    saveRowProperties(`spool_type:${made.id}`, properties)
+    return HttpResponse.json(typeView(made), { status: 201 })
   }),
   http.get(`${BASE}/types/:id`, ({ params }) => {
     const type = state.types.find((one) => one.id === params.id)
     if (!type) return problem(404, `no spool type ${String(params.id)}`)
     return HttpResponse.json({
-      ...type,
+      ...typeView(type),
       presets: state.typePresets.filter((one) => one.type_id === type.id),
       k_values: state.typeKValues.filter((one) => one.type_id === type.id),
     } satisfies S['SpoolTypeDetail'])
@@ -2220,16 +2254,30 @@ export const handlers = [
   http.patch(`${BASE}/types/:id`, async ({ params, request }) => {
     const at = state.types.findIndex((one) => one.id === params.id)
     if (at < 0) return problem(404, `no spool type ${String(params.id)}`)
-    const body = (await request.json()) as Record<string, unknown>
+    const sent = (await request.json()) as Record<string, unknown>
+    const [body, properties] = split(sent)
     const extra = extraKeys(body, PATCH_FIELDS.type)
     if (extra) return extra
     const clear = cleared(body, ['code', 'material_id', 'rgba', 'diameter_mm', 'label_weight_g'])
     if (clear) return problem(422, clear)
     const next = patched(state.types[at]!, body)
-    const refused = typeRefusal(next, next.id)
+    const refused = typeRefusal(next, next.id) ?? rowPropertiesRefusal(request, `spool_type:${next.id}`, properties, checksSave(sent))
     if (refused) return refused
+    saveRowProperties(`spool_type:${next.id}`, properties)
     state.types[at] = PRICED.some((field) => field in body) ? linkPriceBook(next) : next
-    return HttpResponse.json(state.types[at])
+    return HttpResponse.json(typeView(state.types[at]))
+  }),
+  // #7703 — only the cost, not checked for required properties.
+  http.put(`${BASE}/types/:id/cost-per-kg`, async ({ params, request }) => {
+    const at = state.types.findIndex((one) => one.id === params.id)
+    if (at < 0) return problem(404, `no spool type ${String(params.id)}`)
+    const body = (await request.json()) as Record<string, unknown>
+    const extra = extraKeys(body, ['cost_per_kg'])
+    if (extra) return extra
+    if (!('cost_per_kg' in body)) return problem(422, 'cost_per_kg: Field required')
+    const next = patched(state.types[at]!, { cost_per_kg: body.cost_per_kg })
+    state.types[at] = linkPriceBook(next)
+    return HttpResponse.json(typeView(state.types[at]))
   }),
   // #6714: the fill from a type's slicer profile, over `PROFILES` (`fillType`).
   http.post(`${BASE}/types/fill-from-profile`, async ({ request }) => {
@@ -2342,14 +2390,15 @@ export const handlers = [
     )
   }),
   http.post(`${BASE}/spools`, async ({ request }) => {
-    const raw = await request.json()
+    const [raw, properties] = split(await request.json())
     const extra = extraKeys(raw, FIELDS.spoolCreate)
     if (extra) return extra
     const body = normalised(raw as S['SpoolCreate-Input'])
     const made = newSpool(body)
-    const refused = spoolRefusal(made)
+    const refused = spoolRefusal(made) ?? rowPropertiesRefusal(request, `spool:${UNMADE}`, properties, true)
     if (refused) return refused
     state.spools.push(made)
+    saveRowProperties(`spool:${made.id}`, properties)
     addEvent(made.id, 'created', { source: made.grams_left != null ? 'person' : null, grams_after: made.grams_left })
     return HttpResponse.json(view(made), { status: 201 })
   }),
@@ -2374,6 +2423,12 @@ export const handlers = [
   // #7150 — `POST /filament/spools/bulk`: N spools of one draft, all or none.
   http.post(`${BASE}/spools/bulk`, async ({ request }) => {
     const raw = (await request.json()) as Record<string, unknown>
+    // The replay key is the body as sent, `properties` included.
+    const asked = JSON.stringify(raw)
+    const [spoolBody, properties] = split(raw.spool)
+    if (raw.spool !== undefined) raw.spool = spoolBody
+    const propertiesRefused = rowPropertiesRefusal(request, `spool:${UNMADE}`, properties, true)
+    if (propertiesRefused) return propertiesRefused
     const presetKeys = ['printer_model', 'nozzle_diameter', 'slicer_filament', 'slicer_filament_name']
     const extra =
       extraKeys(raw, ['spool', 'quantity', 'location_id', 'presets', 'k_values', 'copy_of', 'continued_from']) ??
@@ -2384,7 +2439,7 @@ export const handlers = [
     const quantity = body.quantity ?? 1
     if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) return problem(422, 'quantity: Input should be between 1 and 100')
     if (body.continued_from && quantity !== 1) return problem(422, 'body: Value error, only one spool continues a respooled one')
-    return keyed(request, JSON.stringify(raw), () => {
+    return keyed(request, asked, () => {
       const place = body.location_id ? state.locations.find((one) => one.id === body.location_id && !one.archived_at) : null
       if (body.location_id && !place) return problem(422, REFUSED.moveTarget)
       if (place && place.tray_id != null) return problem(422, REFUSED.trayPlace)
@@ -2414,6 +2469,7 @@ export const handlers = [
       }
       for (const row of made) {
         state.spools.push(row)
+        saveRowProperties(`spool:${row.id}`, properties)
         addEvent(row.id, 'created', { source: row.grams_left != null ? 'person' : null, grams_after: row.grams_left, data: source ? { continued_from: source.id } : {} })
         if (source) {
           const closing = state.events.filter((event) => event.spool_id === source.id && event.kind === 'archived').sort(byTime).at(-1)
@@ -2533,7 +2589,8 @@ export const handlers = [
   http.patch(`${BASE}/spools/:id`, async ({ params, request }) => {
     const at = state.spools.findIndex((row) => row.id === params.id)
     if (at < 0) return problem(404, `no spool ${String(params.id)}`)
-    const body = (await request.json()) as Record<string, unknown>
+    const sent = (await request.json()) as Record<string, unknown>
+    const [body, properties] = split(sent)
     const extra = extraKeys(body, PATCH_FIELDS.spool)
     if (extra) return extra
     const clear = cleared(body, ['weight_locked'])
@@ -2541,8 +2598,9 @@ export const handlers = [
     const { archived, ...fields } = normalised(body)
     const current = state.spools[at]!
     const next = { ...current, ...(fields as Partial<SpoolRow>) }
-    const refused = spoolRefusal(next)
+    const refused = spoolRefusal(next) ?? rowPropertiesRefusal(request, `spool:${current.id}`, properties, checksSave(sent))
     if (refused) return refused
+    saveRowProperties(`spool:${current.id}`, properties)
     const changes = Object.fromEntries(
       Object.keys(fields)
         .filter((field) => current[field as keyof SpoolRow] !== next[field as keyof SpoolRow])

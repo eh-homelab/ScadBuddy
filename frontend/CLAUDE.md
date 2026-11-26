@@ -410,7 +410,11 @@ same way, `vite.config.ts`).
   page and the order's (`OrderFlowRuns`). The card's key is the run's execution and the task's
   id, so a Reset gives a new form. `TaskCard` reads the task again on `task:<id>`
   (`lib/flows.ts` `taskTopic`) and shows the newer of its read and the page's. Both answer
-  forms are `USER_ONLY`. `SchemaForm` draws a form from a schema, for an answer (`answer`) and
+  forms are `USER_ONLY`. A question the flow asked of people only says so (`pendingParts.tsx`
+  `PeopleOnly`); the run's steps and the task card name an assistant that answered and link its
+  session (`AnsweredBy`, `lib/flows.ts` `answererLabel`). Settings, Assistant, "Flows'
+  questions" (`pages/settings/sections/flow-answerers.tsx`) is `flow_answerers` (#7471).
+  `SchemaForm` draws a form from a schema, for an answer (`answer`) and
   for Start run; `inputsForm.tsx` `useInputs` holds the fields, `lib/flowInputs.ts` the parse:
   an answer leaves out a blank field, Start run sends a cleared text. Mocks:
   `src/mocks/features/tasks.ts` (the task of `run-prompt`). e2e `e2e/workflows.spec.ts`.

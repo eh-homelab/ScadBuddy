@@ -100,7 +100,7 @@ test.describe('settings', () => {
     general: 'Connection',
     printing: 'Hotend usage',
     library: 'Preview',
-    assistant: 'Notifications',
+    assistant: "Flows' questions",
     tools: 'Remote MCP plugins',
     mcp: 'Plugin feed',
     audits: 'Audit log',
