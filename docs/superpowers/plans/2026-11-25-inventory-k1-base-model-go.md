@@ -7,8 +7,10 @@ and `scadbuddy-core` owns kinds, items, lots, units and moves behind internal CR
 that the Python public routes forward to. Every property set and remove is recorded
 (§4.8). Epic #6949, phase K1 (§9).
 
-**Architecture:** The property history is a database trigger on `entity_properties`, so
-no writer can skip it (layer 1, on its own). A new Go package tree
+**Architecture:** The event stream is the history. A trigger on `entity_properties`
+publishes each change as an event in the writer's transaction, so no writer can skip it,
+and a durable history subscriber in `scadbuddy-core` inserts one history row per event
+(layer 1, on #7819). A new Go package tree
 `tools/go/core/internal/inventory/` holds the class, the handler catalog and resolver, the
 K1 default handlers, the base flow, the SQL and the routes, as design §6.2 lays it out.
 The catalog is Go code; a Go test loads `docs/inventory-model/*.yaml` and checks that the
@@ -29,7 +31,7 @@ stock table.
 `crud/client.py`), React + TypeScript (one panel), the agent's TypeScript tools.
 
 **Spec:** `docs/superpowers/specs/2026-11-25-inventory-kinds-and-handlers-design.md` at
-`c51dba825` (§3, §4.1–4.4, §4.8, §6.1, §6.1a, §6.2, §6.3, §8, §9 K1), its proof
+`156e0af78` (§3, §4.1–4.4, §4.7 intro, §4.8, §6.1, §6.1a, §6.2, §6.3, §8, §9 K1), its proof
 `docs/inventory-model/`, and
 `docs/superpowers/specs/2026-11-25-go-service-migration-design.md` (#7667: §4 ports and
 areas, §5 what a ported route keeps, §5.1 shared SQL, §5.2 how we check). Executors read
@@ -220,12 +222,16 @@ both specs.
    Tests: Task 9 `TestARetryReplaysTheFirstAnswer`, `TestTwoRequestsWithOneKeyWriteOnce`;
    Task 12 `TestAnActivityRunTwiceWritesOnce`; Task 13
    `test_a_taken_id_reads_the_existing_result`.
-2. **A property that goes with its entity.** The orphan sweep and a printer merge delete
-   an `entities` row; the cascade removes its properties. Each remove is recorded with the
-   entity's kind and ref and the sweep's or the merge's actor; a direct remove with no
-   `scadbuddy.actor` is refused and changes nothing. Test: Task 1
-   `test_a_cascade_records_each_key_with_the_deleting_actor`, Task 2
-   `test_the_sweep_records_what_it_removes`.
+2. **A property that goes with its entity, and a history that must not double.** The
+   orphan sweep and a printer merge delete an `entities` row; the cascade removes its
+   properties. Each remove is one event with the entity's kind and ref and the sweep's or
+   the merge's actor; a direct remove with no `scadbuddy.actor` is refused and changes
+   nothing. The subscriber restarts, two replicas run it, or its cursor is set back: each
+   event still gives exactly one history row. A payload it cannot store stops the cursor
+   and raises the lag alert; it never skips the event. Tests: Task 1
+   `test_a_set_publishes_one_event`, `test_a_cascade_publishes_one_remove_per_key`,
+   `TestAReplayInsertsNothingTwice`, `TestTwoSubscribersApplyOnce`,
+   `TestABadPayloadStopsTheCursor`; Task 2 `test_the_sweep_publishes_what_it_removes`.
 3. **Phase 2 rows the rules did not foresee.** A kind a person made under `part` (now
    durable) with `tracking = lot`; a lot kind with `life_basis = hours`; an item with
    `life_hours` on a kind whose life handler is `life.months`; a lot of a `part` item with
@@ -242,12 +248,14 @@ both specs.
    comes back the activity runs once. An activity that failed or timed out runs again on
    the same key, and `crud_requests` keeps it from writing twice. Temporal itself out of
    reach is 503 `inventory_unavailable`, and nothing was started. An order fulfil whose
-   `inventory.Take` cannot start or does not finish in time answers an error that is safe
-   to retry, and the retry takes stock once. Tests: Task 13
+   `inventory.Take` cannot start answers 503 (nothing started; safe to retry), and one
+   that does not finish in time answers 202 with the item marked "stock still settling";
+   a settle or a retry takes stock once. Tests: Task 13
    `test_a_slow_write_answers_202_and_a_repeat_202_again`,
    `test_a_done_write_answers_the_stored_result`, `test_a_failed_activity_runs_again`,
    `test_temporal_out_of_reach_is_a_503`; `StillWorking.test.tsx`; Task 16
-   `test_a_failed_start_fails_the_fulfil`, `test_a_fulfil_retry_takes_stock_once`.
+   `test_a_failed_start_fails_the_fulfil`, `test_a_slow_take_answers_202_settling`,
+   `test_a_fulfil_retry_takes_stock_once`.
 
 ---
 
@@ -255,7 +263,7 @@ both specs.
 
 | Layer | Branch | What |
 |---|---|---|
-| 1 | `feat/6949-k1-1-property-history` (from main) | The property history trigger, its readers, the panel and the tool (§4.8). Lands on its own |
+| 1 | `feat/6949-k1-1-property-history` (from main once #7819 is merged; until then on #7819's branch) | The history events, the history subscriber and its cursor, the readers, the panel and the tool (§4.8). Lands on its own, after #7819 |
 | 2 | `feat/6949-k1-2-inventory-model` (from main) | The class, the catalog and the resolver in Go, and the YAML test |
 | 3 | `feat/6949-k1-3-inventory-migration` (on 2) | The §8 migration, `inventory_operations`, the caller `inventory`, the relation tables |
 | 4 | `feat/6949-k1-4-inventory-core` (on 3) | The store, the default handlers, the base flow, idempotency, the Temporal worker and activities, the read routes |
@@ -269,52 +277,66 @@ Layers 1 and 2 are independent. Layers 3 to 6 deploy together (R-K1-18).
 
 ## Layer 1 — `feat/6949-k1-1-property-history`
 
-### Task 1: The history tables and triggers
+### Task 1: History events, the history subscriber, and the history tables
+
+The event stream is the history (owner 2026-11-25; design §4.7 intro, §4.8, §6.3 at
+`156e0af78`). A writer never inserts a history row. A trigger publishes an event in the
+writer's transaction; the history subscriber in `scadbuddy-core` inserts one row per
+event. This layer waits for #7819 (R-K1-26).
 
 **Files:**
-- Create: `backend/scadbuddy/migrations/<UTC>_entity_property_history.sql`
-- Test: `backend/tests/entities/test_property_history.py`, and one case in `backend/tests/test_pg_migrations.py`
+- Create: `backend/scadbuddy/migrations/<UTC>_property_history_events.sql`, `tools/go/core/internal/history/history.go`, `tools/go/core/internal/bus/in.go`
+- Modify: `tools/go/core/main.go` (start the subscriber), `backend/scadbuddy/core/metrics.py` (two gauges), `backend/scadbuddy/api/metrics.py` (their refresh), `deploy/grafana/scadbuddy-api.json` (one lag panel)
+- Test: `backend/tests/entities/test_property_events.py`, `backend/tests/test_pg_migrations.py` (one case), `backend/tests/test_pg_event_bus.py` (two cases), `backend/tests/api/test_metrics.py` (one case), `tools/go/core/internal/history/history_test.go`, `tools/go/core/internal/bus/in_test.go`
 
 **Interfaces:**
-- Produces (SQL):
-  - `entity_property_history (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, entity_id
-    uuid NOT NULL` (no FK: the row outlives the entity)`, kind text NOT NULL, ref text NOT
-    NULL, key text NOT NULL, op text NOT NULL CHECK (op IN ('set','remove')), old jsonb, new
-    jsonb, source text, at timestamptz NOT NULL DEFAULT clock_timestamp(), actor jsonb NOT
-    NULL)`; index `(entity_id, key, id)`; index `(kind, ref)`.
-  - `entity_property_schema_history (id bigint identity PK, owner text NOT NULL` (`kind:<entity kind>` for `entity_property_schemas`, `item_kind:<id>` for `item_kinds.attribute_schema`)`, old jsonb, new jsonb NOT NULL, at timestamptz NOT NULL DEFAULT clock_timestamp(), actor jsonb NOT NULL)`; index `(owner, id)`.
+- SQL, in the migration:
+  - `scadbuddy_publish_event(kind text, fields jsonb) RETURNS bigint`: `pg_advisory_xact_lock(<EVENT_LOG_LOCK>)` (`core/pg_events.py`, Go `bus.logLock`), then `INSERT INTO events (event_id, kind, at, payload)` with `event_id = replace(gen_random_uuid()::text, '-', '')`, `at = clock_timestamp()`, `payload = jsonb_build_object('id', …, 'at', …, 'kind', kind) || fields`; then `pg_notify('scadbuddy_events', payload::text)` when `octet_length(payload::text) <= 4000` (`bus.PayloadMax`), else `pg_notify` of the payload without `old` and `new` plus `"values_in_log": true` (the log row keeps the whole event). Returns the row's `seq`. The lock is held to the writer's commit, so `seq` order is commit order, as for every other publisher; a subscriber reading in `seq` order never passes an uncommitted event.
+  - The four history kinds, each with `retention_seconds: 0` in its payload, so #7819's prune keeps it whatever the global and per-kind settings say (its rule: an event's own retention comes first, and 0 keeps it):
+    - `entity_property.changed`: `entity_id` (uuid), `entity_kind`, `ref`, `key`, `op` (`set`, `remove`), `old`, `new`, `source`, `actor`. The envelope's `kind` and `at` are the event's own, so the entity's kind is `entity_kind` (design §4.8's "kind").
+    - `entity_property_schema.changed`: `owner` (`kind:<entity kind>`, `item_kind:<id>`), `old`, `new`, `actor`.
+    - `handler_config.changed`: `owner`, `step`, `handler`, `old`, `new`, `actor` (Go publishes it from Task 10).
+    - `handler_value.changed`: K2, with `handler_values` (seams table); the subscriber gets its table then.
   - `scadbuddy_actor() RETURNS jsonb`: `current_setting('scadbuddy.actor', true)::jsonb`, NULL when unset or empty.
-  - Trigger `entity_properties_history` AFTER INSERT OR UPDATE OR DELETE FOR EACH ROW
-    (R-K1-12): INSERT → `set` from NULL; UPDATE → `set` only when `OLD.value IS DISTINCT
-    FROM NEW.value`; DELETE → `remove`, actor `scadbuddy_actor()`, and `RAISE EXCEPTION
-    'a property remove needs scadbuddy.actor' USING ERRCODE = 'P0001'` when it is NULL. A
-    set's actor is `coalesce(scadbuddy_actor(), NEW.updated_by)`. `kind` and `ref` are read
-    from `entities`; when the row is gone (a cascade), the trigger writes nothing.
-  - Trigger `entities_property_history` BEFORE DELETE ON `entities` FOR EACH ROW: one
-    `remove` row per property of the entity, with the entity's kind and ref, and the same
-    actor rule and refusal (only when the entity has a property).
-  - Triggers on `entity_property_schemas` (INSERT, UPDATE when the schema changes) and on
-    `item_kinds` (UPDATE OF `attribute_schema` when it changes; INSERT): one schema history
-    row each, actor `coalesce(scadbuddy_actor(), NEW.updated_by,
-    '{"kind":"provider","principal":"migration"}')` (`item_kinds` has no `updated_by`).
-  - Back-fill, in the same file: one `set` row per existing `entity_properties` row (`old`
-    NULL, `at` = `updated_at`, actor `updated_by`), in `(entity_id, key)` order; one schema
-    row per existing schema (actor as above).
+  - Trigger `entity_properties_publish` AFTER INSERT OR UPDATE OR DELETE ON `entity_properties` FOR EACH ROW (R-K1-12): INSERT → `set` from NULL; UPDATE → `set` only when `OLD.value IS DISTINCT FROM NEW.value`; DELETE → `remove`, actor `scadbuddy_actor()`, and `RAISE EXCEPTION 'a property remove needs scadbuddy.actor' USING ERRCODE = 'P0001'` when it is NULL. A set's actor is `coalesce(scadbuddy_actor(), NEW.updated_by)`. `entity_kind` and `ref` are read from `entities`; when the row is gone (a cascade), it publishes nothing.
+  - Trigger `entities_publish_property_removes` BEFORE DELETE ON `entities` FOR EACH ROW: one `remove` event per property of the entity, with its kind and ref, the same actor rule and refusal (only when the entity has a property).
+  - Triggers on `entity_property_schemas` (INSERT; UPDATE when the schema changes) and `item_kinds` (INSERT; UPDATE OF `attribute_schema` when it changes): one `entity_property_schema.changed` each, actor `coalesce(scadbuddy_actor(), NEW.updated_by, '{"kind":"provider","principal":"migration"}')` (`item_kinds` has no `updated_by`).
+  - `event_subscribers (name text PRIMARY KEY CHECK (name ~ '^[a-z][a-z0-9_]{0,39}$'), seq bigint NOT NULL DEFAULT 0, updated_at timestamptz NOT NULL DEFAULT clock_timestamp())`, seeded with `('history', <the seq before the back-fill>)`.
+  - `entity_property_history (event_seq bigint PRIMARY KEY` (the event's `seq`; no FK, the log may be pruned of other kinds)`, entity_id uuid NOT NULL` (no FK: the row outlives the entity)`, kind text NOT NULL, ref text NOT NULL, key text NOT NULL, op text NOT NULL CHECK (op IN ('set','remove')), old jsonb, new jsonb, source text, at timestamptz NOT NULL, actor jsonb NOT NULL)`; index `(entity_id, key, event_seq)`; index `(kind, ref)`.
+  - `entity_property_schema_history (event_seq bigint PRIMARY KEY, owner text NOT NULL, old jsonb, new jsonb NOT NULL, at timestamptz NOT NULL, actor jsonb NOT NULL)`; index `(owner, event_seq)`.
+  - Back-fill, in the same file: one `entity_property.changed` `set` event per existing `entity_properties` row (`old` NULL, actor `updated_by`, `at` in the payload's own `changed_at` = `updated_at`), in `(entity_id, key)` order, and one schema event per existing schema, through `scadbuddy_publish_event`. The subscriber inserts them like any other. The history row's `at` is the payload's `changed_at` when present, else the envelope's `at`.
+- Go, `internal/bus/in.go`: `func PublishIn(ctx context.Context, tx pgx.Tx, kind string, fields ...httpx.Field) (int64, error)`: `validEnvelope` and `Fits` as `Publish`, then `SELECT scadbuddy_publish_event($1, $2::jsonb)` in the caller's transaction. An error is returned, so the write rolls back with its event (unlike `Publish`, which logs).
+- Go, `internal/history/history.go` (the subscriber, design §4.8 "the subscriber's cursor"):
+  - `type Options struct { Name string; Batch int; Poll time.Duration }`, defaults `history`, 500, 2 s.
+  - `func Apply(ctx context.Context, pool *pgxpool.Pool, o Options) (applied int, err error)`: one transaction: `SELECT seq FROM event_subscribers WHERE name = $1 FOR UPDATE SKIP LOCKED` (another replica holds it → 0, nil); `SELECT seq, kind, payload FROM events WHERE seq > $cursor ORDER BY seq LIMIT $batch`; per history kind, `INSERT … ON CONFLICT (event_seq) DO NOTHING` into its table; other kinds are skipped; `UPDATE event_subscribers SET seq = <last seq read>, updated_at = clock_timestamp()`; commit. A payload that does not fit its table (a field missing or of the wrong type) stops the batch before it with an error naming the `seq`, and the cursor stays: never skip a history event.
+  - `func Run(ctx context.Context, pool *pgxpool.Pool, o Options)`: `Apply` until it returns fewer than `Batch`, then waits `Poll`; an error is logged (`slog`, the `seq`) and retried after `Poll`. `main.go` starts it in a goroutine when the database pool is configured; every replica runs it, and `SKIP LOCKED` lets one apply at a time.
+- Python metrics (the only place series are declared, `deploy/CLAUDE.md`): `scadbuddy_event_subscriber_lag_events{subscriber}` (newest `events.seq` less the cursor) and `scadbuddy_event_subscriber_lag_seconds{subscriber}` (now less `logged_at` of the oldest event past the cursor; 0 when none), set by `api/metrics.py` `refresh_subscriber_metrics` on each scrape from one query over `event_subscribers` and `events`. The `scadbuddy-api` dashboard gets one panel of both. The alert is a clusters rule (Task 3 Step 6).
 
-- [ ] **Step 1: Write the failing tests** (`test_property_history.py`, the `pool` fixture of `tests/entities/conftest.py`; each write sets the actor with `SELECT set_config('scadbuddy.actor', %s, true)`):
-  - `test_a_new_key_is_a_set_from_nothing`: set `colour_name = "Gold"` on `item:<id>` → one row `op='set', old=None, new="Gold", kind='item', ref=<id>`.
-  - `test_a_set_to_the_same_value_writes_nothing`: set `"Silk Gold"` twice → one row for the second write, not two (the proof's 2027-01-21 event).
-  - `test_a_change_keeps_the_old_value`: `"Gold"` → `"Silk Gold"` gives `old="Gold", new="Silk Gold"`.
-  - `test_a_remove_needs_an_actor`: `DELETE FROM entity_properties` with no `scadbuddy.actor` raises `psycopg.errors.RaiseException` and the row is still there.
-  - `test_a_remove_records_the_old_value_and_actor`: remove `material` with actor `{"kind":"browser"}` → `op='remove', old="hardened_steel", new=None, actor={"kind":"browser"}`.
-  - `test_a_cascade_records_each_key_with_the_deleting_actor`: an entity with keys `a`, `b`; `DELETE FROM entities` with actor `{"kind":"provider","principal":"entities_sweep"}` → two `remove` rows with the entity's kind and ref and that actor; with no actor the delete raises and both keys stay.
-  - `test_the_history_replays_to_the_current_properties`: 20 random sets and removes on three entities; for each entity, the last row per key (a `remove` drops it) equals `entity_properties`.
-  - `test_a_schema_change_is_recorded`: `entity_property_schemas` `spool` set twice to the same schema → one row; `UPDATE item_kinds SET attribute_schema = …` → one row with `owner='item_kind:<id>'`.
-- [ ] Add `test_property_history_backfills_existing_rows` to `test_pg_migrations.py`: migrate to the file before this one, insert two properties, migrate the rest → two `set` rows with `at` = each row's `updated_at`.
-- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/entities/test_property_history.py tests/test_pg_migrations.py -k "history" -q` — Expected: FAIL (no table).
-- [ ] **Step 3: Write the migration** as the Interfaces say. A top comment cites #6949 and design §4.8.
-- [ ] **Step 4: Run** the same command — Expected: PASS.
-- [ ] **Step 5: Commit** `feat(entities): every property set and remove is recorded with history (#6949, K1 1/7)`
+- [ ] **Step 1: Write the failing tests.** Python (`test_property_events.py`, the `pool` fixture of `tests/entities/conftest.py`; each write sets `scadbuddy.actor` with `SELECT set_config('scadbuddy.actor', %s, true)`; `events_of(conn, kind)` reads `payload` from `events` in `seq` order):
+  - `test_a_set_publishes_one_event`: set `colour_name = "Gold"` on `item:<id>` → exactly one `entity_property.changed` with `op='set', old=None, new="Gold", entity_kind='item', ref=<id>, retention_seconds=0`, and no row in `entity_property_history` (no writer inserts one).
+  - `test_a_set_to_the_same_value_publishes_nothing`: `"Silk Gold"` twice → one event.
+  - `test_a_change_keeps_the_old_value`: `"Gold"` → `"Silk Gold"` → `old="Gold", new="Silk Gold"`.
+  - `test_a_remove_needs_an_actor`: `DELETE FROM entity_properties` with no actor raises `psycopg.errors.RaiseException`; the row stays; no event.
+  - `test_a_cascade_publishes_one_remove_per_key`: an entity with keys `a`, `b`; `DELETE FROM entities` with actor `{"kind":"provider","principal":"entities_sweep"}` → exactly two `remove` events, one per key, with the entity's kind and ref and that actor; with no actor the delete raises, both keys stay, no event.
+  - `test_a_rolled_back_write_publishes_nothing`: a set, then `ROLLBACK` → no event.
+  - `test_a_large_value_is_logged_whole`: a value of 5000 bytes → the `events` row holds it; a `LISTEN scadbuddy_events` connection hears `values_in_log: true` without `new`.
+  - `test_a_schema_change_publishes_one_event`: `entity_property_schemas` `spool` set twice to one schema → one event; `UPDATE item_kinds SET attribute_schema = …` → one event, `owner='item_kind:<id>'`.
+  - `test_pg_migrations.py` `test_property_history_backfills_existing_rows`: migrate to the file before this one, insert two properties, migrate the rest → two `set` events with `changed_at` = each row's `updated_at`, and `event_subscribers` `history` before them.
+  - `test_pg_event_bus.py` `test_history_events_decode_as_opaque` (on #7819's `decode_event`): each of the four kinds' payloads (Go's golden files, below) decodes to an `OpaqueEvent` with that `kind`, and a `replay` page holding one gives it with its `seq`; `test_history_events_survive_every_prune`: `EventLogRetention(seconds=1, rows=1, kinds={"entity_property": 1, "handler_config": 1})`, events older than that → `prune_log` removes the others and keeps the four.
+  - `test_metrics.py` `test_subscriber_lag_is_exported`: three events past a cursor of `history` → `lag_events == 3`, `lag_seconds > 0`.
+  Go (`history_test.go`, `testdb.New` with the migrations):
+  - `TestTheSubscriberInsertsOneRowPerEvent`: three sets and a remove → `Apply` → four rows, `event_seq` = each event's `seq`, fields as the payloads; the cursor is the last `seq`.
+  - `TestAReplayInsertsNothingTwice`: after that, set the cursor back to 0 and `Apply` again → still four rows; the cursor is the last `seq` again.
+  - `TestTwoSubscribersApplyOnce`: two `Apply` calls at once on the same name → four rows, one call applied 0.
+  - `TestOtherKindsMoveTheCursor`: a `job.progress` event between two property events → two rows; the cursor passes all three.
+  - `TestABadPayloadStopsTheCursor`: a hand-inserted `entity_property.changed` with no `key` → `Apply` returns an error naming its `seq`; the events before it are applied; the cursor stops just before it.
+  - `TestTheHistoryReplaysToTheCurrentProperties`: 20 random sets and removes on three entities, `Apply` → for each entity, the last row per key (a `remove` drops it) equals `entity_properties`.
+  - `in_test.go` `TestPublishInRollsBackWithTheWrite`: `PublishIn` then rollback → no event; then commit → one, whose payload is written to `testdata/history/<kind>.json` for the Python decode test (and `handler_config.changed`, `entity_property_schema.changed` alike).
+- [ ] Add `tools/go/core/internal/bus/testdata/` to the `backend` lane's pattern in `.github/scripts/select-lanes.sh`, with a case in `select-lanes.test.sh`.
+- [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/entities/test_property_events.py tests/test_pg_event_bus.py tests/api/test_metrics.py tests/test_pg_migrations.py -k "history or event or lag" -q` and `cd tools/go/core && go test ./internal/history/ ./internal/bus/` — Expected: FAIL.
+- [ ] **Step 3: Write the migration and the code** as the Interfaces say. The migration's top comment cites #6949 and design §4.8.
+- [ ] **Step 4: Run** the same, then `KUSTOMIZE=<kustomize v5.8.1> bash .github/scripts/lint-dashboard.sh` (root CLAUDE.md "Workflow/Dockerfile lint") and `bash .github/scripts/select-lanes.test.sh` — Expected: PASS.
+- [ ] **Step 5: Commit** `feat(entities): property changes are events; a history subscriber writes the history (#6949, K1 1/7)`
 
 ### Task 2: Every Python writer sets the actor; the history routes
 
@@ -324,17 +346,18 @@ Layers 1 and 2 are independent. Layers 3 to 6 deploy together (R-K1-18).
 - Test: `backend/tests/entities/test_property_history.py`, `backend/tests/api/test_entity_properties.py`, `backend/tests/entities/test_sweep.py`
 
 **Interfaces:**
+- Consumes: Task 1's triggers and tables. The history routes read the tables, which the subscriber fills within about its poll (2 s) of the commit; a route test inserts its rows with the fixture `history_rows(conn, *rows)` (`tests/entities/conftest.py`), since Python does not run the Go subscriber.
 - Produces `entities/actor.py`: `set_actor(conn: Conn, by: Actor) -> None` (`SELECT set_config('scadbuddy.actor', %s, true)` with `by.model_dump_json()`); `SWEEP_ACTOR = Actor(kind="provider", principal="entities_sweep")`.
 - Produces `EntityPropertyStore.history(ref: EntityRef, key: str | None, limit: int) -> list[PropertyChange]` and `schema_history(owner: str, limit: int) -> list[SchemaChange]`, newest first. `PropertyChange {key, op, old, new, source, at, actor}`; `SchemaChange {old, new, at, actor}`.
 - Produces routes: `GET /api/v1/entities/{ref}/properties/history?key=&limit=` → `{changes: PropertyChange[]}` (`limit` 1–500, default 100); `GET /api/v1/entity-kinds/{kind}/property-schema/history?limit=` → `{changes: SchemaChange[]}` (for `item` it is 409 `schema_owned_by_item_kind`, as R-P2-5); `GET /api/v1/inventory/kinds/{kind_id}/schema/history` is added in layer 5 with the forwarders (the kind's own `attribute_schema`, owner `item_kind:<id>`).
 - Every transaction that deletes `entity_properties` or `entities` calls `set_actor` first: `apply_on` (with `by`), `repoint_entity` (gains a `by: Actor` parameter; the printer merge passes its actor), the sweep (`SWEEP_ACTOR`).
 
 - [ ] **Step 1: Write the failing tests:**
-  - `test_apply_on_records_a_remove_with_its_actor` (store): a patch `{"material": None}` by `{"kind":"agent","principal":"p"}` → one `remove` row with that actor.
-  - `test_a_merge_records_each_key_it_moves`: entity `printer:a` with `x=1`, `printer:b` with `x=2`, `y=3`; `repoint_entity(conn, "printer", "b", "a", by)` → `printer:a` gets `set y` (actor `by`); `printer:b` gets `remove x`, `remove y` (actor `by`).
-  - `test_the_sweep_records_what_it_removes` (`test_sweep.py`): an orphan with one key → one `remove` row, actor `SWEEP_ACTOR`.
-  - `test_history_route_lists_newest_first` (API): two sets and a remove of `colour_name` → three changes, newest first; `?key=other` → none; `?limit=0` → 422.
-  - `test_schema_history_route`: two `PUT /entity-kinds/spool/property-schema` → two changes; `item` → 409.
+  - `test_apply_on_publishes_a_remove_with_its_actor` (store): a patch `{"material": None}` by `{"kind":"agent","principal":"p"}` → one `entity_property.changed` `remove` event with that actor.
+  - `test_a_merge_publishes_each_key_it_moves`: entity `printer:a` with `x=1`, `printer:b` with `x=2`, `y=3`; `repoint_entity(conn, "printer", "b", "a", by)` → for `printer:a` a `set y` event (actor `by`); for `printer:b` `remove x` and `remove y` events (actor `by`).
+  - `test_the_sweep_publishes_what_it_removes` (`test_sweep.py`): an orphan with one key → one `remove` event, actor `SWEEP_ACTOR`.
+  - `test_history_route_lists_newest_first` (API): `history_rows` with two sets and a remove of `colour_name` → three changes, newest first (by `event_seq`); `?key=other` → none; `?limit=0` → 422.
+  - `test_schema_history_route`: `history_rows` with two schema rows of `kind:spool` → two changes; `item` → 409.
 - [ ] **Step 2: Run** `cd backend && uv run --frozen pytest tests/entities tests/api/test_entity_properties.py -q` — Expected: FAIL.
 - [ ] **Step 3: Implement** the Interfaces. Search for every `DELETE FROM entities` and `DELETE FROM entity_properties` (`git grep -n -E "DELETE FROM (entities|entity_properties)" backend/scadbuddy`) and check that each has `set_actor` in its transaction.
 - [ ] **Step 4: Run** the tests, then `uv run --frozen pytest tests/printers tests/inventory -n auto -q` (merges and kind writes still pass) — Expected: PASS.
@@ -356,6 +379,7 @@ Layers 1 and 2 are independent. Layers 3 to 6 deploy together (R-K1-18).
 - [ ] **Step 3: Implement.** Load the `frontend-design` skill before the panel change.
 - [ ] **Step 4: Run** the two commands, then `cd frontend && pnpm lint && pnpm typecheck` and `cd agent && pnpm lint && pnpm typecheck && pnpm exec vitest run test/coverage.test.ts` — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(entities): a property's history in the panel and the agent (#6949, K1 1/7)`
+- [ ] **Step 6 (outside this repo, with layer 1's deploy):** an eh-homelab/clusters PR adds a PrometheusRule alert `ScadbuddyHistorySubscriberLag`: `scadbuddy_event_subscriber_lag_seconds{subscriber="history"} > 300` for 10 m, severity warning (the subscriber stopped or a payload stopped its cursor, Task 1). This repo has no alert rules of its own; the series comes from `core/metrics.py`.
 
 ---
 
@@ -422,7 +446,7 @@ Layers 1 and 2 are independent. Layers 3 to 6 deploy together (R-K1-18).
 - Test: `tools/go/core/internal/inventory/modeldata/proof_test.go`, `tools/go/core/internal/inventory/modeldata/property_history_test.go`
 
 **Interfaces:**
-- Consumes: Task 4 `Load`, Task 5 `Builtin`, `Resolve`; Task 1's triggers (through `testdb.New`).
+- Consumes: Task 4 `Load`, Task 5 `Builtin`, `Resolve`; Task 1's triggers and `history.Apply` (through `testdb.New`).
 - Produces `func Chain(m *Model, kindID string) (model.Chain, error)` and `func Matrix(m *Model, cat *handlers.Catalog) (string, error)` (the README table, as `check.py` builds it: `—` for `refuse`, the class `nature/role/counting` or `nature/billing`, `+ <special>`).
 
 K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and its history replay of lives and cached values come with K2, which builds those handlers.
@@ -433,7 +457,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
   - `TestEveryExampleItemResolves`: each of the 16 items resolves with no problem; its `requires_properties` and its kinds' `schema` `required` keys are among its properties (as `check.py` `resolve`).
   - `TestEveryInstanceFitsItsClass`: a lot only for `counting: lot`; a service instance only for `billing: term`, with `starts_at` and `ends_at`.
   - `TestTheReadmeTableIsTheResolvedOne`: `Matrix(...)` equals the text between `<!-- matrix:start -->` and `<!-- matrix:end -->`.
-- [ ] Write `TestPropertyHistoryReplaysTheProof` (`property_history_test.go`, `testdb.New`): for `pla_plus_gold` and `nozzle_hs_04`, insert an `entities` row (`kind='item'`, a new uuid ref); set each initial property in key order with actor `{"kind":"provider","principal":"import"}`; then apply the `set_property` and `remove_property` events of `examples.yaml` `history` with actor `{"kind":"browser"}`. The history rows, read in id order as `(key, op, old, new, actor name)` with `import` and `person` for the two actors, equal `expect_property_history` (`at` is not compared). The last row per key equals `entity_properties`.
+- [ ] Write `TestPropertyHistoryReplaysTheProof` (`property_history_test.go`, `testdb.New`): for `pla_plus_gold` and `nozzle_hs_04`, insert an `entities` row (`kind='item'`, a new uuid ref); set each initial property in key order with actor `{"kind":"provider","principal":"import"}`; then apply the `set_property` and `remove_property` events of `examples.yaml` `history` with actor `{"kind":"browser"}`. `history.Apply`, then the history rows, read in `event_seq` order as `(key, op, old, new, actor name)` with `import` and `person` for the two actors, equal `expect_property_history` (`at` is not compared). The last row per key equals `entity_properties`.
 - [ ] **Step 2: Run** `cd tools/go/core && go test ./internal/inventory/modeldata/` — Expected: FAIL.
 - [ ] **Step 3: Implement** `convert.go` and `Matrix`.
 - [ ] **Step 4: Run** the same, then `uvx --with pyyaml python -I docs/inventory-model/check.py` (the proof still passes) — Expected: PASS, and `ok: 33 kinds, 38 handlers, …`.
@@ -456,7 +480,7 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
   - `items` ADD `steps jsonb NOT NULL DEFAULT '{}'`; `stock_units` ADD `steps jsonb NOT NULL DEFAULT '{}'`, `starts_at timestamptz`, `ends_at timestamptz`; `stock_units.status` CHECK gains `ended`.
   - `relation_types (id text PK CHECK (id ~ '^[a-z][a-z0-9_]{0,39}$'), label text NOT NULL, inverse_label text NOT NULL, from_rule jsonb NOT NULL, to_rule jsonb NOT NULL, max_from_per_to int, handler text, attrs text[] NOT NULL DEFAULT '{}', builtin boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now())`, seeded with the five types of `relations.yaml` (`builtin = true`).
   - `relations (id uuid PK DEFAULT gen_random_uuid(), type_id text NOT NULL REFERENCES relation_types, from_entity uuid NOT NULL REFERENCES entities, to_entity uuid NOT NULL REFERENCES entities, attrs jsonb NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT clock_timestamp(), created_by jsonb NOT NULL, ended_at timestamptz, CHECK (from_entity <> to_entity))`; unique `(type_id, from_entity, to_entity) WHERE ended_at IS NULL`; index `(to_entity) WHERE ended_at IS NULL`.
-  - `handler_config_history (id bigint identity PK, owner text NOT NULL` (`item_kind:<id>`, `item:<uuid>`, `unit:<uuid>`)`, step text NOT NULL, handler text, old jsonb, new jsonb, at timestamptz NOT NULL DEFAULT clock_timestamp(), actor jsonb NOT NULL)` (R-K1-13).
+  - `handler_config_history (event_seq bigint PRIMARY KEY, owner text NOT NULL` (`item_kind:<id>`, `item:<uuid>`, `unit:<uuid>`)`, step text NOT NULL, handler text, old jsonb, new jsonb, at timestamptz NOT NULL, actor jsonb NOT NULL)`; index `(owner, step, event_seq)`. Only the history subscriber writes it, from `handler_config.changed` (R-K1-13).
   - `inventory_k1_report (rule text PRIMARY KEY, count int NOT NULL, detail jsonb NOT NULL DEFAULT '[]')`, one row per rule below (R-K1-9). K2 drops it.
   - `inventory_operations (id text PRIMARY KEY CHECK (length(id) BETWEEN 1 AND 300)` (the activity id)`, kind text NOT NULL` (the activity name, `inventory.Take`)`, subject text NOT NULL DEFAULT ''` (`item:<id>`, `lot:<id>`, `unit:<id>`, `item_kind:<id>`, `printer:<id>`)`, status text NOT NULL CHECK (status IN ('running','succeeded','failed')), attempt int NOT NULL DEFAULT 1, actor jsonb, problem jsonb, last_error text, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), updated_at timestamptz NOT NULL DEFAULT clock_timestamp(), finished_at timestamptz)`; index `(status, updated_at)`. Only Go writes it (R-K1-22). The result body stays in `crud_requests` (7 days); the row keeps the problem.
 - Data, in this order (each step writes its report row; the actor of every row is `{"kind":"provider","principal":"inventory_k1_migration"}`):
@@ -536,12 +560,12 @@ K1 ports `check.py` up to the README table (R-K1-19). Its relation checks and it
 ### Task 10: Kinds and items
 
 **Files:**
-- Create: `tools/go/core/internal/inventory/store/kinds.go`, `tools/go/core/internal/inventory/store/items.go`, `tools/go/core/internal/inventory/store/relations.go`, `tools/go/core/internal/inventory/store/config_history.go`, `tools/go/core/internal/inventory/wire/wire.go`
+- Create: `tools/go/core/internal/inventory/store/kinds.go`, `tools/go/core/internal/inventory/store/items.go`, `tools/go/core/internal/inventory/store/relations.go`, `tools/go/core/internal/inventory/store/config_history.go` (the event), `tools/go/core/internal/inventory/wire/wire.go`; Modify: `tools/go/core/internal/history/history.go` (the `handler_config.changed` → `handler_config_history` entry)
 - Test: `tools/go/core/internal/inventory/store/kinds_test.go`, `tools/go/core/internal/inventory/store/items_test.go`
 
 **Interfaces:**
 - `package wire`: the JSON of `inventory/models.py`, field for field: `ItemKind` (phase 2 fields, plus `nature`, `role`, `counting`, `billing` (`string|null`), `special_type`, `steps`, `incomplete_steps: string[]`); `KindInput`, `KindPatch` (phase 2 fields plus the class keys, `special_type` and `steps`; `tracking` and `life_basis` still taken, R-K1-6); `Item` (phase 2 fields plus `steps`, `incomplete_steps`, `class: {nature, role, counting, billing}`, `special_type`); `ItemInput`, `InventoryItemPatch` (plus `steps`). Readers derive `tracking`, `life_basis`, `life_hours`, `life_months` (R-K1-6) and `compatible_with` (the model kinds' names, R-K1-11).
-- `store.Kinds`: `List(ctx, q, archived bool)`, `Get`, `Create(ctx, tx, in wire.KindInput, by Actor)`, `Update(ctx, tx, id, patch, by)`, `Archive`, `Restore`, `Schema(ctx, q, id) (merged, own json.RawMessage, keysInUse [][2]any, err)`. Each save: build the chain, `Resolve` with no item; `Blocking` problems → `*Refused{Status: 422, Code: "steps_invalid", Problems}`; a class conflict → 422 `class_changed` (key, from, to); a parent change that changes the class of a kind with items (its own or its descendants') → 422 `class_changed`; writes `handler_config_history` for each step whose handler or params changed; rewrites `tracking`, `life_basis`.
+- `store.Kinds`: `List(ctx, q, archived bool)`, `Get`, `Create(ctx, tx, in wire.KindInput, by Actor)`, `Update(ctx, tx, id, patch, by)`, `Archive`, `Restore`, `Schema(ctx, q, id) (merged, own json.RawMessage, keysInUse [][2]any, err)`. Each save: build the chain, `Resolve` with no item; `Blocking` problems → `*Refused{Status: 422, Code: "steps_invalid", Problems}`; a class conflict → 422 `class_changed` (key, from, to); a parent change that changes the class of a kind with items (its own or its descendants') → 422 `class_changed`; publishes one `handler_config.changed` (`bus.PublishIn`, in the save's transaction) for each step whose handler or params changed; rewrites `tracking`, `life_basis`.
 - `store.Items`: `List(ctx, q, f ItemFilter)` (phase 2 filters `kind`, `descendants`, `q`, `low`, `archived`, `compatible` (a model kind by name, through `relations`), `limit` 1–5000 default 1000), `Get`, `Create`, `Update`, `Archive`, `Restore`. A save resolves with the item's steps: `Blocking` → 422 `steps_invalid`; an open class → 422 `class_open`; an item whose resolved special type is `filament_spool` → 409 `filament_item_refused` (phase 2 Ruling 9, until K3). `compatible_with` codes become `compatible_with` relations to model kinds, made under `printer` when missing (the §8 id rule).
 - Errors keep phase 2's problem codes where the concept stays (`inventory/problems.py`): `kind_not_found`, `kind_exists`, `kind_in_use`, `kind_cycle`, `kind_archived`, `item_not_found`, `item_exists`, `bad_property_schema`, `filament_item_refused`.
 
@@ -553,7 +577,7 @@ Phase 2's `tests/inventory/test_kinds.py` and `test_items.py` cases are rewritte
   - `TestAParentChangeThatChangesAClassIsRefused`: a consumable kind with one item, `PATCH parent_id = durable` → 422 `class_changed` `{key: role, from: consumable, to: durable}`.
   - `TestTrackingIsDerived`: a kind made with `{nature: service, billing: flat}` reads `tracking = none`; a `KindInput` with only `tracking: unit` under `durable` saves as durable; `life_basis` reads `hours` for `life.hours`.
   - `TestCompatibleWithBecomesRelations`: an item made with `compatible_with: ["H2C"]` reads it back; `List(compatible: "H2C")` finds it; a new code `P1S` makes `printer_p1s`.
-  - `TestAStepChangeIsInTheConfigHistory`: an item's `steps.life.params.hours` 1500 → 2000 → one row, `old` and `new` as the resolved params, `owner = item:<id>`.
+  - `TestAStepChangeIsAConfigEvent`: an item's `steps.life.params.hours` 1500 → 2000 → one `handler_config.changed`, `old` and `new` as the resolved params, `owner = item:<id>`; `history.Apply` → one `handler_config_history` row; `Apply` again → still one. A save that rolls back publishes nothing.
 - [ ] **Step 2: Run** `cd tools/go/core && go test ./internal/inventory/store/ -run 'Kind|Item|Compatible|Tracking|Config'` — Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** the same — Expected: PASS.
@@ -741,24 +765,26 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 **Files:**
 - Modify: `backend/scadbuddy/orders/lifecycle.py` (`_lock_parts_of`, `_use_parts`, `_return_parts`, `parts_unit_cost`, `recost_lot`), `backend/scadbuddy/api/inventory_stock.py` (`recost`), `backend/scadbuddy/printers/store.py` (`_merge` and its two callers, l.667 and l.949), `backend/scadbuddy/entities/registry.py` (`repoint_entity` loses its `UPDATE stock_moves`)
 - Delete: from `backend/scadbuddy/inventory/stock.py` every write (`StockStore` and its helpers); keep `parts_moves`, `parts_moved`, `PartsMoved` (readers, R-K1-16); `backend/tests/inventory/test_stock.py` (ported in Task 11)
-- Test: `backend/tests/orders/test_stock_activities.py`, `backend/tests/orders/test_parts_lifecycle.py`, `backend/tests/printers/test_merge_stock.py` (new, beside `test_merge_filament.py`), `backend/tests/test_no_python_stock_writes.py`
+- Test: `backend/tests/orders/test_stock_activities.py`, `frontend/src/components/orders/OrderItemsTable.test.tsx` (`a slow fulfil shows stock still settling, then settles`), `agent/test/orders.test.ts` (the 202 text, `order_item_parts_settle`), `backend/tests/orders/test_parts_lifecycle.py`, `backend/tests/printers/test_merge_stock.py` (new, beside `test_merge_filament.py`), `backend/tests/test_no_python_stock_writes.py`
 
 **Interfaces:**
 - Keys (§6.1a): `order_item:<order_item_id>:parts:<n>:<item_id>` for `inventory.Take` and `inventory.GiveBack`, where `n` is the item's fulfilment cycle: 1 + the count of its earlier `parts.returned` events, read under the order's lock (so a retry of one fulfil reads the same `n`, and the take after an unfulfil gets a new one). `lot:<lot_id>:recost:<request key>` for `inventory.Recost`. `entity_merge:printer:<gone>:<kept>` for `inventory.Repoint`.
 - `lifecycle.py`, fulfil (R-K1-14):
   1. In the order's transaction: the transition as today; `order_item_parts.used` set; before the commit, `GET …/items/{item_id}/estimate?qty=` per part refuses `bad_quantity` as phase 2 did (a read takes no lock). Commit.
   2. Then `InventoryCore.write("Take", key=…, body={qty, order_id, order_item_id})` per part item, in `item_id` order, awaited inline. The answers' moves give the `parts.used` event, written in a short transaction under the order's lock (phase 2's detail).
-  3. A start that fails (Temporal out of reach), or a `write` that answers `OperationAccepted` (the 15 s wait ended) → `LifecycleError("stock_pending", …)` (503, safe to retry with the same key): the order stays fulfilled, `parts.used` is not written, and the person retries the fulfil. A fulfil of an already-fulfilled item whose `parts.used` event is missing runs step 2 again with the same `n`, so the same keys: a running activity is attached to (Use Existing), a succeeded one answers its stored result (`ActivityAlreadyStartedError`, then the handle), and a failed one runs again (Allow Duplicate Failed Only), whose Go write finds the key in `crud_requests` if the first attempt committed. No path takes the stock twice (owner 2026-11-25). A refusal answer → `parts.stock_refused` event with the problem.
+  3. A start that fails (Temporal out of reach) → `LifecycleError("inventory_unavailable", …)` (503; nothing was started, safe to retry): the order stays fulfilled and `parts.used` is not written. A `write` that answers `OperationAccepted` (the 15 s wait ended) → the route answers its usual body with status 202, and each such item carries `parts_settling: list[OperationAccepted]` (R-K1-27: "order fulfilled; stock still settling"). `parts.used` is written by the next settle: `POST /api/v1/orders/{order_id}/items/{item_id}/parts/settle` (new, `api/orders.py`) runs step 2 again with the same `n` and answers the item, 200 when every take answered, 202 again with `parts_settling` when one still runs. `OrderItem` gains `parts_settling` (empty when settled), read from the `inventory_operations` rows of the item's current keys (Go's read route) only for a fulfilled item with parts and no `parts.used` or `parts.stock_refused` event. A fulfil of an already-fulfilled item whose `parts.used` event is missing runs step 2 again with the same `n`, so the same keys: a running activity is attached to (Use Existing), a succeeded one answers its stored result (`ActivityAlreadyStartedError`, then the handle), and a failed one runs again (Allow Duplicate Failed Only), whose Go write finds the key in `crud_requests` if the first attempt committed. No path takes the stock twice (owner 2026-11-25). A refusal answer → `parts.stock_refused` event with the problem.
   Unfulfil does the same with `inventory.GiveBack` and `parts.returned`. `_lock_parts_of` goes: each activity is its own transaction.
+- Frontend (R-K1-27): the fulfil callers (`components/orders/itemActions.ts`, `ItemsBulk.tsx`) go through `command` with `onAccepted`; `OrderItemsTable.tsx` shows `StillWorking` (Task 13) with the text "Order fulfilled; stock still settling" on an item with `parts_settling`, follows its operations, and calls `…/parts/settle` when they end; the item shows a "Settle stock" button while `parts_settling` is not empty and nothing follows it. Mocks: `mocks/features/orders/orders.ts`. Agent: `order_item_fulfil` and `order_fulfil` say "fulfilled; stock still settling (operation <id>)" on a 202, and a new tool `order_item_parts_settle` (risk `write`, `POST …/parts/settle`; `coverage.ts`).
 - `parts_unit_cost` reads the estimate route. `recost_lot` locks the orders (its transaction), executes `inventory.Recost` with `body={orders: [ids]}` inside it (Go waits on no row Python holds: it locks the lot and its moves, never an order), writes the events, commits; `recost_orders_moved` → the whole recost again (phase 2 `_RECOST_TRIES`).
-- Printer merge (owner 2026-11-25, R-K1-15): `_merge(conn, gone, kept)` first locks the `gone` printer row `FOR UPDATE`, then reads whether a stock row names it (`stock_units.printer_id = gone`, or a `stock_moves.entity_id` of the entity `printer:gone`). If one does, it raises `NeedsRepoint(gone, kept)`; the caller's transaction rolls back; the store calls `InventoryCore.write_blocking("Repoint", key=f"entity_merge:printer:{gone}:{kept}", body={kind: "printer", gone, kept})` with no transaction open, and runs the whole method again (at most 3 times, then `MergeBusy`, 409). A `write_blocking` that answers `OperationAccepted` stops the merge with 503 `stock_pending`; a retry uses the same key. With no stock row, the merge goes on as today without the stock references. A stock write that names `gone` after the check waits on the row lock and then fails on its foreign key when the printer is gone (`stock_moves.entity_id`), or would set `printer_id` NULL (`ON DELETE SET NULL`): the lock makes Go's insert wait, and its retry after the commit finds the printer gone and is refused. `PRINTER_REFERENCES` loses `stock_units`; `repoint_entity` loses its `UPDATE stock_moves`.
+- Printer merge (owner 2026-11-25, R-K1-15): `_merge(conn, gone, kept)` first locks the `gone` printer row `FOR UPDATE`, then reads whether a stock row names it (`stock_units.printer_id = gone`, or a `stock_moves.entity_id` of the entity `printer:gone`). If one does, it raises `NeedsRepoint(gone, kept)`; the caller's transaction rolls back; the store calls `InventoryCore.write_blocking("Repoint", key=f"entity_merge:printer:{gone}:{kept}", body={kind: "printer", gone, kept})` with no transaction open, and runs the whole method again (at most 3 times, then `MergeBusy`, 409). A `write_blocking` that answers `OperationAccepted` stops the merge with 503 `stock_pending` (nothing of the merge is written; a retry uses the same key). A merge keeps 503, not 202: its rows are not written until the repoint has answered. With no stock row, the merge goes on as today without the stock references. A stock write that names `gone` after the check waits on the row lock and then fails on its foreign key when the printer is gone (`stock_moves.entity_id`), or would set `printer_id` NULL (`ON DELETE SET NULL`): the lock makes Go's insert wait, and its retry after the commit finds the printer gone and is refused. `PRINTER_REFERENCES` loses `stock_units`; `repoint_entity` loses its `UPDATE stock_moves`.
 - `test_no_python_stock_writes.py`: `git grep`-style scan of `backend/scadbuddy/**/*.py` (not `migrations/`) for `INSERT INTO|UPDATE|DELETE FROM` followed by `items`, `item_kinds`, `stock_lots`, `stock_units`, `stock_moves`; the only allowed hits are `inventory/offers.py` (`supplier_offers`, `offer_price_points` are not stock tables, K3) — so the test fails on any stock-table write.
 
 - [ ] **Step 1: Write the failing tests** (the fake Temporal client of Task 13):
   - `test_fulfil_takes_stock_through_an_activity`: fulfil an item with 2 of a part → one `inventory.Take`, id `order_item:oi1:parts:1:<part>`, qty `"2"`; one `parts.used` event with the answer's amount.
   - `test_unfulfil_then_fulfil_uses_new_keys`: `…:parts:1:…` (Take), `…:parts:1:…` (GiveBack), `…:parts:2:…` (Take).
-  - `test_a_failed_start_fails_the_fulfil`: `start_activity` raises `RPCError` → 503 `stock_pending`; the item is fulfilled; no `parts.used`. The same with a handle that does not answer within the wait.
-  - `test_a_fulfil_retry_takes_stock_once`: after each of those, the retry starts the same id (`…:parts:1:…`) once more: with the first activity still running the fake attaches, with it done the fake raises `ActivityAlreadyStartedError` and the handle answers; in each case `parts.used` is written once and the fake counts one Take run.
+  - `test_a_failed_start_fails_the_fulfil`: `start_activity` raises `RPCError` → 503 `inventory_unavailable`; the item is fulfilled; no `parts.used`.
+  - `test_a_slow_take_answers_202_settling`: the handle does not answer within the wait → 202 with the attempts; the item's `parts_settling` names the operation `order_item:oi1:parts:1:<part>`; no `parts.used`. Then the handle answers and `…/parts/settle` → 200, `parts.used` once, `parts_settling` empty; a second settle writes nothing.
+  - `test_a_fulfil_retry_takes_stock_once`: after each of those (the retry is the fulfil route or `…/parts/settle`), the retry starts the same id (`…:parts:1:…`) once more: with the first activity still running the fake attaches, with it done the fake raises `ActivityAlreadyStartedError` and the handle answers; in each case `parts.used` is written once and the fake counts one Take run.
   - `test_a_refused_take_is_recorded`: the answer is 422 `bad_quantity` → `parts.stock_refused`.
   - `test_bad_quantity_refuses_before_the_commit`: the estimate route says overflow → `LifecycleError("bad_quantity")`, the order not changed, no activity.
   - `test_recost_retries_when_another_order_moved`: the first answer is 409 `recost_orders_moved`, the second a result → two activities with two keys, events once.
@@ -816,6 +842,9 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
 6. Round 3: a slow write answers 202 after 15 s, never 503 `inventory_pending`; the reuse
    policy is `ALLOW_DUPLICATE_FAILED_ONLY`; a repeat with the same key is never an error;
    order fulfil never takes stock twice (R-K1-24).
+7. Round 4: the event stream is the history; a durable subscriber writes the history
+   tables (R-K1-12, R-K1-13). K1 depends on #7819 (R-K1-26).
+8. Round 4: a slow fulfil answers 202, "order fulfilled; stock still settling" (R-K1-27).
 
 ## Rulings (R-K1-n, made in this plan; the owner may change them)
 
@@ -859,15 +888,25 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   as `_`, at most 32), name the code. `item_kind` becomes an entity kind so a relation can
   name a kind. An item write with a new code makes its model kind, by the same rule.
   `?compatible=` reads the relations.
-- **R-K1-12. The history trigger** follows §4.8 at `c51dba825`: the actor from
-  `scadbuddy.actor` first, `updated_by` only when it is unset; cascades recorded by a
-  `BEFORE DELETE` trigger on `entities`. Existing rows get one back-filled `set` each, so
-  the history replays to the current properties from the first day.
-- **R-K1-13. Parameter history starts in K1** (§4.7 at `c51dba825`).
+- **R-K1-12. The history is the event stream** (owner 2026-11-25; §4.8 at `156e0af78`).
+  A trigger on `entity_properties` (and a `BEFORE DELETE` trigger on `entities` for a
+  cascade) publishes `entity_property.changed` in the writer's transaction through
+  `scadbuddy_publish_event`, which takes the event log's lock as `bus.Publish` does; the
+  actor rule is unchanged (`scadbuddy.actor` first, `updated_by` only when it is unset; a
+  remove without one is refused). The history subscriber (`internal/history`, in
+  `scadbuddy-core`, the `history` row of `event_subscribers`) inserts one row per event,
+  keyed by its `seq`, with `ON CONFLICT DO NOTHING`, so a replay inserts nothing twice.
+  Existing rows get one back-filled event each. The entity's kind is `entity_kind` in the
+  payload: `kind` is the event's own. Lag is `scadbuddy_event_subscriber_lag_*` with a
+  clusters alert.
+- **R-K1-13. Parameter history starts in K1** (§4.7 at `156e0af78`): Go publishes
+  `handler_config.changed` with `bus.PublishIn` in the save's transaction, and the
+  subscriber writes `handler_config_history`. `handler_value.changed` and its table come
+  with `handler_values` in K2, by the same rule.
 - **R-K1-14 (replaces the first draft's outbox). Orders.** Fulfil commits the order change,
   then executes `inventory.Take` per part inline with the key
-  `order_item:<id>:parts:<n>:<item>`. A failed start, or no answer in 15 s, fails the call (503 `stock_pending`, safe to retry
-  with the same key); the order stays fulfilled without `parts.used`, and a retry of the
+  `order_item:<id>:parts:<n>:<item>`. A failed start fails the call (503, safe to retry
+  with the same key), and no answer in 15 s answers 202 (R-K1-27); the order stays fulfilled without `parts.used`, and a retry of the
   fulfil starts the same ids, which attach to, read or (after a failure) re-run the first
   activities; `crud_requests` stops a second take. Unfulfil does the same with
   `inventory.GiveBack`. A re-cost executes `inventory.Recost` inside its order-locked
@@ -916,9 +955,9 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   policies are `USE_EXISTING` and `ALLOW_DUPLICATE_FAILED_ONLY`: a repeat while it runs
   attaches (202 again), a repeat after a success answers the stored result, a repeat after a
   failure or a timeout runs again, and Go's `crud_requests` check stops a second commit. A
-  repeat with the same key is never an error. Order fulfil and the printer merge (Task 16)
-  answer 503 `stock_pending`, safe to retry with the same key, when the start fails or the
-  wait ends. A running row older than 60 s is checked with Temporal's Describe (Task 12).
+  repeat with the same key is never an error. Order fulfil answers 202 "stock still settling" when the wait ends (R-K1-27); the
+  printer merge answers 503 `stock_pending` (Task 16). Both answer 503 when the start
+  fails, safe to retry with the same key. A running row older than 60 s is checked with Temporal's Describe (Task 12).
 - **R-K1-25. Design wording for the review findings** (the coordinator puts it in the
   design, or it stays here):
   - Finding 2 (§6.1a "Merges"): "The foreign key protects only `stock_moves.entity_id`.
@@ -930,6 +969,31 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
     runs again, at most 3 times."
   - Finding 5 (§6.1a "Versions"): "The e2e stack's dev server (`temporal server
     start-dev`) must run Temporal server 1.32.0 or newer, with Standalone Activities on."
+
+- **R-K1-26. K1 depends on #7819** (#7818, `feat/agent-fleet-chat`). On main, `replay`
+  (`core/pg_events.py` l.547-570) calls `decode_event` on every row, and an unknown kind is a
+  `ValueError`, so one history event in the log would break every replay page that holds
+  it (a WebSocket resume, the agent's change stream). #7819's `decode_event` gives an
+  `OpaqueEvent` for an unknown kind with a valid envelope (kind pattern
+  `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`, which the four kinds match), and its Go
+  `Publish` refuses an envelope Python could not decode. Layer 1 is based on #7819's
+  branch until #7819 merges, then rebased onto main. Python gets no typed model for the
+  history kinds: no Python code consumes them in K1, and a typed model with
+  `extra="forbid"` would break on each field Go adds. Retention: #7819 keeps every event by
+  default; each history event also carries `retention_seconds: 0`, which comes first in
+  #7819's precedence, so no `SCADBUDDY_EVENT_LOG_RETENTION_KINDS`, `_SECONDS` or `_ROWS`
+  value can prune it (Task 1 `test_history_events_survive_every_prune`).
+- **R-K1-27. A slow order fulfil answers 202** (the coordinator's open point,
+  2026-11-25). The fulfil is committed before the takes start, so 202 with the route's
+  usual body says what is true: "order fulfilled; stock still settling". Each item names
+  its running operations (`parts_settling`), and `…/parts/settle` writes `parts.used` once
+  they end, with the same keys, so it never takes stock twice. One cost, accepted: if no
+  one settles (the page closed, the agent stopped), the item stays "stock still settling"
+  on the order page, with a "Settle stock" button, and its job cost lacks the parts until
+  then. No sweep settles it (owner, round 2); a durable orders subscriber on the event
+  stream could, once `inventory_operation.changed` is logged (a later phase). A failed
+  start stays 503: nothing was started. The printer merge stays 503: its rows wait for the
+  repoint.
 
 ## Self-review
 
@@ -944,7 +1008,8 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   `handlers.Resolution`, `handlers.Problem`, `handlers.Registry`, `store.Write`,
   `store.Answer`, `store.Actor`, `flow.Flow`, `activities.Activities`,
   `activities.Register`, `activities.Record`, `inventory.Areas`, `inventory.Caller`,
-  `publish.Notify`, `store.StartOperation`, `store.FinishOperation`, `store.NoteError`,
+  `scadbuddy_publish_event`, `bus.PublishIn`, `history.Apply`, `history.Run`,
+  `event_subscribers`, `parts_settling`, `publish.Notify`, `store.StartOperation`, `store.FinishOperation`, `store.NoteError`,
   `store.Operation`, `InventoryOperationEvent`, `ingest_inventory_operation`,
   `OperationAccepted`, `StillWorking`,
   `InventoryCore.read`, `InventoryCore.write`, `InventoryCore.write_blocking` are used with
@@ -952,6 +1017,8 @@ Phase 2's `tests/api/test_inventory.py` and `test_inventory_stock.py` cases for 
   16 start.
 - **No new caller.** Only the `inventory` caller exists; Go's activity record is a row in
   its own transaction plus an event (R-K1-22).
+- **History.** No writer inserts a history row; every history table has `event_seq` as its
+  key and only `internal/history` writes it (Tasks 1, 7, 10).
 - **No outbox, no sweep.** No task adds a table of pending calls or a housekeeping step;
   every write that crosses the line is an activity start.
 - **Proportion.** The plan gives signatures, tests and values; no task writes a body that
