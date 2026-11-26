@@ -180,3 +180,43 @@ func TestRegistryNamesAHandlerNotBuilt(t *testing.T) {
 		t.Fatal("For took a handler on a step it does not fill")
 	}
 }
+
+func TestResolveKindChecksWhatItNames(t *testing.T) {
+	consumable := model.Kind{ID: "consumable", Class: model.Class{Nature: "physical", Role: "consumable"}}
+	ch := model.Chain{consumable, {ID: "odd", ParentID: "consumable", Steps: model.Steps{
+		"life": {Handler: "life.hours", Params: map[string]any{"hours": 10, "source": "manual"}},
+	}}}
+	_, problems, err := Builtin().ResolveKind(ch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(problems) != 1 || problems[0].Step != "life" || problems[0].Reason != NotApplicable {
+		t.Fatalf("problems = %+v, want one not_applicable on life", problems)
+	}
+
+	// cost.unit applies to counting = unit; the kind leaves counting open, so a child may
+	// still answer it.
+	ch = model.Chain{consumable, {ID: "odd", ParentID: "consumable", Steps: model.Steps{"cost": {Handler: "cost.unit"}}}}
+	res, problems, err := Builtin().ResolveKind(ch)
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("err %v, problems %+v", err, problems)
+	}
+	if res.Steps["cost"].Handler != "cost.unit" {
+		t.Fatalf("steps = %+v", res.Steps)
+	}
+}
+
+func TestResolveKindChecksTheSpecialTypesSetKeys(t *testing.T) {
+	open := model.Chain{{ID: "k", Class: model.Class{Nature: "physical", Role: "consumable"}, Special: "filament_spool"}}
+	if _, problems, err := Builtin().ResolveKind(open); err != nil || len(problems) != 0 {
+		t.Fatalf("open counting: err %v, problems %+v", err, problems)
+	}
+	wrong := model.Chain{{ID: "k", Class: model.Class{Nature: "physical", Role: "durable"}, Special: "filament_spool"}}
+	_, problems, err := Builtin().ResolveKind(wrong)
+	if err != nil || len(problems) != 1 || problems[0].Reason != SpecialNeeds {
+		t.Fatalf("durable: err %v, problems %+v", err, problems)
+	}
+	if _, _, err := Builtin().Resolve(open, nil, nil); !errors.Is(err, model.ErrClassOpen) {
+		t.Fatalf("item: got %v", err)
+	}
+}

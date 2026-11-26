@@ -78,8 +78,9 @@ func (c *Catalog) Resolve(chain model.Chain, item, unit model.Steps) (Resolution
 	return c.resolve(chain, item, unit, false)
 }
 
-// ResolveKind is Resolve for a kind save: the kind may leave class keys open. A step
-// with no handler (an open class has no default column) is left out.
+// ResolveKind is Resolve for a kind save: the kind may leave class keys open. A handler's
+// applies and a special type's needs are checked only against the keys the kind sets. A
+// step with no handler (an open class has no default column) is left out.
 func (c *Catalog) ResolveKind(chain model.Chain) (Resolution, []Problem, error) {
 	return c.resolve(chain, nil, nil, true)
 }
@@ -112,8 +113,8 @@ func (c *Catalog) resolve(chain model.Chain, item, unit model.Steps, openOK bool
 
 	if special != "" {
 		sp, ok := c.Special[special]
-		if !ok || !cls.Matches(sp.Needs) {
-			problems = append(problems, Problem{Reason: SpecialNeeds, Missing: unmatched(cls, sp.Needs)})
+		if miss := unmatched(cls, sp.Needs, openOK); !ok || miss != nil {
+			problems = append(problems, Problem{Reason: SpecialNeeds, Missing: miss})
 		}
 		for step, id := range sp.Handlers {
 			res.Steps[step] = Choice{Handler: id}
@@ -137,19 +138,25 @@ func (c *Catalog) resolve(chain model.Chain, item, unit model.Steps, openOK bool
 			delete(res.Steps, step)
 			continue
 		}
-		problems = append(problems, c.check(step, ch, cls, special)...)
+		problems = append(problems, c.check(step, ch, cls, special, openOK)...)
 	}
 	return res, problems, nil
 }
 
-func unmatched(cls, want model.Class) []string {
+// unmatched is the class keys of want that cls does not have. With openOK (a kind save)
+// a key cls leaves open is no mismatch: a child kind may still answer it.
+func unmatched(cls, want model.Class, openOK bool) []string {
 	var out []string
 	for _, key := range []string{"nature", "role", "counting", "billing"} {
-		if v := want.Get(key); v != "" && cls.Get(key) != v {
+		if v := want.Get(key); v != "" && !fits(cls.Get(key), v, openOK) {
 			out = append(out, key)
 		}
 	}
 	return out
+}
+
+func fits(got, want string, openOK bool) bool {
+	return got == want || (openOK && got == "")
 }
 
 // apply lays one layer's settings over the steps resolved so far (check.py apply_steps).
@@ -190,8 +197,9 @@ func apply(steps map[Step]Choice, layer model.Steps, paramsOnly bool, problems [
 }
 
 // check is one step's handler against the catalog: it exists, fills the step, applies to
-// the class and special type, and its parameters fit its schema.
-func (c *Catalog) check(step Step, ch Choice, cls model.Class, special string) []Problem {
+// the class and special type, and its parameters fit its schema. With openOK (a kind
+// save) a class key the kind leaves open is no mismatch.
+func (c *Catalog) check(step Step, ch Choice, cls model.Class, special string, openOK bool) []Problem {
 	at := func(reason string, keys ...string) Problem {
 		return Problem{Step: step, Handler: ch.Handler, Reason: reason, Missing: keys}
 	}
@@ -203,11 +211,7 @@ func (c *Catalog) check(step Step, ch Choice, cls model.Class, special string) [
 		return []Problem{at(WrongStep)}
 	}
 	for key, want := range sp.Applies {
-		got := special
-		if key != "special" {
-			got = cls.Get(key)
-		}
-		if got != want {
+		if key == "special" && special != want || key != "special" && !fits(cls.Get(key), want, openOK) {
 			return []Problem{at(NotApplicable)}
 		}
 	}
