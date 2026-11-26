@@ -127,6 +127,7 @@ from scadbuddy.filament.print_uses import PoolPrintUses
 from scadbuddy.filament.sb_presets import PresetImport, import_from_bambuddy
 from scadbuddy.filament.sensor_notify import SensorNotifyActivities
 from scadbuddy.filament.sensors import PoolSensorNotifications
+from scadbuddy.filament.unknown_tray_rows import PoolUnknownTrays
 from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
 from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
@@ -2121,6 +2122,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         printers=state.components.get(PRINTERS).store,
         reports=state.components.get(PRINTERS).reports,
         sb_spools=PoolSbSpoolReads.over(state.settings_store.pool),
+        unknown_trays=PoolUnknownTrays(state.settings_store.pool),
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
@@ -2152,6 +2154,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         uses=PoolPrintUses(state.settings_store.pool),
         # A run queued on a busy printer says its place (#6871).
         runs=state.print_runs.store,
+        unknown_trays=PoolUnknownTrays(state.settings_store.pool),
     )
     auto_imports = state.components.get(AUTO_IMPORTS)
     activities: list[Callable[..., Any]] = [

@@ -63,6 +63,7 @@ from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.heartbeat import heartbeating
 from scadbuddy.core.problems import ApiError
 from scadbuddy.filament.print_uses import PrintUses, slot_uses
+from scadbuddy.filament.unknown_tray_rows import UnknownSpoolReads, blocked_detail
 from scadbuddy.library.settings_store import SettingsReader
 from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.reads import LibraryReads, reads_for
@@ -235,6 +236,9 @@ class LanDeps:
     uses: PrintUses | None = None
     #: A queued run's place (#6871); ``None`` leaves it unread.
     runs: QueuePlaces | None = None
+    #: The printer's unknown trays (#7143): the API's Postgres in-process, the CRUD route
+    #: on the print worker; ``None`` blocks nothing.
+    unknown_trays: UnknownSpoolReads | None = None
 
 
 class LanActivities:
@@ -420,6 +424,7 @@ class LanActivities:
                     " its bed, then print again if it did not.",
                     status_code=status.HTTP_409_CONFLICT,
                 )
+        await self._refuse_unknown(row)
         command, warnings, picks = await self._command(row, printer, input)
         try:
             started = await self._taken(row, lan, input, command, error_before)
@@ -432,6 +437,25 @@ class LanActivities:
         await self._save_picks(row, input, picks)
         await self._save_uses(input, started.started_at)
         return self._named(started.model_copy(update={"warnings": warnings}), input)
+
+    async def _refuse_unknown(self, row: PrinterRow) -> None:
+        """Refuse the start while the printer holds an unknown tray (#7143). A read that
+        fails is logged and the start goes on: the block is a guard, not a gate."""
+        reads = self.d.unknown_trays
+        if reads is None:
+            return
+        try:
+            refs = await reads.blocking(row.id)
+        except Exception as error:
+            logger.warning(
+                "the unknown trays could not be read before a LAN start",
+                extra={"error": type(error).__name__},
+            )
+            return
+        if refs:
+            raise _failed(
+                blocked_detail(row.name, refs), status_code=status.HTTP_422_UNPROCESSABLE_CONTENT
+            )
 
     async def _save_uses(self, input: LanPrintInput, started_at: datetime) -> None:
         """What the start uses of the SB spools in its trays (#4643, #6262), under its run

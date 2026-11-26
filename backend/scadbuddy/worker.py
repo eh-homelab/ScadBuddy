@@ -79,6 +79,7 @@ from scadbuddy.crud.print import (
     RemoteReprints,
     RemoteSensorNotifications,
     RemoteSettingsStore,
+    RemoteUnknownTrays,
     RemoteUploadStore,
 )
 from scadbuddy.crud.projects import RemoteFlowStore, RemotePayloadKeys
@@ -1356,6 +1357,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
     # A native run's SB spools and what its LAN starts use of them, through the API
     # (#6262 Task 6, #5295): no pool, and no cache of the spools to keep.
     sb_spools = RemoteFilamentTrays(crud)
+    unknown_trays = RemoteUnknownTrays(crud)
     print_uses = RemotePrintUses(crud)
     outcomes = RemoteOutcomes(crud)
     follower = Follower(
@@ -1417,6 +1419,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             printers=printers,
             reports=reports,
             sb_spools=sb_spools,
+            unknown_trays=unknown_trays,
         )
     )
     # A LAN print's sliced blob, through the API's internal route (plan 2026-10-16 Task 9)
@@ -1434,6 +1437,7 @@ def build_print_deps(settings: Settings, crud: CrudClient | None = None) -> Prin
             uses=print_uses,
             # A run queued on a busy printer says its place (#6871).
             runs=print_runs,
+            unknown_trays=unknown_trays,
         )
     )
     return PrintWorkerDeps(
@@ -1518,6 +1522,7 @@ PRINT_CRUD_AREAS = frozenset(
         "filament-pull",
         "sensor-notify",
         "own-presets",
+        "unknown-trays",
     }
 )
 
