@@ -338,6 +338,67 @@ async def test_lan_jobs_name_slug_from_outputs(links: PrintLinkStore, jobs: JobP
     assert (job.run_id, job.output_id, job.slug) == ("r7257", OUTPUT, "sign")
 
 
+def _lan_runs(jobs: JobProjection, printer: str, runs: dict[str, object]) -> None:
+    """Runs on ``printer``, each with one LAN start named ``scadbuddy-<run>-p1`` whose
+    recorded plate is ``runs[run]``."""
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name) VALUES (%s, %s, 'P')", (printer, printer)
+        )
+        for run, plate in runs.items():
+            start = {"subtask_name": f"scadbuddy-{run}-p1", "plate_id": plate}
+            conn.execute(
+                "INSERT INTO print_runs (id, output_id, idempotency_key, status, result, printer,"
+                " slug) VALUES (%s, %s, %s, 'running', %s, %s, 'sign')",
+                (run, OUTPUT, f"k-{run}", Jsonb({"lan": [start]}), printer),
+            )
+
+
+async def test_a_reprint_names_the_plate_its_archive_was_linked_with(
+    links: PrintLinkStore,
+) -> None:
+    """#8079: a reprint records no plate, so its item names the plate of the archive it
+    reprints, from that archive's link."""
+    await links.record(OUT, link(18, queue_item_id=60, plate_id=2))
+    await links.record_reprint(OUT, PrintReprint(queue_item_id=61, archive_id=18))
+
+    job = (await links.jobs(queue_items=[61])).queue_items[61]
+
+    assert (job.archive_id, job.plate) == (18, 2)
+
+
+async def test_a_lan_start_with_no_plate_names_its_archives(
+    links: PrintLinkStore, jobs: JobProjection
+) -> None:
+    """#8079: a LAN start that recorded no plate (a start from before #4541) names the
+    plate its archive link recorded."""
+    printer = "00000000-0000-4000-8000-000000008079"
+    _lan_runs(jobs, printer, {"r8079": None})
+    await links.record_lan_start(
+        LanArchiveLink(archive_id=42, run_id="r8079", subtask_name="scadbuddy-r8079-p1", plate_id=2)
+    )
+
+    job = (await links.jobs(lan_starts=[(printer, "scadbuddy-r8079-p1")])).lan_starts[
+        (printer, "scadbuddy-r8079-p1")
+    ]
+
+    assert (job.archive_id, job.plate) == (42, 2)
+
+
+async def test_a_lan_start_with_a_bad_plate_costs_only_its_own(
+    links: PrintLinkStore, jobs: JobProjection
+) -> None:
+    """#8078: a recorded plate that is not a whole number counts as none; it does not
+    fail the read, so every other LAN start keeps its job and plate."""
+    printer = "00000000-0000-4000-8000-000000008078"
+    _lan_runs(jobs, printer, {"good": 2, "frac": 2.0, "huge": 10**12})
+    names = [(printer, f"scadbuddy-{run}-p1") for run in ("good", "frac", "huge")]
+
+    starts = (await links.jobs(lan_starts=names)).lan_starts
+
+    assert [starts[name].plate for name in names] == [2, None, None]
+
+
 async def test_a_library_send_is_pending_until_its_archive_is_linked(
     links: PrintLinkStore,
 ) -> None:

@@ -15,7 +15,8 @@ const grams = (value: number) => `${Number(value.toFixed(1))} g`
 
 /**
  * The offer in the weigh form: the numbers it rests on, and a checkbox that saves the new
- * empty weight for the insert before the weighing is recorded (R-7280-4, R-7280-6).
+ * empty weight for the insert before the weighing is recorded (R-7280-4, R-7280-6). Over a
+ * weight a person set, it says that weight is replaced (#7450-3).
  */
 export function InsertWeightOffer({ offer, checked, onCheckedChange, disabled }: { offer: Offer; checked: boolean; onCheckedChange: (next: boolean) => void; disabled?: boolean }) {
   const rows: [string, string][] = [
@@ -44,7 +45,11 @@ export function InsertWeightOffer({ offer, checked, onCheckedChange, disabled }:
           Save {grams(offer.new_empty_weight_g)} as the empty weight of {offer.insert_name}
         </span>
       </Label>
-      <p className="text-[12px] text-muted-foreground">Makers overfill by about 10-30 g, so this estimate comes out slightly heavy. A later weighing of an empty spool replaces it.</p>
+      {offer.current_basis === 'person' && !offer.placeholder && <p className="text-[12px] text-warn">This replaces the {grams(offer.current_empty_weight_g)} a person set.</p>}
+      {/* Weighing an empty spool to set the weight is #7300, not built yet (#7451-1). */}
+      <p className="text-[12px] text-muted-foreground">Makers overfill by about 10-30 g, so this estimate comes out slightly heavy. To correct it, edit the insert's empty weight in the catalog.</p>
+      {/* #7451-3: the weighing books `reading - mean`, so the spool can end off its label weight and read `not_full` later. */}
+      {offer.sample_count > 1 && <p className="text-[12px] text-muted-foreground">The new weight is a mean, so this spool's grams left can end a few grams off its label weight. It then gets no new offer.</p>}
     </fieldset>
   )
 }
